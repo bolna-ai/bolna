@@ -90,7 +90,7 @@ class Transcriber(BaseModel):
 
     @validator("language")
     def validate_language(cls, value):
-        return validate_attribute(value, ["en", "hi", "es", "fr", "pt", "ko", "ja", "zh", "de", "it", "pt-BR"])
+        return validate_attribute(value, ["en", "hi", "es", "fr", "pt", "ko", "ja", "zh", "de", "it", "pt-BR", "ru"])
 
 
 class Synthesizer(BaseModel):
