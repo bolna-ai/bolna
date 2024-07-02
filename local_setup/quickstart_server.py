@@ -63,6 +63,7 @@ async def create_agent(agent_data: CreateAgentPayload):
         store_file(file_key=stored_prompt_file_path, file_data=agent_prompts, local=True)
     )
 
+    logger.info(f"Storing agent data in redis {data_for_db}")
     return {"agent_id": agent_uuid, "state": "created"}
 
 

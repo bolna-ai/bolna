@@ -168,3 +168,6 @@ agent_data/**/mp3
 */*/__pycache__/
 logs/
 agent_data/
+
+local_setup/credentials/
+local_setup/ngrok-config.yml

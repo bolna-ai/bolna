@@ -52,7 +52,7 @@ class OPENAISynthesizer(BaseSynthesizer):
         spoken_response = await self.async_client.audio.speech.create(
             model=self.model,
             voice=self.voice,
-            response_format="mp3",
+            response_format="wav",
             input=text
             )
 
@@ -71,7 +71,7 @@ class OPENAISynthesizer(BaseSynthesizer):
                         if not self.first_chunk_generated:
                             meta_info["is_first_chunk"] = True
                             self.first_chunk_generated = True
-                        yield create_ws_data_packet(resample(convert_audio_to_wav(chunk, 'mp3'), self.sample_rate, format="wav"), meta_info)
+                        yield create_ws_data_packet(resample(chunk, self.sample_rate, format="wav"), meta_info)
                         
                     if "end_of_llm_stream" in meta_info and meta_info["end_of_llm_stream"]:
                         meta_info["end_of_synthesizer_stream"] = True

@@ -1,5 +1,4 @@
 services:
-
   # main bolna service
   bolna-app:
     image: bolna-app:latest
@@ -26,7 +25,7 @@ services:
   # ngrok for local tunneling
   ngrok:
     image: ngrok/ngrok:latest
-    restart: unless-stopped
+    # restart: unless-stopped
     command:
       - "start"
       - "--all"
@@ -36,7 +35,6 @@ services:
       - ./ngrok-config.yml:/etc/ngrok.yml
     ports:
       - 4040:4040
-
   ### Telephony servers ###
   twilio-app:
     image: twilio-app:latest
@@ -59,6 +57,20 @@ services:
       dockerfile: dockerfiles/plivo_server.Dockerfile
     ports:
       - "8002:8002"
+    depends_on:
+      - redis
+      - ngrok
+      - bolna-app
+    env_file:
+      - .env
+      
+  voximplant_app:
+    image: voximplant_app:latest
+    build: 
+      context: .
+      dockerfile: dockerfiles/voximplant-server.Dockerfile
+    ports:
+      - "8000:8000"
     depends_on:
       - redis
       - ngrok

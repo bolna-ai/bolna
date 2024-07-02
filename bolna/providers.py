@@ -1,3 +1,4 @@
+from bolna.llms.groq import GroqLLM
 from bolna.transcriber.bodhi_transcriber import BodhiTranscriber
 from .synthesizer import PollySynthesizer, XTTSSynthesizer, ElevenlabsSynthesizer, OPENAISynthesizer, FourieSynthesizer, DeepgramSynthesizer, MeloSynthesizer, StylettsSynthesizer, AzureSynthesizer
 from .transcriber import DeepgramTranscriber, WhisperTranscriber
@@ -42,7 +43,7 @@ SUPPORTED_LLM_PROVIDERS = {
     'anyscale': LiteLLM,
     'custom': OpenAiLLM,
     'ola': OpenAiLLM,
-    'groq': LiteLLM,
+    'groq': GroqLLM,
     'anthropic': LiteLLM
 }
 SUPPORTED_INPUT_HANDLERS = {
