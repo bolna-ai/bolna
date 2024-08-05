@@ -36,6 +36,8 @@ services:
       - ./ngrok-config.yml:/etc/ngrok.yml
     ports:
       - 4040:4040
+    environment:
+      - NGROK_AUTHTOKEN=${NGROK_AUTHTOKEN}
 
   ### Telephony servers ###
   twilio-app:
