@@ -80,7 +80,7 @@ class Transcriber(BaseModel):
     encoding: Optional[str] = "linear16"
     endpointing: Optional[int] = 400
     keywords: Optional[str] = None
-    task:Optional[str] = "transcribe"
+    task: Optional[str] = "transcribe"
     provider: Optional[str] = "deepgram"
 
     @validator("provider")
@@ -88,9 +88,14 @@ class Transcriber(BaseModel):
         print(f"value {value}, PROVIDERS {list(SUPPORTED_TRANSCRIBER_PROVIDERS.keys())}")
         return validate_attribute(value, list(SUPPORTED_TRANSCRIBER_PROVIDERS.keys()))
 
+    # Only whisper works well with russian and kazakh
     @validator("language")
-    def validate_language(cls, value):
-        return validate_attribute(value, ["en", "hi", "es", "fr", "pt", "ko", "ja", "zh", "de", "it", "pt-BR"])
+    def validate_language(cls, value, values):
+        supported_languages = ["en", "hi", "es", "fr", "pt", "ko", "ja", "zh", "de", "it", "pt-BR"]
+        if values.get('model') == 'whisper':
+            supported_languages.append('ru')
+            supported_languages.append('kk')
+        return validate_attribute(value, supported_languages)
 
 
 class Synthesizer(BaseModel):
