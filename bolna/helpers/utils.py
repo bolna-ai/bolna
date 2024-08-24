@@ -543,3 +543,14 @@ def convert_to_request_log(message, meta_info, model, component = "transcriber",
         log['is_final'] = False #This is logged only for users to know final transcript from the transcriber
     log['engine'] = engine
     asyncio.create_task(write_request_logs(log, run_id))
+
+
+def get_route_info(message, route_layer):
+    route = route_layer(message)
+    logger.info(f"route gotten {route}")
+    return route.name
+
+
+async def run_in_seperate_thread(fun):
+    resp = await asyncio.to_thread(fun)
+    return resp
