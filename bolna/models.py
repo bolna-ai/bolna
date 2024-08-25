@@ -179,6 +179,7 @@ class Llm(BaseModel):
     presence_penalty: Optional[float] = 0.0
     provider: Optional[str] = "openai"
     base_url: Optional[str] = None
+    routes: Optional[Routes] = None
 
 
 class SimpleLlmAgent(Llm):
@@ -230,7 +231,7 @@ class KnowledgebaseAgent(Llm):
 class LlmAgent(BaseModel):
     agent_flow_type: str
     agent_type: str
-    guardrails: Optional[Routes] = None
+    routes: Optional[Routes] = None
     extra_config: Union[OpenaiAssistant, KnowledgebaseAgent, LlmAgentGraph, MultiAgent, SimpleLlmAgent]
 
     @field_validator('extra_config', mode='before')

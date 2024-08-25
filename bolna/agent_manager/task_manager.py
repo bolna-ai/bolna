@@ -253,7 +253,7 @@ class TaskManager(BaseManager):
                 routes_meta = self.kwargs.get('routes', None)
                 if self.__is_multiagent():
                     routes_meta = self.kwargs.get('routes', None)
-                    routes_meta = routes_meta['guardrails']
+                    routes_meta = routes_meta['routes']
                 else:
                     routes_meta = self.kwargs.get('routes', None)
 
