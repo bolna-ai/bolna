@@ -231,7 +231,7 @@ class LlmAgent(BaseModel):
     agent_flow_type: str
     agent_type: str
     guardrails: Optional[Routes] = None
-    extra_config: Union[OpenaiAssistant, KnowledgebaseAgent, LlmAgentGraph, MultiAgent, SIMPLE_LLM_AGENT]
+    extra_config: Union[OpenaiAssistant, KnowledgebaseAgent, LlmAgentGraph, MultiAgent, SimpleLlmAgent]
 
     @field_validator('extra_config', mode='before')
     def validate_extra_config(cls, value, info):
@@ -281,7 +281,7 @@ class ToolModel(BaseModel):
 
 
 class ToolsConfig(BaseModel):
-    llm_agent: Optional[Union[LLM_AGENT, SIMPLE_LLM_AGENT]] = None
+    llm_agent: Optional[Union[LlmAgent, SimpleLlmAgent]] = None
     synthesizer: Optional[Synthesizer] = None
     transcriber: Optional[Transcriber] = None
     input: Optional[IOModel] = None
