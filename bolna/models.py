@@ -158,12 +158,6 @@ class VectorStore(BaseModel):
     provider: str
     provider_config: Union[LanceDBProviderConfig, MongoDBProviderConfig]
 
-    @field_validator('provider_config', mode='before')
-    def validate_provider_config(cls, value, info):
-        vector_provider = info.data.get('provider')
-        if vector_provider not in ['mongodb', 'lancedb']:
-            raise ValueError('Unsupported provider for vector_store')
-
 
 class Llm(BaseModel):
     model: Optional[str] = "gpt-3.5-turbo"
@@ -324,7 +318,8 @@ class Task(BaseModel):
     toolchain: ToolsChainModel
     task_type: Optional[str] = "conversation"  # extraction, summarization, notification
     task_config: ConversationConfig = dict()
-    
+
+
 class AgentModel(BaseModel):
     agent_name: str
     agent_type: str = "other"
