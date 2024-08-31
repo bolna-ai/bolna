@@ -83,9 +83,9 @@ class TaskManager(BaseManager):
             "synthesizer": self.synthesizer_queue
         }
         self.pipelines = task['toolchain']['pipelines']
+
         self.textual_chat_agent = False
-        if task['toolchain']['pipelines'][0] == "llm" and task["tools_config"]["llm_agent"][
-            "agent_task"] == "conversation":
+        if task['toolchain']['pipelines'][0] == "llm" and task["tools_config"]["llm_agent"]["agent_task"] == "conversation":
             self.textual_chat_agent = False
 
         # Assistant persistance stuff
@@ -102,7 +102,7 @@ class TaskManager(BaseManager):
         
         # Recording
         self.should_record = False
-        self.conversation_recording= {
+        self.conversation_recording = {
             "input": {
                 'data': b'',
                 'started': time.time()
@@ -130,7 +130,7 @@ class TaskManager(BaseManager):
 
         # Setup IO SERVICE, TRANSCRIBER, LLM, SYNTHESIZER
         self.llm_task = None
-        self.execute_function_call_task =  None
+        self.execute_function_call_task = None
         self.synthesizer_tasks = []
         self.synthesizer_task = None
 
@@ -179,9 +179,7 @@ class TaskManager(BaseManager):
                     'buffer_size']
                 if 'assistant_id' in config:
                     self.llm_config_map[agent]['agent_type'] = "openai_assistant"
-
         elif not self.__is_openai_assistant():
-            logger.info(f"IS NOT OPEN AI ASSISTANT")
             if self.task_config["tools_config"]["llm_agent"] is not None:
                 if self.__is_knowledgebase_agent():
                     self.llm_agent_config = self.task_config["tools_config"]["llm_agent"]
@@ -202,8 +200,6 @@ class TaskManager(BaseManager):
                         "max_tokens": self.llm_agent_config['max_tokens'],
                         "provider": self.llm_agent_config['provider'],
                     }
-
-                logger.info(f"SETTING FOLLOW UP TASK DETAILS {self.llm_agent_config}")
 
         # if self.task_config["tools_config"]["llm_agent"] is not None:
         #     self.llm_config = {
@@ -229,6 +225,9 @@ class TaskManager(BaseManager):
         self.hangup_task = None
         
         self.conversation_config = None
+        provider_config = self.task_config["tools_config"]["synthesizer"].get("provider_config")
+        self.synthesizer_voice = provider_config["voice"]
+
         if task_id == 0:
             self.background_check_task = None
             self.hangup_task = None
@@ -262,7 +261,7 @@ class TaskManager(BaseManager):
                     self.vector_caches = routes_meta["vector_caches"]
                     self.route_responses_dict = routes_meta["route_responses_dict"]
                     self.route_layer = routes_meta["route_layer"]
-                    logger.info(f"Time to setup routes from warrmed up cache {time.time() - start_time}")
+                    logger.info(f"Time to setup routes from warmed up cache {time.time() - start_time}")
                 else:
                     self.__setup_routes(self.routes)
                     logger.info(f"Time to setup routes {time.time() - start_time}")
@@ -281,11 +280,10 @@ class TaskManager(BaseManager):
                 self.incremental_delay = self.conversation_config.get("incremental_delay", 100)
                 logger.info(f"incremental_delay - {self.incremental_delay}")
                 self.required_delay_before_speaking = max(self.minimum_wait_duration - self.incremental_delay, 0)  #Everytime we get a message we increase it by 100 miliseconds 
-                self.time_since_first_interim_result  = -1
+                self.time_since_first_interim_resu = -1
 
                 #Cut conversation
                 self.hang_conversation_after = self.conversation_config.get("hangup_after_silence", 10)
-                self.check_if_user_is_still_there = 5
                 logger.info(f"hangup_after_silence {self.hang_conversation_after}")
                 self.last_transmitted_timestamp = 0
                 self.let_remaining_audio_pass_through = False #Will be used to let remaining audio pass through in case of utterenceEnd event and there's still audio left to be sent
@@ -305,7 +303,6 @@ class TaskManager(BaseManager):
                 self.started_transmitting_audio = False
                 self.accidental_interruption_phrases = set(ACCIDENTAL_INTERRUPTION_PHRASES)
                 #self.interruption_backoff_period = 1000 #conversation_config.get("interruption_backoff_period", 300) #this is the amount of time output loop will sleep before sending next audio
-                self.use_llm_for_hanging_up = self.conversation_config.get("hangup_after_LLMCall", False)
                 self.allow_extra_sleep = False #It'll help us to back off as soon as we hear interruption for a while
 
                 #Backchanneling
