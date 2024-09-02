@@ -225,10 +225,11 @@ class TaskManager(BaseManager):
         self.hangup_task = None
         
         self.conversation_config = None
-        provider_config = self.task_config["tools_config"]["synthesizer"].get("provider_config")
-        self.synthesizer_voice = provider_config["voice"]
 
         if task_id == 0:
+            provider_config = self.task_config["tools_config"]["synthesizer"].get("provider_config")
+            self.synthesizer_voice = provider_config["voice"]
+
             self.background_check_task = None
             self.hangup_task = None
             self.output_chunk_size = 16384 if self.sampling_rate == 24000 else 4096 #0.5 second chunk size for calls
