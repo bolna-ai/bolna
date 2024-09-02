@@ -60,6 +60,6 @@ If there were any proper nouns, or number or date or time involved explicitly ma
 
 FILLER_PROMPT = "Please, do not start your response with fillers like Got it, Noted.\nAbstain from using any greetings like hey, hello at the start of your conversation"
 
-DATE_PROMPT = "### Date\n Today\'s Date is {} and the current Time is {}. The timezone is {}"
+DATE_PROMPT = '### Date:\n Today\'s Date is "{}" and the current local time is "{}" when this conversation has started. The timezone is "{}"'
 
 FUNCTION_CALL_PROMPT = "We did made a function calling for user. We hit the function : {} and send a {} request and it returned us the response as given below: {} \n\n . Understand the above response and convey this response in a context to user. ### Important\n1. If there was an issue with the API call, kindly respond with - Hey, I'm not able to use the system right now, can you please try later? \n2. IF YOU CALLED THE FUNCTION BEFORE, PLEASE DO NOT CALL THE SAME FUNCTION AGAIN!"
