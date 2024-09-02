@@ -1048,7 +1048,11 @@ class TaskManager(BaseManager):
     async def __do_llm_generation(self, messages, meta_info, next_step, should_bypass_synth = False, should_trigger_function_call = False):
         llm_response = ""
         logger.info(f"MEssages before generation {messages}")
-        async for llm_message in self.tools['llm_agent'].generate(messages, synthesize=True, meta_info = meta_info):
+        synthesize = True
+        if should_bypass_synth:
+            synthesize = False
+
+        async for llm_message in self.tools['llm_agent'].generate(messages, synthesize=synthesize, meta_info=meta_info):
             logger.info(f"llm_message {llm_message}")
             data, end_of_llm_stream, latency, trigger_function_call = llm_message
 
@@ -1057,7 +1061,6 @@ class TaskManager(BaseManager):
                 self.llm_task = asyncio.create_task(self.__execute_function_call(next_step = next_step, **data))
                 return
             
-
             if latency and (len(self.llm_latencies) == 0 or self.llm_latencies[-1] != latency):
                 meta_info["llm_latency"] = latency
                 self.llm_latencies.append(latency)
@@ -1066,9 +1069,10 @@ class TaskManager(BaseManager):
 
             llm_response += " " + data
             logger.info(f"Got a response from LLM {llm_response}")
+            if end_of_llm_stream:
+                meta_info["end_of_llm_stream"] = True
+
             if self.stream:
-                if end_of_llm_stream:
-                    meta_info["end_of_llm_stream"] = True
                 text_chunk = self.__process_stop_words(data, meta_info)
                 logger.info(f"##### O/P from LLM {text_chunk} {llm_response}")
 
@@ -1081,7 +1085,6 @@ class TaskManager(BaseManager):
 
                 await self._handle_llm_output(next_step, text_chunk, should_bypass_synth, meta_info)
             else:
-                meta_info["end_of_llm_stream"] = True
                 messages.append({"role": "assistant", "content": llm_response})
                 self.history = copy.deepcopy(messages)
                 await self._handle_llm_output(next_step, llm_response, should_bypass_synth, meta_info)
