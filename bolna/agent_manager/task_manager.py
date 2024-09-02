@@ -9,6 +9,7 @@ import json
 import uuid
 import copy
 from datetime import datetime
+import pytz
 
 import aiohttp
 
@@ -46,6 +47,7 @@ class TaskManager(BaseManager):
         self.average_synthesizer_latency = 0.0
         self.average_transcriber_latency = 0.0
         self.task_config = task
+        self.timezone = pytz.timezone('America/Los_Angeles')
 
         logger.info(f"API TOOLS IN TOOLS CONFIG {task['tools_config'].get('api_tools')}")
         if task['tools_config'].get('api_tools', None) is not None:
@@ -609,14 +611,14 @@ class TaskManager(BaseManager):
     # Helper methods
     ########################
 
-    def __get_final_prompt(self, prompt, today):
+    def __get_final_prompt(self, prompt, today, current_time, current_timezone):
         enriched_prompt = prompt
         if self.context_data is not None:
             enriched_prompt = update_prompt_with_context(enriched_prompt, self.context_data)
         notes = "### Note:\n"
         if self._is_conversation_task() and self.use_fillers:
             notes += f"1.{FILLER_PROMPT}\n"
-        return f"{enriched_prompt}\n{notes}\n{DATE_PROMPT.format(today)}"
+        return f"{enriched_prompt}\n{notes}\n{DATE_PROMPT.format(today, current_time, current_timezone)}"
 
     async def load_prompt(self, assistant_name, task_id, local, **kwargs):
         logger.info("prompt and config setup started")
@@ -626,7 +628,11 @@ class TaskManager(BaseManager):
             return
 
         self.is_local = local
-        today = datetime.now().strftime("%A, %B %d, %Y")
+        if 'recipient_data' in self.context_data and self.context_data['recipient_data'] and self.context_data['recipient_data'].get('timezone', None):
+            self.timezone = pytz.timezone(self.context_data['recipient_data']['timezone'])
+
+        today = datetime.now(self.timezone).strftime("%A, %B %d, %Y")
+        current_time = datetime.now(self.timezone).strftime("%I:%M:%S %p")
 
         prompt_responses = kwargs.get('prompt_responses', None)
         if not prompt_responses:
@@ -641,7 +647,7 @@ class TaskManager(BaseManager):
             for agent in self.task_config["tools_config"]["llm_agent"]['extra_config']['agent_map']:
                 prompt = prompts[agent]['system_prompt']
                 prompt = self.__prefill_prompts(self.task_config, prompt, self.task_config['task_type'])
-                prompt = self.__get_final_prompt(prompt, today)
+                prompt = self.__get_final_prompt(prompt, today, current_time, self.timezone)
                 if agent == self.task_config["tools_config"]["llm_agent"]['extra_config']['default_agent']:
                     self.system_prompt = {
                         'role': 'system',
@@ -674,7 +680,7 @@ class TaskManager(BaseManager):
             
             self.system_prompt = {
                 'role': "system",
-                'content': f"{enriched_prompt}\n{notes}\n{DATE_PROMPT.format(today)}"
+                'content': f"{enriched_prompt}\n{notes}\n{DATE_PROMPT.format(today, current_time, self.timezone)}"
             }
         else:
             self.system_prompt = {
