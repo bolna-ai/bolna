@@ -175,7 +175,7 @@ class LlamaIndexRag(BaseAgent):
             async for token in token_generator.async_response_gen():
                 if latency < 0:
                     latency = time.time() - start_time
-                buffer += " " + token
+                buffer += token
                 if len(buffer.split()) >= self.buffer:
                     yield buffer.strip(), False, latency, False
                     logger.info(f"LLM BUFFER FULL BUFFER OUTPUT: {buffer}")
