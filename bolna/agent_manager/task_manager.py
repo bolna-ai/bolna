@@ -1740,8 +1740,8 @@ class TaskManager(BaseManager):
                     else:
                         meta_info={'io': self.tools["output"].get_provider(), "request_id": str(uuid.uuid4()), "cached": False, "sequence_id": -1, 'format': 'pcm'}
                         await self._synthesize(create_ws_data_packet(self.check_user_online_message, meta_info= meta_info))
-                
-                #Just in case we need to clear messages sent before
+
+                # Just in case we need to clear messages sent before
                 await self.tools["output"].handle_interruption()
             else:
                 logger.info(f"Only {time_since_last_spoken_AI_word} seconds since last spoken time stamp and hence not cutting the phone call")
