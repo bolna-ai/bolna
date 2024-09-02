@@ -280,7 +280,7 @@ class TaskManager(BaseManager):
                 self.incremental_delay = self.conversation_config.get("incremental_delay", 100)
                 logger.info(f"incremental_delay - {self.incremental_delay}")
                 self.required_delay_before_speaking = max(self.minimum_wait_duration - self.incremental_delay, 0)  #Everytime we get a message we increase it by 100 miliseconds 
-                self.time_since_first_interim_resu = -1
+                self.time_since_first_interim_result = -1
 
                 #Cut conversation
                 self.hang_conversation_after = self.conversation_config.get("hangup_after_silence", 10)
