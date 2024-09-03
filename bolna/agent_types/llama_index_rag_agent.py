@@ -43,7 +43,7 @@ class LlamaIndexRag(BaseAgent):
         agent (OpenAIAgent): Agent that uses the query engine to answer questions.
     """
 
-    def __init__(self, vector_id: str, temperature: float, model: str, buffer: int = 40, max_tokens: int = 100,
+    def __init__(self, vector_id: str, temperature: float, model: str, buffer: int = 20, max_tokens: int = 100,
                  provider_config: dict = None):
         """
         Initialize the LlamaIndexRag instance.
@@ -52,7 +52,7 @@ class LlamaIndexRag(BaseAgent):
             vector_id (str): Identifier for the vector store.
             temperature (float): Temperature setting for the language model.
             model (str): The name of the OpenAI model to use.
-            buffer (int, optional): Size of the token buffer for streaming responses. Defaults to 40.
+            buffer (int, optional): Size of the token buffer for streaming responses. Defaults to 20.
             max_tokens (int, optional): Maximum number of tokens for the language model output. Defaults to 100.
         """
         super().__init__()
@@ -176,7 +176,7 @@ class LlamaIndexRag(BaseAgent):
                 if latency < 0:
                     latency = time.time() - start_time
                 buffer += token
-                if len(buffer.split()) >= self.buffer:
+                if len(buffer.split()) >= self.buffer or buffer[-1] in {'.', '!', '?'}:
                     yield buffer.strip(), False, latency, False
                     logger.info(f"LLM BUFFER FULL BUFFER OUTPUT: {buffer}")
                     buffer = ""

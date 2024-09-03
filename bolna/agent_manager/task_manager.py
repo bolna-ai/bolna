@@ -575,8 +575,8 @@ class TaskManager(BaseManager):
                 vector_id=vector_store_config.get("vector_id"),
                 temperature=extra_config.get("temperature", 0.1),
                 model=extra_config.get("model", "gpt-3.5-turbo-16k"),
-                buffer=40,
-                max_tokens=100,  # You might want to make this configurable
+                buffer = self.task_config["tools_config"]["synthesizer"].get('buffer_size'),
+                max_tokens = self.llm_agent_config['extra_config']['max_tokens'], 
                 provider_config=vector_store_config
             )
             logger.info("Llama-index rag agent is created")
@@ -1074,6 +1074,17 @@ class TaskManager(BaseManager):
                 logger.info(f"Got llm latencies {self.llm_latencies}")
 
             llm_response += " " + data
+
+            # Checking the size of the llm_response as it should be less than 20 words
+            # if len(llm_response.strip()) > 20:
+            #     # Let's make a gpt3.5 turbo openai async call to summarize the text and make it shorter
+            #     summary_prompt = f"Summarize the following text in less than 100 characters and the answer should be precise:\n\n{llm_response}"
+            #     summary_response = ""
+            #     async for summarized_response in self.tools['llm_agent'].generate([{'role': 'user', 'content': summary_prompt}]):
+            #         logger.info(f"Summarized response : {summary_response}")
+                
+            #     llm_response = summarized_response
+
             logger.info(f"Got a response from LLM {llm_response}")
             if end_of_llm_stream:
                 meta_info["end_of_llm_stream"] = True
