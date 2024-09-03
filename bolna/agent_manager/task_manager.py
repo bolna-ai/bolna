@@ -575,8 +575,8 @@ class TaskManager(BaseManager):
                 vector_id=vector_store_config.get("vector_id"),
                 temperature=extra_config.get("temperature", 0.1),
                 model=extra_config.get("model", "gpt-3.5-turbo-16k"),
-                buffer = self.task_config["tools_config"]["synthesizer"].get('buffer_size'),
-                max_tokens = self.llm_agent_config['extra_config']['max_tokens'], 
+                buffer=self.task_config["tools_config"]["synthesizer"].get('buffer_size'),
+                max_tokens=self.llm_agent_config['extra_config']['max_tokens'],
                 provider_config=vector_store_config
             )
             logger.info("Llama-index rag agent is created")
