@@ -54,7 +54,7 @@ class TaskManager(BaseManager):
             logger.info(f"API TOOLS is present {task['tools_config']['api_tools']}")
             self.kwargs['api_tools'] = task['tools_config']['api_tools']
 
-        if task['tools_config']["llm_agent"]['extra_config'].get('assistant_id', None) is not None:
+        if task['tools_config']["llm_agent"] and task['tools_config']["llm_agent"]['extra_config'].get('assistant_id', None) is not None:
             self.kwargs['assistant_id'] = task['tools_config']["llm_agent"]['extra_config']['assistant_id']
             logger.info(f"Assistant id for agent is {self.kwargs['assistant_id']}")
 
@@ -388,7 +388,15 @@ class TaskManager(BaseManager):
         elif self.__is_openai_assistant():
             # if self.task_config['tools_config']["llm_agent"].get("agent_type", None) is None:
             #     assistant_config = {"assistant_id": self.task_config['tools_config']["llm_agent"]['assistant_id']}
-            self.__setup_tasks(agent_type = "openai_assistant", assistant_config= task['tools_config']["llm_agent"]['extra_config'])
+            self.__setup_tasks(agent_type="openai_assistant", assistant_config=task['tools_config']["llm_agent"]['extra_config'])
+
+        elif self.task_config["task_type"] == "webhook":
+            if "webhookURL" in self.task_config["tools_config"]["api_tools"]:
+                webhook_url = self.task_config["tools_config"]["api_tools"]["webhookURL"]
+            else:
+                webhook_url = self.task_config["tools_config"]["api_tools"]["tools_params"]["webhook"]["url"]
+            logger.info(f"Webhook URL {webhook_url}")
+            self.tools["webhook_agent"] = WebhookAgent(webhook_url=webhook_url)
 
     def __is_openai_assistant(self):
         if self.task_config["task_type"] == "webhook":
@@ -597,13 +605,6 @@ class TaskManager(BaseManager):
             logger.info("Setting up summarization agent")
             self.tools["llm_agent"] = SummarizationContextualAgent(llm, prompt=self.system_prompt)
             self.summarized_data = None
-        elif self.task_config["task_type"] == "webhook":
-            if "webhookURL" in self.task_config["tools_config"]["api_tools"]:
-                webhook_url = self.task_config["tools_config"]["api_tools"]["webhookURL"]
-            else:
-                webhook_url = self.task_config["tools_config"]["api_tools"]["tools_params"]["webhook"]["url"]
-            logger.info(f"Webhook URL {webhook_url}")
-            self.tools["webhook_agent"] = WebhookAgent(webhook_url=webhook_url)
         logger.info("prompt and config setup completed")
 
 
@@ -622,9 +623,11 @@ class TaskManager(BaseManager):
 
     async def load_prompt(self, assistant_name, task_id, local, **kwargs):
         logger.info("prompt and config setup started")
-        agent_type = self.task_config["tools_config"]["llm_agent"].get("agent_type", "simple_llm_agent")
+        if self.task_config["task_type"] == "webhook":
+            return
 
-        if self.task_config["task_type"] == "webhook" or agent_type in ["openai_assistant", "knowledgebase_agent"]:
+        agent_type = self.task_config["tools_config"]["llm_agent"].get("agent_type", "simple_llm_agent")
+        if agent_type in ["openai_assistant", "knowledgebase_agent"]:
             return
 
         self.is_local = local
