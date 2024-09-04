@@ -628,8 +628,9 @@ class TaskManager(BaseManager):
             return
 
         self.is_local = local
-        if 'recipient_data' in self.context_data and self.context_data['recipient_data'] and self.context_data['recipient_data'].get('timezone', None):
-            self.timezone = pytz.timezone(self.context_data['recipient_data']['timezone'])
+        if task_id == 0:
+            if 'recipient_data' in self.context_data and self.context_data['recipient_data'] and self.context_data['recipient_data'].get('timezone', None):
+                self.timezone = pytz.timezone(self.context_data['recipient_data']['timezone'])
 
         today = datetime.now(self.timezone).strftime("%A, %B %d, %Y")
         current_time = datetime.now(self.timezone).strftime("%I:%M:%S %p")
