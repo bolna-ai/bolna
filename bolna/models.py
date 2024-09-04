@@ -226,10 +226,10 @@ class LlmAgent(BaseModel):
     agent_flow_type: str
     agent_type: str
     routes: Optional[Routes] = None
-    extra_config: Union[OpenaiAssistant, KnowledgebaseAgent, LlmAgentGraph, MultiAgent, SimpleLlmAgent]
+    llm_config: Union[OpenaiAssistant, KnowledgebaseAgent, LlmAgentGraph, MultiAgent, SimpleLlmAgent]
 
-    @field_validator('extra_config', mode='before')
-    def validate_extra_config(cls, value, info):
+    @field_validator('llm_config', mode='before')
+    def validate_llm_config(cls, value, info):
         agent_type = info.data.get('agent_type')
         print(f"Agent type: {agent_type}")
         print(f"Value type: {type(value)}")
@@ -249,12 +249,12 @@ class LlmAgent(BaseModel):
         expected_type = valid_config_types[agent_type]
 
         if not isinstance(value, dict):
-            raise ValueError(f"extra_config must be a dict, got {type(value)}")
+            raise ValueError(f"llm_config must be a dict, got {type(value)}")
 
         try:
             return expected_type(**value)
         except Exception as e:
-            raise ValueError(f"Failed to create {expected_type.__name__} from extra_config: {str(e)}")
+            raise ValueError(f"Failed to create {expected_type.__name__} from llm_config: {str(e)}")
 
 
 class ToolDescription(BaseModel):

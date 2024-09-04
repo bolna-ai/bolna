@@ -54,12 +54,12 @@ class TaskManager(BaseManager):
             logger.info(f"API TOOLS is present {task['tools_config']['api_tools']}")
             self.kwargs['api_tools'] = task['tools_config']['api_tools']
 
-        if task['tools_config']["llm_agent"] and task['tools_config']["llm_agent"]['extra_config'].get('assistant_id', None) is not None:
-            self.kwargs['assistant_id'] = task['tools_config']["llm_agent"]['extra_config']['assistant_id']
+        if task['tools_config']["llm_agent"] and task['tools_config']["llm_agent"]['llm_config'].get('assistant_id', None) is not None:
+            self.kwargs['assistant_id'] = task['tools_config']["llm_agent"]['llm_config']['assistant_id']
             logger.info(f"Assistant id for agent is {self.kwargs['assistant_id']}")
 
         if self.__is_openai_assistant():
-            self.kwargs['assistant_id'] = task['tools_config']["llm_agent"]['extra_config']['assistant_id']
+            self.kwargs['assistant_id'] = task['tools_config']["llm_agent"]['llm_config']['assistant_id']
             logger.info(f"Assistant id for agent is {self.kwargs['assistant_id']}")
 
         logger.info(f"doing task {task}")
@@ -175,7 +175,7 @@ class TaskManager(BaseManager):
         self.llm_config_map = {}
         self.llm_agent_map = {}
         if self.__is_multiagent():
-            for agent, config in self.task_config["tools_config"]["llm_agent"]['extra_config']['agent_map'].items():
+            for agent, config in self.task_config["tools_config"]["llm_agent"]['llm_config']['agent_map'].items():
                 self.llm_config_map[agent] = config.copy()
                 self.llm_config_map[agent]['buffer_size'] = self.task_config["tools_config"]["synthesizer"][
                     'buffer_size']
@@ -186,16 +186,16 @@ class TaskManager(BaseManager):
                 if self.__is_knowledgebase_agent():
                     self.llm_agent_config = self.task_config["tools_config"]["llm_agent"]
                     self.llm_config = {
-                        "model": self.llm_agent_config['extra_config']['model'],
-                        "max_tokens": self.llm_agent_config['extra_config']['max_tokens'],
-                        "provider": self.llm_agent_config['extra_config']['provider'],
+                        "model": self.llm_agent_config['llm_config']['model'],
+                        "max_tokens": self.llm_agent_config['llm_config']['max_tokens'],
+                        "provider": self.llm_agent_config['llm_config']['provider'],
                     }
                 else:
                     agent_type = self.task_config["tools_config"]["llm_agent"].get("agent_type", None)
                     if not agent_type:
                         self.llm_agent_config = self.task_config["tools_config"]["llm_agent"]
                     else:
-                        self.llm_agent_config = self.task_config["tools_config"]["llm_agent"]['extra_config']
+                        self.llm_agent_config = self.task_config["tools_config"]["llm_agent"]['llm_config']
 
                     self.llm_config = {
                         "model": self.llm_agent_config['model'],
@@ -272,7 +272,7 @@ class TaskManager(BaseManager):
             if self.__is_multiagent():
                 routes_meta = self.kwargs.pop('routes', None)
                 self.agent_routing = routes_meta['agent_routing_config']['route_layer']
-                self.default_agent = task['tools_config']['llm_agent']['extra_config']['default_agent']
+                self.default_agent = task['tools_config']['llm_agent']['llm_config']['default_agent']
                 logger.info(f"Initialised with default agent {self.default_agent}, agent_routing {self.agent_routing}")
 
             # for long pauses and rushing
@@ -370,7 +370,7 @@ class TaskManager(BaseManager):
 
         elif self.__is_multiagent():
             # Setup task for multiagent conversation
-            for agent in self.task_config["tools_config"]["llm_agent"]['extra_config']['agent_map']:
+            for agent in self.task_config["tools_config"]["llm_agent"]['llm_config']['agent_map']:
                 if 'routes' in self.llm_config_map[agent]:
                     del self.llm_config_map[agent]['routes'] #Remove routes from here as it'll create conflict ahead
                 llm = self.__setup_llm(self.llm_config_map[agent])
@@ -388,7 +388,7 @@ class TaskManager(BaseManager):
         elif self.__is_openai_assistant():
             # if self.task_config['tools_config']["llm_agent"].get("agent_type", None) is None:
             #     assistant_config = {"assistant_id": self.task_config['tools_config']["llm_agent"]['assistant_id']}
-            self.__setup_tasks(agent_type="openai_assistant", assistant_config=task['tools_config']["llm_agent"]['extra_config'])
+            self.__setup_tasks(agent_type="openai_assistant", assistant_config=task['tools_config']["llm_agent"]['llm_config'])
 
         elif self.task_config["task_type"] == "webhook":
             if "webhookURL" in self.task_config["tools_config"]["api_tools"]:
@@ -577,14 +577,14 @@ class TaskManager(BaseManager):
             llm_agent = OpenAIAssistantAgent(**assistant_config)
         elif agent_type == "knowledgebase_agent":
             logger.info("#### Setting up knowledgebase_agent agent ####")
-            extra_config = self.task_config["tools_config"]["llm_agent"].get("extra_config", {})
-            vector_store_config = extra_config.get("vector_store", {})
+            llm_config = self.task_config["tools_config"]["llm_agent"].get("llm_config", {})
+            vector_store_config = llm_config.get("vector_store", {})
             llm_agent = LlamaIndexRag(
                 vector_id=vector_store_config.get("vector_id"),
-                temperature=extra_config.get("temperature", 0.1),
-                model=extra_config.get("model", "gpt-3.5-turbo-16k"),
+                temperature=llm_config.get("temperature", 0.1),
+                model=llm_config.get("model", "gpt-3.5-turbo-16k"),
                 buffer=self.task_config["tools_config"]["synthesizer"].get('buffer_size'),
-                max_tokens=self.llm_agent_config['extra_config']['max_tokens'],
+                max_tokens=self.llm_agent_config['llm_config']['max_tokens'],
                 provider_config=vector_store_config
             )
             logger.info("Llama-index rag agent is created")
@@ -648,11 +648,11 @@ class TaskManager(BaseManager):
             logger.info(f"Getting {current_task} from prompt responses of type {type(prompt_responses)}, prompt responses key {prompt_responses.keys()}")
             prompts = prompt_responses.get(current_task, None)
             self.prompt_map = {}
-            for agent in self.task_config["tools_config"]["llm_agent"]['extra_config']['agent_map']:
+            for agent in self.task_config["tools_config"]["llm_agent"]['llm_config']['agent_map']:
                 prompt = prompts[agent]['system_prompt']
                 prompt = self.__prefill_prompts(self.task_config, prompt, self.task_config['task_type'])
                 prompt = self.__get_final_prompt(prompt, today, current_time, self.timezone)
-                if agent == self.task_config["tools_config"]["llm_agent"]['extra_config']['default_agent']:
+                if agent == self.task_config["tools_config"]["llm_agent"]['llm_config']['default_agent']:
                     self.system_prompt = {
                         'role': 'system',
                         'content': prompt
