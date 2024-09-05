@@ -706,7 +706,7 @@ class TaskManager(BaseManager):
     def __prefill_prompts(self, task, prompt, task_type):
         if not prompt and task_type in ('extraction', 'summarization'):
             if task_type == 'extraction':
-                extraction_json = task.get("tools_config").get('llm_agent').get('extraction_json')
+                extraction_json = task.get("tools_config").get('llm_agent', {}).get('llm_config', {}).get('extraction_json')
                 prompt = EXTRACTION_PROMPT.format(extraction_json)
                 return {"system_prompt": prompt}
             elif task_type == 'summarization':
