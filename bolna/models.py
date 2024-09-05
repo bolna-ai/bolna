@@ -1,6 +1,6 @@
 import json
 from typing import Optional, List, Union, Dict
-from pydantic import BaseModel, Field, validator, ValidationError, Json
+from pydantic import BaseModel, Field, field_validator, ValidationError, Json
 from pydantic_core import PydanticCustomError
 from .providers import *
 
@@ -83,12 +83,12 @@ class Transcriber(BaseModel):
     task:Optional[str] = "transcribe"
     provider: Optional[str] = "deepgram"
 
-    @validator("provider")
+    @field_validator("provider")
     def validate_model(cls, value):
         print(f"value {value}, PROVIDERS {list(SUPPORTED_TRANSCRIBER_PROVIDERS.keys())}")
         return validate_attribute(value, list(SUPPORTED_TRANSCRIBER_PROVIDERS.keys()))
 
-    @validator("language")
+    @field_validator("language")
     def validate_language(cls, value):
         return validate_attribute(value, ["en", "hi", "es", "fr", "pt", "ko", "ja", "zh", "de", "it", "pt-BR"])
 
@@ -101,16 +101,16 @@ class Synthesizer(BaseModel):
     audio_format: Optional[str] = "pcm"
     caching: Optional[bool] = True
 
-    @validator("provider")
+    @field_validator("provider")
     def validate_model(cls, value):
         return validate_attribute(value, ["polly", "xtts", "elevenlabs", "openai", "deepgram", "melotts", "styletts", "azuretts"])
 
 
 class IOModel(BaseModel):
     provider: str
-    format: str
+    format: Optional[str] = "wav"
 
-    @validator("provider")
+    @field_validator("provider")
     def validate_provider(cls, value):
         return validate_attribute(value, ["twilio", "default", "database", "exotel", "plivo", "daily"])
 
@@ -127,16 +127,41 @@ class Route(BaseModel):
 # Routes can be used for FAQs caching, prompt routing, guard rails, agent assist function calling
 class Routes(BaseModel):
     embedding_model: Optional[str] = "Snowflake/snowflake-arctic-embed-l"
-    routes: List[Route]
+    routes: Optional[List[Route]] = []
 
-class OpenaiAssistants(BaseModel):
+
+class OpenaiAssistant(BaseModel):
     name: Optional[str] = None
     assistant_id: str = None
+    max_tokens: Optional[int] =100
+    temperature: Optional[float] = 0.2
+    buffer_size: Optional[int] = 100
+    provider: Optional[str] = "openai"
+    model: Optional[str] = "gpt-3.5-turbo"
 
-class LLM(BaseModel):
+
+class MongoDBProviderConfig(BaseModel):
+    connection_string: Optional[str] = None
+    db_name: Optional[str] = None
+    collection_name: Optional[str] = None
+    index_name: Optional[str] = None
+    llm_model: Optional[str] = "gpt-3.5-turbo"
+    embedding_model: Optional[str] = "text-embedding-3-small"
+    embedding_dimensions: Optional[int] = 256
+
+
+class LanceDBProviderConfig(BaseModel):
+    vector_id: str
+
+
+class VectorStore(BaseModel):
+    provider: str
+    provider_config: Union[LanceDBProviderConfig, MongoDBProviderConfig]
+
+
+class Llm(BaseModel):
     model: Optional[str] = "gpt-3.5-turbo"
     max_tokens: Optional[int] = 100
-    agent_flow_type: Optional[str] = "streaming"
     family: Optional[str] = "openai"
     temperature: Optional[float] = 0.1
     request_json: Optional[bool] = False
@@ -149,28 +174,94 @@ class LLM(BaseModel):
     provider: Optional[str] = "openai"
     base_url: Optional[str] = None
     routes: Optional[Routes] = None
+
+
+class SimpleLlmAgent(Llm):
+    agent_flow_type: Optional[str] = "streaming" #It is used for backwards compatibility
+    routes: Optional[Routes] = None
     extraction_details: Optional[str] = None
     summarization_details: Optional[str] = None
-    backend: Optional[str] = "bolna"
-    extra_config: Optional[OpenaiAssistants] = None
 
 
-class MessagingModel(BaseModel):
-    provider: str
-    template: str
+class Node(BaseModel):
+    id: str
+    type: str  # Can be router or conversation for now
+    llm: Llm
+    exit_criteria: str
+    exit_response: Optional[str] = None
+    exit_prompt: Optional[str] = None
+    is_root: Optional[bool] = False
 
 
-# Need to redefine it
-class CalendarModel(BaseModel):
-    provider: str
-    title: str
-    email: str
-    time: str
+class Edge(BaseModel):
+    start_node: str  # Node ID
+    end_node: str
+    condition: Optional[tuple] = None  # extracted value from previous step and it's value
+
+
+class LlmAgentGraph(BaseModel):
+    nodes: List[Node]
+    edges: List[Edge]
+
+
+class AgentRouteConfig(BaseModel):
+    utterances: List[str]
+    threshold: Optional[float] = 0.85
+
+
+class MultiAgent(BaseModel):
+    agent_map: Dict[str, Union[Llm, OpenaiAssistant]]
+    agent_routing_config: Dict[str, AgentRouteConfig]
+    default_agent: str
+    embedding_model: Optional[str] = "Snowflake/snowflake-arctic-embed-l"
+
+
+class KnowledgebaseAgent(Llm):
+    vector_store: VectorStore
+    provider: Optional[str] = "openai"
+    model: Optional[str] = "gpt-3.5-turbo"
+
+
+class LlmAgent(BaseModel):
+    agent_flow_type: str
+    agent_type: str
+    routes: Optional[Routes] = None
+    llm_config: Union[OpenaiAssistant, KnowledgebaseAgent, LlmAgentGraph, MultiAgent, SimpleLlmAgent]
+
+    @field_validator('llm_config', mode='before')
+    def validate_llm_config(cls, value, info):
+        agent_type = info.data.get('agent_type')
+        print(f"Agent type: {agent_type}")
+        print(f"Value type: {type(value)}")
+        print(f"Value: {value}")
+
+        valid_config_types = {
+            'openai_assistant': OpenaiAssistant,
+            'knowledgebase_agent': KnowledgebaseAgent,
+            'llm_agent_graph': LlmAgentGraph,
+            'multiagent': MultiAgent,
+            'simple_llm_agent': SimpleLlmAgent,
+        }
+
+        if agent_type not in valid_config_types:
+            raise ValueError(f'Unsupported agent_type: {agent_type}')
+
+        expected_type = valid_config_types[agent_type]
+
+        if not isinstance(value, dict):
+            raise ValueError(f"llm_config must be a dict, got {type(value)}")
+
+        try:
+            return expected_type(**value)
+        except Exception as e:
+            raise ValueError(f"Failed to create {expected_type.__name__} from llm_config: {str(e)}")
+
 
 class ToolDescription(BaseModel):
     name: str
     description: str
     parameters: Dict
+
 
 class APIParams(BaseModel):
     url: Optional[str] = None
@@ -183,8 +274,9 @@ class ToolModel(BaseModel):
     tools:  Optional[Union[str, List[ToolDescription]]] = None
     tools_params: Dict[str, APIParams]
 
+
 class ToolsConfig(BaseModel):
-    llm_agent: Optional[LLM] = None
+    llm_agent: Optional[Union[LlmAgent, SimpleLlmAgent]] = None
     synthesizer: Optional[Synthesizer] = None
     transcriber: Optional[Transcriber] = None
     input: Optional[IOModel] = None
@@ -212,12 +304,11 @@ class ConversationConfig(BaseModel):
     ambient_noise_track: Optional[str] = "convention_hall"
     call_terminate: Optional[int] = 90
     use_fillers: Optional[bool] = False
-    trigger_user_online_message_after:Optional[int] = 6
-    check_user_online_message:Optional[str] = "Hey, are you still there"
-    check_if_user_online:Optional[bool] = True
+    trigger_user_online_message_after: Optional[int] = 6
+    check_user_online_message: Optional[str] = "Hey, are you still there"
+    check_if_user_online: Optional[bool] = True
 
-
-    @validator('hangup_after_silence', pre=True, always=True)
+    @field_validator('hangup_after_silence', mode='before')
     def set_hangup_after_silence(cls, v):
         return v if v is not None else 10  # Set default value if None is passed
 
@@ -227,7 +318,8 @@ class Task(BaseModel):
     toolchain: ToolsChainModel
     task_type: Optional[str] = "conversation"  # extraction, summarization, notification
     task_config: ConversationConfig = dict()
-    
+
+
 class AgentModel(BaseModel):
     agent_name: str
     agent_type: str = "other"

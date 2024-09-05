@@ -65,9 +65,8 @@ class OpenAiLLM(BaseLLM):
             #logger.info(f'thread id : {self.thread_id}')
         self.run_id = kwargs.get("run_id", None)
         self.gave_out_prefunction_call_message = False
-    
-    
-    async def generate_stream(self, messages, synthesize=True, request_json=False, meta_info = None):
+
+    async def generate_stream(self, messages, synthesize=True, request_json=False, meta_info=None):
         if len(messages) == 0:
             raise Exception("No messages provided")
         
@@ -84,15 +83,18 @@ class OpenAiLLM(BaseLLM):
         
         latency = False
         start_time = time.time()
+        tools = []
         if self.trigger_function_call:
             if type(self.tools) is str:
                 tools = json.loads(self.tools)
             else:
                 tools = self.tools
-            model_args["functions"]=tools
-            model_args["function_call"]="auto"
+            model_args["functions"] = tools
+            model_args["function_call"] = "auto"
         textual_response = False
+
         async for chunk in await self.async_client.chat.completions.create(**model_args):
+            logger.info('chunk: {}'.format(chunk.choices[0].delta.content))
             if not self.started_streaming:
                 first_chunk_time = time.time()
                 latency = first_chunk_time - start_time
@@ -155,9 +157,9 @@ class OpenAiLLM(BaseLLM):
             }
         
             if tools[i].get("parameters", None) is not None and (all(key in resp for key in tools[i]["parameters"]["properties"].keys())):
-                logger.info(f"Function call paramaeters {resp}")
+                logger.info(f"Function call parameters: {resp}")
                 convert_to_request_log(resp, meta_info, self.model, "llm", direction = "response", is_cached= False, run_id = self.run_id)
-                resp  = json.loads(resp)
+                resp = json.loads(resp)
                 api_call_return = {**api_call_return, **resp}
             else:
                 api_call_return['resp'] = None
@@ -190,6 +192,7 @@ class OpenAiLLM(BaseLLM):
         start_time = time.time()
         textual_response = False
 
+        tools = []
         if self.trigger_function_call:
             if type(self.tools) is str:
                 tools = json.loads(self.tools)
