@@ -137,6 +137,10 @@ class LlamaIndexRag(BaseAgent):
         chat_history = [ChatMessage(role=msg['role'], content=msg['content']) for msg in history[:-1]]
         return message, chat_history
 
+    async def async_word_generator(self, response):
+        for word in response.split():
+            yield word
+
     async def generate(self, message: List[dict], **kwargs) -> AsyncGenerator[Tuple[str, bool, float, bool], None]:
         """
         Generate a response based on the input message and chat history.
@@ -168,22 +172,33 @@ class LlamaIndexRag(BaseAgent):
             latency = -1
             start_time = time.time()
 
-            # llamaindex provides astream_chat, no need for to_thread as we are running this over cloud!
-            # token_generator = await asyncio.to_thread(self.agent.stream_chat, message.content, history)
-            token_generator = await self.agent.astream_chat(message.content, history)
+            # token_generator = await self.agent.astream_chat(message.content, history)
+            # async for token in token_generator.async_response_gen():
+            #     if latency < 0:
+            #         latency = time.time() - start_time
+            #     buffer += token
+            #     if len(buffer.split()) >= self.buffer or buffer[-1] in {'.', '!', '?'}:
+            #         yield buffer.strip(), False, latency, False
+            #         logger.info(f"LLM BUFFER FULL BUFFER OUTPUT: {buffer}")
+            #         buffer = ""
 
-            async for token in token_generator.async_response_gen():
+            # if buffer:
+            #     logger.info(f"LLM BUFFER FLUSH BUFFER OUTPUT: {buffer}")
+            #     yield buffer.strip(), True, latency, False
+
+            response = await self.query_engine.aquery(message.content)
+
+            async for token in self.async_word_generator(response.response):
                 if latency < 0:
                     latency = time.time() - start_time
-                buffer += token
+                buffer += token + " "
                 if len(buffer.split()) >= self.buffer or buffer[-1] in {'.', '!', '?'}:
                     yield buffer.strip(), False, latency, False
                     logger.info(f"LLM BUFFER FULL BUFFER OUTPUT: {buffer}")
                     buffer = ""
-
             if buffer:
-                logger.info(f"LLM BUFFER FLUSH BUFFER OUTPUT: {buffer}")
                 yield buffer.strip(), True, latency, False
+                logger.info(f"LLM BUFFER FLUSH BUFFER OUTPUT: {buffer}")
 
     def __del__(self):
         if hasattr(self, 'provider') and hasattr(self.provider, 'disconnect'):
