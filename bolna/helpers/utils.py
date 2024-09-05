@@ -328,6 +328,7 @@ def clean_json_string(json_str):
         return json_str
     if json_str.startswith("```json") and json_str.endswith("```"):
         json_str = json_str[7:-3].strip()
+    json_str = json_str.replace("###JSON Structure\n", "")
     return json_str
 
 
