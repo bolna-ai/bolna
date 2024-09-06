@@ -190,6 +190,13 @@ class TaskManager(BaseManager):
                         "max_tokens": self.llm_agent_config['llm_config']['max_tokens'],
                         "provider": self.llm_agent_config['llm_config']['provider'],
                     }
+                elif self.__is_graph_agent():
+                    self.llm_agent_config = self.task_config["tools_config"]["llm_agent"]
+                    self.llm_config = {
+                        "model": self.llm_agent_config['llm_config']['model'],
+                        "max_tokens": self.llm_agent_config['llm_config']['max_tokens'],
+                        "provider": self.llm_agent_config['llm_config']['provider'],
+                    }
                 else:
                     agent_type = self.task_config["tools_config"]["llm_agent"].get("agent_type", None)
                     if not agent_type:
@@ -416,6 +423,12 @@ class TaskManager(BaseManager):
         agent_type = self.task_config['tools_config']["llm_agent"].get("agent_type", None)
         return agent_type == "knowledgebase_agent"
 
+    def __is_graph_agent(self):
+        if self.task_config["task_type"] == "webhook":
+            return False
+        agent_type = self.task_config['tools_config']["llm_agent"].get("agent_type", None)
+        return agent_type == "graph_agent"
+
     def __setup_routes(self, routes):
         embedding_model = routes.get("embedding_model", os.getenv("ROUTE_EMBEDDING_MODEL"))
         self.route_encoder = FastEmbedEncoder(name=embedding_model)
@@ -576,7 +589,7 @@ class TaskManager(BaseManager):
             logger.info(f"setting up backend as openai_assistants {assistant_config}")
             llm_agent = OpenAIAssistantAgent(**assistant_config)
         elif agent_type == "knowledgebase_agent":
-            logger.info("#### Setting up knowledgebase_agent agent ####")
+            logger.info("Setting up knowledgebase_agent agent ####")
             llm_config = self.task_config["tools_config"]["llm_agent"].get("llm_config", {})
             vector_store_config = llm_config.get("vector_store", {})
             llm_agent = LlamaIndexRag(
@@ -588,6 +601,12 @@ class TaskManager(BaseManager):
                 provider_config=vector_store_config
             )
             logger.info("Llama-index rag agent is created")
+        elif agent_type == "graph_agent":
+            logger.info("Setting up graph agent")
+            llm_config = self.task_config["tools_config"]["llm_agent"].get("llm_config", {})
+            logger.info(f"Getting this llm config : {llm_config}")
+            llm_agent = GraphAgent(llm_config)
+            logger.info(f"Graph agent is created")
         else:
             raise f"{agent_type} Agent type is not created yet"
         return llm_agent
@@ -627,7 +646,7 @@ class TaskManager(BaseManager):
             return
 
         agent_type = self.task_config["tools_config"]["llm_agent"].get("agent_type", "simple_llm_agent")
-        if agent_type in ["openai_assistant", "knowledgebase_agent"]:
+        if agent_type in ["openai_assistant", "knowledgebase_agent", "graph_agent"]:
             return
 
         self.is_local = local
@@ -1057,7 +1076,7 @@ class TaskManager(BaseManager):
                         
     async def __do_llm_generation(self, messages, meta_info, next_step, should_bypass_synth = False, should_trigger_function_call = False):
         llm_response = ""
-        logger.info(f"MEssages before generation {messages}")
+        logger.info(f"Messages before generation {messages}")
         synthesize = True
         if should_bypass_synth:
             synthesize = False

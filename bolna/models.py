@@ -1,5 +1,5 @@
 import json
-from typing import Optional, List, Union, Dict
+from typing import Optional, List, Union, Dict, Callable
 from pydantic import BaseModel, Field, field_validator, ValidationError, Json
 from pydantic_core import PydanticCustomError
 from .providers import *
@@ -203,6 +203,22 @@ class LlmAgentGraph(BaseModel):
     nodes: List[Node]
     edges: List[Edge]
 
+class GraphEdge(BaseModel):
+    to_node_id: str
+    condition: str
+
+class GraphNode(BaseModel):
+    id: str
+    description: Optional[str] = None
+    prompt: str
+    edges: List[GraphEdge] = Field(default_factory=list)
+    completion_check: Optional[Callable[[List[dict]], bool]] = None
+
+class GraphAgentConfig(Llm):
+    agent_information: str
+    nodes: List[GraphNode]
+    current_node_id: str
+    context_data: Optional[dict] = None
 
 class AgentRouteConfig(BaseModel):
     utterances: List[str]
@@ -226,7 +242,7 @@ class LlmAgent(BaseModel):
     agent_flow_type: str
     agent_type: str
     routes: Optional[Routes] = None
-    llm_config: Union[OpenaiAssistant, KnowledgebaseAgent, LlmAgentGraph, MultiAgent, SimpleLlmAgent]
+    llm_config: Union[OpenaiAssistant, KnowledgebaseAgent, LlmAgentGraph, MultiAgent, SimpleLlmAgent, GraphAgentConfig]
 
     @field_validator('llm_config', mode='before')
     def validate_llm_config(cls, value, info):
@@ -238,6 +254,7 @@ class LlmAgent(BaseModel):
         valid_config_types = {
             'openai_assistant': OpenaiAssistant,
             'knowledgebase_agent': KnowledgebaseAgent,
+            'graph_agent': GraphAgentConfig,
             'llm_agent_graph': LlmAgentGraph,
             'multiagent': MultiAgent,
             'simple_llm_agent': SimpleLlmAgent,
