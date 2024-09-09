@@ -116,38 +116,6 @@ class GraphAgent(BaseAgent):
         
         return next_node_id
 
-    async def converse(self):
-        history = [
-            {"role": "assistant", "content": self.config['nodes'][0]['prompt']},
-        ]
-        while True:
-            response = await self.generate_response(history)
-            history.append(response)
-    
-            logger.info(f"\nAI response: {response['content']}")
-
-            user_input = yield  # waiting for the customer to say something
-            if user_input is None:
-                break
-
-            user_input = user_input.strip()
-            if not user_input:
-                print("Please enter a valid message.")
-                continue
-
-            history.append({"role": "user", "content": user_input})
-            logger.info(f"User input: {user_input}")
-            logger.info(f"History: {history}")
-
-            next_node_id = await self.decide_next_move_cyclic(history)
-            if next_node_id:
-                logger.info(f"Next node: {next_node_id}")
-                self.current_node_id = next_node_id
-                if self.current_node_id == "end":
-                    print("Thank you for using our restaurant service. Goodbye!")
-                    break
-
-
     async def generate(self, message: List[dict], **kwargs) -> AsyncGenerator[Tuple[str, bool, float, bool], None]:
         logger.info(f"Generating response for message: {message}")
         start_time = time.time()
@@ -165,7 +133,7 @@ class GraphAgent(BaseAgent):
                 logger.info(f"Next node: {next_node_id}")
                 self.current_node_id = next_node_id
                 if self.current_node_id == "end":
-                    response_text += "\nThank you for using our service. Goodbye!"
+                    response_text = "\nThank you for using our service. Goodbye!"
 
             words = response_text.split()
             for i, word in enumerate(words):
