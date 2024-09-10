@@ -1503,6 +1503,9 @@ class TaskManager(BaseManager):
         if self.task_config["tools_config"]["output"]["format"] == "pcm" and meta_info.get('format', '') != 'mulaw':
             message['data'] = wav_bytes_to_pcm(message['data'])
 
+        if self.synthesizer_provider == 'elevenlabs' and self.tools["output"].get_provider() == 'plivo':
+            message['data'] = wav_bytes_to_pcm(message['data'])
+
         return message['data']
 
     async def __send_preprocessed_audio(self, meta_info, text):
