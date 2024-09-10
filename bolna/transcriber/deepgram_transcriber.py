@@ -366,4 +366,4 @@ class DeepgramTranscriber(BaseTranscriber):
 
             await self.push_to_transcriber_queue(create_ws_data_packet("transcriber_connection_closed", self.meta_info))
         except Exception as e:
-            logger.error(f"Error in transcribe: {e}")
+            logger.info(f"Error in transcribe: {e}")
