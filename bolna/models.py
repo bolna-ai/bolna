@@ -21,11 +21,6 @@ class PollyConfig(BaseModel):
     # rate: Optional[str] = '100%'
 
 
-class XTTSConfig(BaseModel):
-    voice: str
-    language: str
-
-
 class ElevenLabsConfig(BaseModel):
     voice: str
     voice_id: str
@@ -95,7 +90,7 @@ class Transcriber(BaseModel):
 
 class Synthesizer(BaseModel):
     provider: str
-    provider_config: Union[PollyConfig, XTTSConfig, ElevenLabsConfig, OpenAIConfig, FourieConfig, MeloConfig, StylettsConfig, DeepgramConfig, AzureConfig] = Field(union_mode='smart')
+    provider_config: Union[PollyConfig, ElevenLabsConfig, OpenAIConfig, FourieConfig, MeloConfig, StylettsConfig, DeepgramConfig, AzureConfig] = Field(union_mode='smart')
     stream: bool = False
     buffer_size: Optional[int] = 40  # 40 characters in a buffer
     audio_format: Optional[str] = "pcm"
@@ -103,7 +98,7 @@ class Synthesizer(BaseModel):
 
     @field_validator("provider")
     def validate_model(cls, value):
-        return validate_attribute(value, ["polly", "xtts", "elevenlabs", "openai", "deepgram", "melotts", "styletts", "azuretts"])
+        return validate_attribute(value, ["polly", "elevenlabs", "openai", "deepgram", "melotts", "styletts", "azuretts"])
 
 
 class IOModel(BaseModel):
