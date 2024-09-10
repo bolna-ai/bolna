@@ -119,7 +119,7 @@ class DeepgramTranscriber(BaseTranscriber):
                 await ws.send(json.dumps(data))
                 await asyncio.sleep(5)  # Send a heartbeat message every 5 seconds
         except Exception as e:
-            logger.error('Error while sending: ' + str(e))
+            logger.info('Error while sending: ' + str(e))
             raise Exception("Something went wrong while sending heartbeats to {}".format(self.model))
 
     async def toggle_connection(self):
