@@ -1921,11 +1921,19 @@ class TaskManager(BaseManager):
                 self.output_task.cancel()
 
                 if self.hangup_task is not None:
-                    self.hangup_task.cancel()                
-            
+                    self.hangup_task.cancel()
+                    try:
+                        await self.hangup_task
+                    except asyncio.CancelledError:
+                        logger.info("hangup_task has been successfully cancelled")
+
                 if self.backchanneling_task is not None:
                     self.backchanneling_task.cancel()
-            
+                    try:
+                        await self.backchanneling_task
+                    except asyncio.CancelledError:
+                        logger.info("backchanneling_task has been successfully cancelled")
+
                 if self.ambient_noise_task is not None:
                     self.ambient_noise_task.cancel()
                   
@@ -1934,7 +1942,11 @@ class TaskManager(BaseManager):
                 
                 if self.first_message_task is not None:
                     self.first_message_task.cancel()
-            
+                    try:
+                        await self.first_message_task
+                    except asyncio.CancelledError:
+                        logger.info("first_message_task has been successfully cancelled")
+
                 if self.should_record:
                     output['recording_url'] = await save_audio_file_to_s3(self.conversation_recording, self.sampling_rate, self.assistant_id, self.run_id)
 
