@@ -63,14 +63,12 @@ class LlamaIndexRag(BaseAgent):
         self.max_tokens = max_tokens
         self.provider_config = provider_config
         self.OPENAI_KEY = os.getenv('OPENAI_API_KEY')
-        # self.LANCE_DB = "/Users/vipul/Nova/Work/Bolna/LlamaIndex-MutiRAG/DataBase/dev"
         self.LANCE_DB = os.getenv('LANCEDB_DIR')
         self.provider = None
         self.query_engine = None
 
         self._setup_llm()
         self._setup_provider()
-        self._setup_agent()
 
     def _setup_llm(self):
         """Set up the OpenAI language model."""
@@ -99,31 +97,13 @@ class LlamaIndexRag(BaseAgent):
         # Add more providers here as elif statements
         else:
             logging.info(f"LanceDB RAG")
-            logging.info(f"URI : LanceDB {self.LANCE_DB}")
-            self.vector_store = LanceDBVectorStore(uri=self.LANCE_DB,
-                                                   table_name=self.provider_config['provider_config'].get('vector_id'))
-            logging.info(f"Table params : {self.provider_config['provider_config'].get('vector_id')}")
+            self.vector_store = LanceDBVectorStore(uri=self.LANCE_DB, table_name=self.provider_config['provider_config'].get('vector_id'))
             storage_context = StorageContext.from_defaults(vector_store=self.vector_store)
             self.vector_index = VectorStoreIndex([], storage_context=storage_context)
-            self.query_engine = self.vector_index.as_query_engine()
+            self.query_engine = self.vector_index.as_query_engine(similarity_top_k=15)
             logger.info("LanceDB vector store initialized")
 
-    def _setup_agent(self):
-        """Set up the OpenAI agent with the query engine tool."""
-        tools = [
-            QueryEngineTool(
-                self.query_engine,
-                metadata=ToolMetadata(
-                    name="search",
-                    description="Search the document, pass the entire user message in the query",
-                ),
-            )
-        ]
-        self.agent = OpenAIAgent.from_tools(tools=tools, verbose=True)
-        logger.info("LLAMA INDEX AGENT IS CREATED")
-
-    @staticmethod
-    def convert_history(history: List[dict]) -> Tuple[ChatMessage, List[ChatMessage]]:
+    def convert_history(self, history: List[dict]) -> Tuple[ChatMessage, List[ChatMessage]]:
         """
         Convert a list of message dictionaries to ChatMessage objects.
 
@@ -163,7 +143,6 @@ class LlamaIndexRag(BaseAgent):
         start_time = time.time()
 
         if self.provider:
-            # Use provider-specific query method
             response = self.provider.query(message.content)
             yield response.response, True, time.time() - start_time, False
 
@@ -171,20 +150,6 @@ class LlamaIndexRag(BaseAgent):
             buffer = ""
             latency = -1
             start_time = time.time()
-
-            # token_generator = await self.agent.astream_chat(message.content, history)
-            # async for token in token_generator.async_response_gen():
-            #     if latency < 0:
-            #         latency = time.time() - start_time
-            #     buffer += token
-            #     if len(buffer.split()) >= self.buffer or buffer[-1] in {'.', '!', '?'}:
-            #         yield buffer.strip(), False, latency, False
-            #         logger.info(f"LLM BUFFER FULL BUFFER OUTPUT: {buffer}")
-            #         buffer = ""
-
-            # if buffer:
-            #     logger.info(f"LLM BUFFER FLUSH BUFFER OUTPUT: {buffer}")
-            #     yield buffer.strip(), True, latency, False
 
             response = await self.query_engine.aquery(message.content)
 
@@ -199,10 +164,3 @@ class LlamaIndexRag(BaseAgent):
             if buffer:
                 yield buffer.strip(), True, latency, False
                 logger.info(f"LLM BUFFER FLUSH BUFFER OUTPUT: {buffer}")
-
-    def __del__(self):
-        if hasattr(self, 'provider') and hasattr(self.provider, 'disconnect'):
-            self.provider.disconnect()
-
-    def get_model(self):
-        return "Model"
