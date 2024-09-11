@@ -1503,6 +1503,9 @@ class TaskManager(BaseManager):
         if self.task_config["tools_config"]["output"]["format"] == "pcm" and meta_info.get('format', '') != 'mulaw':
             message['data'] = wav_bytes_to_pcm(message['data'])
 
+        if self.synthesizer_provider == 'elevenlabs' and self.tools["output"].get_provider() == 'plivo':
+            message['data'] = wav_bytes_to_pcm(message['data'])
+
         return message['data']
 
     async def __send_preprocessed_audio(self, meta_info, text):
@@ -1744,13 +1747,13 @@ class TaskManager(BaseManager):
                 logger.info(f"Last transmitted timestamp is simply 0 and hence continuing")
                 continue
 
-            time_since_last_spoken_AI_word = (time.time() - self.last_transmitted_timestamp)
-            if time_since_last_spoken_AI_word > self.hang_conversation_after and self.time_since_last_spoken_human_word < self.last_transmitted_timestamp:
-                logger.info(f"{time_since_last_spoken_AI_word} seconds since last spoken time stamp and hence cutting the phone call and last transmitted timestampt ws {self.last_transmitted_timestamp} and time since last spoken human word {self.time_since_last_spoken_human_word}")
+            time_since_last_spoken_ai_word = (time.time() - self.last_transmitted_timestamp)
+            if time_since_last_spoken_ai_word > self.hang_conversation_after and self.time_since_last_spoken_human_word < self.last_transmitted_timestamp:
+                logger.info(f"{time_since_last_spoken_ai_word} seconds since last spoken time stamp and hence cutting the phone call and last transmitted timestampt ws {self.last_transmitted_timestamp} and time since last spoken human word {self.time_since_last_spoken_human_word}")
                 await self.__process_end_of_conversation()
                 break
 
-            elif time_since_last_spoken_AI_word > self.trigger_user_online_message_after and not self.asked_if_user_is_still_there and self.time_since_last_spoken_human_word < self.last_transmitted_timestamp:
+            elif time_since_last_spoken_ai_word > self.trigger_user_online_message_after and not self.asked_if_user_is_still_there and self.time_since_last_spoken_human_word < self.last_transmitted_timestamp:
                 logger.info(f"Asking if the user is still there")
                 self.asked_if_user_is_still_there = True
 
@@ -1765,7 +1768,7 @@ class TaskManager(BaseManager):
                 # Just in case we need to clear messages sent before
                 await self.tools["output"].handle_interruption()
             else:
-                logger.info(f"Only {time_since_last_spoken_AI_word} seconds since last spoken time stamp and hence not cutting the phone call")
+                logger.info(f"Only {time_since_last_spoken_ai_word} seconds since last spoken time stamp and hence not cutting the phone call")
     
     async def __check_for_backchanneling(self):
         while True:
@@ -1918,11 +1921,19 @@ class TaskManager(BaseManager):
                 self.output_task.cancel()
 
                 if self.hangup_task is not None:
-                    self.hangup_task.cancel()                
-            
+                    self.hangup_task.cancel()
+                    try:
+                        await self.hangup_task
+                    except asyncio.CancelledError:
+                        logger.info("hangup_task has been successfully cancelled")
+
                 if self.backchanneling_task is not None:
                     self.backchanneling_task.cancel()
-            
+                    try:
+                        await self.backchanneling_task
+                    except asyncio.CancelledError:
+                        logger.info("backchanneling_task has been successfully cancelled")
+
                 if self.ambient_noise_task is not None:
                     self.ambient_noise_task.cancel()
                   
@@ -1931,7 +1942,11 @@ class TaskManager(BaseManager):
                 
                 if self.first_message_task is not None:
                     self.first_message_task.cancel()
-            
+                    try:
+                        await self.first_message_task
+                    except asyncio.CancelledError:
+                        logger.info("first_message_task has been successfully cancelled")
+
                 if self.should_record:
                     output['recording_url'] = await save_audio_file_to_s3(self.conversation_recording, self.sampling_rate, self.assistant_id, self.run_id)
 
