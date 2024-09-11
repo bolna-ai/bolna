@@ -1137,7 +1137,9 @@ class TaskManager(BaseManager):
             logger.info(f"Current agent {current_agent}")
             self.tools['llm_agent'] = self.llm_agent_map[current_agent]
         elif self.route_layer is not None:
-            route = await asyncio.to_thread(self.route_layer(message['data']).name)
+            route_layer_data = self.route_layer(message['data'])
+            if route_layer_data:
+                route = route_layer_data.name
             logger.info(f"Got route name {route}")
 
         if route is not None:
