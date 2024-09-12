@@ -78,6 +78,7 @@ class RAGAgent(BaseAgent):
         provider_name = self.provider_config.get('provider')
         if provider_name == "lancedb":
             self.vector_store = LanceDBVectorStore(uri=self.LANCE_DB_DIR, table_name=self.provider_config['provider_config'].get('vector_id'))
+            logger.info(f"Chunk size is : {self.provider_config['provider_config'].get('chunk_size')}")
             self.storage_context = StorageContext.from_defaults(vector_store=self.vector_store)
             self.vector_index = VectorStoreIndex([], storage_context=self.storage_context)
             self.query_engine = self.vector_index.as_query_engine(similarity_top_k=15)
