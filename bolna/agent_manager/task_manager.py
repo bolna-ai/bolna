@@ -47,6 +47,8 @@ class TaskManager(BaseManager):
         self.average_synthesizer_latency = 0.0
         self.average_transcriber_latency = 0.0
         self.task_config = task
+        logger.info(f"Task config is : {task_config}")
+
         self.timezone = pytz.timezone('America/Los_Angeles')
 
         logger.info(f"API TOOLS IN TOOLS CONFIG {task['tools_config'].get('api_tools')}")
@@ -578,6 +580,8 @@ class TaskManager(BaseManager):
         elif agent_type == "knowledgebase_agent":
             logger.info("#### Setting up knowledgebase_agent agent ####")
             llm_config = self.task_config["tools_config"]["llm_agent"].get("llm_config", {})
+            chunk_size = self.task_config["knowledgebase_agent"].get('chunk_size', 0)
+            logger.info(f"Chunk size is : {chunks_size}")
             vector_store_config = llm_config.get("vector_store", {})
             llm_agent = RAGAgent(
                 temperature=llm_config.get("temperature", 0.1),

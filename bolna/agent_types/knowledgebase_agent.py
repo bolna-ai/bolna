@@ -80,7 +80,7 @@ class RAGAgent(BaseAgent):
             self.vector_store = LanceDBVectorStore(uri=self.LANCE_DB_DIR, table_name=self.provider_config['provider_config'].get('vector_id'))
             self.storage_context = StorageContext.from_defaults(vector_store=self.vector_store)
             self.vector_index = VectorStoreIndex([], storage_context=self.storage_context)
-            self.query_engine = self.vector_index.as_query_engine(similarity_top_k=self.provider_config['provider_config'].get('similarity_top_k', 15))
+            self.query_engine = self.vector_index.as_query_engine(similarity_top_k=15)
             logger.info("LanceDB provider is initialized")
 
     async def async_word_generator(self, response):
