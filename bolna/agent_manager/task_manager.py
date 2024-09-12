@@ -580,7 +580,7 @@ class TaskManager(BaseManager):
         elif agent_type == "knowledgebase_agent":
             logger.info("#### Setting up knowledgebase_agent agent ####")
             llm_config = self.task_config["tools_config"]["llm_agent"].get("llm_config", {})
-            chunk_size = self.task_config["knowledgebase_agent"].get('chunk_size', 0)
+            chunk_size = self.task_config["knowledgebase_data"].get('chunk_size', 0)
             logger.info(f"Chunk size is : {chunks_size}")
             vector_store_config = llm_config.get("vector_store", {})
             llm_agent = RAGAgent(
