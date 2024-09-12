@@ -260,7 +260,6 @@ class TaskManager(BaseManager):
                     routes_meta = self.kwargs.get('routes', None)
 
                 if self.kwargs['routes']:
-                    self.route_encoder = routes_meta["route_encoder"]
                     self.vector_caches = routes_meta["vector_caches"]
                     self.route_responses_dict = routes_meta["route_responses_dict"]
                     self.route_layer = routes_meta["route_layer"]
@@ -418,7 +417,7 @@ class TaskManager(BaseManager):
 
     def __setup_routes(self, routes):
         embedding_model = routes.get("embedding_model", os.getenv("ROUTE_EMBEDDING_MODEL"))
-        self.route_encoder = FastEmbedEncoder(name=embedding_model)
+        route_encoder = FastEmbedEncoder(name=embedding_model)
 
         routes_list = []
         self.vector_caches = {}
@@ -448,7 +447,7 @@ class TaskManager(BaseManager):
                 vector_cache.set(utterances)
                 self.vector_caches[route['route_name']] = vector_cache
             
-        self.route_layer = RouteLayer(encoder=self.route_encoder, routes=routes_list)
+        self.route_layer = RouteLayer(encoder=route_encoder, routes=routes_list)
         logger.info("Routes are set")
 
     def __setup_output_handlers(self, turn_based_conversation, output_queue):
@@ -1137,7 +1136,9 @@ class TaskManager(BaseManager):
             logger.info(f"Current agent {current_agent}")
             self.tools['llm_agent'] = self.llm_agent_map[current_agent]
         elif self.route_layer is not None:
-            route = await asyncio.to_thread(self.route_layer(message['data']).name)
+            route_layer_data = self.route_layer(message['data'])
+            if route_layer_data:
+                route = route_layer_data.name
             logger.info(f"Got route name {route}")
 
         if route is not None:
@@ -1503,7 +1504,8 @@ class TaskManager(BaseManager):
         if self.task_config["tools_config"]["output"]["format"] == "pcm" and meta_info.get('format', '') != 'mulaw':
             message['data'] = wav_bytes_to_pcm(message['data'])
 
-        if self.synthesizer_provider == 'elevenlabs' and self.tools["output"].get_provider() == 'plivo':
+        # TODO remove this hard-coded condition
+        elif self.synthesizer_provider == 'elevenlabs' and self.tools["output"].get_provider() == 'plivo':
             message['data'] = wav_bytes_to_pcm(message['data'])
 
         return message['data']
@@ -1707,7 +1709,7 @@ class TaskManager(BaseManager):
                     logger.info("##### End of synthesizer stream and ")
 
                     #If we're sending the message to check if user is still here, don't set asked_if_user_is_still_there to True
-                    if message['meta_info']['text'] != self.check_user_online_message:
+                    if message['meta_info'].get('text', '') != self.check_user_online_message:
                         self.asked_if_user_is_still_there = False
 
                     num_chunks = 0
