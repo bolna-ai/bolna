@@ -260,7 +260,6 @@ class TaskManager(BaseManager):
                     routes_meta = self.kwargs.get('routes', None)
 
                 if self.kwargs['routes']:
-                    self.route_encoder = routes_meta["route_encoder"]
                     self.vector_caches = routes_meta["vector_caches"]
                     self.route_responses_dict = routes_meta["route_responses_dict"]
                     self.route_layer = routes_meta["route_layer"]
@@ -418,7 +417,7 @@ class TaskManager(BaseManager):
 
     def __setup_routes(self, routes):
         embedding_model = routes.get("embedding_model", os.getenv("ROUTE_EMBEDDING_MODEL"))
-        self.route_encoder = FastEmbedEncoder(name=embedding_model)
+        route_encoder = FastEmbedEncoder(name=embedding_model)
 
         routes_list = []
         self.vector_caches = {}
@@ -448,7 +447,7 @@ class TaskManager(BaseManager):
                 vector_cache.set(utterances)
                 self.vector_caches[route['route_name']] = vector_cache
             
-        self.route_layer = RouteLayer(encoder=self.route_encoder, routes=routes_list)
+        self.route_layer = RouteLayer(encoder=route_encoder, routes=routes_list)
         logger.info("Routes are set")
 
     def __setup_output_handlers(self, turn_based_conversation, output_queue):
@@ -1505,7 +1504,8 @@ class TaskManager(BaseManager):
         if self.task_config["tools_config"]["output"]["format"] == "pcm" and meta_info.get('format', '') != 'mulaw':
             message['data'] = wav_bytes_to_pcm(message['data'])
 
-        if self.synthesizer_provider == 'elevenlabs' and self.tools["output"].get_provider() == 'plivo':
+        # TODO remove this hard-coded condition
+        elif self.synthesizer_provider == 'elevenlabs' and self.tools["output"].get_provider() == 'plivo':
             message['data'] = wav_bytes_to_pcm(message['data'])
 
         return message['data']
