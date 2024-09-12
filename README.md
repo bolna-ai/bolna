@@ -5,13 +5,13 @@
 </p>
 
 <h4 align="center">
-  <a href="https://discord.gg/yDfcqreByj">Discord</a> |
+  <a href="https://discord.gg/59kQWGgnm8">Discord</a> |
   <a href="https://docs.bolna.dev">Docs</a> |
   <a href="https://bolna.dev">Website</a>
 </h4>
 
 <h4 align="center">
-  <a href="https://discord.gg/yDfcqreByj">
+  <a href="https://discord.gg/59kQWGgnm8">
       <img src="https://img.shields.io/static/v1?label=Chat%20on&message=Discord&color=blue&logo=Discord&style=flat-square" alt="Discord">
   </a>
   <a href="https://github.com/bolna-ai/bolna/blob/main/LICENSE">
@@ -22,6 +22,8 @@
   </a>
 </h4>
 
+> [!NOTE]
+> We are actively looking for maintainers.
 
 ## Introduction
 
