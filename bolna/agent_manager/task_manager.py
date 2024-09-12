@@ -1709,7 +1709,7 @@ class TaskManager(BaseManager):
                     logger.info("##### End of synthesizer stream and ")
 
                     #If we're sending the message to check if user is still here, don't set asked_if_user_is_still_there to True
-                    if message['meta_info']['text'] != self.check_user_online_message:
+                    if message['meta_info'].get('text', '') != self.check_user_online_message:
                         self.asked_if_user_is_still_there = False
 
                     num_chunks = 0
