@@ -76,7 +76,6 @@ class RAGAgent(BaseAgent):
         """Based on the relevant provider config, set up the provider."""
 
         provider_name = self.provider_config.get('provider')
-        logger.info(f"Provider config is : {self.provider_config['provider_config']}")
         if provider_name == "lancedb":
             self.vector_store = LanceDBVectorStore(uri=self.LANCE_DB_DIR, table_name=self.provider_config['provider_config'].get('vector_id'))
             self.storage_context = StorageContext.from_defaults(vector_store=self.vector_store)
