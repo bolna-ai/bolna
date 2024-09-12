@@ -152,6 +152,7 @@ class MongoDBProviderConfig(BaseModel):
 
 class LanceDBProviderConfig(BaseModel):
     vector_id: str
+    similarity_top_k: Optional[int] = 15
 
 
 class VectorStore(BaseModel):

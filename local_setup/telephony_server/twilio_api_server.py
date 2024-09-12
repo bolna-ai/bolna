@@ -22,7 +22,7 @@ twilio_client = Client(twilio_account_sid, twilio_auth_token)
 
 
 def populate_ngrok_tunnels():
-    response = requests.get("http://ngrok:4040/api/tunnels")  # ngrok interface
+    response = requests.get("http://localhost:4040/api/tunnels")  # ngrok interface
     telephony_url, bolna_url = None, None
 
     if response.status_code == 200:
