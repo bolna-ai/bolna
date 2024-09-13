@@ -47,6 +47,7 @@ class TaskManager(BaseManager):
         self.average_synthesizer_latency = 0.0
         self.average_transcriber_latency = 0.0
         self.task_config = task
+
         self.timezone = pytz.timezone('America/Los_Angeles')
 
         logger.info(f"API TOOLS IN TOOLS CONFIG {task['tools_config'].get('api_tools')}")
@@ -578,15 +579,14 @@ class TaskManager(BaseManager):
             logger.info("#### Setting up knowledgebase_agent agent ####")
             llm_config = self.task_config["tools_config"]["llm_agent"].get("llm_config", {})
             vector_store_config = llm_config.get("vector_store", {})
-            llm_agent = LlamaIndexRag(
-                vector_id=vector_store_config.get("vector_id"),
+            llm_agent = RAGAgent(
                 temperature=llm_config.get("temperature", 0.1),
                 model=llm_config.get("model", "gpt-3.5-turbo-16k"),
                 buffer=self.task_config["tools_config"]["synthesizer"].get('buffer_size'),
                 max_tokens=self.llm_agent_config['llm_config']['max_tokens'],
                 provider_config=vector_store_config
             )
-            logger.info("Llama-index rag agent is created")
+            logger.info("Knowledge Base Agent created")
         else:
             raise f"{agent_type} Agent type is not created yet"
         return llm_agent
