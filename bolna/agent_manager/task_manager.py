@@ -47,7 +47,6 @@ class TaskManager(BaseManager):
         self.average_synthesizer_latency = 0.0
         self.average_transcriber_latency = 0.0
         self.task_config = task
-        logger.info(f"Task config is : {self.task_config}")
 
         self.timezone = pytz.timezone('America/Los_Angeles')
 
