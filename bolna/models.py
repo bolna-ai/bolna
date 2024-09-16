@@ -62,10 +62,6 @@ class Transcriber(BaseModel):
         print(f"value {value}, PROVIDERS {list(SUPPORTED_TRANSCRIBER_PROVIDERS.keys())}")
         return validate_attribute(value, list(SUPPORTED_TRANSCRIBER_PROVIDERS.keys()))
 
-    @field_validator("language")
-    def validate_language(cls, value):
-        return validate_attribute(value, ["en", "hi", "es", "fr", "pt", "ko", "ja", "zh", "de", "it", "pt-BR"])
-
 
 class Synthesizer(BaseModel):
     provider: str
