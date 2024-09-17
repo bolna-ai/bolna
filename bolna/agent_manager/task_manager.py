@@ -1352,12 +1352,12 @@ class TaskManager(BaseManager):
                             
                             # This means we are generating response from an interim transcript 
                             # Hence we transmit quickly 
+                            if self.first_message_passed and self.first_message_sent:
+                                self.started_transmitting_audio = True
+
                             if not self.started_transmitting_audio:
                                 logger.info("##### Haven't started transmitting audio and hence cleaning up downstream tasks")
-                                if not self.first_message_sent and not self.first_message_passed:
-                                    logger.info(f"First messsage is not sent yet, not doing any kind of cleanup")
-                                else:
-                                    await self.__cleanup_downstream_tasks()
+                                await self.__cleanup_downstream_tasks()
                             else:
                                 logger.info(f"Started transmitting and hence moving further")
                             
