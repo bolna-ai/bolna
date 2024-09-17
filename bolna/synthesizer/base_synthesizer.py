@@ -7,7 +7,7 @@ logger = configure_logger(__name__)
 
 
 class BaseSynthesizer:
-    def __init__(self, stream=True, buffer_size=40, event_loop= None):
+    def __init__(self, stream=True, buffer_size=40, event_loop=None):
         self.stream = stream
         self.buffer_size = buffer_size
         self.internal_queue = asyncio.Queue()

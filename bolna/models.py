@@ -34,38 +34,17 @@ class OpenAIConfig(BaseModel):
     model: str
 
 
-class FourieConfig(BaseModel):
-    voice_id: str
-    gender: str
-    voice: str
-
 
 class DeepgramConfig(BaseModel):
     voice: str
     model: str
 
 
-class MeloConfig(BaseModel):
-    voice:str = 'Casey'
-    sample_rate: int
-    sdp_ratio: float = 0.2
-    noise_scale: float = 0.6
-    noise_scale_w: float = 0.8
-    speed: float = 1.0
-
-
-class StylettsConfig(BaseModel):
-    voice: str
-    rate: int = 8000
-    alpha: float = 0.3
-    beta: float = 0.7
-    diffusion_steps: int = 5
-    embedding_scale: float = 1
-
 class AzureConfig(BaseModel):
     voice: str
     model: str
     language: str
+
 
 class Transcriber(BaseModel):
     model: Optional[str] = "nova-2"
@@ -83,14 +62,10 @@ class Transcriber(BaseModel):
         print(f"value {value}, PROVIDERS {list(SUPPORTED_TRANSCRIBER_PROVIDERS.keys())}")
         return validate_attribute(value, list(SUPPORTED_TRANSCRIBER_PROVIDERS.keys()))
 
-    @field_validator("language")
-    def validate_language(cls, value):
-        return validate_attribute(value, ["en", "hi", "es", "fr", "pt", "ko", "ja", "zh", "de", "it", "pt-BR"])
-
 
 class Synthesizer(BaseModel):
     provider: str
-    provider_config: Union[PollyConfig, ElevenLabsConfig, OpenAIConfig, FourieConfig, MeloConfig, StylettsConfig, DeepgramConfig, AzureConfig] = Field(union_mode='smart')
+    provider_config: Union[PollyConfig, ElevenLabsConfig, AzureConfig, DeepgramConfig, OpenAIConfig] = Field(union_mode='smart')
     stream: bool = False
     buffer_size: Optional[int] = 40  # 40 characters in a buffer
     audio_format: Optional[str] = "pcm"
@@ -98,7 +73,7 @@ class Synthesizer(BaseModel):
 
     @field_validator("provider")
     def validate_model(cls, value):
-        return validate_attribute(value, ["polly", "elevenlabs", "openai", "deepgram", "melotts", "styletts", "azuretts"])
+        return validate_attribute(value, ["polly", "elevenlabs", "openai", "deepgram", "azuretts"])
 
 
 class IOModel(BaseModel):

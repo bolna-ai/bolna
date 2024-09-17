@@ -48,7 +48,7 @@ class TaskManager(BaseManager):
         self.average_transcriber_latency = 0.0
         self.task_config = task
         self.agent_type = self.task_config["tools_config"]["llm_agent"].get("agent_type", "simple_llm_agent")
-
+        
         # Setup for first message
         self.first_message_sent = False 
 
