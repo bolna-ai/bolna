@@ -717,6 +717,7 @@ class TaskManager(BaseManager):
 
     async def __cleanup_downstream_tasks(self):
         logger.info(f"Cleaning up downstream task")
+        logger.info(f"First message sent : {self.first_message_sent}")
 
         # If the first message is not passed, there is no point of doing any kind of cleanup!
         if not self.first_message_passed:
@@ -1353,12 +1354,19 @@ class TaskManager(BaseManager):
                             # Hence we transmit quickly 
                             if not self.started_transmitting_audio:
                                 logger.info("##### Haven't started transmitting audio and hence cleaning up downstream tasks")
-                                await self.__cleanup_downstream_tasks()
+                                if not self.first_message_sent and not self.first_message_passed:
+                                    logger.info(f"First messsage is not sent yet, not doing any kind of cleanup")
+                                else:
+                                    await self.__cleanup_downstream_tasks()
                             else:
                                 logger.info(f"Started transmitting and hence moving further")
                             
                             # If we've started transmitting audio this is probably an interruption, so calculate number of words
-                            if self.started_transmitting_audio and self.number_of_words_for_interruption != 0 and self.first_message_passed:
+                            if self.started_transmitting_audio and self.number_of_words_for_interruption != 0 and self.first_message_sent and self.first_message_passed:
+                                
+                                logger.info(f"First message sent check in the if : {self.first_message_sent}")
+                                logger.info(f"First message passed check in the if : {self.first_message_passed}")
+
                                 if num_words > self.number_of_words_for_interruption or message['data'].strip() in self.accidental_interruption_phrases:
                                     #Process interruption only if number of words is higher than the threshold 
                                     logger.info(f"###### Number of words {num_words} is higher than the required number of words for interruption, hence, definitely interrupting. Interruption and hence changing the turn id")
@@ -1782,6 +1790,8 @@ class TaskManager(BaseManager):
     
     async def __first_message(self):
         logger.info(f"Executing the first message task")
+        logger.info(f"First message sent : {self.first_message_sent}")
+        logger.info(f"First message passed : {self.first_message_passed}")
         try:
             while True:
                 if not self.stream_sid and not self.default_io:
