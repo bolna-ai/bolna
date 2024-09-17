@@ -1286,6 +1286,16 @@ class TaskManager(BaseManager):
         logger.info(f"Starting transcriber task")
         response_started = False
         num_words = 0
+        logger.info(f"First message sent here : {self.first_message_sent}")
+        logger.info(f"First message passed here : {self.first_message_passed}")
+
+        while not self.first_message_sent or not self.first_message_passed:
+            logger.info("Waiting for the first message to be sent and passed.")
+            await asyncio.sleep(1)  # Wait for 1 second before checking again
+
+        logger.info(f"First message sent here : {self.first_message_sent}")
+        logger.info(f"First message passed here : {self.first_message_passed}")
+        logger.info("First message sent and passed, starting transcriber.")
         try:
             while True:
                 message = await self.transcriber_output_queue.get()
@@ -1569,6 +1579,8 @@ class TaskManager(BaseManager):
                     logger.info(f"Yield in chunks is false and hence sending a full")
                     self.buffered_output_queue.put_nowait(message)
 
+            self.first_message_passed = True
+
         except Exception as e:
             traceback.print_exc()
             logger.error(f"Something went wrong {e}")
@@ -1715,6 +1727,8 @@ class TaskManager(BaseManager):
 
                     num_chunks = 0
                     self.turn_id +=1
+                    logger.info(f"First message sent before the end of the conversation {self.first_message_sent}")
+                    logger.info(f"First message passed before the end of the conversation {self.first_message_passed}")
                     if not self.first_message_passed: # last check to make sure we have sent the first message before processing the output loops
                         self.first_message_passed = True
                         logger.info(f"Making first message passed as True")
@@ -1849,7 +1863,9 @@ class TaskManager(BaseManager):
                 if not self.turn_based_conversation:
                     self.background_check_task = asyncio.create_task(self.__handle_initial_silence(duration = 15))
 
+                logger.info("Awaiting first message task")
                 self.first_message_task = await self.__first_message()
+                logger.info("First message task completed")
 
                 if "transcriber" in self.tools:
                     tasks.append(asyncio.create_task(self._listen_transcriber()))
