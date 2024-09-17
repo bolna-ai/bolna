@@ -47,7 +47,10 @@ class TaskManager(BaseManager):
         self.average_synthesizer_latency = 0.0
         self.average_transcriber_latency = 0.0
         self.task_config = task
-        logger.info(f"Task config is : {self.task_config}")
+        self.agent_type = self.task_config["tools_config"]["llm_agent"].get("agent_type", "simple_llm_agent")
+
+        # Setup for first message
+        self.first_message_sent = False 
 
         self.timezone = pytz.timezone('America/Los_Angeles')
 
@@ -55,10 +58,6 @@ class TaskManager(BaseManager):
         if task['tools_config'].get('api_tools', None) is not None:
             logger.info(f"API TOOLS is present {task['tools_config']['api_tools']}")
             self.kwargs['api_tools'] = task['tools_config']['api_tools']
-
-        if task['tools_config']["llm_agent"] and task['tools_config']["llm_agent"]['llm_config'].get('assistant_id', None) is not None:
-            self.kwargs['assistant_id'] = task['tools_config']["llm_agent"]['llm_config']['assistant_id']
-            logger.info(f"Assistant id for agent is {self.kwargs['assistant_id']}")
 
         if self.__is_openai_assistant():
             self.kwargs['assistant_id'] = task['tools_config']["llm_agent"]['llm_config']['assistant_id']
@@ -204,13 +203,6 @@ class TaskManager(BaseManager):
                         "max_tokens": self.llm_agent_config['max_tokens'],
                         "provider": self.llm_agent_config['provider'],
                     }
-
-        # if self.task_config["tools_config"]["llm_agent"] is not None:
-        #     self.llm_config = {
-        #         "model": self.llm_agent_config["model"],
-        #         "max_tokens": self.task_config["tools_config"]["llm_agent"]["max_tokens"],
-        #         "provider": self.task_config["tools_config"]["llm_agent"]["provider"]
-        #     }
 
         # Output stuff
         self.output_task = None
@@ -626,13 +618,9 @@ class TaskManager(BaseManager):
         if self.task_config["task_type"] == "webhook":
             return
 
-        agent_type = self.task_config["tools_config"]["llm_agent"].get("agent_type", "simple_llm_agent")
-        if agent_type in ["openai_assistant", "knowledgebase_agent"]:
-            return
-
         self.is_local = local
         if task_id == 0:
-            if 'recipient_data' in self.context_data and self.context_data['recipient_data'] and self.context_data['recipient_data'].get('timezone', None):
+            if self.context_data and 'recipient_data' in self.context_data and self.context_data['recipient_data'] and self.context_data['recipient_data'].get('timezone', None):
                 self.timezone = pytz.timezone(self.context_data['recipient_data']['timezone'])
 
         today = datetime.now(self.timezone).strftime("%A, %B %d, %Y")
@@ -642,7 +630,7 @@ class TaskManager(BaseManager):
         if not prompt_responses:
             prompt_responses = await get_prompt_responses(assistant_id=self.assistant_id, local=self.is_local)
 
-        logger.info(f"GOT prompt responses {prompt_responses}")
+        logger.info(f"Got prompt responses {prompt_responses}")
         current_task = "task_{}".format(task_id + 1)
         if self.__is_multiagent():
             logger.info(f"Getting {current_task} from prompt responses of type {type(prompt_responses)}, prompt responses key {prompt_responses.keys()}")
@@ -726,12 +714,15 @@ class TaskManager(BaseManager):
         #     text_chunk = text_chunk[index+2:]
         return text_chunk
     
-    async def process_interruption(self):
-        logger.info(f"Handling interruption sequenxce ids {self.sequence_ids}")
-        await self.__cleanup_downstream_tasks()    
 
     async def __cleanup_downstream_tasks(self):
         logger.info(f"Cleaning up downstream task")
+
+        # If the first message is not passed, there is no point of doing any kind of cleanup!
+        if not self.first_message_passed:
+            logger.info(f"First messaage is not passed, not doing any cleanup")
+            return
+        
         start_time = time.time()
         await self.tools["output"].handle_interruption()
         self.sequence_ids = {-1} 
@@ -1180,6 +1171,12 @@ class TaskManager(BaseManager):
 
             await self.__do_llm_generation(messages, meta_info, next_step, should_bypass_synth)
             # TODO : Write a better check for completion prompt
+
+            # TODO : Completion check is not supported in the knowledgebase and graph agent.
+            if self.agent_type in ["knowledgebase_agent", "graph_agent"]:
+                logger.info(f"Agent type is : {self.agent_type}")
+                return
+
             if self.use_llm_to_determine_hangup and not self.turn_based_conversation:
                 answer = await self.tools["llm_agent"].check_for_completion(self.history, self.check_for_completion_prompt)
                 should_hangup = answer['answer'].lower() == "yes"
@@ -1347,11 +1344,6 @@ class TaskManager(BaseManager):
                         elif len(message['data'].strip()) != 0:
                             #Currently simply cancel the next task
 
-                            if not self.first_message_passed:
-                                logger.info(f"Adding to transcrber message")
-                                self.transcriber_message += message['data']
-                                continue
-
                             num_words += len(message['data'].split(" "))
                             if self.callee_speaking is False:
                                 self.callee_speaking_start_time = time.time()
@@ -1363,7 +1355,7 @@ class TaskManager(BaseManager):
                                 logger.info("##### Haven't started transmitting audio and hence cleaning up downstream tasks")
                                 await self.__cleanup_downstream_tasks()
                             else:
-                                logger.info(f"Started transmitting and hence moving fursther")
+                                logger.info(f"Started transmitting and hence moving further")
                             
                             # If we've started transmitting audio this is probably an interruption, so calculate number of words
                             if self.started_transmitting_audio and self.number_of_words_for_interruption != 0 and self.first_message_passed:
@@ -1715,9 +1707,10 @@ class TaskManager(BaseManager):
 
                     num_chunks = 0
                     self.turn_id +=1
-                    if not self.first_message_passed:
+                    if not self.first_message_passed: # last check to make sure we have sent the first message before processing the output loops
                         self.first_message_passed = True
                         logger.info(f"Making first message passed as True")
+                        logger.info(f"First message is sent : {self.first_message_sent}")
                         self.first_message_passing_time = time.time()
                         if len(self.transcriber_message) != 0:
                             logger.info(f"Sending the first message as the first message is still not passed and we got a response")
@@ -1792,7 +1785,7 @@ class TaskManager(BaseManager):
         try:
             while True:
                 if not self.stream_sid and not self.default_io:
-                    stream_sid = self.tools["input"].get_stream_sid()
+                    stream_sid = self.tools["input"].get_stream_sid() # Phone call unique id with the provider (i.g : twilio)
                     if stream_sid is not None:
                         logger.info(f"Got stream sid and hence sending the first message {stream_sid}")
                         self.stream_sid = stream_sid
@@ -1800,6 +1793,7 @@ class TaskManager(BaseManager):
                         logger.info(f"Generating {text}")
                         meta_info = {'io': self.tools["output"].get_provider(), 'message_category': 'agent_welcome_message', 'stream_sid': stream_sid, "request_id": str(uuid.uuid4()), "cached": True, "sequence_id": -1, 'format': self.task_config["tools_config"]["output"]["format"], 'text': text}
                         await self._synthesize(create_ws_data_packet(text, meta_info=meta_info))
+                        self.first_message_sent = True # new variable which checks specifically if the first agent message is sent or not
                         break
                     else:
                         logger.info(f"Stream id is still None, so not passing it")
@@ -1844,6 +1838,9 @@ class TaskManager(BaseManager):
                 tasks = [asyncio.create_task(self.tools['input'].handle())]
                 if not self.turn_based_conversation:
                     self.background_check_task = asyncio.create_task(self.__handle_initial_silence(duration = 15))
+
+                self.first_message_task = await self.__first_message()
+
                 if "transcriber" in self.tools:
                     tasks.append(asyncio.create_task(self._listen_transcriber()))
                     self.transcriber_task = asyncio.create_task(self.tools["transcriber"].run())
@@ -1865,7 +1862,6 @@ class TaskManager(BaseManager):
                 self.output_task = asyncio.create_task(self.__process_output_loop())
                 if not self.turn_based_conversation or self.enforce_streaming:
                     logger.info(f"Setting up other servers")
-                    self.first_message_task = asyncio.create_task(self.__first_message())
                     #if not self.use_llm_to_determine_hangup :
                     # By default we will hang up after x amount of silence
                     # We still need to
