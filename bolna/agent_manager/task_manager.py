@@ -1362,8 +1362,8 @@ class TaskManager(BaseManager):
                             
                             # This means we are generating response from an interim transcript 
                             # Hence we transmit quickly 
-                            if self.first_message_passed and self.first_message_sent:
-                                self.started_transmitting_audio = True
+                            # if self.first_message_passed and self.first_message_sent:
+                            #     self.started_transmitting_audio = True
 
                             if not self.started_transmitting_audio:
                                 logger.info("##### Haven't started transmitting audio and hence cleaning up downstream tasks")
@@ -1579,7 +1579,6 @@ class TaskManager(BaseManager):
                     logger.info(f"Yield in chunks is false and hence sending a full")
                     self.buffered_output_queue.put_nowait(message)
 
-            self.first_message_passed = True
 
         except Exception as e:
             traceback.print_exc()
