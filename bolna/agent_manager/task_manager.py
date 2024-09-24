@@ -1413,8 +1413,7 @@ class TaskManager(BaseManager):
         except Exception as e:
             traceback.print_exc()
             logger.error(f"Error in transcriber {e}")
-    
-    
+
     async def __process_http_transcription(self, message):
         meta_info = self.__get_updated_meta_info(message["meta_info"])
         include_latency = meta_info.get("include_latency", False)
@@ -1512,7 +1511,9 @@ class TaskManager(BaseManager):
 
     async def __send_preprocessed_audio(self, meta_info, text):
         meta_info = copy.deepcopy(meta_info)
-        yield_in_chunks = self.yield_chunks if self.first_message_passed == True else False
+
+        # if self.first_message_passed is True else False. chunking->false to make it interrupted
+        yield_in_chunks = self.yield_chunks
         try:
             #TODO: Either load IVR audio into memory before call or user s3 iter_cunks
             # This will help with interruption in IVR
