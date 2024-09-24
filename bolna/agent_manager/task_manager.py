@@ -1512,7 +1512,7 @@ class TaskManager(BaseManager):
 
     async def __send_preprocessed_audio(self, meta_info, text):
         meta_info = copy.deepcopy(meta_info)
-        yield_in_chunks = self.yield_chunks if self.first_message_passed == True else False
+        yield_in_chunks = self.yield_chunks# if self.first_message_passed is True else False
         try:
             #TODO: Either load IVR audio into memory before call or user s3 iter_cunks
             # This will help with interruption in IVR
