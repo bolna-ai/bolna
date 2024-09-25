@@ -13,7 +13,7 @@ import pytz
 
 import aiohttp
 
-from bolna.constants import ACCIDENTAL_INTERRUPTION_PHRASES, DEFAULT_USER_ONLINE_MESSAGE, DEFAULT_USER_ONLINE_MESSAGE_TRIGGER_DURATION, FILLER_DICT, PRE_FUNCTION_CALL_MESSAGE
+from bolna.constants import ACCIDENTAL_INTERRUPTION_PHRASES, DEFAULT_USER_ONLINE_MESSAGE, DEFAULT_USER_ONLINE_MESSAGE_TRIGGER_DURATION, FILLER_DICT, PRE_FUNCTION_CALL_MESSAGE, DEFAULT_LANGUAGE_CODE
 from bolna.helpers.function_calling_helpers import trigger_api
 from bolna.memory.cache.vector_cache import VectorCache
 from .base_manager import BaseManager
@@ -49,6 +49,7 @@ class TaskManager(BaseManager):
         self.task_config = task
 
         self.timezone = pytz.timezone('America/Los_Angeles')
+        self.language = DEFAULT_LANGUAGE_CODE
 
         logger.info(f"API TOOLS IN TOOLS CONFIG {task['tools_config'].get('api_tools')}")
         if task['tools_config'].get('api_tools', None) is not None:
@@ -86,7 +87,6 @@ class TaskManager(BaseManager):
             "synthesizer": self.synthesizer_queue
         }
         self.pipelines = task['toolchain']['pipelines']
-
         self.textual_chat_agent = False
         if task['toolchain']['pipelines'][0] == "llm" and task["tools_config"]["llm_agent"]["agent_task"] == "conversation":
             self.textual_chat_agent = False
@@ -515,6 +515,7 @@ class TaskManager(BaseManager):
         try:
             if self.task_config["tools_config"]["transcriber"] is not None:
                 logger.info("Setting up transcriber")
+                self.language = self.task_config["tools_config"]["transcriber"].get('language', DEFAULT_LANGUAGE_CODE)
                 provider = "playground" if self.turn_based_conversation else self.task_config["tools_config"]["input"][
                     "provider"]
                 self.task_config["tools_config"]["transcriber"]["input_queue"] = self.audio_queue
@@ -538,7 +539,7 @@ class TaskManager(BaseManager):
     def __setup_synthesizer(self, llm_config=None):
         logger.info(f"Synthesizer config: {self.task_config['tools_config']['synthesizer']}")
         if self._is_conversation_task():
-            self.kwargs["use_turbo"] = self.task_config["tools_config"]["transcriber"]["language"] == "en"
+            self.kwargs["use_turbo"] = self.task_config["tools_config"]["transcriber"]["language"] == DEFAULT_LANGUAGE_CODE
         if self.task_config["tools_config"]["synthesizer"] is not None:
             if "caching" in self.task_config['tools_config']['synthesizer']:
                 caching = self.task_config["tools_config"]["synthesizer"].pop("caching")
@@ -553,7 +554,7 @@ class TaskManager(BaseManager):
                 self.task_config["tools_config"]["synthesizer"]["audio_format"] = "mp3" # Hard code mp3 if we're connected through dashboard
                 self.task_config["tools_config"]["synthesizer"]["stream"] = True if self.enforce_streaming else False #Hardcode stream to be False as we don't want to get blocked by a __listen_synthesizer co-routine
         
-            self.tools["synthesizer"] = synthesizer_class(**self.task_config["tools_config"]["synthesizer"], **provider_config, **self.kwargs, caching = caching)
+            self.tools["synthesizer"] = synthesizer_class(**self.task_config["tools_config"]["synthesizer"], **provider_config, **self.kwargs, caching=caching)
             if self.task_config["tools_config"]["llm_agent"] is not None and llm_config is not None:
                 llm_config["buffer_size"] = self.task_config["tools_config"]["synthesizer"].get('buffer_size')
 
@@ -563,7 +564,7 @@ class TaskManager(BaseManager):
             if llm_config["provider"] in SUPPORTED_LLM_PROVIDERS.keys():
                 llm_class = SUPPORTED_LLM_PROVIDERS.get(llm_config["provider"])
                 logger.info(f"LLM CONFIG {llm_config}")
-                llm = llm_class(**llm_config, **self.kwargs)
+                llm = llm_class(language=self.language, **llm_config, **self.kwargs)
                 return llm
             else:
                 raise Exception(f'LLM {llm_config["provider"]} not supported')
