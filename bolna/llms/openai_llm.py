@@ -4,7 +4,7 @@ from dotenv import load_dotenv
 from openai import AsyncOpenAI, OpenAI
 import json, requests, time
 
-from bolna.constants import CHECKING_THE_DOCUMENTS_FILLER, PRE_FUNCTION_CALL_MESSAGE, TRANSFERING_CALL_FILLER
+from bolna.constants import CHECKING_THE_DOCUMENTS_FILLER, PRE_FUNCTION_CALL_MESSAGE, TRANSFERING_CALL_FILLER, DEFAULT_LANGUAGE_CODE
 from bolna.helpers.utils import convert_to_request_log, format_messages
 from .llm import BaseLLM
 from bolna.helpers.logger_config import configure_logger
@@ -14,11 +14,12 @@ load_dotenv()
     
 
 class OpenAiLLM(BaseLLM):
-    def __init__(self, max_tokens=100, buffer_size=40, model="gpt-3.5-turbo-16k", temperature= 0.1, **kwargs):
+    def __init__(self, max_tokens=100, buffer_size=40, model="gpt-3.5-turbo-16k", temperature=0.1, language=DEFAULT_LANGUAGE_CODE, **kwargs):
         super().__init__(max_tokens, buffer_size)
         self.model = model
 
         self.custom_tools = kwargs.get("api_tools", None)
+        self.language = language
         logger.info(f"API Tools {self.custom_tools}")
         if self.custom_tools is not None:
             self.trigger_function_call = True
@@ -96,7 +97,7 @@ class OpenAiLLM(BaseLLM):
                     i = [i for i in range(len(tools)) if called_fun == tools[i]["name"]][0]
 
                 if not self.gave_out_prefunction_call_message and not textual_response:
-                    filler = PRE_FUNCTION_CALL_MESSAGE if not called_fun.startswith("transfer_call") else TRANSFERING_CALL_FILLER
+                    filler = PRE_FUNCTION_CALL_MESSAGE if not called_fun.startswith("transfer_call") else TRANSFERING_CALL_FILLER.get(self.language, DEFAULT_LANGUAGE_CODE)
                     yield filler , True, latency, False
                     self.gave_out_prefunction_call_message = True
 
@@ -218,7 +219,7 @@ class OpenAiLLM(BaseLLM):
                     i = [i for i in range(len(tools)) if called_fun == tools[i].function.name][0]
                     
                 if not self.gave_out_prefunction_call_message and not textual_response:
-                    filler = PRE_FUNCTION_CALL_MESSAGE if not called_fun.startswith("transfer_call_") else TRANSFERING_CALL_FILLER
+                    filler = PRE_FUNCTION_CALL_MESSAGE if not called_fun.startswith("transfer_call_") else TRANSFERING_CALL_FILLER.get(self.language, DEFAULT_LANGUAGE_CODE)
                     yield filler, True, latency, False
                     self.gave_out_prefunction_call_message = True
                 if len(buffer) > 0:

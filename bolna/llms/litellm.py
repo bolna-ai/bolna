@@ -2,6 +2,7 @@ import os
 import litellm
 from dotenv import load_dotenv
 from .llm import BaseLLM
+from bolna.constants import DEFAULT_LANGUAGE_CODE
 from bolna.helpers.utils import json_to_pydantic_schema
 from bolna.helpers.logger_config import configure_logger
 import time
@@ -11,11 +12,12 @@ load_dotenv()
 
 
 class LiteLLM(BaseLLM):
-    def __init__(self, model, max_tokens=30, buffer_size=40,
-                 temperature=0.0, **kwargs):
+    def __init__(self, model, max_tokens=30, buffer_size=40, temperature=0.0, language=DEFAULT_LANGUAGE_CODE, **kwargs):
         super().__init__(max_tokens, buffer_size)
         self.model = model
         self.started_streaming = False
+
+        self.language = language
         self.model_args = {"max_tokens": max_tokens, "temperature": temperature, "model": self.model}
         self.api_key = kwargs.get("llm_key", os.getenv('LITELLM_MODEL_API_KEY'))
         self.api_base = kwargs.get("base_url", os.getenv('LITELLM_MODEL_API_BASE'))
