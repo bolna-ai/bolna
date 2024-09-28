@@ -866,8 +866,7 @@ class TaskManager(BaseManager):
     def __update_preprocessed_tree_node(self):
         logger.info(f"It's a preprocessed flow and hence updating current node")
         self.tools['llm_agent'].update_current_node()
-    
-    
+
 
     ##############################################################
     # LLM task

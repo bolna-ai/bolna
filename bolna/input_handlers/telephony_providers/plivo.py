@@ -1,5 +1,7 @@
-from bolna.input_handlers.telephony import TelephonyInputHandler
+import os
+import plivo as plivosdk
 from dotenv import load_dotenv
+from bolna.input_handlers.telephony import TelephonyInputHandler
 from bolna.helpers.logger_config import configure_logger
 
 logger = configure_logger(__name__)
@@ -15,3 +17,10 @@ class PlivoInputHandler(TelephonyInputHandler):
         start = packet['start']
         self.call_sid = start['callId']
         self.stream_sid = start['streamId']
+
+    async def disconnect_stream(self):
+        try:
+            client = plivosdk.RestClient(os.getenv('PLIVO_AUTH_ID'), os.getenv('PLIVO_AUTH_TOKEN'))
+            client.calls.delete_all_streams(self.call_sid)
+        except Exception as e:
+            logger.info('Error deleting plivo stream: {}'.format(str(e)))

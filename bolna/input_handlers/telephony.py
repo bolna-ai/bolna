@@ -31,6 +31,9 @@ class TelephonyInputHandler(DefaultInputHandler):
     async def call_start(self, packet):
         pass
 
+    async def disconnect_stream(self):
+        pass
+
     async def process_mark_message(self, packet):
         if packet["mark"]["name"] in self.mark_set:
             self.mark_set.remove(packet["mark"]["name"])
@@ -44,7 +47,9 @@ class TelephonyInputHandler(DefaultInputHandler):
             await self.websocket.close()
             logger.info("WebSocket connection closed")
         except Exception as e:
-            logger.error(f"Error closing WebSocket: {e}")
+            logger.info(f"Error closing WebSocket: {e}")
+        finally:
+            asyncio.create_task(self.disconnect_stream())
 
     async def ingest_audio(self, audio_data, meta_info):
         ws_data_packet = create_ws_data_packet(data=audio_data, meta_info=meta_info)
