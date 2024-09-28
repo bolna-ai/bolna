@@ -51,19 +51,3 @@ class TwilioOutputHandler(TelephonyOutputHandler):
         }
 
         return mark_message
-
-    async def send_sms(self, message_text, call_number):
-        message = self.client.messages.create(
-            to='{}'.format(call_number),
-            from_='{}'.format(os.getenv('TWILIO_PHONE_NUMBER')),
-            body=message_text)
-        logger.info(f'Sent whatsapp message: {message_text}')
-        return message.sid
-
-    async def send_whatsapp(self, message_text, call_number):
-        message = self.client.messages.create(
-            to='whatsapp:{}'.format(call_number),
-            from_='whatsapp:{}'.format(os.getenv('TWILIO_PHONE_NUMBER')),
-            body=message_text)
-        logger.info(f'Sent whatsapp message: {message_text}')
-        return message.sid
