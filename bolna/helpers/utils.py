@@ -421,7 +421,6 @@ Message type
 
 async def write_request_logs(message, run_id):
     component_details = [None, None, None, None, None]
-    logger.info(f"Message {message}")
     message_data = message.get('data', '')
     if message_data is None:
         message_data = ''
@@ -450,6 +449,7 @@ async def write_request_logs(message, run_id):
             await log_file.write(header+log_string)
         else:
             await log_file.write(log_string)
+
 
 async def save_audio_file_to_s3(conversation_recording, sampling_rate = 24000, assistant_id = None, run_id = None):
     last_frame_end_time = conversation_recording['output'][0]['start_time']
