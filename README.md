@@ -57,24 +57,13 @@ graph LR;
 ```
 
 ## Supported providers and models
-1. Initiating a phone call using telephony providers like `Twilio`, `Plivo` etc.
+1. Initiating a phone call using telephony providers like `Twilio`, `Plivo`, `Exotel` (coming soon), `Vonage` (coming soon) etc.
 2. Transcribing the conversations using `Deepgram`, etc.
 3. Using LLMs like `OpenAI`, `Llama`, `Cohere`, `Mistral`,  etc to handle conversations
-4. Synthesizing LLM responses back to telephony using `AWS Polly`, `ElevenLabs`, `Deepgram` etc.
+4. Synthesizing LLM responses back to telephony using `AWS Polly`, `ElevenLabs`, `Deepgram`, `OpenAI`, `Azure`, `Cartesia` (coming soon) etc.
 
 
 Refer to the [docs](https://docs.bolna.dev/providers) for a deepdive into all supported providers.
-
-
-## Open-source v/s Hosted APIs
-**We have in the past tried to maintain both the open source and the hosted solution (via APIs and a UI dashboard)**.
-
-We have fluctuated b/w maintaining this repository purely from a point of time crunch and not interest.
-
-Currently, we are continuing to maintain it for the community and improving the adoption of Voice AI.
-
-Though the repository is completely open source, you can connect with us if interested in managed hosted offerings or more customized solutions.
-<a href="https://calendly.com/bolna/30min"><img alt="Schedule a meeting" src="https://cdn.cookielaw.org/logos/122ecfc3-4694-42f1-863f-2db42d1b1e68/0bcbbcf4-9b83-4684-ba59-bc913c0d5905/c21bea90-f4f1-43d1-8118-8938bbb27a9d/logo.png" /></a>
 
 
 ## Local example setup [will be moved to a different repository]
@@ -96,7 +85,7 @@ Use docker to build the images using `.env` file as the environment file and run
 Once the docker containers are up, you can now start to create your agents and instruct them to initiate calls.
 
 
-## Creating agents and start making calls 
+## Example agents to create, use and start making calls
 Go to the [Bolna wiki](https://github.com/bolna-ai/bolna/wiki) to try out sample agents.
 
 
@@ -161,6 +150,15 @@ These are the current supported Telephony Providers:
 
 </details>
 
+## Open-source v/s Hosted APIs
+**We have in the past tried to maintain both the open source and the hosted solution (via APIs and a UI dashboard)**.
+
+We have fluctuated b/w maintaining this repository purely from a point of time crunch and not interest.
+
+Currently, we are continuing to maintain it for the community and improving the adoption of Voice AI.
+
+Though the repository is completely open source, you can connect with us if interested in managed hosted offerings or more customized solutions.
+<a href="https://calendly.com/bolna/30min"><img alt="Schedule a meeting" src="https://cdn.cookielaw.org/logos/122ecfc3-4694-42f1-863f-2db42d1b1e68/0bcbbcf4-9b83-4684-ba59-bc913c0d5905/c21bea90-f4f1-43d1-8118-8938bbb27a9d/logo.png" /></a>
 
 ## Extending with other Telephony Providers
 In case you wish to extend and add some other Telephony like Vonage, Telnyx, etc. following the guidelines below:
