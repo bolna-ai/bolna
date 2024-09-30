@@ -1,7 +1,0 @@
-python-dotenv==1.0.0
-fastapi==0.108.0
-plivo==4.47.0
-redis==5.0.1
-twilio==8.9.0
-uvicorn==0.22.0
-daily-python==0.9.1

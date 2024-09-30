@@ -1,1 +1,0 @@
-https://docs.bolna.dev/batch-calling#example-request
