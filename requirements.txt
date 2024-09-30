@@ -14,7 +14,6 @@ openai>=1.10.0
 pydantic==2.5.3
 pydub==0.25.1
 pymongo==4.8.0
-pystemmer==2.2.0.1
 python-dateutil==2.8.2
 python-dotenv==1.0.0
 redis==5.0.1
