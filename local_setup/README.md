@@ -19,5 +19,5 @@ Once the docker containers are up, you can now start to create your agents and i
 
 
 
-## Creating agents and start making calls 
+## Example agents to create, use and start making calls
 Go to the [Bolna wiki](https://github.com/bolna-ai/bolna/wiki) to try out sample agents.
