@@ -84,7 +84,6 @@ class OpenAiLLM(BaseLLM):
         textual_response = False
 
         async for chunk in await self.async_client.chat.completions.create(**model_args):
-            logger.info('chunk: {}'.format(chunk.choices[0].delta.content))
             if not self.started_streaming:
                 first_chunk_time = time.time()
                 latency = first_chunk_time - start_time

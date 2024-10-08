@@ -1920,7 +1920,6 @@ class TaskManager(BaseManager):
             if "synthesizer" in self.tools and self.synthesizer_task is not None:   
                 self.synthesizer_task.cancel()
 
-            
             if self._is_conversation_task():
                 output = {"messages": self.history, "conversation_time": time.time() - self.start_time,
                     "label_flow": self.label_flow, "call_sid": self.call_sid, "stream_sid": self.stream_sid,
@@ -1974,7 +1973,6 @@ class TaskManager(BaseManager):
                     output = {"status": self.webhook_response, "task_type": "webhook"}
             
             return output
-                
 
     def handle_cancellation(self, message):
         try:
