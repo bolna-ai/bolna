@@ -94,7 +94,8 @@ class TaskManager(BaseManager):
         # Assistant persistance stuff
         self.assistant_id = assistant_id
         self.run_id = kwargs.get("run_id", "1234#0")
-        logger.info(f"Run id {self.run_id}")
+        self.agent_id, self.run_id_ts = self.run_id.split('#')
+
         self.mark_set = set()
         self.sampling_rate = 24000
         self.conversation_ended = False
@@ -360,7 +361,7 @@ class TaskManager(BaseManager):
         # setting llm
         if self.llm_config is not None:
             logger.info(f"LLM CONFIG IS NOT NONE {self.task_config['task_type']} llm agent config {self.llm_agent_config}")
-            llm = self.__setup_llm(self.llm_config)
+            llm = self.__setup_llm(self.llm_config, task_id)
             #Setup tasks
             agent_params = {
                 'llm': llm,
@@ -558,12 +559,17 @@ class TaskManager(BaseManager):
             if self.task_config["tools_config"]["llm_agent"] is not None and llm_config is not None:
                 llm_config["buffer_size"] = self.task_config["tools_config"]["synthesizer"].get('buffer_size')
 
-    def __setup_llm(self, llm_config):
+    def __setup_llm(self, llm_config, task_id=0):
         if self.task_config["tools_config"]["llm_agent"] is not None:
             logger.info(f'### PROVIDER {llm_config["provider"] }')
             if llm_config["provider"] in SUPPORTED_LLM_PROVIDERS.keys():
                 llm_class = SUPPORTED_LLM_PROVIDERS.get(llm_config["provider"])
                 logger.info(f"LLM CONFIG {llm_config}")
+
+                if task_id and task_id > 0:
+                    self.kwargs.pop('llm_key', None)
+                    self.kwargs.pop('base_url', None)
+                    self.kwargs.pop('api_version', None)
                 llm = llm_class(language=self.language, **llm_config, **self.kwargs)
                 return llm
             else:
@@ -675,6 +681,7 @@ class TaskManager(BaseManager):
                     self.call_sid = self.context_data['recipient_data']['call_sid']
                     enriched_prompt = f'{enriched_prompt}\nPhone call_sid is "{self.call_sid}"\n'
 
+                enriched_prompt = f'{enriched_prompt}\nagent_id is "{self.agent_id}"\nexecution_id is "{self.run_id_ts}"\n'
                 self.prompts["system_prompt"] = enriched_prompt
 
             notes = "### Note:\n"
@@ -699,7 +706,7 @@ class TaskManager(BaseManager):
 
         #If history is empty and agent welcome message is not empty add it to history
         if len(self.history) == 1 and len(self.kwargs['agent_welcome_message']) != 0:
-            self.history.append({'role': 'assistant', 'content':self.kwargs['agent_welcome_message']})
+            self.history.append({'role': 'assistant', 'content': self.kwargs['agent_welcome_message']})
 
         self.interim_history = copy.deepcopy(self.history)
 

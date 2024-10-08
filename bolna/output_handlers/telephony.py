@@ -57,7 +57,7 @@ class TelephonyOutputHandler(DefaultOutputHandler):
                     logger.info("Not sending")
             except Exception as e:
                 traceback.print_exc()
-                logger.error(f'something went wrong while sending message to twilio {e}')
+                logger.info(f'something went wrong while sending message to twilio {e}')
 
         except Exception as e:
-            logger.error(f'something went wrong while handling twilio {e}')
+            logger.info(f'something went wrong while handling twilio {e}')

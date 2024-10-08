@@ -112,7 +112,7 @@ class TelephonyInputHandler(DefaultInputHandler):
                         'eos': True
                     })
                 self.queues['transcriber'].put_nowait(ws_data_packet)
-                logger.error('Exception in twilio_receiver reading events: {}'.format(e))
+                logger.info('Exception in twilio_receiver reading events: {}'.format(e))
                 break
 
     async def handle(self):

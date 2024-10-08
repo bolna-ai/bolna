@@ -508,12 +508,14 @@ async def save_audio_file_to_s3(conversation_recording, sampling_rate = 24000, a
     
     return f'{RECORDING_BUCKET_URL}{key}'
 
+
 def list_number_of_wav_files_in_directory(directory):
     count = 0
     for filename in os.listdir(directory):
         if filename.endswith(".mp3") or filename.endswith(".wav") or filename.endswith(".ogg"):
             count += 1
     return count
+
 
 def get_file_names_in_directory(directory):
     return os.listdir(directory)
