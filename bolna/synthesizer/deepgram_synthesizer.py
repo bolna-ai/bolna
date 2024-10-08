@@ -41,7 +41,7 @@ class DeepgramSynthesizer(BaseSynthesizer):
             "Authorization": "Token {}".format(self.api_key),
             "Content-Type": "application/json"
         }
-        url = DEEPGRAM_TTS_URL + "?encoding={}&container=none&sample_rate={}&model={}".format(
+        url = DEEPGRAM_TTS_URL + "?encoding={}&container=wav&sample_rate={}&model={}".format(
             self.format, self.sample_rate, self.model
         )
 
