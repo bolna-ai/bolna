@@ -360,7 +360,7 @@ class TaskManager(BaseManager):
         # setting llm
         if self.llm_config is not None:
             logger.info(f"LLM CONFIG IS NOT NONE {self.task_config['task_type']} llm agent config {self.llm_agent_config}")
-            llm = self.__setup_llm(self.llm_config)
+            llm = self.__setup_llm(self.llm_config, task_id)
             #Setup tasks
             agent_params = {
                 'llm': llm,
@@ -558,12 +558,17 @@ class TaskManager(BaseManager):
             if self.task_config["tools_config"]["llm_agent"] is not None and llm_config is not None:
                 llm_config["buffer_size"] = self.task_config["tools_config"]["synthesizer"].get('buffer_size')
 
-    def __setup_llm(self, llm_config):
+    def __setup_llm(self, llm_config, task_id=0):
         if self.task_config["tools_config"]["llm_agent"] is not None:
             logger.info(f'### PROVIDER {llm_config["provider"] }')
             if llm_config["provider"] in SUPPORTED_LLM_PROVIDERS.keys():
                 llm_class = SUPPORTED_LLM_PROVIDERS.get(llm_config["provider"])
                 logger.info(f"LLM CONFIG {llm_config}")
+
+                if task_id and task_id > 0:
+                    self.kwargs.pop('llm_key', None)
+                    self.kwargs.pop('base_url', None)
+                    self.kwargs.pop('api_version', None)
                 llm = llm_class(language=self.language, **llm_config, **self.kwargs)
                 return llm
             else:
