@@ -94,7 +94,8 @@ class TaskManager(BaseManager):
         # Assistant persistance stuff
         self.assistant_id = assistant_id
         self.run_id = kwargs.get("run_id", "1234#0")
-        logger.info(f"Run id {self.run_id}")
+        self.agent_id, self.run_id_ts = self.run_id.split('#')
+
         self.mark_set = set()
         self.sampling_rate = 24000
         self.conversation_ended = False
@@ -680,6 +681,7 @@ class TaskManager(BaseManager):
                     self.call_sid = self.context_data['recipient_data']['call_sid']
                     enriched_prompt = f'{enriched_prompt}\nPhone call_sid is "{self.call_sid}"\n'
 
+                enriched_prompt = f'{enriched_prompt}\nagent_id is "{self.agent_id}"\nexecution_id is "{self.run_id_ts}"\n'
                 self.prompts["system_prompt"] = enriched_prompt
 
             notes = "### Note:\n"
@@ -704,7 +706,7 @@ class TaskManager(BaseManager):
 
         #If history is empty and agent welcome message is not empty add it to history
         if len(self.history) == 1 and len(self.kwargs['agent_welcome_message']) != 0:
-            self.history.append({'role': 'assistant', 'content':self.kwargs['agent_welcome_message']})
+            self.history.append({'role': 'assistant', 'content': self.kwargs['agent_welcome_message']})
 
         self.interim_history = copy.deepcopy(self.history)
 
