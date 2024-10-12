@@ -339,7 +339,7 @@ class TaskManager(BaseManager):
                 self.ambient_noise_task = None
                 if self.ambient_noise:
                     logger.info(f"Ambient noise is True {self.ambient_noise}")
-                    self.soundtrack = f"{self.conversation_config.get('ambient_noise_track', 'convention_hall')}.wav"
+                    self.soundtrack = f"{self.conversation_config.get('ambient_noise_track', 'coffee-shop')}.wav"
 
             # Classifier for filler
             self.use_fillers = self.conversation_config.get("use_fillers", False)
