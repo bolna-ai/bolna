@@ -24,17 +24,14 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
         super().__init__(stream)
         self.api_key = os.environ["ELEVENLABS_API_KEY"] if synthesier_key is None else synthesier_key
         self.voice = voice_id
-        self.use_turbo = kwargs.get("use_turbo", False)
         self.model = model
-        logger.info(f"Using turbo or not {self.model}")
-        self.stream = False  # Issue with elevenlabs streaming that we need to always send the text quickly
-        self.websocket_connection = None
-        self.connection_open = False
+        self.stream = True  # Issue with elevenlabs streaming that we need to always send the text quickly
         self.sampling_rate = sampling_rate
         self.audio_format = "mp3"
         self.use_mulaw = kwargs.get("use_mulaw", False)
-        self.ws_url = f"wss://api.elevenlabs.io/v1/text-to-speech/{self.voice}/stream-input?model_id={self.model}&optimize_streaming_latency=2&output_format={self.get_format(self.audio_format, self.sampling_rate)}"
-        self.api_url = f"https://api.elevenlabs.io/v1/text-to-speech/{self.voice}?optimize_streaming_latency=2&output_format="
+        #self.ws_url = f"wss://api.elevenlabs.io/v1/text-to-speech/{self.voice}/stream-input?model_id={self.model}&optimize_streaming_latency=2&output_format={self.get_format(self.audio_format, self.sampling_rate)}"
+        self.ws_url = f"wss://api.elevenlabs.io/v1/text-to-speech/{self.voice}/stream-input?model_id={self.model}&output_format=ulaw_8000&inactivity_timeout=60"
+        self.api_url = f"https://api.elevenlabs.io/v1/text-to-speech/{self.voice}/?optimize_streaming_latency=2&output_format="
         self.first_chunk_generated = False
         self.last_text_sent = False
         self.text_queue = deque()
@@ -46,6 +43,7 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
             self.cache = InmemoryScalarCache()
         self.synthesized_characters = 0
         self.previous_request_ids = []
+        self.websocket_holder = {"websocket": None}
 
     # Ensuring we only do wav output for now
     def get_format(self, format, sampling_rate):
@@ -58,63 +56,58 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
     def get_engine(self):
         return self.model
 
-    # Don't send EOS signal. Let
-    async def sender(self, text, end_of_llm_stream=False):  # sends text to websocket
-        if self.websocket_connection is not None and not self.websocket_connection.open:
-            self.connection_open = False
-            logger.info(f"Connection was closed and hence opening connection")
-            await self.open_connection()
-
-        if not self.connection_open:
-            logger.info("Connecting to elevenlabs websocket...")
-            bos_message = {
-                "text": " ",
-                "voice_settings": {
-                    "stability": self.temperature,
-                    "similarity_boost": self.similarity_boost
-                },
-                "xi_api_key": self.api_key,
-            }
-            
-            await self.websocket_connection.send(json.dumps(bos_message))
-            self.connection_open = True
+    async def sender(self, text, end_of_llm_stream=False):
+        # Ensure the WebSocket connection is established
+        while self.websocket_holder["websocket"] is None or self.websocket_holder["websocket"].closed:
+            logger.info("Waiting for elevenlabs ws connection to be established...")
+            await asyncio.sleep(1)
 
         if text != "":
-            logger.info(f"Sending message {text}")
+            for text_chunk in self.text_chunker(text):
+                logger.info(f"Sending text_chunk: {text_chunk}")
+                try:
+                    await self.websocket_holder["websocket"].send(json.dumps({"text": text_chunk}))
+                except Exception as e:
+                    logger.info(f"Error sending chunk: {e}")
+                    return
 
-            input_message = {
-                "text": f"{text} ",
-                "try_trigger_generation": True,
-                "flush": True
-            }
-            await self.websocket_connection.send(json.dumps(input_message))
-            if end_of_llm_stream:
-                self.last_text_sent = True
+        # If end_of_llm_stream is True, mark the last chunk and send an empty message
+        if end_of_llm_stream:
+            self.last_text_sent = True
 
-            # self.connection_open = False
+        # Send the end-of-stream signal with an empty string as text
+        try:
+            await self.websocket_holder["websocket"].send(json.dumps({"text": "", "flush": True}))
+        except Exception as e:
+            logger.info(f"Error sending end-of-stream signal: {e}")
 
     async def receiver(self):
         while True:
-            if not self.connection_open:
-                logger.info("Since eleven labs always closes the connection after every leg, simply open it...")
-                await self.open_connection()
             try:
-                response = await self.websocket_connection.recv()
+                if self.websocket_holder["websocket"] is None or self.websocket_holder["websocket"].closed:
+                    logger.info("WebSocket is not connected, skipping receive.")
+                    await asyncio.sleep(5)
+                    continue
+
+                response = await self.websocket_holder["websocket"].recv()
                 data = json.loads(response)
+                logger.info('data ->> {}'.format(data))
                 logger.info("response for isFinal: {}".format(data.get('isFinal', False)))
                 if "audio" in data and data["audio"]:
                     chunk = base64.b64decode(data["audio"])
-                    if len(chunk) % 2 == 1:
-                        chunk += b'\x00'
+                    #if len(chunk) % 2 == 1:
+                    #   chunk += b'\x00'
                     # @TODO make it better - for example sample rate changing for mp3 and other formats  
                     yield chunk
 
                     if "isFinal" in data and data["isFinal"]:
-                        self.connection_open = False
                         yield b'\x00'
                 else:
                     logger.info("No audio data in the response")
+
             except websockets.exceptions.ConnectionClosed:
+                break
+            except Exception as e:
                 break
 
     async def __send_payload(self, payload, format=None):
@@ -232,18 +225,46 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
 
         except Exception as e:
             traceback.print_exc()
-            logger.error(f"Error in eleven labs generate {e}")
+            logger.info(f"Error in eleven labs generate {e}")
 
-    async def open_connection(self):
-        if self.websocket_connection is None or self.connection_open is False:
-            self.websocket_connection = await websockets.connect(self.ws_url)
-            logger.info("Connected to the server")
+    def supports_websocket(self):
+        return True
+
+    async def establish_connection(self):
+        try:
+            websocket = await websockets.connect(self.ws_url)
+            bos_message = {
+                "text": " ",
+                "voice_settings": {
+                    "stability": 0.5,
+                    "similarity_boost": 0.8
+                },
+                "xi_api_key": self.api_key
+            }
+            await websocket.send(json.dumps(bos_message))
+            logger.info(f"Connected to {self.ws_url}")
+            return websocket
+        except Exception as e:
+            logger.info(f"Failed to connect: {e}")
+            return None
+
+    async def monitor_connection(self):
+        # Periodically check if the connection is still alive
+        while True:
+            if self.websocket_holder["websocket"] is None or self.websocket_holder["websocket"].closed:
+                logger.info("Re-establishing elevenlabs connection...")
+                self.websocket_holder["websocket"] = await self.establish_connection()
+            await asyncio.sleep(50)
+
+    async def get_sender_task(self):
+        return self.sender_task
 
     async def push(self, message):
         logger.info(f"Pushed message to internal queue {message}")
         if self.stream:
             meta_info, text = message.get("meta_info"), message.get("data")
             end_of_llm_stream = "end_of_llm_stream" in meta_info and meta_info["end_of_llm_stream"]
+            logger.info(f"end_of_llm_stream: {end_of_llm_stream}")
             self.meta_info = copy.deepcopy(meta_info)
             meta_info["text"] = text
             self.sender_task = asyncio.create_task(self.sender(text, end_of_llm_stream))
