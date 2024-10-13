@@ -19,7 +19,7 @@ logger = configure_logger(__name__)
 
 class ElevenlabsSynthesizer(BaseSynthesizer):
     def __init__(self, voice, voice_id, model="eleven_turbo_v2_5", audio_format="mp3", sampling_rate="16000",
-                 stream=False, buffer_size=400, temperature = 0.9, similarity_boost = 0.5, synthesier_key=None, 
+                 stream=False, buffer_size=400, temperature=0.9, similarity_boost=0.5, synthesier_key=None,
                  caching=True, **kwargs):
         super().__init__(stream)
         self.api_key = os.environ["ELEVENLABS_API_KEY"] if synthesier_key is None else synthesier_key
@@ -29,9 +29,8 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
         self.sampling_rate = sampling_rate
         self.audio_format = "mp3"
         self.use_mulaw = kwargs.get("use_mulaw", False)
-        #self.ws_url = f"wss://api.elevenlabs.io/v1/text-to-speech/{self.voice}/stream-input?model_id={self.model}&optimize_streaming_latency=2&output_format={self.get_format(self.audio_format, self.sampling_rate)}"
         self.ws_url = f"wss://api.elevenlabs.io/v1/text-to-speech/{self.voice}/stream-input?model_id={self.model}&output_format=ulaw_8000&inactivity_timeout=60"
-        self.api_url = f"https://api.elevenlabs.io/v1/text-to-speech/{self.voice}/?optimize_streaming_latency=2&output_format="
+        self.api_url = f"https://api.elevenlabs.io/v1/text-to-speech/{self.voice}?optimize_streaming_latency=2&output_format="
         self.first_chunk_generated = False
         self.last_text_sent = False
         self.text_queue = deque()
@@ -91,7 +90,6 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
 
                 response = await self.websocket_holder["websocket"].recv()
                 data = json.loads(response)
-                logger.info('data ->> {}'.format(data))
                 logger.info("response for isFinal: {}".format(data.get('isFinal', False)))
                 if "audio" in data and data["audio"]:
                     chunk = base64.b64decode(data["audio"])

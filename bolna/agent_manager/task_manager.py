@@ -734,10 +734,6 @@ class TaskManager(BaseManager):
         # if index != -1:
         #     text_chunk = text_chunk[index+2:]
         return text_chunk
-    
-    async def process_interruption(self):
-        logger.info(f"Handling interruption sequenxce ids {self.sequence_ids}")
-        await self.__cleanup_downstream_tasks()    
 
     async def __cleanup_downstream_tasks(self):
         logger.info(f"Cleaning up downstream task")
@@ -1350,7 +1346,7 @@ class TaskManager(BaseManager):
                         if transcriber_message.strip() == message['data'].strip():
                             logger.info(f"###### Transcriber message and message data are same and hence not changing anything else. Probably just an is_final thingy. {message}")
                             continue
-                                                    
+
                         elif len(message['data'].strip()) != 0:
                             #Currently simply cancel the next task
 
@@ -1821,7 +1817,7 @@ class TaskManager(BaseManager):
                         self.stream_sid = stream_sid
                         text = self.kwargs.get('agent_welcome_message', None)
                         logger.info(f"Generating {text}")
-                        meta_info = {'io': self.tools["output"].get_provider(), 'message_category': 'agent_welcome_message', 'stream_sid': stream_sid, "request_id": str(uuid.uuid4()), "cached": False, "sequence_id": -1, 'format': self.task_config["tools_config"]["output"]["format"], 'text': text}
+                        meta_info = {'io': self.tools["output"].get_provider(), 'message_category': 'agent_welcome_message', 'stream_sid': stream_sid, "request_id": str(uuid.uuid4()), "cached": True, "sequence_id": -1, 'format': self.task_config["tools_config"]["output"]["format"], 'text': text}
                         await self._synthesize(create_ws_data_packet(text, meta_info=meta_info))
                         break
                     else:
