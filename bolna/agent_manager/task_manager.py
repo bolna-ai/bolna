@@ -513,6 +513,7 @@ class TaskManager(BaseManager):
         else:
             raise "Other input handlers not supported yet"
 
+
     def __setup_transcriber(self):
         try:
             if self.task_config["tools_config"]["transcriber"] is not None:
