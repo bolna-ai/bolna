@@ -45,7 +45,7 @@ class TelephonyOutputHandler(DefaultOutputHandler):
                     audio_format = meta_info.get("format", "wav")
                     logger.info(f"Sending message {len(audio_chunk)} {audio_format}")
 
-                    if audio_format == 'wav' and meta_info.get('message_category', '') == 'agent_welcome_message' and self.io_provider == 'plivo' and meta_info['cached'] is True:
+                    if audio_format == 'pcm' and meta_info.get('message_category', '') == 'agent_welcome_message' and self.io_provider == 'plivo' and meta_info['cached'] is True:
                         audio_format = 'wav'
                     media_message = await self.form_media_message(audio_chunk, audio_format)
                     await self.websocket.send_text(json.dumps(media_message))
