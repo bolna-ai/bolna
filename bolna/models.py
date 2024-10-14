@@ -40,6 +40,11 @@ class DeepgramConfig(BaseModel):
     model: str
 
 
+class CartesiaConfig(BaseModel):
+    voice_id: str
+    voice: str
+
+
 class AzureConfig(BaseModel):
     voice: str
     model: str
@@ -65,7 +70,7 @@ class Transcriber(BaseModel):
 
 class Synthesizer(BaseModel):
     provider: str
-    provider_config: Union[PollyConfig, ElevenLabsConfig, AzureConfig, DeepgramConfig, OpenAIConfig] = Field(union_mode='smart')
+    provider_config: Union[PollyConfig, ElevenLabsConfig, AzureConfig, CartesiaConfig, DeepgramConfig, OpenAIConfig] = Field(union_mode='smart')
     stream: bool = False
     buffer_size: Optional[int] = 40  # 40 characters in a buffer
     audio_format: Optional[str] = "pcm"
@@ -73,7 +78,7 @@ class Synthesizer(BaseModel):
 
     @field_validator("provider")
     def validate_model(cls, value):
-        return validate_attribute(value, ["polly", "elevenlabs", "openai", "deepgram", "azuretts"])
+        return validate_attribute(value, ["polly", "elevenlabs", "openai", "deepgram", "azuretts", "cartesia"])
 
 
 class IOModel(BaseModel):

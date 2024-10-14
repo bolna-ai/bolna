@@ -3,3 +3,4 @@ from .elevenlabs_synthesizer import ElevenlabsSynthesizer
 from .openai_synthesizer import OPENAISynthesizer
 from .deepgram_synthesizer import DeepgramSynthesizer
 from .azure_synthesizer import AzureSynthesizer
+from .cartesia_synthesizer import CartesiaSynthesizer
