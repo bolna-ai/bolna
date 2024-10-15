@@ -97,6 +97,7 @@ class PollySynthesizer(BaseSynthesizer):
             return audio
         except Exception as e:
             logger.error(f"Could not synthesize {e}")
+
     async def generate(self):
         while True:
             logger.info("Generating TTS response")
