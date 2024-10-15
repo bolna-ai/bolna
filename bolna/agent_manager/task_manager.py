@@ -1374,7 +1374,7 @@ class TaskManager(BaseManager):
                                 if num_words > self.number_of_words_for_interruption or message['data'].strip() in self.accidental_interruption_phrases:
                                     #Process interruption only if number of words is higher than the threshold 
                                     logger.info(f"###### Number of words {num_words} is higher than the required number of words for interruption, hence, definitely interrupting. Interruption and hence changing the turn id")
-                                    self.turn_id +=1
+                                    self.turn_id += 1
                                     await self.__cleanup_downstream_tasks()
                                 else:
                                     logger.info(f"Not starting a cleanup because {num_words} number of words are lesser {self.number_of_words_for_interruption} and hence continuing,")
@@ -1716,7 +1716,7 @@ class TaskManager(BaseManager):
                     await self.__process_end_of_conversation()
                 
                 if 'sequence_id' in message['meta_info'] and message["meta_info"]["sequence_id"] in self.sequence_ids:
-                    num_chunks +=1
+                    num_chunks += 1
                     await self.tools["output"].handle(message)                    
                     duration = calculate_audio_duration(len(message["data"]), self.sampling_rate, format = message['meta_info']['format'])
                     logger.info(f"Duration of the byte {duration}")
@@ -1734,7 +1734,7 @@ class TaskManager(BaseManager):
                         self.asked_if_user_is_still_there = False
 
                     num_chunks = 0
-                    self.turn_id +=1
+                    self.turn_id += 1
                     if not self.first_message_passed:
                         self.first_message_passed = True
                         logger.info(f"Making first message passed as True")
