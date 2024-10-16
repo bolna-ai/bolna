@@ -272,6 +272,7 @@ class CartesiaSynthesizer(BaseSynthesizer):
         logger.info(f"Pushed message to internal queue {message}")
         if self.stream:
             meta_info, text = message.get("meta_info"), message.get("data")
+            self.synthesized_characters += len(text) if text is not None else 0
             end_of_llm_stream = "end_of_llm_stream" in meta_info and meta_info["end_of_llm_stream"]
             self.meta_info = copy.deepcopy(meta_info)
             meta_info["text"] = text

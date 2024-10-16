@@ -74,6 +74,7 @@ class SmallestSynthesizer(BaseSynthesizer):
                 logger.info(f"Generating TTS response for message: {message}")
                 meta_info, text = message.get("meta_info"), message.get("data")
                 meta_info['is_cached'] = False
+                self.synthesized_characters += len(text)
                 audio = await self.__generate_http(text)
 
                 meta_info['text'] = text
