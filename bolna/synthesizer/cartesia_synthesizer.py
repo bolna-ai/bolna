@@ -1,6 +1,6 @@
 import asyncio
 import copy
-import uuid
+
 
 import websockets
 import base64
@@ -13,7 +13,7 @@ from collections import deque
 from bolna.memory.cache.inmemory_scalar_cache import InmemoryScalarCache
 from .base_synthesizer import BaseSynthesizer
 from bolna.helpers.logger_config import configure_logger
-from bolna.helpers.utils import convert_audio_to_wav, create_ws_data_packet, pcm_to_wav_bytes, resample
+from bolna.helpers.utils import convert_audio_to_wav, create_ws_data_packet, resample
 
 logger = configure_logger(__name__)
 
@@ -23,6 +23,7 @@ class CartesiaSynthesizer(BaseSynthesizer):
                  stream=False, buffer_size=400, synthesier_key=None, caching=True, **kwargs):
         super().__init__(stream)
         self.api_key = os.environ["CARTESIA_API_KEY"] if synthesier_key is None else synthesier_key
+        self.version = '2024-06-10'
         self.voice_id = voice_id
         self.model = model
         self.stream = True
@@ -73,7 +74,6 @@ class CartesiaSynthesizer(BaseSynthesizer):
                     "add_timestamps": True
                 }
 
-                logger.info('send_data ->> {}'.format(input_message))
                 await self.websocket_holder["websocket"].send(json.dumps(input_message))
             except Exception as e:
                 logger.error(f"Error sending chunk: {e}")
@@ -100,7 +100,7 @@ class CartesiaSynthesizer(BaseSynthesizer):
                     "sample_rate": 8000
                 }
             }
-            logger.info('send_data ->> {}'.format(input_message))
+
             await self.websocket_holder["websocket"].send(json.dumps(input_message))
             logger.info("Sent end-of-stream signal.")
         except Exception as e:
@@ -131,7 +131,7 @@ class CartesiaSynthesizer(BaseSynthesizer):
     async def __send_payload(self, payload):
         headers = {
             'X-API-Key': self.api_key,
-            'Cartesia-Version': '2024-06-10'
+            'Cartesia-Version': self.version
         }
 
         async with aiohttp.ClientSession() as session:
@@ -186,7 +186,6 @@ class CartesiaSynthesizer(BaseSynthesizer):
                         self.meta_info['format'] = 'mulaw'
                         audio = message
                     else:
-                        logger.info(f"reached here")
                         self.meta_info['format'] = "wav"
                         audio = resample(convert_audio_to_wav(message, source_format="mp3"), int(self.sampling_rate),
                                          format="wav")
@@ -251,11 +250,6 @@ class CartesiaSynthesizer(BaseSynthesizer):
         except Exception as e:
             traceback.print_exc()
             logger.error(f"Error in cartesia generate {e}")
-
-    async def open_connection(self):
-        if self.websocket_connection is None or self.connection_open is False:
-            self.websocket_connection = await websockets.connect(self.ws_url)
-            logger.info("Connected to the server")
 
     async def establish_connection(self):
         try:
