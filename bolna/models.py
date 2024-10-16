@@ -43,12 +43,14 @@ class DeepgramConfig(BaseModel):
 class CartesiaConfig(BaseModel):
     voice_id: str
     voice: str
+    model: str
 
 
 class SmallestConfig(BaseModel):
     voice_id: str
     language: str
     voice: str
+    model: str
 
 
 class AzureConfig(BaseModel):
