@@ -134,6 +134,7 @@ https://github.com/bolna-ai/bolna/blob/c8a0d1428793d4df29133119e354bc2f85a7ca76/
 | Elevenlabs | `ELEVENLABS_API_KEY`                             |
 | OpenAI     | `OPENAI_API_KEY`                                 |
 | Deepgram   | `DEEPGRAM_AUTH_TOKEN`                            |
+| Cartesia   | `CARTESIA_API_KEY`                            |
 | Smallest   | `SMALLEST_API_KEY`                            |
 
 </details>
