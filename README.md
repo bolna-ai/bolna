@@ -60,7 +60,7 @@ graph LR;
 1. Initiating a phone call using telephony providers like `Twilio`, `Plivo`, `Exotel` (coming soon), `Vonage` (coming soon) etc.
 2. Transcribing the conversations using `Deepgram`, etc.
 3. Using LLMs like `OpenAI`, `Llama`, `Cohere`, `Mistral`,  etc to handle conversations
-4. Synthesizing LLM responses back to telephony using `AWS Polly`, `ElevenLabs`, `Deepgram`, `OpenAI`, `Azure`, `Cartesia` (coming soon) etc.
+4. Synthesizing LLM responses back to telephony using `AWS Polly`, `ElevenLabs`, `Deepgram`, `OpenAI`, `Azure`, `Cartesia`, `Smallest` etc.
 
 
 Refer to the [docs](https://docs.bolna.dev/providers) for a deepdive into all supported providers.
@@ -134,6 +134,8 @@ https://github.com/bolna-ai/bolna/blob/c8a0d1428793d4df29133119e354bc2f85a7ca76/
 | Elevenlabs | `ELEVENLABS_API_KEY`                             |
 | OpenAI     | `OPENAI_API_KEY`                                 |
 | Deepgram   | `DEEPGRAM_AUTH_TOKEN`                            |
+| Cartesia   | `CARTESIA_API_KEY`                            |
+| Smallest   | `SMALLEST_API_KEY`                            |
 
 </details>
 &nbsp;<br>

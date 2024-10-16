@@ -188,6 +188,7 @@ async def store_file(bucket_name=None, file_key=None, file_data=None, content_ty
         except Exception as e:
             logger.error(f"Could not save local file {e}")
 
+
 async def get_raw_audio_bytes(filename, agent_name = None, audio_format='mp3', assistant_id=None, local = False, is_location = False):
     # we are already storing pcm formatted audio in the filler config. No need to encode/decode them further
     audio_data = None
@@ -257,7 +258,7 @@ def format_messages(messages, use_system_prompt=False):
 
 def update_prompt_with_context(prompt, context_data):
     if not context_data or not isinstance(context_data.get('recipient_data'), dict):
-        return prompt
+        return prompt.format_map(DictWithMissing({}))
     return prompt.format_map(DictWithMissing(context_data.get('recipient_data', {})))
 
 
@@ -557,3 +558,13 @@ def get_route_info(message, route_layer):
 async def run_in_seperate_thread(fun):
     resp = await asyncio.to_thread(fun)
     return resp
+
+
+async def process_task_cancellation(asyncio_task, task_name):
+    if asyncio_task is not None:
+        asyncio_task.cancel()
+        try:
+            await asyncio_task
+            asyncio_task = None
+        except asyncio.CancelledError:
+            logger.info("{} has been successfully cancelled".format(task_name))

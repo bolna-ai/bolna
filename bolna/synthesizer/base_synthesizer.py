@@ -28,6 +28,23 @@ class BaseSynthesizer:
     def get_synthesized_characters(self):
         return 0
 
+    async def monitor_connection(self):
+        pass
+
+    def text_chunker(self, text):
+        """Split text into chunks, ensuring to not break sentences."""
+        splitters = (".", ",", "?", "!", ";", ":", "—", "-", "(", ")", "[", "]", "}", " ")
+
+        buffer = ""
+        for char in text:
+            buffer += char
+            if char in splitters:
+                yield buffer.strip() + " "
+                buffer = ""
+
+        if buffer:
+            yield buffer.strip() + " "
+
     def resample(self, audio_bytes):
         audio_buffer = io.BytesIO(audio_bytes)
         waveform, orig_sample_rate = torchaudio.load(audio_buffer)
