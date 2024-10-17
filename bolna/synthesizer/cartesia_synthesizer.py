@@ -20,9 +20,9 @@ logger = configure_logger(__name__)
 
 class CartesiaSynthesizer(BaseSynthesizer):
     def __init__(self, voice_id, voice, model="sonic-english", audio_format="mp3", sampling_rate="16000",
-                 stream=False, buffer_size=400, synthesier_key=None, caching=True, **kwargs):
+                 stream=False, buffer_size=400, synthesizer_key=None, caching=True, **kwargs):
         super().__init__(stream)
-        self.api_key = os.environ["CARTESIA_API_KEY"] if synthesier_key is None else synthesier_key
+        self.api_key = os.environ["CARTESIA_API_KEY"] if synthesizer_key is None else synthesizer_key
         self.version = '2024-06-10'
         self.voice_id = voice_id
         self.model = model
