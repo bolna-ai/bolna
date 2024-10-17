@@ -19,10 +19,10 @@ logger = configure_logger(__name__)
 
 class ElevenlabsSynthesizer(BaseSynthesizer):
     def __init__(self, voice, voice_id, model="eleven_turbo_v2_5", audio_format="mp3", sampling_rate="16000",
-                 stream=False, buffer_size=400, temperature=0.9, similarity_boost=0.5, synthesier_key=None,
+                 stream=False, buffer_size=400, temperature=0.9, similarity_boost=0.5, synthesizer_key=None,
                  caching=True, **kwargs):
         super().__init__(stream)
-        self.api_key = os.environ["ELEVENLABS_API_KEY"] if synthesier_key is None else synthesier_key
+        self.api_key = os.environ["ELEVENLABS_API_KEY"] if synthesizer_key is None else synthesizer_key
         self.voice = voice_id
         self.model = model
         self.stream = True  # Issue with elevenlabs streaming that we need to always send the text quickly
