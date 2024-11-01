@@ -1507,7 +1507,7 @@ class TaskManager(BaseManager):
                             logger.info(f"{message['meta_info']['sequence_id']} is not in sequence ids  {self.sequence_ids} and hence not sending to output")
 
                         convert_to_request_log(message = meta_info['text'], meta_info= meta_info, component="synthesizer", direction="response", model = self.synthesizer_provider, is_cached= 'is_cached' in meta_info and meta_info['is_cached'], engine=self.tools['synthesizer'].get_engine(), run_id= self.run_id)
-                        await asyncio.sleep(0.05) #Sleeping for 50ms after receiving every chunk so other tasks can execute
+                        await asyncio.sleep(0.1) #Sleeping for 100ms after receiving every chunk so other tasks can execute
                 except asyncio.CancelledError:
                     logger.info("Synthesizer task was cancelled.")
                     raise  # Make sure to re-raise the exception to stop the loop
