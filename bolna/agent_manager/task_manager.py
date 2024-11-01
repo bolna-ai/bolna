@@ -977,12 +977,18 @@ class TaskManager(BaseManager):
             logger.info(f"Transfer call function called param {param}. First sleeping for 2 seconds to make sure we're done speaking the filler")
             await asyncio.sleep(2) #Sleep for 1 second to ensure that the filler is spoken before transfering call
             call_sid = self.tools["input"].get_call_sid()
+
+            try:
+                from_number = self.context_data['recipient_data']['from_number']
+            except Exception as e:
+                from_number = None
+
             user_id, agent_id = self.assistant_id.split("/")
             self.history = copy.deepcopy(model_args["messages"])
 
             if url is None:
                 url = os.getenv("CALL_TRANSFER_WEBHOOK_URL")
-                payload = {'call_sid': call_sid, "agent_id": agent_id, "user_id": user_id}
+                payload = {'call_sid': call_sid, "agent_id": agent_id, "user_id": user_id, 'provider': self.tools["input"].io_provider, 'stream_sid': self.stream_sid, 'from_number': from_number}
 
                 try:
                     json_function_call_params = json.loads(param)
@@ -1501,7 +1507,7 @@ class TaskManager(BaseManager):
                             logger.info(f"{message['meta_info']['sequence_id']} is not in sequence ids  {self.sequence_ids} and hence not sending to output")
 
                         convert_to_request_log(message = meta_info['text'], meta_info= meta_info, component="synthesizer", direction="response", model = self.synthesizer_provider, is_cached= 'is_cached' in meta_info and meta_info['is_cached'], engine=self.tools['synthesizer'].get_engine(), run_id= self.run_id)
-                        await asyncio.sleep(0.05) #Sleeping for 50ms after receiving every chunk so other tasks can execute
+                        await asyncio.sleep(0.1) #Sleeping for 100ms after receiving every chunk so other tasks can execute
                 except asyncio.CancelledError:
                     logger.info("Synthesizer task was cancelled.")
                     raise  # Make sure to re-raise the exception to stop the loop

@@ -65,14 +65,13 @@ class Transcriber(BaseModel):
     stream: bool = False
     sampling_rate: Optional[int] = 16000
     encoding: Optional[str] = "linear16"
-    endpointing: Optional[int] = 400
+    endpointing: Optional[int] = 500
     keywords: Optional[str] = None
     task:Optional[str] = "transcribe"
     provider: Optional[str] = "deepgram"
 
     @field_validator("provider")
     def validate_model(cls, value):
-        print(f"value {value}, PROVIDERS {list(SUPPORTED_TRANSCRIBER_PROVIDERS.keys())}")
         return validate_attribute(value, list(SUPPORTED_TRANSCRIBER_PROVIDERS.keys()))
 
 
@@ -214,9 +213,6 @@ class LlmAgent(BaseModel):
     @field_validator('llm_config', mode='before')
     def validate_llm_config(cls, value, info):
         agent_type = info.data.get('agent_type')
-        print(f"Agent type: {agent_type}")
-        print(f"Value type: {type(value)}")
-        print(f"Value: {value}")
 
         valid_config_types = {
             'openai_assistant': OpenaiAssistant,
@@ -273,8 +269,8 @@ class ToolsChainModel(BaseModel):
 
 class ConversationConfig(BaseModel):
     optimize_latency: Optional[bool] = True  # This will work on in conversation
-    hangup_after_silence: Optional[int] = 10
-    incremental_delay: Optional[int] = 100  # use this to incrementally delay to handle long pauses
+    hangup_after_silence: Optional[int] = 20
+    incremental_delay: Optional[int] = 900  # use this to incrementally delay to handle long pauses
     number_of_words_for_interruption: Optional[
         int] = 1  # Maybe send half second of empty noise if needed for a while as soon as we get speaking true in nitro, use that to delay
     interruption_backoff_period: Optional[int] = 100
@@ -287,7 +283,7 @@ class ConversationConfig(BaseModel):
     ambient_noise_track: Optional[str] = "convention_hall"
     call_terminate: Optional[int] = 90
     use_fillers: Optional[bool] = False
-    trigger_user_online_message_after: Optional[int] = 6
+    trigger_user_online_message_after: Optional[int] = 10
     check_user_online_message: Optional[str] = "Hey, are you still there"
     check_if_user_online: Optional[bool] = True
 
