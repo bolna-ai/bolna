@@ -988,7 +988,15 @@ class TaskManager(BaseManager):
 
             if url is None:
                 url = os.getenv("CALL_TRANSFER_WEBHOOK_URL")
-                payload = {'call_sid': call_sid, "agent_id": agent_id, "user_id": user_id, 'provider': self.tools["input"].io_provider, 'stream_sid': self.stream_sid, 'from_number': from_number}
+                payload = {
+                    'call_sid': call_sid,
+                    'agent_id': agent_id,
+                    'user_id': user_id,
+                    'provider': self.tools['input'].io_provider,
+                    'stream_sid': self.stream_sid,
+                    'from_number': from_number,
+                    'execution_id': self.run_id_ts
+                }
 
                 try:
                     json_function_call_params = json.loads(param)
