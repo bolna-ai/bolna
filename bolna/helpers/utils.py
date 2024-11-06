@@ -158,7 +158,7 @@ async def store_file(bucket_name=None, file_key=None, file_data=None, content_ty
             data = None
             if content_type == "json":
                 data = json.dumps(file_data)
-            elif content_type in ["mp3", "wav", "pcm", "csv"]:
+            else:
                 data = file_data
             try:
                 await s3_client.put_object(Bucket=bucket_name, Key=file_key, Body=data)
@@ -173,7 +173,6 @@ async def store_file(bucket_name=None, file_key=None, file_data=None, content_ty
         try:
             logger.info(f"Writing to {dir_name}/{file_key} ")
             if content_type == "json":
-                
                 with open(f"{dir_name}/{file_key}", 'w') as f:
                     data = json.dumps(file_data)
                     f.write(data)
@@ -181,7 +180,7 @@ async def store_file(bucket_name=None, file_key=None, file_data=None, content_ty
                 with open(f"{dir_name}/{file_key}", 'w') as f:
                     data = file_data
                     f.write(data)
-            elif content_type in ["mp3", "wav", "pcm"]:
+            else:
                 with open(f"{dir_name}/{file_key}", 'wb') as f:
                     data = file_data
                     f.write(data)
