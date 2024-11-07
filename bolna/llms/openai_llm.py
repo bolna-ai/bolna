@@ -145,7 +145,8 @@ class OpenAiLLM(BaseLLM):
                 #**resp
             }
         
-            if tools[i].get("parameters", None) is not None and (all(key in resp for key in tools[i]["parameters"]["properties"].keys())):
+            all_required_keys = tools[i]["parameters"]["properties"].keys() and tools[i]["parameters"]["required"]
+            if tools[i].get("parameters", None) is not None and (all(key in resp for key in all_required_keys)):
                 logger.info(f"Function call parameters: {resp}")
                 convert_to_request_log(resp, meta_info, self.model, "llm", direction = "response", is_cached= False, run_id = self.run_id)
                 resp = json.loads(resp)
@@ -287,7 +288,7 @@ class OpenAiLLM(BaseLLM):
         self.started_streaming = False
 
     def get_response_format(self, is_json_format: bool):
-        if is_json_format and self.model in ('gpt-4-1106-preview', 'gpt-3.5-turbo-1106'):
+        if is_json_format and self.model in ('gpt-4-1106-preview', 'gpt-3.5-turbo-1106', 'gpt-4o-mini'):
             return {"type": "json_object"}
         else:
             return {"type": "text"}
