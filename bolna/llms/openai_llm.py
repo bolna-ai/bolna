@@ -145,7 +145,7 @@ class OpenAiLLM(BaseLLM):
                 #**resp
             }
         
-            all_required_keys = tools[i]["parameters"]["properties"].keys() and tools[i]["parameters"]["required"]
+            all_required_keys = tools[i]["parameters"]["properties"].keys() and tools[i]["parameters"].get("required", [])
             if tools[i].get("parameters", None) is not None and (all(key in resp for key in all_required_keys)):
                 logger.info(f"Function call parameters: {resp}")
                 convert_to_request_log(resp, meta_info, self.model, "llm", direction = "response", is_cached= False, run_id = self.run_id)
