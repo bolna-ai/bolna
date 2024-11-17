@@ -573,6 +573,9 @@ class TaskManager(BaseManager):
                     self.kwargs.pop('llm_key', None)
                     self.kwargs.pop('base_url', None)
                     self.kwargs.pop('api_version', None)
+
+                    if self._is_summarization_task() or self._is_extraction_task():
+                        llm_config['model'] = 'gpt-4o-mini'
                 llm = llm_class(language=self.language, **llm_config, **self.kwargs)
                 return llm
             else:
@@ -833,7 +836,6 @@ class TaskManager(BaseManager):
             logger.info(f"DOING THE POST REQUEST TO WEBHOOK {extraction_details}")
             self.webhook_response = await self.tools["webhook_agent"].execute(extraction_details)
             logger.info(f"Response from the server {self.webhook_response}")
-        
         else:
             message = format_messages(self.input_parameters["messages"])  # Remove the initial system prompt
             self.history.append({
