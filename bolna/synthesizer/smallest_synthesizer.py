@@ -59,7 +59,7 @@ class SmallestSynthesizer(BaseSynthesizer):
             "text": text,
             "voice_id": self.voice_id,
             "sample_rate": self.sampling_rate,
-            "add_wav_header": True
+            "add_wav_header": False
         }
         response = await self.__send_payload(payload)
         return response
