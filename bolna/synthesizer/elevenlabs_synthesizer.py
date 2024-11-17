@@ -56,29 +56,35 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
         return self.model
 
     async def sender(self, text, end_of_llm_stream=False):
-        # Ensure the WebSocket connection is established
-        while self.websocket_holder["websocket"] is None or self.websocket_holder["websocket"].closed:
-            logger.info("Waiting for elevenlabs ws connection to be established...")
-            await asyncio.sleep(1)
-
-        if text != "":
-            for text_chunk in self.text_chunker(text):
-                logger.info(f"Sending text_chunk: {text_chunk}")
-                try:
-                    await self.websocket_holder["websocket"].send(json.dumps({"text": text_chunk}))
-                except Exception as e:
-                    logger.info(f"Error sending chunk: {e}")
-                    return
-
-        # If end_of_llm_stream is True, mark the last chunk and send an empty message
-        if end_of_llm_stream:
-            self.last_text_sent = True
-
-        # Send the end-of-stream signal with an empty string as text
         try:
-            await self.websocket_holder["websocket"].send(json.dumps({"text": "", "flush": True}))
+            # Ensure the WebSocket connection is established
+            while self.websocket_holder["websocket"] is None or self.websocket_holder["websocket"].closed:
+                logger.info("Waiting for elevenlabs ws connection to be established...")
+                await asyncio.sleep(1)
+
+            if text != "":
+                for text_chunk in self.text_chunker(text):
+                    logger.info(f"Sending text_chunk: {text_chunk}")
+                    try:
+                        await self.websocket_holder["websocket"].send(json.dumps({"text": text_chunk}))
+                    except Exception as e:
+                        logger.info(f"Error sending chunk: {e}")
+                        return
+
+            # If end_of_llm_stream is True, mark the last chunk and send an empty message
+            if end_of_llm_stream:
+                self.last_text_sent = True
+
+            # Send the end-of-stream signal with an empty string as text
+            try:
+                await self.websocket_holder["websocket"].send(json.dumps({"text": "", "flush": True}))
+            except Exception as e:
+                logger.info(f"Error sending end-of-stream signal: {e}")
+
+        except asyncio.CancelledError:
+            logger.info("Sender task was cancelled.")
         except Exception as e:
-            logger.info(f"Error sending end-of-stream signal: {e}")
+            logger.error(f"Unexpected error in sender: {e}")
 
     async def receiver(self):
         while True:
@@ -270,3 +276,17 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
             self.text_queue.append(meta_info)
         else:
             self.internal_queue.put_nowait(message)
+
+    async def cleanup(self):
+        logger.info("cleaning elevenlabs synthesizer tasks")
+        if self.sender_task and not self.sender_task.done():
+            self.sender_task.cancel()
+            try:
+                await self.sender_task
+            except asyncio.CancelledError:
+                logger.info("Sender task was successfully cancelled during WebSocket cleanup.")
+
+        if self.websocket_holder["websocket"]:
+            await self.websocket_holder["websocket"].close()
+        self.websocket_holder["websocket"] = None
+        logger.info("WebSocket connection closed.")

@@ -1518,6 +1518,7 @@ class TaskManager(BaseManager):
                         await asyncio.sleep(0.1) #Sleeping for 100ms after receiving every chunk so other tasks can execute
                 except asyncio.CancelledError:
                     logger.info("Synthesizer task was cancelled.")
+                    await self.tools["synthesizer"].cleanup()
                     raise  # Make sure to re-raise the exception to stop the loop
                 except Exception as e:
                     traceback.print_exc()
