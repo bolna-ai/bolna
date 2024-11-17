@@ -43,6 +43,7 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
         self.synthesized_characters = 0
         self.previous_request_ids = []
         self.websocket_holder = {"websocket": None}
+        self.sender_task = None
 
     # Ensuring we only do wav output for now
     def get_format(self, format, sampling_rate):
