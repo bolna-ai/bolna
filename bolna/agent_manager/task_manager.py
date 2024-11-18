@@ -1029,6 +1029,8 @@ class TaskManager(BaseManager):
         get_res_keys, get_res_values = await computed_api_response(function_response)
         if called_fun.startswith('check_availability_of_slots') and (not get_res_values or (len(get_res_values) == 1 and len(get_res_values[0]) == 0)):
             set_response_prompt = []
+        elif called_fun.startswith('book_appointment') and 'id' not in get_res_keys:
+            set_response_prompt = []
         else:
             set_response_prompt = function_response
 
@@ -1955,7 +1957,8 @@ class TaskManager(BaseManager):
         finally:
             # Construct output
             tasks_to_cancel = []
-            if "synthesizer" in self.tools and self.synthesizer_task is not None:   
+            if "synthesizer" in self.tools and self.synthesizer_task is not None:
+                tasks_to_cancel.append(self.tools["synthesizer"].cleanup())
                 tasks_to_cancel.append(process_task_cancellation(self.synthesizer_task, 'synthesizer_task'))
                 tasks_to_cancel.append(process_task_cancellation(self.synthesizer_monitor_task, 'synthesizer_monitor_task'))
 
