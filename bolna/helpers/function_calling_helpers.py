@@ -46,3 +46,14 @@ async def trigger_api(url, method, param, api_token, meta_info, run_id, **kwargs
         message = f"ERROR CALLING API: There was an error calling the API: {e}"
         logger.error(message)
         return message
+
+
+async def computed_api_response(response):
+    get_res_keys, get_res_values = None, None
+    try:
+        get_res_keys = list(json.loads(response).keys())
+        get_res_values = list(json.loads(response).values())
+    except Exception as e:
+        pass
+
+    return get_res_keys, get_res_values
