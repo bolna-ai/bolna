@@ -88,7 +88,7 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
             logger.error(f"Unexpected error in sender: {e}")
 
     async def receiver(self):
-        while True:
+        while not asyncio.current_task().cancelled():
             try:
                 if self.websocket_holder["websocket"] is None or self.websocket_holder["websocket"].closed:
                     logger.info("WebSocket is not connected, skipping receive.")
@@ -110,45 +110,12 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
                 else:
                     logger.info("No audio data in the response")
 
-            except websockets.exceptions.ConnectionClosed:
+            except asyncio.CancelledError:
+                logger.info("Receiver task was cancelled.")
                 break
             except Exception as e:
-                break
-
-    async def __send_payload(self, payload, format=None):
-        headers = {
-            'xi-api-key': self.api_key
-        }
-        url = f"{self.api_url}{self.get_format(self.audio_format, self.sampling_rate)}" if format is None else f"{self.api_url}{format}"
-        async with aiohttp.ClientSession() as session:
-            if payload is not None:
-                async with session.post(url, headers=headers, json=payload) as response:
-                    if response.status == 200:
-                        data = await response.read()
-                        return data
-                    else:
-                        logger.error(f"Error: {response.status} - {await response.text()}")
-            else:
-                logger.info("Payload was null")
-
-    async def synthesize(self, text):
-        audio = await self.__generate_http(text, format="mp3_44100_128")
-        return audio
-
-    async def __generate_http(self, text, format=None):
-        payload = None
-        logger.info(f"text {text}")
-        payload = {
-            "text": text,
-            "model_id": self.model,
-            "voice_settings": {
-                "stability": self.temperature,
-                "similarity_boost": self.similarity_boost,
-                "optimize_streaming_latency": 3
-            }
-        }
-        response = await self.__send_payload(payload, format=format)
-        return response
+                logger.error(f"Error in receiver: {e}")
+                await asyncio.sleep(1)  # Avoid busy waiting
 
     def get_synthesized_characters(self):
         return self.synthesized_characters
@@ -156,77 +123,36 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
     # Currently we are only supporting wav output but soon we will incorporate conver
     async def generate(self):
         try:
-            if self.stream:
-                async for message in self.receiver():
-                    logger.info(f"Received message from server")
+            async for message in self.receiver():
+                logger.info(f"Received message from server")
 
-                    if len(self.text_queue) > 0:
-                        self.meta_info = self.text_queue.popleft()
-                    audio = ""
+                if len(self.text_queue) > 0:
+                    self.meta_info = self.text_queue.popleft()
+                audio = ""
 
-                    if self.use_mulaw:
-                        self.meta_info['format'] = 'mulaw'
-                        audio = message
-                    else:
-                        self.meta_info['format'] = "wav"
-                        audio = resample(convert_audio_to_wav(message, source_format="mp3"), int(self.sampling_rate),
-                                             format="wav")
+                if self.use_mulaw:
+                    self.meta_info['format'] = 'mulaw'
+                    audio = message
+                else:
+                    self.meta_info['format'] = "wav"
+                    audio = resample(convert_audio_to_wav(message, source_format="mp3"), int(self.sampling_rate),
+                                         format="wav")
 
-                    yield create_ws_data_packet(audio, self.meta_info)
-                    if not self.first_chunk_generated:
-                        self.meta_info["is_first_chunk"] = True
-                        self.first_chunk_generated = True
+                yield create_ws_data_packet(audio, self.meta_info)
+                if not self.first_chunk_generated:
+                    self.meta_info["is_first_chunk"] = True
+                    self.first_chunk_generated = True
 
-                    if self.last_text_sent:
-                        # Reset the last_text_sent and first_chunk converted to reset synth latency
-                        self.first_chunk_generated = False
-                        self.last_text_sent = True
+                if self.last_text_sent:
+                    # Reset the last_text_sent and first_chunk converted to reset synth latency
+                    self.first_chunk_generated = False
+                    self.last_text_sent = True
 
-                    if message == b'\x00':
-                        logger.info("received null byte and hence end of stream")
-                        self.meta_info["end_of_synthesizer_stream"] = True
-                        yield create_ws_data_packet(resample(message, int(self.sampling_rate)), self.meta_info)
-                        self.first_chunk_generated = False
-
-            else:
-                while True:
-                    message = await self.internal_queue.get()
-                    logger.info(f"Generating TTS response for message: {message}, using mulaw {self.use_mulaw}")
-                    meta_info, text = message.get("meta_info"), message.get("data")
-                    audio = None
-                    if self.caching:
-                        if self.cache.get(text):
-                            logger.info(f"Cache hit and hence returning quickly {text}")
-                            audio = self.cache.get(text)
-                            meta_info['is_cached'] = True
-                        else:
-                            c = len(text)
-                            self.synthesized_characters += c
-                            logger.info(f"Not a cache hit {list(self.cache.data_dict)} and hence increasing characters by {c}")
-                            meta_info['is_cached'] = False
-                            audio = await self.__generate_http(text)
-                            self.cache.set(text, audio)
-                    else:
-                        meta_info['is_cached'] = False
-                        audio = await self.__generate_http(text)
-                        
-                    meta_info['text'] = text
-                    if not self.first_chunk_generated:
-                        meta_info["is_first_chunk"] = True
-                        self.first_chunk_generated = True
-
-                    if "end_of_llm_stream" in meta_info and meta_info["end_of_llm_stream"]:
-                        meta_info["end_of_synthesizer_stream"] = True
-                        self.first_chunk_generated = False
-
-                    if self.use_mulaw:
-                        meta_info['format'] = "mulaw"
-                    else:
-                        meta_info['format'] = "wav"
-                        wav_bytes = convert_audio_to_wav(audio, source_format="mp3")
-                        logger.info(f"self.sampling_rate {self.sampling_rate}")
-                        audio = resample(wav_bytes, int(self.sampling_rate), format="wav")
-                    yield create_ws_data_packet(audio, meta_info)
+                if message == b'\x00':
+                    logger.info("received null byte and hence end of stream")
+                    self.meta_info["end_of_synthesizer_stream"] = True
+                    yield create_ws_data_packet(resample(message, int(self.sampling_rate)), self.meta_info)
+                    self.first_chunk_generated = False
 
         except Exception as e:
             traceback.print_exc()

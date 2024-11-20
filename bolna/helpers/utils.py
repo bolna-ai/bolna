@@ -561,9 +561,10 @@ async def run_in_seperate_thread(fun):
 
 async def process_task_cancellation(asyncio_task, task_name):
     if asyncio_task is not None:
-        asyncio_task.cancel()
         try:
+            asyncio_task.cancel()
             await asyncio_task
-            asyncio_task = None
         except asyncio.CancelledError:
-            logger.info("{} has been successfully cancelled".format(task_name))
+            logger.info(f"{task_name} has been successfully cancelled.")
+        except Exception as e:
+            logger.error(f"Error cancelling {task_name}: {e}")
