@@ -14,7 +14,7 @@ import pytz
 import aiohttp
 
 from bolna.constants import ACCIDENTAL_INTERRUPTION_PHRASES, DEFAULT_USER_ONLINE_MESSAGE, DEFAULT_USER_ONLINE_MESSAGE_TRIGGER_DURATION, FILLER_DICT, PRE_FUNCTION_CALL_MESSAGE, DEFAULT_LANGUAGE_CODE
-from bolna.helpers.function_calling_helpers import trigger_api
+from bolna.helpers.function_calling_helpers import trigger_api, computed_api_response
 from bolna.memory.cache.vector_cache import VectorCache
 from .base_manager import BaseManager
 from bolna.agent_types import *
@@ -1025,10 +1025,19 @@ class TaskManager(BaseManager):
                     return
                 
         response = await trigger_api(url= url, method=method.lower(), param= param, api_token= api_token, meta_info = meta_info, run_id = self.run_id, **resp)
-        content = FUNCTION_CALL_PROMPT.format(called_fun, method, str(response))
-        model_args["messages"].append({"role":"system","content":content})
+        function_response = str(response)
+        get_res_keys, get_res_values = await computed_api_response(function_response)
+        if called_fun.startswith('check_availability_of_slots') and (not get_res_values or (len(get_res_values) == 1 and len(get_res_values[0]) == 0)):
+            set_response_prompt = []
+        elif called_fun.startswith('book_appointment') and 'id' not in get_res_keys:
+            set_response_prompt = []
+        else:
+            set_response_prompt = function_response
+
+        content = FUNCTION_CALL_PROMPT.format(called_fun, method, set_response_prompt)
+        model_args["messages"].append({"role": "system","content": content})
         logger.info(f"Logging function call parameters ")
-        convert_to_request_log(str(response), meta_info , None, "function_call", direction = "response", is_cached= False, run_id = self.run_id)
+        convert_to_request_log(function_response, meta_info , None, "function_call", direction = "response", is_cached= False, run_id = self.run_id)
 
         convert_to_request_log(format_messages(model_args['messages'], True), meta_info, self.llm_config['model'], "llm", direction = "request", is_cached= False, run_id = self.run_id)
         self.check_if_user_online = self.conversation_config.get("check_if_user_online", True)
@@ -1948,7 +1957,8 @@ class TaskManager(BaseManager):
         finally:
             # Construct output
             tasks_to_cancel = []
-            if "synthesizer" in self.tools and self.synthesizer_task is not None:   
+            if "synthesizer" in self.tools and self.synthesizer_task is not None:
+                tasks_to_cancel.append(self.tools["synthesizer"].cleanup())
                 tasks_to_cancel.append(process_task_cancellation(self.synthesizer_task, 'synthesizer_task'))
                 tasks_to_cancel.append(process_task_cancellation(self.synthesizer_monitor_task, 'synthesizer_monitor_task'))
 
