@@ -256,10 +256,12 @@ def format_messages(messages, use_system_prompt=False):
 
 
 def update_prompt_with_context(prompt, context_data):
-    if not context_data or not isinstance(context_data.get('recipient_data'), dict):
-        return prompt.format_map(DictWithMissing({}))
-    return prompt.format_map(DictWithMissing(context_data.get('recipient_data', {})))
-
+    try:
+        if not context_data or not isinstance(context_data.get('recipient_data'), dict):
+            return prompt.format_map(DictWithMissing({}))
+        return prompt.format_map(DictWithMissing(context_data.get('recipient_data', {})))
+    except Exception as e:
+        return prompt
 
 async def get_prompt_responses(assistant_id, local=False):
     filepath = f"{PREPROCESS_DIR}/{assistant_id}/conversation_details.json"

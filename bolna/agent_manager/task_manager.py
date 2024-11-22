@@ -1541,7 +1541,7 @@ class TaskManager(BaseManager):
 
                 except asyncio.CancelledError:
                     logger.info("Synthesizer task was cancelled.")
-                    await self.handle_cancellation("Synthesizer task was cancelled.")
+                    #await self.handle_cancellation("Synthesizer task was cancelled.")
                     break
                 except Exception as e:
                     logger.error(f"Error in synthesizer: {e}", exc_info=True)
@@ -1551,7 +1551,7 @@ class TaskManager(BaseManager):
 
         except asyncio.CancelledError:
             logger.info("Synthesizer task cancelled outside loop.")
-            await self.handle_cancellation("Synthesizer task was cancelled outside loop.")
+            #await self.handle_cancellation("Synthesizer task was cancelled outside loop.")
         except Exception as e:
             logger.error(f"Unexpected error in __listen_synthesizer: {e}", exc_info=True)
         finally:
