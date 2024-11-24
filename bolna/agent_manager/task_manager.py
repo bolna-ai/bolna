@@ -1479,70 +1479,83 @@ class TaskManager(BaseManager):
 
     async def __listen_synthesizer(self):
         try:
-            # if self.stream and self.tools['synthesizer'].supports_websocket() and not self.is_an_ivr_call:
-            #     logger.info("Opening websocket connection to synthesizer")
-            #     await self.tools["synthesizer"].open_connection()
-
-            while True:
+            while not self.conversation_ended:
                 logger.info("Listening to synthesizer")
                 try:
                     async for message in self.tools["synthesizer"].generate():
-                        meta_info = message["meta_info"]
-                        is_first_message = 'is_first_message' in meta_info and meta_info['is_first_message']
-                        if is_first_message or (not self.conversation_ended and message["meta_info"]["sequence_id"] in self.sequence_ids):
-                            logger.info(f"{message['meta_info']['sequence_id'] } is in sequence ids  {self.sequence_ids} and hence letting it pass by")
+                        meta_info = message.get("meta_info", {})
+                        is_first_message = meta_info.get("is_first_message", False)
+                        sequence_id = meta_info.get("sequence_id", None)
+
+                        # Check if the message is valid to process
+                        if is_first_message or (not self.conversation_ended and sequence_id in self.sequence_ids):
+                            logger.info(f"Processing message with sequence_id: {sequence_id}")
                             first_chunk_generation_timestamp = time.time()
-                            meta_info["synthesizer_latency"] = first_chunk_generation_timestamp - message['meta_info']['synthesizer_start_time']
+                            meta_info["synthesizer_latency"] = first_chunk_generation_timestamp - meta_info.get(
+                                "synthesizer_start_time", 0)
                             self.synthesizer_latencies.append(meta_info["synthesizer_latency"])
-                            self.average_synthesizer_latency = sum(self.synthesizer_latencies) / len(self.synthesizer_latencies)
+                            self.average_synthesizer_latency = sum(self.synthesizer_latencies) / len(
+                                self.synthesizer_latencies)
 
                             if self.stream:
+                                # Process streaming audio
                                 message['data'] = await self.process_audio_data_for_output(meta_info, message)
-                                if "is_first_chunk" in message['meta_info'] and message['meta_info']['is_first_chunk']:
+                                if meta_info.get("is_first_chunk", False):
                                     first_chunk_generation_timestamp = time.time()
-                                    meta_info["synthesizer_first_chunk_latency"] = first_chunk_generation_timestamp - message['meta_info']['synthesizer_start_time']
-                                logger.info(f"Simply Storing in buffered output queue for now")
+                                    meta_info["synthesizer_first_chunk_latency"] = first_chunk_generation_timestamp - \
+                                                                                   meta_info["synthesizer_start_time"]
 
-                                #self.buffered_output_queue.put_nowait(message)
                                 if self.tools["output"].process_in_chunks(self.yield_chunks):
-                                    number_of_chunks = math.ceil(len(message['data'])/self.output_chunk_size)
-                                    chunk_idx = 0
-                                    logger.info(f"Audio chunk size {len(message['data'])}, chunk size {self.output_chunk_size}, number_of_chunks: {number_of_chunks}")
-                                    for chunk in yield_chunks_from_memory(message['data'], chunk_size=self.output_chunk_size):
+                                    number_of_chunks = math.ceil(len(message['data']) / self.output_chunk_size)
+                                    for chunk_idx, chunk in enumerate(
+                                            yield_chunks_from_memory(message['data'], chunk_size=self.output_chunk_size)
+                                    ):
                                         self.__enqueue_chunk(chunk, chunk_idx, number_of_chunks, meta_info)
-                                        chunk_idx += 1
                                 else:
-                                    #await self.tools["output"].handle(message)
                                     self.buffered_output_queue.put_nowait(message)
                             else:
-                                logger.info("Stream is not enabled and hence sending entire audio")
+                                # Non-streaming output
+                                logger.info("Stream not enabled, sending entire audio")
                                 self.latency_dict[meta_info["request_id"]]["synthesizer"] = {
-                                    "synthesizer_first_chunk_latency": meta_info.get("synthesizer_latency", 0),
-                                    "average_latency": self.average_synthesizer_latency
+                                    "synthesizer_first_chunk_latency": meta_info.get("synthesizer_first_chunk_latency",
+                                                                                     0),
+                                    "average_latency": self.average_synthesizer_latency,
                                 }
-                                overall_time = time.time() - meta_info["start_time"]
                                 await self.tools["output"].handle(message)
-                        else:
-                            logger.info(f"{message['meta_info']['sequence_id']} is not in sequence ids  {self.sequence_ids} and hence not sending to output")
 
-                        convert_to_request_log(message = meta_info['text'], meta_info= meta_info, component="synthesizer", direction="response", model = self.synthesizer_provider, is_cached= 'is_cached' in meta_info and meta_info['is_cached'], engine=self.tools['synthesizer'].get_engine(), run_id= self.run_id)
-                        await asyncio.sleep(0.1) #Sleeping for 100ms after receiving every chunk so other tasks can execute
+                            convert_to_request_log(
+                                message=meta_info.get("text", ""),
+                                meta_info=meta_info,
+                                component="synthesizer",
+                                direction="response",
+                                model=self.synthesizer_provider,
+                                is_cached=meta_info.get("is_cached", False),
+                                engine=self.tools['synthesizer'].get_engine(),
+                                run_id=self.run_id
+                            )
+                        else:
+                            logger.info(f"Skipping message with sequence_id: {sequence_id}")
+
+                        # Give control to other tasks
+                        await asyncio.sleep(0.1)
+
                 except asyncio.CancelledError:
                     logger.info("Synthesizer task was cancelled.")
-                    await self.tools["synthesizer"].cleanup()
-                    raise  # Make sure to re-raise the exception to stop the loop
-                except Exception as e:
-                    traceback.print_exc()
-                    logger.error(f"Error in synthesizer {e}")
+                    #await self.handle_cancellation("Synthesizer task was cancelled.")
                     break
+                except Exception as e:
+                    logger.error(f"Error in synthesizer: {e}", exc_info=True)
+                    break
+
+            logger.info("Exiting __listen_synthesizer gracefully.")
 
         except asyncio.CancelledError:
             logger.info("Synthesizer task cancelled outside loop.")
-            raise  # Allow cancellation outside the loop
-
+            #await self.handle_cancellation("Synthesizer task was cancelled outside loop.")
         except Exception as e:
-            traceback.print_exc()
-            logger.error(f"Error in synthesizer outside loop.{e}")
+            logger.error(f"Unexpected error in __listen_synthesizer: {e}", exc_info=True)
+        finally:
+            await self.tools["synthesizer"].cleanup()
 
     async def process_audio_data_for_output(self, meta_info, message):
         return message['data']
@@ -1970,39 +1983,11 @@ class TaskManager(BaseManager):
                     "latency_dict": self.latency_dict}
 
                 tasks_to_cancel.append(process_task_cancellation(self.output_task,'output_task'))
-                #self.output_task.cancel()
                 tasks_to_cancel.append(process_task_cancellation(self.hangup_task,'hangup_task'))
                 tasks_to_cancel.append(process_task_cancellation(self.backchanneling_task, 'backchanneling_task'))
                 tasks_to_cancel.append(process_task_cancellation(self.ambient_noise_task, 'ambient_noise_task'))
                 tasks_to_cancel.append(process_task_cancellation(self.background_check_task, 'background_check_task'))
                 tasks_to_cancel.append(process_task_cancellation(self.first_message_task, 'first_message_task'))
-
-                # if self.hangup_task is not None:
-                #     self.hangup_task.cancel()
-                #     try:
-                #         await self.hangup_task
-                #     except asyncio.CancelledError:
-                #         logger.info("hangup_task has been successfully cancelled")
-
-                # if self.backchanneling_task is not None:
-                #     self.backchanneling_task.cancel()
-                #     try:
-                #         await self.backchanneling_task
-                #     except asyncio.CancelledError:
-                #         logger.info("backchanneling_task has been successfully cancelled")
-
-                # if self.ambient_noise_task is not None:
-                #     self.ambient_noise_task.cancel()
-                  
-                # if self.background_check_task is not None:
-                #     self.background_check_task.cancel()
-
-                # if self.first_message_task is not None:
-                #     self.first_message_task.cancel()
-                #     try:
-                #         await self.first_message_task
-                #     except asyncio.CancelledError:
-                #         logger.info("first_message_task has been successfully cancelled")
 
                 if self.should_record:
                     output['recording_url'] = await save_audio_file_to_s3(self.conversation_recording, self.sampling_rate, self.assistant_id, self.run_id)
