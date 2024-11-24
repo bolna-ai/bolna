@@ -14,10 +14,10 @@ DEEPGRAM_TTS_URL = "https://{}/v1/speak".format(DEEPGRAM_HOST)
 
 
 class DeepgramSynthesizer(BaseSynthesizer):
-    def __init__(self, voice, audio_format="pcm", sampling_rate="8000", stream=False, buffer_size=400, caching = True, 
-                 model = "aura-zeus-en", **kwargs):
+    def __init__(self, voice, audio_format="pcm", sampling_rate="8000", stream=False, buffer_size=400, caching=True,
+                 model="aura-zeus-en", **kwargs):
         super().__init__(stream, buffer_size)
-        self.format = "linear16" if audio_format in ["pcm", 'wav'] else audio_format
+        self.format = "mulaw" if audio_format in ["pcm", 'wav'] else audio_format
         self.voice = voice
         self.sample_rate = str(sampling_rate)
         self.model = model
@@ -28,7 +28,6 @@ class DeepgramSynthesizer(BaseSynthesizer):
         self.caching = caching
         if caching:
             self.cache = InmemoryScalarCache()
-
 
     def get_synthesized_characters(self):
         return self.synthesized_characters
@@ -41,7 +40,7 @@ class DeepgramSynthesizer(BaseSynthesizer):
             "Authorization": "Token {}".format(self.api_key),
             "Content-Type": "application/json"
         }
-        url = DEEPGRAM_TTS_URL + "?encoding={}&container=wav&sample_rate={}&model={}".format(
+        url = DEEPGRAM_TTS_URL + "?container=none&encoding={}&sample_rate={}&model={}".format(
             self.format, self.sample_rate, self.model
         )
 
@@ -65,6 +64,7 @@ class DeepgramSynthesizer(BaseSynthesizer):
                     logger.info("Payload was null")
         except Exception as e:
             logger.error("something went wrong")
+
     def supports_websocket(self):
         return False
 
@@ -112,7 +112,7 @@ class DeepgramSynthesizer(BaseSynthesizer):
                 meta_info["end_of_synthesizer_stream"] = True
                 self.first_chunk_generated = False
             meta_info['text'] = text
-            meta_info['format'] = 'wav'
+            meta_info['format'] = 'mulaw'
             yield create_ws_data_packet(message, meta_info)
 
     async def push(self, message):
