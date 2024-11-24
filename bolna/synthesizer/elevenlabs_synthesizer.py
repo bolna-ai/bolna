@@ -13,7 +13,6 @@ from .base_synthesizer import BaseSynthesizer
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.utils import convert_audio_to_wav, create_ws_data_packet, pcm_to_wav_bytes, resample
 
-
 logger = configure_logger(__name__)
 
 
@@ -100,9 +99,9 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
                 logger.info("response for isFinal: {}".format(data.get('isFinal', False)))
                 if "audio" in data and data["audio"]:
                     chunk = base64.b64decode(data["audio"])
-                    #if len(chunk) % 2 == 1:
+                    # if len(chunk) % 2 == 1:
                     #   chunk += b'\x00'
-                    # @TODO make it better - for example sample rate changing for mp3 and other formats  
+                    # @TODO make it better - for example sample rate changing for mp3 and other formats
                     yield chunk
 
                     if "isFinal" in data and data["isFinal"]:
@@ -170,7 +169,7 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
                     else:
                         self.meta_info['format'] = "wav"
                         audio = resample(convert_audio_to_wav(message, source_format="mp3"), int(self.sampling_rate),
-                                             format="wav")
+                                         format="wav")
 
                     yield create_ws_data_packet(audio, self.meta_info)
                     if not self.first_chunk_generated:
@@ -202,14 +201,15 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
                         else:
                             c = len(text)
                             self.synthesized_characters += c
-                            logger.info(f"Not a cache hit {list(self.cache.data_dict)} and hence increasing characters by {c}")
+                            logger.info(
+                                f"Not a cache hit {list(self.cache.data_dict)} and hence increasing characters by {c}")
                             meta_info['is_cached'] = False
                             audio = await self.__generate_http(text)
                             self.cache.set(text, audio)
                     else:
                         meta_info['is_cached'] = False
                         audio = await self.__generate_http(text)
-                        
+
                     meta_info['text'] = text
                     if not self.first_chunk_generated:
                         meta_info["is_first_chunk"] = True
