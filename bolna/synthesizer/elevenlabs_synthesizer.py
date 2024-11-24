@@ -280,9 +280,9 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
 
     async def cleanup(self):
         logger.info("cleaning elevenlabs synthesizer tasks")
-        if self.sender_task and not self.sender_task.done():
-            self.sender_task.cancel()
+        if self.sender_task:
             try:
+                self.sender_task.cancel()
                 await self.sender_task
             except asyncio.CancelledError:
                 logger.info("Sender task was successfully cancelled during WebSocket cleanup.")
