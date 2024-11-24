@@ -742,6 +742,7 @@ class TaskManager(BaseManager):
     async def __cleanup_downstream_tasks(self):
         logger.info(f"Cleaning up downstream task")
         start_time = time.time()
+        await self.tools["synthesizer"].handle_interruption()
         await self.tools["output"].handle_interruption()
         self.sequence_ids = {-1} 
         

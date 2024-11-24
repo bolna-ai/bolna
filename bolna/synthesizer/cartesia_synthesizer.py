@@ -1,6 +1,6 @@
 import asyncio
 import copy
-
+import uuid
 
 import websockets
 import base64
@@ -45,9 +45,45 @@ class CartesiaSynthesizer(BaseSynthesizer):
 
         self.ws_url = f"wss://api.cartesia.ai/tts/websocket?api_key={self.api_key}&cartesia_version=2024-06-10"
         self.api_url = "https://api.cartesia.ai/tts/bytes"
+        self.turn_id = 0
+        self.sequence_id = 0
+        self.context_ids_to_ignore = set()
 
     def get_engine(self):
         return self.model
+
+    async def handle_interruption(self):
+        try:
+            if self.context_id:
+                self.context_ids_to_ignore.add(self.context_id)
+                interrupt_message = {
+                    "context_id": self.context_id,
+                    "cancel": True
+                }
+
+                logger.info('handle_interruption: {}'.format(interrupt_message))
+                await self.websocket_holder["websocket"].send(json.dumps(interrupt_message))
+        except Exception as e:
+            pass
+
+    def form_payload(self, text):
+        payload = {
+            "context_id": self.context_id,
+            "model_id": self.model,
+            "transcript": text,
+            "voice": {
+                "mode": "id",
+                "id": self.voice_id
+            },
+            "continue": True,
+            "output_format": {
+                "container": "raw",
+                "encoding": "pcm_mulaw",
+                "sample_rate": 8000
+            }
+        }
+
+        return payload
 
     async def sender(self, text, end_of_llm_stream=False):
         while self.websocket_holder["websocket"] is None or self.websocket_holder["websocket"].closed:
@@ -57,23 +93,7 @@ class CartesiaSynthesizer(BaseSynthesizer):
         if text != "":
             logger.info(f"Sending text_chunk: {text}")
             try:
-                input_message = {
-                    "context_id": self.context_id,
-                    "model_id": self.model,
-                    "transcript": text,
-                    "voice": {
-                        "mode": "id",
-                        "id": self.voice_id
-                    },
-                    "continue": True,
-                    "output_format": {
-                        "container": "raw",
-                        "encoding": "pcm_mulaw",
-                        "sample_rate": 8000
-                    },
-                    "add_timestamps": True
-                }
-
+                input_message = self.form_payload(text)
                 await self.websocket_holder["websocket"].send(json.dumps(input_message))
             except Exception as e:
                 logger.error(f"Error sending chunk: {e}")
@@ -85,22 +105,7 @@ class CartesiaSynthesizer(BaseSynthesizer):
 
         # Send the end-of-stream signal with an empty string as text
         try:
-            input_message = {
-                "context_id": self.context_id,
-                "model_id": self.model,
-                "transcript": "",
-                "voice": {
-                    "mode": "id",
-                    "id": self.voice_id
-                },
-                "continue": False,
-                "output_format": {
-                    "container": "raw",
-                    "encoding": "pcm_mulaw",
-                    "sample_rate": 8000
-                }
-            }
-
+            input_message = self.form_payload("")
             await self.websocket_holder["websocket"].send(json.dumps(input_message))
             logger.info("Sent end-of-stream signal.")
         except Exception as e:
@@ -116,6 +121,11 @@ class CartesiaSynthesizer(BaseSynthesizer):
 
                 response = await self.websocket_holder["websocket"].recv()
                 data = json.loads(response)
+                logger.info('got response as: {}'.format(data))
+
+                # ignore all future generations of audio
+                if data.get('context_id', None) in self.context_ids_to_ignore:
+                    continue
 
                 if "data" in data and data["data"]:
                     chunk = base64.b64decode(data["data"])
@@ -268,6 +278,11 @@ class CartesiaSynthesizer(BaseSynthesizer):
                 self.websocket_holder["websocket"] = await self.establish_connection()
             await asyncio.sleep(50)
 
+    def update_context(self, meta_info):
+        self.context_id = str(uuid.uuid4())
+        self.turn_id = meta_info.get('turn_id', 0)
+        self.sequence_id = meta_info.get('sequence_id', 0)
+
     async def push(self, message):
         logger.info(f"Pushed message to internal queue {message}")
         if self.stream:
@@ -276,7 +291,12 @@ class CartesiaSynthesizer(BaseSynthesizer):
             end_of_llm_stream = "end_of_llm_stream" in meta_info and meta_info["end_of_llm_stream"]
             self.meta_info = copy.deepcopy(meta_info)
             meta_info["text"] = text
-            self.context_id = meta_info["request_id"]
+            if not self.context_id:
+                self.update_context(meta_info)
+            else:
+                if self.turn_id != meta_info.get('turn_id', 0) or self.sequence_id != meta_info.get('sequence_id', 0):
+                    self.update_context(meta_info)
+
             self.sender_task = asyncio.create_task(self.sender(text, end_of_llm_stream))
             self.text_queue.append(meta_info)
         else:
