@@ -42,12 +42,14 @@ class CartesiaSynthesizer(BaseSynthesizer):
         self.previous_request_ids = []
         self.websocket_holder = {"websocket": None}
         self.context_id = None
+        self.sender_task = None
 
         self.ws_url = f"wss://api.cartesia.ai/tts/websocket?api_key={self.api_key}&cartesia_version=2024-06-10"
         self.api_url = "https://api.cartesia.ai/tts/bytes"
         self.turn_id = 0
         self.sequence_id = 0
         self.context_ids_to_ignore = set()
+        self.conversation_ended = False
 
     def get_engine(self):
         return self.model
@@ -86,34 +88,45 @@ class CartesiaSynthesizer(BaseSynthesizer):
         return payload
 
     async def sender(self, text, end_of_llm_stream=False):
-        while self.websocket_holder["websocket"] is None or self.websocket_holder["websocket"].closed:
-            logger.info("Waiting for webSocket connection to be established...")
-            await asyncio.sleep(1)
-
-        if text != "":
-            logger.info(f"Sending text_chunk: {text}")
-            try:
-                input_message = self.form_payload(text)
-                await self.websocket_holder["websocket"].send(json.dumps(input_message))
-            except Exception as e:
-                logger.error(f"Error sending chunk: {e}")
+        try:
+            if self.conversation_ended:
                 return
 
-        # If end_of_llm_stream is True, mark the last chunk and send an empty message
-        if end_of_llm_stream:
-            self.last_text_sent = True
+            while self.websocket_holder["websocket"] is None or self.websocket_holder["websocket"].closed:
+                logger.info("Waiting for webSocket connection to be established...")
+                await asyncio.sleep(1)
 
-        # Send the end-of-stream signal with an empty string as text
-        try:
-            input_message = self.form_payload("")
-            await self.websocket_holder["websocket"].send(json.dumps(input_message))
-            logger.info("Sent end-of-stream signal.")
+            if text != "":
+                logger.info(f"Sending text_chunk: {text}")
+                try:
+                    input_message = self.form_payload(text)
+                    await self.websocket_holder["websocket"].send(json.dumps(input_message))
+                except Exception as e:
+                    logger.error(f"Error sending chunk: {e}")
+                    return
+
+            # If end_of_llm_stream is True, mark the last chunk and send an empty message
+            if end_of_llm_stream:
+                self.last_text_sent = True
+
+            # Send the end-of-stream signal with an empty string as text
+            try:
+                input_message = self.form_payload("")
+                await self.websocket_holder["websocket"].send(json.dumps(input_message))
+                logger.info("Sent end-of-stream signal.")
+            except Exception as e:
+                logger.error(f"Error sending end-of-stream signal: {e}")
+        except asyncio.CancelledError:
+            logger.info("Sender task was cancelled.")
         except Exception as e:
-            logger.error(f"Error sending end-of-stream signal: {e}")
+            logger.error(f"Unexpected error in sender: {e}")
 
     async def receiver(self):
         while True:
             try:
+                if self.conversation_ended:
+                    return
+
                 if self.websocket_holder["websocket"] is None or self.websocket_holder["websocket"].closed:
                     logger.info("WebSocket is not connected, skipping receive.")
                     await asyncio.sleep(5)
@@ -181,81 +194,36 @@ class CartesiaSynthesizer(BaseSynthesizer):
     def get_synthesized_characters(self):
         return self.synthesized_characters
 
-    # Currently we are only supporting wav output but soon we will incorporate conver
     async def generate(self):
         try:
-            if self.stream:
-                async for message in self.receiver():
-                    logger.info(f"Received message from server")
+            async for message in self.receiver():
+                if len(self.text_queue) > 0:
+                    self.meta_info = self.text_queue.popleft()
+                audio = ""
 
-                    if len(self.text_queue) > 0:
-                        self.meta_info = self.text_queue.popleft()
-                    audio = ""
+                if self.use_mulaw:
+                    self.meta_info['format'] = 'mulaw'
+                    audio = message
+                else:
+                    self.meta_info['format'] = "wav"
+                    audio = resample(convert_audio_to_wav(message, source_format="mp3"), int(self.sampling_rate),
+                                     format="wav")
 
-                    if self.use_mulaw:
-                        self.meta_info['format'] = 'mulaw'
-                        audio = message
-                    else:
-                        self.meta_info['format'] = "wav"
-                        audio = resample(convert_audio_to_wav(message, source_format="mp3"), int(self.sampling_rate),
-                                         format="wav")
+                yield create_ws_data_packet(audio, self.meta_info)
+                if not self.first_chunk_generated:
+                    self.meta_info["is_first_chunk"] = True
+                    self.first_chunk_generated = True
 
-                    yield create_ws_data_packet(audio, self.meta_info)
-                    if not self.first_chunk_generated:
-                        self.meta_info["is_first_chunk"] = True
-                        self.first_chunk_generated = True
+                if self.last_text_sent:
+                    # Reset the last_text_sent and first_chunk converted to reset synth latency
+                    self.first_chunk_generated = False
+                    self.last_text_sent = True
 
-                    if self.last_text_sent:
-                        # Reset the last_text_sent and first_chunk converted to reset synth latency
-                        self.first_chunk_generated = False
-                        self.last_text_sent = True
-
-                    if message == b'\x00':
-                        logger.info("received null byte and hence end of stream")
-                        self.meta_info["end_of_synthesizer_stream"] = True
-                        #yield create_ws_data_packet(resample(message, int(self.sampling_rate)), self.meta_info)
-                        self.first_chunk_generated = False
-
-            else:
-                while True:
-                    message = await self.internal_queue.get()
-                    logger.info(f"Generating TTS response for message: {message}, using mulaw {self.use_mulaw}")
-                    meta_info, text = message.get("meta_info"), message.get("data")
-                    audio = None
-                    if self.caching:
-                        if self.cache.get(text):
-                            logger.info(f"Cache hit and hence returning quickly {text}")
-                            audio = self.cache.get(text)
-                            meta_info['is_cached'] = True
-                        else:
-                            c = len(text)
-                            self.synthesized_characters += c
-                            logger.info(
-                                f"Not a cache hit {list(self.cache.data_dict)} and hence increasing characters by {c}")
-                            meta_info['is_cached'] = False
-                            audio = await self.__generate_http(text)
-                            self.cache.set(text, audio)
-                    else:
-                        meta_info['is_cached'] = False
-                        audio = await self.__generate_http(text)
-
-                    meta_info['text'] = text
-                    if not self.first_chunk_generated:
-                        meta_info["is_first_chunk"] = True
-                        self.first_chunk_generated = True
-
-                    if "end_of_llm_stream" in meta_info and meta_info["end_of_llm_stream"]:
-                        meta_info["end_of_synthesizer_stream"] = True
-                        self.first_chunk_generated = False
-
-                    if self.use_mulaw:
-                        meta_info['format'] = "mulaw"
-                    else:
-                        meta_info['format'] = "wav"
-                        wav_bytes = convert_audio_to_wav(audio, source_format="mp3")
-                        logger.info(f"self.sampling_rate {self.sampling_rate}")
-                        audio = resample(wav_bytes, int(self.sampling_rate), format="wav")
-                    yield create_ws_data_packet(audio, meta_info)
+                if message == b'\x00':
+                    logger.info("received null byte and hence end of stream")
+                    self.meta_info["end_of_synthesizer_stream"] = True
+                    #yield create_ws_data_packet(resample(message, int(self.sampling_rate)), self.meta_info)
+                    self.first_chunk_generated = False
 
         except Exception as e:
             traceback.print_exc()
@@ -301,3 +269,18 @@ class CartesiaSynthesizer(BaseSynthesizer):
             self.text_queue.append(meta_info)
         else:
             self.internal_queue.put_nowait(message)
+
+    async def cleanup(self):
+        self.conversation_ended = True
+        logger.info("cleaning cartesia synthesizer tasks")
+        if self.sender_task:
+            try:
+                self.sender_task.cancel()
+                await self.sender_task
+            except asyncio.CancelledError:
+                logger.info("Sender task was successfully cancelled during WebSocket cleanup.")
+
+        if self.websocket_holder["websocket"]:
+            await self.websocket_holder["websocket"].close()
+        self.websocket_holder["websocket"] = None
+        logger.info("WebSocket connection closed.")

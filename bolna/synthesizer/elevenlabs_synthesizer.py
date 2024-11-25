@@ -43,6 +43,7 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
         self.previous_request_ids = []
         self.websocket_holder = {"websocket": None}
         self.sender_task = None
+        self.conversation_ended = False
 
     # Ensuring we only do wav output for now
     def get_format(self, format, sampling_rate):
@@ -57,6 +58,8 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
 
     async def sender(self, text, end_of_llm_stream=False):
         try:
+            if self.conversation_ended:
+                return
             # Ensure the WebSocket connection is established
             while self.websocket_holder["websocket"] is None or self.websocket_holder["websocket"].closed:
                 logger.info("Waiting for elevenlabs ws connection to be established...")
@@ -89,6 +92,9 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
     async def receiver(self):
         while True:
             try:
+                if self.conversation_ended:
+                    return
+
                 if self.websocket_holder["websocket"] is None or self.websocket_holder["websocket"].closed:
                     logger.info("WebSocket is not connected, skipping receive.")
                     await asyncio.sleep(5)
@@ -99,9 +105,6 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
                 logger.info("response for isFinal: {}".format(data.get('isFinal', False)))
                 if "audio" in data and data["audio"]:
                     chunk = base64.b64decode(data["audio"])
-                    # if len(chunk) % 2 == 1:
-                    #   chunk += b'\x00'
-                    # @TODO make it better - for example sample rate changing for mp3 and other formats
                     yield chunk
 
                     if "isFinal" in data and data["isFinal"]:
@@ -279,6 +282,7 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
             self.internal_queue.put_nowait(message)
 
     async def cleanup(self):
+        self.conversation_ended = True
         logger.info("cleaning elevenlabs synthesizer tasks")
         if self.sender_task:
             try:
