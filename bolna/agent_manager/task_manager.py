@@ -1587,6 +1587,8 @@ class TaskManager(BaseManager):
                     audio_chunk = await get_raw_audio_bytes(text, self.assistant_name,
                                                                 'pcm', local=self.is_local,
                                                                 assistant_id=self.assistant_id)
+                    if meta_info['text'] == '':
+                        audio_chunk = None
                     logger.info(f"Time to get response from S3 {time.perf_counter() - start_time }")
                     if not self.buffered_output_queue.empty():
                         logger.info(f"Output queue was not empty and hence emptying it")
