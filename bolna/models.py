@@ -287,6 +287,7 @@ class ConversationConfig(BaseModel):
     check_user_online_message: Optional[str] = "Hey, are you still there"
     check_if_user_online: Optional[bool] = True
 
+
     @field_validator('hangup_after_silence', mode='before')
     def set_hangup_after_silence(cls, v):
         return v if v is not None else 10  # Set default value if None is passed

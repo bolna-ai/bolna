@@ -55,6 +55,7 @@ class SmallestSynthesizer(BaseSynthesizer):
     async def __generate_http(self, text):
         payload = None
         logger.info(f"text {text}")
+
         payload = {
             "text": text,
             "voice_id": self.voice_id,
@@ -76,6 +77,8 @@ class SmallestSynthesizer(BaseSynthesizer):
                 meta_info['is_cached'] = False
                 self.synthesized_characters += len(text)
                 audio = await self.__generate_http(text)
+                if not audio:
+                    audio = b'\x00'
 
                 meta_info['text'] = text
                 if not self.first_chunk_generated:

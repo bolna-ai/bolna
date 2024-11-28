@@ -1499,8 +1499,6 @@ class TaskManager(BaseManager):
                                 self.synthesizer_latencies)
 
                             if self.stream:
-                                # Process streaming audio
-                                message['data'] = await self.process_audio_data_for_output(meta_info, message)
                                 if meta_info.get("is_first_chunk", False):
                                     first_chunk_generation_timestamp = time.time()
                                     meta_info["synthesizer_first_chunk_latency"] = first_chunk_generation_timestamp - \
@@ -1557,17 +1555,6 @@ class TaskManager(BaseManager):
             logger.error(f"Unexpected error in __listen_synthesizer: {e}", exc_info=True)
         finally:
             await self.tools["synthesizer"].cleanup()
-
-    async def process_audio_data_for_output(self, meta_info, message):
-        return message['data']
-        if self.task_config["tools_config"]["output"]["format"] == "pcm" and meta_info.get('format', '') != 'mulaw':
-            message['data'] = wav_bytes_to_pcm(message['data'])
-
-        # TODO remove this hard-coded condition
-        elif self.synthesizer_provider == 'elevenlabs' and self.tools["output"].get_provider() == 'plivo':
-            message['data'] = wav_bytes_to_pcm(message['data'])
-
-        return message['data']
 
     async def __send_preprocessed_audio(self, meta_info, text):
         meta_info = copy.deepcopy(meta_info)
