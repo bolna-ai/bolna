@@ -1903,7 +1903,7 @@ class TaskManager(BaseManager):
                         "Since it's connected through dashboard, I'll run listen_llm_tas too in case user wants to simply text")
                     self.llm_queue_task = asyncio.create_task(self._listen_llm_input_queue())
                 
-                if "synthesizer" in self.tools and self._is_conversation_task():
+                if "synthesizer" in self.tools and self._is_conversation_task() and not self.turn_based_conversation:
                     logger.info("Starting synthesizer task")
                     try:
                         self.synthesizer_task = asyncio.create_task(self.__listen_synthesizer())
