@@ -21,11 +21,6 @@ class PollyConfig(BaseModel):
     # rate: Optional[str] = '100%'
 
 
-class XTTSConfig(BaseModel):
-    voice: str
-    language: str
-
-
 class ElevenLabsConfig(BaseModel):
     voice: str
     voice_id: str
@@ -39,38 +34,30 @@ class OpenAIConfig(BaseModel):
     model: str
 
 
-class FourieConfig(BaseModel):
-    voice_id: str
-    gender: str
-    voice: str
-
 
 class DeepgramConfig(BaseModel):
     voice: str
     model: str
 
 
-class MeloConfig(BaseModel):
-    voice:str = 'Casey'
-    sample_rate: int
-    sdp_ratio: float = 0.2
-    noise_scale: float = 0.6
-    noise_scale_w: float = 0.8
-    speed: float = 1.0
-
-
-class StylettsConfig(BaseModel):
+class CartesiaConfig(BaseModel):
+    voice_id: str
     voice: str
-    rate: int = 8000
-    alpha: float = 0.3
-    beta: float = 0.7
-    diffusion_steps: int = 5
-    embedding_scale: float = 1
+    model: str
+
+
+class SmallestConfig(BaseModel):
+    voice_id: str
+    language: str
+    voice: str
+    model: str
+
 
 class AzureConfig(BaseModel):
     voice: str
     model: str
     language: str
+
 
 class Transcriber(BaseModel):
     model: Optional[str] = "nova-2"
@@ -78,24 +65,19 @@ class Transcriber(BaseModel):
     stream: bool = False
     sampling_rate: Optional[int] = 16000
     encoding: Optional[str] = "linear16"
-    endpointing: Optional[int] = 400
+    endpointing: Optional[int] = 500
     keywords: Optional[str] = None
     task:Optional[str] = "transcribe"
     provider: Optional[str] = "deepgram"
 
     @field_validator("provider")
     def validate_model(cls, value):
-        print(f"value {value}, PROVIDERS {list(SUPPORTED_TRANSCRIBER_PROVIDERS.keys())}")
         return validate_attribute(value, list(SUPPORTED_TRANSCRIBER_PROVIDERS.keys()))
-
-    @field_validator("language")
-    def validate_language(cls, value):
-        return validate_attribute(value, ["en", "hi", "es", "fr", "pt", "ko", "ja", "zh", "de", "it", "pt-BR"])
 
 
 class Synthesizer(BaseModel):
     provider: str
-    provider_config: Union[PollyConfig, XTTSConfig, ElevenLabsConfig, OpenAIConfig, FourieConfig, MeloConfig, StylettsConfig, DeepgramConfig, AzureConfig] = Field(union_mode='smart')
+    provider_config: Union[PollyConfig, ElevenLabsConfig, AzureConfig, SmallestConfig, CartesiaConfig, DeepgramConfig, OpenAIConfig] = Field(union_mode='smart')
     stream: bool = False
     buffer_size: Optional[int] = 40  # 40 characters in a buffer
     audio_format: Optional[str] = "pcm"
@@ -103,7 +85,7 @@ class Synthesizer(BaseModel):
 
     @field_validator("provider")
     def validate_model(cls, value):
-        return validate_attribute(value, ["polly", "xtts", "elevenlabs", "openai", "deepgram", "melotts", "styletts", "azuretts"])
+        return validate_attribute(value, ["polly", "elevenlabs", "openai", "deepgram", "azuretts", "cartesia", "smallest"])
 
 
 class IOModel(BaseModel):
@@ -247,9 +229,6 @@ class LlmAgent(BaseModel):
     @field_validator('llm_config', mode='before')
     def validate_llm_config(cls, value, info):
         agent_type = info.data.get('agent_type')
-        print(f"Agent type: {agent_type}")
-        print(f"Value type: {type(value)}")
-        print(f"Value: {value}")
 
         valid_config_types = {
             'openai_assistant': OpenaiAssistant,
@@ -307,8 +286,8 @@ class ToolsChainModel(BaseModel):
 
 class ConversationConfig(BaseModel):
     optimize_latency: Optional[bool] = True  # This will work on in conversation
-    hangup_after_silence: Optional[int] = 10
-    incremental_delay: Optional[int] = 100  # use this to incrementally delay to handle long pauses
+    hangup_after_silence: Optional[int] = 20
+    incremental_delay: Optional[int] = 900  # use this to incrementally delay to handle long pauses
     number_of_words_for_interruption: Optional[
         int] = 1  # Maybe send half second of empty noise if needed for a while as soon as we get speaking true in nitro, use that to delay
     interruption_backoff_period: Optional[int] = 100
@@ -321,9 +300,10 @@ class ConversationConfig(BaseModel):
     ambient_noise_track: Optional[str] = "convention_hall"
     call_terminate: Optional[int] = 90
     use_fillers: Optional[bool] = False
-    trigger_user_online_message_after: Optional[int] = 6
+    trigger_user_online_message_after: Optional[int] = 10
     check_user_online_message: Optional[str] = "Hey, are you still there"
     check_if_user_online: Optional[bool] = True
+
 
     @field_validator('hangup_after_silence', mode='before')
     def set_hangup_after_silence(cls, v):

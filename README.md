@@ -5,13 +5,13 @@
 </p>
 
 <h4 align="center">
-  <a href="https://discord.gg/yDfcqreByj">Discord</a> |
+  <a href="https://discord.gg/59kQWGgnm8">Discord</a> |
   <a href="https://docs.bolna.dev">Docs</a> |
   <a href="https://bolna.dev">Website</a>
 </h4>
 
 <h4 align="center">
-  <a href="https://discord.gg/yDfcqreByj">
+  <a href="https://discord.gg/59kQWGgnm8">
       <img src="https://img.shields.io/static/v1?label=Chat%20on&message=Discord&color=blue&logo=Discord&style=flat-square" alt="Discord">
   </a>
   <a href="https://github.com/bolna-ai/bolna/blob/main/LICENSE">
@@ -22,30 +22,51 @@
   </a>
 </h4>
 
+> [!NOTE]
+> We are actively looking for maintainers.
 
 ## Introduction
 
 **[Bolna](https://bolna.dev)** is the end-to-end open source production ready framework for quickly building LLM based voice driven conversational applications.
 
-
 ## Demo
 https://github.com/bolna-ai/bolna/assets/1313096/2237f64f-1c5b-4723-b7e7-d11466e9b226
 
+
+## What is this repository?
+This repository contains the entire orchestration platform to build voice AI applications. It technically orchestrates voice conversations using combination of different ASR+LLM+TTS providers and models over websockets.
 
 
 ## Components
 Bolna helps you create AI Voice Agents which can be instructed to do tasks beginning with:
 
-1. Initiating a phone call using telephony providers like `Twilio`, `Plivo`, `Exotel`, etc.
+1. Orchestration platform (this open source repository)
+2. Hosted APIs (https://docs.bolna.dev/api-reference/introduction) built on top of this orchestration platform [currently closed source]
+3. No-code UI playground at https://playground.bolna.dev/ using the hosted APIs + tailwind CSS [currently closed source]
+
+
+## Development philosophy
+1. Any integration, enhancement or feature initially lands on this open source package since it form the backbone of our APIs and dashboard
+2. Post that we expose APIs or make changes to existing APIs as required for the same
+3. Thirdly, we push it to the UI dashboard
+
+```mermaid
+graph LR;
+    A[Bolna open source] -->B[Hosted APIs];
+    B[Hosted APIs] --> C[Playground]
+```
+
+## Supported providers and models
+1. Initiating a phone call using telephony providers like `Twilio`, `Plivo`, `Exotel` (coming soon), `Vonage` (coming soon) etc.
 2. Transcribing the conversations using `Deepgram`, etc.
 3. Using LLMs like `OpenAI`, `Llama`, `Cohere`, `Mistral`,  etc to handle conversations
-4. Synthesizing LLM responses back to telephony using `AWS Polly`, `XTTS`, `ElevenLabs`, `Deepgram` etc.
-5. Instructing the Agent to perform tasks like sending emails, text messages, booking calendar after the conversation has ended
+4. Synthesizing LLM responses back to telephony using `AWS Polly`, `ElevenLabs`, `Deepgram`, `OpenAI`, `Azure`, `Cartesia`, `Smallest` etc.
+
 
 Refer to the [docs](https://docs.bolna.dev/providers) for a deepdive into all supported providers.
 
 
-## Local example setup
+## Local example setup [will be moved to a different repository]
 A basic local setup includes usage of [Twilio](local_setup/telephony_server/twilio_api_server.py) or [Plivo](local_setup/telephony_server/plivo_api_server.py) for telephony. We have dockerized the setup in `local_setup/`. One will need to populate an environment `.env` file from `.env.sample`.
 
 The setup consists of four containers:
@@ -58,100 +79,14 @@ The setup consists of four containers:
 4. `redis`: for persisting agents & prompt data
 
 Use docker to build the images using `.env` file as the environment file and run them locally
-1. `docker-compose build --no-cache <twilio-app | plivo-app>`: rebuild images
-2. `docker-compose up <twilio-app | plivo-app>`: run the build images
+1. `docker-compose build --no-cache bolna-app <twilio-app | plivo-app>`: rebuild images
+2. `docker-compose up bolna-app <twilio-app | plivo-app>`: run the build images
 
 Once the docker containers are up, you can now start to create your agents and instruct them to initiate calls.
 
 
-
-## Creating your agent and invoking calls
-Once you have the above docker setup and running, you can create agents and initiate calls.
-1. Use the below payload to create an Agent via `http://localhost:5001/agent`
-
-<details>
-<summary>Agent Payload</summary><br>
-
-```yaml
-{
-    "agent_config": {
-        "agent_name": "Alfred",
-        "agent_type": "other",
-        "agent_welcome_message": "Welcome",
-        "tasks": [
-            {
-                "task_type": "conversation",
-                "toolchain": {
-                    "execution": "parallel",
-                    "pipelines": [
-                        [
-                            "transcriber",
-                            "llm",
-                            "synthesizer"
-                        ]
-                    ]
-                },
-                "tools_config": {
-                    "input": {
-                        "format": "pcm",
-                        "provider": "twilio"
-                    },
-                    "llm_agent": {
-                        "agent_flow_type": "streaming",
-                        "provider": "openai",
-                        "request_json": true,
-                        "model": "gpt-3.5-turbo-16k",
-                        "use_fallback": true
-                    },
-                    "output": {
-                        "format": "pcm",
-                        "provider": "twilio"
-                    },
-                    "synthesizer": {
-                        "audio_format": "wav",
-                        "provider": "elevenlabs",
-                        "stream": true,
-                        "provider_config": {
-                            "voice": "Meera - high quality, emotive",
-                            "model": "eleven_turbo_v2_5",
-                            "voice_id": "TTa58Hl9lmhnQEvhp1WM"
-                        },
-                        "buffer_size": 100.0
-                    },
-                    "transcriber": {
-                        "encoding": "linear16",
-                        "language": "en",
-                        "provider": "deepgram",
-                        "stream": true
-                    }
-                },
-                "task_config": {
-                    "hangup_after_silence": 30.0
-                }
-            }
-        ]
-    },
-    "agent_prompts": {
-        "task_1": {
-            "system_prompt": "Ask if they are coming for party tonight"
-        }
-    }
-}
-```
-</details>
-
-2. The response of the previous API will return a uuid as the `agent_id`. Use this `agent_id` to initiate a call via the telephony server running on `8001` port (for Twilio) or `8002` port (for Plivo) at `http://localhost:8001/call`
-
-<details>
-<summary>Call Payload</summary><br>
-
-```yaml
-{
-    "agent_id": "4c19700b-227c-4c2d-8bgf-42dfe4b240fc",
-    "recipient_phone_number": "+19876543210",
-}
-```
-</details>
+## Example agents to create, use and start making calls
+Go to the [Bolna wiki](https://github.com/bolna-ai/bolna/wiki) to try out sample agents.
 
 
 ## Using your own providers
@@ -199,6 +134,8 @@ https://github.com/bolna-ai/bolna/blob/c8a0d1428793d4df29133119e354bc2f85a7ca76/
 | Elevenlabs | `ELEVENLABS_API_KEY`                             |
 | OpenAI     | `OPENAI_API_KEY`                                 |
 | Deepgram   | `DEEPGRAM_AUTH_TOKEN`                            |
+| Cartesia   | `CARTESIA_API_KEY`                            |
+| Smallest   | `SMALLEST_API_KEY`                            |
 
 </details>
 &nbsp;<br>
@@ -215,6 +152,15 @@ These are the current supported Telephony Providers:
 
 </details>
 
+## Open-source v/s Hosted APIs
+**We have in the past tried to maintain both the open source and the hosted solution (via APIs and a UI dashboard)**.
+
+We have fluctuated b/w maintaining this repository purely from a point of time crunch and not interest.
+
+Currently, we are continuing to maintain it for the community and improving the adoption of Voice AI.
+
+Though the repository is completely open source, you can connect with us if interested in managed hosted offerings or more customized solutions.
+<a href="https://calendly.com/bolna/30min"><img alt="Schedule a meeting" src="https://cdn.cookielaw.org/logos/122ecfc3-4694-42f1-863f-2db42d1b1e68/0bcbbcf4-9b83-4684-ba59-bc913c0d5905/c21bea90-f4f1-43d1-8118-8938bbb27a9d/logo.png" /></a>
 
 ## Extending with other Telephony Providers
 In case you wish to extend and add some other Telephony like Vonage, Telnyx, etc. following the guidelines below:
@@ -224,11 +170,6 @@ In case you wish to extend and add some other Telephony like Vonage, Telnyx, etc
 3. Add telephony-specific output handler file in [output_handlers/telephony_providers](https://github.com/bolna-ai/bolna/tree/master/bolna/output_handlers/telephony_providers) writing custom functions extending from the [telephony.py](https://github.com/bolna-ai/bolna/blob/master/bolna/output_handlers/telephony.py) class
    1. This mainly concerns converting audio from the synthesizer class to a supported audio format and streaming it over the websocket provided by the telephony provider
 4. Lastly, you'll have to write a dedicated server like the example [twilio_api_server.py](https://github.com/bolna-ai/bolna/blob/master/local_setup/telephony_server/twilio_api_server.py) provided in [local_setup](https://github.com/bolna-ai/bolna/blob/master/local_setup/telephony_server) to initiate calls over websockets.
-
-## Open-source v/s Paid
-Though the repository is completely open source, you can connect with us if interested in managed hosted offerings or more customized solutions.
-
-<a href="https://calendly.com/bolna/30min"><img alt="Schedule a meeting" src="https://cdn.cookielaw.org/logos/122ecfc3-4694-42f1-863f-2db42d1b1e68/0bcbbcf4-9b83-4684-ba59-bc913c0d5905/c21bea90-f4f1-43d1-8118-8938bbb27a9d/logo.png" /></a>
 
 
 ## Contributing

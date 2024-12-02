@@ -4,7 +4,7 @@ from dotenv import load_dotenv
 from openai import AsyncOpenAI, OpenAI
 import json, requests, time
 
-from bolna.constants import CHECKING_THE_DOCUMENTS_FILLER, PRE_FUNCTION_CALL_MESSAGE, TRANSFERING_CALL_FILLER
+from bolna.constants import CHECKING_THE_DOCUMENTS_FILLER, PRE_FUNCTION_CALL_MESSAGE, TRANSFERING_CALL_FILLER, DEFAULT_LANGUAGE_CODE
 from bolna.helpers.utils import convert_to_request_log, format_messages
 from .llm import BaseLLM
 from bolna.helpers.logger_config import configure_logger
@@ -14,17 +14,18 @@ load_dotenv()
     
 
 class OpenAiLLM(BaseLLM):
-    def __init__(self, max_tokens=100, buffer_size=40, model="gpt-3.5-turbo-16k", temperature= 0.1, **kwargs):
+    def __init__(self, max_tokens=100, buffer_size=40, model="gpt-3.5-turbo-16k", temperature=0.1, language=DEFAULT_LANGUAGE_CODE, **kwargs):
         super().__init__(max_tokens, buffer_size)
         self.model = model
+
         self.custom_tools = kwargs.get("api_tools", None)
+        self.language = language
         logger.info(f"API Tools {self.custom_tools}")
         if self.custom_tools is not None:
             self.trigger_function_call = True
             self.api_params = self.custom_tools['tools_params']
             logger.info(f"Function dict {self.api_params}")
             self.tools = self.custom_tools['tools']
-
         else:
             self.trigger_function_call = False
 
@@ -32,25 +33,14 @@ class OpenAiLLM(BaseLLM):
         logger.info(f"Initializing OpenAI LLM with model: {self.model} and maxc tokens {max_tokens}")
         self.max_tokens = max_tokens
         self.temperature = temperature
-        self.model_args = { "max_tokens": self.max_tokens, "temperature": self.temperature, "model": self.model}
-        provider = kwargs.get("provider", "openai")
-        if  provider == "ola":
-            logger.info(f"Connecting to Ola's krutrim model")
-            base_url = kwargs.get("base_url", os.getenv("OLA_KRUTRIM_BASE_URL"))
-            api_key=kwargs.get('llm_key', None)
-            if api_key is not None and len(api_key) > 0:
-                api_key = api_key
-            self.async_client = AsyncOpenAI( base_url=base_url, api_key= api_key)
-        elif kwargs.get("provider", "openai") == "custom":
+        self.model_args = {"max_tokens": self.max_tokens, "temperature": self.temperature, "model": self.model}
+
+        if kwargs.get("provider", "openai") == "custom":
             base_url = kwargs.get("base_url")
-            api_key=kwargs.get('llm_key', None)
+            api_key = kwargs.get('llm_key', None)
             self.async_client = AsyncOpenAI(base_url=base_url, api_key= api_key)
         else:
             llm_key = kwargs.get('llm_key', os.getenv('OPENAI_API_KEY'))
-            if llm_key != "sk-":
-                llm_key = os.getenv('OPENAI_API_KEY')
-            else:
-                llm_key = kwargs['llm_key']
             self.async_client = AsyncOpenAI(api_key=llm_key)
             api_key = llm_key
         self.assistant_id = kwargs.get("assistant_id", None)
@@ -94,7 +84,6 @@ class OpenAiLLM(BaseLLM):
         textual_response = False
 
         async for chunk in await self.async_client.chat.completions.create(**model_args):
-            logger.info('chunk: {}'.format(chunk.choices[0].delta.content))
             if not self.started_streaming:
                 first_chunk_time = time.time()
                 latency = first_chunk_time - start_time
@@ -107,7 +96,7 @@ class OpenAiLLM(BaseLLM):
                     i = [i for i in range(len(tools)) if called_fun == tools[i]["name"]][0]
 
                 if not self.gave_out_prefunction_call_message and not textual_response:
-                    filler = PRE_FUNCTION_CALL_MESSAGE if not called_fun.startswith("transfer_call") else TRANSFERING_CALL_FILLER
+                    filler = PRE_FUNCTION_CALL_MESSAGE if not called_fun.startswith("transfer_call") else TRANSFERING_CALL_FILLER.get(self.language, DEFAULT_LANGUAGE_CODE)
                     yield filler , True, latency, False
                     self.gave_out_prefunction_call_message = True
 
@@ -156,7 +145,8 @@ class OpenAiLLM(BaseLLM):
                 #**resp
             }
         
-            if tools[i].get("parameters", None) is not None and (all(key in resp for key in tools[i]["parameters"]["properties"].keys())):
+            all_required_keys = tools[i]["parameters"]["properties"].keys() and tools[i]["parameters"].get("required", [])
+            if tools[i].get("parameters", None) is not None and (all(key in resp for key in all_required_keys)):
                 logger.info(f"Function call parameters: {resp}")
                 convert_to_request_log(resp, meta_info, self.model, "llm", direction = "response", is_cached= False, run_id = self.run_id)
                 resp = json.loads(resp)
@@ -229,7 +219,7 @@ class OpenAiLLM(BaseLLM):
                     i = [i for i in range(len(tools)) if called_fun == tools[i].function.name][0]
                     
                 if not self.gave_out_prefunction_call_message and not textual_response:
-                    filler = PRE_FUNCTION_CALL_MESSAGE if not called_fun.startswith("transfer_call_") else TRANSFERING_CALL_FILLER
+                    filler = PRE_FUNCTION_CALL_MESSAGE if not called_fun.startswith("transfer_call_") else TRANSFERING_CALL_FILLER.get(self.language, DEFAULT_LANGUAGE_CODE)
                     yield filler, True, latency, False
                     self.gave_out_prefunction_call_message = True
                 if len(buffer) > 0:
@@ -298,7 +288,7 @@ class OpenAiLLM(BaseLLM):
         self.started_streaming = False
 
     def get_response_format(self, is_json_format: bool):
-        if is_json_format and self.model in ('gpt-4-1106-preview', 'gpt-3.5-turbo-1106'):
+        if is_json_format and self.model in ('gpt-4-1106-preview', 'gpt-3.5-turbo-1106', 'gpt-4o-mini'):
             return {"type": "json_object"}
         else:
             return {"type": "text"}

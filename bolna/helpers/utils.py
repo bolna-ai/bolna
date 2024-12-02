@@ -158,7 +158,7 @@ async def store_file(bucket_name=None, file_key=None, file_data=None, content_ty
             data = None
             if content_type == "json":
                 data = json.dumps(file_data)
-            elif content_type in ["mp3", "wav", "pcm", "csv"]:
+            else:
                 data = file_data
             try:
                 await s3_client.put_object(Bucket=bucket_name, Key=file_key, Body=data)
@@ -173,7 +173,6 @@ async def store_file(bucket_name=None, file_key=None, file_data=None, content_ty
         try:
             logger.info(f"Writing to {dir_name}/{file_key} ")
             if content_type == "json":
-                
                 with open(f"{dir_name}/{file_key}", 'w') as f:
                     data = json.dumps(file_data)
                     f.write(data)
@@ -181,12 +180,13 @@ async def store_file(bucket_name=None, file_key=None, file_data=None, content_ty
                 with open(f"{dir_name}/{file_key}", 'w') as f:
                     data = file_data
                     f.write(data)
-            elif content_type in ["mp3", "wav", "pcm"]:
+            else:
                 with open(f"{dir_name}/{file_key}", 'wb') as f:
                     data = file_data
                     f.write(data)
         except Exception as e:
             logger.error(f"Could not save local file {e}")
+
 
 async def get_raw_audio_bytes(filename, agent_name = None, audio_format='mp3', assistant_id=None, local = False, is_location = False):
     # we are already storing pcm formatted audio in the filler config. No need to encode/decode them further
@@ -256,10 +256,12 @@ def format_messages(messages, use_system_prompt=False):
 
 
 def update_prompt_with_context(prompt, context_data):
-    if not context_data or not isinstance(context_data.get('recipient_data'), dict):
+    try:
+        if not context_data or not isinstance(context_data.get('recipient_data'), dict):
+            return prompt.format_map(DictWithMissing({}))
+        return prompt.format_map(DictWithMissing(context_data.get('recipient_data', {})))
+    except Exception as e:
         return prompt
-    return prompt.format_map(DictWithMissing(context_data.get('recipient_data', {})))
-
 
 async def get_prompt_responses(assistant_id, local=False):
     filepath = f"{PREPROCESS_DIR}/{assistant_id}/conversation_details.json"
@@ -328,6 +330,7 @@ def clean_json_string(json_str):
         return json_str
     if json_str.startswith("```json") and json_str.endswith("```"):
         json_str = json_str[7:-3].strip()
+    json_str = json_str.replace("###JSON Structure\n", "")
     return json_str
 
 
@@ -420,7 +423,6 @@ Message type
 
 async def write_request_logs(message, run_id):
     component_details = [None, None, None, None, None]
-    logger.info(f"Message {message}")
     message_data = message.get('data', '')
     if message_data is None:
         message_data = ''
@@ -449,6 +451,7 @@ async def write_request_logs(message, run_id):
             await log_file.write(header+log_string)
         else:
             await log_file.write(log_string)
+
 
 async def save_audio_file_to_s3(conversation_recording, sampling_rate = 24000, assistant_id = None, run_id = None):
     last_frame_end_time = conversation_recording['output'][0]['start_time']
@@ -507,12 +510,14 @@ async def save_audio_file_to_s3(conversation_recording, sampling_rate = 24000, a
     
     return f'{RECORDING_BUCKET_URL}{key}'
 
+
 def list_number_of_wav_files_in_directory(directory):
     count = 0
     for filename in os.listdir(directory):
         if filename.endswith(".mp3") or filename.endswith(".wav") or filename.endswith(".ogg"):
             count += 1
     return count
+
 
 def get_file_names_in_directory(directory):
     return os.listdir(directory)
@@ -554,3 +559,14 @@ def get_route_info(message, route_layer):
 async def run_in_seperate_thread(fun):
     resp = await asyncio.to_thread(fun)
     return resp
+
+
+async def process_task_cancellation(asyncio_task, task_name):
+    if asyncio_task is not None:
+        try:
+            asyncio_task.cancel()
+            await asyncio_task
+        except asyncio.CancelledError:
+            logger.info(f"{task_name} has been successfully cancelled.")
+        except Exception as e:
+            logger.error(f"Error cancelling {task_name}: {e}")

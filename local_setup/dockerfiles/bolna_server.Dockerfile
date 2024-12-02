@@ -2,10 +2,12 @@ FROM python:3.10.13-slim
 
 WORKDIR /app
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN apt-get update && apt-get -y upgrade && apt-get install -y --no-install-recommends \
     libgomp1 \
     git \
-    ffmpeg
+    ffmpeg \
+    gcc \
+    g++
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install git+https://github.com/bolna-ai/bolna@master
 COPY quickstart_server.py /app/
