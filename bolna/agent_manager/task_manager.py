@@ -1089,7 +1089,6 @@ class TaskManager(BaseManager):
                         
     async def __do_llm_generation(self, messages, meta_info, next_step, should_bypass_synth=False, should_trigger_function_call=False):
         llm_response = ""
-        logger.info(f"MEssages before generation {messages}")
         synthesize = True
         if should_bypass_synth:
             synthesize = False
@@ -1205,7 +1204,6 @@ class TaskManager(BaseManager):
             self.llm_processed_request_ids.add(self.current_request_id)
         else:
             messages = copy.deepcopy(self.history)
-            logger.info(f"Message {messages} history {self.history}")
             messages.append({'role': 'user', 'content': message['data']})
             ### TODO CHECK IF THIS IS EVEN REQUIRED
             convert_to_request_log(message=format_messages(messages, use_system_prompt=True), meta_info=meta_info, component="llm", direction="request", model=self.llm_config["model"], run_id= self.run_id)
