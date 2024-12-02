@@ -195,6 +195,8 @@ class GraphNode(BaseModel):
     prompt: str
     edges: List[GraphEdge] = Field(default_factory=list)
     completion_check: Optional[Callable[[List[dict]], bool]] = None
+    rag_config: Optional[dict] = None
+
 
 class GraphAgentConfig(Llm):
     agent_information: str
