@@ -1025,7 +1025,7 @@ class TaskManager(BaseManager):
                     convert_to_request_log(str(response_text), meta_info, None, "function_call", direction="response", is_cached=False, run_id=self.run_id)
                     return
                 
-        response = await trigger_api(url= url, method=method.lower(), param= param, api_token= api_token, meta_info = meta_info, run_id = self.run_id, **resp)
+        response = await trigger_api(url= url, method=method.lower(), param=param, api_token=api_token, meta_info=meta_info, run_id=self.run_id, **resp)
         function_response = str(response)
         get_res_keys, get_res_values = await computed_api_response(function_response)
         if called_fun.startswith('check_availability_of_slots') and (not get_res_values or (len(get_res_values) == 1 and len(get_res_values[0]) == 0)):
@@ -1044,7 +1044,8 @@ class TaskManager(BaseManager):
         self.check_if_user_online = self.conversation_config.get("check_if_user_online", True)
 
         if not called_fun.startswith("transfer_call"):
-            await self.__do_llm_generation(model_args["messages"], meta_info, next_step, should_trigger_function_call = True)
+            should_bypass_synth = meta_info.get('bypass_synth', False)
+            await self.__do_llm_generation(model_args["messages"], meta_info, next_step, should_bypass_synth=should_bypass_synth, should_trigger_function_call=True)
 
         self.execute_function_call_task = None
             
@@ -1086,7 +1087,7 @@ class TaskManager(BaseManager):
                     self.history = copy.deepcopy(self.interim_history)
                 #self.__update_transcripts()
                         
-    async def __do_llm_generation(self, messages, meta_info, next_step, should_bypass_synth = False, should_trigger_function_call = False):
+    async def __do_llm_generation(self, messages, meta_info, next_step, should_bypass_synth=False, should_trigger_function_call=False):
         llm_response = ""
         logger.info(f"MEssages before generation {messages}")
         synthesize = True
