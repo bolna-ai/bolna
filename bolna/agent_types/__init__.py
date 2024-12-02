@@ -4,6 +4,5 @@ from .graph_based_conversational_agent import GraphBasedConversationAgent
 from .summarization_agent import SummarizationContextualAgent
 from .webhook_agent import WebhookAgent
 from .openai_assistant import OpenAIAssistantAgent
-from .llama_index_rag_agent import LlamaIndexRag
 from .graph_agent import GraphAgent
 from .knowledgebase_agent import RAGAgent
