@@ -1049,7 +1049,7 @@ class TaskManager(BaseManager):
                     convert_to_request_log(str(response_text), meta_info, None, "function_call", direction="response", is_cached=False, run_id=self.run_id)
                     return
                 
-        response = await trigger_api(url= url, method=method.lower(), param= param, api_token= api_token, meta_info = meta_info, run_id = self.run_id, **resp)
+        response = await trigger_api(url= url, method=method.lower(), param=param, api_token=api_token, meta_info=meta_info, run_id=self.run_id, **resp)
         function_response = str(response)
         get_res_keys, get_res_values = await computed_api_response(function_response)
         if called_fun.startswith('check_availability_of_slots') and (not get_res_values or (len(get_res_values) == 1 and len(get_res_values[0]) == 0)):
@@ -1068,7 +1068,8 @@ class TaskManager(BaseManager):
         self.check_if_user_online = self.conversation_config.get("check_if_user_online", True)
 
         if not called_fun.startswith("transfer_call"):
-            await self.__do_llm_generation(model_args["messages"], meta_info, next_step, should_trigger_function_call = True)
+            should_bypass_synth = meta_info.get('bypass_synth', False)
+            await self.__do_llm_generation(model_args["messages"], meta_info, next_step, should_bypass_synth=should_bypass_synth, should_trigger_function_call=True)
 
         self.execute_function_call_task = None
             
@@ -1110,9 +1111,8 @@ class TaskManager(BaseManager):
                     self.history = copy.deepcopy(self.interim_history)
                 #self.__update_transcripts()
                         
-    async def __do_llm_generation(self, messages, meta_info, next_step, should_bypass_synth = False, should_trigger_function_call = False):
+    async def __do_llm_generation(self, messages, meta_info, next_step, should_bypass_synth=False, should_trigger_function_call=False):
         llm_response = ""
-        logger.info(f"Messages before generation {messages}")
         synthesize = True
         if should_bypass_synth:
             synthesize = False
@@ -1228,7 +1228,6 @@ class TaskManager(BaseManager):
             self.llm_processed_request_ids.add(self.current_request_id)
         else:
             messages = copy.deepcopy(self.history)
-            logger.info(f"Message {messages} history {self.history}")
             messages.append({'role': 'user', 'content': message['data']})
             ### TODO CHECK IF THIS IS EVEN REQUIRED
             convert_to_request_log(message=format_messages(messages, use_system_prompt=True), meta_info=meta_info, component="llm", direction="request", model=self.llm_config["model"], run_id= self.run_id)
@@ -1928,7 +1927,7 @@ class TaskManager(BaseManager):
                         "Since it's connected through dashboard, I'll run listen_llm_tas too in case user wants to simply text")
                     self.llm_queue_task = asyncio.create_task(self._listen_llm_input_queue())
                 
-                if "synthesizer" in self.tools and self._is_conversation_task():
+                if "synthesizer" in self.tools and self._is_conversation_task() and not self.turn_based_conversation:
                     logger.info("Starting synthesizer task")
                     try:
                         self.synthesizer_task = asyncio.create_task(self.__listen_synthesizer())
