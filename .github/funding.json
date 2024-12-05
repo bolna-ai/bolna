@@ -1,0 +1,59 @@
+{
+  "version": "v1.0.0",
+  "entity": {
+    "type": "organisation",
+    "role": "maintainer",
+    "name": "Bolna",
+    "email": "hello@bolna.dev",
+    "phone": "",
+    "description": "Full stack tools for building voice agents",
+    "webpageUrl": {
+      "url": "https://github.com/bolna-ai/bolna"
+    }
+  },
+  "projects": [
+    {
+      "guid": "bolna",
+      "name": "bolna",
+      "description": "Bolna orchestration platform",
+      "webpageUrl": {
+        "url": "https://github.com/bolna-ai/bolna"
+      },
+      "repositoryUrl": {
+        "url": "https://github.com/bolna-ai/bolna"
+      },
+      "licenses": [
+        "MIT License"
+      ],
+      "tags": [
+        "voice-agents",
+        "voice-assistants"
+      ]
+    }
+  ],
+  "funding": {
+    "channels": [
+      {
+        "guid": "stripe",
+        "type": "payment-provider",
+        "address": "https://buy.stripe.com/7sIaIyg4m19f31SdQW",
+        "description": "Pay with Stripe and setup recurring subscriptions."
+      }
+    ],
+    "plans": [
+      {
+        "guid": "hosting-monthly",
+        "status": "active",
+        "name": "Hosting support",
+        "description": "This will cover the monthly server hosting costs and maintenance costs for the project.",
+        "amount": 24.99,
+        "currency": "USD",
+        "frequency": "monthly",
+        "channels": [
+          "stripe"
+        ]
+      }
+    ],
+    "history": null
+  }
+}
