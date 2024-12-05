@@ -42,9 +42,9 @@
     ],
     "plans": [
       {
-        "guid": "hosting-monthly",
+        "guid": "monthly",
         "status": "active",
-        "name": "Hosting support",
+        "name": "Monthly support",
         "description": "This will cover the monthly server hosting costs and maintenance costs for the project.",
         "amount": 24.99,
         "currency": "USD",
