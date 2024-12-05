@@ -15,7 +15,7 @@
     {
       "guid": "bolna",
       "name": "bolna",
-      "description": "Bolna orchestration platform",
+      "description": "Full stack tools for building voice agents",
       "webpageUrl": {
         "url": "https://github.com/bolna-ai/bolna"
       },
