@@ -421,6 +421,7 @@ Message type
 9. engine
 '''
 
+
 async def write_request_logs(message, run_id):
     component_details = [None, None, None, None, None]
     message_data = message.get('data', '')
@@ -435,15 +436,15 @@ async def write_request_logs(message, run_id):
     elif message["component"] == "synthesizer":
         component_details = [message_data, None, None, len(message_data), message.get('latency', None), message['cached'], None, message['engine']]
     elif message["component"] == "function_call":
-        component_details =  [message_data, None, None, None, message.get('latency', None), None, None, None]
+        component_details = [message_data, None, None, None, message.get('latency', None), None, None, None]
      
     row = row + component_details
 
     header = "Time,Component,Direction,Leg ID,Sequence ID,Model,Data,Input Tokens,Output Tokens,Characters,Latency,Cached,Final Transcript,Engine\n"
     log_string = ','.join(['"' + str(item).replace('"', '""') + '"' if item is not None else '' for item in row]) + '\n'
-    log_dir = f"./logs/{run_id.split('#')[0]}"
+    log_dir = f"./logs"
     os.makedirs(log_dir, exist_ok=True)
-    log_file_path = f"{log_dir}/{run_id.split('#')[1]}.csv"
+    log_file_path = f"{log_dir}/{run_id}.csv"
     file_exists = os.path.exists(log_file_path)
 
     async with aiofiles.open(log_file_path, mode='a') as log_file:
