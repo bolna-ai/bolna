@@ -174,6 +174,9 @@ class TaskManager(BaseManager):
         self.is_local = False
         self.llm_config = None
 
+
+        self.agent_type = None
+
         self.llm_config_map = {}
         self.llm_agent_map = {}
         if self.__is_multiagent():
@@ -186,6 +189,13 @@ class TaskManager(BaseManager):
         elif not self.__is_openai_assistant():
             if self.task_config["tools_config"]["llm_agent"] is not None:
                 if self.__is_knowledgebase_agent():
+                    self.llm_agent_config = self.task_config["tools_config"]["llm_agent"]
+                    self.llm_config = {
+                        "model": self.llm_agent_config['llm_config']['model'],
+                        "max_tokens": self.llm_agent_config['llm_config']['max_tokens'],
+                        "provider": self.llm_agent_config['llm_config']['provider'],
+                    }
+                elif self.__is_graph_agent():
                     self.llm_agent_config = self.task_config["tools_config"]["llm_agent"]
                     self.llm_config = {
                         "model": self.llm_agent_config['llm_config']['model'],
@@ -417,6 +427,12 @@ class TaskManager(BaseManager):
         agent_type = self.task_config['tools_config']["llm_agent"].get("agent_type", None)
         return agent_type == "knowledgebase_agent"
 
+    def __is_graph_agent(self):
+        if self.task_config["task_type"] == "webhook":
+            return False
+        agent_type = self.task_config['tools_config']["llm_agent"].get("agent_type", None)
+        return agent_type == "graph_agent"
+
     def __setup_routes(self, routes):
         embedding_model = routes.get("embedding_model", os.getenv("ROUTE_EMBEDDING_MODEL"))
         route_encoder = FastEmbedEncoder(name=embedding_model)
@@ -581,6 +597,7 @@ class TaskManager(BaseManager):
                 raise Exception(f'LLM {llm_config["provider"]} not supported')
 
     def __get_agent_object(self, llm, agent_type, assistant_config=None):
+        self.agent_type = agent_type
         if agent_type == "simple_llm_agent":
             logger.info(f"Simple llm agent")
             llm_agent = StreamingContextualAgent(llm)
@@ -588,7 +605,7 @@ class TaskManager(BaseManager):
             logger.info(f"setting up backend as openai_assistants {assistant_config}")
             llm_agent = OpenAIAssistantAgent(**assistant_config)
         elif agent_type == "knowledgebase_agent":
-            logger.info("#### Setting up knowledgebase_agent agent ####")
+            logger.info("Setting up knowledgebase_agent agent ####")
             llm_config = self.task_config["tools_config"]["llm_agent"].get("llm_config", {})
             vector_store_config = llm_config.get("vector_store", {})
             llm_agent = RAGAgent(
@@ -598,6 +615,13 @@ class TaskManager(BaseManager):
                 max_tokens=self.llm_agent_config['llm_config']['max_tokens'],
                 provider_config=vector_store_config
             )
+            logger.info("Llama-index rag agent is created")
+        elif agent_type == "graph_agent":
+            logger.info("Setting up graph agent")
+            llm_config = self.task_config["tools_config"]["llm_agent"].get("llm_config", {})
+            logger.info(f"Getting this llm config : {llm_config}")
+            llm_agent = GraphAgent(llm_config)
+            logger.info(f"Graph agent is created")
             logger.info("Knowledge Base Agent created")
         else:
             raise f"{agent_type} Agent type is not created yet"
@@ -638,7 +662,7 @@ class TaskManager(BaseManager):
             return
 
         agent_type = self.task_config["tools_config"]["llm_agent"].get("agent_type", "simple_llm_agent")
-        if agent_type in ["openai_assistant", "knowledgebase_agent"]:
+        if agent_type in ["openai_assistant", "knowledgebase_agent", "graph_agent"]:
             return
 
         self.is_local = local
@@ -1204,19 +1228,21 @@ class TaskManager(BaseManager):
 
             await self.__do_llm_generation(messages, meta_info, next_step, should_bypass_synth)
             # TODO : Write a better check for completion prompt
-            if self.use_llm_to_determine_hangup and not self.turn_based_conversation:
-                answer = await self.tools["llm_agent"].check_for_completion(self.history, self.check_for_completion_prompt)
-                should_hangup = answer['answer'].lower() == "yes"
-                prompt = [
-                        {'role': 'system', 'content': self.check_for_completion_prompt},
-                        {'role': 'user', 'content': format_messages(self.history, use_system_prompt= True)}]
-                logger.info(f"##### Answer from the LLM {answer}")
-                convert_to_request_log(message=format_messages(prompt, use_system_prompt= True), meta_info= meta_info, component="llm", direction="request", model=self.llm_config["model"], run_id= self.run_id)
-                convert_to_request_log(message=answer, meta_info= meta_info, component="llm", direction="response", model= self.check_for_completion_llm, run_id= self.run_id)
 
-                if should_hangup:
-                    await self.__process_end_of_conversation()
-                    return
+            if self.agent_type not in ["graph_agent", "knowledgebase_agent"]:
+                if self.use_llm_to_determine_hangup and not self.turn_based_conversation:
+                    answer = await self.tools["llm_agent"].check_for_completion(self.history, self.check_for_completion_prompt)
+                    should_hangup = answer['answer'].lower() == "yes"
+                    prompt = [
+                            {'role': 'system', 'content': self.check_for_completion_prompt},
+                            {'role': 'user', 'content': format_messages(self.history, use_system_prompt= True)}]
+                    logger.info(f"##### Answer from the LLM {answer}")
+                    convert_to_request_log(message=format_messages(prompt, use_system_prompt= True), meta_info= meta_info, component="llm", direction="request", model=self.llm_config["model"], run_id= self.run_id)
+                    convert_to_request_log(message=answer, meta_info= meta_info, component="llm", direction="response", model= self.check_for_completion_llm, run_id= self.run_id)
+
+                    if should_hangup:
+                        await self.__process_end_of_conversation()
+                        return
 
             self.llm_processed_request_ids.add(self.current_request_id)
             llm_response = ""
