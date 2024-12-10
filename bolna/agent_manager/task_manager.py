@@ -1854,11 +1854,18 @@ class TaskManager(BaseManager):
             else:
                 logger.info(f"Callee isn't speaking and hence not sending or {time.time() - self.callee_speaking_start_time} is not greater than {self.backchanneling_start_delay}") 
             await asyncio.sleep(self.backchanneling_message_gap) 
-    
-    async def __first_message(self):
+
+    async def __first_message(self, timeout=10.0):
         logger.info(f"Executing the first message task")
         try:
+            start_time = asyncio.get_running_loop().time()
             while True:
+                elapsed_time = asyncio.get_running_loop().time() - start_time
+                if elapsed_time > timeout:
+                    await self.__process_end_of_conversation()
+                    logger.warning("Timeout reached while waiting for stream_sid")
+                    break
+
                 if not self.stream_sid and not self.default_io:
                     stream_sid = self.tools["input"].get_stream_sid()
                     if stream_sid is not None:
