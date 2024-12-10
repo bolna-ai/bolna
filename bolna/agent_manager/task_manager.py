@@ -93,8 +93,7 @@ class TaskManager(BaseManager):
 
         # Assistant persistance stuff
         self.assistant_id = assistant_id
-        self.run_id = kwargs.get("run_id", "1234#0")
-        self.agent_id, self.run_id_ts = self.run_id.split('#')
+        self.run_id = kwargs.get("run_id")
 
         self.mark_set = set()
         self.sampling_rate = 24000
@@ -711,7 +710,7 @@ class TaskManager(BaseManager):
                     self.call_sid = self.context_data['recipient_data']['call_sid']
                     enriched_prompt = f'{enriched_prompt}\nPhone call_sid is "{self.call_sid}"\n'
 
-                enriched_prompt = f'{enriched_prompt}\nagent_id is "{self.agent_id}"\nexecution_id is "{self.run_id_ts}"\n'
+                enriched_prompt = f'{enriched_prompt}\nagent_id is "{self.assistant_id}"\nexecution_id is "{self.run_id}"\n'
                 self.prompts["system_prompt"] = enriched_prompt
 
             notes = "### Note:\n"
@@ -1010,20 +1009,17 @@ class TaskManager(BaseManager):
             except Exception as e:
                 from_number = None
 
-            user_id, agent_id = self.assistant_id.split("/")
             self.history = copy.deepcopy(model_args["messages"])
+            payload = {
+                'call_sid': call_sid,
+                'provider': self.tools['input'].io_provider,
+                'stream_sid': self.stream_sid,
+                'from_number': from_number,
+                'execution_id': self.run_id
+            }
 
             if url is None:
                 url = os.getenv("CALL_TRANSFER_WEBHOOK_URL")
-                payload = {
-                    'call_sid': call_sid,
-                    'agent_id': agent_id,
-                    'user_id': user_id,
-                    'provider': self.tools['input'].io_provider,
-                    'stream_sid': self.stream_sid,
-                    'from_number': from_number,
-                    'execution_id': self.run_id_ts
-                }
 
                 try:
                     json_function_call_params = json.loads(param)
@@ -1032,8 +1028,6 @@ class TaskManager(BaseManager):
                         payload['call_transfer_number'] = call_transfer_number
                 except Exception as e:
                     logger.error(f"Error in __execute_function_call {e}")
-            else:
-                payload = {'call_sid': call_sid, "agent_id": agent_id}
 
             if param is not None:
                 logger.info(f"Gotten response {resp}")
@@ -1860,11 +1854,18 @@ class TaskManager(BaseManager):
             else:
                 logger.info(f"Callee isn't speaking and hence not sending or {time.time() - self.callee_speaking_start_time} is not greater than {self.backchanneling_start_delay}") 
             await asyncio.sleep(self.backchanneling_message_gap) 
-    
-    async def __first_message(self):
+
+    async def __first_message(self, timeout=10.0):
         logger.info(f"Executing the first message task")
         try:
+            start_time = asyncio.get_running_loop().time()
             while True:
+                elapsed_time = asyncio.get_running_loop().time() - start_time
+                if elapsed_time > timeout:
+                    await self.__process_end_of_conversation()
+                    logger.warning("Timeout reached while waiting for stream_sid")
+                    break
+
                 if not self.stream_sid and not self.default_io:
                     stream_sid = self.tools["input"].get_stream_sid()
                     if stream_sid is not None:
