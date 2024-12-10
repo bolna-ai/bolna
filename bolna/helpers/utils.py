@@ -454,7 +454,7 @@ async def write_request_logs(message, run_id):
             await log_file.write(log_string)
 
 
-async def save_audio_file_to_s3(conversation_recording, sampling_rate = 24000, assistant_id = None, run_id = None):
+async def save_audio_file_to_s3(conversation_recording, sampling_rate = 24000, assistant_id=None, run_id=None):
     last_frame_end_time = conversation_recording['output'][0]['start_time']
     logger.info(f"LENGTH OF OUTPUT AUDIO {len(conversation_recording['output'])}")
     initial_gap = (last_frame_end_time - conversation_recording["metadata"]["started"] ) *1000
@@ -500,7 +500,7 @@ async def save_audio_file_to_s3(conversation_recording, sampling_rate = 24000, a
 
     # Verify the stereo waveform shape is [2, M]
     assert stereo_waveform.shape[0] == 2, "Stereo waveform should have 2 channels."
-    key = f'{assistant_id + run_id.split("#")[1]}.wav'
+    key = f'{assistant_id + run_id}.wav'
 
     audio_buffer = io.BytesIO()
     torchaudio.save(audio_buffer, stereo_waveform, 24000, format="wav")
