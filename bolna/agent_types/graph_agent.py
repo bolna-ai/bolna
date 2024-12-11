@@ -26,6 +26,7 @@ class GraphAgent(BaseAgent):
         self.node_history = ["root"]
         self.node_structure = self.build_node_structure()
         self.rag_agents = self.initialize_rag_agents()
+        self.buffer_size = self.config.get("buffer_size",150)
 
     def initialize_rag_agents(self) -> Dict[str, RAGAgent]:
         rag_agents = {}
@@ -207,10 +208,11 @@ class GraphAgent(BaseAgent):
 
     async def generate(self, message: List[dict], **kwargs) -> AsyncGenerator[Tuple[str, bool, float, bool], None]:
         logger.info(f"Generating response for message: {message}")
+        logger.info(f"Configuration:{self.config}")
         start_time = time.time()
         first_token_time = None
         buffer = ""
-        buffer_size = 100
+        buffer_size = self.buffer_size
         try:
             # Decide next move
             next_node_id = await self.decide_next_move_cyclic(message)

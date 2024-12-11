@@ -203,6 +203,7 @@ class GraphAgentConfig(Llm):
     nodes: List[GraphNode]
     current_node_id: str
     context_data: Optional[dict] = None
+    buffer_size: Optional[int] = None
 
 class AgentRouteConfig(BaseModel):
     utterances: List[str]
