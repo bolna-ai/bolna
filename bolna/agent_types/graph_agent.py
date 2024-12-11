@@ -210,11 +210,8 @@ class GraphAgent(BaseAgent):
         start_time = time.time()
         first_token_time = None
         buffer = ""
-        buffer_size = 20  # Default buffer size of 20 words
+        buffer_size = 100
         try:
-            # Generate response
-            
-            
             # Decide next move
             next_node_id = await self.decide_next_move_cyclic(message)
             if next_node_id:
