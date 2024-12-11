@@ -208,7 +208,6 @@ class GraphAgent(BaseAgent):
 
     async def generate(self, message: List[dict], **kwargs) -> AsyncGenerator[Tuple[str, bool, float, bool], None]:
         logger.info(f"Generating response for message: {message}")
-        logger.info(f"Configuration:{self.config}")
         start_time = time.time()
         first_token_time = None
         buffer = ""
