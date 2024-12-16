@@ -266,6 +266,7 @@ class APIParams(BaseModel):
     method: Optional[str] = "POST"
     api_token: Optional[str] = None
     param: Optional[str] = None #Payload for the URL
+    header: Optional[str] = None
 
 
 class ToolModel(BaseModel):
