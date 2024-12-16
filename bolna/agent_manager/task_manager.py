@@ -39,6 +39,7 @@ class TaskManager(BaseManager):
         # Latency and logging 
         self.latency_dict = defaultdict(dict)
         self.kwargs = kwargs
+
         #Setup Latency part
         self.llm_latencies = []
         self.synthesizer_latencies = []
@@ -51,18 +52,14 @@ class TaskManager(BaseManager):
         self.timezone = pytz.timezone('America/Los_Angeles')
         self.language = DEFAULT_LANGUAGE_CODE
 
-        logger.info(f"API TOOLS IN TOOLS CONFIG {task['tools_config'].get('api_tools')}")
         if task['tools_config'].get('api_tools', None) is not None:
-            logger.info(f"API TOOLS is present {task['tools_config']['api_tools']}")
             self.kwargs['api_tools'] = task['tools_config']['api_tools']
 
         if task['tools_config']["llm_agent"] and task['tools_config']["llm_agent"]['llm_config'].get('assistant_id', None) is not None:
             self.kwargs['assistant_id'] = task['tools_config']["llm_agent"]['llm_config']['assistant_id']
-            logger.info(f"Assistant id for agent is {self.kwargs['assistant_id']}")
 
         if self.__is_openai_assistant():
             self.kwargs['assistant_id'] = task['tools_config']["llm_agent"]['llm_config']['assistant_id']
-            logger.info(f"Assistant id for agent is {self.kwargs['assistant_id']}")
 
         logger.info(f"doing task {task}")
         self.task_id = task_id
@@ -528,7 +525,6 @@ class TaskManager(BaseManager):
         else:
             raise "Other input handlers not supported yet"
 
-
     def __setup_transcriber(self):
         try:
             if self.task_config["tools_config"]["transcriber"] is not None:
@@ -714,7 +710,6 @@ class TaskManager(BaseManager):
                 self.prompts["system_prompt"] = enriched_prompt
 
             notes = "### Note:\n"
-            
             if self._is_conversation_task() and self.use_fillers:
                 notes += f"1.{FILLER_PROMPT}\n"
             
@@ -768,7 +763,7 @@ class TaskManager(BaseManager):
         await self.tools["synthesizer"].handle_interruption()
         await self.tools["output"].handle_interruption()
         self.sequence_ids = {-1} 
-        
+
         #Stop the output loop first so that we do not transmit anything else
         if self.output_task is not None:
             logger.info(f"Cancelling output task")
@@ -1401,7 +1396,7 @@ class TaskManager(BaseManager):
                                 self.transcriber_message += message['data']
                                 continue
 
-                            num_words += len(message['data'].split(" "))
+                            num_words += len(message['data'].strip().split(" "))
                             if self.callee_speaking is False:
                                 self.callee_speaking_start_time = time.time()
                                 self.callee_speaking = True
@@ -2029,8 +2024,6 @@ class TaskManager(BaseManager):
         try:
             # Cancel all tasks on cancellation
             tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
-            #if "synthesizer" in self.tools and self.synthesizer_task:
-            #    self.synthesizer_task.cancel()
             logger.info(f"tasks {len(tasks)}")
             for task in tasks:
                 await process_task_cancellation(task, task.get_name())
