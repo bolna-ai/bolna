@@ -1,4 +1,6 @@
 import time
+import uuid
+
 from .base_manager import BaseManager
 from .task_manager import TaskManager
 from bolna.helpers.logger_config import configure_logger
@@ -12,14 +14,14 @@ class AssistantManager(BaseManager):
     def __init__(self, agent_config, ws=None, assistant_id=None, context_data=None, conversation_history=None,
                  turn_based_conversation=None, cache=None, input_queue=None, output_queue=None, **kwargs):
         super().__init__()
+        self.run_id = str(uuid.uuid4())
+        self.assistant_id = assistant_id
         self.tools = {}
         self.websocket = ws
         self.agent_config = agent_config
         self.context_data = context_data
         self.tasks = agent_config.get('tasks', [])
         self.task_states = [False] * len(self.tasks)
-        self.assistant_id = assistant_id
-        self.run_id = f"{self.assistant_id}#{str(int(time.time() * 1000))}"
         self.turn_based_conversation = turn_based_conversation
         self.cache = cache
         self.input_queue = input_queue
