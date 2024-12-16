@@ -16,19 +16,22 @@ SUMMARIZATION_PROMPT = """
 Given this transcript from the communication between user and an agent your task is to summarize the conversation.
 """
 
-completion_json_format = {"answer": "A simple Yes or No based on if you should cut the phone or not"}
-
 CHECK_FOR_COMPLETION_PROMPT = """
-You are an helpful AI assistant that's having a conversation with customer on a phone call. 
-Based on the given transcript, should you cut the call?\n\n 
-RULES: 
-1. If user is not interested in talking, or is annoyed or is angry we might need to cut the phone. 
-2. You are also provided with original prompt use the content of original prompt to make your decision. For example if the purpose of the phone call is done and we have all the required content we need to cut the call.
+You are an AI assistant determining if a conversation is complete. A conversation is complete if:
 
-### JSON Structure
-{}
+1. The user explicitly says they want to stop (e.g., "That's all," "I'm done," "Goodbye," "thank you").
+2. The user seems satisfied, and their goal appears to be achieved.
+3. The user's goal appears achieved based on the conversation history, even without explicit confirmation.
 
-""".format(completion_json_format)
+If none of these apply, the conversation is not complete.
+
+Respond only in this JSON format:
+
+{{
+  "hangup": "Yes" or "No"
+}}
+
+"""
 
 EXTRACTION_PROMPT_GENERATION_PROMPT = """
 I've asked user to explain in English what data would they like to extract from the conversation. A user will write in points and your task is to form a JSON by converting every point into a respective key value pair.
