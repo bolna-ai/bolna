@@ -13,7 +13,7 @@ def dynamic_log_record_factory(*args, **kwargs):
     record = original_factory(*args, **kwargs)
     # Inject the entire context dictionary as a single attribute
     context = log_context_data.get()
-    record.context = ", ".join(f"{{{key}={value}}}" for key, value in context.items()) or ""
+    record.context = " ".join(f"{{{key}={value}}}" for key, value in context.items()) or ""
     return record
 
 
