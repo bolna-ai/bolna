@@ -95,6 +95,7 @@ class TaskManager(BaseManager):
         self.mark_set = set()
         self.sampling_rate = 24000
         self.conversation_ended = False
+        self.hangup_triggered = False
 
         # Prompts
         self.prompts, self.system_prompt = {}, {}
@@ -301,6 +302,7 @@ class TaskManager(BaseManager):
 
                 self.use_llm_to_determine_hangup = self.conversation_config.get("hangup_after_LLMCall", False)
                 self.check_for_completion_prompt = self.conversation_config.get("call_cancellation_prompt", None)
+                self.call_hangup_message = self.conversation_config.get("call_hangup_message", "Call will now disconnect")
                 self.check_for_completion_llm = os.getenv("CHECK_FOR_COMPLETION_LLM")
                 self.time_since_last_spoken_human_word = 0
 
@@ -799,7 +801,7 @@ class TaskManager(BaseManager):
             meta_info = self.tools["transcriber"].get_meta_info()
             logger.info(f"Metainfo {meta_info}")
         meta_info_copy = meta_info.copy()
-        self.curr_sequence_id +=1
+        self.curr_sequence_id += 1
         meta_info_copy["sequence_id"] = self.curr_sequence_id
         meta_info_copy['turn_id'] = self.turn_id
         self.sequence_ids.add(meta_info_copy["sequence_id"])
@@ -885,7 +887,7 @@ class TaskManager(BaseManager):
         if "transcriber" in self.tools and not self.turn_based_conversation:
             logger.info("Stopping transcriber")
             await self.tools["transcriber"].toggle_connection()
-            await asyncio.sleep(5)  # Making sure whatever message was passed is over
+            await asyncio.sleep(2)  # Making sure whatever message was passed is over
 
     def __update_preprocessed_tree_node(self):
         logger.info(f"It's a preprocessed flow and hence updating current node")
@@ -1076,7 +1078,6 @@ class TaskManager(BaseManager):
                     #Nothing was spoken
                     self.interim_history[-1]['content'] += llm_response
                 else:
-
                     logger.info(f"There was a conversation between function call and this and changing relevant history point")
                     #There was a conversation
                     messages = copy.deepcopy(self.interim_history)
@@ -1233,7 +1234,11 @@ class TaskManager(BaseManager):
                     convert_to_request_log(message=completion_res, meta_info= meta_info, component="llm_hangup", direction="response", model= self.check_for_completion_llm, run_id= self.run_id)
 
                     if should_hangup:
-                        await self.__process_end_of_conversation()
+                        meta_info = {'io': self.tools["output"].get_provider(), "request_id": str(uuid.uuid4()),
+                                     "cached": False, "sequence_id": -1, 'format': 'pcm'}
+                        self.hangup_triggered = True
+                        meta_info['hangup_triggered'] = True
+                        await self._synthesize(create_ws_data_packet(self.call_hangup_message, meta_info=meta_info))
                         return
 
             self.llm_processed_request_ids.add(self.current_request_id)
@@ -1362,10 +1367,7 @@ class TaskManager(BaseManager):
                             logger.info(f"Output task was none and hence starting it")
                             self.output_task = asyncio.create_task(self.__process_output_loop())
 
-                        if self._is_preprocessed_flow():
-                            self.__update_preprocessed_tree_node()
-
-                        logger.info(f"INTERIM TRANSCRIPT WHEN EVERYTING IS OVER {self.interim_history}")
+                        logger.info(f"INTERIM TRANSCRIPT WHEN EVERYTHING IS OVER {self.interim_history}")
                         if self.llm_response_generated:
                             logger.info(f"LLM RESPONSE WAS GENERATED AND HENCE MOVING INTERIM HISTORY TO HISTORY")
                             self.history = copy.deepcopy(self.interim_history)
@@ -1476,7 +1478,7 @@ class TaskManager(BaseManager):
     # Synthesizer task
     #################################################################
     def __enqueue_chunk(self, chunk, i, number_of_chunks, meta_info):
-        logger.info(f"Meta_info of chunk {meta_info} {i} {number_of_chunks}")
+        #logger.info(f"Meta_info of chunk {meta_info} {i} {number_of_chunks}")
         meta_info['chunk_id'] = i
         copied_meta_info = copy.deepcopy(meta_info)
         if i == 0 and "is_first_chunk" in meta_info and meta_info["is_first_chunk"]:
@@ -1669,6 +1671,7 @@ class TaskManager(BaseManager):
     # Output handling
     ############################################################
 
+
     async def __send_first_message(self, message):
         meta_info = self.__get_updated_meta_info()
         sequence = meta_info["sequence"]
@@ -1680,11 +1683,11 @@ class TaskManager(BaseManager):
         while True:
             logger.info(f"Checking for initial silence {duration}")
             #logger.info(f"Woke up from my slumber {self.callee_silent}, {self.history}, {self.interim_history}")
-            if self.first_message_passed and self.callee_silent and len(self.history) == 1 and len(self.interim_history) == 1 and time.time() - self.first_message_passing_time > duration:
+            if self.first_message_passed and self.callee_silent and len(self.history) == 2 and len(self.interim_history) == 2 and time.time() - self.first_message_passing_time > duration:
                 logger.info(f"Callee was silent and hence speaking Hello on callee's behalf")
                 await self.__send_first_message("Hello")
                 break
-            elif len(self.history) > 1:
+            elif len(self.history) > 2:
                 break
             await asyncio.sleep(3)
         self.background_check_task = None
@@ -1767,7 +1770,11 @@ class TaskManager(BaseManager):
 
                 if "is_final_chunk_of_entire_response" in message['meta_info'] and message['meta_info']['is_final_chunk_of_entire_response']:
                     self.started_transmitting_audio = False
-                    logger.info("##### End of synthesizer stream and ")
+                    logger.info("##### End of synthesizer stream")
+
+                    if "hangup_triggered" in message['meta_info'] and message['meta_info']['hangup_triggered']:
+                        await self.__process_end_of_conversation()
+                        break
 
                     #If we're sending the message to check if user is still here, don't set asked_if_user_is_still_there to True
                     if message['meta_info'].get('text', '') != self.check_user_online_message:
@@ -1810,10 +1817,18 @@ class TaskManager(BaseManager):
                 logger.info(f"Last transmitted timestamp is simply 0 and hence continuing")
                 continue
 
+            if self.hangup_triggered:
+                logger.info(f"Call is going to hangup")
+                break
+
             time_since_last_spoken_ai_word = (time.time() - self.last_transmitted_timestamp)
             if time_since_last_spoken_ai_word > self.hang_conversation_after and self.time_since_last_spoken_human_word < self.last_transmitted_timestamp:
                 logger.info(f"{time_since_last_spoken_ai_word} seconds since last spoken time stamp and hence cutting the phone call and last transmitted timestampt ws {self.last_transmitted_timestamp} and time since last spoken human word {self.time_since_last_spoken_human_word}")
-                await self.__process_end_of_conversation()
+                meta_info={'io': self.tools["output"].get_provider(), "request_id": str(uuid.uuid4()), "cached": False, "sequence_id": -1, 'format': 'pcm'}
+                self.hangup_triggered = True
+                meta_info['hangup_triggered'] = True
+                await self._synthesize(create_ws_data_packet(self.call_hangup_message, meta_info=meta_info))
+                #await self.__process_end_of_conversation()
                 break
 
             elif time_since_last_spoken_ai_word > self.trigger_user_online_message_after and not self.asked_if_user_is_still_there and self.time_since_last_spoken_human_word < self.last_transmitted_timestamp:

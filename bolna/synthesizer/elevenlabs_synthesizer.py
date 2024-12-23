@@ -44,6 +44,7 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
         self.websocket_holder = {"websocket": None}
         self.sender_task = None
         self.conversation_ended = False
+        self.current_text = ""
 
     # Ensuring we only do wav output for now
     def get_format(self, format, sampling_rate):
@@ -103,12 +104,25 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
                 response = await self.websocket_holder["websocket"].recv()
                 data = json.loads(response)
                 logger.info("response for isFinal: {}".format(data.get('isFinal', False)))
+
                 if "audio" in data and data["audio"]:
                     chunk = base64.b64decode(data["audio"])
                     yield chunk
 
                     if "isFinal" in data and data["isFinal"]:
                         yield b'\x00'
+
+                    elif self.last_text_sent:
+                        try:
+                            response_chars = data.get('alignment', {}).get('chars', [])
+                            response_text = ''.join(response_chars)
+                            last_four_words_text = ' '.join(response_text.split(" ")[-4:]).strip()
+                            if self.current_text.strip().endswith(last_four_words_text):
+                                logger.info('send end_of_synthesizer_stream')
+                                yield b'\x00'
+                        except Exception as e:
+                            pass
+
                 else:
                     logger.info("No audio data in the response")
 
@@ -187,7 +201,7 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
                     if message == b'\x00':
                         logger.info("received null byte and hence end of stream")
                         self.meta_info["end_of_synthesizer_stream"] = True
-                        yield create_ws_data_packet(resample(message, int(self.sampling_rate)), self.meta_info)
+                        yield create_ws_data_packet(audio, self.meta_info)
                         self.first_chunk_generated = False
 
             else:
@@ -270,7 +284,7 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
     async def push(self, message):
         logger.info(f"Pushed message to internal queue {message}")
         if self.stream:
-            meta_info, text = message.get("meta_info"), message.get("data")
+            meta_info, text, self.current_text = message.get("meta_info"), message.get("data"), message.get("data")
             self.synthesized_characters += len(text) if text is not None else 0
             end_of_llm_stream = "end_of_llm_stream" in meta_info and meta_info["end_of_llm_stream"]
             logger.info(f"end_of_llm_stream: {end_of_llm_stream}")
