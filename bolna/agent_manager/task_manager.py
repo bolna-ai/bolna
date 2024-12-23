@@ -302,7 +302,7 @@ class TaskManager(BaseManager):
 
                 self.use_llm_to_determine_hangup = self.conversation_config.get("hangup_after_LLMCall", False)
                 self.check_for_completion_prompt = self.conversation_config.get("call_cancellation_prompt", None)
-                self.call_hangup_message = self.conversation_config.get("call_hangup_message", "Call will now disconnect")
+                self.call_hangup_message = self.conversation_config.get("call_hangup_message", None)
                 self.check_for_completion_llm = os.getenv("CHECK_FOR_COMPLETION_LLM")
                 self.time_since_last_spoken_human_word = 0
 
@@ -1234,15 +1234,21 @@ class TaskManager(BaseManager):
                     convert_to_request_log(message=completion_res, meta_info= meta_info, component="llm_hangup", direction="response", model= self.check_for_completion_llm, run_id= self.run_id)
 
                     if should_hangup:
-                        meta_info = {'io': self.tools["output"].get_provider(), "request_id": str(uuid.uuid4()),
-                                     "cached": False, "sequence_id": -1, 'format': 'pcm'}
-                        self.hangup_triggered = True
-                        meta_info['hangup_triggered'] = True
-                        await self._synthesize(create_ws_data_packet(self.call_hangup_message, meta_info=meta_info))
-                        return
+                        await self.process_call_hangup()
 
             self.llm_processed_request_ids.add(self.current_request_id)
             llm_response = ""
+
+    async def process_call_hangup(self):
+        if not self.call_hangup_message:
+            await self.__process_end_of_conversation()
+        else:
+            meta_info = {'io': self.tools["output"].get_provider(), "request_id": str(uuid.uuid4()),
+                         "cached": False, "sequence_id": -1, 'format': 'pcm'}
+            self.hangup_triggered = True
+            meta_info['hangup_triggered'] = True
+            await self._synthesize(create_ws_data_packet(self.call_hangup_message, meta_info=meta_info))
+        return
 
     async def _listen_llm_input_queue(self):
         logger.info(
@@ -1824,10 +1830,7 @@ class TaskManager(BaseManager):
             time_since_last_spoken_ai_word = (time.time() - self.last_transmitted_timestamp)
             if time_since_last_spoken_ai_word > self.hang_conversation_after and self.time_since_last_spoken_human_word < self.last_transmitted_timestamp:
                 logger.info(f"{time_since_last_spoken_ai_word} seconds since last spoken time stamp and hence cutting the phone call and last transmitted timestampt ws {self.last_transmitted_timestamp} and time since last spoken human word {self.time_since_last_spoken_human_word}")
-                meta_info={'io': self.tools["output"].get_provider(), "request_id": str(uuid.uuid4()), "cached": False, "sequence_id": -1, 'format': 'pcm'}
-                self.hangup_triggered = True
-                meta_info['hangup_triggered'] = True
-                await self._synthesize(create_ws_data_packet(self.call_hangup_message, meta_info=meta_info))
+                await self.process_call_hangup()
                 #await self.__process_end_of_conversation()
                 break
 
