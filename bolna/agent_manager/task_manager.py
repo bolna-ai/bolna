@@ -301,7 +301,18 @@ class TaskManager(BaseManager):
                 self.let_remaining_audio_pass_through = False #Will be used to let remaining audio pass through in case of utterenceEnd event and there's still audio left to be sent
 
                 self.use_llm_to_determine_hangup = self.conversation_config.get("hangup_after_LLMCall", False)
-                self.check_for_completion_prompt = self.conversation_config.get("call_cancellation_prompt", None)
+                self.check_for_completion_prompt = None
+                if self.use_llm_to_determine_hangup:
+                    self.check_for_completion_prompt = self.conversation_config.get("call_cancellation_prompt", None)
+                    if not self.check_for_completion_prompt:
+                        self.check_for_completion_prompt = CHECK_FOR_COMPLETION_PROMPT
+                    self.check_for_completion_prompt += """
+                        Respond only in this JSON format:
+                            {{
+                              "hangup": "Yes" or "No"
+                            }}
+                    """
+
                 self.call_hangup_message = self.conversation_config.get("call_hangup_message", None)
                 self.check_for_completion_llm = os.getenv("CHECK_FOR_COMPLETION_LLM")
                 self.time_since_last_spoken_human_word = 0
