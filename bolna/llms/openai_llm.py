@@ -97,7 +97,7 @@ class OpenAiLLM(BaseLLM):
 
                 if not self.gave_out_prefunction_call_message and not textual_response:
                     filler = PRE_FUNCTION_CALL_MESSAGE if not called_fun.startswith("transfer_call") else TRANSFERING_CALL_FILLER.get(self.language, DEFAULT_LANGUAGE_CODE)
-                    yield filler , True, latency, False
+                    yield filler, True, latency, False
                     self.gave_out_prefunction_call_message = True
 
                 if len(buffer) > 0:

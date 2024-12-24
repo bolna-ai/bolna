@@ -13,7 +13,7 @@ def dynamic_log_record_factory(*args, **kwargs):
     record = original_factory(*args, **kwargs)
     # Inject the entire context dictionary as a single attribute
     context = log_context_data.get()
-    record.context = ", ".join(f"{key}={value}" for key, value in context.items()) or "N/A"
+    record.context = " ".join(f"{{{key}={value}}}" for key, value in context.items()) or ""
     return record
 
 
@@ -26,7 +26,7 @@ def configure_logger(file_name, logging_level='INFO'):
 
     logging.basicConfig(
         level=logging_level,
-        format="%(asctime)s.%(msecs)03d %(levelname)s [%(context)s] {%(module)s} [%(funcName)s] %(message)s",
+        format="%(asctime)s.%(msecs)03d %(levelname)s %(context)s {%(module)s} [%(funcName)s] %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
 

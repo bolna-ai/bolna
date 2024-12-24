@@ -42,8 +42,8 @@ class TelephonyInputHandler(DefaultInputHandler):
         asyncio.create_task(self.disconnect_stream())
         logger.info("stopping handler")
         self.running = False
-        logger.info("sleeping for 5 seconds so that whatever needs to pass is passed")
-        await asyncio.sleep(5)
+        logger.info("sleeping for 2 seconds so that whatever needs to pass is passed")
+        await asyncio.sleep(2)
         try:
             await self.websocket.close()
             logger.info("WebSocket connection closed")

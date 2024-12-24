@@ -226,7 +226,6 @@ class DeepgramTranscriber(BaseTranscriber):
                     logger.info(
                         f"Connecton start time {self.connection_start_time} {self.num_frames} and {self.audio_frame_duration}")
 
-                logger.info(f"###### ######### ############# Message from the transcriber {msg}")
                 if msg['type'] == "Metadata":
                     logger.info(f"Got a summary object {msg}")
                     self.meta_info["transcriber_duration"] = msg["duration"]
