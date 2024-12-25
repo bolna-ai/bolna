@@ -244,6 +244,7 @@ class TaskManager(BaseManager):
 
             self.background_check_task = None
             self.hangup_task = None
+            self.transcriber_task = None
             self.output_chunk_size = 16384 if self.sampling_rate == 24000 else 4096 #0.5 second chunk size for calls
             # For nitro
             self.nitro = True
@@ -1427,7 +1428,7 @@ class TaskManager(BaseManager):
                             #Currently simply cancel the next task
 
                             if not self.first_message_passed:
-                                logger.info(f"Adding to transcrber message")
+                                logger.info(f"Adding to transcriber message")
                                 self.transcriber_message += message['data']
                                 continue
 
@@ -1707,7 +1708,6 @@ class TaskManager(BaseManager):
     # Output handling
     ############################################################
 
-
     async def __send_first_message(self, message):
         meta_info = self.__get_updated_meta_info()
         sequence = meta_info["sequence"]
@@ -1965,7 +1965,7 @@ class TaskManager(BaseManager):
                 logger.info("starting task_id {}".format(self.task_id))
                 tasks = [asyncio.create_task(self.tools['input'].handle())]
                 if not self.turn_based_conversation:
-                    self.background_check_task = asyncio.create_task(self.__handle_initial_silence(duration=15))
+                    self.background_check_task = asyncio.create_task(self.__handle_initial_silence(duration=10))
                 if "transcriber" in self.tools:
                     tasks.append(asyncio.create_task(self._listen_transcriber()))
                     self.transcriber_task = asyncio.create_task(self.tools["transcriber"].run())
