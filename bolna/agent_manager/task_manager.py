@@ -315,6 +315,8 @@ class TaskManager(BaseManager):
                     """
 
                 self.call_hangup_message = self.conversation_config.get("call_hangup_message", None)
+                if self.call_hangup_message and self.context_data:
+                    self.call_hangup_message = update_prompt_with_context(self.call_hangup_message, self.context_data)
                 self.check_for_completion_llm = os.getenv("CHECK_FOR_COMPLETION_LLM")
                 self.time_since_last_spoken_human_word = 0
 
