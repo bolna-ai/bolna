@@ -1933,7 +1933,7 @@ class TaskManager(BaseManager):
                     break
 
         except Exception as e:
-            logger.error(f"Error happeneed {e}")
+            logger.error(f"Exception in __first_message {str(e)}")
 
     async def __start_transmitting_ambient_noise(self):
         try:
