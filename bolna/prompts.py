@@ -25,12 +25,6 @@ You are an AI assistant determining if a conversation is complete. A conversatio
 
 If none of these apply, the conversation is not complete.
 
-Respond only in this JSON format:
-
-{{
-  "hangup": "Yes" or "No"
-}}
-
 """
 
 EXTRACTION_PROMPT_GENERATION_PROMPT = """

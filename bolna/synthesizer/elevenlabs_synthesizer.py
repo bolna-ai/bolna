@@ -188,10 +188,11 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
                         audio = resample(convert_audio_to_wav(message, source_format="mp3"), int(self.sampling_rate),
                                          format="wav")
 
-                    yield create_ws_data_packet(audio, self.meta_info)
                     if not self.first_chunk_generated:
                         self.meta_info["is_first_chunk"] = True
                         self.first_chunk_generated = True
+                    else:
+                        self.meta_info["is_first_chunk"] = False
 
                     if self.last_text_sent:
                         # Reset the last_text_sent and first_chunk converted to reset synth latency
@@ -201,9 +202,9 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
                     if message == b'\x00':
                         logger.info("received null byte and hence end of stream")
                         self.meta_info["end_of_synthesizer_stream"] = True
-                        yield create_ws_data_packet(audio, self.meta_info)
                         self.first_chunk_generated = False
 
+                    yield create_ws_data_packet(audio, self.meta_info)
             else:
                 while True:
                     message = await self.internal_queue.get()
