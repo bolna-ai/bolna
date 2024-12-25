@@ -1372,8 +1372,6 @@ class TaskManager(BaseManager):
             while True:
                 message = await self.transcriber_output_queue.get()
                 logger.info(f"##### Message from the transcriber class {message}")
-                if self.hangup_triggered:
-                    continue
 
                 if message['meta_info'] is not None and message['meta_info'].get('transcriber_latency', False):
                     self.transcriber_latencies.append(message['meta_info']['transcriber_latency'])
@@ -1384,6 +1382,9 @@ class TaskManager(BaseManager):
                     self.transcriber_duration += message['meta_info']["transcriber_duration"] if message['meta_info'] is not None else 0
                     logger.info("transcriber connection closed")
                     break
+
+                if self.hangup_triggered:
+                    continue
 
                 if self.stream:
                     self._set_call_details(message)
