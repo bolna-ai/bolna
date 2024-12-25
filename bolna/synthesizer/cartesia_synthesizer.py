@@ -77,13 +77,15 @@ class CartesiaSynthesizer(BaseSynthesizer):
                 "mode": "id",
                 "id": self.voice_id
             },
-            "continue": True,
             "output_format": {
                 "container": "raw",
                 "encoding": "pcm_mulaw",
                 "sample_rate": 8000
             }
         }
+
+        if text:
+            payload["continue"] = True
 
         return payload
 
@@ -251,7 +253,6 @@ class CartesiaSynthesizer(BaseSynthesizer):
     def update_context(self, meta_info):
         self.context_id = str(uuid.uuid4())
         self.turn_id = meta_info.get('turn_id', 0)
-        self.sequence_id = meta_info.get('sequence_id', 0)
 
     async def push(self, message):
         logger.info(f"Pushed message to internal queue {message}")
@@ -263,9 +264,8 @@ class CartesiaSynthesizer(BaseSynthesizer):
             meta_info["text"] = text
             if not self.context_id:
                 self.update_context(meta_info)
-            else:
-                if self.turn_id != meta_info.get('turn_id', 0) or self.sequence_id != meta_info.get('sequence_id', 0):
-                    self.update_context(meta_info)
+            elif self.turn_id != meta_info.get('turn_id', 0):
+                self.update_context(meta_info)
 
             self.sender_task = asyncio.create_task(self.sender(text, end_of_llm_stream))
             self.text_queue.append(meta_info)
