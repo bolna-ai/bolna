@@ -246,7 +246,10 @@ def format_messages(messages, use_system_prompt=False):
         content = message['content']
 
         if use_system_prompt and role == 'system':
-            formatted_string += "system: " + content + "\n"
+            try:
+                formatted_string += "system: " + content + "\n"
+            except Exception as e:
+                a = 1
         if role == 'assistant':
             formatted_string += "assistant: " + content + "\n"
         elif role == 'user':
