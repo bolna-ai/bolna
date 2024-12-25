@@ -20,6 +20,16 @@ class StreamingContextualAgent(BaseAgent):
 
     async def check_for_completion(self, messages, check_for_completion_prompt):
         try:
+            if check_for_completion_prompt:
+                check_for_completion_prompt += """
+                    Respond only in this JSON format:
+                        {{
+                          "hangup": "Yes" or "No"
+                        }}
+                """
+            else:
+                check_for_completion_prompt = CHECK_FOR_COMPLETION_PROMPT
+
             prompt = [
                 {'role': 'system', 'content': check_for_completion_prompt},
                 {'role': 'user', 'content': format_messages(messages)}

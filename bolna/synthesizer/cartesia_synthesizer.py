@@ -77,15 +77,13 @@ class CartesiaSynthesizer(BaseSynthesizer):
                 "mode": "id",
                 "id": self.voice_id
             },
+            "continue": True,
             "output_format": {
                 "container": "raw",
                 "encoding": "pcm_mulaw",
                 "sample_rate": 8000
             }
         }
-
-        if text:
-            payload["continue"] = True
 
         return payload
 
@@ -136,6 +134,7 @@ class CartesiaSynthesizer(BaseSynthesizer):
 
                 response = await self.websocket_holder["websocket"].recv()
                 data = json.loads(response)
+                logger.info('got response as: {}'.format(data))
 
                 # ignore all future generations of audio
                 if data.get('context_id', None) in self.context_ids_to_ignore:
@@ -210,11 +209,10 @@ class CartesiaSynthesizer(BaseSynthesizer):
                     audio = resample(convert_audio_to_wav(message, source_format="mp3"), int(self.sampling_rate),
                                      format="wav")
 
+                yield create_ws_data_packet(audio, self.meta_info)
                 if not self.first_chunk_generated:
                     self.meta_info["is_first_chunk"] = True
                     self.first_chunk_generated = True
-                else:
-                    self.meta_info["is_first_chunk"] = False
 
                 if self.last_text_sent:
                     # Reset the last_text_sent and first_chunk converted to reset synth latency
@@ -224,9 +222,8 @@ class CartesiaSynthesizer(BaseSynthesizer):
                 if message == b'\x00':
                     logger.info("received null byte and hence end of stream")
                     self.meta_info["end_of_synthesizer_stream"] = True
+                    #yield create_ws_data_packet(resample(message, int(self.sampling_rate)), self.meta_info)
                     self.first_chunk_generated = False
-
-                yield create_ws_data_packet(audio, self.meta_info)
 
         except Exception as e:
             traceback.print_exc()

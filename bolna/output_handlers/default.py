@@ -13,8 +13,6 @@ class DefaultOutputHandler:
         self.queue = queue
         self.io_provider = io_provider
         self.is_chunking_supported = True
-        self.is_last_hangup_chunk_sent = False
-        self.is_welcome_message_sent = False
 
     # @TODO Figure out the best way to handle this
     async def handle_interruption(self):
@@ -27,12 +25,6 @@ class DefaultOutputHandler:
 
     def get_provider(self):
         return self.io_provider
-
-    def hangup_sent(self):
-        return self.is_last_hangup_chunk_sent
-
-    def welcome_message_sent(self):
-        return self.is_welcome_message_sent
 
     async def handle(self, packet):
         try:
