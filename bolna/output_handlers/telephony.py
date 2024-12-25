@@ -35,7 +35,14 @@ class TelephonyOutputHandler(DefaultOutputHandler):
             meta_info = ws_data_packet.get('meta_info')
             if self.stream_sid is None:
                 self.stream_sid = meta_info.get('stream_sid', None)
-            logger.info(f"Sending Message {self.current_request_id} and {self.stream_sid} and  {meta_info}")
+
+            logger.info(f"Sending Message {self.current_request_id} and {self.stream_sid} and {meta_info}")
+            if meta_info.get('message_category', '') == 'agent_hangup' and meta_info.get('is_final_chunk_of_entire_response', True):
+                self.is_last_hangup_chunk_sent = True
+
+            if meta_info.get('message_category', '') == 'agent_welcome_message' and meta_info.get('is_final_chunk_of_entire_response', True):
+                self.is_welcome_message_sent = True
+
             try:
                 if self.current_request_id == meta_info['request_id']:
                     if len(audio_chunk) == 1:
