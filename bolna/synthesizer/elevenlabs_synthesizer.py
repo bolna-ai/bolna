@@ -27,7 +27,7 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
         self.stream = True  # Issue with elevenlabs streaming that we need to always send the text quickly
         self.sampling_rate = sampling_rate
         self.audio_format = "mp3"
-        self.use_mulaw = kwargs.get("use_mulaw", False)
+        self.use_mulaw = kwargs.get("use_mulaw", True)
         self.ws_url = f"wss://api.elevenlabs.io/v1/text-to-speech/{self.voice}/stream-input?model_id={self.model}&output_format=ulaw_8000&inactivity_timeout=60"
         self.api_url = f"https://api.elevenlabs.io/v1/text-to-speech/{self.voice}?optimize_streaming_latency=2&output_format="
         self.first_chunk_generated = False

@@ -671,7 +671,7 @@ class TaskManager(BaseManager):
             return
 
         agent_type = self.task_config["tools_config"]["llm_agent"].get("agent_type", "simple_llm_agent")
-        if agent_type in ["openai_assistant", "knowledgebase_agent", "graph_agent"]:
+        if agent_type in ["openai_assistant", "knowledgebase_agent"]:
             return
 
         self.is_local = local
