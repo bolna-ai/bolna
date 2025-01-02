@@ -671,7 +671,7 @@ class TaskManager(BaseManager):
             return
 
         agent_type = self.task_config["tools_config"]["llm_agent"].get("agent_type", "simple_llm_agent")
-        if agent_type in ["openai_assistant", "knowledgebase_agent", "graph_agent"]:
+        if agent_type in ["openai_assistant", "knowledgebase_agent"]:
             return
 
         self.is_local = local
@@ -907,6 +907,9 @@ class TaskManager(BaseManager):
             except Exception as e:
                 logger.error(f"Error while checking queue: {e}", exc_info=True)
                 break
+
+        if self.hangup_triggered and self.history[-1]['role'] == 'assistant':
+            self.history[-1]['content'] = self.call_hangup_message
 
         self.conversation_ended = True
         self.ended_by_assistant = True
