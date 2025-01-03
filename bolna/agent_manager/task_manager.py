@@ -263,14 +263,13 @@ class TaskManager(BaseManager):
 
             if self.routes:
                 start_time = time.time()
-                routes_meta = self.kwargs.get('routes', None)
                 if self.__is_multiagent():
                     routes_meta = self.kwargs.get('routes', None)
                     routes_meta = routes_meta['routes']
                 else:
                     routes_meta = self.kwargs.get('routes', None)
 
-                if self.kwargs['routes']:
+                if routes_meta:
                     self.vector_caches = routes_meta["vector_caches"]
                     self.route_responses_dict = routes_meta["route_responses_dict"]
                     self.route_layer = routes_meta["route_layer"]
@@ -1239,7 +1238,7 @@ class TaskManager(BaseManager):
                 cache_response = self.route_responses_dict[route]
 
             logger.info(f"Cached response {cache_response}")
-            meta_info['cached'] = True
+            meta_info['cached'] = False
             meta_info["end_of_llm_stream"] = True
 
             await self._handle_llm_output(next_step, cache_response, should_bypass_synth, meta_info)
