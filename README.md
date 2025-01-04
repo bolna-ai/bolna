@@ -6,7 +6,7 @@
 
 <h4 align="center">
   <a href="https://discord.gg/59kQWGgnm8">Discord</a> |
-  <a href="https://docs.bolna.dev">Docs</a> |
+  <a href="https://docs.bolna.dev">Hosted Docs</a> |
   <a href="https://bolna.dev">Website</a>
 </h4>
 
@@ -46,14 +46,14 @@ Bolna helps you create AI Voice Agents which can be instructed to do tasks begin
 
 
 ## Development philosophy
-1. Any integration, enhancement or feature initially lands on this open source package since it form the backbone of our APIs and dashboard
+1. Any integration, enhancement or feature initially lands on this open source package since it forms the backbone of our Hosted APIs and dashboard
 2. Post that we expose APIs or make changes to existing APIs as required for the same
 3. Thirdly, we push it to the UI dashboard
 
 ```mermaid
 graph LR;
     A[Bolna open source] -->B[Hosted APIs];
-    B[Hosted APIs] --> C[Playground]
+    B[Hosted APIs] --> C[Hosted Playground]
 ```
 
 ## Supported providers and models
@@ -86,7 +86,7 @@ Once the docker containers are up, you can now start to create your agents and i
 
 
 ## Example agents to create, use and start making calls
-Go to the [Bolna wiki](https://github.com/bolna-ai/bolna/wiki) to try out sample agents.
+You may try out different agents from [example.bolna.dev](https://examples.bolna.dev).
 
 
 ## Using your own providers
