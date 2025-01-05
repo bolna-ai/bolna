@@ -510,10 +510,12 @@ class TaskManager(BaseManager):
     def __setup_input_handlers(self, turn_based_conversation, input_queue, should_record):
         if self.task_config["tools_config"]["input"]["provider"] in SUPPORTED_INPUT_HANDLERS.keys():
             logger.info(f"Connected through dashboard {turn_based_conversation}")
-            input_kwargs = {"queues": self.queues,
-                            "websocket": self.websocket,
-                            "input_types": get_required_input_types(self.task_config),
-                            "mark_set": self.mark_set}
+            input_kwargs = {
+                "queues": self.queues,
+                "websocket": self.websocket,
+                "input_types": get_required_input_types(self.task_config),
+                "mark_set": self.mark_set
+            }
 
             if self.task_config["tools_config"]["input"]["provider"] == "daily":
                 input_kwargs['room_url'] = self.room_url
@@ -928,7 +930,6 @@ class TaskManager(BaseManager):
     # LLM task
     ##############################################################
     async def _handle_llm_output(self, next_step, text_chunk, should_bypass_synth, meta_info, is_filler = False):
-
         logger.info("received text from LLM for output processing: {} which belongs to sequence id {}".format(text_chunk, meta_info['sequence_id']))
         if "request_id" not in meta_info:
             meta_info["request_id"] = str(uuid.uuid4())
@@ -1192,7 +1193,7 @@ class TaskManager(BaseManager):
         logger.info("agent flow is not preprocessed")
 
         start_time = time.time()
-        should_bypass_synth = 'bypass_synth' in meta_info and meta_info['bypass_synth'] == True
+        should_bypass_synth = 'bypass_synth' in meta_info and meta_info['bypass_synth'] is True
         next_step = self._get_next_step(sequence, "llm")
         meta_info['llm_start_time'] = time.time()
         route = None
@@ -1926,7 +1927,15 @@ class TaskManager(BaseManager):
                         text = self.kwargs.get('agent_welcome_message', None)
                         logger.info(f"Generating {text}")
                         meta_info = {'io': self.tools["output"].get_provider(), 'message_category': 'agent_welcome_message', 'stream_sid': stream_sid, "request_id": str(uuid.uuid4()), "cached": True, "sequence_id": -1, 'format': self.task_config["tools_config"]["output"]["format"], 'text': text}
-                        await self._synthesize(create_ws_data_packet(text, meta_info=meta_info))
+                        if self.turn_based_conversation:
+                            meta_info['type'] = 'text'
+                            bos_packet = create_ws_data_packet("<beginning_of_stream>", meta_info)
+                            await self.tools["output"].handle(bos_packet)
+                            await self.tools["output"].handle(create_ws_data_packet(text, meta_info))
+                            eos_packet = create_ws_data_packet("<end_of_stream>", meta_info)
+                            await self.tools["output"].handle(eos_packet)
+                        else:
+                            await self._synthesize(create_ws_data_packet(text, meta_info=meta_info))
                         break
                     else:
                         logger.info(f"Stream id is still None, so not passing it")
@@ -1990,12 +1999,9 @@ class TaskManager(BaseManager):
 
                 logger.info(f"Starting the first message task {self.enforce_streaming}")
                 self.output_task = asyncio.create_task(self.__process_output_loop())
+                self.first_message_task = asyncio.create_task(self.__first_message())
                 if not self.turn_based_conversation or self.enforce_streaming:
                     logger.info(f"Setting up other servers")
-                    self.first_message_task = asyncio.create_task(self.__first_message())
-                    #if not self.use_llm_to_determine_hangup :
-                    # By default we will hang up after x amount of silence
-                    # We still need to
                     self.hangup_task = asyncio.create_task(self.__check_for_completion())
 
                     if self.should_backchannel:
