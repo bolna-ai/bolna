@@ -132,6 +132,22 @@ async def edit_agent(agent_id: str, agent_data: CreateAgentPayload = Body(...)):
         logger.error(f"Error updating agent {agent_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Internal server error")
 
+@app.delete("/agent/{agent_id}")
+async def delete_agent(agent_id: str):
+    """Deletes an agent by ID."""
+    try:
+        agent_exists = await redis_client.exists(agent_id)
+        if not agent_exists:
+            raise HTTPException(status_code=404, detail="Agent not found")
+            
+        await redis_client.delete(agent_id)
+        return {"agent_id": agent_id, "state": "deleted"}
+
+    except Exception as e:
+        logger.error(f"Error deleting agent {agent_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
 @app.get("/all")
 async def get_all_agents():
     """Fetches all agents stored in Redis."""
