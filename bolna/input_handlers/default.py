@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import time
+import uuid
 from dotenv import load_dotenv
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.utils import create_ws_data_packet
@@ -27,6 +28,9 @@ class DefaultInputHandler:
                 await self.websocket.close()
         except Exception as e:
             logger.error(f"Error closing WebSocket: {e}")
+
+    def get_stream_sid(self):
+        return str(uuid.uuid4())
 
     def __process_audio(self, audio):
         data = base64.b64decode(audio)

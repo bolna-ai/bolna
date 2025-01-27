@@ -11,6 +11,7 @@ RUN apt-get update && apt-get -y upgrade && apt-get install -y --no-install-reco
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install git+https://github.com/bolna-ai/bolna@master
 COPY quickstart_server.py /app/
+COPY presets /app/presets
 
 EXPOSE 5001
 
