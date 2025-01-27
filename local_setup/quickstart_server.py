@@ -164,7 +164,6 @@ async def get_all_agents():
                 agents_data.append(data)
             except Exception as e:
                 logger.error(f"An error occurred with key {key}: {e}")
-                agents_data.append(None)
 
 
         agents = [{ "agent_id": key, "data": json.loads(data) } for key, data in zip(agent_keys, agents_data) if data]
