@@ -42,6 +42,7 @@ SUPPORTED_LLM_PROVIDERS = {
     'ola': OpenAiLLM,
     'groq': LiteLLM,
     'anthropic': LiteLLM,
+    'deepseek': LiteLLM,
     'azure': LiteLLM #Backwards compatibility
 }
 SUPPORTED_INPUT_HANDLERS = {
