@@ -58,7 +58,7 @@ class DeepgramSynthesizer(BaseSynthesizer):
                             logger.info(f"status for deepgram request {response.status} response {len(await response.read())}")
                             return chunk
                         else:
-                            logger.info(f"status for deepgram reques {response.status} response {len(await response.read())}")
+                            logger.info(f"status for deepgram reques {response.status} response {await response.read()}")
                             return b'\x00'
                 else:
                     logger.info("Payload was null")

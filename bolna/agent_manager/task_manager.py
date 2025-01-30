@@ -1695,7 +1695,9 @@ class TaskManager(BaseManager):
                     # logger.info(f"After adding into sequence id {self.sequence_ids}")
                     convert_to_request_log(message = text, meta_info= meta_info, component="synthesizer", direction="request", model = self.synthesizer_provider, engine=self.tools['synthesizer'].get_engine(), run_id= self.run_id)
                     logger.info('##### sending text to {} for generation: {} '.format(self.synthesizer_provider, text))
-                    if 'cached' in message['meta_info'] and meta_info['cached'] is True:
+                    # if 'cached' in message['meta_info'] and meta_info['cached'] is True:
+                    # did this since local does not have preprocessed audio as of now
+                    if False:
                         logger.info(f"Cached response and hence sending preprocessed text")
                         convert_to_request_log(message = text, meta_info= meta_info, component="synthesizer", direction="response", model = self.synthesizer_provider, is_cached= True, engine=self.tools['synthesizer'].get_engine(), run_id= self.run_id)
                         await self.__send_preprocessed_audio(meta_info, get_md5_hash(text))
@@ -1928,7 +1930,8 @@ class TaskManager(BaseManager):
                         text = self.kwargs.get('agent_welcome_message', None)
                         logger.info(f"Generating {text}")
                         meta_info = {'io': self.tools["output"].get_provider(), 'message_category': 'agent_welcome_message', 'stream_sid': stream_sid, "request_id": str(uuid.uuid4()), "cached": True, "sequence_id": -1, 'format': self.task_config["tools_config"]["output"]["format"], 'text': text}
-                        if self.turn_based_conversation:
+                        # if self.turn_based_conversation:
+                        if False:
                             meta_info['type'] = 'text'
                             bos_packet = create_ws_data_packet("<beginning_of_stream>", meta_info)
                             await self.tools["output"].handle(bos_packet)
@@ -1990,7 +1993,8 @@ class TaskManager(BaseManager):
                         "Since it's connected through dashboard, I'll run listen_llm_tas too in case user wants to simply text")
                     self.llm_queue_task = asyncio.create_task(self._listen_llm_input_queue())
 
-                if "synthesizer" in self.tools and self._is_conversation_task() and not self.turn_based_conversation:
+                # if "synthesizer" in self.tools and self._is_conversation_task() and not self.turn_based_conversation:
+                if "synthesizer" in self.tools and self._is_conversation_task():
                     logger.info("Starting synthesizer task")
                     try:
                         self.synthesizer_task = asyncio.create_task(self.__listen_synthesizer())
