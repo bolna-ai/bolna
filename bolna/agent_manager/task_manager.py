@@ -1796,8 +1796,10 @@ class TaskManager(BaseManager):
                 else:
                     logger.info(f"Started transmitting at {time.time()}")
 
+                self.first_message_passed = True
                 message = await self.buffered_output_queue.get()
-                chunk_id = message['meta_info']['chunk_id']
+                # TODO why are we access chunk_id like this as it is being passed at only one place (__enqueue_chunk)
+                chunk_id = message['meta_info'].get('chunk_id', 1)
 
                 logger.info("Start response is True for {} and hence starting to speak {} Current sequence ids {}".format(chunk_id, message['meta_info'], self.sequence_ids))
                 if "end_of_conversation" in message['meta_info']:
