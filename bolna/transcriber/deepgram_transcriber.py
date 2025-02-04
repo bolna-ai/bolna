@@ -84,11 +84,8 @@ class DeepgramTranscriber(BaseTranscriber):
             dg_params['channels'] = "1"
 
         elif self.connected_via_dashboard:
-            # uncomment below for PCM to work
-            # dg_params['encoding'] = "linear16"
-            # dg_params['sample_rate'] = 16000
-            dg_params['encoding'] = "opus"
-            dg_params['sample_rate'] = 48000
+            dg_params['encoding'] = "linear16"
+            dg_params['sample_rate'] = 16000
             dg_params['channels'] = "1"
 
         if self.provider == "playground":
