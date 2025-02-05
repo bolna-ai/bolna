@@ -115,6 +115,10 @@ class TaskManager(BaseManager):
         }
         #IO HANDLERS
         if task_id == 0:
+            if self.kwargs["is_web_based_call"]:
+                self.task_config["tools_config"]["input"]["provider"] = "default"
+                self.task_config["tools_config"]["output"]["provider"] = "default"
+
             self.default_io = self.task_config["tools_config"]["output"]["provider"] == 'default'
             logger.info(f"Connected via websocket")
             self.should_record = self.task_config["tools_config"]["output"]["provider"] == 'default' and self.enforce_streaming #In this case, this is a websocket connection and we should record
@@ -544,8 +548,13 @@ class TaskManager(BaseManager):
             if self.task_config["tools_config"]["transcriber"] is not None:
                 logger.info("Setting up transcriber")
                 self.language = self.task_config["tools_config"]["transcriber"].get('language', DEFAULT_LANGUAGE_CODE)
-                provider = "playground" if self.turn_based_conversation else self.task_config["tools_config"]["input"][
-                    "provider"]
+                if self.turn_based_conversation:
+                    provider = "playground"
+                elif self.kwargs["is_web_based_call"]:
+                    provider = "web_based_call"
+                else:
+                    provider = self.task_config["tools_config"]["input"]["provider"]
+
                 self.task_config["tools_config"]["transcriber"]["input_queue"] = self.audio_queue
                 self.task_config['tools_config']["transcriber"]["output_queue"] = self.transcriber_output_queue
 
@@ -1622,7 +1631,7 @@ class TaskManager(BaseManager):
             #TODO: Either load IVR audio into memory before call or user s3 iter_cunks
             # This will help with interruption in IVR
             audio_chunk = None
-            if self.turn_based_conversation or self.task_config['tools_config']['output'] == "default":
+            if self.turn_based_conversation or self.task_config['tools_config']['output']['provider'] == "default":
                 audio_chunk = await get_raw_audio_bytes(text, self.assistant_name,
                                                                 self.task_config["tools_config"]["output"][
                                                                     "format"], local=self.is_local,
@@ -1695,9 +1704,7 @@ class TaskManager(BaseManager):
                     # logger.info(f"After adding into sequence id {self.sequence_ids}")
                     convert_to_request_log(message = text, meta_info= meta_info, component="synthesizer", direction="request", model = self.synthesizer_provider, engine=self.tools['synthesizer'].get_engine(), run_id= self.run_id)
                     logger.info('##### sending text to {} for generation: {} '.format(self.synthesizer_provider, text))
-                    # if 'cached' in message['meta_info'] and meta_info['cached'] is True:
-                    # did this since local does not have preprocessed audio as of now
-                    if False:
+                    if 'cached' in message['meta_info'] and meta_info['cached'] is True:
                         logger.info(f"Cached response and hence sending preprocessed text")
                         convert_to_request_log(message = text, meta_info= meta_info, component="synthesizer", direction="response", model = self.synthesizer_provider, is_cached= True, engine=self.tools['synthesizer'].get_engine(), run_id= self.run_id)
                         await self.__send_preprocessed_audio(meta_info, get_md5_hash(text))
@@ -1796,9 +1803,7 @@ class TaskManager(BaseManager):
                 else:
                     logger.info(f"Started transmitting at {time.time()}")
 
-                self.first_message_passed = True
                 message = await self.buffered_output_queue.get()
-                # TODO why are we access chunk_id like this as it is being passed at only one place (__enqueue_chunk)
                 chunk_id = message['meta_info'].get('chunk_id', 1)
 
                 logger.info("Start response is True for {} and hence starting to speak {} Current sequence ids {}".format(chunk_id, message['meta_info'], self.sequence_ids))
@@ -1916,6 +1921,16 @@ class TaskManager(BaseManager):
     async def __first_message(self, timeout=10.0):
         logger.info(f"Executing the first message task")
         try:
+            if self.kwargs["is_web_based_call"]:
+                logger.info("Sending agent welcome message for web based call")
+                text = self.kwargs.get('agent_welcome_message', None)
+                meta_info = {'io': self.tools["output"].get_provider(), 'message_category': 'agent_welcome_message',
+                             'stream_sid': self.stream_sid, "request_id": str(uuid.uuid4()), "cached": False,
+                             "sequence_id": -1, 'format': self.task_config["tools_config"]["output"]["format"],
+                             'text': text}
+                await self._synthesize(create_ws_data_packet(text, meta_info=meta_info))
+                return
+
             start_time = asyncio.get_running_loop().time()
             while True:
                 elapsed_time = asyncio.get_running_loop().time() - start_time
@@ -1932,8 +1947,7 @@ class TaskManager(BaseManager):
                         text = self.kwargs.get('agent_welcome_message', None)
                         logger.info(f"Generating {text}")
                         meta_info = {'io': self.tools["output"].get_provider(), 'message_category': 'agent_welcome_message', 'stream_sid': stream_sid, "request_id": str(uuid.uuid4()), "cached": True, "sequence_id": -1, 'format': self.task_config["tools_config"]["output"]["format"], 'text': text}
-                        # if self.turn_based_conversation:
-                        if False:
+                        if self.turn_based_conversation:
                             meta_info['type'] = 'text'
                             bos_packet = create_ws_data_packet("<beginning_of_stream>", meta_info)
                             await self.tools["output"].handle(bos_packet)
@@ -1995,8 +2009,7 @@ class TaskManager(BaseManager):
                         "Since it's connected through dashboard, I'll run listen_llm_tas too in case user wants to simply text")
                     self.llm_queue_task = asyncio.create_task(self._listen_llm_input_queue())
 
-                # if "synthesizer" in self.tools and self._is_conversation_task() and not self.turn_based_conversation:
-                if "synthesizer" in self.tools and self._is_conversation_task():
+                if "synthesizer" in self.tools and self._is_conversation_task() and not self.turn_based_conversation:
                     logger.info("Starting synthesizer task")
                     try:
                         self.synthesizer_task = asyncio.create_task(self.__listen_synthesizer())
