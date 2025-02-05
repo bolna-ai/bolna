@@ -28,7 +28,7 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
         self.sampling_rate = sampling_rate
         self.audio_format = "mp3"
         self.use_mulaw = kwargs.get("use_mulaw", True)
-        self.ws_url = f"wss://api.elevenlabs.io/v1/text-to-speech/{self.voice}/stream-input?model_id={self.model}&output_format=ulaw_8000&inactivity_timeout=60"
+        self.ws_url = f"wss://api.elevenlabs.io/v1/text-to-speech/{self.voice}/stream-input?model_id={self.model}&output_format={'ulaw_8000' if self.use_mulaw else 'mp3_44100_128'}&inactivity_timeout=60"
         self.api_url = f"https://api.elevenlabs.io/v1/text-to-speech/{self.voice}?optimize_streaming_latency=2&output_format="
         self.first_chunk_generated = False
         self.last_text_sent = False
@@ -185,8 +185,10 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
                         audio = message
                     else:
                         self.meta_info['format'] = "wav"
-                        audio = resample(convert_audio_to_wav(message, source_format="mp3"), int(self.sampling_rate),
-                                         format="wav")
+                        audio = message
+                        if message != b'\x00':
+                            audio = resample(convert_audio_to_wav(message, source_format="mp3"), int(self.sampling_rate),
+                                             format="wav")
 
                     if not self.first_chunk_generated:
                         self.meta_info["is_first_chunk"] = True
