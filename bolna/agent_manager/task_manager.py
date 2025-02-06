@@ -488,7 +488,10 @@ class TaskManager(BaseManager):
         logger.info("Routes are set")
 
     def __setup_output_handlers(self, turn_based_conversation, output_queue):
-        output_kwargs = {"websocket": self.websocket}
+        output_kwargs = {
+            "websocket": self.websocket,
+            "is_web_based_call": self.kwargs["is_web_based_call"]
+        }
 
         if self.task_config["tools_config"]["output"] is None:
             logger.info("Not setting up any output handler as it is none")
