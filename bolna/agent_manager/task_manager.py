@@ -121,7 +121,13 @@ class TaskManager(BaseManager):
 
             self.default_io = self.task_config["tools_config"]["output"]["provider"] == 'default'
             logger.info(f"Connected via websocket")
-            self.should_record = self.task_config["tools_config"]["output"]["provider"] == 'default' and self.enforce_streaming #In this case, this is a websocket connection and we should record
+
+            # TODO revert this temporary change for web based call
+            if self.kwargs["is_web_based_call"]:
+                self.should_record = False
+            else:
+                self.should_record = self.task_config["tools_config"]["output"]["provider"] == 'default' and self.enforce_streaming #In this case, this is a websocket connection and we should record
+
             self.__setup_input_handlers(turn_based_conversation, input_queue, self.should_record)
         self.__setup_output_handlers(turn_based_conversation, output_queue)
 
@@ -2083,6 +2089,7 @@ class TaskManager(BaseManager):
                 tasks_to_cancel.append(process_task_cancellation(self.initial_silence_task, 'initial_silence_task'))
                 tasks_to_cancel.append(process_task_cancellation(self.first_message_task, 'first_message_task'))
 
+                output['recording_url'] = ""
                 if self.should_record:
                     output['recording_url'] = await save_audio_file_to_s3(self.conversation_recording, self.sampling_rate, self.assistant_id, self.run_id)
 
