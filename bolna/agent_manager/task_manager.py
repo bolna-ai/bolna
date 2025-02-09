@@ -489,8 +489,7 @@ class TaskManager(BaseManager):
 
     def __setup_output_handlers(self, turn_based_conversation, output_queue):
         output_kwargs = {
-            "websocket": self.websocket,
-            "is_web_based_call": self.kwargs["is_web_based_call"]
+            "websocket": self.websocket
         }
 
         if self.task_config["tools_config"]["output"] is None:
@@ -515,6 +514,9 @@ class TaskManager(BaseManager):
                     self.task_config['tools_config']['synthesizer']['provider_config']['sampling_rate'] = 24000
                     output_kwargs['queue'] = output_queue
                 self.sampling_rate = self.task_config['tools_config']['synthesizer']['provider_config']['sampling_rate']
+
+            if self.task_config["tools_config"]["output"]["provider"] == "default":
+                output_kwargs["is_web_based_call"] = self.kwargs["is_web_based_call"]
 
             self.tools["output"] = output_handler_class(**output_kwargs)
         else:
