@@ -1379,6 +1379,30 @@ class TaskManager(BaseManager):
                 message = await self.transcriber_output_queue.get()
                 logger.info(f"##### Message from the transcriber class {message}")
 
+                if self.stream:
+                    self._set_call_details(message)
+                    meta_info = message["meta_info"]
+                    sequence = await self.process_transcriber_request(meta_info)
+                    next_task = self._get_next_step(sequence, "transcriber")
+
+                    # Handling of transcriber events
+                    if message["data"] == "speech_started":
+                        logger.info(f"User has started speaking")
+
+                    elif message["data"] == "transcriber_connection_closed":
+                        logger.info(f"Transcriber connection has been closed")
+
+                    elif isinstance(message.get("data"), dict) and message["data"].get("type", "") == "transcript":
+                        logger.info(f"Received transcript, sending for further processing")
+                        transcriber_message = message["data"].get("content")
+
+                        meta_info = self.__get_updated_meta_info(meta_info)
+                        await self._handle_transcriber_output(next_task, transcriber_message, meta_info)
+                else:
+                    # TODO handle non-streaming condition
+                    pass
+
+                continue
                 if message['meta_info'] is not None and message['meta_info'].get('transcriber_latency', False):
                     self.transcriber_latencies.append(message['meta_info']['transcriber_latency'])
                     self.average_transcriber_latency = sum(self.transcriber_latencies) / len(self.transcriber_latencies)

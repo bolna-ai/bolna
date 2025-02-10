@@ -338,15 +338,25 @@ class DeepgramTranscriber(BaseTranscriber):
                     if msg["speech_final"] and self.final_transcript.strip():
                         if not self.is_transcript_sent_for_processing and self.final_transcript.strip():
                             logger.info(f"Received speech final hence yielding the following transcript - {self.final_transcript}")
+                            data = {
+                                "type": "transcript",
+                                "content": self.final_transcript
+                            }
                             self.is_transcript_sent_for_processing = True
                             self.final_transcript = ""
+                            yield create_ws_data_packet(data, self.meta_info)
 
                 elif msg["type"] == "UtteranceEnd":
                     logger.info(f"Value of is_transcript_sent_for_processing in utterance end - {self.is_transcript_sent_for_processing}")
                     if not self.is_transcript_sent_for_processing and self.final_transcript.strip():
                         logger.info(f"Received UtteranceEnd hence yielding the following transcript - {self.final_transcript}")
+                        data = {
+                            "type": "transcript",
+                            "content": self.final_transcript
+                        }
                         self.is_transcript_sent_for_processing = True
                         self.final_transcript = ""
+                        yield create_ws_data_packet(data, self.meta_info)
 
                 elif msg["type"] == "Metadata":
                     logger.info(f"Received Metadata from deepgram - {msg}")
