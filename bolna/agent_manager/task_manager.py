@@ -1373,7 +1373,6 @@ class TaskManager(BaseManager):
         transcriber_message = ""
         logger.info(f"Starting transcriber task")
         response_started = False
-        num_words = 0
         try:
             while True:
                 message = await self.transcriber_output_queue.get()
@@ -1384,13 +1383,23 @@ class TaskManager(BaseManager):
                     meta_info = message["meta_info"]
                     sequence = await self.process_transcriber_request(meta_info)
                     next_task = self._get_next_step(sequence, "transcriber")
+                    interim_transcript_len = 0
 
                     # Handling of transcriber events
                     if message["data"] == "speech_started":
                         logger.info(f"User has started speaking")
 
-                    elif message["data"] == "transcriber_connection_closed":
-                        logger.info(f"Transcriber connection has been closed")
+                    elif isinstance(message.get("data"), dict) and message["data"].get("type", "") == "interim_transcript_received":
+                        logger.info("Received interim transcripts")
+                        interim_transcript_len += len(message["data"].get("content").split(" "))
+
+                        if (self.tools["output"].welcome_message_sent() or self.first_message_passed) and \
+                                self.number_of_words_for_interruption != 0:
+                            if interim_transcript_len > self.number_of_words_for_interruption or \
+                                    message["data"].get("content") in self.accidental_interruption_phrases:
+                                logger.info(f"Condition for interruption hit")
+                                self.turn_id += 1
+                                await self.__cleanup_downstream_tasks()
 
                     elif isinstance(message.get("data"), dict) and message["data"].get("type", "") == "transcript":
                         logger.info(f"Received transcript, sending for further processing")
@@ -1398,6 +1407,10 @@ class TaskManager(BaseManager):
 
                         meta_info = self.__get_updated_meta_info(meta_info)
                         await self._handle_transcriber_output(next_task, transcriber_message, meta_info)
+
+                    elif message["data"] == "transcriber_connection_closed":
+                        logger.info(f"Transcriber connection has been closed")
+
                 else:
                     # TODO handle non-streaming condition
                     pass

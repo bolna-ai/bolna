@@ -328,6 +328,14 @@ class DeepgramTranscriber(BaseTranscriber):
 
                 elif msg["type"] == "Results":
                     transcript = msg["channel"]["alternatives"][0]["transcript"]
+
+                    if transcript.strip():
+                        data = {
+                            "type": "interim_transcript_received",
+                            "content": transcript.strip()
+                        }
+                        yield create_ws_data_packet(data, self.meta_info)
+
                     if msg["is_final"] and transcript.strip():
                         logger.info(f"Received interim result with is_final set as True - {transcript}")
                         self.final_transcript += f' {transcript}'
