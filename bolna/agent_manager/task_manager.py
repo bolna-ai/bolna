@@ -1376,7 +1376,7 @@ class TaskManager(BaseManager):
         try:
             while True:
                 message = await self.transcriber_output_queue.get()
-                logger.info(f"##### Message from the transcriber class {message}")
+                logger.info(f"Message from the transcriber class {message}")
 
                 if self.stream:
                     self._set_call_details(message)
@@ -1390,8 +1390,8 @@ class TaskManager(BaseManager):
                         logger.info(f"User has started speaking")
 
                     elif isinstance(message.get("data"), dict) and message["data"].get("type", "") == "interim_transcript_received":
-                        logger.info("Received interim transcripts")
                         interim_transcript_len += len(message["data"].get("content").split(" "))
+                        logger.info(f"Received interim transcript - {message['data'].get('content')} and len = {interim_transcript_len}")
 
                         if (self.tools["output"].welcome_message_sent() or self.first_message_passed) and \
                                 self.number_of_words_for_interruption != 0:
