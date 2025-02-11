@@ -1399,6 +1399,8 @@ class TaskManager(BaseManager):
 
                     # Whenever interim results would be received from Deepgram, this condition would get triggered
                     elif isinstance(message.get("data"), dict) and message["data"].get("type", "") == "interim_transcript_received":
+                        # TODO remove this temp log
+                        logger.info(f"Received interim transcript event")
                         self.time_since_last_spoken_human_word = time.time()
                         if temp_transcriber_message == message["data"].get("content"):
                             logger.info("Received the same transcript as the previous one we have hence continuing")
@@ -1973,6 +1975,8 @@ class TaskManager(BaseManager):
                 break
 
             elif time_since_last_spoken_ai_word > self.trigger_user_online_message_after and not self.asked_if_user_is_still_there and self.time_since_last_spoken_human_word < self.last_transmitted_timestamp:
+                # TODO remove this temp log
+                logger.info(f"Are you still there condition - time_since_last_spoken_ai_word {time_since_last_spoken_ai_word} | self.trigger_user_online_message_after {self.trigger_user_online_message_after} | self.asked_if_user_is_still_there {self.asked_if_user_is_still_there} | self.time_since_last_spoken_human_word {self.time_since_last_spoken_human_word} | self.last_transmitted_timestamp {self.last_transmitted_timestamp}")
                 logger.info(f"Asking if the user is still there")
                 self.asked_if_user_is_still_there = True
 
