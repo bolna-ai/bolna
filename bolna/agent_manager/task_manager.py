@@ -1370,13 +1370,20 @@ class TaskManager(BaseManager):
             logger.info(f"Need to separate out output task")
 
     async def _listen_transcriber(self):
-        transcriber_message = ""
+        temp_transcriber_message = ""
         logger.info(f"Starting transcriber task")
-        response_started = False
         try:
             while True:
                 message = await self.transcriber_output_queue.get()
                 logger.info(f"Message from the transcriber class {message}")
+
+                # TODO add this to transcriber class
+                if message['meta_info'] is not None and message['meta_info'].get('transcriber_latency', False):
+                    self.transcriber_latencies.append(message['meta_info']['transcriber_latency'])
+                    self.average_transcriber_latency = sum(self.transcriber_latencies) / len(self.transcriber_latencies)
+
+                if self.hangup_triggered:
+                    continue
 
                 if self.stream:
                     self._set_call_details(message)
@@ -1388,34 +1395,84 @@ class TaskManager(BaseManager):
                     # Handling of transcriber events
                     if message["data"] == "speech_started":
                         logger.info(f"User has started speaking")
+                        self.callee_silent = False
 
+                    # Whenever interim results would be received from Deepgram, this condition would get triggered
                     elif isinstance(message.get("data"), dict) and message["data"].get("type", "") == "interim_transcript_received":
-                        interim_transcript_len += len(message["data"].get("content").split(" "))
-                        logger.info(f"Received interim transcript - {message['data'].get('content')} and len = {interim_transcript_len}")
+                        self.time_since_last_spoken_human_word = time.time()
+                        if temp_transcriber_message == message["data"].get("content"):
+                            logger.info("Received the same transcript as the previous one we have hence continuing")
+                            continue
 
+                        temp_transcriber_message = message["data"].get("content")
+
+                        if not self.first_message_passed:
+                            logger.info(f"Since first message has not been sent, adding the transcript to self.transcriber_message")
+                            self.transcriber_message += f' {message["data"].get("content")}'
+                            continue
+
+                        if not self.callee_speaking:
+                            self.callee_speaking_start_time = time.time()
+                            self.callee_speaking = True
+
+                        interim_transcript_len += len(message["data"].get("content").strip().split(" "))
                         if (self.tools["output"].welcome_message_sent() or self.first_message_passed) and \
                                 self.number_of_words_for_interruption != 0:
                             if interim_transcript_len > self.number_of_words_for_interruption or \
-                                    message["data"].get("content") in self.accidental_interruption_phrases:
+                                    message["data"].get("content").strip() in self.accidental_interruption_phrases:
                                 logger.info(f"Condition for interruption hit")
                                 self.turn_id += 1
                                 await self.__cleanup_downstream_tasks()
 
+                        # Doing changes for incremental delay
+                        self.required_delay_before_speaking += self.incremental_delay
+                        logger.info(f"Increased the incremental delay time to {self.required_delay_before_speaking}")
+                        if self.time_since_first_interim_result == -1:
+                            self.time_since_first_interim_result = time.time() * 1000
+                            logger.info(f"Setting time for first interim result as {self.time_since_first_interim_result}")
+
+                        self.callee_silent = False
+                        # TODO check where this needs to be added post understanding it's usage
+                        self.let_remaining_audio_pass_through = False
+                        self.llm_response_generated = False
+
+                    # Whenever speech_final or UtteranceEnd is received from Deepgram, this condition would get triggered
                     elif isinstance(message.get("data"), dict) and message["data"].get("type", "") == "transcript":
                         logger.info(f"Received transcript, sending for further processing")
-                        transcriber_message = message["data"].get("content")
+                        self.callee_speaking = False
+                        self.callee_silent = True
+                        temp_transcriber_message = ""
 
+                        if self.output_task is None:
+                            logger.info(f"Output task was none and hence starting it")
+                            self.output_task = asyncio.create_task(self.__process_output_loop())
+
+                        if self.llm_response_generated:
+                            self.history = copy.deepcopy(self.interim_history)
+
+                        # TODO check where this needs to be added post understanding it's usage
+                        self.let_remaining_audio_pass_through = True
+
+                        # Resetting variables for incremental delay
+                        self.time_since_first_interim_result = -1
+                        self.required_delay_before_speaking = max(
+                            self.minimum_wait_duration - self.incremental_delay, 0)
+
+                        transcriber_message = message["data"].get("content")
                         meta_info = self.__get_updated_meta_info(meta_info)
                         await self._handle_transcriber_output(next_task, transcriber_message, meta_info)
 
                     elif message["data"] == "transcriber_connection_closed":
                         logger.info(f"Transcriber connection has been closed")
+                        self.transcriber_duration += message['meta_info']["transcriber_duration"] if message['meta_info'] is not None else 0
+                        break
 
                 else:
                     # TODO handle non-streaming condition
                     pass
 
                 continue
+
                 if message['meta_info'] is not None and message['meta_info'].get('transcriber_latency', False):
                     self.transcriber_latencies.append(message['meta_info']['transcriber_latency'])
                     self.average_transcriber_latency = sum(self.transcriber_latencies) / len(self.transcriber_latencies)
@@ -1932,6 +1989,7 @@ class TaskManager(BaseManager):
             else:
                 logger.info(f"Only {time_since_last_spoken_ai_word} seconds since last spoken time stamp and hence not cutting the phone call")
 
+    # TODO what is this?
     async def __check_for_backchanneling(self):
         while True:
             if self.callee_speaking and time.time() - self.callee_speaking_start_time > self.backchanneling_start_delay:

@@ -324,6 +324,7 @@ class DeepgramTranscriber(BaseTranscriber):
 
                 if msg["type"] == "SpeechStarted":
                     logger.info("Received SpeechStarted event from deepgram")
+                    yield create_ws_data_packet("speech_started", self.meta_info)
                     pass
 
                 elif msg["type"] == "Results":
@@ -332,7 +333,7 @@ class DeepgramTranscriber(BaseTranscriber):
                     if transcript.strip():
                         data = {
                             "type": "interim_transcript_received",
-                            "content": transcript.strip()
+                            "content": transcript
                         }
                         yield create_ws_data_packet(data, self.meta_info)
 
@@ -368,7 +369,7 @@ class DeepgramTranscriber(BaseTranscriber):
 
                 elif msg["type"] == "Metadata":
                     logger.info(f"Received Metadata from deepgram - {msg}")
-                    # self.meta_info["transcriber_duration"] = msg["duration"]
+                    self.meta_info["transcriber_duration"] = msg["duration"]
                     yield create_ws_data_packet("transcriber_connection_closed", self.meta_info)
                     return
 
