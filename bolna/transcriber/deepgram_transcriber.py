@@ -74,9 +74,9 @@ class DeepgramTranscriber(BaseTranscriber):
             # 'diarize': 'true',
             'language': self.language,
             'vad_events' : 'true',
-            'endpointing': '500',
+            'endpointing': self.endpointing,
             'interim_results': 'true',
-            'utterance_end_ms': '1200'
+            'utterance_end_ms': '1200' if int(self.endpointing) < 1200 else str(self.endpointing)
         }
 
         self.audio_frame_duration = 0.5  # We're sending 8k samples with a sample rate of 16k
@@ -102,15 +102,6 @@ class DeepgramTranscriber(BaseTranscriber):
 
         if "en" not in self.language:
             dg_params['language'] = self.language
-
-        # TODO revisit this logic
-        # if self.process_interim_results == "false":
-        #     dg_params['endpointing'] = self.endpointing
-        #     #dg_params['vad_events'] = 'true'
-        #
-        # else:
-        #     dg_params['interim_results'] = self.process_interim_results
-        #     dg_params['utterance_end_ms'] = '1000' if int(self.endpointing) < 1000 else str(self.endpointing)
 
         if self.keywords and len(self.keywords.split(",")) > 0:
             dg_params['keywords'] = "&keywords=".join(self.keywords.split(","))
