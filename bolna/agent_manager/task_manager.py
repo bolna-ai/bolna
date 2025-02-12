@@ -1400,8 +1400,9 @@ class TaskManager(BaseManager):
                     next_task = self._get_next_step(sequence, "transcriber")
                     num_words = 0
                     if message['data'] == "TRANSCRIBER_BEGIN":
-                        response_started = False #This signifies if we've gotten the first bit of interim text for the given response or not
-                        self.callee_silent = False
+                        if self.tools["input"].welcome_message_played():
+                            response_started = False #This signifies if we've gotten the first bit of interim text for the given response or not
+                            self.callee_silent = False
 
                     elif "speech_final" in meta_info and meta_info['speech_final'] and message['data'] != "":
                         logger.info(f"Starting the TRANSCRIBER_END TASK")
