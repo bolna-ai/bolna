@@ -59,7 +59,7 @@ graph LR;
 ## Supported providers and models
 1. Initiating a phone call using telephony providers like `Twilio`, `Plivo`, `Exotel` (coming soon), `Vonage` (coming soon) etc.
 2. Transcribing the conversations using `Deepgram`, etc.
-3. Using LLMs like `OpenAI`, `Llama`, `Cohere`, `Mistral`,  etc to handle conversations
+3. Using LLMs like `OpenAI`, `DeepSeek`, `Llama`, `Cohere`, `Mistral`,  etc to handle conversations
 4. Synthesizing LLM responses back to telephony using `AWS Polly`, `ElevenLabs`, `Deepgram`, `OpenAI`, `Azure`, `Cartesia`, `Smallest` etc.
 
 
@@ -109,7 +109,7 @@ These are the current supported ASRs Providers:
 Bolna uses LiteLLM package to support multiple LLM integrations.
 
 These are the current supported LLM Provider Family:
-https://github.com/bolna-ai/bolna/blob/477e08d6800dbf02931abeeea883d78451b7d7e2/bolna/providers.py#L29-L44
+https://github.com/bolna-ai/bolna/blob/10fa26e5985d342eedb5a8985642f12f1cf92a4b/bolna/providers.py#L30-L47
 
 For LiteLLM based LLMs, add either of the following to the `.env` file depending on your use-case:<br><br>
 `LITELLM_MODEL_API_KEY`: API Key of the LLM<br>
