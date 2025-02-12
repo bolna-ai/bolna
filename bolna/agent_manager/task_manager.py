@@ -1446,24 +1446,24 @@ class TaskManager(BaseManager):
 
                             # This means we are generating response from an interim transcript
                             # Hence we transmit quickly
-                            if not self.started_transmitting_audio and self.tools["output"].welcome_message_sent():
-                                logger.info("##### Haven't started transmitting audio and hence cleaning up downstream tasks")
-                                await self.__cleanup_downstream_tasks()
-                            else:
-                                logger.info(f"Started transmitting and hence moving fursther")
-
-                            # If we've started transmitting audio this is probably an interruption, so calculate number of words
-                            if self.started_transmitting_audio and self.number_of_words_for_interruption != 0 and self.first_message_passed:
-                                if num_words > self.number_of_words_for_interruption or message['data'].strip() in self.accidental_interruption_phrases:
-                                    #Process interruption only if number of words is higher than the threshold
-                                    logger.info(f"###### Number of words {num_words} is higher than the required number of words for interruption, hence, definitely interrupting. Interruption and hence changing the turn id")
-                                    self.turn_id += 1
-                                    await self.__cleanup_downstream_tasks()
-                                else:
-                                    logger.info(f"Not starting a cleanup because {num_words} number of words are lesser {self.number_of_words_for_interruption} and hence continuing,")
-                                    continue
-                            elif self.number_of_words_for_interruption == 0:
-                                logger.info(f"Not interrupting")
+                            # if not self.started_transmitting_audio and self.tools["output"].welcome_message_sent():
+                            #     logger.info("##### Haven't started transmitting audio and hence cleaning up downstream tasks")
+                            #     await self.__cleanup_downstream_tasks()
+                            # else:
+                            #     logger.info(f"Started transmitting and hence moving fursther")
+                            #
+                            # # If we've started transmitting audio this is probably an interruption, so calculate number of words
+                            # if self.started_transmitting_audio and self.number_of_words_for_interruption != 0 and self.first_message_passed:
+                            #     if num_words > self.number_of_words_for_interruption or message['data'].strip() in self.accidental_interruption_phrases:
+                            #         #Process interruption only if number of words is higher than the threshold
+                            #         logger.info(f"###### Number of words {num_words} is higher than the required number of words for interruption, hence, definitely interrupting. Interruption and hence changing the turn id")
+                            #         self.turn_id += 1
+                            #         await self.__cleanup_downstream_tasks()
+                            #     else:
+                            #         logger.info(f"Not starting a cleanup because {num_words} number of words are lesser {self.number_of_words_for_interruption} and hence continuing,")
+                            #         continue
+                            # elif self.number_of_words_for_interruption == 0:
+                            #     logger.info(f"Not interrupting")
 
                             self.last_response_time = time.time()
                             transcriber_message = message['data']
