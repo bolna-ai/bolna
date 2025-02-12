@@ -34,7 +34,7 @@ class DefaultInputHandler:
     def get_stream_sid(self):
         return str(uuid.uuid4())
 
-    def is_welcome_message_played(self):
+    def welcome_message_played(self):
         return self.is_welcome_message_played
 
     def __process_audio(self, audio):
