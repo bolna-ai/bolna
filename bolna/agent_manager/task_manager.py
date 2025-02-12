@@ -1534,6 +1534,10 @@ class TaskManager(BaseManager):
             copied_meta_info["is_final_chunk_of_entire_response"] = True
             copied_meta_info.pop("is_first_chunk_of_entire_response", None)
 
+        if copied_meta_info.get('message_category', None) == 'agent_welcome_message':
+            copied_meta_info["is_first_chunk_of_entire_response"] = True
+            copied_meta_info["is_final_chunk_of_entire_response"] = True
+
         self.buffered_output_queue.put_nowait(create_ws_data_packet(chunk, copied_meta_info))
 
     async def __listen_synthesizer(self):
@@ -1653,7 +1657,6 @@ class TaskManager(BaseManager):
                         self.buffered_output_queue = asyncio.Queue()
                     meta_info["format"] = "pcm"
                     if 'message_category' in meta_info and meta_info['message_category'] == "agent_welcome_message":
-                        yield_in_chunks = False
                         if audio_chunk is None:
                             logger.info(f"File doesn't exist in S3. Hence we're synthesizing it from synthesizer")
                             meta_info['cached'] = False
@@ -1664,11 +1667,11 @@ class TaskManager(BaseManager):
                             meta_info['is_first_chunk'] = True
                 if yield_in_chunks and audio_chunk is not None:
                     i = 0
-                    number_of_chunks = math.ceil(len(audio_chunk)/self.output_chunk_size)
-                    logger.info(f"Audio chunk size {len(audio_chunk)}, chunk size {self.output_chunk_size}")
-                    for chunk in yield_chunks_from_memory(audio_chunk, chunk_size=self.output_chunk_size):
+                    number_of_chunks = math.ceil(len(audio_chunk)/100000000)
+                    logger.info(f"Audio chunk size {len(audio_chunk)}, chunk size {100000000}")
+                    for chunk in yield_chunks_from_memory(audio_chunk, chunk_size=100000000):
                         self.__enqueue_chunk(chunk, i, number_of_chunks, meta_info)
-                        i +=1
+                        i += 1
                 elif audio_chunk is not None:
                     meta_info['chunk_id'] = 1
                     meta_info["is_first_chunk_of_entire_response"] = True
