@@ -7,8 +7,8 @@ load_dotenv()
 
 
 class TwilioInputHandler(TelephonyInputHandler):
-    def __init__(self, queues, websocket=None, input_types=None, mark_set=None, turn_based_conversation=False):
-        super().__init__(queues, websocket, input_types, mark_set, turn_based_conversation)
+    def __init__(self, queues, websocket=None, input_types=None, mark_set=None, turn_based_conversation=False, is_welcome_message_played=False):
+        super().__init__(queues, websocket, input_types, mark_set, turn_based_conversation, is_welcome_message_played=is_welcome_message_played)
         self.io_provider = 'twilio'
 
     async def call_start(self, packet):
