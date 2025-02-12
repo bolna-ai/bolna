@@ -24,3 +24,11 @@ class PlivoInputHandler(TelephonyInputHandler):
             self.client.calls.delete_all_streams(self.call_sid)
         except Exception as e:
             logger.info('Error deleting plivo stream: {}'.format(str(e)))
+
+    async def process_mark_message(self, packet, mark_set):
+        mark_event_name = packet["name"]
+        if mark_event_name in mark_set:
+            mark_set.remove(mark_event_name)
+        if mark_event_name == "agent_welcome_message":
+            logger.info("Received mark event for agent_welcome_message")
+            self.is_welcome_message_played = True

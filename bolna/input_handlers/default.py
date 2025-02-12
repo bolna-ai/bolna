@@ -11,7 +11,8 @@ load_dotenv()
 
 
 class DefaultInputHandler:
-    def __init__(self, queues=None, websocket=None, input_types=None, mark_set = None, queue = None, turn_based_conversation=False, conversation_recording = None):
+    def __init__(self, queues=None, websocket=None, input_types=None, mark_set=None, queue=None,
+                 turn_based_conversation=False, conversation_recording=None, is_welcome_message_played=False):
         self.queues = queues
         self.websocket = websocket
         self.input_types = input_types
@@ -20,6 +21,7 @@ class DefaultInputHandler:
         self.turn_based_conversation = turn_based_conversation
         self.queue = queue
         self.conversation_recording = conversation_recording
+        self.is_welcome_message_played = is_welcome_message_played
         
     async def stop_handler(self):
         self.running = False
@@ -31,6 +33,9 @@ class DefaultInputHandler:
 
     def get_stream_sid(self):
         return str(uuid.uuid4())
+
+    def is_welcome_message_played(self):
+        return self.is_welcome_message_played
 
     def __process_audio(self, audio):
         data = base64.b64decode(audio)

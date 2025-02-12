@@ -34,9 +34,8 @@ class TelephonyInputHandler(DefaultInputHandler):
     async def disconnect_stream(self):
         pass
 
-    async def process_mark_message(self, packet):
-        if packet["mark"]["name"] in self.mark_set:
-            self.mark_set.remove(packet["mark"]["name"])
+    async def process_mark_message(self, packet, mark_set):
+        pass
 
     async def stop_handler(self):
         asyncio.create_task(self.disconnect_stream())
@@ -94,8 +93,8 @@ class TelephonyInputHandler(DefaultInputHandler):
                     else:
                         logger.info("Getting media elements but not inbound media")
 
-                elif packet['event'] == 'mark':
-                    await self.process_mark_message(packet)
+                elif packet['event'] == 'mark' or packet['event'] == 'playedStream':
+                    await self.process_mark_message(packet, self.mark_set)
 
                 elif packet['event'] == 'stop':
                     logger.info('call stopping')

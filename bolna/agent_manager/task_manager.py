@@ -514,7 +514,8 @@ class TaskManager(BaseManager):
                 "queues": self.queues,
                 "websocket": self.websocket,
                 "input_types": get_required_input_types(self.task_config),
-                "mark_set": self.mark_set
+                "mark_set": self.mark_set,
+                "is_welcome_message_played": True if self.task_config["tools_config"]["output"]["provider"] == 'default' else False
             }
 
             if self.task_config["tools_config"]["input"]["provider"] == "daily":
@@ -1434,7 +1435,7 @@ class TaskManager(BaseManager):
                         elif len(message['data'].strip()) != 0:
                             #Currently simply cancel the next task
 
-                            if not self.first_message_passed:
+                            if not self.tools["input"].is_welcome_message_played():
                                 logger.info(f"Adding to transcriber message")
                                 self.transcriber_message += message['data']
                                 continue
@@ -1446,14 +1447,14 @@ class TaskManager(BaseManager):
 
                             # This means we are generating response from an interim transcript
                             # Hence we transmit quickly
-                            if not self.started_transmitting_audio and self.tools["output"].welcome_message_sent():
+                            if not self.started_transmitting_audio and self.tools["input"].is_welcome_message_played():
                                 logger.info("##### Haven't started transmitting audio and hence cleaning up downstream tasks")
                                 await self.__cleanup_downstream_tasks()
                             else:
                                 logger.info(f"Started transmitting and hence moving fursther")
 
                             # If we've started transmitting audio this is probably an interruption, so calculate number of words
-                            if self.started_transmitting_audio and self.number_of_words_for_interruption != 0 and self.first_message_passed:
+                            if self.started_transmitting_audio and self.number_of_words_for_interruption != 0 and self.tools["input"].is_welcome_message_played():
                                 if num_words > self.number_of_words_for_interruption or message['data'].strip() in self.accidental_interruption_phrases:
                                     #Process interruption only if number of words is higher than the threshold
                                     logger.info(f"###### Number of words {num_words} is higher than the required number of words for interruption, hence, definitely interrupting. Interruption and hence changing the turn id")
@@ -1727,7 +1728,7 @@ class TaskManager(BaseManager):
         while True:
             logger.info(f"Checking for initial silence {duration}")
             #logger.info(f"Woke up from my slumber {self.callee_silent}, {self.history}, {self.interim_history}")
-            if self.first_message_passed and self.callee_silent and len(self.history) == 2 and len(self.interim_history) == 2 and time.time() - self.first_message_passing_time > duration:
+            if self.tools["input"].is_welcome_message_played() and self.callee_silent and len(self.history) == 2 and len(self.interim_history) == 2 and time.time() - self.first_message_passing_time > duration:
                 logger.info(f"Callee was silent and hence speaking Hello on callee's behalf")
                 await self.__send_first_message("Hello")
                 break
@@ -1774,7 +1775,7 @@ class TaskManager(BaseManager):
         try:
             num_chunks = 0
             while True:
-                if (not self.let_remaining_audio_pass_through) and self.first_message_passed:
+                if (not self.let_remaining_audio_pass_through) and self.tools["input"].is_welcome_message_played():
                     time_since_first_interim_result = (time.time() * 1000) - self.time_since_first_interim_result if self.time_since_first_interim_result != -1 else -1
                     logger.info(f"##### It's been {time_since_first_interim_result} ms since first  interim result and required time to wait for it is {self.required_delay_before_speaking}. Hence sleeping for 100ms. self.time_since_first_interim_result {self.time_since_first_interim_result}")
                     if time_since_first_interim_result != -1 and time_since_first_interim_result < self.required_delay_before_speaking:
