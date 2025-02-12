@@ -242,6 +242,7 @@ class TaskManager(BaseManager):
             provider_config = self.task_config["tools_config"]["synthesizer"].get("provider_config")
             self.synthesizer_voice = provider_config["voice"]
 
+            self.handle_accumulated_message_task = None
             self.initial_silence_task = None
             self.hangup_task = None
             self.transcriber_task = None
@@ -1728,6 +1729,25 @@ class TaskManager(BaseManager):
         await self._handle_transcriber_output(next_task, message, meta_info)
         self.time_since_first_interim_result = (time.time() * 1000) - 1000
 
+    """
+    When the welcome message is playing we accumulate the transcript in the self.transcriber_message variable and once 
+    the welcome message is completely played we send this transcript for further processing.
+    """
+    async def __handle_accumulated_message(self):
+        logger.info("Setting up __handle_accumulated_message function")
+        while True:
+            if self.tools["input"].welcome_message_played():
+                logger.info(f"Welcome message has been played")
+                self.first_message_passing_time = time.time()
+                if len(self.transcriber_message):
+                    logger.info(f"Sending the accumulated transcribed message - {self.transcriber_message}")
+                    await self.__send_first_message(self.transcriber_message)
+                    self.transcriber_message = ""
+                break
+
+            await asyncio.sleep(0.1)
+        self.handle_accumulated_message_task = None
+
     async def __handle_initial_silence(self, duration=5):
         while True:
             logger.info(f"Checking for initial silence {duration}")
@@ -1987,6 +2007,7 @@ class TaskManager(BaseManager):
                 tasks = [asyncio.create_task(self.tools['input'].handle())]
                 if not self.turn_based_conversation:
                     self.initial_silence_task = asyncio.create_task(self.__handle_initial_silence(duration=10))
+                    self.handle_accumulated_message_task = asyncio.create_task(self.__handle_accumulated_message())
                 if "transcriber" in self.tools:
                     tasks.append(asyncio.create_task(self._listen_transcriber()))
                     self.transcriber_task = asyncio.create_task(self.tools["transcriber"].run())
@@ -2069,6 +2090,7 @@ class TaskManager(BaseManager):
                 tasks_to_cancel.append(process_task_cancellation(self.ambient_noise_task, 'ambient_noise_task'))
                 tasks_to_cancel.append(process_task_cancellation(self.initial_silence_task, 'initial_silence_task'))
                 tasks_to_cancel.append(process_task_cancellation(self.first_message_task, 'first_message_task'))
+                tasks_to_cancel.append(process_task_cancellation(self.handle_accumulated_message_task, "handle_accumulated_message_task"))
 
                 if self.should_record:
                     output['recording_url'] = await save_audio_file_to_s3(self.conversation_recording, self.sampling_rate, self.assistant_id, self.run_id)
