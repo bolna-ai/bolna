@@ -1855,14 +1855,6 @@ class TaskManager(BaseManager):
 
                     num_chunks = 0
                     self.turn_id += 1
-                    if not self.first_message_passed:
-                        self.first_message_passed = True
-                        logger.info(f"Making first message passed as True")
-                        self.first_message_passing_time = time.time()
-                        if len(self.transcriber_message) != 0:
-                            logger.info(f"Sending the first message as the first message is still not passed and we got a response")
-                            await self.__send_first_message(self.transcriber_message)
-                            self.transcriber_message = ''
 
                 if "is_first_chunk_of_entire_response" in message['meta_info'] and message['meta_info']['is_first_chunk_of_entire_response']:
                     logger.info(f"First chunk stuff")
