@@ -1745,7 +1745,7 @@ class TaskManager(BaseManager):
                     self.transcriber_message = ""
                 break
 
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(10)
         self.handle_accumulated_message_task = None
 
     async def __handle_initial_silence(self, duration=5):
