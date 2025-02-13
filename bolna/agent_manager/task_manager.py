@@ -1745,7 +1745,7 @@ class TaskManager(BaseManager):
                     self.transcriber_message = ""
                 break
 
-            await asyncio.sleep(10)
+            await asyncio.sleep(0.1)
         self.handle_accumulated_message_task = None
 
     async def __handle_initial_silence(self, duration=5):
@@ -1753,7 +1753,7 @@ class TaskManager(BaseManager):
             logger.info(f"Checking for initial silence {duration}")
             #logger.info(f"Woke up from my slumber {self.callee_silent}, {self.history}, {self.interim_history}")
             if (self.tools["input"].welcome_message_played() and self.callee_silent and len(self.history) == 2 and
-                    len(self.interim_history) == 2 and 
+                    len(self.interim_history) == 2 and self.first_message_passing_time and
                     time.time() - self.first_message_passing_time > duration):
                 logger.info(f"Callee was silent and hence speaking Hello on callee's behalf")
                 await self.__send_first_message("Hello")
