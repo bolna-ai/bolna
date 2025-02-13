@@ -872,6 +872,7 @@ class TaskManager(BaseManager):
             logger.info(f"Response from the server {self.webhook_response}")
         else:
             message = format_messages(self.input_parameters["messages"])  # Remove the initial system prompt
+            # TODO revisit this
             self.history.append({
                 'role': 'user',
                 'content': message
@@ -969,6 +970,7 @@ class TaskManager(BaseManager):
     async def _process_conversation_preprocessed_task(self, message, sequence, meta_info):
         if self.task_config["tools_config"]["llm_agent"]['agent_flow_type'] == "preprocessed":
             messages = copy.deepcopy(self.history)
+            # TODO revisit this
             messages.append({'role': 'user', 'content': message['data']})
             logger.info(f"Starting LLM Agent {messages}")
             #Expose get current classification_response method from the agent class and use it for the response log
@@ -980,6 +982,7 @@ class TaskManager(BaseManager):
                     return
 
                 logger.info(f"Text chunk {next_state['text']}")
+                # TODO revisit this
                 messages.append({'role': 'assistant', 'content': next_state['text']})
                 self.synthesizer_tasks.append(asyncio.create_task(
                         self._synthesize(create_ws_data_packet(next_state['audio'], meta_info, is_md5_hash=True))))
@@ -1035,7 +1038,7 @@ class TaskManager(BaseManager):
             except Exception as e:
                 from_number = None
 
-            self.history = copy.deepcopy(model_args["messages"])
+            # self.history = copy.deepcopy(model_args["messages"])
             payload = {
                 'call_sid': call_sid,
                 'provider': self.tools['input'].io_provider,
@@ -1080,6 +1083,7 @@ class TaskManager(BaseManager):
             set_response_prompt = function_response
 
         content = FUNCTION_CALL_PROMPT.format(called_fun, method, set_response_prompt)
+        # TODO revisit this
         model_args["messages"].append({"role": "system","content": content})
         logger.info(f"Logging function call parameters ")
         convert_to_request_log(function_response, meta_info , None, "function_call", direction = "response", is_cached= False, run_id = self.run_id)
@@ -1094,7 +1098,9 @@ class TaskManager(BaseManager):
         self.execute_function_call_task = None
 
     def __store_into_history(self, meta_info, messages, llm_response, should_trigger_function_call = False):
-        if self.current_request_id in self.llm_rejected_request_ids:
+        # TODO revisit this
+        # if self.current_request_id in self.llm_rejected_request_ids:
+        if False:
             logger.info("##### User spoke while LLM was generating response")
         else:
             self.llm_response_generated = True
@@ -1123,7 +1129,10 @@ class TaskManager(BaseManager):
                 # self.history = copy.deepcopy(self.interim_history)
             else:
                 logger.info(f"There was no function call {messages}")
+                # TODO revisit this
                 messages.append({"role": "assistant", "content": llm_response})
+
+                self.history.append({"role": "assistant", "content": llm_response})
                 self.interim_history = copy.deepcopy(messages)
                 # if self.callee_silent:
                 #     logger.info("##### When we got utterance end, maybe LLM was still generating response. So, copying into history")
@@ -1175,13 +1184,14 @@ class TaskManager(BaseManager):
                 # So we have to make sure we've commited the filler message
                 if text_chunk == PRE_FUNCTION_CALL_MESSAGE:
                     logger.info("Got a pre function call message")
+                    # TODO revisit this
                     messages.append({'role':'assistant', 'content': PRE_FUNCTION_CALL_MESSAGE})
                     self.interim_history = copy.deepcopy(messages)
 
                 await self._handle_llm_output(next_step, text_chunk, should_bypass_synth, meta_info)
             else:
-                messages.append({"role": "assistant", "content": llm_response})
-                self.history = copy.deepcopy(messages)
+                # messages.append({"role": "assistant", "content": llm_response})
+                # self.history = copy.deepcopy(messages)
                 await self._handle_llm_output(next_step, llm_response, should_bypass_synth, meta_info)
                 convert_to_request_log(message=llm_response, meta_info=meta_info, component="llm", direction="response", model=self.llm_config["model"], run_id= self.run_id)
 
@@ -1228,6 +1238,7 @@ class TaskManager(BaseManager):
                 convert_to_request_log(message=message['data'], meta_info=meta_info, component="llm", direction="request", model=self.llm_config["model"], run_id=self.run_id)
                 convert_to_request_log(message=message['data'], meta_info=meta_info, component="llm", direction="response", model=self.llm_config["model"], is_cached=True, run_id= self.run_id)
                 messages = copy.deepcopy(self.history)
+                # TODO revisit this
                 messages += [{'role': 'user', 'content': message['data']},{'role': 'assistant', 'content': cache_response}]
                 self.interim_history = copy.deepcopy(messages)
                 self.llm_response_generated = True
@@ -1247,7 +1258,7 @@ class TaskManager(BaseManager):
             self.llm_processed_request_ids.add(self.current_request_id)
         else:
             messages = copy.deepcopy(self.history)
-            messages.append({'role': 'user', 'content': message['data']})
+            # messages.append({'role': 'user', 'content': message['data']})
             ### TODO CHECK IF THIS IS EVEN REQUIRED
             convert_to_request_log(message=format_messages(messages, use_system_prompt=True), meta_info=meta_info, component="llm", direction="request", model=self.llm_config["model"], run_id= self.run_id)
 
@@ -1353,7 +1364,9 @@ class TaskManager(BaseManager):
         return sequence
 
     async def _handle_transcriber_output(self, next_task, transcriber_message, meta_info):
+        self.history.append({"role": "user", "content": transcriber_message})
         convert_to_request_log(message=transcriber_message, meta_info= meta_info, model = "deepgram", run_id= self.run_id)
+
         if next_task == "llm":
             logger.info(f"Running llm Tasks")
             meta_info["origin"] = "transcriber"
@@ -1449,6 +1462,7 @@ class TaskManager(BaseManager):
                             logger.info(f"Output task was none and hence starting it")
                             self.output_task = asyncio.create_task(self.__process_output_loop())
 
+                        # TODO remove this variable if we do not use the below condition
                         # if self.llm_response_generated:
                         #     self.history = copy.deepcopy(self.interim_history)
 
