@@ -986,9 +986,9 @@ class TaskManager(BaseManager):
             logger.info(f"Interim history after the LLM task {messages}")
             self.llm_response_generated = True
             self.interim_history = copy.deepcopy(messages)
-            if self.callee_silent:
-                logger.info("When we got utterance end, maybe LLM was still generating response. So, copying into history")
-                self.history = copy.deepcopy(self.interim_history)
+            # if self.callee_silent:
+            #     logger.info("When we got utterance end, maybe LLM was still generating response. So, copying into history")
+            #     self.history = copy.deepcopy(self.interim_history)
 
     async def _process_conversation_formulaic_task(self, message, sequence, meta_info):
         llm_response = ""
@@ -1120,14 +1120,14 @@ class TaskManager(BaseManager):
 
                     self.interim_history = copy.deepcopy(messages)
                 #Assuming that callee was silent
-                self.history = copy.deepcopy(self.interim_history)
+                # self.history = copy.deepcopy(self.interim_history)
             else:
                 logger.info(f"There was no function call {messages}")
                 messages.append({"role": "assistant", "content": llm_response})
                 self.interim_history = copy.deepcopy(messages)
-                if self.callee_silent:
-                    logger.info("##### When we got utterance end, maybe LLM was still generating response. So, copying into history")
-                    self.history = copy.deepcopy(self.interim_history)
+                # if self.callee_silent:
+                #     logger.info("##### When we got utterance end, maybe LLM was still generating response. So, copying into history")
+                #     self.history = copy.deepcopy(self.interim_history)
                 #self.__update_transcripts()
 
     async def __do_llm_generation(self, messages, meta_info, next_step, should_bypass_synth=False, should_trigger_function_call=False):
@@ -1231,9 +1231,9 @@ class TaskManager(BaseManager):
                 messages += [{'role': 'user', 'content': message['data']},{'role': 'assistant', 'content': cache_response}]
                 self.interim_history = copy.deepcopy(messages)
                 self.llm_response_generated = True
-                if self.callee_silent:
-                    logger.info("##### When we got utterance end, maybe LLM was still generating response. So, copying into history")
-                    self.history = copy.deepcopy(self.interim_history)
+                # if self.callee_silent:
+                #     logger.info("##### When we got utterance end, maybe LLM was still generating response. So, copying into history")
+                #     self.history = copy.deepcopy(self.interim_history)
 
             else:
                 logger.info(f"Route doesn't have a vector cache, and hence simply returning back a given response")
@@ -1449,8 +1449,8 @@ class TaskManager(BaseManager):
                             logger.info(f"Output task was none and hence starting it")
                             self.output_task = asyncio.create_task(self.__process_output_loop())
 
-                        if self.llm_response_generated:
-                            self.history = copy.deepcopy(self.interim_history)
+                        # if self.llm_response_generated:
+                        #     self.history = copy.deepcopy(self.interim_history)
 
                         # TODO check where this needs to be added post understanding it's usage
                         self.let_remaining_audio_pass_through = True
