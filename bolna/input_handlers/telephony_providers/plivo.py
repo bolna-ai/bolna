@@ -9,8 +9,8 @@ load_dotenv()
 
 
 class PlivoInputHandler(TelephonyInputHandler):
-    def __init__(self, queues, websocket=None, input_types=None, mark_set=None, turn_based_conversation=False):
-        super().__init__(queues, websocket, input_types, mark_set, turn_based_conversation)
+    def __init__(self, queues, websocket=None, input_types=None, mark_set=None, turn_based_conversation=False, is_welcome_message_played=False):
+        super().__init__(queues, websocket, input_types, mark_set, turn_based_conversation, is_welcome_message_played=is_welcome_message_played)
         self.io_provider = 'plivo'
         self.client = plivosdk.RestClient(os.getenv('PLIVO_AUTH_ID'), os.getenv('PLIVO_AUTH_TOKEN'))
 
@@ -24,3 +24,11 @@ class PlivoInputHandler(TelephonyInputHandler):
             self.client.calls.delete_all_streams(self.call_sid)
         except Exception as e:
             logger.info('Error deleting plivo stream: {}'.format(str(e)))
+
+    async def process_mark_message(self, packet, mark_set):
+        mark_event_name = packet["name"]
+        if mark_event_name in mark_set:
+            mark_set.remove(mark_event_name)
+        if mark_event_name == "agent_welcome_message":
+            logger.info("Received mark event for agent_welcome_message")
+            self.is_welcome_message_played = True

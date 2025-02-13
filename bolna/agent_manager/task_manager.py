@@ -242,6 +242,7 @@ class TaskManager(BaseManager):
             provider_config = self.task_config["tools_config"]["synthesizer"].get("provider_config")
             self.synthesizer_voice = provider_config["voice"]
 
+            self.handle_accumulated_message_task = None
             self.initial_silence_task = None
             self.hangup_task = None
             self.transcriber_task = None
@@ -514,7 +515,8 @@ class TaskManager(BaseManager):
                 "queues": self.queues,
                 "websocket": self.websocket,
                 "input_types": get_required_input_types(self.task_config),
-                "mark_set": self.mark_set
+                "mark_set": self.mark_set,
+                "is_welcome_message_played": True if self.task_config["tools_config"]["output"]["provider"] == 'default' else False
             }
 
             if self.task_config["tools_config"]["input"]["provider"] == "daily":
@@ -1366,7 +1368,6 @@ class TaskManager(BaseManager):
     async def _handle_transcriber_output(self, next_task, transcriber_message, meta_info):
         self.history.append({"role": "user", "content": transcriber_message})
         convert_to_request_log(message=transcriber_message, meta_info= meta_info, model = "deepgram", run_id= self.run_id)
-
         if next_task == "llm":
             logger.info(f"Running llm Tasks")
             meta_info["origin"] = "transcriber"
@@ -1407,8 +1408,9 @@ class TaskManager(BaseManager):
 
                     # Handling of transcriber events
                     if message["data"] == "speech_started":
-                        logger.info(f"User has started speaking")
-                        self.callee_silent = False
+                        if self.tools["input"].welcome_message_played():
+                            logger.info(f"User has started speaking")
+                            self.callee_silent = False
 
                     # Whenever interim results would be received from Deepgram, this condition would get triggered
                     elif isinstance(message.get("data"), dict) and message["data"].get("type", "") == "interim_transcript_received":
@@ -1419,7 +1421,7 @@ class TaskManager(BaseManager):
 
                         temp_transcriber_message = message["data"].get("content")
 
-                        if not self.first_message_passed:
+                        if not self.tools["input"].welcome_message_played():
                             # logger.info(f"Since first message has not been sent, adding the transcript to self.transcriber_message")
                             # self.transcriber_message += f' {message["data"].get("content")}'
                             continue
@@ -1429,8 +1431,7 @@ class TaskManager(BaseManager):
                             self.callee_speaking = True
 
                         interim_transcript_len += len(message["data"].get("content").strip().split(" "))
-                        if (self.tools["output"].welcome_message_sent() or self.first_message_passed) and \
-                                self.number_of_words_for_interruption != 0:
+                        if self.tools["input"].welcome_message_played() and self.number_of_words_for_interruption != 0:
                             if interim_transcript_len > self.number_of_words_for_interruption or \
                                     message["data"].get("content").strip() in self.accidental_interruption_phrases:
                                 logger.info(f"Condition for interruption hit")

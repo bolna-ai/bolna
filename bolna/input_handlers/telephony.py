@@ -12,8 +12,9 @@ load_dotenv()
 
 
 class TelephonyInputHandler(DefaultInputHandler):
-    def __init__(self, queues, websocket=None, input_types=None, mark_set=None, turn_based_conversation=False):
-        super().__init__(queues, websocket, input_types, turn_based_conversation)
+    def __init__(self, queues, websocket=None, input_types=None, mark_set=None, turn_based_conversation=False,
+                 is_welcome_message_played=False):
+        super().__init__(queues, websocket, input_types, turn_based_conversation, is_welcome_message_played=is_welcome_message_played)
         self.stream_sid = None
         self.call_sid = None
         self.buffer = []
@@ -34,9 +35,8 @@ class TelephonyInputHandler(DefaultInputHandler):
     async def disconnect_stream(self):
         pass
 
-    async def process_mark_message(self, packet):
-        if packet["mark"]["name"] in self.mark_set:
-            self.mark_set.remove(packet["mark"]["name"])
+    async def process_mark_message(self, packet, mark_set):
+        pass
 
     async def stop_handler(self):
         asyncio.create_task(self.disconnect_stream())
@@ -94,8 +94,8 @@ class TelephonyInputHandler(DefaultInputHandler):
                     else:
                         logger.info("Getting media elements but not inbound media")
 
-                elif packet['event'] == 'mark':
-                    await self.process_mark_message(packet)
+                elif packet['event'] == 'mark' or packet['event'] == 'playedStream':
+                    await self.process_mark_message(packet, self.mark_set)
 
                 elif packet['event'] == 'stop':
                     logger.info('call stopping')

@@ -40,8 +40,8 @@ class TelephonyOutputHandler(DefaultOutputHandler):
             if meta_info.get('message_category', '') == 'agent_hangup' and meta_info.get('is_final_chunk_of_entire_response', True):
                 self.is_last_hangup_chunk_sent = True
 
-            if meta_info.get('message_category', '') == 'agent_welcome_message' and meta_info.get('is_final_chunk_of_entire_response', True):
-                self.is_welcome_message_sent = True
+            # if meta_info.get('message_category', '') == 'agent_welcome_message' and meta_info.get('is_final_chunk_of_entire_response', True):
+            #     self.is_welcome_message_sent = True
 
             try:
                 if self.current_request_id == meta_info['request_id']:
@@ -57,11 +57,14 @@ class TelephonyOutputHandler(DefaultOutputHandler):
                     media_message = await self.form_media_message(audio_chunk, audio_format)
                     await self.websocket.send_text(json.dumps(media_message))
 
-                    mark_id = str(uuid.uuid4())
-                    self.mark_set.add(mark_id)
-
-                    mark_message = await self.form_mark_message(mark_id)
-                    #await self.websocket.send_text(json.dumps(mark_message))
+                    if meta_info.get('message_category', '') == 'agent_welcome_message' and meta_info.get(
+                            'is_final_chunk_of_entire_response', True):
+                        # mark_id = str(uuid.uuid4())
+                        mark_event_type = "agent_welcome_message"
+                        self.mark_set.add(mark_event_type)
+                        mark_message = await self.form_mark_message(mark_event_type)
+                        logger.info(f"Sending mark event - {mark_message}")
+                        await self.websocket.send_text(json.dumps(mark_message))
                 else:
                     logger.info("Not sending")
             except Exception as e:
