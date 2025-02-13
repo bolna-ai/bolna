@@ -1,8 +1,5 @@
 import asyncio
 import traceback
-from typing import final
-
-import numpy as np
 import torch
 import websockets
 import os
