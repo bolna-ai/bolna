@@ -1421,10 +1421,10 @@ class TaskManager(BaseManager):
 
                         temp_transcriber_message = message["data"].get("content")
 
-                        # if not self.first_message_passed:
-                        #     logger.info(f"Since first message has not been sent, adding the transcript to self.transcriber_message")
-                        #     self.transcriber_message += f' {message["data"].get("content")}'
-                        #     continue
+                        if not self.first_message_passed:
+                            # logger.info(f"Since first message has not been sent, adding the transcript to self.transcriber_message")
+                            # self.transcriber_message += f' {message["data"].get("content")}'
+                            continue
 
                         if not self.callee_speaking:
                             self.callee_speaking_start_time = time.time()
