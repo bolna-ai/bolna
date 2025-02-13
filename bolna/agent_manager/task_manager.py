@@ -323,7 +323,6 @@ class TaskManager(BaseManager):
                 #Handling accidental interruption
                 self.number_of_words_for_interruption = self.conversation_config.get("number_of_words_for_interruption", 3)
                 self.asked_if_user_is_still_there = False #Used to make sure that if user's phrase qualifies as acciedental interruption, we don't break the conversation loop
-                self.first_message_passed = True if self.task_config["tools_config"]["output"]["provider"] == 'default' else False
                 self.started_transmitting_audio = False
                 self.accidental_interruption_phrases = set(ACCIDENTAL_INTERRUPTION_PHRASES)
                 #self.interruption_backoff_period = 1000 #conversation_config.get("interruption_backoff_period", 300) #this is the amount of time output loop will sleep before sending next audio
@@ -1521,6 +1520,10 @@ class TaskManager(BaseManager):
             copied_meta_info["is_final_chunk_of_entire_response"] = True
             copied_meta_info.pop("is_first_chunk_of_entire_response", None)
 
+        if copied_meta_info.get('message_category', None) == 'agent_welcome_message':
+            copied_meta_info["is_first_chunk_of_entire_response"] = True
+            copied_meta_info["is_final_chunk_of_entire_response"] = True
+
         self.buffered_output_queue.put_nowait(create_ws_data_packet(chunk, copied_meta_info))
 
     async def __listen_synthesizer(self):
@@ -1603,8 +1606,6 @@ class TaskManager(BaseManager):
 
     async def __send_preprocessed_audio(self, meta_info, text):
         meta_info = copy.deepcopy(meta_info)
-
-        # if self.first_message_passed is True else False. chunking->false to make it interrupted
         yield_in_chunks = self.yield_chunks
         try:
             #TODO: Either load IVR audio into memory before call or user s3 iter_cunks
@@ -1650,11 +1651,11 @@ class TaskManager(BaseManager):
                             meta_info['is_first_chunk'] = True
                 if yield_in_chunks and audio_chunk is not None:
                     i = 0
-                    number_of_chunks = math.ceil(len(audio_chunk)/self.output_chunk_size)
-                    logger.info(f"Audio chunk size {len(audio_chunk)}, chunk size {self.output_chunk_size}")
-                    for chunk in yield_chunks_from_memory(audio_chunk, chunk_size=self.output_chunk_size):
+                    number_of_chunks = math.ceil(len(audio_chunk) / 100000000)
+                    logger.info(f"Audio chunk size {len(audio_chunk)}, chunk size {100000000}")
+                    for chunk in yield_chunks_from_memory(audio_chunk, chunk_size=100000000):
                         self.__enqueue_chunk(chunk, i, number_of_chunks, meta_info)
-                        i +=1
+                        i += 1
                 elif audio_chunk is not None:
                     meta_info['chunk_id'] = 1
                     meta_info["is_first_chunk_of_entire_response"] = True
@@ -1710,11 +1711,32 @@ class TaskManager(BaseManager):
         await self._handle_transcriber_output(next_task, message, meta_info)
         self.time_since_first_interim_result = (time.time() * 1000) - 1000
 
+    """
+    When the welcome message is playing we accumulate the transcript in the self.transcriber_message variable and once 
+    the welcome message is completely played we send this transcript for further processing.
+    """
+    async def __handle_accumulated_message(self):
+        logger.info("Setting up __handle_accumulated_message function")
+        while True:
+            if self.tools["input"].welcome_message_played():
+                logger.info(f"Welcome message has been played")
+                self.first_message_passing_time = time.time()
+                if len(self.transcriber_message):
+                    logger.info(f"Sending the accumulated transcribed message - {self.transcriber_message}")
+                    await self.__send_first_message(self.transcriber_message)
+                    self.transcriber_message = ""
+                break
+
+            await asyncio.sleep(0.1)
+        self.handle_accumulated_message_task = None
+
     async def __handle_initial_silence(self, duration=5):
         while True:
             logger.info(f"Checking for initial silence {duration}")
             #logger.info(f"Woke up from my slumber {self.callee_silent}, {self.history}, {self.interim_history}")
-            if self.first_message_passed and self.callee_silent and len(self.history) == 2 and len(self.interim_history) == 2 and time.time() - self.first_message_passing_time > duration:
+            if (self.tools["input"].welcome_message_played() and self.callee_silent and len(self.history) == 2 and
+                    len(self.interim_history) == 2 and self.first_message_passing_time and
+                    time.time() - self.first_message_passing_time > duration):
                 logger.info(f"Callee was silent and hence speaking Hello on callee's behalf")
                 await self.__send_first_message("Hello")
                 break
@@ -1761,7 +1783,7 @@ class TaskManager(BaseManager):
         try:
             num_chunks = 0
             while True:
-                if (not self.let_remaining_audio_pass_through) and self.first_message_passed:
+                if (not self.let_remaining_audio_pass_through) and self.tools["input"].welcome_message_played():
                     time_since_first_interim_result = (time.time() * 1000) - self.time_since_first_interim_result if self.time_since_first_interim_result != -1 else -1
                     logger.info(f"##### It's been {time_since_first_interim_result} ms since first  interim result and required time to wait for it is {self.required_delay_before_speaking}. Hence sleeping for 100ms. self.time_since_first_interim_result {self.time_since_first_interim_result}")
                     if time_since_first_interim_result != -1 and time_since_first_interim_result < self.required_delay_before_speaking:
@@ -1817,14 +1839,6 @@ class TaskManager(BaseManager):
 
                     num_chunks = 0
                     self.turn_id += 1
-                    if not self.first_message_passed:
-                        self.first_message_passed = True
-                        logger.info(f"Making first message passed as True")
-                        self.first_message_passing_time = time.time()
-                        if len(self.transcriber_message) != 0:
-                            logger.info(f"Sending the first message as the first message is still not passed and we got a response")
-                            await self.__send_first_message(self.transcriber_message)
-                            self.transcriber_message = ''
 
                 if "is_first_chunk_of_entire_response" in message['meta_info'] and message['meta_info']['is_first_chunk_of_entire_response']:
                     logger.info(f"First chunk stuff")
@@ -1968,7 +1982,9 @@ class TaskManager(BaseManager):
                 logger.info("starting task_id {}".format(self.task_id))
                 tasks = [asyncio.create_task(self.tools['input'].handle())]
                 if not self.turn_based_conversation:
+                    self.first_message_passing_time = None
                     self.initial_silence_task = asyncio.create_task(self.__handle_initial_silence(duration=10))
+                    self.handle_accumulated_message_task = asyncio.create_task(self.__handle_accumulated_message())
                 if "transcriber" in self.tools:
                     tasks.append(asyncio.create_task(self._listen_transcriber()))
                     self.transcriber_task = asyncio.create_task(self.tools["transcriber"].run())
@@ -2051,6 +2067,8 @@ class TaskManager(BaseManager):
                 tasks_to_cancel.append(process_task_cancellation(self.ambient_noise_task, 'ambient_noise_task'))
                 tasks_to_cancel.append(process_task_cancellation(self.initial_silence_task, 'initial_silence_task'))
                 tasks_to_cancel.append(process_task_cancellation(self.first_message_task, 'first_message_task'))
+                tasks_to_cancel.append(
+                    process_task_cancellation(self.handle_accumulated_message_task, "handle_accumulated_message_task"))
 
                 if self.should_record:
                     output['recording_url'] = await save_audio_file_to_s3(self.conversation_recording, self.sampling_rate, self.assistant_id, self.run_id)
