@@ -73,7 +73,7 @@ class DeepgramTranscriber(BaseTranscriber):
             'vad_events' : 'true',
             'endpointing': self.endpointing,
             'interim_results': 'true',
-            'utterance_end_ms': '1200' if int(self.endpointing) < 1200 else str(self.endpointing)
+            'utterance_end_ms': '1000' if int(self.endpointing) < 1000 else str(self.endpointing)
         }
 
         self.audio_frame_duration = 0.5  # We're sending 8k samples with a sample rate of 16k
