@@ -76,8 +76,8 @@ class TelephonyInputHandler(DefaultInputHandler):
         message_type = mark_event_meta_data_obj.get("type")
         self.response_heard_by_user += mark_event_meta_data_obj.get("text_synthesized")
 
-        if mark_event_meta_data_obj.get("is_first_chunk"):
-            self.is_audio_being_played_to_user = True
+        # if mark_event_meta_data_obj.get("is_first_chunk"):
+        #     self.is_audio_being_played_to_user = True
 
         if mark_event_meta_data_obj.get("is_final_chunk"):
             self.is_audio_being_played_to_user = False
