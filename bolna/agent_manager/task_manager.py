@@ -487,7 +487,7 @@ class TaskManager(BaseManager):
 
     async def temp(self):
         while True:
-            logger.info(f"Is audio being played - {self.tools['input']._is_audio_being_played_to_user()}")
+            logger.info(f"Is audio being played - {self.tools['input']._is_audio_being_played_to_user()} | current mark dict - {self.mark_event_meta_data}")
             await asyncio.sleep(0.5)
 
     def __setup_output_handlers(self, turn_based_conversation, output_queue):
