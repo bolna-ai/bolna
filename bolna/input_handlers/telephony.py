@@ -12,16 +12,21 @@ load_dotenv()
 
 
 class TelephonyInputHandler(DefaultInputHandler):
-    def __init__(self, queues, websocket=None, input_types=None, mark_set=None, turn_based_conversation=False,
-                 is_welcome_message_played=False):
+    def __init__(self, queues, websocket=None, input_types=None, mark_event_meta_data=None, turn_based_conversation=False,
+                 is_welcome_message_played=False, observable_variables=None):
         super().__init__(queues, websocket, input_types, turn_based_conversation, is_welcome_message_played=is_welcome_message_played)
         self.stream_sid = None
         self.call_sid = None
         self.buffer = []
         self.message_count = 0
-        self.mark_set = mark_set
+        self.mark_event_meta_data = mark_event_meta_data
         self.last_media_received = 0
         self.io_provider = None
+        # This variable stores the response which has been heard by the user
+        self.response_heard_by_user = ""
+        self.is_audio_being_played_to_user = False
+        # self.is_clear_event_sent = False
+        self.observable_variables = observable_variables
 
     def get_stream_sid(self):
         return self.stream_sid
@@ -35,8 +40,54 @@ class TelephonyInputHandler(DefaultInputHandler):
     async def disconnect_stream(self):
         pass
 
-    async def process_mark_message(self, packet, mark_set):
+    async def get_mark_event_meta_data_obj(self, packet):
         pass
+
+    def update_is_audio_being_played(self, value):
+        self.is_audio_being_played_to_user = value
+        # self.is_clear_event_sent = value
+
+    def _is_audio_being_played_to_user(self):
+        return self.is_audio_being_played_to_user
+
+    def get_response_heard_by_user(self):
+        response = self.response_heard_by_user
+        self.response_heard_by_user = ""
+        return response.strip()
+
+    async def process_mark_message(self, packet):
+        mark_event_meta_data_obj = self.get_mark_event_meta_data_obj(packet)
+        if not mark_event_meta_data_obj:
+            logger.info("No object retrieved from global dict of mark_event_meta_data")
+            return
+
+        # if self.is_clear_event_sent and not mark_event_meta_data_obj.get("is_first_chunk"):
+        #     return
+        #
+        # self.is_clear_event_sent = False
+        # mark_event_meta_data = {
+        #     "text_synthesized": meta_info.get("text_synthesized", ""),
+        #     "type": meta_info.get('message_category', ''),
+        #     "is_first_chunk": meta_info.get("is_first_chunk", False),
+        #     "is_final_chunk": meta_info.get("end_of_synthesizer_stream", False)
+        # }
+
+        logger.info(f"Mark event meta data object retrieved = {mark_event_meta_data_obj}")
+        message_type = mark_event_meta_data_obj.get("type")
+        self.response_heard_by_user += mark_event_meta_data_obj.get("text_synthesized")
+
+        if mark_event_meta_data_obj.get("is_first_chunk"):
+            self.is_audio_being_played_to_user = True
+        elif mark_event_meta_data_obj.get("is_final_chunk"):
+            self.is_audio_being_played_to_user = False
+
+        if message_type == "agent_welcome_message" and mark_event_meta_data_obj.get("is_final_chunk"):
+            logger.info("Received mark event for agent_welcome_message")
+            self.is_welcome_message_played = True
+        elif message_type == "agent_hangup" and mark_event_meta_data_obj.get("is_final_chunk"):
+            logger.info(f"Agent hangup has been triggered")
+            self.observable_variables["agent_hangup_observable"].value = True
+
 
     async def stop_handler(self):
         asyncio.create_task(self.disconnect_stream())
@@ -95,7 +146,7 @@ class TelephonyInputHandler(DefaultInputHandler):
                         logger.info("Getting media elements but not inbound media")
 
                 elif packet['event'] == 'mark' or packet['event'] == 'playedStream':
-                    await self.process_mark_message(packet, self.mark_set)
+                    await self.process_mark_message(packet)
 
                 elif packet['event'] == 'stop':
                     logger.info('call stopping')

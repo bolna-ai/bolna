@@ -11,10 +11,10 @@ load_dotenv()
 
 
 class TwilioOutputHandler(TelephonyOutputHandler):
-    def __init__(self, websocket=None, mark_set=None, log_dir_name=None):
+    def __init__(self, websocket=None, mark_event_meta_data=None, log_dir_name=None):
         io_provider = 'twilio'
 
-        super().__init__(io_provider, websocket, mark_set, log_dir_name)
+        super().__init__(io_provider, websocket, mark_event_meta_data, log_dir_name)
         self.is_chunking_supported = True
 
     async def handle_interruption(self):
@@ -24,7 +24,8 @@ class TwilioOutputHandler(TelephonyOutputHandler):
             "streamSid": self.stream_sid,
         }
         await self.websocket.send_text(json.dumps(message_clear))
-        self.mark_set = set()
+        # TODO check this
+        self.mark_event_meta_data = {}
 
     async def form_media_message(self, audio_data, audio_format="wav"):
         if audio_format != "mulaw":

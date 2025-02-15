@@ -11,7 +11,7 @@ load_dotenv()
 
 
 class DefaultInputHandler:
-    def __init__(self, queues=None, websocket=None, input_types=None, mark_set=None, queue=None,
+    def __init__(self, queues=None, websocket=None, input_types=None, mark_event_meta_data=None, queue=None,
                  turn_based_conversation=False, conversation_recording=None, is_welcome_message_played=False):
         self.queues = queues
         self.websocket = websocket

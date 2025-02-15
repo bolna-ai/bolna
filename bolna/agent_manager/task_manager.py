@@ -27,6 +27,8 @@ from semantic_router import Route
 from semantic_router.layer import RouteLayer
 from semantic_router.encoders import FastEmbedEncoder
 
+from ..helpers.observable_variable import ObservableVariable
+
 asyncio.get_event_loop().set_debug(True)
 logger = configure_logger(__name__)
 
@@ -72,7 +74,8 @@ class TaskManager(BaseManager):
         self.enforce_streaming = kwargs.get("enforce_streaming", False)
         self.room_url = kwargs.get("room_url", None)
         self.callee_silent = True
-        self.yield_chunks = yield_chunks
+        # TODO check if we need to toggle this based on some config
+        self.yield_chunks = False
         # Set up communication queues between processes
         self.audio_queue = asyncio.Queue()
         self.llm_queue = asyncio.Queue()
@@ -92,7 +95,7 @@ class TaskManager(BaseManager):
         self.assistant_id = assistant_id
         self.run_id = kwargs.get("run_id")
 
-        self.mark_set = set()
+        self.mark_event_meta_data = {}
         self.sampling_rate = 24000
         self.conversation_ended = False
         self.hangup_triggered = False
@@ -113,9 +116,14 @@ class TaskManager(BaseManager):
                 "started": 0
             }
         }
+
+        self.observable_variables = {}
         #IO HANDLERS
         if task_id == 0:
             self.default_io = self.task_config["tools_config"]["output"]["provider"] == 'default'
+            agent_hangup_observable = ObservableVariable(False)
+            agent_hangup_observable.add_observer(self.agent_hangup_observer)
+            self.observable_variables["agent_hangup_observable"] = agent_hangup_observable
             logger.info(f"Connected via websocket")
             self.should_record = self.task_config["tools_config"]["output"]["provider"] == 'default' and self.enforce_streaming #In this case, this is a websocket connection and we should record
             self.__setup_input_handlers(turn_based_conversation, input_queue, self.should_record)
@@ -494,7 +502,7 @@ class TaskManager(BaseManager):
                     output_kwargs['room_url'] = self.room_url
 
                 if self.task_config["tools_config"]["output"]["provider"] in SUPPORTED_OUTPUT_TELEPHONY_HANDLERS.keys():
-                    output_kwargs['mark_set'] = self.mark_set
+                    output_kwargs['mark_event_meta_data'] = self.mark_event_meta_data
                     logger.info(f"Making sure that the sampling rate for output handler is 8000")
                     self.task_config['tools_config']['synthesizer']['provider_config']['sampling_rate'] = 8000
                     self.task_config['tools_config']['synthesizer']['audio_format'] = 'pcm'
@@ -514,7 +522,7 @@ class TaskManager(BaseManager):
                 "queues": self.queues,
                 "websocket": self.websocket,
                 "input_types": get_required_input_types(self.task_config),
-                "mark_set": self.mark_set,
+                "mark_event_meta_data": self.mark_event_meta_data,
                 "is_welcome_message_played": True if self.task_config["tools_config"]["output"]["provider"] == 'default' else False
             }
 
@@ -535,6 +543,8 @@ class TaskManager(BaseManager):
 
                 if self.task_config['tools_config']['input']['provider'] == 'default':
                     input_kwargs['queue'] = input_queue
+                else:
+                    input_kwargs["observable_variables"] = self.observable_variables
 
             self.tools["input"] = input_handler_class(**input_kwargs)
         else:
@@ -895,6 +905,11 @@ class TaskManager(BaseManager):
                     json_data = json.loads(json_data)
                 self.extracted_data = json_data
         logger.info("Done")
+
+    async def agent_hangup_observer(self, is_agent_hangup):
+        logger.info(f"agent_hangup_observer triggered with is_agent_hangup = {is_agent_hangup}")
+        if is_agent_hangup:
+            await self.__process_end_of_conversation()
 
     async def __process_end_of_conversation(self):
         logger.info("Got end of conversation. I'm stopping now")
@@ -1366,6 +1381,12 @@ class TaskManager(BaseManager):
 
     async def _handle_transcriber_output(self, next_task, transcriber_message, meta_info):
         self.history.append({"role": "user", "content": transcriber_message})
+
+        message_heard_by_user = self.tools["input"].get_response_heard_by_user()
+        if self.tools["input"].welcome_message_played() and self.history[-2]["role"] == "assistant" and message_heard_by_user:
+            logger.info(f"Updating the chat history with the message heard by the user. Original message = {self.history[-2]['content']} | Message heard by user - {message_heard_by_user}")
+            self.history[-2]["content"] = message_heard_by_user
+
         convert_to_request_log(message=transcriber_message, meta_info= meta_info, model = "deepgram", run_id= self.run_id)
         if next_task == "llm":
             logger.info(f"Running llm Tasks")
@@ -1435,6 +1456,7 @@ class TaskManager(BaseManager):
                                     message["data"].get("content").strip() in self.accidental_interruption_phrases:
                                 logger.info(f"Condition for interruption hit")
                                 self.turn_id += 1
+                                self.tools["input"].update_is_audio_being_played(False)
                                 await self.__cleanup_downstream_tasks()
 
                         # Doing changes for incremental delay
@@ -1781,7 +1803,6 @@ class TaskManager(BaseManager):
     # but it shouldn't be the case.
     async def __process_output_loop(self):
         try:
-            num_chunks = 0
             while True:
                 if (not self.let_remaining_audio_pass_through) and self.tools["input"].welcome_message_played():
                     time_since_first_interim_result = (time.time() * 1000) - self.time_since_first_interim_result if self.time_since_first_interim_result != -1 else -1
@@ -1805,14 +1826,12 @@ class TaskManager(BaseManager):
                     logger.info(f"Started transmitting at {time.time()}")
 
                 message = await self.buffered_output_queue.get()
-                chunk_id = message['meta_info']['chunk_id']
 
-                logger.info("Start response is True for {} and hence starting to speak {} Current sequence ids {}".format(chunk_id, message['meta_info'], self.sequence_ids))
+                logger.info("Start response is True and hence starting to speak {} Current sequence ids {}".format(message['meta_info'], self.sequence_ids))
                 if "end_of_conversation" in message['meta_info']:
                     await self.__process_end_of_conversation()
 
                 if 'sequence_id' in message['meta_info'] and message["meta_info"]["sequence_id"] in self.sequence_ids:
-                    num_chunks += 1
                     await self.tools["output"].handle(message)
                     try:
                         duration = calculate_audio_duration(len(message["data"]), self.sampling_rate, format = message['meta_info']['format'])
@@ -1825,6 +1844,7 @@ class TaskManager(BaseManager):
                     logger.info(f'{message["meta_info"]["sequence_id"]} is not in {self.sequence_ids} and hence not speaking')
                     continue
 
+                # The below code is redundant in the case of telephony
                 if "is_final_chunk_of_entire_response" in message['meta_info'] and message['meta_info']['is_final_chunk_of_entire_response']:
                     self.started_transmitting_audio = False
                     logger.info("##### End of synthesizer stream")
@@ -1837,9 +1857,9 @@ class TaskManager(BaseManager):
                     if message['meta_info'].get('text', '') != self.check_user_online_message:
                         self.asked_if_user_is_still_there = False
 
-                    num_chunks = 0
                     self.turn_id += 1
 
+                # The below code is redundant in the case of telephony
                 if "is_first_chunk_of_entire_response" in message['meta_info'] and message['meta_info']['is_first_chunk_of_entire_response']:
                     logger.info(f"First chunk stuff")
                     self.started_transmitting_audio = True if "is_final_chunk_of_entire_response" not in message['meta_info'] else False
