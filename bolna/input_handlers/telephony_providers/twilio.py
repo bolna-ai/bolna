@@ -18,6 +18,6 @@ class TwilioInputHandler(TelephonyInputHandler):
         self.call_sid = start['callSid']
         self.stream_sid = start['streamSid']
 
-    async def get_mark_event_meta_data_obj(self, packet):
+    def get_mark_event_meta_data_obj(self, packet):
         mark_id = packet["mark"]["name"]
         return self.mark_event_meta_data.pop(mark_id, {})

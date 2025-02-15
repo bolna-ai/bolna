@@ -40,7 +40,7 @@ class TelephonyInputHandler(DefaultInputHandler):
     async def disconnect_stream(self):
         pass
 
-    async def get_mark_event_meta_data_obj(self, packet):
+    def get_mark_event_meta_data_obj(self, packet):
         pass
 
     def update_is_audio_being_played(self, value):

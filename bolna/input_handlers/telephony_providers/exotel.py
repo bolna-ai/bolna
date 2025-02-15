@@ -18,5 +18,5 @@ class ExotelInputHandler(TelephonyInputHandler):
         self.call_sid = start['call_sid']
         self.stream_sid = start['stream_sid']
 
-    async def get_mark_event_meta_data_obj(self, packet):
+    def get_mark_event_meta_data_obj(self, packet):
         pass

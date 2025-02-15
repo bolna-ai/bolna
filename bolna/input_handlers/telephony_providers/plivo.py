@@ -27,6 +27,6 @@ class PlivoInputHandler(TelephonyInputHandler):
         except Exception as e:
             logger.info('Error deleting plivo stream: {}'.format(str(e)))
 
-    async def get_mark_event_meta_data_obj(self, packet):
+    def get_mark_event_meta_data_obj(self, packet):
         mark_id = packet["name"]
         return self.mark_event_meta_data.pop(mark_id, {})
