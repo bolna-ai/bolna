@@ -485,6 +485,11 @@ class TaskManager(BaseManager):
         self.route_layer = RouteLayer(encoder=route_encoder, routes=routes_list)
         logger.info("Routes are set")
 
+    async def temp(self):
+        while True:
+            logger.info(f"Is audio being played - {self.tools['input']._is_audio_being_played_to_user()}")
+            await asyncio.sleep(0.5)
+
     def __setup_output_handlers(self, turn_based_conversation, output_queue):
         output_kwargs = {"websocket": self.websocket}
 
@@ -1999,6 +2004,7 @@ class TaskManager(BaseManager):
     async def run(self):
         try:
             if self._is_conversation_task():
+                self.temp = asyncio.create_task(self.temp())
                 # Create transcriber and synthesizer tasks
                 logger.info("starting task_id {}".format(self.task_id))
                 tasks = [asyncio.create_task(self.tools['input'].handle())]
@@ -2082,6 +2088,7 @@ class TaskManager(BaseManager):
                     "synthesizer_characters": self.tools['synthesizer'].get_synthesized_characters(), "ended_by_assistant": self.ended_by_assistant,
                     "latency_dict": self.latency_dict}
 
+                tasks_to_cancel.append(process_task_cancellation(self.temp, 'temp'))
                 tasks_to_cancel.append(process_task_cancellation(self.output_task,'output_task'))
                 tasks_to_cancel.append(process_task_cancellation(self.hangup_task,'hangup_task'))
                 tasks_to_cancel.append(process_task_cancellation(self.backchanneling_task, 'backchanneling_task'))
