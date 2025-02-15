@@ -78,7 +78,8 @@ class TelephonyInputHandler(DefaultInputHandler):
 
         if mark_event_meta_data_obj.get("is_first_chunk"):
             self.is_audio_being_played_to_user = True
-        elif mark_event_meta_data_obj.get("is_final_chunk"):
+
+        if mark_event_meta_data_obj.get("is_final_chunk"):
             self.is_audio_being_played_to_user = False
 
         if message_type == "agent_welcome_message" and mark_event_meta_data_obj.get("is_final_chunk"):

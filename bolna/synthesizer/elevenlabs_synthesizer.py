@@ -112,19 +112,19 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
                     text_spoken = ''.join(data.get('alignment', {}).get('chars', []))
                     yield chunk, text_spoken
 
-                    if "isFinal" in data and data["isFinal"]:
-                        yield b'\x00', ""
+                if "isFinal" in data and data["isFinal"]:
+                    yield b'\x00', ""
 
-                    elif self.last_text_sent:
-                        try:
-                            response_chars = data.get('alignment', {}).get('chars', [])
-                            response_text = ''.join(response_chars)
-                            last_four_words_text = ' '.join(response_text.split(" ")[-4:]).strip()
-                            if self.current_text.strip().endswith(last_four_words_text):
-                                logger.info('send end_of_synthesizer_stream')
-                                yield b'\x00', ""
-                        except Exception as e:
-                            pass
+                elif self.last_text_sent:
+                    try:
+                        response_chars = data.get('alignment', {}).get('chars', [])
+                        response_text = ''.join(response_chars)
+                        last_four_words_text = ' '.join(response_text.split(" ")[-4:]).strip()
+                        if self.current_text.strip().endswith(last_four_words_text):
+                            logger.info('send end_of_synthesizer_stream')
+                            yield b'\x00', ""
+                    except Exception as e:
+                        pass
 
                 else:
                     logger.info("No audio data in the response")

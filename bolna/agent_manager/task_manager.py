@@ -1832,6 +1832,7 @@ class TaskManager(BaseManager):
                     await self.__process_end_of_conversation()
 
                 if 'sequence_id' in message['meta_info'] and message["meta_info"]["sequence_id"] in self.sequence_ids:
+                    self.tools["input"].update_is_audio_being_played(True)
                     await self.tools["output"].handle(message)
                     try:
                         duration = calculate_audio_duration(len(message["data"]), self.sampling_rate, format = message['meta_info']['format'])
