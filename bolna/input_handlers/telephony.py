@@ -58,7 +58,7 @@ class TelephonyInputHandler(DefaultInputHandler):
     async def process_mark_message(self, packet):
         mark_event_meta_data_obj = self.get_mark_event_meta_data_obj(packet)
         if not mark_event_meta_data_obj:
-            logger.info("No object retrieved from global dict of mark_event_meta_data")
+            logger.info(f"No object retrieved from global dict of mark_event_meta_data for received mark event - {packet}")
             return
 
         # if self.is_clear_event_sent and not mark_event_meta_data_obj.get("is_first_chunk"):
