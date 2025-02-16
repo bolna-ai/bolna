@@ -63,7 +63,6 @@ class TelephonyOutputHandler(DefaultOutputHandler):
                     await self.websocket.send_text(json.dumps(media_message))
                     logger.info(f"Meta info received - {meta_info}")
 
-                    # TODO when meta_info is -1 we could maybe get text_syn from text
                     if meta_info["sequence_id"] == -1 and not meta_info.get("text_synthesized", ""):
                         text_synthesized = meta_info.get("text", "")
                     else:

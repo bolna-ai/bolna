@@ -488,11 +488,6 @@ class TaskManager(BaseManager):
         self.route_layer = RouteLayer(encoder=route_encoder, routes=routes_list)
         logger.info("Routes are set")
 
-    async def temp(self):
-        while True:
-            logger.info(f"Is audio being played - {self.tools['input'].is_audio_being_played_to_user()} | current mark dict - {self.mark_event_meta_data}")
-            await asyncio.sleep(0.5)
-
     def __setup_output_handlers(self, turn_based_conversation, output_queue):
         output_kwargs = {"websocket": self.websocket}
 
@@ -553,7 +548,6 @@ class TaskManager(BaseManager):
                     input_kwargs['queue'] = input_queue
                 else:
                     input_kwargs["observable_variables"] = self.observable_variables
-                    logger.info(f'input kwargs, observable - input_kwargs["observable_variables"] = {input_kwargs["observable_variables"]} | self.observable_variables = {self.observable_variables}')
             self.tools["input"] = input_handler_class(**input_kwargs)
         else:
             raise "Other input handlers not supported yet"
@@ -1174,7 +1168,6 @@ class TaskManager(BaseManager):
         if should_bypass_synth:
             synthesize = False
 
-        logger.info(f"Chat history being sent for LLM generation - {messages}")
         async for llm_message in self.tools['llm_agent'].generate(messages, synthesize=synthesize, meta_info=meta_info):
             logger.info(f"llm_message {llm_message}")
             data, end_of_llm_stream, latency, trigger_function_call = llm_message
@@ -1577,7 +1570,6 @@ class TaskManager(BaseManager):
                 logger.info("Listening to synthesizer")
                 try:
                     async for message in self.tools["synthesizer"].generate():
-                        # logger.info(f"Synthesizer message received = {message}")
                         meta_info = message.get("meta_info", {})
                         is_first_message = meta_info.get("is_first_message", False)
                         sequence_id = meta_info.get("sequence_id", None)
@@ -2028,7 +2020,6 @@ class TaskManager(BaseManager):
     async def run(self):
         try:
             if self._is_conversation_task():
-                self.temp = asyncio.create_task(self.temp())
                 # Create transcriber and synthesizer tasks
                 logger.info("starting task_id {}".format(self.task_id))
                 tasks = [asyncio.create_task(self.tools['input'].handle())]
@@ -2112,7 +2103,6 @@ class TaskManager(BaseManager):
                     "synthesizer_characters": self.tools['synthesizer'].get_synthesized_characters(), "ended_by_assistant": self.ended_by_assistant,
                     "latency_dict": self.latency_dict}
 
-                tasks_to_cancel.append(process_task_cancellation(self.temp, 'temp'))
                 tasks_to_cancel.append(process_task_cancellation(self.output_task,'output_task'))
                 tasks_to_cancel.append(process_task_cancellation(self.hangup_task,'hangup_task'))
                 tasks_to_cancel.append(process_task_cancellation(self.backchanneling_task, 'backchanneling_task'))

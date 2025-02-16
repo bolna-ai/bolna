@@ -56,7 +56,7 @@ class TelephonyInputHandler(DefaultInputHandler):
     async def process_mark_message(self, packet):
         mark_event_meta_data_obj = self.get_mark_event_meta_data_obj(packet)
         if not mark_event_meta_data_obj:
-            logger.info(f"No object retrieved from global dict of mark_event_meta_data for received mark event - {packet} | Existing packets in dict - {self.mark_event_meta_data}")
+            logger.info(f"No object retrieved from global dict of mark_event_meta_data for received mark event - {packet}")
             return
 
         logger.info(f"Mark event meta data object retrieved = {mark_event_meta_data_obj}")
@@ -74,7 +74,6 @@ class TelephonyInputHandler(DefaultInputHandler):
             self.is_welcome_message_played = True
         elif message_type == "agent_hangup" and mark_event_meta_data_obj.get("is_final_chunk"):
             logger.info(f"Agent hangup has been triggered")
-            logger.info(f'Observable dict - {self.observable_variables["agent_hangup_observable"]}')
             self.observable_variables["agent_hangup_observable"].value = True
 
 
