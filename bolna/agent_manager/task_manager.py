@@ -1167,6 +1167,7 @@ class TaskManager(BaseManager):
         if should_bypass_synth:
             synthesize = False
 
+        logger.info(f"Chat history being sent for LLM generation - {messages}")
         async for llm_message in self.tools['llm_agent'].generate(messages, synthesize=synthesize, meta_info=meta_info):
             logger.info(f"llm_message {llm_message}")
             data, end_of_llm_stream, latency, trigger_function_call = llm_message
