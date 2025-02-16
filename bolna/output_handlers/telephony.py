@@ -58,9 +58,15 @@ class TelephonyOutputHandler(DefaultOutputHandler):
                     media_message = await self.form_media_message(audio_chunk, audio_format)
                     await self.websocket.send_text(json.dumps(media_message))
                     logger.info(f"Meta info received - {meta_info}")
+
                     # TODO when meta_info is -1 we could maybe get text_syn from text
+                    if meta_info["sequence_id"] == -1 and not meta_info.get("text_synthesized", ""):
+                        text_synthesized = meta_info.get("text", "")
+                    else:
+                        text_synthesized = meta_info.get("text_synthesized", "")
+
                     mark_event_meta_data = {
-                        "text_synthesized": meta_info.get("text_synthesized", ""),
+                        "text_synthesized": text_synthesized,
                         "type": meta_info.get('message_category', ''),
                         "is_first_chunk": meta_info.get("is_first_chunk", False),
                         "is_final_chunk": True if (meta_info["sequence_id"] == -1 or meta_info.get("end_of_llm_stream", False)) else False
