@@ -551,7 +551,7 @@ class TaskManager(BaseManager):
                     input_kwargs['queue'] = input_queue
                 else:
                     input_kwargs["observable_variables"] = self.observable_variables
-
+            logger.info(f'input kwargs, observable - input_kwargs["observable_variables"] = {input_kwargs["observable_variables"]} | self.observable_variables = {self.observable_variables}')
             self.tools["input"] = input_handler_class(**input_kwargs)
         else:
             raise "Other input handlers not supported yet"
