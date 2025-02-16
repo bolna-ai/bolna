@@ -1213,6 +1213,8 @@ class TaskManager(BaseManager):
 
                 await self._handle_llm_output(next_step, text_chunk, should_bypass_synth, meta_info)
             else:
+                if self.turn_based_conversation:
+                    self.history.append({"role": "assistant", "content": llm_response})
                 # messages.append({"role": "assistant", "content": llm_response})
                 # self.history = copy.deepcopy(messages)
                 await self._handle_llm_output(next_step, llm_response, should_bypass_synth, meta_info)
@@ -1280,6 +1282,8 @@ class TaskManager(BaseManager):
             await self._handle_llm_output(next_step, cache_response, should_bypass_synth, meta_info)
             self.llm_processed_request_ids.add(self.current_request_id)
         else:
+            if self.turn_based_conversation:
+                self.history.append({"role": "user", "content": message})
             messages = copy.deepcopy(self.history)
             # messages.append({'role': 'user', 'content': message['data']})
             ### TODO CHECK IF THIS IS EVEN REQUIRED
