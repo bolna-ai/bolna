@@ -1560,6 +1560,7 @@ class TaskManager(BaseManager):
                 logger.info("Listening to synthesizer")
                 try:
                     async for message in self.tools["synthesizer"].generate():
+                        logger.info(f"Synthesizer message received = {message}")
                         meta_info = message.get("meta_info", {})
                         is_first_message = meta_info.get("is_first_message", False)
                         sequence_id = meta_info.get("sequence_id", None)
