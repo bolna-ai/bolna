@@ -112,6 +112,8 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
                     text_spoken = ''.join(data.get('alignment', {}).get('chars', []))
                     yield chunk, text_spoken
 
+                logger.info(f"Value of isFinal = {data.get('isFinal')} | last_text_sent = {self.last_text_sent}")
+
                 if "isFinal" in data and data["isFinal"]:
                     yield b'\x00', ""
 
@@ -120,6 +122,7 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
                         response_chars = data.get('alignment', {}).get('chars', [])
                         response_text = ''.join(response_chars)
                         last_four_words_text = ' '.join(response_text.split(" ")[-4:]).strip()
+                        logger.info(f"Value of current text = {self.current_text.strip()} | value of last four words = {last_four_words_text}")
                         if self.current_text.strip().endswith(last_four_words_text):
                             logger.info('send end_of_synthesizer_stream')
                             yield b'\x00', ""
