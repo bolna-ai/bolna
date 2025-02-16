@@ -10,7 +10,7 @@ class ExotelInputHandler(TelephonyInputHandler):
     def __init__(self, queues, websocket=None, input_types=None, mark_event_meta_data=None, turn_based_conversation=False,
                  is_welcome_message_played=False, observable_variables=None):
         super().__init__(queues, websocket, input_types, mark_event_meta_data, turn_based_conversation,
-                         is_welcome_message_played=is_welcome_message_played, observable_variables=None)
+                         is_welcome_message_played=is_welcome_message_played, observable_variables=observable_variables)
         self.io_provider = 'exotel'
 
     async def call_start(self, packet):
