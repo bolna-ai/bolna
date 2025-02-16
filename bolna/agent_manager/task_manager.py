@@ -125,9 +125,6 @@ class TaskManager(BaseManager):
             agent_hangup_observable = ObservableVariable(False)
             agent_hangup_observable.add_observer(self.agent_hangup_observer)
             self.observable_variables["agent_hangup_observable"] = agent_hangup_observable
-            check_user_online_observable = ObservableVariable(False)
-            check_user_online_observable.add_observer(self.check_user_online_observer)
-            self.observable_variables["check_user_online_observable"] = check_user_online_observable
             logger.info(f"Connected via websocket")
             self.should_record = self.task_config["tools_config"]["output"]["provider"] == 'default' and self.enforce_streaming #In this case, this is a websocket connection and we should record
             self.__setup_input_handlers(turn_based_conversation, input_queue, self.should_record)
@@ -919,10 +916,6 @@ class TaskManager(BaseManager):
         logger.info(f"agent_hangup_observer triggered with is_agent_hangup = {is_agent_hangup}")
         if is_agent_hangup:
             await self.__process_end_of_conversation()
-
-    def check_user_online_observer(self, is_user_online_message_played):
-        if is_user_online_message_played:
-            self.asked_if_user_is_still_there = False
 
     async def __process_end_of_conversation(self):
         logger.info("Got end of conversation. I'm stopping now")
@@ -1929,14 +1922,13 @@ class TaskManager(BaseManager):
             elif time_since_last_spoken_ai_word > self.trigger_user_online_message_after and not self.asked_if_user_is_still_there and self.time_since_last_spoken_human_word < self.last_transmitted_timestamp:
                 logger.info(f"Asking if the user is still there")
                 self.asked_if_user_is_still_there = True
-                self.observable_variables["check_user_online_observable"].value = False
 
                 if self.check_if_user_online:
                     if self.should_record:
-                        meta_info={'io': 'default', "request_id": str(uuid.uuid4()), "cached": False, "sequence_id": -1, 'format': 'wav', 'message_category': 'check_user_online'}
+                        meta_info={'io': 'default', "request_id": str(uuid.uuid4()), "cached": False, "sequence_id": -1, 'format': 'wav'}
                         await self._synthesize(create_ws_data_packet(self.check_user_online_message, meta_info= meta_info))
                     else:
-                        meta_info={'io': self.tools["output"].get_provider(), "request_id": str(uuid.uuid4()), "cached": False, "sequence_id": -1, 'format': 'pcm', 'message_category': 'check_user_online'}
+                        meta_info={'io': self.tools["output"].get_provider(), "request_id": str(uuid.uuid4()), "cached": False, "sequence_id": -1, 'format': 'pcm'}
                         await self._synthesize(create_ws_data_packet(self.check_user_online_message, meta_info= meta_info))
 
                 # Just in case we need to clear messages sent before
