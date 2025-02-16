@@ -41,15 +41,7 @@ class TelephonyOutputHandler(DefaultOutputHandler):
             if meta_info.get('message_category', '') == 'agent_hangup' and meta_info.get('is_final_chunk_of_entire_response', True):
                 self.is_last_hangup_chunk_sent = True
 
-            # if meta_info.get('message_category', '') == 'agent_welcome_message' and meta_info.get('is_final_chunk_of_entire_response', True):
-            #     self.is_welcome_message_sent = True
-
             try:
-                # TODO check with Prateek about this
-                # if self.current_request_id == meta_info['request_id']:
-                #     if len(audio_chunk) == 1:
-                #         audio_chunk += b'\x00'
-
                 if len(audio_chunk) == 1:
                     audio_chunk += b'\x00'
 
