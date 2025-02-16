@@ -219,8 +219,7 @@ class TaskManager(BaseManager):
                     self.llm_config = {
                         "model": self.llm_agent_config['model'],
                         "max_tokens": self.llm_agent_config['max_tokens'],
-                        "provider": self.llm_agent_config['provider'],
-                        "buffer_size": 10
+                        "provider": self.llm_agent_config['provider']
                     }
 
         # if self.task_config["tools_config"]["llm_agent"] is not None:
