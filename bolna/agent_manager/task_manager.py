@@ -488,7 +488,7 @@ class TaskManager(BaseManager):
 
     async def temp(self):
         while True:
-            logger.info(f"Is audio being played - {self.tools['input']._is_audio_being_played_to_user()} | current mark dict - {self.mark_event_meta_data}")
+            logger.info(f"Is audio being played - {self.tools['input'].is_audio_being_played_to_user()} | current mark dict - {self.mark_event_meta_data}")
             await asyncio.sleep(0.5)
 
     def __setup_output_handlers(self, turn_based_conversation, output_queue):
@@ -1480,6 +1480,10 @@ class TaskManager(BaseManager):
                     # Whenever speech_final or UtteranceEnd is received from Deepgram, this condition would get triggered
                     elif isinstance(message.get("data"), dict) and message["data"].get("type", "") == "transcript":
                         logger.info(f"Received transcript, sending for further processing")
+                        if self.tools["input"].is_audio_being_played_to_user() and len(message["data"].get("content")) <= self.number_of_words_for_interruption:
+                            logger.info(f"Continuing the loop and ignoring the transcript received ({message['data'].get('content')}) in speech final as it is false interruption")
+                            continue
+
                         self.callee_speaking = False
                         self.callee_silent = True
                         temp_transcriber_message = ""
@@ -1597,6 +1601,7 @@ class TaskManager(BaseManager):
                                                                                      0),
                                     "average_latency": self.average_synthesizer_latency,
                                 }
+                                # TODO handle is audio playing over here
                                 await self.tools["output"].handle(message)
 
                             convert_to_request_log(

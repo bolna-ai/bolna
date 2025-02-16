@@ -24,7 +24,7 @@ class TelephonyInputHandler(DefaultInputHandler):
         self.io_provider = None
         # This variable stores the response which has been heard by the user
         self.response_heard_by_user = ""
-        self.is_audio_being_played_to_user = False
+        self._is_audio_being_played_to_user = False
         # self.is_clear_event_sent = False
         self.observable_variables = observable_variables
 
@@ -44,11 +44,11 @@ class TelephonyInputHandler(DefaultInputHandler):
         pass
 
     def update_is_audio_being_played(self, value):
-        self.is_audio_being_played_to_user = value
+        self._is_audio_being_played_to_user = value
         # self.is_clear_event_sent = value
 
-    def _is_audio_being_played_to_user(self):
-        return self.is_audio_being_played_to_user
+    def is_audio_being_played_to_user(self):
+        return self._is_audio_being_played_to_user
 
     def get_response_heard_by_user(self):
         response = self.response_heard_by_user
@@ -77,10 +77,10 @@ class TelephonyInputHandler(DefaultInputHandler):
         self.response_heard_by_user += mark_event_meta_data_obj.get("text_synthesized")
 
         # if mark_event_meta_data_obj.get("is_first_chunk"):
-        #     self.is_audio_being_played_to_user = True
+        #     self._is_audio_being_played_to_user = True
 
         if mark_event_meta_data_obj.get("is_final_chunk"):
-            self.is_audio_being_played_to_user = False
+            self._is_audio_being_played_to_user = False
 
         if message_type == "agent_welcome_message" and mark_event_meta_data_obj.get("is_final_chunk"):
             logger.info("Received mark event for agent_welcome_message")

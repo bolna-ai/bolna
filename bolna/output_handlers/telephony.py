@@ -45,9 +45,13 @@ class TelephonyOutputHandler(DefaultOutputHandler):
             #     self.is_welcome_message_sent = True
 
             try:
-                if self.current_request_id == meta_info['request_id']:
-                    if len(audio_chunk) == 1:
-                        audio_chunk += b'\x00'
+                # TODO check with Prateek about this
+                # if self.current_request_id == meta_info['request_id']:
+                #     if len(audio_chunk) == 1:
+                #         audio_chunk += b'\x00'
+
+                if len(audio_chunk) == 1:
+                    audio_chunk += b'\x00'
 
                 if audio_chunk and self.stream_sid and len(audio_chunk) != 1:
                     audio_format = meta_info.get("format", "wav")
