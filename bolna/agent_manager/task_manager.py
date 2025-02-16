@@ -27,6 +27,7 @@ from semantic_router import Route
 from semantic_router.layer import RouteLayer
 from semantic_router.encoders import FastEmbedEncoder
 
+from ..helpers.mark_event_meta_data import MarkEventMetaData
 from ..helpers.observable_variable import ObservableVariable
 
 asyncio.get_event_loop().set_debug(True)
@@ -95,7 +96,7 @@ class TaskManager(BaseManager):
         self.assistant_id = assistant_id
         self.run_id = kwargs.get("run_id")
 
-        self.mark_event_meta_data = {}
+        self.mark_event_meta_data = MarkEventMetaData()
         self.sampling_rate = 24000
         self.conversation_ended = False
         self.hangup_triggered = False

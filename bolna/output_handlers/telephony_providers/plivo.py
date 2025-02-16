@@ -22,7 +22,7 @@ class PlivoOutputHandler(TelephonyOutputHandler):
             "streamId": self.stream_sid,
         }
         await self.websocket.send_text(json.dumps(message_clear))
-        self.mark_event_meta_data = {}
+        self.mark_event_meta_data.clear_data()
 
     async def form_media_message(self, audio_data, audio_format='audio/x-mulaw'):
         base64_audio = base64.b64encode(audio_data).decode("utf-8")

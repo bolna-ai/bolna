@@ -29,4 +29,4 @@ class PlivoInputHandler(TelephonyInputHandler):
 
     def get_mark_event_meta_data_obj(self, packet):
         mark_id = packet["name"]
-        return self.mark_event_meta_data.pop(mark_id, {})
+        return self.mark_event_meta_data.fetch_data(mark_id)
