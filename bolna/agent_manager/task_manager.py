@@ -122,9 +122,11 @@ class TaskManager(BaseManager):
         #IO HANDLERS
         if task_id == 0:
             self.default_io = self.task_config["tools_config"]["output"]["provider"] == 'default'
-            agent_hangup_observable = ObservableVariable(False)
-            agent_hangup_observable.add_observer(self.agent_hangup_observer)
-            self.observable_variables["agent_hangup_observable"] = agent_hangup_observable
+            self.observable_variables["agent_hangup_observable"] = ObservableVariable(False)
+            self.observable_variables["agent_hangup_observable"].add_observer(self.agent_hangup_observer)
+
+            self.observable_variables["final_chunk_played_observable"] = ObservableVariable(False)
+            self.observable_variables["final_chunk_played_observable"].add_observer(self.final_chunk_played_observer)
             logger.info(f"Connected via websocket")
             self.should_record = self.task_config["tools_config"]["output"]["provider"] == 'default' and self.enforce_streaming #In this case, this is a websocket connection and we should record
             self.__setup_input_handlers(turn_based_conversation, input_queue, self.should_record)
@@ -911,6 +913,11 @@ class TaskManager(BaseManager):
                     json_data = json.loads(json_data)
                 self.extracted_data = json_data
         logger.info("Done")
+
+    # This observer works only for messages which have sequence_id != -1
+    def final_chunk_played_observer(self, is_final_chunk_played):
+        logger.info(f'Updating last_transmitted_timestamp')
+        self.last_transmitted_timestamp = time.time()
 
     async def agent_hangup_observer(self, is_agent_hangup):
         logger.info(f"agent_hangup_observer triggered with is_agent_hangup = {is_agent_hangup}")

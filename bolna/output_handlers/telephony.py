@@ -73,7 +73,8 @@ class TelephonyOutputHandler(DefaultOutputHandler):
                         "text_synthesized": text_synthesized,
                         "type": meta_info.get('message_category', ''),
                         "is_first_chunk": meta_info.get("is_first_chunk", False),
-                        "is_final_chunk": True if (meta_info["sequence_id"] == -1 or (meta_info.get("end_of_llm_stream", False) and meta_info.get("end_of_synthesizer_stream", False))) else False
+                        "is_final_chunk": True if (meta_info["sequence_id"] == -1 or (meta_info.get("end_of_llm_stream", False) and meta_info.get("end_of_synthesizer_stream", False))) else False,
+                        "sequence_id": meta_info["sequence_id"]
                     }
                     mark_id = meta_info.get("mark_id") if (meta_info.get("mark_id") and meta_info.get("mark_id") != "") else str(uuid.uuid4())
                     logger.info(f"Mark meta data being saved for mark id - {mark_id} is - {mark_event_meta_data}")
