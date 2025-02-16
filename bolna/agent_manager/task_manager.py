@@ -1283,7 +1283,7 @@ class TaskManager(BaseManager):
             self.llm_processed_request_ids.add(self.current_request_id)
         else:
             if self.turn_based_conversation:
-                self.history.append({"role": "user", "content": message})
+                self.history.append({"role": "user", "content": message['data']})
             messages = copy.deepcopy(self.history)
             # messages.append({'role': 'user', 'content': message['data']})
             ### TODO CHECK IF THIS IS EVEN REQUIRED
