@@ -25,7 +25,6 @@ class TelephonyInputHandler(DefaultInputHandler):
         # This variable stores the response which has been heard by the user
         self.response_heard_by_user = ""
         self._is_audio_being_played_to_user = False
-        # self.is_clear_event_sent = False
         self.observable_variables = observable_variables
 
     def get_stream_sid(self):
@@ -45,7 +44,6 @@ class TelephonyInputHandler(DefaultInputHandler):
 
     def update_is_audio_being_played(self, value):
         self._is_audio_being_played_to_user = value
-        # self.is_clear_event_sent = value
 
     def is_audio_being_played_to_user(self):
         return self._is_audio_being_played_to_user
@@ -61,23 +59,9 @@ class TelephonyInputHandler(DefaultInputHandler):
             logger.info(f"No object retrieved from global dict of mark_event_meta_data for received mark event - {packet} | Existing packets in dict - {self.mark_event_meta_data}")
             return
 
-        # if self.is_clear_event_sent and not mark_event_meta_data_obj.get("is_first_chunk"):
-        #     return
-        #
-        # self.is_clear_event_sent = False
-        # mark_event_meta_data = {
-        #     "text_synthesized": meta_info.get("text_synthesized", ""),
-        #     "type": meta_info.get('message_category', ''),
-        #     "is_first_chunk": meta_info.get("is_first_chunk", False),
-        #     "is_final_chunk": meta_info.get("end_of_synthesizer_stream", False)
-        # }
-
         logger.info(f"Mark event meta data object retrieved = {mark_event_meta_data_obj}")
         message_type = mark_event_meta_data_obj.get("type")
         self.response_heard_by_user += mark_event_meta_data_obj.get("text_synthesized")
-
-        # if mark_event_meta_data_obj.get("is_first_chunk"):
-        #     self._is_audio_being_played_to_user = True
 
         if mark_event_meta_data_obj.get("is_final_chunk"):
             self._is_audio_being_played_to_user = False

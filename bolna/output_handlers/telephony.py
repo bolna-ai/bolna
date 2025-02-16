@@ -81,12 +81,6 @@ class TelephonyOutputHandler(DefaultOutputHandler):
                     mark_message = await self.form_mark_message(mark_id)
                     logger.info(f"Sending mark event - {mark_message}")
                     await self.websocket.send_text(json.dumps(mark_message))
-
-                    # if meta_info.get('message_category', '') == 'agent_welcome_message' and meta_info.get(
-                    #         'is_final_chunk_of_entire_response', True):
-                    #     # mark_id = str(uuid.uuid4())
-                    #     mark_event_type = "agent_welcome_message"
-
                 else:
                     logger.info("Not sending")
             except Exception as e:
