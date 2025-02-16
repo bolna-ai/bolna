@@ -116,9 +116,12 @@ class OpenAiLLM(BaseLLM):
                 textual_response = True
                 answer += text_chunk    
                 buffer += text_chunk
+                logger.info(f'buffer = {buffer} | buffer_size = {self.buffer_size} | synthesize = {synthesize}')
                 if len(buffer) >= self.buffer_size and synthesize:
                     buffer_words = buffer.split(" ")
+                    logger.info(f"buffer_words = {buffer_words} | buffer_words[:-1] = {buffer_words[:-1]}")
                     text = ' '.join(buffer_words[:-1])
+                    logger.info(f"text = {text}")
 
                     if not self.started_streaming:
                         self.started_streaming = True
