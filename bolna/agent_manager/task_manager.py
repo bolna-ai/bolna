@@ -1480,6 +1480,7 @@ class TaskManager(BaseManager):
                     # Whenever speech_final or UtteranceEnd is received from Deepgram, this condition would get triggered
                     elif isinstance(message.get("data"), dict) and message["data"].get("type", "") == "transcript":
                         logger.info(f"Received transcript, sending for further processing")
+                        logger.info(f'Value of conditions to bypass false interruption - ia_audio_being_played = {self.tools["input"].is_audio_being_played_to_user()} | len(message["data"].get("content")) = {len(message["data"].get("content"))} | self.number_of_words_for_interruption = {self.number_of_words_for_interruption}')
                         if self.tools["input"].is_audio_being_played_to_user() and len(message["data"].get("content")) <= self.number_of_words_for_interruption:
                             logger.info(f"Continuing the loop and ignoring the transcript received ({message['data'].get('content')}) in speech final as it is false interruption")
                             continue
