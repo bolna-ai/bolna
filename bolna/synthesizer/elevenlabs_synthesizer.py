@@ -106,6 +106,7 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
                 response = await self.websocket_holder["websocket"].recv()
                 data = json.loads(response)
                 logger.info("response for isFinal: {}".format(data.get('isFinal', False)))
+                logger.info(f"Response from elevenlabs - {data}")
 
                 if "audio" in data and data["audio"]:
                     chunk = base64.b64decode(data["audio"])
