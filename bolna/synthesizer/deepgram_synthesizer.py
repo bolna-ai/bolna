@@ -1,6 +1,7 @@
 import copy
 import aiohttp
 import os
+import uuid
 from dotenv import load_dotenv
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.utils import convert_audio_to_wav, create_ws_data_packet
@@ -113,6 +114,8 @@ class DeepgramSynthesizer(BaseSynthesizer):
                 self.first_chunk_generated = False
             meta_info['text'] = text
             meta_info['format'] = 'mulaw'
+            meta_info["mark_id"] = str(uuid.uuid4())
+            meta_info["text_synthesized"] = f"{text} "
             yield create_ws_data_packet(message, meta_info)
 
     async def push(self, message):
