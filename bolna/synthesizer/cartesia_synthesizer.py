@@ -197,6 +197,7 @@ class CartesiaSynthesizer(BaseSynthesizer):
 
     async def generate(self):
         try:
+            # TODO changes wrt mark event are yet to be done for Cartesia. For reference you could look at the changes done in elevenlabs_synthesizer
             async for message in self.receiver():
                 if len(self.text_queue) > 0:
                     self.meta_info = self.text_queue.popleft()
