@@ -72,6 +72,8 @@ class TelephonyInputHandler(DefaultInputHandler):
         if message_type == "agent_welcome_message" and mark_event_meta_data_obj.get("is_final_chunk"):
             logger.info("Received mark event for agent_welcome_message")
             self.is_welcome_message_played = True
+            self.observable_variables["final_chunk_played_observable"].value = not self.observable_variables[
+                "final_chunk_played_observable"].value
         elif message_type == "agent_hangup" and mark_event_meta_data_obj.get("is_final_chunk"):
             logger.info(f"Agent hangup has been triggered")
             self.observable_variables["agent_hangup_observable"].value = True
