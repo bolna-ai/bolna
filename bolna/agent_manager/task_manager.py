@@ -935,7 +935,7 @@ class TaskManager(BaseManager):
                 logger.error(f"Error while checking queue: {e}", exc_info=True)
                 break
 
-        if self.call_hangup_message.strip():
+        if self.call_hangup_message and self.call_hangup_message.strip():
             self.history.append({"role": "assistant", "content": self.call_hangup_message})
 
         self.conversation_ended = True
