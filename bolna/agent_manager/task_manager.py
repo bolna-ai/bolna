@@ -916,6 +916,7 @@ class TaskManager(BaseManager):
     async def agent_hangup_observer(self, is_agent_hangup):
         logger.info(f"agent_hangup_observer triggered with is_agent_hangup = {is_agent_hangup}")
         if is_agent_hangup:
+            self.tools["output"].set_hangup_sent()
             await self.__process_end_of_conversation()
 
     async def __process_end_of_conversation(self):
@@ -934,8 +935,8 @@ class TaskManager(BaseManager):
                 logger.error(f"Error while checking queue: {e}", exc_info=True)
                 break
 
-        if self.hangup_triggered and self.history[-1]['role'] == 'assistant':
-            self.history[-1]['content'] = self.call_hangup_message
+        if self.call_hangup_message.strip():
+            self.history.append({"role": "assistant", "content": self.call_hangup_message})
 
         self.conversation_ended = True
         self.ended_by_assistant = True
@@ -1428,6 +1429,8 @@ class TaskManager(BaseManager):
                 #     self.average_transcriber_latency = sum(self.transcriber_latencies) / len(self.transcriber_latencies)
 
                 if self.hangup_triggered:
+                    if message["data"] == "transcriber_connection_closed":
+                        break
                     continue
 
                 if self.stream:
