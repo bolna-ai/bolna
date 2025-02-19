@@ -1777,6 +1777,7 @@ class TaskManager(BaseManager):
         while True:
             logger.info(f"Checking for initial silence {duration}")
             #logger.info(f"Woke up from my slumber {self.callee_silent}, {self.history}, {self.interim_history}")
+            logger.info(f"welcome_message_played = {self.tools['input'].welcome_message_played()} | self.callee_silent = {self.callee_silent} | self.history = {self.history} | self.interim_history = {self.interim_history} | self.first_message_passing_time = {self.first_message_passing_time} | time.time() = {time.time()}")
             if (self.tools["input"].welcome_message_played() and self.callee_silent and len(self.history) == 2 and
                     len(self.interim_history) == 2 and self.first_message_passing_time and
                     time.time() - self.first_message_passing_time > duration):
