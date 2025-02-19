@@ -903,6 +903,7 @@ class TaskManager(BaseManager):
             logger.info(f"Response from the server {self.webhook_response}")
         else:
             message = format_messages(self.input_parameters["messages"])  # Remove the initial system prompt
+            # TODO revisit this
             self.history.append({
                 'role': 'user',
                 'content': message
