@@ -1,7 +1,6 @@
 import asyncio
 import copy
 import uuid
-
 import websockets
 import base64
 import json
@@ -106,10 +105,15 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
                 response = await self.websocket_holder["websocket"].recv()
                 data = json.loads(response)
                 logger.info("response for isFinal: {}".format(data.get('isFinal', False)))
+                # logger.info(f"Response from elevenlabs - {data}")
 
                 if "audio" in data and data["audio"]:
                     chunk = base64.b64decode(data["audio"])
-                    text_spoken = ''.join(data.get('alignment', {}).get('chars', []))
+                    try:
+                        text_spoken = ''.join(data.get('alignment', {}).get('chars', []))
+                    except Exception as e:
+                        logger.error(f"Error occurred while getting chars from response - {e}")
+                        text_spoken = ""
                     yield chunk, text_spoken
 
                 if "isFinal" in data and data["isFinal"]:
@@ -124,7 +128,7 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
                             logger.info('send end_of_synthesizer_stream')
                             yield b'\x00', ""
                     except Exception as e:
-                        pass
+                        logger.error(f"Error occurred while getting chars from response - {e}")
 
                 else:
                     logger.info("No audio data in the response")
@@ -132,7 +136,7 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
             except websockets.exceptions.ConnectionClosed:
                 break
             except Exception as e:
-                break
+                logger.error(f"Error occurred in receiver - {e}")
 
     async def __send_payload(self, payload, format=None):
         headers = {

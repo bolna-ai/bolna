@@ -1,4 +1,5 @@
 import os
+import uuid
 from dotenv import load_dotenv
 from botocore.exceptions import BotoCoreError, ClientError
 from aiobotocore.session import AioSession
@@ -130,6 +131,8 @@ class PollySynthesizer(BaseSynthesizer):
                 self.first_chunk_generated = False
             meta_info['text'] = text
             meta_info['format'] = 'wav'
+            meta_info["mark_id"] = str(uuid.uuid4())
+            meta_info["text_synthesized"] = f"{text} "
             yield create_ws_data_packet(message, meta_info)
 
     async def push(self, message):

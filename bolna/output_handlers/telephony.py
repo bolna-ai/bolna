@@ -37,19 +37,8 @@ class TelephonyOutputHandler(DefaultOutputHandler):
                 self.stream_sid = meta_info.get('stream_sid', None)
 
             logger.info(f"Sending Message {self.current_request_id} and {self.stream_sid} and {meta_info}")
-            # TODO revisit this - need to change this logic
-            if meta_info.get('message_category', '') == 'agent_hangup' and meta_info.get('is_final_chunk_of_entire_response', True):
-                self.is_last_hangup_chunk_sent = True
-
-            # if meta_info.get('message_category', '') == 'agent_welcome_message' and meta_info.get('is_final_chunk_of_entire_response', True):
-            #     self.is_welcome_message_sent = True
 
             try:
-                # TODO check with Prateek about this
-                # if self.current_request_id == meta_info['request_id']:
-                #     if len(audio_chunk) == 1:
-                #         audio_chunk += b'\x00'
-
                 if len(audio_chunk) == 1:
                     audio_chunk += b'\x00'
 
@@ -63,13 +52,8 @@ class TelephonyOutputHandler(DefaultOutputHandler):
                     await self.websocket.send_text(json.dumps(media_message))
                     logger.info(f"Meta info received - {meta_info}")
 
-                    if meta_info["sequence_id"] == -1 and not meta_info.get("text_synthesized", ""):
-                        text_synthesized = meta_info.get("text", "")
-                    else:
-                        text_synthesized = meta_info.get("text_synthesized", "")
-
                     mark_event_meta_data = {
-                        "text_synthesized": text_synthesized,
+                        "text_synthesized": "" if meta_info["sequence_id"] == -1 else meta_info.get("text_synthesized", ""),
                         "type": meta_info.get('message_category', ''),
                         "is_first_chunk": meta_info.get("is_first_chunk", False),
                         "is_final_chunk": True if (meta_info["sequence_id"] == -1 or (meta_info.get("end_of_llm_stream", False) and meta_info.get("end_of_synthesizer_stream", False))) else False,

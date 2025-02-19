@@ -916,6 +916,7 @@ class TaskManager(BaseManager):
     async def agent_hangup_observer(self, is_agent_hangup):
         logger.info(f"agent_hangup_observer triggered with is_agent_hangup = {is_agent_hangup}")
         if is_agent_hangup:
+            self.tools["output"].set_hangup_sent()
             await self.__process_end_of_conversation()
 
     async def __process_end_of_conversation(self):
@@ -934,8 +935,8 @@ class TaskManager(BaseManager):
                 logger.error(f"Error while checking queue: {e}", exc_info=True)
                 break
 
-        if self.hangup_triggered and self.history[-1]['role'] == 'assistant':
-            self.history[-1]['content'] = self.call_hangup_message
+        if self.call_hangup_message and self.call_hangup_message.strip():
+            self.history.append({"role": "assistant", "content": self.call_hangup_message})
 
         self.conversation_ended = True
         self.ended_by_assistant = True
@@ -1428,6 +1429,8 @@ class TaskManager(BaseManager):
                 #     self.average_transcriber_latency = sum(self.transcriber_latencies) / len(self.transcriber_latencies)
 
                 if self.hangup_triggered:
+                    if message["data"] == "transcriber_connection_closed":
+                        break
                     continue
 
                 if self.stream:
@@ -1485,8 +1488,9 @@ class TaskManager(BaseManager):
                     # Whenever speech_final or UtteranceEnd is received from Deepgram, this condition would get triggered
                     elif isinstance(message.get("data"), dict) and message["data"].get("type", "") == "transcript":
                         logger.info(f"Received transcript, sending for further processing")
-                        if self.tools["input"].is_audio_being_played_to_user() and len(message["data"].get("content").strip().split(" ")) <= self.number_of_words_for_interruption and \
-                                                                                    message["data"].get("content").strip() not in self.accidental_interruption_phrases:
+                        if self.tools["input"].welcome_message_played() and self.tools["input"].is_audio_being_played_to_user() and \
+                                len(message["data"].get("content").strip().split(" ")) <= self.number_of_words_for_interruption and \
+                                message["data"].get("content").strip() not in self.accidental_interruption_phrases:
                             logger.info(f"Continuing the loop and ignoring the transcript received ({message['data'].get('content')}) in speech final as it is false interruption")
                             continue
 
@@ -1773,6 +1777,7 @@ class TaskManager(BaseManager):
         while True:
             logger.info(f"Checking for initial silence {duration}")
             #logger.info(f"Woke up from my slumber {self.callee_silent}, {self.history}, {self.interim_history}")
+            logger.info(f"welcome_message_played = {self.tools['input'].welcome_message_played()} | self.callee_silent = {self.callee_silent} | self.history = {self.history} | self.interim_history = {self.interim_history} | self.first_message_passing_time = {self.first_message_passing_time} | time.time() = {time.time()}")
             if (self.tools["input"].welcome_message_played() and self.callee_silent and len(self.history) == 2 and
                     len(self.interim_history) == 2 and self.first_message_passing_time and
                     time.time() - self.first_message_passing_time > duration):
@@ -1866,34 +1871,34 @@ class TaskManager(BaseManager):
                         message['meta_info'].get('text', '') != self.check_user_online_message:
                     self.asked_if_user_is_still_there = False
 
-                # The below code is redundant in the case of telephony
-                if "is_final_chunk_of_entire_response" in message['meta_info'] and message['meta_info']['is_final_chunk_of_entire_response']:
-                    self.started_transmitting_audio = False
-                    logger.info("##### End of synthesizer stream")
-
-                    if message['meta_info'].get('message_category', '') == 'agent_hangup':
-                        await self.__process_end_of_conversation()
-                        break
-
-                    #If we're sending the message to check if user is still here, don't set asked_if_user_is_still_there to True
-                    if message['meta_info'].get('text', '') != self.check_user_online_message:
-                        self.asked_if_user_is_still_there = False
-
-                    self.turn_id += 1
-
-                # The below code is redundant in the case of telephony
-                if "is_first_chunk_of_entire_response" in message['meta_info'] and message['meta_info']['is_first_chunk_of_entire_response']:
-                    logger.info(f"First chunk stuff")
-                    self.started_transmitting_audio = True if "is_final_chunk_of_entire_response" not in message['meta_info'] else False
-                    self.consider_next_transcript_after = time.time() + self.duration_to_prevent_accidental_interruption
-                    self.__process_latency_data(message)
-                else:
-                    # Sleep until this particular audio frame is spoken only if the duration for the frame is atleast 500ms
-                    if duration > 0:
-                        logger.info(f"##### Sleeping for {duration} to maintain quueue on our side {self.sampling_rate}")
-                        await asyncio.sleep(duration - 0.030) #30 milliseconds less
-                if message['meta_info']['sequence_id'] != -1: #Making sure we only track the conversation's last transmitted timesatamp
-                    self.last_transmitted_timestamp = time.time()
+                # # The below code is redundant in the case of telephony
+                # if "is_final_chunk_of_entire_response" in message['meta_info'] and message['meta_info']['is_final_chunk_of_entire_response']:
+                #     self.started_transmitting_audio = False
+                #     logger.info("##### End of synthesizer stream")
+                #
+                #     if message['meta_info'].get('message_category', '') == 'agent_hangup':
+                #         await self.__process_end_of_conversation()
+                #         break
+                #
+                #     #If we're sending the message to check if user is still here, don't set asked_if_user_is_still_there to True
+                #     if message['meta_info'].get('text', '') != self.check_user_online_message:
+                #         self.asked_if_user_is_still_there = False
+                #
+                #     self.turn_id += 1
+                #
+                # # The below code is redundant in the case of telephony
+                # if "is_first_chunk_of_entire_response" in message['meta_info'] and message['meta_info']['is_first_chunk_of_entire_response']:
+                #     logger.info(f"First chunk stuff")
+                #     self.started_transmitting_audio = True if "is_final_chunk_of_entire_response" not in message['meta_info'] else False
+                #     self.consider_next_transcript_after = time.time() + self.duration_to_prevent_accidental_interruption
+                #     self.__process_latency_data(message)
+                # else:
+                #     # Sleep until this particular audio frame is spoken only if the duration for the frame is atleast 500ms
+                #     if duration > 0:
+                #         logger.info(f"##### Sleeping for {duration} to maintain quueue on our side {self.sampling_rate}")
+                #         await asyncio.sleep(duration - 0.030) #30 milliseconds less
+                # if message['meta_info']['sequence_id'] != -1: #Making sure we only track the conversation's last transmitted timesatamp
+                #     self.last_transmitted_timestamp = time.time()
 
                 try:
                     logger.info(f"Updating Last transmitted timestamp to {str(self.last_transmitted_timestamp)}")
