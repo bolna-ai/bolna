@@ -29,6 +29,9 @@ class DefaultOutputHandler:
     def get_provider(self):
         return self.io_provider
 
+    def set_hangup_sent(self):
+        self.is_last_hangup_chunk_sent = True
+
     def hangup_sent(self):
         return self.is_last_hangup_chunk_sent
 

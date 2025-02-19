@@ -1,5 +1,6 @@
 import asyncio
 import copy
+import uuid
 import websockets
 import base64
 import json
@@ -104,24 +105,30 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
                 response = await self.websocket_holder["websocket"].recv()
                 data = json.loads(response)
                 logger.info("response for isFinal: {}".format(data.get('isFinal', False)))
+                # logger.info(f"Response from elevenlabs - {data}")
 
                 if "audio" in data and data["audio"]:
                     chunk = base64.b64decode(data["audio"])
-                    yield chunk
+                    try:
+                        text_spoken = ''.join(data.get('alignment', {}).get('chars', []))
+                    except Exception as e:
+                        logger.error(f"Error occurred while getting chars from response - {e}")
+                        text_spoken = ""
+                    yield chunk, text_spoken
 
-                    if "isFinal" in data and data["isFinal"]:
-                        yield b'\x00'
+                if "isFinal" in data and data["isFinal"]:
+                    yield b'\x00', ""
 
-                    elif self.last_text_sent:
-                        try:
-                            response_chars = data.get('alignment', {}).get('chars', [])
-                            response_text = ''.join(response_chars)
-                            last_four_words_text = ' '.join(response_text.split(" ")[-4:]).strip()
-                            if self.current_text.strip().endswith(last_four_words_text):
-                                logger.info('send end_of_synthesizer_stream')
-                                yield b'\x00'
-                        except Exception as e:
-                            pass
+                elif self.last_text_sent:
+                    try:
+                        response_chars = data.get('alignment', {}).get('chars', [])
+                        response_text = ''.join(response_chars)
+                        last_four_words_text = ' '.join(response_text.split(" ")[-4:]).strip()
+                        if self.current_text.strip().endswith(last_four_words_text):
+                            logger.info('send end_of_synthesizer_stream')
+                            yield b'\x00', ""
+                    except Exception as e:
+                        logger.error(f"Error occurred while getting chars from response - {e}")
 
                 else:
                     logger.info("No audio data in the response")
@@ -129,7 +136,7 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
             except websockets.exceptions.ConnectionClosed:
                 break
             except Exception as e:
-                break
+                logger.error(f"Error occurred in receiver - {e}")
 
     async def __send_payload(self, payload, format=None):
         headers = {
@@ -173,7 +180,7 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
     async def generate(self):
         try:
             if self.stream:
-                async for message in self.receiver():
+                async for message, text_synthesized in self.receiver():
                     logger.info(f"Received message from server")
 
                     if len(self.text_queue) > 0:
@@ -206,6 +213,8 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
                         self.meta_info["end_of_synthesizer_stream"] = True
                         self.first_chunk_generated = False
 
+                    self.meta_info["mark_id"] = str(uuid.uuid4())
+                    self.meta_info["text_synthesized"] = text_synthesized
                     yield create_ws_data_packet(audio, self.meta_info)
             else:
                 while True:
