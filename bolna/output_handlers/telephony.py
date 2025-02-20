@@ -13,7 +13,7 @@ load_dotenv()
 
 class TelephonyOutputHandler(DefaultOutputHandler):
     def __init__(self, io_provider, websocket=None, mark_event_meta_data=None, log_dir_name=None):
-        super().__init__(io_provider, websocket, log_dir_name)
+        super().__init__(io_provider, websocket, log_dir_name, mark_event_meta_data=mark_event_meta_data)
         self.mark_event_meta_data = mark_event_meta_data
 
         self.stream_sid = None

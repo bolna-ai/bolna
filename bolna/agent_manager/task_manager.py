@@ -526,6 +526,7 @@ class TaskManager(BaseManager):
 
             if self.task_config["tools_config"]["output"]["provider"] == "default":
                 output_kwargs["is_web_based_call"] = self.kwargs["is_web_based_call"]
+                output_kwargs['mark_event_meta_data'] = self.mark_event_meta_data
 
             self.tools["output"] = output_handler_class(**output_kwargs)
         else:
@@ -539,7 +540,7 @@ class TaskManager(BaseManager):
                 "websocket": self.websocket,
                 "input_types": get_required_input_types(self.task_config),
                 "mark_event_meta_data": self.mark_event_meta_data,
-                "is_welcome_message_played": True if self.task_config["tools_config"]["output"]["provider"] == 'default' else False
+                "is_welcome_message_played": True if self.task_config["tools_config"]["output"]["provider"] == 'default' and not self.kwargs["is_web_based_call"] else False
             }
 
             if self.task_config["tools_config"]["input"]["provider"] == "daily":
@@ -559,8 +560,8 @@ class TaskManager(BaseManager):
 
                 if self.task_config['tools_config']['input']['provider'] == 'default':
                     input_kwargs['queue'] = input_queue
-                else:
-                    input_kwargs["observable_variables"] = self.observable_variables
+
+                input_kwargs["observable_variables"] = self.observable_variables
             self.tools["input"] = input_handler_class(**input_kwargs)
         else:
             raise "Other input handlers not supported yet"
@@ -1448,6 +1449,8 @@ class TaskManager(BaseManager):
 
                 if self.hangup_triggered:
                     if message["data"] == "transcriber_connection_closed":
+                        logger.info(f"Transcriber connection has been closed")
+                        self.transcriber_duration += message['meta_info']["transcriber_duration"] if message['meta_info'] is not None else 0
                         break
                     continue
 
@@ -1918,10 +1921,10 @@ class TaskManager(BaseManager):
                 # if message['meta_info']['sequence_id'] != -1: #Making sure we only track the conversation's last transmitted timesatamp
                 #     self.last_transmitted_timestamp = time.time()
 
-                try:
-                    logger.info(f"Updating Last transmitted timestamp to {str(self.last_transmitted_timestamp)}")
-                except Exception as e:
-                    logger.error(f'Error in printing Last transmitted timestamp: {str(e)}')
+                # try:
+                #     logger.info(f"Updating Last transmitted timestamp to {str(self.last_transmitted_timestamp)}")
+                # except Exception as e:
+                #     logger.error(f'Error in printing Last transmitted timestamp: {str(e)}')
 
         except Exception as e:
             traceback.print_exc()
@@ -1959,6 +1962,15 @@ class TaskManager(BaseManager):
 
                 # Just in case we need to clear messages sent before
                 await self.tools["output"].handle_interruption()
+
+            # In the case of web call if the user has not spoken for more than 30 seconds and audio is not being played
+            # by the AI and the time since the last word said by the AI is greater than 7 seconds then we cut the call.
+            elif self.kwargs["is_web_based_call"] and self.use_llm_to_determine_hangup and time.time() - self.time_since_last_spoken_human_word > 30 and \
+                    not self.tools["input"].is_audio_being_played_to_user() and time_since_last_spoken_ai_word > 7:
+                logger.info("Hanging up for web call")
+                await self.__process_end_of_conversation()
+                break
+
             else:
                 logger.info(f"Only {time_since_last_spoken_ai_word} seconds since last spoken time stamp and hence not cutting the phone call")
 
@@ -1982,7 +1994,7 @@ class TaskManager(BaseManager):
             if self.kwargs["is_web_based_call"]:
                 logger.info("Sending agent welcome message for web based call")
                 text = self.kwargs.get('agent_welcome_message', None)
-                meta_info = {'io': self.tools["output"].get_provider(), 'message_category': 'agent_welcome_message',
+                meta_info = {'io': 'default', 'message_category': 'agent_welcome_message',
                              'stream_sid': self.stream_sid, "request_id": str(uuid.uuid4()), "cached": False,
                              "sequence_id": -1, 'format': self.task_config["tools_config"]["output"]["format"],
                              'text': text}
