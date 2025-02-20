@@ -938,7 +938,7 @@ class TaskManager(BaseManager):
             self.tools["output"].set_hangup_sent()
             await self.__process_end_of_conversation()
 
-    async def __process_end_of_conversation(self):
+    async def __process_end_of_conversation(self, web_call_timeout=False):
         logger.info("Got end of conversation. I'm stopping now")
 
         # Check completion of agent_hangup_message sent from output
@@ -954,7 +954,7 @@ class TaskManager(BaseManager):
                 logger.error(f"Error while checking queue: {e}", exc_info=True)
                 break
 
-        if self.call_hangup_message and self.call_hangup_message.strip():
+        if self.call_hangup_message and self.call_hangup_message.strip() and not web_call_timeout:
             self.history.append({"role": "assistant", "content": self.call_hangup_message})
 
         self.conversation_ended = True
@@ -1968,7 +1968,7 @@ class TaskManager(BaseManager):
             elif self.kwargs["is_web_based_call"] and self.use_llm_to_determine_hangup and time.time() - self.time_since_last_spoken_human_word > 30 and \
                     not self.tools["input"].is_audio_being_played_to_user() and time_since_last_spoken_ai_word > 7:
                 logger.info("Hanging up for web call")
-                await self.__process_end_of_conversation()
+                await self.__process_end_of_conversation(web_call_timeout=True)
                 break
 
             else:
