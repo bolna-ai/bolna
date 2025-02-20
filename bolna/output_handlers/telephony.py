@@ -43,14 +43,15 @@ class TelephonyOutputHandler(DefaultOutputHandler):
                     audio_chunk += b'\x00'
 
                 if audio_chunk and self.stream_sid and len(audio_chunk) != 1:
-                    audio_format = meta_info.get("format", "wav")
-                    logger.info(f"Sending message {len(audio_chunk)} {audio_format}")
+                    if audio_chunk != b'\x00\x00':
+                        audio_format = meta_info.get("format", "wav")
+                        logger.info(f"Sending message {len(audio_chunk)} {audio_format}")
 
-                    if audio_format == 'pcm' and meta_info.get('message_category', '') == 'agent_welcome_message' and self.io_provider == 'plivo' and meta_info['cached'] is True:
-                        audio_format = 'wav'
-                    media_message = await self.form_media_message(audio_chunk, audio_format)
-                    await self.websocket.send_text(json.dumps(media_message))
-                    logger.info(f"Meta info received - {meta_info}")
+                        if audio_format == 'pcm' and meta_info.get('message_category', '') == 'agent_welcome_message' and self.io_provider == 'plivo' and meta_info['cached'] is True:
+                            audio_format = 'wav'
+                        media_message = await self.form_media_message(audio_chunk, audio_format)
+                        await self.websocket.send_text(json.dumps(media_message))
+                        logger.info(f"Meta info received - {meta_info}")
 
                     mark_event_meta_data = {
                         "text_synthesized": "" if meta_info["sequence_id"] == -1 else meta_info.get("text_synthesized", ""),
