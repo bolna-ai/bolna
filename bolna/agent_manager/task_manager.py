@@ -1934,6 +1934,13 @@ class TaskManager(BaseManager):
         logger.info(f"Starting task to check for completion")
         while True:
             await asyncio.sleep(2)
+
+            if self.kwargs["is_web_based_call"] and time.time() - self.start_time >= int(
+                    self.task_config["task_config"]["call_terminate"]):
+                logger.info("Hanging up for web call as max time of call has been reached")
+                await self.__process_end_of_conversation(web_call_timeout=True)
+                break
+
             if self.last_transmitted_timestamp == 0:
                 logger.info(f"Last transmitted timestamp is simply 0 and hence continuing")
                 continue
@@ -1962,14 +1969,6 @@ class TaskManager(BaseManager):
 
                 # Just in case we need to clear messages sent before
                 await self.tools["output"].handle_interruption()
-
-            # In the case of web call if the user has not spoken for more than 30 seconds and audio is not being played
-            # by the AI and the time since the last word said by the AI is greater than 7 seconds then we cut the call.
-            elif self.kwargs["is_web_based_call"] and self.use_llm_to_determine_hangup and time.time() - self.time_since_last_spoken_human_word > 30 and \
-                    not self.tools["input"].is_audio_being_played_to_user() and time_since_last_spoken_ai_word > 7:
-                logger.info("Hanging up for web call")
-                await self.__process_end_of_conversation(web_call_timeout=True)
-                break
 
             else:
                 logger.info(f"Only {time_since_last_spoken_ai_word} seconds since last spoken time stamp and hence not cutting the phone call")
