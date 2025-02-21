@@ -74,7 +74,7 @@ class TaskManager(BaseManager):
         self.turn_based_conversation = turn_based_conversation
         self.enforce_streaming = kwargs.get("enforce_streaming", False)
         self.room_url = kwargs.get("room_url", None)
-        self.callee_silent = True
+        # self.callee_silent = True
         # TODO check if we need to toggle this based on some config
         self.yield_chunks = False
         # Set up communication queues between processes
@@ -264,7 +264,7 @@ class TaskManager(BaseManager):
             self.synthesizer_voice = provider_config["voice"]
 
             self.handle_accumulated_message_task = None
-            self.initial_silence_task = None
+            # self.initial_silence_task = None
             self.hangup_task = None
             self.transcriber_task = None
             self.output_chunk_size = 16384 if self.sampling_rate == 24000 else 4096 #0.5 second chunk size for calls
@@ -1465,7 +1465,7 @@ class TaskManager(BaseManager):
                     if message["data"] == "speech_started":
                         if self.tools["input"].welcome_message_played():
                             logger.info(f"User has started speaking")
-                            self.callee_silent = False
+                            # self.callee_silent = False
 
                     # Whenever interim results would be received from Deepgram, this condition would get triggered
                     elif isinstance(message.get("data"), dict) and message["data"].get("type", "") == "interim_transcript_received":
@@ -1501,7 +1501,7 @@ class TaskManager(BaseManager):
                             self.time_since_first_interim_result = time.time() * 1000
                             logger.info(f"Setting time for first interim result as {self.time_since_first_interim_result}")
 
-                        self.callee_silent = False
+                        # self.callee_silent = False
                         # TODO check where this needs to be added post understanding it's usage
                         self.let_remaining_audio_pass_through = False
                         self.llm_response_generated = False
@@ -1516,7 +1516,7 @@ class TaskManager(BaseManager):
                             continue
 
                         self.callee_speaking = False
-                        self.callee_silent = True
+                        # self.callee_silent = True
                         temp_transcriber_message = ""
 
                         if self.output_task is None:
@@ -1794,21 +1794,21 @@ class TaskManager(BaseManager):
             await asyncio.sleep(0.1)
         self.handle_accumulated_message_task = None
 
-    async def __handle_initial_silence(self, duration=5):
-        while True:
-            logger.info(f"Checking for initial silence {duration}")
-            #logger.info(f"Woke up from my slumber {self.callee_silent}, {self.history}, {self.interim_history}")
-            logger.info(f"welcome_message_played = {self.tools['input'].welcome_message_played()} | self.callee_silent = {self.callee_silent} | self.history = {self.history} | self.interim_history = {self.interim_history} | self.first_message_passing_time = {self.first_message_passing_time} | time.time() = {time.time()}")
-            if (self.tools["input"].welcome_message_played() and self.callee_silent and len(self.history) == 2 and
-                    len(self.interim_history) == 2 and self.first_message_passing_time and
-                    time.time() - self.first_message_passing_time > duration):
-                logger.info(f"Callee was silent and hence speaking Hello on callee's behalf")
-                await self.__send_first_message("Hello")
-                break
-            elif len(self.history) > 2:
-                break
-            await asyncio.sleep(3)
-        self.initial_silence_task = None
+    # async def __handle_initial_silence(self, duration=5):
+    #     while True:
+    #         logger.info(f"Checking for initial silence {duration}")
+    #         #logger.info(f"Woke up from my slumber {self.callee_silent}, {self.history}, {self.interim_history}")
+    #         logger.info(f"welcome_message_played = {self.tools['input'].welcome_message_played()} | self.callee_silent = {self.callee_silent} | self.history = {self.history} | self.interim_history = {self.interim_history} | self.first_message_passing_time = {self.first_message_passing_time} | time.time() = {time.time()}")
+    #         if (self.tools["input"].welcome_message_played() and self.callee_silent and len(self.history) == 2 and
+    #                 len(self.interim_history) == 2 and self.first_message_passing_time and
+    #                 time.time() - self.first_message_passing_time > duration):
+    #             logger.info(f"Callee was silent and hence speaking Hello on callee's behalf")
+    #             await self.__send_first_message("Hello")
+    #             break
+    #         elif len(self.history) > 2:
+    #             break
+    #         await asyncio.sleep(3)
+    #     self.initial_silence_task = None
 
     def __process_latency_data(self, message):
         utterance_end = message['meta_info'].get("utterance_end", None)
@@ -2069,7 +2069,7 @@ class TaskManager(BaseManager):
                 tasks = [asyncio.create_task(self.tools['input'].handle())]
                 if not self.turn_based_conversation:
                     self.first_message_passing_time = None
-                    self.initial_silence_task = asyncio.create_task(self.__handle_initial_silence(duration=10))
+                    # self.initial_silence_task = asyncio.create_task(self.__handle_initial_silence(duration=10))
                     self.handle_accumulated_message_task = asyncio.create_task(self.__handle_accumulated_message())
                 if "transcriber" in self.tools:
                     tasks.append(asyncio.create_task(self._listen_transcriber()))
@@ -2151,7 +2151,7 @@ class TaskManager(BaseManager):
                 tasks_to_cancel.append(process_task_cancellation(self.hangup_task,'hangup_task'))
                 tasks_to_cancel.append(process_task_cancellation(self.backchanneling_task, 'backchanneling_task'))
                 tasks_to_cancel.append(process_task_cancellation(self.ambient_noise_task, 'ambient_noise_task'))
-                tasks_to_cancel.append(process_task_cancellation(self.initial_silence_task, 'initial_silence_task'))
+                # tasks_to_cancel.append(process_task_cancellation(self.initial_silence_task, 'initial_silence_task'))
                 tasks_to_cancel.append(process_task_cancellation(self.first_message_task, 'first_message_task'))
                 tasks_to_cancel.append(
                     process_task_cancellation(self.handle_accumulated_message_task, "handle_accumulated_message_task"))

@@ -70,17 +70,15 @@ class DefaultInputHandler:
 
         if mark_event_meta_data_obj.get("is_final_chunk"):
             self._is_audio_being_played_to_user = False
-
-        if mark_event_meta_data_obj.get("is_final_chunk") and mark_event_meta_data_obj.get("sequence_id") != -1:
             self.observable_variables["final_chunk_played_observable"].value = not self.observable_variables["final_chunk_played_observable"].value
 
-        if message_type == "agent_welcome_message" and mark_event_meta_data_obj.get("is_final_chunk"):
-            logger.info("Received mark event for agent_welcome_message")
-            self.is_welcome_message_played = True
+            if message_type == "agent_welcome_message":
+                logger.info("Received mark event for agent_welcome_message")
+                self.is_welcome_message_played = True
 
-        elif message_type == "agent_hangup" and mark_event_meta_data_obj.get("is_final_chunk"):
-            logger.info(f"Agent hangup has been triggered")
-            self.observable_variables["agent_hangup_observable"].value = True
+            elif message_type == "agent_hangup":
+                logger.info(f"Agent hangup has been triggered")
+                self.observable_variables["agent_hangup_observable"].value = True
 
     def __process_mark_event(self, packet):
         self.process_mark_message(packet)
