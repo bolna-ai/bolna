@@ -70,7 +70,9 @@ class DefaultInputHandler:
 
         if mark_event_meta_data_obj.get("is_final_chunk"):
             self._is_audio_being_played_to_user = False
-            self.observable_variables["final_chunk_played_observable"].value = not self.observable_variables["final_chunk_played_observable"].value
+
+            if message_type != "is_user_online_message":
+                self.observable_variables["final_chunk_played_observable"].value = not self.observable_variables["final_chunk_played_observable"].value
 
             if message_type == "agent_welcome_message":
                 logger.info("Received mark event for agent_welcome_message")
