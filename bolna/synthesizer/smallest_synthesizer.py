@@ -1,7 +1,7 @@
 import aiohttp
 import os
+import uuid
 import traceback
-
 from .base_synthesizer import BaseSynthesizer
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.utils import create_ws_data_packet
@@ -90,6 +90,8 @@ class SmallestSynthesizer(BaseSynthesizer):
                     self.first_chunk_generated = False
 
                 meta_info['format'] = "wav"
+                meta_info["mark_id"] = str(uuid.uuid4())
+                meta_info["text_synthesized"] = f"{text} "
                 yield create_ws_data_packet(audio, meta_info)
 
         except Exception as e:
