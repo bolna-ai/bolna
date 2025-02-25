@@ -87,6 +87,14 @@ class DeepgramTranscriber(BaseTranscriber):
             dg_params['sample_rate'] = self.sampling_rate
             dg_params['channels'] = "1"
 
+        elif self.provider == "web_based_call":
+            dg_params['encoding'] = "linear16"
+            dg_params['sample_rate'] = 16000
+            dg_params['channels'] = "1"
+            self.sampling_rate = 16000
+            # TODO what is the purpose of this?
+            self.audio_frame_duration = 0.256
+
         elif not self.connected_via_dashboard:
             dg_params['encoding'] = "linear16"
             dg_params['sample_rate'] = 16000

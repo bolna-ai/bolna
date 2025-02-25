@@ -74,7 +74,7 @@ class TaskManager(BaseManager):
         self.turn_based_conversation = turn_based_conversation
         self.enforce_streaming = kwargs.get("enforce_streaming", False)
         self.room_url = kwargs.get("room_url", None)
-        self.callee_silent = True
+        # self.callee_silent = True
         # TODO check if we need to toggle this based on some config
         self.yield_chunks = False
         # Set up communication queues between processes
@@ -121,6 +121,10 @@ class TaskManager(BaseManager):
         self.observable_variables = {}
         #IO HANDLERS
         if task_id == 0:
+            if self.kwargs["is_web_based_call"]:
+                self.task_config["tools_config"]["input"]["provider"] = "default"
+                self.task_config["tools_config"]["output"]["provider"] = "default"
+
             self.default_io = self.task_config["tools_config"]["output"]["provider"] == 'default'
             self.observable_variables["agent_hangup_observable"] = ObservableVariable(False)
             self.observable_variables["agent_hangup_observable"].add_observer(self.agent_hangup_observer)
@@ -128,7 +132,13 @@ class TaskManager(BaseManager):
             self.observable_variables["final_chunk_played_observable"] = ObservableVariable(False)
             self.observable_variables["final_chunk_played_observable"].add_observer(self.final_chunk_played_observer)
             logger.info(f"Connected via websocket")
-            self.should_record = self.task_config["tools_config"]["output"]["provider"] == 'default' and self.enforce_streaming #In this case, this is a websocket connection and we should record
+
+            # TODO revert this temporary change for web based call
+            if self.kwargs["is_web_based_call"]:
+                self.should_record = False
+            else:
+                self.should_record = self.task_config["tools_config"]["output"]["provider"] == 'default' and self.enforce_streaming #In this case, this is a websocket connection and we should record
+
             self.__setup_input_handlers(turn_based_conversation, input_queue, self.should_record)
         self.__setup_output_handlers(turn_based_conversation, output_queue)
 
@@ -254,7 +264,7 @@ class TaskManager(BaseManager):
             self.synthesizer_voice = provider_config["voice"]
 
             self.handle_accumulated_message_task = None
-            self.initial_silence_task = None
+            # self.initial_silence_task = None
             self.hangup_task = None
             self.transcriber_task = None
             self.output_chunk_size = 16384 if self.sampling_rate == 24000 else 4096 #0.5 second chunk size for calls
@@ -514,6 +524,10 @@ class TaskManager(BaseManager):
                     output_kwargs['queue'] = output_queue
                 self.sampling_rate = self.task_config['tools_config']['synthesizer']['provider_config']['sampling_rate']
 
+            if self.task_config["tools_config"]["output"]["provider"] == "default":
+                output_kwargs["is_web_based_call"] = self.kwargs["is_web_based_call"]
+                output_kwargs['mark_event_meta_data'] = self.mark_event_meta_data
+
             self.tools["output"] = output_handler_class(**output_kwargs)
         else:
             raise "Other input handlers not supported yet"
@@ -526,7 +540,7 @@ class TaskManager(BaseManager):
                 "websocket": self.websocket,
                 "input_types": get_required_input_types(self.task_config),
                 "mark_event_meta_data": self.mark_event_meta_data,
-                "is_welcome_message_played": True if self.task_config["tools_config"]["output"]["provider"] == 'default' else False
+                "is_welcome_message_played": True if self.task_config["tools_config"]["output"]["provider"] == 'default' and not self.kwargs["is_web_based_call"] else False
             }
 
             if self.task_config["tools_config"]["input"]["provider"] == "daily":
@@ -546,8 +560,8 @@ class TaskManager(BaseManager):
 
                 if self.task_config['tools_config']['input']['provider'] == 'default':
                     input_kwargs['queue'] = input_queue
-                else:
-                    input_kwargs["observable_variables"] = self.observable_variables
+
+                input_kwargs["observable_variables"] = self.observable_variables
             self.tools["input"] = input_handler_class(**input_kwargs)
         else:
             raise "Other input handlers not supported yet"
@@ -557,8 +571,13 @@ class TaskManager(BaseManager):
             if self.task_config["tools_config"]["transcriber"] is not None:
                 logger.info("Setting up transcriber")
                 self.language = self.task_config["tools_config"]["transcriber"].get('language', DEFAULT_LANGUAGE_CODE)
-                provider = "playground" if self.turn_based_conversation else self.task_config["tools_config"]["input"][
-                    "provider"]
+                if self.turn_based_conversation:
+                    provider = "playground"
+                elif self.kwargs["is_web_based_call"]:
+                    provider = "web_based_call"
+                else:
+                    provider = self.task_config["tools_config"]["input"]["provider"]
+
                 self.task_config["tools_config"]["transcriber"]["input_queue"] = self.audio_queue
                 self.task_config['tools_config']["transcriber"]["output_queue"] = self.transcriber_output_queue
 
@@ -919,7 +938,7 @@ class TaskManager(BaseManager):
             self.tools["output"].set_hangup_sent()
             await self.__process_end_of_conversation()
 
-    async def __process_end_of_conversation(self):
+    async def __process_end_of_conversation(self, web_call_timeout=False):
         logger.info("Got end of conversation. I'm stopping now")
 
         # Check completion of agent_hangup_message sent from output
@@ -935,7 +954,7 @@ class TaskManager(BaseManager):
                 logger.error(f"Error while checking queue: {e}", exc_info=True)
                 break
 
-        if self.call_hangup_message and self.call_hangup_message.strip():
+        if self.call_hangup_message and self.call_hangup_message.strip() and not web_call_timeout:
             self.history.append({"role": "assistant", "content": self.call_hangup_message})
 
         self.conversation_ended = True
@@ -1430,6 +1449,8 @@ class TaskManager(BaseManager):
 
                 if self.hangup_triggered:
                     if message["data"] == "transcriber_connection_closed":
+                        logger.info(f"Transcriber connection has been closed")
+                        self.transcriber_duration += message['meta_info']["transcriber_duration"] if message['meta_info'] is not None else 0
                         break
                     continue
 
@@ -1444,7 +1465,7 @@ class TaskManager(BaseManager):
                     if message["data"] == "speech_started":
                         if self.tools["input"].welcome_message_played():
                             logger.info(f"User has started speaking")
-                            self.callee_silent = False
+                            # self.callee_silent = False
 
                     # Whenever interim results would be received from Deepgram, this condition would get triggered
                     elif isinstance(message.get("data"), dict) and message["data"].get("type", "") == "interim_transcript_received":
@@ -1480,7 +1501,7 @@ class TaskManager(BaseManager):
                             self.time_since_first_interim_result = time.time() * 1000
                             logger.info(f"Setting time for first interim result as {self.time_since_first_interim_result}")
 
-                        self.callee_silent = False
+                        # self.callee_silent = False
                         # TODO check where this needs to be added post understanding it's usage
                         self.let_remaining_audio_pass_through = False
                         self.llm_response_generated = False
@@ -1495,7 +1516,7 @@ class TaskManager(BaseManager):
                             continue
 
                         self.callee_speaking = False
-                        self.callee_silent = True
+                        # self.callee_silent = True
                         temp_transcriber_message = ""
 
                         if self.output_task is None:
@@ -1654,7 +1675,7 @@ class TaskManager(BaseManager):
             #TODO: Either load IVR audio into memory before call or user s3 iter_cunks
             # This will help with interruption in IVR
             audio_chunk = None
-            if self.turn_based_conversation or self.task_config['tools_config']['output'] == "default":
+            if self.turn_based_conversation or self.task_config['tools_config']['output']['provider'] == "default":
                 audio_chunk = await get_raw_audio_bytes(text, self.assistant_name,
                                                                 self.task_config["tools_config"]["output"][
                                                                     "format"], local=self.is_local,
@@ -1773,21 +1794,21 @@ class TaskManager(BaseManager):
             await asyncio.sleep(0.1)
         self.handle_accumulated_message_task = None
 
-    async def __handle_initial_silence(self, duration=5):
-        while True:
-            logger.info(f"Checking for initial silence {duration}")
-            #logger.info(f"Woke up from my slumber {self.callee_silent}, {self.history}, {self.interim_history}")
-            logger.info(f"welcome_message_played = {self.tools['input'].welcome_message_played()} | self.callee_silent = {self.callee_silent} | self.history = {self.history} | self.interim_history = {self.interim_history} | self.first_message_passing_time = {self.first_message_passing_time} | time.time() = {time.time()}")
-            if (self.tools["input"].welcome_message_played() and self.callee_silent and len(self.history) == 2 and
-                    len(self.interim_history) == 2 and self.first_message_passing_time and
-                    time.time() - self.first_message_passing_time > duration):
-                logger.info(f"Callee was silent and hence speaking Hello on callee's behalf")
-                await self.__send_first_message("Hello")
-                break
-            elif len(self.history) > 2:
-                break
-            await asyncio.sleep(3)
-        self.initial_silence_task = None
+    # async def __handle_initial_silence(self, duration=5):
+    #     while True:
+    #         logger.info(f"Checking for initial silence {duration}")
+    #         #logger.info(f"Woke up from my slumber {self.callee_silent}, {self.history}, {self.interim_history}")
+    #         logger.info(f"welcome_message_played = {self.tools['input'].welcome_message_played()} | self.callee_silent = {self.callee_silent} | self.history = {self.history} | self.interim_history = {self.interim_history} | self.first_message_passing_time = {self.first_message_passing_time} | time.time() = {time.time()}")
+    #         if (self.tools["input"].welcome_message_played() and self.callee_silent and len(self.history) == 2 and
+    #                 len(self.interim_history) == 2 and self.first_message_passing_time and
+    #                 time.time() - self.first_message_passing_time > duration):
+    #             logger.info(f"Callee was silent and hence speaking Hello on callee's behalf")
+    #             await self.__send_first_message("Hello")
+    #             break
+    #         elif len(self.history) > 2:
+    #             break
+    #         await asyncio.sleep(3)
+    #     self.initial_silence_task = None
 
     def __process_latency_data(self, message):
         utterance_end = message['meta_info'].get("utterance_end", None)
@@ -1900,10 +1921,10 @@ class TaskManager(BaseManager):
                 # if message['meta_info']['sequence_id'] != -1: #Making sure we only track the conversation's last transmitted timesatamp
                 #     self.last_transmitted_timestamp = time.time()
 
-                try:
-                    logger.info(f"Updating Last transmitted timestamp to {str(self.last_transmitted_timestamp)}")
-                except Exception as e:
-                    logger.error(f'Error in printing Last transmitted timestamp: {str(e)}')
+                # try:
+                #     logger.info(f"Updating Last transmitted timestamp to {str(self.last_transmitted_timestamp)}")
+                # except Exception as e:
+                #     logger.error(f'Error in printing Last transmitted timestamp: {str(e)}')
 
         except Exception as e:
             traceback.print_exc()
@@ -1913,6 +1934,13 @@ class TaskManager(BaseManager):
         logger.info(f"Starting task to check for completion")
         while True:
             await asyncio.sleep(2)
+
+            if self.kwargs["is_web_based_call"] and time.time() - self.start_time >= int(
+                    self.task_config["task_config"]["call_terminate"]):
+                logger.info("Hanging up for web call as max time of call has been reached")
+                await self.__process_end_of_conversation(web_call_timeout=True)
+                break
+
             if self.last_transmitted_timestamp == 0:
                 logger.info(f"Last transmitted timestamp is simply 0 and hence continuing")
                 continue
@@ -1933,14 +1961,15 @@ class TaskManager(BaseManager):
 
                 if self.check_if_user_online:
                     if self.should_record:
-                        meta_info={'io': 'default', "request_id": str(uuid.uuid4()), "cached": False, "sequence_id": -1, 'format': 'wav'}
+                        meta_info={'io': 'default', "request_id": str(uuid.uuid4()), "cached": False, "sequence_id": -1, 'format': 'wav', "message_category": "is_user_online_message"}
                         await self._synthesize(create_ws_data_packet(self.check_user_online_message, meta_info= meta_info))
                     else:
-                        meta_info={'io': self.tools["output"].get_provider(), "request_id": str(uuid.uuid4()), "cached": False, "sequence_id": -1, 'format': 'pcm'}
+                        meta_info={'io': self.tools["output"].get_provider(), "request_id": str(uuid.uuid4()), "cached": False, "sequence_id": -1, 'format': 'pcm', "message_category": "is_user_online_message"}
                         await self._synthesize(create_ws_data_packet(self.check_user_online_message, meta_info= meta_info))
 
                 # Just in case we need to clear messages sent before
                 await self.tools["output"].handle_interruption()
+
             else:
                 logger.info(f"Only {time_since_last_spoken_ai_word} seconds since last spoken time stamp and hence not cutting the phone call")
 
@@ -1961,6 +1990,16 @@ class TaskManager(BaseManager):
     async def __first_message(self, timeout=10.0):
         logger.info(f"Executing the first message task")
         try:
+            if self.kwargs["is_web_based_call"]:
+                logger.info("Sending agent welcome message for web based call")
+                text = self.kwargs.get('agent_welcome_message', None)
+                meta_info = {'io': 'default', 'message_category': 'agent_welcome_message',
+                             'stream_sid': self.stream_sid, "request_id": str(uuid.uuid4()), "cached": False,
+                             "sequence_id": -1, 'format': self.task_config["tools_config"]["output"]["format"],
+                             'text': text}
+                await self._synthesize(create_ws_data_packet(text, meta_info=meta_info))
+                return
+
             start_time = asyncio.get_running_loop().time()
             while True:
                 elapsed_time = asyncio.get_running_loop().time() - start_time
@@ -2030,7 +2069,7 @@ class TaskManager(BaseManager):
                 tasks = [asyncio.create_task(self.tools['input'].handle())]
                 if not self.turn_based_conversation:
                     self.first_message_passing_time = None
-                    self.initial_silence_task = asyncio.create_task(self.__handle_initial_silence(duration=10))
+                    # self.initial_silence_task = asyncio.create_task(self.__handle_initial_silence(duration=10))
                     self.handle_accumulated_message_task = asyncio.create_task(self.__handle_accumulated_message())
                 if "transcriber" in self.tools:
                     tasks.append(asyncio.create_task(self._listen_transcriber()))
@@ -2112,11 +2151,12 @@ class TaskManager(BaseManager):
                 tasks_to_cancel.append(process_task_cancellation(self.hangup_task,'hangup_task'))
                 tasks_to_cancel.append(process_task_cancellation(self.backchanneling_task, 'backchanneling_task'))
                 tasks_to_cancel.append(process_task_cancellation(self.ambient_noise_task, 'ambient_noise_task'))
-                tasks_to_cancel.append(process_task_cancellation(self.initial_silence_task, 'initial_silence_task'))
+                # tasks_to_cancel.append(process_task_cancellation(self.initial_silence_task, 'initial_silence_task'))
                 tasks_to_cancel.append(process_task_cancellation(self.first_message_task, 'first_message_task'))
                 tasks_to_cancel.append(
                     process_task_cancellation(self.handle_accumulated_message_task, "handle_accumulated_message_task"))
 
+                output['recording_url'] = ""
                 if self.should_record:
                     output['recording_url'] = await save_audio_file_to_s3(self.conversation_recording, self.sampling_rate, self.assistant_id, self.run_id)
 
