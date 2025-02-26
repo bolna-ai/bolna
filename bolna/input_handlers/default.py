@@ -28,6 +28,12 @@ class DefaultInputHandler:
         self._is_audio_being_played_to_user = False
         self.observable_variables = observable_variables
         self.mark_event_meta_data = mark_event_meta_data
+        self.audio_chunks_received = 0
+
+    def get_audio_chunks_received(self):
+        audio_chunks_received = self.audio_chunks_received
+        self.audio_chunks_received = 0
+        return audio_chunks_received
         
     def update_is_audio_being_played(self, value):
         self._is_audio_being_played_to_user = value
@@ -64,6 +70,7 @@ class DefaultInputHandler:
             logger.info(f"No object retrieved from global dict of mark_event_meta_data for received mark event - {packet}")
             return
 
+        self.audio_chunks_received += 1
         logger.info(f"Mark event meta data object retrieved = {mark_event_meta_data_obj}")
         message_type = mark_event_meta_data_obj.get("type")
         self.response_heard_by_user += mark_event_meta_data_obj.get("text_synthesized")
@@ -76,6 +83,7 @@ class DefaultInputHandler:
 
             if message_type == "agent_welcome_message":
                 logger.info("Received mark event for agent_welcome_message")
+                self.audio_chunks_received = 0
                 self.is_welcome_message_played = True
 
             elif message_type == "agent_hangup":

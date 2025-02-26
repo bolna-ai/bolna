@@ -11,11 +11,17 @@ class BaseSynthesizer:
         self.stream = stream
         self.buffer_size = buffer_size
         self.internal_queue = asyncio.Queue()
+        self.audio_chunks_sent = 0
 
     def clear_internal_queue(self):
         logger.info(f"Clearing out internal queue")
         self.internal_queue = asyncio.Queue()
-        
+
+    def get_audio_chunks_sent(self):
+        audio_chunks_sent = self.audio_chunks_sent
+        self.audio_chunks_sent = 0
+        return audio_chunks_sent
+
     def generate(self):
         pass
 

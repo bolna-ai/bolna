@@ -1414,9 +1414,27 @@ class TaskManager(BaseManager):
         self.history.append({"role": "user", "content": transcriber_message})
 
         message_heard_by_user = self.tools["input"].get_response_heard_by_user()
-        if self.tools["input"].welcome_message_played() and self.history[-2]["role"] == "assistant" and message_heard_by_user:
-            logger.info(f"Updating the chat history with the message heard by the user. Original message = {self.history[-2]['content']} | Message heard by user - {message_heard_by_user}")
-            self.history[-2]["content"] = message_heard_by_user
+        if self.synthesizer_provider == "elevenlabs":
+            if self.tools["input"].welcome_message_played() and self.history[-2][
+                "role"] == "assistant" and message_heard_by_user:
+                logger.info(
+                    f"Updating the chat history with the message heard by the user. Original message = {self.history[-2]['content']} | Message heard by user - {message_heard_by_user}")
+                audio_chunk_sent = self.tools['synthesizer'].get_audio_chunks_sent()
+                audio_chunk_received = self.tools['input'].get_audio_chunks_received()
+                logger.info(f"Audio chunks sent = {audio_chunk_sent} | audio chunks received = {audio_chunk_received}")
+                if audio_chunk_received == audio_chunk_sent:
+                    self.history[-2]["content"] = message_heard_by_user
+                else:
+                    message_heard_by_user_words = message_heard_by_user.split(" ")
+                    number_of_words_to_append = math.floor(
+                        (audio_chunk_received / audio_chunk_sent) * len(message_heard_by_user_words))
+                    logger.info(
+                        f"Total number of words - {len(message_heard_by_user_words)} | Number of words to append - {number_of_words_to_append} | Words to append - {message_heard_by_user[:number_of_words_to_append]}")
+                    self.history[-2]["content"] = " ".join(message_heard_by_user_words[:number_of_words_to_append])
+        else:
+            if self.tools["input"].welcome_message_played() and self.history[-2]["role"] == "assistant" and message_heard_by_user:
+                logger.info(f"Updating the chat history with the message heard by the user. Original message = {self.history[-2]['content']} | Message heard by user - {message_heard_by_user}")
+                self.history[-2]["content"] = message_heard_by_user
 
         convert_to_request_log(message=transcriber_message, meta_info= meta_info, model = "deepgram", run_id= self.run_id)
         if next_task == "llm":
