@@ -220,6 +220,7 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
                         for i in range(0, len(audio), 8000):
                             if is_first_chunk_sent:
                                 self.meta_info["text_synthesized"] = ""
+                            is_first_chunk_sent = True
                             self.meta_info["mark_id"] = str(uuid.uuid4())
                             self.audio_chunks_sent += 1
                             temp = audio[i: i + 8000]
