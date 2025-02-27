@@ -214,20 +214,22 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
                         self.first_chunk_generated = False
 
                     self.meta_info["text_synthesized"] = text_synthesized
-                    is_first_chunk_sent = False
+                    # is_first_chunk_sent = False
+                    #
+                    # try:
+                    #     for i in range(0, len(audio), 8000):
+                    #         if is_first_chunk_sent:
+                    #             self.meta_info["text_synthesized"] = ""
+                    #         is_first_chunk_sent = True
+                    #         self.meta_info["mark_id"] = str(uuid.uuid4())
+                    #         self.audio_chunks_sent += 1
+                    #         temp = audio[i: i + 8000]
+                    #         # logger.info(f"Broken chunk = {temp}")
+                    #         yield create_ws_data_packet(temp, self.meta_info)
+                    # except Exception as e:
+                    #     logger.error(f"Broken chunk error - {e}")
 
-                    try:
-                        for i in range(0, len(audio), 8000):
-                            if is_first_chunk_sent:
-                                self.meta_info["text_synthesized"] = ""
-                            is_first_chunk_sent = True
-                            self.meta_info["mark_id"] = str(uuid.uuid4())
-                            self.audio_chunks_sent += 1
-                            temp = audio[i: i + 8000]
-                            # logger.info(f"Broken chunk = {temp}")
-                            yield create_ws_data_packet(temp, self.meta_info)
-                    except Exception as e:
-                        logger.error(f"Broken chunk error - {e}")
+                    yield self.break_audio_into_chunks(audio, 4000, self.meta_info)
 
                     # yield create_ws_data_packet(audio, self.meta_info)
             else:

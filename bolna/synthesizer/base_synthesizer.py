@@ -1,7 +1,9 @@
 import io
+import uuid
 import torchaudio
 from bolna.helpers.logger_config import configure_logger
 import asyncio
+from bolna.helpers.utils import create_ws_data_packet
 
 logger = configure_logger(__name__)
 
@@ -21,6 +23,21 @@ class BaseSynthesizer:
         audio_chunks_sent = self.audio_chunks_sent
         self.audio_chunks_sent = 0
         return audio_chunks_sent
+
+    def break_audio_into_chunks(self, audio, slicing_range, meta_info):
+        is_first_chunk_sent = False
+        try:
+            for i in range(0, len(audio), slicing_range):
+                if is_first_chunk_sent:
+                    meta_info["text_synthesized"] = ""
+                is_first_chunk_sent = True
+                meta_info["mark_id"] = str(uuid.uuid4())
+                self.audio_chunks_sent += 1
+                sliced_audio = audio[i: i + slicing_range]
+                yield create_ws_data_packet(sliced_audio, meta_info)
+        except Exception as e:
+            logger.error(f"Error in break_audio_into_chunks - {e}")
+            yield create_ws_data_packet(audio, meta_info)
 
     def generate(self):
         pass
