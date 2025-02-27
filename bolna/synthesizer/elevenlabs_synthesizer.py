@@ -216,8 +216,7 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
 
                     self.meta_info["text_synthesized"] = text_synthesized
 
-                    if not self.is_web_based_call and self.is_precise_transcript_generation_enabled:
-                        # TODO check what happens when audio = b'\x00' is everything working as expected - end_of_synthesizer_stream?
+                    if not self.is_web_based_call and self.is_precise_transcript_generation_enabled and audio != b'\x00':
                         async for chunk in self.break_audio_into_chunks(audio, self.slicing_range, self.meta_info):
                             yield chunk
                     else:
