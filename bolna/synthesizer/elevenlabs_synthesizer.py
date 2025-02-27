@@ -46,7 +46,7 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
         self.sender_task = None
         self.conversation_ended = False
         self.current_text = ""
-        self.slicing_range = 4000 if self.use_mulaw else 16000
+        self.slicing_range = 4000
 
     # Ensuring we only do wav output for now
     def get_format(self, format, sampling_rate):
@@ -194,9 +194,9 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
                     else:
                         self.meta_info['format'] = "wav"
                         audio = message
-                        # if message != b'\x00':
-                        #     audio = resample(convert_audio_to_wav(message, source_format="mp3"), int(self.sampling_rate),
-                        #                      format="wav")
+                        if message != b'\x00':
+                            audio = resample(convert_audio_to_wav(message, source_format="mp3"), int(self.sampling_rate),
+                                             format="wav")
 
                     if not self.first_chunk_generated:
                         self.meta_info["is_first_chunk"] = True
@@ -215,31 +215,13 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
                         self.first_chunk_generated = False
 
                     self.meta_info["text_synthesized"] = text_synthesized
-                    # is_first_chunk_sent = False
-                    #
-                    # try:
-                    #     for i in range(0, len(audio), 8000):
-                    #         if is_first_chunk_sent:
-                    #             self.meta_info["text_synthesized"] = ""
-                    #         is_first_chunk_sent = True
-                    #         self.meta_info["mark_id"] = str(uuid.uuid4())
-                    #         self.audio_chunks_sent += 1
-                    #         temp = audio[i: i + 8000]
-                    #         # logger.info(f"Broken chunk = {temp}")
-                    #         yield create_ws_data_packet(temp, self.meta_info)
-                    # except Exception as e:
-                    #     logger.error(f"Broken chunk error - {e}")
 
-                    async for chunk in self.break_audio_into_chunks(audio, self.slicing_range, self.meta_info):
-                        # if not self.use_mulaw:
-                        #     message = chunk.get("data")
-                        #     if message != b'\x00':
-                        #         message = resample(convert_audio_to_wav(message, source_format="mp3"), int(self.sampling_rate),
-                        #                          format="wav")
-                        #         chunk["data"] = message
-                        yield chunk
-
-                    # yield create_ws_data_packet(audio, self.meta_info)
+                    if self.use_mulaw:
+                        async for chunk in self.break_audio_into_chunks(audio, self.slicing_range, self.meta_info):
+                            yield chunk
+                    else:
+                        self.meta_info["mark_id"] = str(uuid.uuid4())
+                        yield create_ws_data_packet(audio, self.meta_info)
             else:
                 while True:
                     message = await self.internal_queue.get()

@@ -1414,7 +1414,8 @@ class TaskManager(BaseManager):
         self.history.append({"role": "user", "content": transcriber_message})
 
         message_heard_by_user = self.tools["input"].get_response_heard_by_user()
-        if self.synthesizer_provider == "elevenlabs":
+        # TODO add condition for web call
+        if self.synthesizer_provider == "elevenlabs" and not self.kwargs["is_web_based_call"]:
             if self.tools["input"].welcome_message_played() and self.history[-2][
                 "role"] == "assistant" and message_heard_by_user:
                 logger.info(
