@@ -229,7 +229,8 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
                     # except Exception as e:
                     #     logger.error(f"Broken chunk error - {e}")
 
-                    yield self.break_audio_into_chunks(audio, 4000, self.meta_info)
+                    async for chunk in self.break_audio_into_chunks(audio, 4000, self.meta_info):
+                        yield chunk
 
                     # yield create_ws_data_packet(audio, self.meta_info)
             else:

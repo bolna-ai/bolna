@@ -24,7 +24,7 @@ class BaseSynthesizer:
         self.audio_chunks_sent = 0
         return audio_chunks_sent
 
-    def break_audio_into_chunks(self, audio, slicing_range, meta_info):
+    async def break_audio_into_chunks(self, audio, slicing_range, meta_info):
         is_first_chunk_sent = False
         try:
             for i in range(0, len(audio), slicing_range):
