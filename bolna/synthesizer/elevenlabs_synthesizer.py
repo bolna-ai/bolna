@@ -194,9 +194,9 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
                     else:
                         self.meta_info['format'] = "wav"
                         audio = message
-                        if message != b'\x00':
-                            audio = resample(convert_audio_to_wav(message, source_format="mp3"), int(self.sampling_rate),
-                                             format="wav")
+                        # if message != b'\x00':
+                        #     audio = resample(convert_audio_to_wav(message, source_format="mp3"), int(self.sampling_rate),
+                        #                      format="wav")
 
                     if not self.first_chunk_generated:
                         self.meta_info["is_first_chunk"] = True
@@ -231,6 +231,12 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
                     #     logger.error(f"Broken chunk error - {e}")
 
                     async for chunk in self.break_audio_into_chunks(audio, self.slicing_range, self.meta_info):
+                        if not self.use_mulaw:
+                            message = chunk.get("data")
+                            if message != b'\x00':
+                                message = resample(convert_audio_to_wav(message, source_format="mp3"), int(self.sampling_rate),
+                                                 format="wav")
+                                chunk["data"] = message
                         yield chunk
 
                     # yield create_ws_data_packet(audio, self.meta_info)
