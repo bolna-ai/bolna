@@ -24,6 +24,7 @@ class SmallestSynthesizer(BaseSynthesizer):
         self.meta_info = None
         self.synthesized_characters = 0
         self.previous_request_ids = []
+        self.slicing_range = int(self.sampling_rate / 2)
 
     def get_engine(self):
         return self.model
@@ -90,9 +91,15 @@ class SmallestSynthesizer(BaseSynthesizer):
                     self.first_chunk_generated = False
 
                 meta_info['format'] = "wav"
-                meta_info["mark_id"] = str(uuid.uuid4())
+                # meta_info["mark_id"] = str(uuid.uuid4())
                 meta_info["text_synthesized"] = f"{text} "
-                yield create_ws_data_packet(audio, meta_info)
+                if not self.is_web_based_call and self.is_precise_transcript_generation_enabled:
+                    async for chunk in self.break_audio_into_chunks(audio, self.slicing_range, meta_info,
+                                                                    override_end_of_synthesizer_stream=True):
+                        yield chunk
+                else:
+                    meta_info["mark_id"] = str(uuid.uuid4())
+                    yield create_ws_data_packet(audio, meta_info)
 
         except Exception as e:
             traceback.print_exc()

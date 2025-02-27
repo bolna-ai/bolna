@@ -29,6 +29,7 @@ class DeepgramSynthesizer(BaseSynthesizer):
         self.caching = caching
         if caching:
             self.cache = InmemoryScalarCache()
+        self.slicing_range = int(int(sampling_rate) / 2)
 
     def get_synthesized_characters(self):
         return self.synthesized_characters
@@ -114,9 +115,15 @@ class DeepgramSynthesizer(BaseSynthesizer):
                 self.first_chunk_generated = False
             meta_info['text'] = text
             meta_info['format'] = 'mulaw'
-            meta_info["mark_id"] = str(uuid.uuid4())
+            # meta_info["mark_id"] = str(uuid.uuid4())
             meta_info["text_synthesized"] = f"{text} "
-            yield create_ws_data_packet(message, meta_info)
+            if not self.is_web_based_call and self.is_precise_transcript_generation_enabled:
+                async for chunk in self.break_audio_into_chunks(message, self.slicing_range, meta_info,
+                                                                override_end_of_synthesizer_stream=True):
+                    yield chunk
+            else:
+                meta_info["mark_id"] = str(uuid.uuid4())
+                yield create_ws_data_packet(message, meta_info)
 
     async def push(self, message):
         logger.info(f"Pushed message to internal queue {message}")
