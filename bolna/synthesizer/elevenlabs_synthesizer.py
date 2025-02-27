@@ -46,7 +46,7 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
         self.sender_task = None
         self.conversation_ended = False
         self.current_text = ""
-        self.slicing_range = 4000 if self.use_mulaw else 8000
+        self.slicing_range = 4000 if self.use_mulaw else 16000
 
     # Ensuring we only do wav output for now
     def get_format(self, format, sampling_rate):
