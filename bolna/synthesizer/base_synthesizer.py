@@ -15,6 +15,7 @@ class BaseSynthesizer:
         self.internal_queue = asyncio.Queue()
         self.audio_chunks_sent = 0
         self.is_web_based_call = is_web_based_call
+        self.is_precise_transcript_generation_enabled = True
 
     def clear_internal_queue(self):
         logger.info(f"Clearing out internal queue")
