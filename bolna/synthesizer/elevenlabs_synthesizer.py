@@ -231,12 +231,12 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
                     #     logger.error(f"Broken chunk error - {e}")
 
                     async for chunk in self.break_audio_into_chunks(audio, self.slicing_range, self.meta_info):
-                        if not self.use_mulaw:
-                            message = chunk.get("data")
-                            if message != b'\x00':
-                                message = resample(convert_audio_to_wav(message, source_format="mp3"), int(self.sampling_rate),
-                                                 format="wav")
-                                chunk["data"] = message
+                        # if not self.use_mulaw:
+                        #     message = chunk.get("data")
+                        #     if message != b'\x00':
+                        #         message = resample(convert_audio_to_wav(message, source_format="mp3"), int(self.sampling_rate),
+                        #                          format="wav")
+                        #         chunk["data"] = message
                         yield chunk
 
                     # yield create_ws_data_packet(audio, self.meta_info)
