@@ -1,5 +1,6 @@
 import os
 import uuid
+import unicodedata
 from dotenv import load_dotenv
 from botocore.exceptions import BotoCoreError, ClientError
 from aiobotocore.session import AioSession
@@ -19,7 +20,7 @@ class PollySynthesizer(BaseSynthesizer):
         super().__init__(stream, buffer_size)
         self.engine = engine
         self.format = self.get_format(audio_format.lower())
-        self.voice = voice
+        self.voice = self.resolve_voice(voice)
         self.language = language
         self.sample_rate = str(sampling_rate)
         self.client = None
@@ -36,6 +37,9 @@ class PollySynthesizer(BaseSynthesizer):
     
     def get_engine(self):
         return self.engine
+
+    def resolve_voice(self, text):
+        return ''.join(c for c in unicodedata.normalize('NFKD', text) if not unicodedata.combining(c))
 
     def supports_websocket(self):
         return False
