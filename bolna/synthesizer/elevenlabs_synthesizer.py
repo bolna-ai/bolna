@@ -46,6 +46,7 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
         self.sender_task = None
         self.conversation_ended = False
         self.current_text = ""
+        self.slicing_range = 4000 if self.use_mulaw else 16000
 
     # Ensuring we only do wav output for now
     def get_format(self, format, sampling_rate):
@@ -229,7 +230,7 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
                     # except Exception as e:
                     #     logger.error(f"Broken chunk error - {e}")
 
-                    async for chunk in self.break_audio_into_chunks(audio, 4000, self.meta_info):
+                    async for chunk in self.break_audio_into_chunks(audio, self.slicing_range, self.meta_info):
                         yield chunk
 
                     # yield create_ws_data_packet(audio, self.meta_info)

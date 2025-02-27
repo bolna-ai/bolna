@@ -1429,7 +1429,7 @@ class TaskManager(BaseManager):
                     number_of_words_to_append = math.floor(
                         (audio_chunk_received / audio_chunk_sent) * len(message_heard_by_user_words))
                     logger.info(
-                        f"Total number of words - {len(message_heard_by_user_words)} | Number of words to append - {number_of_words_to_append} | Words to append - {message_heard_by_user[:number_of_words_to_append]}")
+                        f"Total number of words - {len(message_heard_by_user_words)} | Number of words to append - {number_of_words_to_append} | Words to append - {message_heard_by_user_words[:number_of_words_to_append]}")
                     self.history[-2]["content"] = " ".join(message_heard_by_user_words[:number_of_words_to_append])
         else:
             if self.tools["input"].welcome_message_played() and self.history[-2]["role"] == "assistant" and message_heard_by_user:
