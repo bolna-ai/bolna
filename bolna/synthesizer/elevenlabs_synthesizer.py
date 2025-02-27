@@ -21,7 +21,7 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
     def __init__(self, voice, voice_id, model="eleven_turbo_v2_5", audio_format="mp3", sampling_rate="16000",
                  stream=False, buffer_size=400, temperature=0.5, similarity_boost=0.8, synthesizer_key=None,
                  caching=True, **kwargs):
-        super().__init__(stream)
+        super().__init__(stream, is_web_based_call=kwargs.get("is_web_based_call", False))
         self.api_key = os.environ["ELEVENLABS_API_KEY"] if synthesizer_key is None else synthesizer_key
         self.voice = voice_id
         self.model = model
@@ -217,6 +217,7 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
                     self.meta_info["text_synthesized"] = text_synthesized
 
                     if self.use_mulaw:
+                        # TODO check what happens when audio = b'\x00' is everything working as expected - end_of_synthesizer_stream?
                         async for chunk in self.break_audio_into_chunks(audio, self.slicing_range, self.meta_info):
                             yield chunk
                     else:

@@ -12,7 +12,7 @@ logger = configure_logger(__name__)
 class SmallestSynthesizer(BaseSynthesizer):
     def __init__(self, voice, voice_id, model="lightning", audio_format="mp3", sampling_rate="8000",
                  stream=False, buffer_size=400, synthesizer_key=None, **kwargs):
-        super().__init__(stream)
+        super().__init__(stream, is_web_based_call=kwargs.get("is_web_based_call", False))
         self.api_key = os.environ["SMALLEST_API_KEY"] if synthesizer_key is None else synthesizer_key
         self.voice_id = voice_id
         self.model = model

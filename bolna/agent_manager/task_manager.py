@@ -1415,7 +1415,7 @@ class TaskManager(BaseManager):
 
         message_heard_by_user = self.tools["input"].get_response_heard_by_user()
         # TODO add condition for web call
-        if self.synthesizer_provider == "elevenlabs" and not self.kwargs["is_web_based_call"]:
+        if self.synthesizer_provider in ["elevenlabs", "polly"] and not self.kwargs["is_web_based_call"]:
             if self.tools["input"].welcome_message_played() and self.history[-2][
                 "role"] == "assistant" and message_heard_by_user:
                 logger.info(
@@ -1426,12 +1426,17 @@ class TaskManager(BaseManager):
                 if audio_chunk_received == audio_chunk_sent:
                     self.history[-2]["content"] = message_heard_by_user
                 else:
-                    message_heard_by_user_words = message_heard_by_user.split(" ")
-                    number_of_words_to_append = math.floor(
-                        (audio_chunk_received / audio_chunk_sent) * len(message_heard_by_user_words))
-                    logger.info(
-                        f"Total number of words - {len(message_heard_by_user_words)} | Number of words to append - {number_of_words_to_append} | Words to append - {message_heard_by_user_words[:number_of_words_to_append]}")
-                    self.history[-2]["content"] = " ".join(message_heard_by_user_words[:number_of_words_to_append])
+                    # TODO revisit this and understand why are we getting divide by zero in case of polly
+                    try:
+                        message_heard_by_user_words = message_heard_by_user.split(" ")
+                        number_of_words_to_append = math.floor(
+                            (audio_chunk_received / audio_chunk_sent) * len(message_heard_by_user_words))
+                        logger.info(
+                            f"Total number of words - {len(message_heard_by_user_words)} | Number of words to append - {number_of_words_to_append} | Words to append - {message_heard_by_user_words[:number_of_words_to_append]}")
+                        self.history[-2]["content"] = " ".join(message_heard_by_user_words[:number_of_words_to_append])
+                    except Exception as e:
+                        logger.error(f"Error occurred in getting number of words to append - {e}")
+                        self.history[-2]["content"] = message_heard_by_user
         else:
             if self.tools["input"].welcome_message_played() and self.history[-2]["role"] == "assistant" and message_heard_by_user:
                 logger.info(f"Updating the chat history with the message heard by the user. Original message = {self.history[-2]['content']} | Message heard by user - {message_heard_by_user}")

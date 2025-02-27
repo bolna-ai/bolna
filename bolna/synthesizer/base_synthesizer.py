@@ -9,11 +9,12 @@ logger = configure_logger(__name__)
 
 
 class BaseSynthesizer:
-    def __init__(self, stream=True, buffer_size=40, event_loop=None):
+    def __init__(self, stream=True, buffer_size=40, event_loop=None, is_web_based_call=False):
         self.stream = stream
         self.buffer_size = buffer_size
         self.internal_queue = asyncio.Queue()
         self.audio_chunks_sent = 0
+        self.is_web_based_call = is_web_based_call
 
     def clear_internal_queue(self):
         logger.info(f"Clearing out internal queue")
@@ -24,16 +25,20 @@ class BaseSynthesizer:
         self.audio_chunks_sent = 0
         return audio_chunks_sent
 
-    async def break_audio_into_chunks(self, audio, slicing_range, meta_info):
+    async def break_audio_into_chunks(self, audio, slicing_range, meta_info, override_end_of_synthesizer_stream=False):
         is_first_chunk_sent = False
         try:
-            for i in range(0, len(audio), slicing_range):
+            audio_len = len(audio)
+            for i in range(0, audio_len, slicing_range):
+                is_last_iteration = (i + slicing_range >= len(audio))
                 if is_first_chunk_sent:
                     meta_info["text_synthesized"] = ""
                 is_first_chunk_sent = True
                 meta_info["mark_id"] = str(uuid.uuid4())
                 self.audio_chunks_sent += 1
                 sliced_audio = audio[i: i + slicing_range]
+                if override_end_of_synthesizer_stream:
+                    meta_info["end_of_synthesizer_stream"] = is_last_iteration
                 yield create_ws_data_packet(sliced_audio, meta_info)
         except Exception as e:
             logger.error(f"Error in break_audio_into_chunks - {e}")

@@ -13,7 +13,7 @@ load_dotenv()
 
 class AzureSynthesizer(BaseSynthesizer):
     def __init__(self, voice, language, model="neural", stream=False, sampling_rate=16000, buffer_size=400, caching=True, **kwargs):
-        super().__init__(stream, buffer_size)
+        super().__init__(stream, buffer_size, is_web_based_call=kwargs.get("is_web_based_call", False))
         self.model = model
         self.language = language
         self.voice = f"{language}-{voice}{model}" #hard-code for testing to self.voice = "en-US-JennyNeural"

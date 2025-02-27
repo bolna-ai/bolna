@@ -17,7 +17,7 @@ DEEPGRAM_TTS_URL = "https://{}/v1/speak".format(DEEPGRAM_HOST)
 class DeepgramSynthesizer(BaseSynthesizer):
     def __init__(self, voice, audio_format="pcm", sampling_rate="8000", stream=False, buffer_size=400, caching=True,
                  model="aura-zeus-en", **kwargs):
-        super().__init__(stream, buffer_size)
+        super().__init__(stream, buffer_size, is_web_based_call=kwargs.get("is_web_based_call", False))
         self.format = "mulaw" if audio_format in ["pcm", 'wav'] else audio_format
         self.voice = voice
         self.sample_rate = str(sampling_rate)
