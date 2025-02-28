@@ -272,7 +272,7 @@ class TaskManager(BaseManager):
             self.nitro = True
             self.conversation_config = task.get("task_config", {})
             logger.info(f"Conversation config {self.conversation_config}")
-            self.kwargs["is_precise_transcript_generation_enabled"] = self.conversation_config.get('is_precise_transcript_generation_enabled', True)
+            self.kwargs["is_precise_transcript_generation_enabled"] = self.conversation_config.get('generate_precise_transcript', False)
 
             self.trigger_user_online_message_after = self.conversation_config.get("trigger_user_online_message_after", DEFAULT_USER_ONLINE_MESSAGE_TRIGGER_DURATION)
             self.check_if_user_online = self.conversation_config.get("check_if_user_online", True)
