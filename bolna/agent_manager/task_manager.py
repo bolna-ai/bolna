@@ -1972,6 +1972,10 @@ class TaskManager(BaseManager):
                 logger.info(f"Call is going to hangup")
                 break
 
+            if self.tools["input"].is_audio_being_played_to_user():
+                logger.info(f"Continuing since audio is being played by AI")
+                continue
+
             time_since_last_spoken_ai_word = (time.time() - self.last_transmitted_timestamp)
             if time_since_last_spoken_ai_word > self.hang_conversation_after and self.time_since_last_spoken_human_word < self.last_transmitted_timestamp:
                 logger.info(f"{time_since_last_spoken_ai_word} seconds since last spoken time stamp and hence cutting the phone call and last transmitted timestampt ws {self.last_transmitted_timestamp} and time since last spoken human word {self.time_since_last_spoken_human_word}")

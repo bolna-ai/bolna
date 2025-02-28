@@ -76,10 +76,10 @@ class DefaultInputHandler:
         self.response_heard_by_user += mark_event_meta_data_obj.get("text_synthesized")
 
         if mark_event_meta_data_obj.get("is_final_chunk"):
-            self._is_audio_being_played_to_user = False
-
             if message_type != "is_user_online_message":
                 self.observable_variables["final_chunk_played_observable"].value = not self.observable_variables["final_chunk_played_observable"].value
+
+            self._is_audio_being_played_to_user = False
 
             if message_type == "agent_welcome_message":
                 logger.info("Received mark event for agent_welcome_message")
