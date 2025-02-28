@@ -9,13 +9,14 @@ logger = configure_logger(__name__)
 
 
 class BaseSynthesizer:
-    def __init__(self, stream=True, buffer_size=40, event_loop=None, is_web_based_call=False):
+    def __init__(self, stream=True, buffer_size=40, event_loop=None, is_web_based_call=False,
+                 is_precise_transcript_generation_enabled=True):
         self.stream = stream
         self.buffer_size = buffer_size
         self.internal_queue = asyncio.Queue()
         self.audio_chunks_sent = 0
         self.is_web_based_call = is_web_based_call
-        self.is_precise_transcript_generation_enabled = True
+        self.is_precise_transcript_generation_enabled = is_precise_transcript_generation_enabled
 
     def clear_internal_queue(self):
         logger.info(f"Clearing out internal queue")

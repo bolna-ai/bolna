@@ -13,7 +13,8 @@ load_dotenv()
 
 class AzureSynthesizer(BaseSynthesizer):
     def __init__(self, voice, language, model="neural", stream=False, sampling_rate=16000, buffer_size=400, caching=True, **kwargs):
-        super().__init__(stream, buffer_size, is_web_based_call=kwargs.get("is_web_based_call", False))
+        super().__init__(stream, buffer_size, is_web_based_call=kwargs.get("is_web_based_call", False),
+                         is_precise_transcript_generation_enabled=kwargs.get("is_precise_transcript_generation_enabled"))
         self.model = model
         self.language = language
         self.voice = f"{language}-{voice}{model}" #hard-code for testing to self.voice = "en-US-JennyNeural"
@@ -102,8 +103,6 @@ class AzureSynthesizer(BaseSynthesizer):
             else:
                 meta_info["mark_id"] = str(uuid.uuid4())
                 yield create_ws_data_packet(message, meta_info)
-
-            # yield create_ws_data_packet(message, meta_info)
 
     async def open_connection(self):
         pass

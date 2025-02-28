@@ -12,7 +12,8 @@ logger = configure_logger(__name__)
 class SmallestSynthesizer(BaseSynthesizer):
     def __init__(self, voice, voice_id, model="lightning", audio_format="mp3", sampling_rate="8000",
                  stream=False, buffer_size=400, synthesizer_key=None, **kwargs):
-        super().__init__(stream, is_web_based_call=kwargs.get("is_web_based_call", False))
+        super().__init__(stream, is_web_based_call=kwargs.get("is_web_based_call", False),
+                         is_precise_transcript_generation_enabled=kwargs.get("is_precise_transcript_generation_enabled"))
         self.api_key = os.environ["SMALLEST_API_KEY"] if synthesizer_key is None else synthesizer_key
         self.voice_id = voice_id
         self.model = model
@@ -91,7 +92,6 @@ class SmallestSynthesizer(BaseSynthesizer):
                     self.first_chunk_generated = False
 
                 meta_info['format'] = "wav"
-                # meta_info["mark_id"] = str(uuid.uuid4())
                 meta_info["text_synthesized"] = f"{text} "
                 if not self.is_web_based_call and self.is_precise_transcript_generation_enabled:
                     async for chunk in self.break_audio_into_chunks(audio, self.slicing_range, meta_info,

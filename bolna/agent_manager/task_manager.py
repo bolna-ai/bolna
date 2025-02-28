@@ -272,6 +272,7 @@ class TaskManager(BaseManager):
             self.nitro = True
             self.conversation_config = task.get("task_config", {})
             logger.info(f"Conversation config {self.conversation_config}")
+            self.kwargs["is_precise_transcript_generation_enabled"] = self.conversation_config.get('is_precise_transcript_generation_enabled', True)
 
             self.trigger_user_online_message_after = self.conversation_config.get("trigger_user_online_message_after", DEFAULT_USER_ONLINE_MESSAGE_TRIGGER_DURATION)
             self.check_if_user_online = self.conversation_config.get("check_if_user_online", True)
@@ -1414,8 +1415,7 @@ class TaskManager(BaseManager):
         self.history.append({"role": "user", "content": transcriber_message})
 
         message_heard_by_user = self.tools["input"].get_response_heard_by_user()
-        # TODO add condition for web call
-        if not self.kwargs["is_web_based_call"]:
+        if not self.kwargs["is_web_based_call"] and self.kwargs["is_precise_transcript_generation_enabled"]:
             if self.tools["input"].welcome_message_played() and self.history[-2][
                 "role"] == "assistant" and message_heard_by_user:
                 logger.info(
@@ -1426,7 +1426,6 @@ class TaskManager(BaseManager):
                 if audio_chunk_received == audio_chunk_sent:
                     self.history[-2]["content"] = message_heard_by_user
                 else:
-                    # TODO revisit this and understand why are we getting divide by zero in case of polly
                     try:
                         message_heard_by_user_words = message_heard_by_user.split(" ")
                         number_of_words_to_append = math.floor(
