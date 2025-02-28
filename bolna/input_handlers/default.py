@@ -36,6 +36,7 @@ class DefaultInputHandler:
         return audio_chunks_received
         
     def update_is_audio_being_played(self, value):
+        logger.info(f"Audio is being updated - {value}")
         self._is_audio_being_played_to_user = value
 
     def is_audio_being_played_to_user(self):
@@ -79,7 +80,7 @@ class DefaultInputHandler:
             if message_type != "is_user_online_message":
                 self.observable_variables["final_chunk_played_observable"].value = not self.observable_variables["final_chunk_played_observable"].value
 
-            self._is_audio_being_played_to_user = False
+            self.update_is_audio_being_played(False)
 
             if message_type == "agent_welcome_message":
                 logger.info("Received mark event for agent_welcome_message")
