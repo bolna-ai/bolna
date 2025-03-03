@@ -47,6 +47,7 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
         self.sender_task = None
         self.conversation_ended = False
         self.current_text = ""
+        self.text_generated = ""
         self.slicing_range = int(16000 / 4)
 
     # Ensuring we only do wav output for now
@@ -70,7 +71,7 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
                 await asyncio.sleep(1)
 
             if text != "":
-                for text_chunk in self.text_chunker(text):
+                async for text_chunk in self.text_iterator(text):
                     logger.info(f"Sending text_chunk: {text_chunk}")
                     try:
                         await self.websocket_holder["websocket"].send(json.dumps({"text": text_chunk}))
@@ -112,20 +113,29 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
                 if "audio" in data and data["audio"]:
                     chunk = base64.b64decode(data["audio"])
                     try:
-                        text_spoken = ''.join(data.get('alignment', {}).get('chars', []))
+                        current_text_spoken = await self.update_alignment_text_generation(data)
+                        if current_text_spoken:
+                            self.text_generated = current_text_spoken
+
                     except Exception as e:
                         logger.error(f"Error occurred while getting chars from response - {e}")
-                        text_spoken = ""
-                    yield chunk, text_spoken
+                        #current_text_spoken = ""
+                    logger.info("11labs current_text: {}".format(self.text_generated))
+                    yield chunk, self.text_generated
 
                 if "isFinal" in data and data["isFinal"]:
                     yield b'\x00', ""
 
                 elif self.last_text_sent:
                     try:
-                        response_chars = data.get('alignment', {}).get('chars', [])
-                        response_text = ''.join(response_chars)
-                        last_four_words_text = ' '.join(response_text.split(" ")[-4:]).strip()
+                        current_text_spoken = await self.update_alignment_text_generation(data)
+                        if current_text_spoken:
+                            self.text_generated = current_text_spoken
+
+                        final_response_text = ''.join(self.text_generated)
+                        last_four_words_text = ' '.join(final_response_text.split(" ")[-4:]).strip()
+                        logger.info("11labs last_text: {}".format(last_four_words_text))
+                        logger.info("11labs current_text: {}".format(self.current_text.strip()))
                         if self.current_text.strip().endswith(last_four_words_text):
                             logger.info('send end_of_synthesizer_stream')
                             yield b'\x00', ""
@@ -139,6 +149,14 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
                 break
             except Exception as e:
                 logger.error(f"Error occurred in receiver - {e}")
+
+    async def update_alignment_text_generation(self, audio_response):
+        alignment_data = audio_response.get('alignment', None)
+        current_text_spoken = ''
+        if alignment_data:
+            current_text_spoken = ''.join(alignment_data.get('chars', []))
+
+        return current_text_spoken
 
     async def __send_payload(self, payload, format=None):
         headers = {
