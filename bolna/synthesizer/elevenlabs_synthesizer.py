@@ -21,7 +21,8 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
     def __init__(self, voice, voice_id, model="eleven_turbo_v2_5", audio_format="mp3", sampling_rate="16000",
                  stream=False, buffer_size=400, temperature=0.5, similarity_boost=0.8, synthesizer_key=None,
                  caching=True, **kwargs):
-        super().__init__(stream)
+        super().__init__(stream, is_web_based_call=kwargs.get("is_web_based_call", False),
+                         is_precise_transcript_generation_enabled=kwargs.get("is_precise_transcript_generation_enabled"))
         self.api_key = os.environ["ELEVENLABS_API_KEY"] if synthesizer_key is None else synthesizer_key
         self.voice = voice_id
         self.model = model
@@ -46,6 +47,7 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
         self.sender_task = None
         self.conversation_ended = False
         self.current_text = ""
+        self.slicing_range = int(16000 / 4)
 
     # Ensuring we only do wav output for now
     def get_format(self, format, sampling_rate):
@@ -213,9 +215,14 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
                         self.meta_info["end_of_synthesizer_stream"] = True
                         self.first_chunk_generated = False
 
-                    self.meta_info["mark_id"] = str(uuid.uuid4())
                     self.meta_info["text_synthesized"] = text_synthesized
-                    yield create_ws_data_packet(audio, self.meta_info)
+
+                    if not self.is_web_based_call and self.is_precise_transcript_generation_enabled and audio != b'\x00':
+                        async for chunk in self.break_audio_into_chunks(audio, self.slicing_range, self.meta_info):
+                            yield chunk
+                    else:
+                        self.meta_info["mark_id"] = str(uuid.uuid4())
+                        yield create_ws_data_packet(audio, self.meta_info)
             else:
                 while True:
                     message = await self.internal_queue.get()

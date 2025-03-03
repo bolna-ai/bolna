@@ -13,7 +13,8 @@ load_dotenv()
 
 class AzureSynthesizer(BaseSynthesizer):
     def __init__(self, voice, language, model="neural", stream=False, sampling_rate=16000, buffer_size=400, caching=True, **kwargs):
-        super().__init__(stream, buffer_size)
+        super().__init__(stream, buffer_size, is_web_based_call=kwargs.get("is_web_based_call", False),
+                         is_precise_transcript_generation_enabled=kwargs.get("is_precise_transcript_generation_enabled"))
         self.model = model
         self.language = language
         self.voice = f"{language}-{voice}{model}" #hard-code for testing to self.voice = "en-US-JennyNeural"
@@ -32,8 +33,10 @@ class AzureSynthesizer(BaseSynthesizer):
         self.speech_config = speechsdk.SpeechConfig(subscription=self.subscription_key, region=self.region)
         if self.stream:
             self.speech_config.set_speech_synthesis_output_format(speechsdk.SpeechSynthesisOutputFormat.Riff8Khz16BitMonoPcm)
+            self.slicing_range = int(8000 / 2)
         else:
             self.speech_config.set_speech_synthesis_output_format(speechsdk.SpeechSynthesisOutputFormat.Riff16Khz16BitMonoPcm)
+            self.slicing_range = int(16000 / 4)
         self.speech_config.speech_synthesis_voice_name = self.voice
 
     def get_synthesized_characters(self):
@@ -90,11 +93,16 @@ class AzureSynthesizer(BaseSynthesizer):
             
             meta_info['text'] = text
             meta_info['format'] = 'wav'
-            meta_info["mark_id"] = str(uuid.uuid4())
             meta_info["text_synthesized"] = f"{text} "
-            message = wav_bytes_to_pcm(message)
-
-            yield create_ws_data_packet(message, meta_info)
+            # TODO check if this is required
+            # message = wav_bytes_to_pcm(message)
+            if not self.is_web_based_call and self.is_precise_transcript_generation_enabled:
+                async for chunk in self.break_audio_into_chunks(message, self.slicing_range, meta_info,
+                                                                override_end_of_synthesizer_stream=True):
+                    yield chunk
+            else:
+                meta_info["mark_id"] = str(uuid.uuid4())
+                yield create_ws_data_packet(message, meta_info)
 
     async def open_connection(self):
         pass
