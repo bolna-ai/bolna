@@ -787,7 +787,14 @@ class TaskManager(BaseManager):
         if not prompt and task_type in ('extraction', 'summarization'):
             if task_type == 'extraction':
                 extraction_json = task.get("tools_config").get('llm_agent', {}).get('llm_config', {}).get('extraction_json')
-                prompt = EXTRACTION_PROMPT.format(extraction_json)
+                if self.context_data and 'recipient_data' in self.context_data and self.context_data[
+                    'recipient_data'] and self.context_data['recipient_data'].get('timezone', None):
+                    self.timezone = pytz.timezone(self.context_data['recipient_data']['timezone'])
+
+                today = datetime.now(self.timezone).strftime("%A, %B %d, %Y")
+                current_time = datetime.now(self.timezone).strftime("%I:%M:%S %p")
+
+                prompt = EXTRACTION_PROMPT.format(today, current_time, self.timezone, extraction_json)
                 return {"system_prompt": prompt}
             elif task_type == 'summarization':
                 return {"system_prompt": SUMMARIZATION_PROMPT}
