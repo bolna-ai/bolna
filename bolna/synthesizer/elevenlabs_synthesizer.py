@@ -83,11 +83,11 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
             if end_of_llm_stream:
                 self.last_text_sent = True
 
-            # # Send the end-of-stream signal with an empty string as text
-            # try:
-            #     await self.websocket_holder["websocket"].send(json.dumps({"text": "", "flush": True}))
-            # except Exception as e:
-            #     logger.info(f"Error sending end-of-stream signal: {e}")
+            # Send the end-of-stream signal with an empty string as text
+            try:
+                await self.websocket_holder["websocket"].send(json.dumps({"text": ""}))
+            except Exception as e:
+                logger.info(f"Error sending end-of-stream signal: {e}")
 
         except asyncio.CancelledError:
             logger.info("Sender task was cancelled.")
@@ -124,19 +124,19 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
                 if "isFinal" in data and data["isFinal"]:
                     yield b'\x00', ""
 
-                elif self.last_text_sent:
-                    try:
-                        response_chars = data.get('alignment', {}).get('chars', [])
-                        response_text = ''.join(response_chars)
-                        last_four_words_text = ' '.join(response_text.split(" ")[-4:]).strip()
-                        if self.current_text.strip().endswith(last_four_words_text):
-                            logger.info('send end_of_synthesizer_stream')
-                            yield b'\x00', ""
-                    except Exception as e:
-                        logger.error(f"Error occurred while getting chars from response - {e}")
+                # elif self.last_text_sent:
+                #     try:
+                #         response_chars = data.get('alignment', {}).get('chars', [])
+                #         response_text = ''.join(response_chars)
+                #         last_four_words_text = ' '.join(response_text.split(" ")[-4:]).strip()
+                #         if self.current_text.strip().endswith(last_four_words_text):
+                #             logger.info('send end_of_synthesizer_stream')
+                #             yield b'\x00', ""
+                #     except Exception as e:
+                #         logger.error(f"Error occurred while getting chars from response - {e}")
 
-                else:
-                    logger.info("No audio data in the response")
+                # else:
+                #     logger.info("No audio data in the response")
 
             except websockets.exceptions.ConnectionClosed:
                 break
@@ -300,6 +300,7 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
                 self.websocket_holder["websocket"] = await self.establish_connection()
 
             if self.websocket_holder["websocket"] and self.websocket_holder["websocket"].open:
+                logger.info("breaking the monitor loop")
                 break
             await asyncio.sleep(2)
 
