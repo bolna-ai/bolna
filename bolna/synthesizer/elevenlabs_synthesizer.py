@@ -100,12 +100,17 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
                 if self.conversation_ended:
                     return
 
-                if self.websocket_holder["websocket"] is None or self.websocket_holder["websocket"].closed:
+                if not self.websocket_holder["websocket"]:
                     logger.info("WebSocket is not connected, skipping receive.")
-                    # await asyncio.sleep(5)
-                    # continue
-                    await self.monitor_connection()
+                    await asyncio.sleep(2)
                     continue
+
+                # if self.websocket_holder["websocket"] is None or self.websocket_holder["websocket"].closed:
+                #     logger.info("WebSocket is not connected, skipping receive.")
+                #     await asyncio.sleep(3)
+                #     continue
+                    # await self.monitor_connection()
+                    # continue
 
                 response = await self.websocket_holder["websocket"].recv()
                 data = json.loads(response)
@@ -123,6 +128,9 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
 
                 if "isFinal" in data and data["isFinal"]:
                     yield b'\x00', ""
+                    # waiting for elevenlabs to close the connection
+                    await asyncio.sleep(1)
+                    await self.monitor_connection()
 
                 # elif self.last_text_sent:
                 #     try:
