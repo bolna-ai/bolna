@@ -321,7 +321,7 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
         if self.stream:
             meta_info, text, self.current_text = message.get("meta_info"), message.get("data"), message.get("data")
             self.synthesized_characters += len(text) if text is not None else 0
-            end_of_llm_stream = "end_of_llm_stream" in meta_info and meta_info["end_of_llm_stream"]
+            end_of_llm_stream = ("end_of_llm_stream" in meta_info and meta_info["end_of_llm_stream"]) or meta_info["sequence_id"] == -1
             logger.info(f"end_of_llm_stream: {end_of_llm_stream}")
             self.meta_info = copy.deepcopy(meta_info)
             meta_info["text"] = text
