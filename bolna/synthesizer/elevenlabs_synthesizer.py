@@ -147,7 +147,8 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
                 # else:
                 #     logger.info("No audio data in the response")
 
-            except websockets.exceptions.ConnectionClosed:
+            except websockets.exceptions.ConnectionClosed as e:
+                logger.error(f"Error in receiver - websockets exception raised ConnectionClosed - {e}")
                 break
             except Exception as e:
                 logger.error(f"Error occurred in receiver - {e}")
