@@ -12,8 +12,7 @@ load_dotenv()
 
 class OPENAISynthesizer(BaseSynthesizer):
     def __init__(self, voice, audio_format="mp3", model = "tts-1", stream=False, sampling_rate=8000, buffer_size=400, **kwargs):
-        super().__init__(stream, buffer_size, is_web_based_call=kwargs.get("is_web_based_call", False),
-                         is_precise_transcript_generation_enabled=kwargs.get("is_precise_transcript_generation_enabled"))
+        super().__init__(stream, buffer_size)
         self.format = self.get_format(audio_format.lower())
         self.voice = voice
         self.sample_rate = sampling_rate

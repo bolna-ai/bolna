@@ -305,7 +305,7 @@ class ConversationConfig(BaseModel):
     trigger_user_online_message_after: Optional[int] = 10
     check_user_online_message: Optional[str] = "Hey, are you still there"
     check_if_user_online: Optional[bool] = True
-    generate_precise_transcript: Optional[bool] = False
+
 
     @field_validator('hangup_after_silence', mode='before')
     def set_hangup_after_silence(cls, v):
