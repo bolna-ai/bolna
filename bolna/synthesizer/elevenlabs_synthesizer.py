@@ -67,11 +67,14 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
             # Ensure the WebSocket connection is established
             while self.websocket_holder["websocket"] is None or self.websocket_holder["websocket"].closed:
                 logger.info("Waiting for elevenlabs ws connection to be established...")
-                await asyncio.sleep(1)
+                await self.monitor_connection()
+                # await asyncio.sleep(1)
 
             if text != "":
                 for text_chunk in self.text_chunker(text):
                     logger.info(f"Sending text_chunk: {text_chunk}")
+                    if text_chunk.strip() == "":
+                        continue
                     try:
                         await self.websocket_holder["websocket"].send(json.dumps({"text": text_chunk}))
                     except Exception as e:
@@ -81,12 +84,11 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
             # If end_of_llm_stream is True, mark the last chunk and send an empty message
             if end_of_llm_stream:
                 self.last_text_sent = True
-
-            # Send the end-of-stream signal with an empty string as text
-            try:
-                await self.websocket_holder["websocket"].send(json.dumps({"text": "", "flush": True}))
-            except Exception as e:
-                logger.info(f"Error sending end-of-stream signal: {e}")
+                # Send the end-of-stream signal with an empty string as text
+                try:
+                    await self.websocket_holder["websocket"].send(json.dumps({"text": ""}))
+                except Exception as e:
+                    logger.info(f"Error sending end-of-stream signal: {e}")
 
         except asyncio.CancelledError:
             logger.info("Sender task was cancelled.")
@@ -99,10 +101,17 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
                 if self.conversation_ended:
                     return
 
-                if self.websocket_holder["websocket"] is None or self.websocket_holder["websocket"].closed:
+                if not self.websocket_holder["websocket"]:
                     logger.info("WebSocket is not connected, skipping receive.")
-                    await asyncio.sleep(5)
+                    await asyncio.sleep(2)
                     continue
+
+                # if self.websocket_holder["websocket"] is None or self.websocket_holder["websocket"].closed:
+                #     logger.info("WebSocket is not connected, skipping receive.")
+                #     await asyncio.sleep(3)
+                #     continue
+                    # await self.monitor_connection()
+                    # continue
 
                 response = await self.websocket_holder["websocket"].recv()
                 data = json.loads(response)
@@ -120,22 +129,26 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
 
                 if "isFinal" in data and data["isFinal"]:
                     yield b'\x00', ""
+                    # waiting for elevenlabs to close the connection
+                    await asyncio.sleep(1)
+                    await self.monitor_connection()
 
-                elif self.last_text_sent:
-                    try:
-                        response_chars = data.get('alignment', {}).get('chars', [])
-                        response_text = ''.join(response_chars)
-                        last_four_words_text = ' '.join(response_text.split(" ")[-4:]).strip()
-                        if self.current_text.strip().endswith(last_four_words_text):
-                            logger.info('send end_of_synthesizer_stream')
-                            yield b'\x00', ""
-                    except Exception as e:
-                        logger.error(f"Error occurred while getting chars from response - {e}")
+                # elif self.last_text_sent:
+                #     try:
+                #         response_chars = data.get('alignment', {}).get('chars', [])
+                #         response_text = ''.join(response_chars)
+                #         last_four_words_text = ' '.join(response_text.split(" ")[-4:]).strip()
+                #         if self.current_text.strip().endswith(last_four_words_text):
+                #             logger.info('send end_of_synthesizer_stream')
+                #             yield b'\x00', ""
+                #     except Exception as e:
+                #         logger.error(f"Error occurred while getting chars from response - {e}")
 
-                else:
-                    logger.info("No audio data in the response")
+                # else:
+                #     logger.info("No audio data in the response")
 
-            except websockets.exceptions.ConnectionClosed:
+            except websockets.exceptions.ConnectionClosed as e:
+                logger.error(f"Error in receiver - websockets exception raised ConnectionClosed - {e}")
                 break
             except Exception as e:
                 logger.error(f"Error occurred in receiver - {e}")
@@ -295,7 +308,11 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
             if self.websocket_holder["websocket"] is None or self.websocket_holder["websocket"].closed:
                 logger.info("Re-establishing elevenlabs connection...")
                 self.websocket_holder["websocket"] = await self.establish_connection()
-            await asyncio.sleep(50)
+
+            if self.websocket_holder["websocket"] and self.websocket_holder["websocket"].open:
+                logger.info("breaking the monitor loop")
+                break
+            await asyncio.sleep(2)
 
     async def get_sender_task(self):
         return self.sender_task
@@ -305,7 +322,7 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
         if self.stream:
             meta_info, text, self.current_text = message.get("meta_info"), message.get("data"), message.get("data")
             self.synthesized_characters += len(text) if text is not None else 0
-            end_of_llm_stream = "end_of_llm_stream" in meta_info and meta_info["end_of_llm_stream"]
+            end_of_llm_stream = ("end_of_llm_stream" in meta_info and meta_info["end_of_llm_stream"]) or meta_info["sequence_id"] == -1
             logger.info(f"end_of_llm_stream: {end_of_llm_stream}")
             self.meta_info = copy.deepcopy(meta_info)
             meta_info["text"] = text
