@@ -74,6 +74,7 @@ class TaskManager(BaseManager):
         self.turn_based_conversation = turn_based_conversation
         self.enforce_streaming = kwargs.get("enforce_streaming", False)
         self.room_url = kwargs.get("room_url", None)
+        self.is_web_based_call = kwargs.get("is_web_based_call", False)
         # self.callee_silent = True
         # TODO check if we need to toggle this based on some config
         self.yield_chunks = False
@@ -121,7 +122,7 @@ class TaskManager(BaseManager):
         self.observable_variables = {}
         #IO HANDLERS
         if task_id == 0:
-            if self.kwargs["is_web_based_call"]:
+            if self.is_web_based_call:
                 self.task_config["tools_config"]["input"]["provider"] = "default"
                 self.task_config["tools_config"]["output"]["provider"] = "default"
 
@@ -134,7 +135,7 @@ class TaskManager(BaseManager):
             logger.info(f"Connected via websocket")
 
             # TODO revert this temporary change for web based call
-            if self.kwargs["is_web_based_call"]:
+            if self.is_web_based_call:
                 self.should_record = False
             else:
                 self.should_record = self.task_config["tools_config"]["output"]["provider"] == 'default' and self.enforce_streaming #In this case, this is a websocket connection and we should record
@@ -272,7 +273,7 @@ class TaskManager(BaseManager):
             self.nitro = True
             self.conversation_config = task.get("task_config", {})
             logger.info(f"Conversation config {self.conversation_config}")
-            self.kwargs["is_precise_transcript_generation_enabled"] = self.conversation_config.get('is_precise_transcript_generation_enabled', True)
+            self.kwargs["is_precise_transcript_generation_enabled"] = self.conversation_config.get('generate_precise_transcript', False)
 
             self.trigger_user_online_message_after = self.conversation_config.get("trigger_user_online_message_after", DEFAULT_USER_ONLINE_MESSAGE_TRIGGER_DURATION)
             self.check_if_user_online = self.conversation_config.get("check_if_user_online", True)
@@ -526,7 +527,7 @@ class TaskManager(BaseManager):
                 self.sampling_rate = self.task_config['tools_config']['synthesizer']['provider_config']['sampling_rate']
 
             if self.task_config["tools_config"]["output"]["provider"] == "default":
-                output_kwargs["is_web_based_call"] = self.kwargs["is_web_based_call"]
+                output_kwargs["is_web_based_call"] = self.is_web_based_call
                 output_kwargs['mark_event_meta_data'] = self.mark_event_meta_data
 
             self.tools["output"] = output_handler_class(**output_kwargs)
@@ -541,7 +542,7 @@ class TaskManager(BaseManager):
                 "websocket": self.websocket,
                 "input_types": get_required_input_types(self.task_config),
                 "mark_event_meta_data": self.mark_event_meta_data,
-                "is_welcome_message_played": True if self.task_config["tools_config"]["output"]["provider"] == 'default' and not self.kwargs["is_web_based_call"] else False
+                "is_welcome_message_played": True if self.task_config["tools_config"]["output"]["provider"] == 'default' and not self.is_web_based_call else False
             }
 
             if self.task_config["tools_config"]["input"]["provider"] == "daily":
@@ -574,7 +575,7 @@ class TaskManager(BaseManager):
                 self.language = self.task_config["tools_config"]["transcriber"].get('language', DEFAULT_LANGUAGE_CODE)
                 if self.turn_based_conversation:
                     provider = "playground"
-                elif self.kwargs["is_web_based_call"]:
+                elif self.is_web_based_call:
                     provider = "web_based_call"
                 else:
                     provider = self.task_config["tools_config"]["input"]["provider"]
@@ -786,7 +787,14 @@ class TaskManager(BaseManager):
         if not prompt and task_type in ('extraction', 'summarization'):
             if task_type == 'extraction':
                 extraction_json = task.get("tools_config").get('llm_agent', {}).get('llm_config', {}).get('extraction_json')
-                prompt = EXTRACTION_PROMPT.format(extraction_json)
+                if self.context_data and 'recipient_data' in self.context_data and self.context_data[
+                    'recipient_data'] and self.context_data['recipient_data'].get('timezone', None):
+                    self.timezone = pytz.timezone(self.context_data['recipient_data']['timezone'])
+
+                today = datetime.now(self.timezone).strftime("%A, %B %d, %Y")
+                current_time = datetime.now(self.timezone).strftime("%I:%M:%S %p")
+
+                prompt = EXTRACTION_PROMPT.format(today, current_time, self.timezone, extraction_json)
                 return {"system_prompt": prompt}
             elif task_type == 'summarization':
                 return {"system_prompt": SUMMARIZATION_PROMPT}
@@ -1415,7 +1423,7 @@ class TaskManager(BaseManager):
         self.history.append({"role": "user", "content": transcriber_message})
 
         message_heard_by_user = self.tools["input"].get_response_heard_by_user()
-        if not self.kwargs["is_web_based_call"] and self.kwargs["is_precise_transcript_generation_enabled"]:
+        if not self.is_web_based_call and self.kwargs["is_precise_transcript_generation_enabled"]:
             if self.tools["input"].welcome_message_played() and self.history[-2][
                 "role"] == "assistant" and message_heard_by_user:
                 logger.info(
@@ -1958,7 +1966,7 @@ class TaskManager(BaseManager):
         while True:
             await asyncio.sleep(2)
 
-            if self.kwargs["is_web_based_call"] and time.time() - self.start_time >= int(
+            if self.is_web_based_call and time.time() - self.start_time >= int(
                     self.task_config["task_config"]["call_terminate"]):
                 logger.info("Hanging up for web call as max time of call has been reached")
                 await self.__process_end_of_conversation(web_call_timeout=True)
@@ -2017,7 +2025,7 @@ class TaskManager(BaseManager):
     async def __first_message(self, timeout=10.0):
         logger.info(f"Executing the first message task")
         try:
-            if self.kwargs["is_web_based_call"]:
+            if self.is_web_based_call:
                 logger.info("Sending agent welcome message for web based call")
                 text = self.kwargs.get('agent_welcome_message', None)
                 meta_info = {'io': 'default', 'message_category': 'agent_welcome_message',

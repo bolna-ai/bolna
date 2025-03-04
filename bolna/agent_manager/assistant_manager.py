@@ -55,9 +55,6 @@ class AssistantManager(BaseManager):
             self.task_states[task_id] = True
             if task_id == 0:
                 input_parameters = task_output
-
-                # removing context_data from non-conversational tasks
-                self.context_data = None
             logger.info(f"task_output {task_output}")
             if task["task_type"] == "extraction":
                 input_parameters["extraction_details"] = task_output["extracted_data"]
