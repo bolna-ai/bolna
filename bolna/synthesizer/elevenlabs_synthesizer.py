@@ -67,7 +67,8 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
             # Ensure the WebSocket connection is established
             while self.websocket_holder["websocket"] is None or self.websocket_holder["websocket"].closed:
                 logger.info("Waiting for elevenlabs ws connection to be established...")
-                await asyncio.sleep(1)
+                await self.monitor_connection()
+                # await asyncio.sleep(1)
 
             if text != "":
                 for text_chunk in self.text_chunker(text):
@@ -82,11 +83,11 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
             if end_of_llm_stream:
                 self.last_text_sent = True
 
-            # Send the end-of-stream signal with an empty string as text
-            try:
-                await self.websocket_holder["websocket"].send(json.dumps({"text": "", "flush": True}))
-            except Exception as e:
-                logger.info(f"Error sending end-of-stream signal: {e}")
+            # # Send the end-of-stream signal with an empty string as text
+            # try:
+            #     await self.websocket_holder["websocket"].send(json.dumps({"text": "", "flush": True}))
+            # except Exception as e:
+            #     logger.info(f"Error sending end-of-stream signal: {e}")
 
         except asyncio.CancelledError:
             logger.info("Sender task was cancelled.")
@@ -101,7 +102,9 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
 
                 if self.websocket_holder["websocket"] is None or self.websocket_holder["websocket"].closed:
                     logger.info("WebSocket is not connected, skipping receive.")
-                    await asyncio.sleep(5)
+                    # await asyncio.sleep(5)
+                    # continue
+                    await self.monitor_connection()
                     continue
 
                 response = await self.websocket_holder["websocket"].recv()
@@ -295,7 +298,10 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
             if self.websocket_holder["websocket"] is None or self.websocket_holder["websocket"].closed:
                 logger.info("Re-establishing elevenlabs connection...")
                 self.websocket_holder["websocket"] = await self.establish_connection()
-            await asyncio.sleep(50)
+
+            if self.websocket_holder["websocket"] and self.websocket_holder["websocket"].open:
+                break
+            await asyncio.sleep(2)
 
     async def get_sender_task(self):
         return self.sender_task
