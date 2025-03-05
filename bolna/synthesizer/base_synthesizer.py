@@ -67,6 +67,21 @@ class BaseSynthesizer:
     async def handle_interruption(self):
         pass
 
+    async def text_iterator(self, text):
+        """Split text into chunks to mimic streaming from an LLM or similar"""
+        split_text = text.split(" ")
+        words = 0
+        to_send = ""
+        for chunk in split_text:
+            to_send += chunk  + ' '
+            words += 1
+            if words >= 10:
+                print(to_send)
+                yield to_send
+                words = 0
+                to_send = ""
+        yield to_send
+
     def text_chunker(self, text):
         """Split text into chunks, ensuring to not break sentences."""
         splitters = (".", ",", "?", "!", ";", ":", "—", "-", "(", ")", "[", "]", "}", " ")

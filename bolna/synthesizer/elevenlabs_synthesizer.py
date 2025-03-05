@@ -30,7 +30,7 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
         self.sampling_rate = sampling_rate
         self.audio_format = "mp3"
         self.use_mulaw = kwargs.get("use_mulaw", True)
-        self.ws_url = f"wss://api.elevenlabs.io/v1/text-to-speech/{self.voice}/stream-input?model_id={self.model}&output_format={'ulaw_8000' if self.use_mulaw else 'mp3_44100_128'}&inactivity_timeout=60"
+        self.ws_url = f"wss://api.elevenlabs.io/v1/text-to-speech/{self.voice}/stream-input?model_id={self.model}&output_format={'ulaw_8000' if self.use_mulaw else 'mp3_44100_128'}&inactivity_timeout=150&sync_alignment=true"
         self.api_url = f"https://api.elevenlabs.io/v1/text-to-speech/{self.voice}?optimize_streaming_latency=2&output_format="
         self.first_chunk_generated = False
         self.last_text_sent = False
@@ -67,11 +67,11 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
             # Ensure the WebSocket connection is established
             while self.websocket_holder["websocket"] is None or self.websocket_holder["websocket"].closed:
                 logger.info("Waiting for elevenlabs ws connection to be established...")
-                await self.monitor_connection()
-                # await asyncio.sleep(1)
+                #await self.monitor_connection()
+                await asyncio.sleep(1)
 
             if text != "":
-                for text_chunk in self.text_chunker(text):
+                async for text_chunk in self.text_iterator(text):
                     logger.info(f"Sending text_chunk: {text_chunk}")
                     if text_chunk.strip() == "":
                         continue
@@ -86,7 +86,7 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
                 self.last_text_sent = True
                 # Send the end-of-stream signal with an empty string as text
                 try:
-                    await self.websocket_holder["websocket"].send(json.dumps({"text": ""}))
+                    await self.websocket_holder["websocket"].send(json.dumps({"text": "", "flush": True}))
                 except Exception as e:
                     logger.info(f"Error sending end-of-stream signal: {e}")
 
@@ -101,17 +101,10 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
                 if self.conversation_ended:
                     return
 
-                if not self.websocket_holder["websocket"]:
+                if self.websocket_holder["websocket"] is None or self.websocket_holder["websocket"].closed:
                     logger.info("WebSocket is not connected, skipping receive.")
                     await asyncio.sleep(2)
                     continue
-
-                # if self.websocket_holder["websocket"] is None or self.websocket_holder["websocket"].closed:
-                #     logger.info("WebSocket is not connected, skipping receive.")
-                #     await asyncio.sleep(3)
-                #     continue
-                    # await self.monitor_connection()
-                    # continue
 
                 response = await self.websocket_holder["websocket"].recv()
                 data = json.loads(response)
@@ -130,8 +123,8 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
                 if "isFinal" in data and data["isFinal"]:
                     yield b'\x00', ""
                     # waiting for elevenlabs to close the connection
-                    await asyncio.sleep(1)
-                    await self.monitor_connection()
+                    #await asyncio.sleep(1)
+                    #await self.monitor_connection()
 
                 # elif self.last_text_sent:
                 #     try:
@@ -309,10 +302,10 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
                 logger.info("Re-establishing elevenlabs connection...")
                 self.websocket_holder["websocket"] = await self.establish_connection()
 
-            if self.websocket_holder["websocket"] and self.websocket_holder["websocket"].open:
-                logger.info("breaking the monitor loop")
-                break
-            await asyncio.sleep(2)
+            # if self.websocket_holder["websocket"] and self.websocket_holder["websocket"].open:
+            #     logger.info("breaking the monitor loop")
+            #     break
+            await asyncio.sleep(30)
 
     async def get_sender_task(self):
         return self.sender_task
