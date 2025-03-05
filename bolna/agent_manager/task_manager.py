@@ -1444,10 +1444,10 @@ class TaskManager(BaseManager):
                     except Exception as e:
                         logger.error(f"Error occurred in getting number of words to append - {e}")
                         self.history[-2]["content"] = message_heard_by_user
-        else:
-            if self.tools["input"].welcome_message_played() and self.history[-2]["role"] == "assistant" and message_heard_by_user:
-                logger.info(f"Updating the chat history with the message heard by the user. Original message = {self.history[-2]['content']} | Message heard by user - {message_heard_by_user}")
-                self.history[-2]["content"] = message_heard_by_user
+        # else:
+        #     if self.tools["input"].welcome_message_played() and self.history[-2]["role"] == "assistant" and message_heard_by_user:
+        #         logger.info(f"Updating the chat history with the message heard by the user. Original message = {self.history[-2]['content']} | Message heard by user - {message_heard_by_user}")
+        #         self.history[-2]["content"] = message_heard_by_user
 
         convert_to_request_log(message=transcriber_message, meta_info= meta_info, model = "deepgram", run_id= self.run_id)
         if next_task == "llm":
