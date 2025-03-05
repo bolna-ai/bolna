@@ -84,9 +84,16 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
             # If end_of_llm_stream is True, mark the last chunk and send an empty message
             if end_of_llm_stream:
                 self.last_text_sent = True
-                # Send the end-of-stream signal with an empty string as text
+                if not self.is_web_based_call:
+                    # Send the end-of-stream signal with an empty string as text
+                    try:
+                        await self.websocket_holder["websocket"].send(json.dumps({"text": ""}))
+                    except Exception as e:
+                        logger.info(f"Error sending end-of-stream signal: {e}")
+
+            if self.is_web_based_call:
                 try:
-                    await self.websocket_holder["websocket"].send(json.dumps({"text": ""}))
+                    await self.websocket_holder["websocket"].send(json.dumps({"text": "", "flush": True}))
                 except Exception as e:
                     logger.info(f"Error sending end-of-stream signal: {e}")
 
