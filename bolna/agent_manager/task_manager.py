@@ -2145,6 +2145,7 @@ class TaskManager(BaseManager):
                     logger.error(f"Error: {e}")
 
                 logger.info("Conversation completed")
+                self.conversation_ended = True
             else:
                 # Run agent followup tasks
                 try:
