@@ -8,7 +8,6 @@ import time
 import json
 import uuid
 import copy
-from datetime import datetime
 import pytz
 
 import aiohttp
@@ -20,7 +19,7 @@ from .base_manager import BaseManager
 from bolna.agent_types import *
 from bolna.providers import *
 from bolna.prompts import *
-from bolna.helpers.utils import get_route_info, calculate_audio_duration, create_ws_data_packet, get_file_names_in_directory, get_raw_audio_bytes, is_valid_md5, \
+from bolna.helpers.utils import get_date_time_from_timezone, get_route_info, calculate_audio_duration, create_ws_data_packet, get_file_names_in_directory, get_raw_audio_bytes, is_valid_md5, \
     get_required_input_types, format_messages, get_prompt_responses, resample, save_audio_file_to_s3, update_prompt_with_context, get_md5_hash, clean_json_string, wav_bytes_to_pcm, convert_to_request_log, yield_chunks_from_memory, process_task_cancellation
 from bolna.helpers.logger_config import configure_logger
 from semantic_router import Route
@@ -714,9 +713,7 @@ class TaskManager(BaseManager):
         if task_id == 0:
             if self.context_data and 'recipient_data' in self.context_data and self.context_data['recipient_data'] and self.context_data['recipient_data'].get('timezone', None):
                 self.timezone = pytz.timezone(self.context_data['recipient_data']['timezone'])
-
-        today = datetime.now(self.timezone).strftime("%A, %B %d, %Y")
-        current_time = datetime.now(self.timezone).strftime("%I:%M:%S %p")
+        current_date, current_time = get_date_time_from_timezone(self.timezone)
 
         prompt_responses = kwargs.get('prompt_responses', None)
         if not prompt_responses:
@@ -731,7 +728,7 @@ class TaskManager(BaseManager):
             for agent in self.task_config["tools_config"]["llm_agent"]['llm_config']['agent_map']:
                 prompt = prompts[agent]['system_prompt']
                 prompt = self.__prefill_prompts(self.task_config, prompt, self.task_config['task_type'])
-                prompt = self.__get_final_prompt(prompt, today, current_time, self.timezone)
+                prompt = self.__get_final_prompt(prompt, current_date, current_time, self.timezone)
                 if agent == self.task_config["tools_config"]["llm_agent"]['llm_config']['default_agent']:
                     self.system_prompt = {
                         'role': 'system',
@@ -762,9 +759,10 @@ class TaskManager(BaseManager):
             if self._is_conversation_task() and self.use_fillers:
                 notes += f"1.{FILLER_PROMPT}\n"
 
+            current_date, current_time = get_date_time_from_timezone(self.timezone)
             self.system_prompt = {
                 'role': "system",
-                'content': f"{enriched_prompt}\n{notes}\n{DATE_PROMPT.format(today, current_time, self.timezone)}"
+                'content': f"{enriched_prompt}\n{notes}\n{DATE_PROMPT.format(current_date, current_time, self.timezone)}"
             }
         else:
             self.system_prompt = {
@@ -791,10 +789,8 @@ class TaskManager(BaseManager):
                     'recipient_data'] and self.context_data['recipient_data'].get('timezone', None):
                     self.timezone = pytz.timezone(self.context_data['recipient_data']['timezone'])
 
-                today = datetime.now(self.timezone).strftime("%A, %B %d, %Y")
-                current_time = datetime.now(self.timezone).strftime("%I:%M:%S %p")
-
-                prompt = EXTRACTION_PROMPT.format(today, current_time, self.timezone, extraction_json)
+                current_date, current_time = get_date_time_from_timezone(self.timezone)
+                prompt = EXTRACTION_PROMPT.format(current_date, current_time, self.timezone, extraction_json)
                 return {"system_prompt": prompt}
             elif task_type == 'summarization':
                 return {"system_prompt": SUMMARIZATION_PROMPT}
@@ -919,8 +915,8 @@ class TaskManager(BaseManager):
                 'content': message
             })
 
-            today = datetime.now().strftime("%A, %B %d, %Y")
-            self.history[0]['content'] += f"\n Today's Date is {today}"
+            current_date, current_time = get_date_time_from_timezone(self.timezone)
+            self.history[0]['content'] += f"\n Today's Date is {current_date}"
 
             json_data = await self.tools["llm_agent"].generate(self.history)
             if self.task_config["task_type"] == "summarization":
