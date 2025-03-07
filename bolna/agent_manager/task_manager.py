@@ -940,6 +940,7 @@ class TaskManager(BaseManager):
     def final_chunk_played_observer(self, is_final_chunk_played):
         logger.info(f'Updating last_transmitted_timestamp')
         self.last_transmitted_timestamp = time.time()
+        self.append_assistant_message()
 
     async def agent_hangup_observer(self, is_agent_hangup):
         logger.info(f"agent_hangup_observer triggered with is_agent_hangup = {is_agent_hangup}")
@@ -1184,7 +1185,8 @@ class TaskManager(BaseManager):
                 # TODO revisit this
                 messages.append({"role": "assistant", "content": llm_response})
 
-                self.history.append({"role": "assistant", "content": llm_response})
+                if not self.kwargs["is_precise_transcript_generation_enabled"]:
+                    self.history.append({"role": "assistant", "content": llm_response})
                 self.interim_history = copy.deepcopy(messages)
                 # if self.callee_silent:
                 #     logger.info("##### When we got utterance end, maybe LLM was still generating response. So, copying into history")
@@ -1419,20 +1421,24 @@ class TaskManager(BaseManager):
             skip_append_to_data = False
         return sequence
 
-    async def _handle_transcriber_output(self, next_task, transcriber_message, meta_info):
-        self.history.append({"role": "user", "content": transcriber_message})
-
+    def append_assistant_message(self):
         message_heard_by_user = self.tools["input"].get_response_heard_by_user()
+        logger.info(f"Appending assistant message. Message heard by user - {message_heard_by_user}")
         if not self.is_web_based_call and self.kwargs["is_precise_transcript_generation_enabled"]:
-            if self.tools["input"].welcome_message_played() and self.history[-2][
-                "role"] == "assistant" and message_heard_by_user:
+            if self.tools["input"].welcome_message_played() and message_heard_by_user:
                 logger.info(
-                    f"Updating the chat history with the message heard by the user. Original message = {self.history[-2]['content']} | Message heard by user - {message_heard_by_user}")
+                    f"Updating the chat history with the message heard by the user | Message heard by user - {message_heard_by_user}")
+
+                if self.synthesizer_provider == "elevenlabs":
+                    self.history.append({"role": "assistant", "content": message_heard_by_user})
+                    return
+
                 audio_chunk_sent = self.tools['synthesizer'].get_audio_chunks_sent()
                 audio_chunk_received = self.tools['input'].get_audio_chunks_received()
                 logger.info(f"Audio chunks sent = {audio_chunk_sent} | audio chunks received = {audio_chunk_received}")
                 if audio_chunk_received == audio_chunk_sent:
-                    self.history[-2]["content"] = message_heard_by_user
+                    self.history.append({"role": "assistant", "content": message_heard_by_user})
+                    # self.history[-2]["content"] = message_heard_by_user
                 else:
                     try:
                         message_heard_by_user_words = message_heard_by_user.split(" ")
@@ -1440,10 +1446,39 @@ class TaskManager(BaseManager):
                             (audio_chunk_received / audio_chunk_sent) * len(message_heard_by_user_words))
                         logger.info(
                             f"Total number of words - {len(message_heard_by_user_words)} | Number of words to append - {number_of_words_to_append} | Words to append - {message_heard_by_user_words[:number_of_words_to_append]}")
-                        self.history[-2]["content"] = " ".join(message_heard_by_user_words[:number_of_words_to_append])
+                        # self.history[-2]["content"] = " ".join(message_heard_by_user_words[:number_of_words_to_append])
+                        self.history.append({"role": "assistant", "content": " ".join(message_heard_by_user_words[:number_of_words_to_append])})
                     except Exception as e:
                         logger.error(f"Error occurred in getting number of words to append - {e}")
-                        self.history[-2]["content"] = message_heard_by_user
+                        # self.history[-2]["content"] = message_heard_by_user
+                        self.history.append({"role": "assistant", "content": message_heard_by_user})
+
+    async def _handle_transcriber_output(self, next_task, transcriber_message, meta_info):
+        self.history.append({"role": "user", "content": transcriber_message})
+        logger.info(f"Chunks sent - {self.tools['synthesizer'].audio_chunks_sent} | Chunks received - {self.tools['input'].audio_chunks_received} | Appended user speech - {transcriber_message}")
+
+        # message_heard_by_user = self.tools["input"].get_response_heard_by_user()
+        # if not self.is_web_based_call and self.kwargs["is_precise_transcript_generation_enabled"]:
+        #     if self.tools["input"].welcome_message_played() and self.history[-2][
+        #         "role"] == "assistant" and message_heard_by_user:
+        #         logger.info(
+        #             f"Updating the chat history with the message heard by the user. Original message = {self.history[-2]['content']} | Message heard by user - {message_heard_by_user}")
+        #         audio_chunk_sent = self.tools['synthesizer'].get_audio_chunks_sent()
+        #         audio_chunk_received = self.tools['input'].get_audio_chunks_received()
+        #         logger.info(f"Audio chunks sent = {audio_chunk_sent} | audio chunks received = {audio_chunk_received}")
+        #         if audio_chunk_received == audio_chunk_sent:
+        #             self.history[-2]["content"] = message_heard_by_user
+        #         else:
+        #             try:
+        #                 message_heard_by_user_words = message_heard_by_user.split(" ")
+        #                 number_of_words_to_append = math.floor(
+        #                     (audio_chunk_received / audio_chunk_sent) * len(message_heard_by_user_words))
+        #                 logger.info(
+        #                     f"Total number of words - {len(message_heard_by_user_words)} | Number of words to append - {number_of_words_to_append} | Words to append - {message_heard_by_user_words[:number_of_words_to_append]}")
+        #                 self.history[-2]["content"] = " ".join(message_heard_by_user_words[:number_of_words_to_append])
+        #             except Exception as e:
+        #                 logger.error(f"Error occurred in getting number of words to append - {e}")
+        #                 self.history[-2]["content"] = message_heard_by_user
         # else:
         #     if self.tools["input"].welcome_message_played() and self.history[-2]["role"] == "assistant" and message_heard_by_user:
         #         logger.info(f"Updating the chat history with the message heard by the user. Original message = {self.history[-2]['content']} | Message heard by user - {message_heard_by_user}")
@@ -1523,7 +1558,9 @@ class TaskManager(BaseManager):
                                 logger.info(f"Condition for interruption hit")
                                 self.turn_id += 1
                                 self.tools["input"].update_is_audio_being_played(False)
+                                # TODO check if the below function can be added in the downstream task
                                 await self.__cleanup_downstream_tasks()
+                                self.append_assistant_message()
 
                         # Doing changes for incremental delay
                         self.required_delay_before_speaking += self.incremental_delay
@@ -1545,6 +1582,10 @@ class TaskManager(BaseManager):
                                 message["data"].get("content").strip() not in self.accidental_interruption_phrases:
                             logger.info(f"Continuing the loop and ignoring the transcript received ({message['data'].get('content')}) in speech final as it is false interruption")
                             continue
+
+                        # TODO make this better and this should work only if precise transcript is enabled
+                        _ = self.tools['synthesizer'].get_audio_chunks_sent()
+                        _ = self.tools['input'].get_audio_chunks_received()
 
                         self.callee_speaking = False
                         # self.callee_silent = True
@@ -1631,6 +1672,7 @@ class TaskManager(BaseManager):
                         sequence_id = meta_info.get("sequence_id", None)
 
                         # Check if the message is valid to process
+                        logger.info(f"is_first_message - {is_first_message} | self.conversation_ended - {self.conversation_ended} | sequence_id - {sequence_id} | self.sequence_ids - {self.sequence_ids}")
                         if is_first_message or (not self.conversation_ended and sequence_id in self.sequence_ids):
                             logger.info(f"Processing message with sequence_id: {sequence_id}")
                             first_chunk_generation_timestamp = time.time()
@@ -1676,6 +1718,8 @@ class TaskManager(BaseManager):
                                 run_id=self.run_id
                             )
                         else:
+                            _ = self.tools['synthesizer'].get_audio_chunks_sent()
+                            _ = self.tools['input'].get_audio_chunks_received()
                             logger.info(f"Skipping message with sequence_id: {sequence_id}")
 
                         # Give control to other tasks
@@ -2144,6 +2188,7 @@ class TaskManager(BaseManager):
                     traceback.print_exc()
                     logger.error(f"Error: {e}")
 
+                # self.conversation_ended = True
                 logger.info("Conversation completed")
             else:
                 # Run agent followup tasks

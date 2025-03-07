@@ -8,7 +8,8 @@ import aiohttp
 import os
 import traceback
 from collections import deque
-
+from pydub import AudioSegment
+from io import BytesIO
 from bolna.memory.cache.inmemory_scalar_cache import InmemoryScalarCache
 from .base_synthesizer import BaseSynthesizer
 from bolna.helpers.logger_config import configure_logger
@@ -109,14 +110,120 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
                 logger.info("response for isFinal: {}".format(data.get('isFinal', False)))
                 # logger.info(f"Response from elevenlabs - {data}")
 
+                # if "audio" in data and data["audio"]:
+                #     chunk = base64.b64decode(data["audio"])
+                #     try:
+                #         text_spoken = ''.join(data.get('alignment', {}).get('chars', []))
+                #     except Exception as e:
+                #         logger.error(f"Error occurred while getting chars from response - {e}")
+                #         text_spoken = ""
+                #     yield chunk, text_spoken
+
                 if "audio" in data and data["audio"]:
-                    chunk = base64.b64decode(data["audio"])
-                    try:
-                        text_spoken = ''.join(data.get('alignment', {}).get('chars', []))
-                    except Exception as e:
-                        logger.error(f"Error occurred while getting chars from response - {e}")
-                        text_spoken = ""
-                    yield chunk, text_spoken
+                    audio_chunk = base64.b64decode(data["audio"])
+                    if not self.is_web_based_call and self.is_precise_transcript_generation_enabled:
+                        # TODO add in exception handling
+
+                        # uncomment the below to perform operation on audio file
+                        # audio = AudioSegment.from_file(
+                        #     BytesIO(audio_chunk),
+                        #     format="raw",
+                        #     parameters=["-f", "mulaw"],
+                        #     frame_rate=8000,
+                        #     channels=1,
+                        #     sample_width=1
+                        # )
+
+                        words = []
+                        current_word = ""
+                        word_start_time = None
+
+                        for i, char in enumerate(data.get('alignment', {}).get('chars', [])):
+                            if char != " ":
+                                if not current_word:
+                                    word_start_time = data.get('alignment', {}).get('charStartTimesMs', [])[i] / 1000.0
+                                current_word += char
+                            else:
+                                if current_word:
+                                    words.append((current_word, word_start_time))
+                                    current_word = ""
+                                    word_start_time = None
+
+                        if current_word:
+                            words.append((current_word, word_start_time))
+
+                        group_size = 10
+                        grouped_words = []
+                        for i in range(0, len(words), group_size):
+                            group = words[i:i + group_size]
+                            combined_text = " ".join(word for word, _ in group)
+                            group_start_sec = group[0][1]  # Start time of the first word in the group.
+                            grouped_words.append((combined_text, group_start_sec))
+
+                        # uncomment the below to perform operation on audio file
+                        # for i in range(len(grouped_words)):
+                        #     combined_text, group_start_sec = grouped_words[i]
+                        #
+                        #     if i < len(grouped_words) - 1:
+                        #         next_group_start_sec = grouped_words[i + 1][1]
+                        #     else:
+                        #         # For the last group, use the full audio length.
+                        #         next_group_start_sec = len(audio) / 1000.0
+                        #
+                        #     # Extract the audio segment for this group.
+                        #     segment = audio[group_start_sec * 1000: next_group_start_sec * 1000]
+                        #
+                        #     # Export the segment to a BytesIO buffer.
+                        #     buffer = BytesIO()
+                        #     segment.export(buffer, format="wav")
+                        #
+                        #     # Retrieve the bytes from the buffer
+                        #     segmented_audio_bytes = buffer.getvalue()
+                        #
+                        #     yield segmented_audio_bytes, f"{combined_text} "
+
+                        # comment the below code when you perform operation on audio file - below code works on the bytes directly
+                        FRAME_RATE = 8000
+                        SAMPLE_WIDTH, CHANNELS = 1, 1
+                        total_duration_sec = len(audio_chunk) / (FRAME_RATE * SAMPLE_WIDTH * CHANNELS)
+                        for i in range(len(grouped_words)):
+                            combined_text, group_start_sec = grouped_words[i]
+                            if i < len(grouped_words) - 1:
+                                next_group_start_sec = grouped_words[i + 1][1]
+                            else:
+                                next_group_start_sec = total_duration_sec
+                            # start_byte = int(group_start_sec * FRAME_RATE * SAMPLE_WIDTH * CHANNELS)
+                            # end_byte = int(next_group_start_sec * FRAME_RATE * SAMPLE_WIDTH * CHANNELS)
+                            # segment_bytes = audio_chunk[start_byte:end_byte]
+
+                            bits_per_sample = 16
+                            channels = 1
+                            sample_rate = 8000
+                            bytes_per_sample = bits_per_sample // 8
+
+                            # Calculate total bytes per frame (frame = sample across all channels)
+                            bytes_per_frame = bytes_per_sample * channels
+
+                            # Calculate frame indices for start and end times
+                            start_frame = int((group_start_sec) * sample_rate)
+                            end_frame = int((next_group_start_sec) * sample_rate)
+
+                            # Calculate byte positions
+                            start_byte = start_frame * bytes_per_frame
+                            end_byte = end_frame * bytes_per_frame
+
+                            # Ensure we don't exceed the audio length
+                            end_byte = min(end_byte, len(audio_chunk))
+
+                            # Extract the bytes for the specified range
+                            yield audio_chunk[start_byte:end_byte], f"{combined_text} "
+                    else:
+                        try:
+                            text_spoken = ''.join(data.get('alignment', {}).get('chars', []))
+                        except Exception as e:
+                            logger.error(f"Error occurred while getting chars from response - {e}")
+                            text_spoken = ""
+                        yield audio_chunk, text_spoken
 
                 if "isFinal" in data and data["isFinal"]:
                     yield b'\x00', ""
@@ -217,13 +324,15 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
                         self.first_chunk_generated = False
 
                     self.meta_info["text_synthesized"] = text_synthesized
+                    self.meta_info["mark_id"] = str(uuid.uuid4())
+                    yield create_ws_data_packet(audio, self.meta_info)
 
-                    if not self.is_web_based_call and self.is_precise_transcript_generation_enabled and audio != b'\x00':
-                        async for chunk in self.break_audio_into_chunks(audio, self.slicing_range, self.meta_info):
-                            yield chunk
-                    else:
-                        self.meta_info["mark_id"] = str(uuid.uuid4())
-                        yield create_ws_data_packet(audio, self.meta_info)
+                    # if not self.is_web_based_call and self.is_precise_transcript_generation_enabled and audio != b'\x00':
+                    #     async for chunk in self.break_audio_into_chunks(audio, self.slicing_range, self.meta_info):
+                    #         yield chunk
+                    # else:
+                    #     self.meta_info["mark_id"] = str(uuid.uuid4())
+                    #     yield create_ws_data_packet(audio, self.meta_info)
             else:
                 while True:
                     message = await self.internal_queue.get()
