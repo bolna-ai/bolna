@@ -1,3 +1,4 @@
+import copy
 import time
 import uuid
 
@@ -51,7 +52,7 @@ class AssistantManager(BaseManager):
                                            task_id, local=local, **self.kwargs)
             task_output = await task_manager.run()
             task_output['run_id'] = self.run_id
-            yield task_id, task_output.copy()
+            yield task_id, copy.deepcopy(task_output)
             self.task_states[task_id] = True
             if task_id == 0:
                 input_parameters = task_output
