@@ -30,6 +30,7 @@ class AzureTranscriber(BaseTranscriber):
         self.encoding = "linear16"
         self.sampling_rate = 8000
         self.bits_per_sample = 16
+        self.run_id = kwargs.get("run_id", "")
 
         if self.audio_provider in ("twilio", "exotel", "plivo"):
             self.encoding = "mulaw" if self.audio_provider in ("twilio",) else "linear16"
@@ -103,12 +104,6 @@ class AzureTranscriber(BaseTranscriber):
             self.recognizer = speechsdk.SpeechRecognizer(speech_config=speech_config, audio_config=audio_config)
 
             # Connect event handlers to the recognizer
-            # self.recognizer.recognizing.connect(self.recognizing_handler)
-            # self.recognizer.recognized.connect(self.recognized_handler)
-            # self.recognizer.canceled.connect(self.canceled_handler)
-            # self.recognizer.session_started.connect(self.session_started_handler)
-            # self.recognizer.session_stopped.connect(self.session_stopped_handler)
-
             self.recognizer.recognizing.connect(self._sync_recognizing_handler)
             self.recognizer.recognized.connect(self._sync_recognized_handler)
             self.recognizer.canceled.connect(self._sync_canceled_handler)
@@ -117,46 +112,10 @@ class AzureTranscriber(BaseTranscriber):
 
             # Start continuous recognition asynchronously (blocking until it starts)
             self.recognizer.start_continuous_recognition_async().get()
-            # self.recognizer.start_continuous_recognition_async()
             logger.info("Azure speech recognition started successfully")
 
         except Exception as e:
             logger.error(f"Error in initialize_connection - {e}")
-
-    # def recognizing_handler(self, evt):
-    #     logger.info(f"Intermediate results: {evt.result.text}")
-    #     data = {
-    #         "type": "interim_transcript_received",
-    #         "content": evt.result.text
-    #     }
-    #     logger.info(f"Queue details - {self.transcriber_output_queue} | before size - {self.transcriber_output_queue.qsize()}")
-    #     self.transcriber_output_queue.put_nowait(create_ws_data_packet(data, self.meta_info))
-    #     logger.info(f"Queue details - {self.transcriber_output_queue} | after size - {self.transcriber_output_queue.qsize()}")
-    #
-    # def recognized_handler(self, evt):
-    #     # Final recognized text for an utterance.
-    #     logger.info(f"Final transcript: {evt.result.text}")
-    #     data = {
-    #         "type": "transcript",
-    #         "content": evt.result.text
-    #     }
-    #     logger.info(f"Queue details - {self.transcriber_output_queue} | before size - {self.transcriber_output_queue.qsize()}")
-    #     self.transcriber_output_queue.put_nowait(create_ws_data_packet(data, self.meta_info))
-    #     logger.info(f"Queue details - {self.transcriber_output_queue} | after size - {self.transcriber_output_queue.qsize()}")
-    #
-    # def canceled_handler(self, evt):
-    #     logger.info(f"Canceled event received: {evt}")
-    #
-    # def session_started_handler(self, evt):
-    #     # TODO add run id and user id in these logs as they do not print them
-    #     # 2025-03-09 13:10:32.999 INFO  {azure_transcriber} [session_started_handler] Session start event received: SessionEventArgs(session_id=b0e46e0936684c568a298891e3897732)
-    #     logger.info(f"Session start event received: {evt}")
-    #     self.transcriber_output_queue.put_nowait(create_ws_data_packet("speech_started", self.meta_info))
-    #
-    # def session_stopped_handler(self, evt):
-    #     logger.info(f"Session stop event received: {evt}")
-    #     # TODO add the code for getting transcript duration for billing
-    #     self.transcriber_output_queue.put_nowait(create_ws_data_packet("transcriber_connection_closed", self.meta_info))
 
     # Synchronous wrapper functions that schedule the async handlers
     def _sync_recognizing_handler(self, evt):
@@ -176,7 +135,7 @@ class AzureTranscriber(BaseTranscriber):
 
     # Async handlers
     async def recognizing_handler(self, evt):
-        logger.info(f"Intermediate results: {evt.result.text}")
+        logger.info(f"Intermediate results: {evt.result.text} | run_id - {self.run_id}")
         data = {
             "type": "interim_transcript_received",
             "content": evt.result.text
@@ -185,7 +144,7 @@ class AzureTranscriber(BaseTranscriber):
 
     async def recognized_handler(self, evt):
         # Final recognized text for an utterance.
-        logger.info(f"Final transcript: {evt.result.text}")
+        logger.info(f"Final transcript: {evt.result.text} | run_id - {self.run_id}")
         data = {
             "type": "transcript",
             "content": evt.result.text
@@ -193,13 +152,13 @@ class AzureTranscriber(BaseTranscriber):
         await self.transcriber_output_queue.put(create_ws_data_packet(data, self.meta_info))
 
     async def canceled_handler(self, evt):
-        logger.info(f"Canceled event received: {evt}")
+        logger.info(f"Canceled event received: {evt} | run_id - {self.run_id}")
 
     async def session_started_handler(self, evt):
-        logger.info(f"Session start event received: {evt}")
+        logger.info(f"Session start event received: {evt} | run_id - {self.run_id}")
 
     async def session_stopped_handler(self, evt):
-        logger.info(f"Session stop event received: {evt}")
+        logger.info(f"Session stop event received: {evt} | run_id - {self.run_id}")
         # TODO add the code for getting transcript duration for billing
         await self.transcriber_output_queue.put(
             create_ws_data_packet("transcriber_connection_closed", self.meta_info))
