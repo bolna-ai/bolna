@@ -31,6 +31,9 @@ class AzureTranscriber(BaseTranscriber):
         self.sampling_rate = 8000
         self.bits_per_sample = 16
         self.run_id = kwargs.get("run_id", "")
+        self.duration = 0
+        self.start_time = None
+        self.end_time = None
 
         if self.audio_provider in ("twilio", "exotel", "plivo"):
             self.encoding = "mulaw" if self.audio_provider in ("twilio",) else "linear16"
@@ -150,18 +153,21 @@ class AzureTranscriber(BaseTranscriber):
             "content": evt.result.text
         }
         await self.transcriber_output_queue.put(create_ws_data_packet(data, self.meta_info))
+        self.duration += evt.result.duration
 
     async def canceled_handler(self, evt):
         logger.info(f"Canceled event received: {evt} | run_id - {self.run_id}")
 
     async def session_started_handler(self, evt):
         logger.info(f"Session start event received: {evt} | run_id - {self.run_id}")
+        self.start_time = time.time()
 
     async def session_stopped_handler(self, evt):
         logger.info(f"Session stop event received: {evt} | run_id - {self.run_id}")
         # TODO add the code for getting transcript duration for billing
         await self.transcriber_output_queue.put(
             create_ws_data_packet("transcriber_connection_closed", self.meta_info))
+        self.end_time = time.time()
 
     async def toggle_connection(self):
         self.connection_on = False
@@ -194,6 +200,7 @@ class AzureTranscriber(BaseTranscriber):
                     self.recognizer = None
 
             logger.info("Connections to azure have been successfully closed")
+            logger.info(f"Time duration as per azure - {self.duration} | Time duration as per self calculation - {self.end_time-self.start_time}" )
         except Exception as e:
             logger.error(f"Error occurred while cleaning up - {e}")
 
