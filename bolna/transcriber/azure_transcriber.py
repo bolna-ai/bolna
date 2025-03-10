@@ -93,7 +93,7 @@ class AzureTranscriber(BaseTranscriber):
                 samples_per_second=self.sampling_rate,
                 bits_per_sample=self.bits_per_sample,
                 channels=self.channels,
-                compressed_stream_format=AudioStreamContainerFormat.MULAW if self.encoding == "mulaw" else None,
+                compressed_stream_format=None,
                 wave_stream_format=AudioStreamWaveFormat.MULAW if self.encoding == "mulaw" else AudioStreamWaveFormat.PCM
             )
 
