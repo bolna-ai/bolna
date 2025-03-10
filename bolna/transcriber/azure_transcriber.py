@@ -35,12 +35,12 @@ class AzureTranscriber(BaseTranscriber):
         self.start_time = None
         self.end_time = None
 
-        # if self.audio_provider in ("twilio", "exotel", "plivo"):
-        #     self.encoding = "mulaw" if self.audio_provider in ("twilio",) else "linear16"
-        #     if self.encoding == "mulaw":
-        #         self.bits_per_sample = 8
+        if self.audio_provider in ("twilio", "exotel", "plivo"):
+            self.encoding = "mulaw" if self.audio_provider in ("twilio",) else "linear16"
+            if self.encoding == "mulaw":
+                self.bits_per_sample = 8
 
-        if self.audio_provider == "web_based_call":
+        elif self.audio_provider == "web_based_call":
             self.sampling_rate = 16000
 
         # Store the event loop to use in the handlers
