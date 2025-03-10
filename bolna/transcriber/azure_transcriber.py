@@ -139,21 +139,23 @@ class AzureTranscriber(BaseTranscriber):
     # Async handlers
     async def recognizing_handler(self, evt):
         logger.info(f"Intermediate results: {evt.result.text} | run_id - {self.run_id}")
-        data = {
-            "type": "interim_transcript_received",
-            "content": evt.result.text
-        }
-        await self.transcriber_output_queue.put(create_ws_data_packet(data, self.meta_info))
+        if evt.result.text.strip():
+            data = {
+                "type": "interim_transcript_received",
+                "content": evt.result.text.strip()
+            }
+            await self.transcriber_output_queue.put(create_ws_data_packet(data, self.meta_info))
 
     async def recognized_handler(self, evt):
         # Final recognized text for an utterance.
         logger.info(f"Final transcript: {evt.result.text} | run_id - {self.run_id}")
-        data = {
-            "type": "transcript",
-            "content": evt.result.text
-        }
-        await self.transcriber_output_queue.put(create_ws_data_packet(data, self.meta_info))
-        self.duration += evt.result.duration
+        if evt.result.text.strip():
+            data = {
+                "type": "transcript",
+                "content": evt.result.text.strip()
+            }
+            await self.transcriber_output_queue.put(create_ws_data_packet(data, self.meta_info))
+            self.duration += evt.result.duration
 
     async def canceled_handler(self, evt):
         logger.info(f"Canceled event received: {evt} | run_id - {self.run_id}")
