@@ -309,6 +309,7 @@ class TaskManager(BaseManager):
 
             # for long pauses and rushing
             if self.conversation_config is not None:
+                # TODO need to get this for azure - for azure the subtraction would not happen
                 self.minimum_wait_duration = self.task_config["tools_config"]["transcriber"]["endpointing"]
                 logger.info(f"minimum wait duration {self.minimum_wait_duration}")
                 self.last_spoken_timestamp = time.time() * 1000
@@ -571,6 +572,8 @@ class TaskManager(BaseManager):
         try:
             if self.task_config["tools_config"]["transcriber"] is not None:
                 logger.info("Setting up transcriber")
+                # TODO remove this
+                self.task_config["tools_config"]["transcriber"]["provider"] = "azure"
                 self.language = self.task_config["tools_config"]["transcriber"].get('language', DEFAULT_LANGUAGE_CODE)
                 if self.turn_based_conversation:
                     provider = "playground"
