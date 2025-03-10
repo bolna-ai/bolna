@@ -199,8 +199,10 @@ class AzureTranscriber(BaseTranscriber):
                 finally:
                     self.recognizer = None
 
+            if not self.end_time:
+                self.end_time = time.time()
             logger.info("Connections to azure have been successfully closed")
-            logger.info(f"Time duration as per azure - {self.duration} | Time duration as per self calculation - {self.end_time} {self.start_time}" )
+            logger.info(f"Time duration as per azure - {self.duration} | Time duration as per self calculation - {self.end_time - self.start_time}" )
         except Exception as e:
             logger.error(f"Error occurred while cleaning up - {e}")
 
