@@ -1480,7 +1480,7 @@ class TaskManager(BaseManager):
                 if self.hangup_triggered:
                     if message["data"] == "transcriber_connection_closed":
                         logger.info(f"Transcriber connection has been closed")
-                        self.transcriber_duration += message['meta_info']["transcriber_duration"] if message['meta_info'] is not None else 0
+                        self.transcriber_duration += message.get("meta_info", {}).get("transcriber_duration", 0) if message['meta_info'] is not None else 0
                         break
                     continue
 
@@ -1571,7 +1571,7 @@ class TaskManager(BaseManager):
 
                     elif message["data"] == "transcriber_connection_closed":
                         logger.info(f"Transcriber connection has been closed")
-                        self.transcriber_duration += message['meta_info']["transcriber_duration"] if message['meta_info'] is not None else 0
+                        self.transcriber_duration += message.get("meta_info", {}).get("transcriber_duration", 0) if message["meta_info"] is not None else 0
                         break
 
                 else:
