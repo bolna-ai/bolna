@@ -31,6 +31,9 @@ class BaseSynthesizer:
     def should_synthesize_response(self, sequence_id):
         return self.task_manager_instance.is_sequence_id_in_current_ids(sequence_id)
 
+    async def close_websocket(self):
+        pass
+
     async def break_audio_into_chunks(self, audio, slicing_range, meta_info, override_end_of_synthesizer_stream=False):
         is_first_chunk_sent = False
         try:

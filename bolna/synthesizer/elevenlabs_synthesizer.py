@@ -60,13 +60,20 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
     def get_engine(self):
         return self.model
 
+    async def close_websocket(self):
+        if self.websocket_holder["websocket"] and not self.websocket_holder["websocket"].closed:
+            await self.websocket_holder["websocket"].close()
+            self.websocket_holder["websocket"] = None
+
     async def sender(self, text, sequence_id, end_of_llm_stream=False):
         try:
             if self.conversation_ended:
                 return
 
             if not self.should_synthesize_response(sequence_id):
-                logger.info(f"Not synthesizing text as the sequence_id ({sequence_id}) of it is not in the list of sequence_ids present in the task manager.")
+                logger.info(
+                    f"Not synthesizing text as the sequence_id ({sequence_id}) of it is not in the list of sequence_ids present in the task manager.")
+                await self.close_websocket()
                 return
 
             # Ensure the WebSocket connection is established
@@ -76,6 +83,11 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
 
             if text != "":
                 for text_chunk in self.text_chunker(text):
+                    if not self.should_synthesize_response(sequence_id):
+                        logger.info(
+                            f"Not synthesizing text as the sequence_id ({sequence_id}) of it is not in the list of sequence_ids present in the task manager (inner loop).")
+                        await self.close_websocket()
+                        return
                     logger.info(f"Sending text_chunk: {text_chunk}")
                     try:
                         await self.websocket_holder["websocket"].send(json.dumps({"text": text_chunk}))
@@ -301,7 +313,7 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
             if self.websocket_holder["websocket"] is None or self.websocket_holder["websocket"].closed:
                 logger.info("Re-establishing elevenlabs connection...")
                 self.websocket_holder["websocket"] = await self.establish_connection()
-            await asyncio.sleep(50)
+            await asyncio.sleep(1)
 
     async def get_sender_task(self):
         return self.sender_task
