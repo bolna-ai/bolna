@@ -13,7 +13,7 @@ load_dotenv()
 
 class AzureSynthesizer(BaseSynthesizer):
     def __init__(self, voice, language, model="neural", stream=False, sampling_rate=16000, buffer_size=400, caching=True, **kwargs):
-        super().__init__(stream, buffer_size, is_web_based_call=kwargs.get("is_web_based_call", False),
+        super().__init__(kwargs["task_manager_instance"], stream, buffer_size, is_web_based_call=kwargs.get("is_web_based_call", False),
                          is_precise_transcript_generation_enabled=kwargs.get("is_precise_transcript_generation_enabled"))
         self.model = model
         self.language = language
@@ -67,6 +67,11 @@ class AzureSynthesizer(BaseSynthesizer):
             message = await self.internal_queue.get()
             logger.info(f"Generating TTS response for message: {message}")
             meta_info, text = message.get("meta_info"), message.get("data")
+
+            if not self.should_synthesize_response(meta_info.get('sequence_id')):
+                logger.info(f"Not synthesizing text as the sequence_id ({meta_info.get('sequence_id')}) of it is not in the list of sequence_ids present in the task manager.")
+                return
+
             if self.caching:
                 logger.info(f"Caching is on")
                 if self.cache.get(text):

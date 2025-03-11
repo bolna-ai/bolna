@@ -41,6 +41,7 @@ class TaskManager(BaseManager):
         # Latency and logging
         self.latency_dict = defaultdict(dict)
         self.kwargs = kwargs
+        self.kwargs["task_manager_instance"] = self
 
         #Setup Latency part
         self.llm_latencies = []
@@ -1618,6 +1619,9 @@ class TaskManager(BaseManager):
             copied_meta_info["is_final_chunk_of_entire_response"] = True
 
         self.buffered_output_queue.put_nowait(create_ws_data_packet(chunk, copied_meta_info))
+
+    def is_sequence_id_in_current_ids(self, sequence_id):
+        return sequence_id in self.sequence_ids
 
     async def __listen_synthesizer(self):
         try:
