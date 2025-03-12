@@ -1,6 +1,7 @@
 import copy
 import aiohttp
 import os
+import uuid
 from dotenv import load_dotenv
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.utils import convert_audio_to_wav, create_ws_data_packet
@@ -16,7 +17,8 @@ DEEPGRAM_TTS_URL = "https://{}/v1/speak".format(DEEPGRAM_HOST)
 class DeepgramSynthesizer(BaseSynthesizer):
     def __init__(self, voice, audio_format="pcm", sampling_rate="8000", stream=False, buffer_size=400, caching=True,
                  model="aura-zeus-en", **kwargs):
-        super().__init__(stream, buffer_size)
+        super().__init__(stream, buffer_size, is_web_based_call=kwargs.get("is_web_based_call", False),
+                         is_precise_transcript_generation_enabled=kwargs.get("is_precise_transcript_generation_enabled"))
         self.format = "mulaw" if audio_format in ["pcm", 'wav'] else audio_format
         self.voice = voice
         self.sample_rate = str(sampling_rate)
@@ -28,6 +30,7 @@ class DeepgramSynthesizer(BaseSynthesizer):
         self.caching = caching
         if caching:
             self.cache = InmemoryScalarCache()
+        self.slicing_range = int(int(sampling_rate) / 2)
 
     def get_synthesized_characters(self):
         return self.synthesized_characters
@@ -58,7 +61,7 @@ class DeepgramSynthesizer(BaseSynthesizer):
                             logger.info(f"status for deepgram request {response.status} response {len(await response.read())}")
                             return chunk
                         else:
-                            logger.info(f"status for deepgram reques {response.status} response {len(await response.read())}")
+                            logger.info(f"status for deepgram reques {response.status} response {await response.read()}")
                             return b'\x00'
                 else:
                     logger.info("Payload was null")
@@ -113,7 +116,14 @@ class DeepgramSynthesizer(BaseSynthesizer):
                 self.first_chunk_generated = False
             meta_info['text'] = text
             meta_info['format'] = 'mulaw'
-            yield create_ws_data_packet(message, meta_info)
+            meta_info["text_synthesized"] = f"{text} "
+            if not self.is_web_based_call and self.is_precise_transcript_generation_enabled:
+                async for chunk in self.break_audio_into_chunks(message, self.slicing_range, meta_info,
+                                                                override_end_of_synthesizer_stream=True):
+                    yield chunk
+            else:
+                meta_info["mark_id"] = str(uuid.uuid4())
+                yield create_ws_data_packet(message, meta_info)
 
     async def push(self, message):
         logger.info(f"Pushed message to internal queue {message}")
