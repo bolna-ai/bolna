@@ -1717,6 +1717,7 @@ class TaskManager(BaseManager):
                                                                 assistant_id=self.assistant_id)
                 logger.info("Sending preprocessed audio")
                 meta_info["format"] = self.task_config["tools_config"]["output"]["format"]
+                meta_info["end_of_synthesizer_stream"] = True
                 await self.tools["output"].handle(create_ws_data_packet(audio_chunk, meta_info))
             else:
                 if meta_info.get('message_category', None ) == 'filler':
@@ -1748,6 +1749,7 @@ class TaskManager(BaseManager):
                         else:
                             logger.info(f"Sending the agent welcome message")
                             meta_info['is_first_chunk'] = True
+                meta_info["end_of_synthesizer_stream"] = True
                 if yield_in_chunks and audio_chunk is not None:
                     i = 0
                     number_of_chunks = math.ceil(len(audio_chunk) / 100000000)
