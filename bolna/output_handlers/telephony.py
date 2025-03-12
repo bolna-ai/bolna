@@ -57,7 +57,7 @@ class TelephonyOutputHandler(DefaultOutputHandler):
                         "text_synthesized": "" if meta_info["sequence_id"] == -1 else meta_info.get("text_synthesized", ""),
                         "type": meta_info.get('message_category', ''),
                         "is_first_chunk": meta_info.get("is_first_chunk", False),
-                        "is_final_chunk": True if (meta_info["sequence_id"] == -1 or (meta_info.get("end_of_llm_stream", False) and meta_info.get("end_of_synthesizer_stream", False))) else False,
+                        "is_final_chunk": (meta_info["sequence_id"] == -1 or (meta_info.get("end_of_llm_stream", False) and meta_info.get("end_of_synthesizer_stream", False))),
                         "sequence_id": meta_info["sequence_id"]
                     }
                     mark_id = meta_info.get("mark_id") if (meta_info.get("mark_id") and meta_info.get("mark_id") != "") else str(uuid.uuid4())

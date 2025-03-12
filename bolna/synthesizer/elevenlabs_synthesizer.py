@@ -60,7 +60,7 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
     def get_engine(self):
         return self.model
 
-    async def close_websocket(self):
+    async def flush_synthesizer_stream(self):
         if self.websocket_holder["websocket"] and not self.websocket_holder["websocket"].closed:
             await self.websocket_holder["websocket"].close()
             self.websocket_holder["websocket"] = None
@@ -73,7 +73,7 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
             if not self.should_synthesize_response(sequence_id):
                 logger.info(
                     f"Not synthesizing text as the sequence_id ({sequence_id}) of it is not in the list of sequence_ids present in the task manager.")
-                await self.close_websocket()
+                await self.flush_synthesizer_stream()
                 return
 
             # Ensure the WebSocket connection is established
@@ -86,7 +86,7 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
                     if not self.should_synthesize_response(sequence_id):
                         logger.info(
                             f"Not synthesizing text as the sequence_id ({sequence_id}) of it is not in the list of sequence_ids present in the task manager (inner loop).")
-                        await self.close_websocket()
+                        await self.flush_synthesizer_stream()
                         return
                     logger.info(f"Sending text_chunk: {text_chunk}")
                     try:

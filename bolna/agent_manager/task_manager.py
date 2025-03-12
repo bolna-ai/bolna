@@ -819,7 +819,7 @@ class TaskManager(BaseManager):
         await self.tools["synthesizer"].handle_interruption()
         await self.tools["output"].handle_interruption()
         self.sequence_ids = {-1}
-        await self.tools["synthesizer"].close_websocket()
+        await self.tools["synthesizer"].flush_synthesizer_stream()
 
         #Stop the output loop first so that we do not transmit anything else
         if self.output_task is not None:
