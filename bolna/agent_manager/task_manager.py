@@ -2000,10 +2000,10 @@ class TaskManager(BaseManager):
 
                 if self.check_if_user_online:
                     if self.should_record:
-                        meta_info={'io': 'default', "request_id": str(uuid.uuid4()), "cached": False, "sequence_id": -1, 'format': 'wav', "message_category": "is_user_online_message"}
+                        meta_info={'io': 'default', "request_id": str(uuid.uuid4()), "cached": False, "sequence_id": -1, 'format': 'wav', "message_category": "is_user_online_message", 'end_of_llm_stream': True}
                         await self._synthesize(create_ws_data_packet(self.check_user_online_message, meta_info= meta_info))
                     else:
-                        meta_info={'io': self.tools["output"].get_provider(), "request_id": str(uuid.uuid4()), "cached": False, "sequence_id": -1, 'format': 'pcm', "message_category": "is_user_online_message"}
+                        meta_info={'io': self.tools["output"].get_provider(), "request_id": str(uuid.uuid4()), "cached": False, "sequence_id": -1, 'format': 'pcm', "message_category": "is_user_online_message", 'end_of_llm_stream': True}
                         await self._synthesize(create_ws_data_packet(self.check_user_online_message, meta_info= meta_info))
 
                 # Just in case we need to clear messages sent before
