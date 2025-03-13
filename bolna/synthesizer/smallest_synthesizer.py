@@ -1,7 +1,7 @@
 import aiohttp
 import os
+import uuid
 import traceback
-
 from .base_synthesizer import BaseSynthesizer
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.utils import create_ws_data_packet
@@ -12,7 +12,8 @@ logger = configure_logger(__name__)
 class SmallestSynthesizer(BaseSynthesizer):
     def __init__(self, voice, voice_id, model="lightning", audio_format="mp3", sampling_rate="8000",
                  stream=False, buffer_size=400, synthesizer_key=None, **kwargs):
-        super().__init__(stream)
+        super().__init__(stream, is_web_based_call=kwargs.get("is_web_based_call", False),
+                         is_precise_transcript_generation_enabled=kwargs.get("is_precise_transcript_generation_enabled"))
         self.api_key = os.environ["SMALLEST_API_KEY"] if synthesizer_key is None else synthesizer_key
         self.voice_id = voice_id
         self.model = model
@@ -24,6 +25,7 @@ class SmallestSynthesizer(BaseSynthesizer):
         self.meta_info = None
         self.synthesized_characters = 0
         self.previous_request_ids = []
+        self.slicing_range = int(self.sampling_rate / 2)
 
     def get_engine(self):
         return self.model
@@ -90,7 +92,14 @@ class SmallestSynthesizer(BaseSynthesizer):
                     self.first_chunk_generated = False
 
                 meta_info['format'] = "wav"
-                yield create_ws_data_packet(audio, meta_info)
+                meta_info["text_synthesized"] = f"{text} "
+                if not self.is_web_based_call and self.is_precise_transcript_generation_enabled:
+                    async for chunk in self.break_audio_into_chunks(audio, self.slicing_range, meta_info,
+                                                                    override_end_of_synthesizer_stream=True):
+                        yield chunk
+                else:
+                    meta_info["mark_id"] = str(uuid.uuid4())
+                    yield create_ws_data_packet(audio, meta_info)
 
         except Exception as e:
             traceback.print_exc()

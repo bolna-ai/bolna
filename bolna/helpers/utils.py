@@ -1,4 +1,4 @@
-import datetime
+from datetime import datetime
 import json
 import asyncio
 import math
@@ -533,7 +533,7 @@ def convert_to_request_log(message, meta_info, model, component="transcriber", d
     log['direction'] = direction
     log['data'] = message
     log['leg_id'] = meta_info['request_id'] if "request_id" in meta_info else "1234"
-    log['time'] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    log['time'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     log['component'] = component
     log['sequence_id'] = meta_info['sequence_id']
     log['model'] = model
@@ -576,3 +576,10 @@ async def process_task_cancellation(asyncio_task, task_name):
             logger.info(f"{task_name} has been successfully cancelled.")
         except Exception as e:
             logger.error(f"Error cancelling {task_name}: {e}")
+
+
+def get_date_time_from_timezone(timezone):
+    dt = datetime.now(timezone).strftime("%A, %B %d, %Y")
+    ts = datetime.now(timezone).strftime("%I:%M:%S %p")
+
+    return dt, ts
