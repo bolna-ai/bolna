@@ -71,9 +71,14 @@ class DefaultInputHandler:
             logger.info(f"No object retrieved from global dict of mark_event_meta_data for received mark event - {packet}")
             return
 
-        self.audio_chunks_received += 1
         logger.info(f"Mark event meta data object retrieved = {mark_event_meta_data_obj}")
         message_type = mark_event_meta_data_obj.get("type")
+
+        if message_type == "pre_mark_message":
+            self.update_is_audio_being_played(True)
+            return
+
+        self.audio_chunks_received += 1
         self.response_heard_by_user += mark_event_meta_data_obj.get("text_synthesized")
 
         if mark_event_meta_data_obj.get("is_final_chunk"):
