@@ -296,7 +296,7 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
             if self.websocket_holder["websocket"] is None or self.websocket_holder["websocket"].closed:
                 logger.info("Re-establishing elevenlabs connection...")
                 self.websocket_holder["websocket"] = await self.establish_connection()
-            await asyncio.sleep(50)
+            await asyncio.sleep(1)
 
     async def get_sender_task(self):
         return self.sender_task
