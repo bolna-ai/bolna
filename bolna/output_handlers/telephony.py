@@ -47,12 +47,24 @@ class TelephonyOutputHandler(DefaultOutputHandler):
                         audio_format = meta_info.get("format", "wav")
                         logger.info(f"Sending message {len(audio_chunk)} {audio_format}")
 
+                        # sending of pre-mark message
+                        pre_mark_event_meta_data = {
+                            "type": "pre_mark_message",
+                        }
+                        mark_id = str(uuid.uuid4())
+                        self.mark_event_meta_data.update_data(mark_id, pre_mark_event_meta_data)
+                        mark_message = await self.form_mark_message(mark_id)
+                        logger.info(f"Sending pre-mark event - {mark_message}")
+                        await self.websocket.send_text(json.dumps(mark_message))
+
+                        # sending of audio chunk
                         if audio_format == 'pcm' and meta_info.get('message_category', '') == 'agent_welcome_message' and self.io_provider == 'plivo' and meta_info['cached'] is True:
                             audio_format = 'wav'
                         media_message = await self.form_media_message(audio_chunk, audio_format)
                         await self.websocket.send_text(json.dumps(media_message))
                         logger.info(f"Meta info received - {meta_info}")
 
+                    # sending of post-mark message
                     mark_event_meta_data = {
                         "text_synthesized": "" if meta_info["sequence_id"] == -1 else meta_info.get("text_synthesized", ""),
                         "type": meta_info.get('message_category', ''),

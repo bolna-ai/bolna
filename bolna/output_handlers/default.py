@@ -57,11 +57,25 @@ class DefaultOutputHandler:
                     logger.info(f"Sending text response {packet['data']}")
                     data = packet['data']
 
+                # sending of pre-mark message
+                if packet["meta_info"]['type'] == 'audio':
+                    pre_mark_event_meta_data = {
+                        "type": "pre_mark_message",
+                    }
+                    mark_id = str(uuid.uuid4())
+                    self.mark_event_meta_data.update_data(mark_id, pre_mark_event_meta_data)
+                    mark_message = {
+                        "type": "mark",
+                        "name": mark_id
+                    }
+                    logger.info(f"Sending pre-mark event - {mark_message}")
+                    await self.websocket.send_text(json.dumps(mark_message))
+
                 logger.info(f"Sending to the frontend {len(data)}")
                 response = {"data": data, "type": packet["meta_info"]['type']}
                 await self.websocket.send_json(response)
 
-                # sending mark message for type of audio
+                # sending of post-mark message
                 if packet["meta_info"]['type'] == 'audio':
                     meta_info = packet["meta_info"]
                     mark_event_meta_data = {
