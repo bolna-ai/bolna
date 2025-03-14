@@ -1159,20 +1159,20 @@ class TaskManager(BaseManager):
                 #2. There was a conversation till now
                 logger.info(f"There was a function call and need to make that work")
 
-                if self.interim_history[-1]['role'] == 'assistant' and self.interim_history[-1]['content'] == PRE_FUNCTION_CALL_MESSAGE:
+                if self.history[-1]['role'] == 'assistant' and self.history[-1]['content'] == PRE_FUNCTION_CALL_MESSAGE:
                     logger.info(f"There was a no conversation between function call")
                     #Nothing was spoken
-                    self.interim_history[-1]['content'] += llm_response
+                    self.history[-1]['content'] += llm_response
                 else:
                     logger.info(f"There was a conversation between function call and this and changing relevant history point")
                     #There was a conversation
-                    messages = copy.deepcopy(self.interim_history)
+                    messages = copy.deepcopy(self.history)
                     for entry in reversed(messages):
                         if entry['content'] == PRE_FUNCTION_CALL_MESSAGE:
                             entry['content'] += llm_response
                             break
 
-                    self.interim_history = copy.deepcopy(messages)
+                    self.history = copy.deepcopy(messages)
                 #Assuming that callee was silent
                 # self.history = copy.deepcopy(self.interim_history)
             else:
@@ -1234,6 +1234,7 @@ class TaskManager(BaseManager):
                     logger.info("Got a pre function call message")
                     # TODO revisit this
                     messages.append({'role':'assistant', 'content': PRE_FUNCTION_CALL_MESSAGE})
+                    self.history.append({'role': 'assistant', 'content': PRE_FUNCTION_CALL_MESSAGE})
                     self.interim_history = copy.deepcopy(messages)
 
                 await self._handle_llm_output(next_step, text_chunk, should_bypass_synth, meta_info)
