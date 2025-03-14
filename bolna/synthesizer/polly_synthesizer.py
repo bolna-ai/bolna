@@ -1,4 +1,6 @@
 import os
+import uuid
+import unicodedata
 from dotenv import load_dotenv
 from botocore.exceptions import BotoCoreError, ClientError
 from aiobotocore.session import AioSession
@@ -15,10 +17,11 @@ load_dotenv()
 class PollySynthesizer(BaseSynthesizer):
     def __init__(self, voice, language, audio_format="pcm", sampling_rate=8000, stream=False, engine="neural",
                  buffer_size=400, speaking_rate = "100%", volume = "0dB", caching= True, **kwargs):
-        super().__init__(stream, buffer_size)
+        super().__init__(stream, buffer_size, is_web_based_call=kwargs.get("is_web_based_call", False),
+                         is_precise_transcript_generation_enabled=kwargs.get("is_precise_transcript_generation_enabled"))
         self.engine = engine
         self.format = self.get_format(audio_format.lower())
-        self.voice = voice
+        self.voice = self.resolve_voice(voice)
         self.language = language
         self.sample_rate = str(sampling_rate)
         self.client = None
@@ -27,6 +30,7 @@ class PollySynthesizer(BaseSynthesizer):
         self.volume = volume
         self.synthesized_characters = 0
         self.caching = caching
+        self.slicing_range = int(sampling_rate / 2)
         if caching:
             self.cache = InmemoryScalarCache()
 
@@ -35,6 +39,9 @@ class PollySynthesizer(BaseSynthesizer):
     
     def get_engine(self):
         return self.engine
+
+    def resolve_voice(self, text):
+        return ''.join(c for c in unicodedata.normalize('NFKD', text) if not unicodedata.combining(c))
 
     def supports_websocket(self):
         return False
@@ -130,7 +137,14 @@ class PollySynthesizer(BaseSynthesizer):
                 self.first_chunk_generated = False
             meta_info['text'] = text
             meta_info['format'] = 'wav'
-            yield create_ws_data_packet(message, meta_info)
+            meta_info["text_synthesized"] = f"{text} "
+            if not self.is_web_based_call and self.is_precise_transcript_generation_enabled:
+                async for chunk in self.break_audio_into_chunks(message, self.slicing_range, meta_info,
+                                                                override_end_of_synthesizer_stream=True):
+                    yield chunk
+            else:
+                meta_info["mark_id"] = str(uuid.uuid4())
+                yield create_ws_data_packet(message, meta_info)
 
     async def push(self, message):
         logger.info("Pushed message to internal queue")

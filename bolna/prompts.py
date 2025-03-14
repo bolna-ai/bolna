@@ -2,6 +2,7 @@ from datetime import datetime
 
 
 EXTRACTION_PROMPT = """
+Today Current Date and Time:\n {} at {} local time in the {} timezone. Use this information to ensure all time-related responses are accurate and contextually relevant based on the user's location.
 Given this transcript from the communication between user and an agent, your task is to extract following information:
 
 ###JSON Structure
