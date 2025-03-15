@@ -913,9 +913,6 @@ class TaskManager(BaseManager):
                 'content': message
             })
 
-            # current_date, current_time = get_date_time_from_timezone(self.timezone)
-            # self.history[0]['content'] += f"\n Today's Date is {current_date}"
-
             json_data = await self.tools["llm_agent"].generate(self.history)
             if self.task_config["task_type"] == "summarization":
                 logger.info(f'Summary {json_data["summary"]}')
