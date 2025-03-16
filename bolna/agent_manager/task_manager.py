@@ -821,6 +821,7 @@ class TaskManager(BaseManager):
         if self.output_task is not None:
             logger.info(f"Cancelling output task")
             self.output_task.cancel()
+        self.output_task = None
 
         if self.llm_task is not None:
             logger.info(f"Cancelling LLM Task")

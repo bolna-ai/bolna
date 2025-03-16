@@ -82,13 +82,13 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
                 await asyncio.sleep(1)
 
             if text != "":
+                logger.info(f"Sending text: {text}")
                 for text_chunk in self.text_chunker(text):
                     if not self.should_synthesize_response(sequence_id):
                         logger.info(
                             f"Not synthesizing text as the sequence_id ({sequence_id}) of it is not in the list of sequence_ids present in the task manager (inner loop).")
                         await self.flush_synthesizer_stream()
                         return
-                    logger.info(f"Sending text_chunk: {text_chunk}")
                     try:
                         await self.websocket_holder["websocket"].send(json.dumps({"text": text_chunk}))
                     except Exception as e:
