@@ -243,7 +243,7 @@ def format_messages(messages, use_system_prompt=False):
     formatted_string = ""
     for message in messages:
         role = message['role']
-        content = message['content']
+        content = "" if message['content'] is None else message['content']
 
         if use_system_prompt and role == 'system':
             try:
