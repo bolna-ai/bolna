@@ -12,6 +12,7 @@ from bolna.helpers.logger_config import configure_logger
 logger = configure_logger(__name__)
 load_dotenv()
 
+
 class AzureTranscriber(BaseTranscriber):
     def __init__(self, telephony_provider, input_queue=None, output_queue=None, language="en-US", encoding="linear16", **kwargs):
         super().__init__(input_queue)
@@ -24,7 +25,7 @@ class AzureTranscriber(BaseTranscriber):
         self.audio_submitted = False
         self.audio_submission_time = None
         self.send_audio_to_transcriber_task = None
-        self.recognition_language = "en-IN"
+        self.recognition_language = language
         self.audio_provider = telephony_provider
         self.channels = 1
         self.encoding = "linear16"
@@ -167,9 +168,10 @@ class AzureTranscriber(BaseTranscriber):
     async def session_stopped_handler(self, evt):
         logger.info(f"Session stop event received: {evt} | run_id - {self.run_id}")
         # TODO add the code for getting transcript duration for billing
+        self.end_time = time.time()
+        self.meta_info["transcriber_duration"] = self.end_time - self.start_time
         await self.transcriber_output_queue.put(
             create_ws_data_packet("transcriber_connection_closed", self.meta_info))
-        self.end_time = time.time()
 
     async def toggle_connection(self):
         self.connection_on = False

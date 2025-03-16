@@ -571,8 +571,6 @@ class TaskManager(BaseManager):
         try:
             if self.task_config["tools_config"]["transcriber"] is not None:
                 logger.info("Setting up transcriber")
-                # TODO remove this
-                self.task_config["tools_config"]["transcriber"]["provider"] = "azure"
                 self.language = self.task_config["tools_config"]["transcriber"].get('language', DEFAULT_LANGUAGE_CODE)
                 if self.turn_based_conversation:
                     provider = "playground"
