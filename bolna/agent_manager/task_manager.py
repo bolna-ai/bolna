@@ -190,11 +190,9 @@ class TaskManager(BaseManager):
         self.summarized_data = None
         logger.info(f"TASK CONFIG {self.task_config['tools_config'] }")
         self.stream = (self.task_config["tools_config"]['synthesizer'] is not None and self.task_config["tools_config"]["synthesizer"]["stream"]) and (self.enforce_streaming or not self.turn_based_conversation)
-        #self.stream = not turn_based_conversation #Currently we are allowing only realtime conversation based usecases. Hence it'll always be true unless connected through dashboard
+
         self.is_local = False
         self.llm_config = None
-
-
         self.agent_type = None
 
         self.llm_config_map = {}
@@ -780,20 +778,20 @@ class TaskManager(BaseManager):
             self.history = [self.system_prompt] if len(self.history) == 0 else [self.system_prompt] + self.history
 
         #If history is empty and agent welcome message is not empty add it to history
-        if len(self.history) == 1 and len(self.kwargs['agent_welcome_message']) != 0:
+        if task_id == 0 and len(self.history) == 1 and len(self.kwargs['agent_welcome_message']) != 0:
             self.history.append({'role': 'assistant', 'content': self.kwargs['agent_welcome_message']})
 
         self.interim_history = copy.deepcopy(self.history)
 
     def __prefill_prompts(self, task, prompt, task_type):
+        if self.context_data and 'recipient_data' in self.context_data and self.context_data[
+            'recipient_data'] and self.context_data['recipient_data'].get('timezone', None):
+            self.timezone = pytz.timezone(self.context_data['recipient_data']['timezone'])
+        current_date, current_time = get_date_time_from_timezone(self.timezone)
+
         if not prompt and task_type in ('extraction', 'summarization'):
             if task_type == 'extraction':
                 extraction_json = task.get("tools_config").get('llm_agent', {}).get('llm_config', {}).get('extraction_json')
-                if self.context_data and 'recipient_data' in self.context_data and self.context_data[
-                    'recipient_data'] and self.context_data['recipient_data'].get('timezone', None):
-                    self.timezone = pytz.timezone(self.context_data['recipient_data']['timezone'])
-
-                current_date, current_time = get_date_time_from_timezone(self.timezone)
                 prompt = EXTRACTION_PROMPT.format(current_date, current_time, self.timezone, extraction_json)
                 return {"system_prompt": prompt}
             elif task_type == 'summarization':
@@ -920,22 +918,17 @@ class TaskManager(BaseManager):
                 'content': message
             })
 
-            current_date, current_time = get_date_time_from_timezone(self.timezone)
-            self.history[0]['content'] += f"\n Today's Date is {current_date}"
-
             json_data = await self.tools["llm_agent"].generate(self.history)
             if self.task_config["task_type"] == "summarization":
                 logger.info(f'Summary {json_data["summary"]}')
                 self.summarized_data = json_data["summary"]
                 logger.info(f"self.summarize {self.summarized_data}")
             else:
-                logger.info(f"Extraction task output {json_data}")
                 json_data = clean_json_string(json_data)
                 logger.info(f"After replacing {json_data}")
                 if type(json_data) is not dict:
                     json_data = json.loads(json_data)
                 self.extracted_data = json_data
-        logger.info("Done")
 
     # This observer works only for messages which have sequence_id != -1
     def final_chunk_played_observer(self, is_final_chunk_played):
