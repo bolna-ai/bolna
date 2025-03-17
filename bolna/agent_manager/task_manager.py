@@ -907,7 +907,6 @@ class TaskManager(BaseManager):
             logger.info(f"Response from the server {self.webhook_response}")
         else:
             message = format_messages(self.input_parameters["messages"])  # Remove the initial system prompt
-            # TODO revisit this
             self.history.append({
                 'role': 'user',
                 'content': message
@@ -1119,13 +1118,17 @@ class TaskManager(BaseManager):
         if called_fun.startswith('check_availability_of_slots') and (not get_res_values or (len(get_res_values) == 1 and len(get_res_values[0]) == 0)):
             set_response_prompt = []
         elif called_fun.startswith('book_appointment') and 'id' not in get_res_keys:
+            if get_res_values and get_res_values[0] == 'no_available_users_found_error':
+                function_response = "Sorry, the host isn't available at this time. Are you available at any other time?"
             set_response_prompt = []
         else:
             set_response_prompt = function_response
 
-        content = FUNCTION_CALL_PROMPT.format(called_fun, method, set_response_prompt)
-        # TODO revisit this
-        model_args["messages"].append({"role": "system","content": content})
+        self.history.append({"role": "assistant", "content": None, "tool_calls": resp["model_response"]})
+        self.history.append({"role": "tool", "tool_call_id": resp.get("tool_call_id", ""), "content": function_response})
+        model_args["messages"].append({"role": "assistant", "content": None, "tool_calls": resp["model_response"]})
+        model_args["messages"].append({"role": "tool", "tool_call_id": resp.get("tool_call_id", ""), "content": function_response})
+
         logger.info(f"Logging function call parameters ")
         convert_to_request_log(function_response, meta_info , None, "function_call", direction = "response", is_cached= False, run_id = self.run_id)
 
@@ -1147,32 +1150,13 @@ class TaskManager(BaseManager):
             self.llm_response_generated = True
             convert_to_request_log(message=llm_response, meta_info= meta_info, component="llm", direction="response", model=self.llm_config["model"], run_id= self.run_id)
             if should_trigger_function_call:
-                #Now, we need to consider 2 things here
-                #1. There was silence between function call and now
-                #2. There was a conversation till now
                 logger.info(f"There was a function call and need to make that work")
-
-                if self.interim_history[-1]['role'] == 'assistant' and self.interim_history[-1]['content'] == PRE_FUNCTION_CALL_MESSAGE:
-                    logger.info(f"There was a no conversation between function call")
-                    #Nothing was spoken
-                    self.interim_history[-1]['content'] += llm_response
-                else:
-                    logger.info(f"There was a conversation between function call and this and changing relevant history point")
-                    #There was a conversation
-                    messages = copy.deepcopy(self.interim_history)
-                    for entry in reversed(messages):
-                        if entry['content'] == PRE_FUNCTION_CALL_MESSAGE:
-                            entry['content'] += llm_response
-                            break
-
-                    self.interim_history = copy.deepcopy(messages)
+                self.history.append({"role": "assistant", "content": llm_response})
                 #Assuming that callee was silent
                 # self.history = copy.deepcopy(self.interim_history)
             else:
                 logger.info(f"There was no function call {messages}")
-                # TODO revisit this
                 messages.append({"role": "assistant", "content": llm_response})
-
                 self.history.append({"role": "assistant", "content": llm_response})
                 self.interim_history = copy.deepcopy(messages)
                 # if self.callee_silent:
@@ -1225,8 +1209,8 @@ class TaskManager(BaseManager):
                 # So we have to make sure we've commited the filler message
                 if text_chunk == PRE_FUNCTION_CALL_MESSAGE:
                     logger.info("Got a pre function call message")
-                    # TODO revisit this
                     messages.append({'role':'assistant', 'content': PRE_FUNCTION_CALL_MESSAGE})
+                    self.history.append({'role': 'assistant', 'content': PRE_FUNCTION_CALL_MESSAGE})
                     self.interim_history = copy.deepcopy(messages)
 
                 await self._handle_llm_output(next_step, text_chunk, should_bypass_synth, meta_info)
