@@ -1118,6 +1118,8 @@ class TaskManager(BaseManager):
         if called_fun.startswith('check_availability_of_slots') and (not get_res_values or (len(get_res_values) == 1 and len(get_res_values[0]) == 0)):
             set_response_prompt = []
         elif called_fun.startswith('book_appointment') and 'id' not in get_res_keys:
+            if get_res_values and get_res_values[0] == 'no_available_users_found_error':
+                function_response = "Sorry, the host isn't available at this time. Are you available at any other time?"
             set_response_prompt = []
         else:
             set_response_prompt = function_response
