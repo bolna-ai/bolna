@@ -1134,9 +1134,6 @@ class TaskManager(BaseManager):
         model_args["messages"].append({"role": "assistant", "content": None, "tool_calls": resp["model_response"]})
         model_args["messages"].append({"role": "tool", "tool_call_id": resp.get("tool_call_id", ""), "content": function_response})
 
-        # content = FUNCTION_CALL_PROMPT.format(called_fun, method, set_response_prompt)
-        # TODO revisit this
-        # model_args["messages"].append({"role": "system","content": content})
         logger.info(f"Logging function call parameters ")
         convert_to_request_log(function_response, meta_info , None, "function_call", direction = "response", is_cached= False, run_id = self.run_id)
 
@@ -1158,33 +1155,13 @@ class TaskManager(BaseManager):
             self.llm_response_generated = True
             convert_to_request_log(message=llm_response, meta_info= meta_info, component="llm", direction="response", model=self.llm_config["model"], run_id= self.run_id)
             if should_trigger_function_call:
-                #Now, we need to consider 2 things here
-                #1. There was silence between function call and now
-                #2. There was a conversation till now
                 logger.info(f"There was a function call and need to make that work")
-
-                # if self.history[-1]['role'] == 'assistant' and self.history[-1]['content'] == PRE_FUNCTION_CALL_MESSAGE:
-                #     logger.info(f"There was a no conversation between function call")
-                #     #Nothing was spoken
-                #     self.history[-1]['content'] += llm_response
-                # else:
-                #     logger.info(f"There was a conversation between function call and this and changing relevant history point")
-                #     #There was a conversation
-                #     messages = copy.deepcopy(self.history)
-                #     for entry in reversed(messages):
-                #         if entry['content'] == PRE_FUNCTION_CALL_MESSAGE:
-                #             entry['content'] += llm_response
-                #             break
-                #
-                #     self.history = copy.deepcopy(messages)
                 self.history.append({"role": "assistant", "content": llm_response})
                 #Assuming that callee was silent
                 # self.history = copy.deepcopy(self.interim_history)
             else:
                 logger.info(f"There was no function call {messages}")
-                # TODO revisit this
                 messages.append({"role": "assistant", "content": llm_response})
-
                 self.history.append({"role": "assistant", "content": llm_response})
                 self.interim_history = copy.deepcopy(messages)
                 # if self.callee_silent:
@@ -1235,10 +1212,8 @@ class TaskManager(BaseManager):
 
                 # A hack as during the 'await' part control passes to llm streaming function parameters
                 # So we have to make sure we've commited the filler message
-                # TODO check if adding this message is actually breaking the function call output
                 if text_chunk == PRE_FUNCTION_CALL_MESSAGE:
                     logger.info("Got a pre function call message")
-                    # TODO revisit this
                     messages.append({'role':'assistant', 'content': PRE_FUNCTION_CALL_MESSAGE})
                     self.history.append({'role': 'assistant', 'content': PRE_FUNCTION_CALL_MESSAGE})
                     self.interim_history = copy.deepcopy(messages)
