@@ -190,11 +190,9 @@ class TaskManager(BaseManager):
         self.summarized_data = None
         logger.info(f"TASK CONFIG {self.task_config['tools_config'] }")
         self.stream = (self.task_config["tools_config"]['synthesizer'] is not None and self.task_config["tools_config"]["synthesizer"]["stream"]) and (self.enforce_streaming or not self.turn_based_conversation)
-        #self.stream = not turn_based_conversation #Currently we are allowing only realtime conversation based usecases. Hence it'll always be true unless connected through dashboard
+
         self.is_local = False
         self.llm_config = None
-
-
         self.agent_type = None
 
         self.llm_config_map = {}
@@ -573,8 +571,6 @@ class TaskManager(BaseManager):
         try:
             if self.task_config["tools_config"]["transcriber"] is not None:
                 logger.info("Setting up transcriber")
-                # TODO remove this
-                self.task_config["tools_config"]["transcriber"]["provider"] = "azure"
                 self.language = self.task_config["tools_config"]["transcriber"].get('language', DEFAULT_LANGUAGE_CODE)
                 if self.turn_based_conversation:
                     provider = "playground"
@@ -780,20 +776,20 @@ class TaskManager(BaseManager):
             self.history = [self.system_prompt] if len(self.history) == 0 else [self.system_prompt] + self.history
 
         #If history is empty and agent welcome message is not empty add it to history
-        if len(self.history) == 1 and len(self.kwargs['agent_welcome_message']) != 0:
+        if task_id == 0 and len(self.history) == 1 and len(self.kwargs['agent_welcome_message']) != 0:
             self.history.append({'role': 'assistant', 'content': self.kwargs['agent_welcome_message']})
 
         self.interim_history = copy.deepcopy(self.history)
 
     def __prefill_prompts(self, task, prompt, task_type):
+        if self.context_data and 'recipient_data' in self.context_data and self.context_data[
+            'recipient_data'] and self.context_data['recipient_data'].get('timezone', None):
+            self.timezone = pytz.timezone(self.context_data['recipient_data']['timezone'])
+        current_date, current_time = get_date_time_from_timezone(self.timezone)
+
         if not prompt and task_type in ('extraction', 'summarization'):
             if task_type == 'extraction':
                 extraction_json = task.get("tools_config").get('llm_agent', {}).get('llm_config', {}).get('extraction_json')
-                if self.context_data and 'recipient_data' in self.context_data and self.context_data[
-                    'recipient_data'] and self.context_data['recipient_data'].get('timezone', None):
-                    self.timezone = pytz.timezone(self.context_data['recipient_data']['timezone'])
-
-                current_date, current_time = get_date_time_from_timezone(self.timezone)
                 prompt = EXTRACTION_PROMPT.format(current_date, current_time, self.timezone, extraction_json)
                 return {"system_prompt": prompt}
             elif task_type == 'summarization':
@@ -825,6 +821,7 @@ class TaskManager(BaseManager):
         if self.output_task is not None:
             logger.info(f"Cancelling output task")
             self.output_task.cancel()
+        self.output_task = None
 
         if self.llm_task is not None:
             logger.info(f"Cancelling LLM Task")
@@ -914,14 +911,10 @@ class TaskManager(BaseManager):
             logger.info(f"Response from the server {self.webhook_response}")
         else:
             message = format_messages(self.input_parameters["messages"])  # Remove the initial system prompt
-            # TODO revisit this
             self.history.append({
                 'role': 'user',
                 'content': message
             })
-
-            current_date, current_time = get_date_time_from_timezone(self.timezone)
-            self.history[0]['content'] += f"\n Today's Date is {current_date}"
 
             json_data = await self.tools["llm_agent"].generate(self.history)
             if self.task_config["task_type"] == "summarization":
@@ -929,13 +922,11 @@ class TaskManager(BaseManager):
                 self.summarized_data = json_data["summary"]
                 logger.info(f"self.summarize {self.summarized_data}")
             else:
-                logger.info(f"Extraction task output {json_data}")
                 json_data = clean_json_string(json_data)
                 logger.info(f"After replacing {json_data}")
                 if type(json_data) is not dict:
                     json_data = json.loads(json_data)
                 self.extracted_data = json_data
-        logger.info("Done")
 
     # This observer works only for messages which have sequence_id != -1
     def final_chunk_played_observer(self, is_final_chunk_played):
@@ -1131,13 +1122,17 @@ class TaskManager(BaseManager):
         if called_fun.startswith('check_availability_of_slots') and (not get_res_values or (len(get_res_values) == 1 and len(get_res_values[0]) == 0)):
             set_response_prompt = []
         elif called_fun.startswith('book_appointment') and 'id' not in get_res_keys:
+            if get_res_values and get_res_values[0] == 'no_available_users_found_error':
+                function_response = "Sorry, the host isn't available at this time. Are you available at any other time?"
             set_response_prompt = []
         else:
             set_response_prompt = function_response
 
-        content = FUNCTION_CALL_PROMPT.format(called_fun, method, set_response_prompt)
-        # TODO revisit this
-        model_args["messages"].append({"role": "system","content": content})
+        self.history.append({"role": "assistant", "content": None, "tool_calls": resp["model_response"]})
+        self.history.append({"role": "tool", "tool_call_id": resp.get("tool_call_id", ""), "content": function_response})
+        model_args["messages"].append({"role": "assistant", "content": None, "tool_calls": resp["model_response"]})
+        model_args["messages"].append({"role": "tool", "tool_call_id": resp.get("tool_call_id", ""), "content": function_response})
+
         logger.info(f"Logging function call parameters ")
         convert_to_request_log(function_response, meta_info , None, "function_call", direction = "response", is_cached= False, run_id = self.run_id)
 
@@ -1159,32 +1154,13 @@ class TaskManager(BaseManager):
             self.llm_response_generated = True
             convert_to_request_log(message=llm_response, meta_info= meta_info, component="llm", direction="response", model=self.llm_config["model"], run_id= self.run_id)
             if should_trigger_function_call:
-                #Now, we need to consider 2 things here
-                #1. There was silence between function call and now
-                #2. There was a conversation till now
                 logger.info(f"There was a function call and need to make that work")
-
-                if self.interim_history[-1]['role'] == 'assistant' and self.interim_history[-1]['content'] == PRE_FUNCTION_CALL_MESSAGE:
-                    logger.info(f"There was a no conversation between function call")
-                    #Nothing was spoken
-                    self.interim_history[-1]['content'] += llm_response
-                else:
-                    logger.info(f"There was a conversation between function call and this and changing relevant history point")
-                    #There was a conversation
-                    messages = copy.deepcopy(self.interim_history)
-                    for entry in reversed(messages):
-                        if entry['content'] == PRE_FUNCTION_CALL_MESSAGE:
-                            entry['content'] += llm_response
-                            break
-
-                    self.interim_history = copy.deepcopy(messages)
+                self.history.append({"role": "assistant", "content": llm_response})
                 #Assuming that callee was silent
                 # self.history = copy.deepcopy(self.interim_history)
             else:
                 logger.info(f"There was no function call {messages}")
-                # TODO revisit this
                 messages.append({"role": "assistant", "content": llm_response})
-
                 self.history.append({"role": "assistant", "content": llm_response})
                 self.interim_history = copy.deepcopy(messages)
                 # if self.callee_silent:
@@ -1237,8 +1213,8 @@ class TaskManager(BaseManager):
                 # So we have to make sure we've commited the filler message
                 if text_chunk == PRE_FUNCTION_CALL_MESSAGE:
                     logger.info("Got a pre function call message")
-                    # TODO revisit this
                     messages.append({'role':'assistant', 'content': PRE_FUNCTION_CALL_MESSAGE})
+                    self.history.append({'role': 'assistant', 'content': PRE_FUNCTION_CALL_MESSAGE})
                     self.interim_history = copy.deepcopy(messages)
 
                 await self._handle_llm_output(next_step, text_chunk, should_bypass_synth, meta_info)
