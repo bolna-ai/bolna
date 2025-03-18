@@ -60,10 +60,10 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
     def get_engine(self):
         return self.model
 
-    async def flush_synthesizer_stream(self):
-        if self.websocket_holder["websocket"] and not self.websocket_holder["websocket"].closed:
-            await self.websocket_holder["websocket"].close()
-            self.websocket_holder["websocket"] = None
+    # async def flush_synthesizer_stream(self):
+    #     if self.websocket_holder["websocket"] and not self.websocket_holder["websocket"].closed:
+    #         await self.websocket_holder["websocket"].close()
+    #         self.websocket_holder["websocket"] = None
 
     async def sender(self, text, sequence_id, end_of_llm_stream=False):
         try:
