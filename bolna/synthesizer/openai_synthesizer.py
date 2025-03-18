@@ -12,7 +12,7 @@ load_dotenv()
 
 class OPENAISynthesizer(BaseSynthesizer):
     def __init__(self, voice, audio_format="mp3", model = "tts-1", stream=False, sampling_rate=8000, buffer_size=400, **kwargs):
-        super().__init__(stream, buffer_size, is_web_based_call=kwargs.get("is_web_based_call", False),
+        super().__init__(kwargs["task_manager_instance"], stream, buffer_size, is_web_based_call=kwargs.get("is_web_based_call", False),
                          is_precise_transcript_generation_enabled=kwargs.get("is_precise_transcript_generation_enabled"))
         self.format = self.get_format(audio_format.lower())
         self.voice = voice
@@ -67,6 +67,12 @@ class OPENAISynthesizer(BaseSynthesizer):
                 logger.info(f"Generating TTS response for message: {message}")
                 meta_info, text = message.get("meta_info"), message.get("data")
                 meta_info["text"] = text
+
+                if not self.should_synthesize_response(meta_info.get('sequence_id')):
+                    logger.info(
+                        f"Not synthesizing text as the sequence_id ({meta_info.get('sequence_id')}) of it is not in the list of sequence_ids present in the task manager.")
+                    return
+
                 if self.stream:
                     async for chunk in self.__generate_stream(text):
                         if not self.first_chunk_generated:

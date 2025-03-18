@@ -41,6 +41,7 @@ class TaskManager(BaseManager):
         # Latency and logging
         self.latency_dict = defaultdict(dict)
         self.kwargs = kwargs
+        self.kwargs["task_manager_instance"] = self
 
         #Setup Latency part
         self.llm_latencies = []
@@ -307,6 +308,7 @@ class TaskManager(BaseManager):
 
             # for long pauses and rushing
             if self.conversation_config is not None:
+                # TODO need to get this for azure - for azure the subtraction would not happen
                 self.minimum_wait_duration = self.task_config["tools_config"]["transcriber"]["endpointing"]
                 logger.info(f"minimum wait duration {self.minimum_wait_duration}")
                 self.last_spoken_timestamp = time.time() * 1000
@@ -813,11 +815,13 @@ class TaskManager(BaseManager):
         await self.tools["synthesizer"].handle_interruption()
         await self.tools["output"].handle_interruption()
         self.sequence_ids = {-1}
+        await self.tools["synthesizer"].flush_synthesizer_stream()
 
         #Stop the output loop first so that we do not transmit anything else
         if self.output_task is not None:
             logger.info(f"Cancelling output task")
             self.output_task.cancel()
+        self.output_task = None
 
         if self.llm_task is not None:
             logger.info(f"Cancelling LLM Task")
@@ -1318,9 +1322,9 @@ class TaskManager(BaseManager):
         else:
             await self.__cleanup_downstream_tasks()
             meta_info = {'io': self.tools["output"].get_provider(), "request_id": str(uuid.uuid4()),
-                         "cached": False, "sequence_id": -1, 'format': 'pcm'}
+                             "cached": False, "sequence_id": -1, 'format': 'pcm', 'message_category': 'agent_hangup',
+                         'end_of_llm_stream': True}
             self.hangup_triggered = True
-            meta_info['message_category'] = 'agent_hangup'
             await self._synthesize(create_ws_data_packet(self.call_hangup_message, meta_info=meta_info))
         return
 
@@ -1454,7 +1458,7 @@ class TaskManager(BaseManager):
                 if self.hangup_triggered:
                     if message["data"] == "transcriber_connection_closed":
                         logger.info(f"Transcriber connection has been closed")
-                        self.transcriber_duration += message['meta_info']["transcriber_duration"] if message['meta_info'] is not None else 0
+                        self.transcriber_duration += message.get("meta_info", {}).get("transcriber_duration", 0) if message['meta_info'] is not None else 0
                         break
                     continue
 
@@ -1545,7 +1549,7 @@ class TaskManager(BaseManager):
 
                     elif message["data"] == "transcriber_connection_closed":
                         logger.info(f"Transcriber connection has been closed")
-                        self.transcriber_duration += message['meta_info']["transcriber_duration"] if message['meta_info'] is not None else 0
+                        self.transcriber_duration += message.get("meta_info", {}).get("transcriber_duration", 0) if message["meta_info"] is not None else 0
                         break
 
                 else:
@@ -1592,6 +1596,9 @@ class TaskManager(BaseManager):
             copied_meta_info["is_final_chunk_of_entire_response"] = True
 
         self.buffered_output_queue.put_nowait(create_ws_data_packet(chunk, copied_meta_info))
+
+    def is_sequence_id_in_current_ids(self, sequence_id):
+        return sequence_id in self.sequence_ids
 
     async def __listen_synthesizer(self):
         try:
@@ -1686,6 +1693,7 @@ class TaskManager(BaseManager):
                                                                 assistant_id=self.assistant_id)
                 logger.info("Sending preprocessed audio")
                 meta_info["format"] = self.task_config["tools_config"]["output"]["format"]
+                meta_info["end_of_synthesizer_stream"] = True
                 await self.tools["output"].handle(create_ws_data_packet(audio_chunk, meta_info))
             else:
                 if meta_info.get('message_category', None ) == 'filler':
@@ -1717,6 +1725,7 @@ class TaskManager(BaseManager):
                         else:
                             logger.info(f"Sending the agent welcome message")
                             meta_info['is_first_chunk'] = True
+                meta_info["end_of_synthesizer_stream"] = True
                 if yield_in_chunks and audio_chunk is not None:
                     i = 0
                     number_of_chunks = math.ceil(len(audio_chunk) / 100000000)
@@ -1969,10 +1978,10 @@ class TaskManager(BaseManager):
 
                 if self.check_if_user_online:
                     if self.should_record:
-                        meta_info={'io': 'default', "request_id": str(uuid.uuid4()), "cached": False, "sequence_id": -1, 'format': 'wav', "message_category": "is_user_online_message"}
+                        meta_info={'io': 'default', "request_id": str(uuid.uuid4()), "cached": False, "sequence_id": -1, 'format': 'wav', "message_category": "is_user_online_message", 'end_of_llm_stream': True}
                         await self._synthesize(create_ws_data_packet(self.check_user_online_message, meta_info= meta_info))
                     else:
-                        meta_info={'io': self.tools["output"].get_provider(), "request_id": str(uuid.uuid4()), "cached": False, "sequence_id": -1, 'format': 'pcm', "message_category": "is_user_online_message"}
+                        meta_info={'io': self.tools["output"].get_provider(), "request_id": str(uuid.uuid4()), "cached": False, "sequence_id": -1, 'format': 'pcm', "message_category": "is_user_online_message", 'end_of_llm_stream': True}
                         await self._synthesize(create_ws_data_packet(self.check_user_online_message, meta_info= meta_info))
 
                 # Just in case we need to clear messages sent before
@@ -2004,7 +2013,7 @@ class TaskManager(BaseManager):
                 meta_info = {'io': 'default', 'message_category': 'agent_welcome_message',
                              'stream_sid': self.stream_sid, "request_id": str(uuid.uuid4()), "cached": False,
                              "sequence_id": -1, 'format': self.task_config["tools_config"]["output"]["format"],
-                             'text': text}
+                             'text': text, 'end_of_llm_stream': True}
                 await self._synthesize(create_ws_data_packet(text, meta_info=meta_info))
                 return
 
@@ -2023,7 +2032,7 @@ class TaskManager(BaseManager):
                         self.stream_sid = stream_sid
                         text = self.kwargs.get('agent_welcome_message', None)
                         logger.info(f"Generating {text}")
-                        meta_info = {'io': self.tools["output"].get_provider(), 'message_category': 'agent_welcome_message', 'stream_sid': stream_sid, "request_id": str(uuid.uuid4()), "cached": True, "sequence_id": -1, 'format': self.task_config["tools_config"]["output"]["format"], 'text': text}
+                        meta_info = {'io': self.tools["output"].get_provider(), 'message_category': 'agent_welcome_message', 'stream_sid': stream_sid, "request_id": str(uuid.uuid4()), "cached": True, "sequence_id": -1, 'format': self.task_config["tools_config"]["output"]["format"], 'text': text, 'end_of_llm_stream': True}
                         if self.turn_based_conversation:
                             meta_info['type'] = 'text'
                             bos_packet = create_ws_data_packet("<beginning_of_stream>", meta_info)
@@ -2053,6 +2062,7 @@ class TaskManager(BaseManager):
             if self.task_config["tools_config"]["output"]["provider"] in SUPPORTED_OUTPUT_TELEPHONY_HANDLERS.keys():
                 audio = wav_bytes_to_pcm(audio)
             logger.info(f"Length of audio {len(audio)} {self.sampling_rate}")
+            # TODO whenever this feature is redone ensure to have a look at the metadata of other messages which have the sequence_id of -1. Fields such as end_of_synthesizer_stream and end_of_llm_stream would need to be added here
             if self.should_record:
                 meta_info={'io': 'default', 'message_category': 'ambient_noise', "request_id": str(uuid.uuid4()), "sequence_id": -1, "type":'audio', 'format': 'wav'}
             else:

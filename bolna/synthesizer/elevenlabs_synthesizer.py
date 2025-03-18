@@ -21,7 +21,7 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
     def __init__(self, voice, voice_id, model="eleven_turbo_v2_5", audio_format="mp3", sampling_rate="16000",
                  stream=False, buffer_size=400, temperature=0.5, similarity_boost=0.8, synthesizer_key=None,
                  caching=True, **kwargs):
-        super().__init__(stream, is_web_based_call=kwargs.get("is_web_based_call", False),
+        super().__init__(kwargs["task_manager_instance"], stream, is_web_based_call=kwargs.get("is_web_based_call", False),
                          is_precise_transcript_generation_enabled=kwargs.get("is_precise_transcript_generation_enabled"))
         self.api_key = os.environ["ELEVENLABS_API_KEY"] if synthesizer_key is None else synthesizer_key
         self.voice = voice_id
@@ -60,18 +60,35 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
     def get_engine(self):
         return self.model
 
-    async def sender(self, text, end_of_llm_stream=False):
+    # async def flush_synthesizer_stream(self):
+    #     if self.websocket_holder["websocket"] and not self.websocket_holder["websocket"].closed:
+    #         await self.websocket_holder["websocket"].close()
+    #         self.websocket_holder["websocket"] = None
+
+    async def sender(self, text, sequence_id, end_of_llm_stream=False):
         try:
             if self.conversation_ended:
                 return
+
+            if not self.should_synthesize_response(sequence_id):
+                logger.info(
+                    f"Not synthesizing text as the sequence_id ({sequence_id}) of it is not in the list of sequence_ids present in the task manager.")
+                await self.flush_synthesizer_stream()
+                return
+
             # Ensure the WebSocket connection is established
             while self.websocket_holder["websocket"] is None or self.websocket_holder["websocket"].closed:
                 logger.info("Waiting for elevenlabs ws connection to be established...")
                 await asyncio.sleep(1)
 
             if text != "":
+                logger.info(f"Sending text: {text}")
                 for text_chunk in self.text_chunker(text):
-                    logger.info(f"Sending text_chunk: {text_chunk}")
+                    if not self.should_synthesize_response(sequence_id):
+                        logger.info(
+                            f"Not synthesizing text as the sequence_id ({sequence_id}) of it is not in the list of sequence_ids present in the task manager (inner loop).")
+                        await self.flush_synthesizer_stream()
+                        return
                     try:
                         await self.websocket_holder["websocket"].send(json.dumps({"text": text_chunk}))
                     except Exception as e:
@@ -311,7 +328,7 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
             logger.info(f"end_of_llm_stream: {end_of_llm_stream}")
             self.meta_info = copy.deepcopy(meta_info)
             meta_info["text"] = text
-            self.sender_task = asyncio.create_task(self.sender(text, end_of_llm_stream))
+            self.sender_task = asyncio.create_task(self.sender(text, meta_info.get("sequence_id"), end_of_llm_stream))
             self.text_queue.append(meta_info)
         else:
             self.internal_queue.put_nowait(message)

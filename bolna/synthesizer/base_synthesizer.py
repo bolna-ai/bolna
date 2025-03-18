@@ -9,7 +9,7 @@ logger = configure_logger(__name__)
 
 
 class BaseSynthesizer:
-    def __init__(self, stream=True, buffer_size=40, event_loop=None, is_web_based_call=False,
+    def __init__(self, task_manager_instance, stream=True, buffer_size=40, event_loop=None, is_web_based_call=False,
                  is_precise_transcript_generation_enabled=True):
         self.stream = stream
         self.buffer_size = buffer_size
@@ -17,6 +17,7 @@ class BaseSynthesizer:
         self.audio_chunks_sent = 0
         self.is_web_based_call = is_web_based_call
         self.is_precise_transcript_generation_enabled = is_precise_transcript_generation_enabled
+        self.task_manager_instance = task_manager_instance
 
     def clear_internal_queue(self):
         logger.info(f"Clearing out internal queue")
@@ -26,6 +27,12 @@ class BaseSynthesizer:
         audio_chunks_sent = self.audio_chunks_sent
         self.audio_chunks_sent = 0
         return audio_chunks_sent
+
+    def should_synthesize_response(self, sequence_id):
+        return self.task_manager_instance.is_sequence_id_in_current_ids(sequence_id)
+
+    async def flush_synthesizer_stream(self):
+        pass
 
     async def break_audio_into_chunks(self, audio, slicing_range, meta_info, override_end_of_synthesizer_stream=False):
         is_first_chunk_sent = False
