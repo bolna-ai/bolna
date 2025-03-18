@@ -21,7 +21,7 @@ logger = configure_logger(__name__)
 class CartesiaSynthesizer(BaseSynthesizer):
     def __init__(self, voice_id, voice, model="sonic-english", audio_format="mp3", sampling_rate="16000",
                  stream=False, buffer_size=400, synthesizer_key=None, caching=True, **kwargs):
-        super().__init__(kwargs["task_manager_instance"], stream, is_web_based_call=kwargs.get("is_web_based_call", False),
+        super().__init__(kwargs.get("task_manager_instance", None), stream, is_web_based_call=kwargs.get("is_web_based_call", False),
                          is_precise_transcript_generation_enabled=kwargs.get("is_precise_transcript_generation_enabled"))
         self.api_key = os.environ["CARTESIA_API_KEY"] if synthesizer_key is None else synthesizer_key
         self.version = '2024-06-10'
