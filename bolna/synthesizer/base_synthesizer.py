@@ -9,7 +9,7 @@ logger = configure_logger(__name__)
 
 
 class BaseSynthesizer:
-    def __init__(self, task_manager_instance, stream=True, buffer_size=40, event_loop=None, is_web_based_call=False,
+    def __init__(self, task_manager_instance=None, stream=True, buffer_size=40, event_loop=None, is_web_based_call=False,
                  is_precise_transcript_generation_enabled=True):
         self.stream = stream
         self.buffer_size = buffer_size
