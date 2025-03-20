@@ -21,7 +21,8 @@ logger = configure_logger(__name__)
 class CartesiaSynthesizer(BaseSynthesizer):
     def __init__(self, voice_id, voice, model="sonic-english", audio_format="mp3", sampling_rate="16000",
                  stream=False, buffer_size=400, synthesizer_key=None, caching=True, **kwargs):
-        super().__init__(stream)
+        super().__init__(kwargs.get("task_manager_instance", None), stream, is_web_based_call=kwargs.get("is_web_based_call", False),
+                         is_precise_transcript_generation_enabled=kwargs.get("is_precise_transcript_generation_enabled"))
         self.api_key = os.environ["CARTESIA_API_KEY"] if synthesizer_key is None else synthesizer_key
         self.version = '2024-06-10'
         self.voice_id = voice_id
@@ -89,9 +90,13 @@ class CartesiaSynthesizer(BaseSynthesizer):
 
         return payload
 
-    async def sender(self, text, end_of_llm_stream=False):
+    async def sender(self, text, sequence_id, end_of_llm_stream=False):
         try:
             if self.conversation_ended:
+                return
+
+            if not self.should_synthesize_response(sequence_id):
+                logger.info(f"Not synthesizing text as the sequence_id ({sequence_id}) of it is not in the list of sequence_ids present in the task manager.")
                 return
 
             while self.websocket_holder["websocket"] is None or self.websocket_holder["websocket"].closed:
@@ -197,6 +202,7 @@ class CartesiaSynthesizer(BaseSynthesizer):
 
     async def generate(self):
         try:
+            # TODO changes wrt mark event and precise transcription generation are yet to be done for Cartesia. For reference you could look at the changes done in elevenlabs_synthesizer
             async for message in self.receiver():
                 if len(self.text_queue) > 0:
                     self.meta_info = self.text_queue.popleft()
@@ -268,7 +274,7 @@ class CartesiaSynthesizer(BaseSynthesizer):
                 if self.turn_id != meta_info.get('turn_id', 0) or self.sequence_id != meta_info.get('sequence_id', 0):
                     self.update_context(meta_info)
 
-            self.sender_task = asyncio.create_task(self.sender(text, end_of_llm_stream))
+            self.sender_task = asyncio.create_task(self.sender(text, meta_info.get('sequence_id'), end_of_llm_stream))
             self.text_queue.append(meta_info)
         else:
             self.internal_queue.put_nowait(message)
