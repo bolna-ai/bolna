@@ -120,7 +120,7 @@ class TaskManager(BaseManager):
             }
         }
 
-        self.welcome_message_audio = self.kwargs.get('welcome_message_audio', None)
+        self.welcome_message_audio = self.kwargs.pop('welcome_message_audio', None)
         self.observable_variables = {}
         #IO HANDLERS
         if task_id == 0:
