@@ -8,6 +8,7 @@ import time
 import json
 import uuid
 import copy
+import base64
 import pytz
 
 import aiohttp
@@ -119,6 +120,7 @@ class TaskManager(BaseManager):
             }
         }
 
+        self.welcome_message_audio = self.kwargs.pop('welcome_message_audio', None)
         self.observable_variables = {}
         #IO HANDLERS
         if task_id == 0:
@@ -1706,9 +1708,7 @@ class TaskManager(BaseManager):
                         meta_info["format"] = "pcm"
                 else:
                     start_time = time.perf_counter()
-                    audio_chunk = await get_raw_audio_bytes(text, self.assistant_name,
-                                                                'pcm', local=self.is_local,
-                                                                assistant_id=self.assistant_id)
+                    audio_chunk = base64.b64decode(self.welcome_message_audio) if self.welcome_message_audio else None
                     if meta_info['text'] == '':
                         audio_chunk = None
                     logger.info(f"Time to get response from S3 {time.perf_counter() - start_time }")
