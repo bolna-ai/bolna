@@ -119,7 +119,7 @@ class OpenAiLLM(BaseLLM):
                         final_tool_calls_data[index]["function"]["arguments"] += tool_call.function.arguments
 
                 if not self.gave_out_prefunction_call_message and not received_textual_response:
-                    filler = PRE_FUNCTION_CALL_MESSAGE if not called_fun.startswith("transfer_call") else TRANSFERING_CALL_FILLER.get(self.language, DEFAULT_LANGUAGE_CODE)
+                    filler = PRE_FUNCTION_CALL_MESSAGE.get(self.language, DEFAULT_LANGUAGE_CODE) if not called_fun.startswith("transfer_call") else TRANSFERING_CALL_FILLER.get(self.language, DEFAULT_LANGUAGE_CODE)
                     yield filler, True, latency, False
                     self.gave_out_prefunction_call_message = True
 
@@ -226,7 +226,7 @@ class OpenAiLLM(BaseLLM):
                     i = [i for i in range(len(tools)) if called_fun == tools[i].function.name][0]
                     
                 if not self.gave_out_prefunction_call_message and not textual_response:
-                    filler = PRE_FUNCTION_CALL_MESSAGE if not called_fun.startswith("transfer_call_") else TRANSFERING_CALL_FILLER.get(self.language, DEFAULT_LANGUAGE_CODE)
+                    filler = PRE_FUNCTION_CALL_MESSAGE.get(self.language, DEFAULT_LANGUAGE_CODE) if not called_fun.startswith("transfer_call_") else TRANSFERING_CALL_FILLER.get(self.language, DEFAULT_LANGUAGE_CODE)
                     yield filler, True, latency, False
                     self.gave_out_prefunction_call_message = True
                 if len(buffer) > 0:

@@ -40,7 +40,7 @@ class AssistantManager(BaseManager):
 
         input_parameters = None
         for task_id, task in enumerate(self.tasks):
-            logger.info(f"Running task {task_id} {task} and sending kwargs {self.kwargs}")
+            logger.info(f"Running task {task_id}")
             task_manager = TaskManager(self.agent_config.get("agent_name", self.agent_config.get("assistant_name")),
                                        task_id, task, self.websocket,
                                        context_data=self.context_data, input_parameters=input_parameters,

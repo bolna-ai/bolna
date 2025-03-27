@@ -8,6 +8,7 @@ import time
 import json
 import uuid
 import copy
+import base64
 import pytz
 
 import aiohttp
@@ -119,6 +120,7 @@ class TaskManager(BaseManager):
             }
         }
 
+        self.welcome_message_audio = self.kwargs.pop('welcome_message_audio', None)
         self.observable_variables = {}
         #IO HANDLERS
         if task_id == 0:
@@ -1211,10 +1213,10 @@ class TaskManager(BaseManager):
 
                 # A hack as during the 'await' part control passes to llm streaming function parameters
                 # So we have to make sure we've commited the filler message
-                if text_chunk == PRE_FUNCTION_CALL_MESSAGE:
+                if text_chunk == PRE_FUNCTION_CALL_MESSAGE.get(self.language, DEFAULT_LANGUAGE_CODE):
                     logger.info("Got a pre function call message")
-                    messages.append({'role':'assistant', 'content': PRE_FUNCTION_CALL_MESSAGE})
-                    self.history.append({'role': 'assistant', 'content': PRE_FUNCTION_CALL_MESSAGE})
+                    messages.append({'role':'assistant', 'content': PRE_FUNCTION_CALL_MESSAGE.get(self.language, DEFAULT_LANGUAGE_CODE)})
+                    self.history.append({'role': 'assistant', 'content': PRE_FUNCTION_CALL_MESSAGE.get(self.language, DEFAULT_LANGUAGE_CODE)})
                     self.interim_history = copy.deepcopy(messages)
 
                 await self._handle_llm_output(next_step, text_chunk, should_bypass_synth, meta_info)
@@ -1226,7 +1228,7 @@ class TaskManager(BaseManager):
                 await self._handle_llm_output(next_step, llm_response, should_bypass_synth, meta_info)
                 convert_to_request_log(message=llm_response, meta_info=meta_info, component="llm", direction="response", model=self.llm_config["model"], run_id= self.run_id)
 
-        if self.stream and llm_response != PRE_FUNCTION_CALL_MESSAGE:
+        if self.stream and llm_response != PRE_FUNCTION_CALL_MESSAGE.get(self.language, DEFAULT_LANGUAGE_CODE):
             logger.info(f"Storing {llm_response} into history should_trigger_function_call {should_trigger_function_call}")
             self.__store_into_history(meta_info, messages, llm_response, should_trigger_function_call= should_trigger_function_call)
 
@@ -1706,9 +1708,7 @@ class TaskManager(BaseManager):
                         meta_info["format"] = "pcm"
                 else:
                     start_time = time.perf_counter()
-                    audio_chunk = await get_raw_audio_bytes(text, self.assistant_name,
-                                                                'pcm', local=self.is_local,
-                                                                assistant_id=self.assistant_id)
+                    audio_chunk = base64.b64decode(self.welcome_message_audio) if self.welcome_message_audio else None
                     if meta_info['text'] == '':
                         audio_chunk = None
                     logger.info(f"Time to get response from S3 {time.perf_counter() - start_time }")

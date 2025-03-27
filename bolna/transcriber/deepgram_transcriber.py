@@ -22,7 +22,7 @@ class DeepgramTranscriber(BaseTranscriber):
     def __init__(self, telephony_provider, input_queue=None, model='nova-2', stream=True, language="en", endpointing="400",
                  sampling_rate="16000", encoding="linear16", output_queue=None, keywords=None,
                  process_interim_results="true", **kwargs):
-        logger.info(f"Initializing transcriber {kwargs}")
+        logger.info(f"Initializing transcriber")
         super().__init__(input_queue)
         self.endpointing = endpointing
         self.language = language if model == "nova-2" else "en"
@@ -330,7 +330,11 @@ class DeepgramTranscriber(BaseTranscriber):
     async def transcribe(self):
         logger.info(f"STARTED TRANSCRIBING")
         try:
+            start_time = time.perf_counter()
             async with self.deepgram_connect() as deepgram_ws:
+                connection_time = time.perf_counter() - start_time
+                logger.info(f"WebSocket connection established in {connection_time:.3f} seconds")
+
                 if self.stream:
                     self.sender_task = asyncio.create_task(self.sender_stream(deepgram_ws))
                     self.heartbeat_task = asyncio.create_task(self.send_heartbeat(deepgram_ws))
