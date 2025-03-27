@@ -255,10 +255,16 @@ class LlmAgent(BaseModel):
             raise ValueError(f"Failed to create {expected_type.__name__} from llm_config: {str(e)}")
 
 
-class ToolDescription(BaseModel):
+class ToolFunction(BaseModel):
     name: str
     description: str
     parameters: Dict
+    strict: bool = True
+
+
+class ToolDescription(BaseModel):
+    type: str = "function"
+    function: ToolFunction
 
 
 class APIParams(BaseModel):
