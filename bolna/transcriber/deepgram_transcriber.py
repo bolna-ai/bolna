@@ -330,7 +330,11 @@ class DeepgramTranscriber(BaseTranscriber):
     async def transcribe(self):
         logger.info(f"STARTED TRANSCRIBING")
         try:
+            start_time = time.perf_counter()
             async with self.deepgram_connect() as deepgram_ws:
+                connection_time = time.perf_counter() - start_time
+                logger.info(f"WebSocket connection established in {connection_time:.3f} seconds")
+
                 if self.stream:
                     self.sender_task = asyncio.create_task(self.sender_stream(deepgram_ws))
                     self.heartbeat_task = asyncio.create_task(self.send_heartbeat(deepgram_ws))
