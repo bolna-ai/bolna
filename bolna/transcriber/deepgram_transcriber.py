@@ -331,7 +331,7 @@ class DeepgramTranscriber(BaseTranscriber):
         logger.info(f"STARTED TRANSCRIBING")
         try:
             start_time = time.perf_counter()
-            async with await self.deepgram_connect() as deepgram_ws:
+            async with self.deepgram_connect() as deepgram_ws:
                 connection_time = time.perf_counter() - start_time
                 logger.info(f"WebSocket connection established in {connection_time:.3f} seconds")
 
