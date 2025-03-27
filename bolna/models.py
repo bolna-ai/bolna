@@ -267,6 +267,12 @@ class ToolDescription(BaseModel):
     function: ToolFunction
 
 
+class ToolDescriptionLegacy(BaseModel):
+    name: str
+    description: str
+    parameters: Dict
+
+
 class APIParams(BaseModel):
     url: Optional[str] = None
     method: Optional[str] = "POST"
@@ -275,7 +281,7 @@ class APIParams(BaseModel):
 
 
 class ToolModel(BaseModel):
-    tools:  Optional[Union[str, List[ToolDescription]]] = None
+    tools: Optional[Union[str, List[Union[ToolDescription, ToolDescriptionLegacy]]]] = None
     tools_params: Dict[str, APIParams]
 
 
