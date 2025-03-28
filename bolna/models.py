@@ -255,7 +255,19 @@ class LlmAgent(BaseModel):
             raise ValueError(f"Failed to create {expected_type.__name__} from llm_config: {str(e)}")
 
 
+class ToolFunction(BaseModel):
+    name: str
+    description: str
+    parameters: Dict
+    strict: bool = True
+
+
 class ToolDescription(BaseModel):
+    type: str = "function"
+    function: ToolFunction
+
+
+class ToolDescriptionLegacy(BaseModel):
     name: str
     description: str
     parameters: Dict
@@ -269,7 +281,7 @@ class APIParams(BaseModel):
 
 
 class ToolModel(BaseModel):
-    tools:  Optional[Union[str, List[ToolDescription]]] = None
+    tools: Optional[Union[str, List[Union[ToolDescription, ToolDescriptionLegacy]]]] = None
     tools_params: Dict[str, APIParams]
 
 

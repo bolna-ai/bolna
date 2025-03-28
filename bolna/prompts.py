@@ -8,7 +8,6 @@ Given this transcript from the communication between user and an agent, your tas
 ###JSON Structure
 {}
 - Make sure your response is in ENGLISH. 
-- If required data doesn't exist or if the transcript is empty, PLEASE USE NULL, 0, or "DOESN'T EXIST" as the values. DO NOT USE RANDOM ARBRITARY DATA.
 """
 
 SUMMARY_JSON_STRUCTURE = {"summary": "Summary of the conversation goes here"}

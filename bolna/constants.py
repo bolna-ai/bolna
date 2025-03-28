@@ -32,7 +32,10 @@ ACCIDENTAL_INTERRUPTION_PHRASES = [
     "that's enough", "shush", "listen", "excuse me", "hold up", "not now", "stop there", "stop speaking"
 ]
 
-PRE_FUNCTION_CALL_MESSAGE = "Just give me a moment, I'll be back with you."
+PRE_FUNCTION_CALL_MESSAGE = {
+    "en": "Just give me a moment, I'll be back with you.",
+    "ge": "Geben Sie mir einen Moment Zeit, ich bin gleich wieder bei Ihnen."
+}
 
 FILLER_PHRASES = [
     "No worries.", "It's fine.", "I'm here.", "No rush.", "Take your time.",

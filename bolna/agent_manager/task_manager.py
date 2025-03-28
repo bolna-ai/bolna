@@ -8,6 +8,7 @@ import time
 import json
 import uuid
 import copy
+import base64
 import pytz
 
 import aiohttp
@@ -41,6 +42,7 @@ class TaskManager(BaseManager):
         # Latency and logging
         self.latency_dict = defaultdict(dict)
         self.kwargs = kwargs
+        self.kwargs["task_manager_instance"] = self
 
         #Setup Latency part
         self.llm_latencies = []
@@ -118,6 +120,7 @@ class TaskManager(BaseManager):
             }
         }
 
+        self.welcome_message_audio = self.kwargs.pop('welcome_message_audio', None)
         self.observable_variables = {}
         #IO HANDLERS
         if task_id == 0:
@@ -189,11 +192,9 @@ class TaskManager(BaseManager):
         self.summarized_data = None
         logger.info(f"TASK CONFIG {self.task_config['tools_config'] }")
         self.stream = (self.task_config["tools_config"]['synthesizer'] is not None and self.task_config["tools_config"]["synthesizer"]["stream"]) and (self.enforce_streaming or not self.turn_based_conversation)
-        #self.stream = not turn_based_conversation #Currently we are allowing only realtime conversation based usecases. Hence it'll always be true unless connected through dashboard
+
         self.is_local = False
         self.llm_config = None
-
-
         self.agent_type = None
 
         self.llm_config_map = {}
@@ -309,6 +310,7 @@ class TaskManager(BaseManager):
 
             # for long pauses and rushing
             if self.conversation_config is not None:
+                # TODO need to get this for azure - for azure the subtraction would not happen
                 self.minimum_wait_duration = self.task_config["tools_config"]["transcriber"]["endpointing"]
                 logger.info(f"minimum wait duration {self.minimum_wait_duration}")
                 self.last_spoken_timestamp = time.time() * 1000
@@ -776,20 +778,20 @@ class TaskManager(BaseManager):
             self.history = [self.system_prompt] if len(self.history) == 0 else [self.system_prompt] + self.history
 
         #If history is empty and agent welcome message is not empty add it to history
-        if len(self.history) == 1 and len(self.kwargs['agent_welcome_message']) != 0:
+        if task_id == 0 and len(self.history) == 1 and len(self.kwargs['agent_welcome_message']) != 0:
             self.history.append({'role': 'assistant', 'content': self.kwargs['agent_welcome_message']})
 
         self.interim_history = copy.deepcopy(self.history)
 
     def __prefill_prompts(self, task, prompt, task_type):
+        if self.context_data and 'recipient_data' in self.context_data and self.context_data[
+            'recipient_data'] and self.context_data['recipient_data'].get('timezone', None):
+            self.timezone = pytz.timezone(self.context_data['recipient_data']['timezone'])
+        current_date, current_time = get_date_time_from_timezone(self.timezone)
+
         if not prompt and task_type in ('extraction', 'summarization'):
             if task_type == 'extraction':
                 extraction_json = task.get("tools_config").get('llm_agent', {}).get('llm_config', {}).get('extraction_json')
-                if self.context_data and 'recipient_data' in self.context_data and self.context_data[
-                    'recipient_data'] and self.context_data['recipient_data'].get('timezone', None):
-                    self.timezone = pytz.timezone(self.context_data['recipient_data']['timezone'])
-
-                current_date, current_time = get_date_time_from_timezone(self.timezone)
                 prompt = EXTRACTION_PROMPT.format(current_date, current_time, self.timezone, extraction_json)
                 return {"system_prompt": prompt}
             elif task_type == 'summarization':
@@ -815,11 +817,13 @@ class TaskManager(BaseManager):
         await self.tools["synthesizer"].handle_interruption()
         await self.tools["output"].handle_interruption()
         self.sequence_ids = {-1}
+        await self.tools["synthesizer"].flush_synthesizer_stream()
 
         #Stop the output loop first so that we do not transmit anything else
         if self.output_task is not None:
             logger.info(f"Cancelling output task")
             self.output_task.cancel()
+        self.output_task = None
 
         if self.llm_task is not None:
             logger.info(f"Cancelling LLM Task")
@@ -909,14 +913,10 @@ class TaskManager(BaseManager):
             logger.info(f"Response from the server {self.webhook_response}")
         else:
             message = format_messages(self.input_parameters["messages"])  # Remove the initial system prompt
-            # TODO revisit this
             self.history.append({
                 'role': 'user',
                 'content': message
             })
-
-            current_date, current_time = get_date_time_from_timezone(self.timezone)
-            self.history[0]['content'] += f"\n Today's Date is {current_date}"
 
             json_data = await self.tools["llm_agent"].generate(self.history)
             if self.task_config["task_type"] == "summarization":
@@ -924,13 +924,11 @@ class TaskManager(BaseManager):
                 self.summarized_data = json_data["summary"]
                 logger.info(f"self.summarize {self.summarized_data}")
             else:
-                logger.info(f"Extraction task output {json_data}")
                 json_data = clean_json_string(json_data)
                 logger.info(f"After replacing {json_data}")
                 if type(json_data) is not dict:
                     json_data = json.loads(json_data)
                 self.extracted_data = json_data
-        logger.info("Done")
 
     # This observer works only for messages which have sequence_id != -1
     def final_chunk_played_observer(self, is_final_chunk_played):
@@ -1126,13 +1124,17 @@ class TaskManager(BaseManager):
         if called_fun.startswith('check_availability_of_slots') and (not get_res_values or (len(get_res_values) == 1 and len(get_res_values[0]) == 0)):
             set_response_prompt = []
         elif called_fun.startswith('book_appointment') and 'id' not in get_res_keys:
+            if get_res_values and get_res_values[0] == 'no_available_users_found_error':
+                function_response = "Sorry, the host isn't available at this time. Are you available at any other time?"
             set_response_prompt = []
         else:
             set_response_prompt = function_response
 
-        content = FUNCTION_CALL_PROMPT.format(called_fun, method, set_response_prompt)
-        # TODO revisit this
-        model_args["messages"].append({"role": "system","content": content})
+        self.history.append({"role": "assistant", "content": None, "tool_calls": resp["model_response"]})
+        self.history.append({"role": "tool", "tool_call_id": resp.get("tool_call_id", ""), "content": function_response})
+        model_args["messages"].append({"role": "assistant", "content": None, "tool_calls": resp["model_response"]})
+        model_args["messages"].append({"role": "tool", "tool_call_id": resp.get("tool_call_id", ""), "content": function_response})
+
         logger.info(f"Logging function call parameters ")
         convert_to_request_log(function_response, meta_info , None, "function_call", direction = "response", is_cached= False, run_id = self.run_id)
 
@@ -1154,32 +1156,13 @@ class TaskManager(BaseManager):
             self.llm_response_generated = True
             convert_to_request_log(message=llm_response, meta_info= meta_info, component="llm", direction="response", model=self.llm_config["model"], run_id= self.run_id)
             if should_trigger_function_call:
-                #Now, we need to consider 2 things here
-                #1. There was silence between function call and now
-                #2. There was a conversation till now
                 logger.info(f"There was a function call and need to make that work")
-
-                if self.interim_history[-1]['role'] == 'assistant' and self.interim_history[-1]['content'] == PRE_FUNCTION_CALL_MESSAGE:
-                    logger.info(f"There was a no conversation between function call")
-                    #Nothing was spoken
-                    self.interim_history[-1]['content'] += llm_response
-                else:
-                    logger.info(f"There was a conversation between function call and this and changing relevant history point")
-                    #There was a conversation
-                    messages = copy.deepcopy(self.interim_history)
-                    for entry in reversed(messages):
-                        if entry['content'] == PRE_FUNCTION_CALL_MESSAGE:
-                            entry['content'] += llm_response
-                            break
-
-                    self.interim_history = copy.deepcopy(messages)
+                self.history.append({"role": "assistant", "content": llm_response})
                 #Assuming that callee was silent
                 # self.history = copy.deepcopy(self.interim_history)
             else:
                 logger.info(f"There was no function call {messages}")
-                # TODO revisit this
                 messages.append({"role": "assistant", "content": llm_response})
-
                 self.history.append({"role": "assistant", "content": llm_response})
                 self.interim_history = copy.deepcopy(messages)
                 # if self.callee_silent:
@@ -1230,10 +1213,10 @@ class TaskManager(BaseManager):
 
                 # A hack as during the 'await' part control passes to llm streaming function parameters
                 # So we have to make sure we've commited the filler message
-                if text_chunk == PRE_FUNCTION_CALL_MESSAGE:
+                if text_chunk == PRE_FUNCTION_CALL_MESSAGE.get(self.language, DEFAULT_LANGUAGE_CODE):
                     logger.info("Got a pre function call message")
-                    # TODO revisit this
-                    messages.append({'role':'assistant', 'content': PRE_FUNCTION_CALL_MESSAGE})
+                    messages.append({'role':'assistant', 'content': PRE_FUNCTION_CALL_MESSAGE.get(self.language, DEFAULT_LANGUAGE_CODE)})
+                    self.history.append({'role': 'assistant', 'content': PRE_FUNCTION_CALL_MESSAGE.get(self.language, DEFAULT_LANGUAGE_CODE)})
                     self.interim_history = copy.deepcopy(messages)
 
                 await self._handle_llm_output(next_step, text_chunk, should_bypass_synth, meta_info)
@@ -1245,7 +1228,7 @@ class TaskManager(BaseManager):
                 await self._handle_llm_output(next_step, llm_response, should_bypass_synth, meta_info)
                 convert_to_request_log(message=llm_response, meta_info=meta_info, component="llm", direction="response", model=self.llm_config["model"], run_id= self.run_id)
 
-        if self.stream and llm_response != PRE_FUNCTION_CALL_MESSAGE:
+        if self.stream and llm_response != PRE_FUNCTION_CALL_MESSAGE.get(self.language, DEFAULT_LANGUAGE_CODE):
             logger.info(f"Storing {llm_response} into history should_trigger_function_call {should_trigger_function_call}")
             self.__store_into_history(meta_info, messages, llm_response, should_trigger_function_call= should_trigger_function_call)
 
@@ -1341,9 +1324,9 @@ class TaskManager(BaseManager):
         else:
             await self.__cleanup_downstream_tasks()
             meta_info = {'io': self.tools["output"].get_provider(), "request_id": str(uuid.uuid4()),
-                         "cached": False, "sequence_id": -1, 'format': 'pcm'}
+                             "cached": False, "sequence_id": -1, 'format': 'pcm', 'message_category': 'agent_hangup',
+                         'end_of_llm_stream': True}
             self.hangup_triggered = True
-            meta_info['message_category'] = 'agent_hangup'
             await self._synthesize(create_ws_data_packet(self.call_hangup_message, meta_info=meta_info))
         return
 
@@ -1477,7 +1460,7 @@ class TaskManager(BaseManager):
                 if self.hangup_triggered:
                     if message["data"] == "transcriber_connection_closed":
                         logger.info(f"Transcriber connection has been closed")
-                        self.transcriber_duration += message['meta_info']["transcriber_duration"] if message['meta_info'] is not None else 0
+                        self.transcriber_duration += message.get("meta_info", {}).get("transcriber_duration", 0) if message['meta_info'] is not None else 0
                         break
                     continue
 
@@ -1568,7 +1551,7 @@ class TaskManager(BaseManager):
 
                     elif message["data"] == "transcriber_connection_closed":
                         logger.info(f"Transcriber connection has been closed")
-                        self.transcriber_duration += message['meta_info']["transcriber_duration"] if message['meta_info'] is not None else 0
+                        self.transcriber_duration += message.get("meta_info", {}).get("transcriber_duration", 0) if message["meta_info"] is not None else 0
                         break
 
                 else:
@@ -1615,6 +1598,9 @@ class TaskManager(BaseManager):
             copied_meta_info["is_final_chunk_of_entire_response"] = True
 
         self.buffered_output_queue.put_nowait(create_ws_data_packet(chunk, copied_meta_info))
+
+    def is_sequence_id_in_current_ids(self, sequence_id):
+        return sequence_id in self.sequence_ids
 
     async def __listen_synthesizer(self):
         try:
@@ -1709,6 +1695,7 @@ class TaskManager(BaseManager):
                                                                 assistant_id=self.assistant_id)
                 logger.info("Sending preprocessed audio")
                 meta_info["format"] = self.task_config["tools_config"]["output"]["format"]
+                meta_info["end_of_synthesizer_stream"] = True
                 await self.tools["output"].handle(create_ws_data_packet(audio_chunk, meta_info))
             else:
                 if meta_info.get('message_category', None ) == 'filler':
@@ -1721,9 +1708,7 @@ class TaskManager(BaseManager):
                         meta_info["format"] = "pcm"
                 else:
                     start_time = time.perf_counter()
-                    audio_chunk = await get_raw_audio_bytes(text, self.assistant_name,
-                                                                'pcm', local=self.is_local,
-                                                                assistant_id=self.assistant_id)
+                    audio_chunk = base64.b64decode(self.welcome_message_audio) if self.welcome_message_audio else None
                     if meta_info['text'] == '':
                         audio_chunk = None
                     logger.info(f"Time to get response from S3 {time.perf_counter() - start_time }")
@@ -1740,6 +1725,7 @@ class TaskManager(BaseManager):
                         else:
                             logger.info(f"Sending the agent welcome message")
                             meta_info['is_first_chunk'] = True
+                meta_info["end_of_synthesizer_stream"] = True
                 if yield_in_chunks and audio_chunk is not None:
                     i = 0
                     number_of_chunks = math.ceil(len(audio_chunk) / 100000000)
@@ -1992,10 +1978,10 @@ class TaskManager(BaseManager):
 
                 if self.check_if_user_online:
                     if self.should_record:
-                        meta_info={'io': 'default', "request_id": str(uuid.uuid4()), "cached": False, "sequence_id": -1, 'format': 'wav', "message_category": "is_user_online_message"}
+                        meta_info={'io': 'default', "request_id": str(uuid.uuid4()), "cached": False, "sequence_id": -1, 'format': 'wav', "message_category": "is_user_online_message", 'end_of_llm_stream': True}
                         await self._synthesize(create_ws_data_packet(self.check_user_online_message, meta_info= meta_info))
                     else:
-                        meta_info={'io': self.tools["output"].get_provider(), "request_id": str(uuid.uuid4()), "cached": False, "sequence_id": -1, 'format': 'pcm', "message_category": "is_user_online_message"}
+                        meta_info={'io': self.tools["output"].get_provider(), "request_id": str(uuid.uuid4()), "cached": False, "sequence_id": -1, 'format': 'pcm', "message_category": "is_user_online_message", 'end_of_llm_stream': True}
                         await self._synthesize(create_ws_data_packet(self.check_user_online_message, meta_info= meta_info))
 
                 # Just in case we need to clear messages sent before
@@ -2027,7 +2013,7 @@ class TaskManager(BaseManager):
                 meta_info = {'io': 'default', 'message_category': 'agent_welcome_message',
                              'stream_sid': self.stream_sid, "request_id": str(uuid.uuid4()), "cached": False,
                              "sequence_id": -1, 'format': self.task_config["tools_config"]["output"]["format"],
-                             'text': text}
+                             'text': text, 'end_of_llm_stream': True}
                 await self._synthesize(create_ws_data_packet(text, meta_info=meta_info))
                 return
 
@@ -2046,7 +2032,7 @@ class TaskManager(BaseManager):
                         self.stream_sid = stream_sid
                         text = self.kwargs.get('agent_welcome_message', None)
                         logger.info(f"Generating {text}")
-                        meta_info = {'io': self.tools["output"].get_provider(), 'message_category': 'agent_welcome_message', 'stream_sid': stream_sid, "request_id": str(uuid.uuid4()), "cached": True, "sequence_id": -1, 'format': self.task_config["tools_config"]["output"]["format"], 'text': text}
+                        meta_info = {'io': self.tools["output"].get_provider(), 'message_category': 'agent_welcome_message', 'stream_sid': stream_sid, "request_id": str(uuid.uuid4()), "cached": True, "sequence_id": -1, 'format': self.task_config["tools_config"]["output"]["format"], 'text': text, 'end_of_llm_stream': True}
                         if self.turn_based_conversation:
                             meta_info['type'] = 'text'
                             bos_packet = create_ws_data_packet("<beginning_of_stream>", meta_info)
@@ -2076,6 +2062,7 @@ class TaskManager(BaseManager):
             if self.task_config["tools_config"]["output"]["provider"] in SUPPORTED_OUTPUT_TELEPHONY_HANDLERS.keys():
                 audio = wav_bytes_to_pcm(audio)
             logger.info(f"Length of audio {len(audio)} {self.sampling_rate}")
+            # TODO whenever this feature is redone ensure to have a look at the metadata of other messages which have the sequence_id of -1. Fields such as end_of_synthesizer_stream and end_of_llm_stream would need to be added here
             if self.should_record:
                 meta_info={'io': 'default', 'message_category': 'ambient_noise', "request_id": str(uuid.uuid4()), "sequence_id": -1, "type":'audio', 'format': 'wav'}
             else:

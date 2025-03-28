@@ -243,6 +243,9 @@ def format_messages(messages, use_system_prompt=False):
     formatted_string = ""
     for message in messages:
         role = message['role']
+        if message['content'] is None:
+            logger.info(f"Continuing the loop as content received is None")
+            continue
         content = message['content']
 
         if use_system_prompt and role == 'system':
