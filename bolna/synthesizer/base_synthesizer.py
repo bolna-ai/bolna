@@ -82,7 +82,10 @@ class BaseSynthesizer:
         for char in text:
             buffer += char
             if char in splitters:
-                yield buffer.strip() + " "
+                if buffer != " ":
+                    yield buffer.strip() + " "
+                else:
+                    logger.info(f"In else condition of text chunker where buffer = {buffer}")
                 buffer = ""
 
         if buffer:
