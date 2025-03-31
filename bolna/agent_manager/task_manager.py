@@ -2112,6 +2112,13 @@ class TaskManager(BaseManager):
             if self.call_hangup_message and self.context_data:
                 self.call_hangup_message = update_prompt_with_context(self.call_hangup_message, self.context_data)
 
+            agent_welcome_message = self.kwargs.get("agent_welcome_message", "")
+            agent_welcome_message = update_prompt_with_context(agent_welcome_message, self.context_data)
+            logger.info(f"Updated agent welcome message after context data replacement - {agent_welcome_message}")
+            self.kwargs["agent_welcome_message"] = agent_welcome_message
+            if len(self.history) == 2 and agent_welcome_message and self.history[1]["role"] == "assistant":
+                self.history[1]["content"] = agent_welcome_message
+
             await self.tools["output"].send_init_acknowledgement()
             self.first_message_task = asyncio.create_task(self.__first_message())
         except Exception as e:
