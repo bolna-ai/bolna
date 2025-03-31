@@ -134,6 +134,12 @@ class TaskManager(BaseManager):
 
             self.observable_variables["final_chunk_played_observable"] = ObservableVariable(False)
             self.observable_variables["final_chunk_played_observable"].add_observer(self.final_chunk_played_observer)
+
+            self.observable_variables["init_event_observable"] = None
+            if self.is_web_based_call:
+                self.observable_variables["init_event_observable"] = ObservableVariable(None)
+                self.observable_variables["init_event_observable"].add_observer(self.handle_init_event)
+
             logger.info(f"Connected via websocket")
 
             # TODO revert this temporary change for web based call
@@ -339,7 +345,8 @@ class TaskManager(BaseManager):
                     """
 
                 self.call_hangup_message = self.conversation_config.get("call_hangup_message", None)
-                if self.call_hangup_message and self.context_data:
+                # In the case of web call skipping hangup message updation with context data as it would be updated when the init event is received
+                if self.call_hangup_message and self.context_data and not self.is_web_based_call:
                     self.call_hangup_message = update_prompt_with_context(self.call_hangup_message, self.context_data)
                 self.check_for_completion_llm = os.getenv("CHECK_FOR_COMPLETION_LLM")
                 self.time_since_last_spoken_human_word = 0
@@ -748,7 +755,9 @@ class TaskManager(BaseManager):
             enriched_prompt = self.prompts["system_prompt"]
             logger.info("There's a system prompt")
             if self.context_data is not None:
-                enriched_prompt = update_prompt_with_context(self.prompts["system_prompt"], self.context_data)
+                # In the case of web call skipping prompt updation with context data as it would be updated when the init event is received
+                if not self.is_web_based_call:
+                    enriched_prompt = update_prompt_with_context(self.prompts["system_prompt"], self.context_data)
 
                 if 'recipient_data' in self.context_data and self.context_data['recipient_data'] and self.context_data['recipient_data'].get('call_sid', None):
                     self.call_sid = self.context_data['recipient_data']['call_sid']
@@ -2079,6 +2088,42 @@ class TaskManager(BaseManager):
         except Exception as e:
             logger.error(f"Something went wrong while transmitting noise {e}")
 
+    async def handle_init_event(self, init_meta_data):
+        """
+        This function is used to handle the init event which we get from the client side in the case of web calling.
+
+        Args:
+            init_meta_data: This consists of the metadata which has been sent via the client. It would consist of the
+            context data which needs to be injected in the prompt.
+        """
+        try:
+            logger.info(f"handle_init_event has been triggered with metadata = {init_meta_data}")
+            self.context_data["recipient_data"].update(init_meta_data["context_data"])
+            logger.info(f"Context data updated - {self.context_data}")
+
+            self.prompts["system_prompt"] = update_prompt_with_context(self.prompts["system_prompt"], self.context_data)
+
+            if self.system_prompt['content']:
+                system_prompt = self.system_prompt['content']
+                system_prompt = update_prompt_with_context(system_prompt, self.context_data)
+                self.system_prompt['content'] = system_prompt
+                self.history[0]['content'] = system_prompt
+
+            if self.call_hangup_message and self.context_data:
+                self.call_hangup_message = update_prompt_with_context(self.call_hangup_message, self.context_data)
+
+            agent_welcome_message = self.kwargs.get("agent_welcome_message", "")
+            agent_welcome_message = update_prompt_with_context(agent_welcome_message, self.context_data)
+            logger.info(f"Updated agent welcome message after context data replacement - {agent_welcome_message}")
+            self.kwargs["agent_welcome_message"] = agent_welcome_message
+            if len(self.history) == 2 and agent_welcome_message and self.history[1]["role"] == "assistant":
+                self.history[1]["content"] = agent_welcome_message
+
+            await self.tools["output"].send_init_acknowledgement()
+            self.first_message_task = asyncio.create_task(self.__first_message())
+        except Exception as e:
+            logger.error(f"Error occurred in handling init event - {e}")
+
     async def run(self):
         try:
             if self._is_conversation_task():
@@ -2108,7 +2153,9 @@ class TaskManager(BaseManager):
 
                 logger.info(f"Starting the first message task {self.enforce_streaming}")
                 self.output_task = asyncio.create_task(self.__process_output_loop())
-                self.first_message_task = asyncio.create_task(self.__first_message())
+                # In the case of web call we would play the first message once we receive the init event
+                if not self.is_web_based_call:
+                    self.first_message_task = asyncio.create_task(self.__first_message())
                 if not self.turn_based_conversation or self.enforce_streaming:
                     logger.info(f"Setting up other servers")
                     self.hangup_task = asyncio.create_task(self.__check_for_completion())
