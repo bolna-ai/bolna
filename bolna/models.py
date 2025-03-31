@@ -277,7 +277,7 @@ class APIParams(BaseModel):
     url: Optional[str] = None
     method: Optional[str] = "POST"
     api_token: Optional[str] = None
-    param: Optional[str] = None #Payload for the URL
+    param: Optional[Union[str, dict]] = None
 
 
 class ToolModel(BaseModel):
