@@ -29,7 +29,11 @@ class AssistantManager(BaseManager):
         self.output_queue = output_queue
         self.kwargs = kwargs
         self.conversation_history = conversation_history
-        self.kwargs['agent_welcome_message'] = update_prompt_with_context(agent_config.get('agent_welcome_message', AGENT_WELCOME_MESSAGE), context_data)
+        if kwargs.get("is_web_based_call", False):
+            self.kwargs['agent_welcome_message'] = agent_config.get('agent_welcome_message', AGENT_WELCOME_MESSAGE)
+        else:
+            self.kwargs['agent_welcome_message'] = update_prompt_with_context(
+                agent_config.get('agent_welcome_message', AGENT_WELCOME_MESSAGE), context_data)
 
     async def run(self, local=False, run_id=None):
         """
