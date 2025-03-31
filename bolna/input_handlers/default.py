@@ -169,6 +169,11 @@ class DefaultInputHandler:
             logger.info(f"Received mark event")
             self.__process_mark_event(message)
 
+        elif message["type"] == "init":
+            logger.info(f"Received init event")
+            if self.observable_variables.get("init_event_observable") is not None:
+                self.observable_variables.get("init_event_observable").value = message.get("meta_data", None)
+
         else:
             return {"message": "Other modalities not implemented yet"}
             
