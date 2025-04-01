@@ -41,6 +41,13 @@ class DefaultOutputHandler:
     # def welcome_message_sent(self):
     #     return self.is_welcome_message_sent
 
+    async def send_init_acknowledgement(self):
+        data = {
+            "type": "ack"
+        }
+        logger.info(f"Sending ack event")
+        await self.websocket.send_text(json.dumps(data))
+
     async def handle(self, packet):
         try:
             logger.info(f"Packet received:")
