@@ -1097,7 +1097,9 @@ class TaskManager(BaseManager):
                 url = os.getenv("CALL_TRANSFER_WEBHOOK_URL")
 
                 try:
-                    json_function_call_params = json.loads(param)
+                    json_function_call_params = copy.deepcopy(param)
+                    if isinstance(param, str):
+                        json_function_call_params = json.loads(param)
                     call_transfer_number = json_function_call_params['call_transfer_number']
                     if call_transfer_number:
                         payload['call_transfer_number'] = call_transfer_number

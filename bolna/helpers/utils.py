@@ -29,6 +29,9 @@ BUCKET_NAME = os.getenv('BUCKET_NAME')
 RECORDING_BUCKET_NAME = os.getenv('RECORDING_BUCKET_NAME')
 RECORDING_BUCKET_URL = os.getenv('RECORDING_BUCKET_URL')
 
+FORMAT_PATTERN = re.compile(r"%\(([^)]+)\)([sdifouxXeEgGcr])")
+
+
 class DictWithMissing(dict):
     def __missing__(self, key):
         return ''
@@ -586,3 +589,22 @@ def get_date_time_from_timezone(timezone):
     ts = datetime.now(timezone).strftime("%I:%M:%S %p")
 
     return dt, ts
+
+
+def safe_format_with_context(template_dict, context):
+    result = {}
+    for key, value in template_dict.items():
+        if isinstance(value, str):
+            def replacer(match):
+                var_name, fmt_type = match.group(1), match.group(2)
+                if var_name in context:
+                    try:
+                        return ("%%(%s)%s" % (var_name, fmt_type)) % context
+                    except (ValueError, TypeError):
+                        return match.group(0)  # leave untouched on format failure
+                else:
+                    return match.group(0)  # leave as-is if missing
+            result[key] = FORMAT_PATTERN.sub(replacer, value)
+        else:
+            result[key] = value  # pass non-strings as-is
+    return result
