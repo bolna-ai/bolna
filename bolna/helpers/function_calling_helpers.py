@@ -7,10 +7,13 @@ from bolna.helpers.utils import convert_to_request_log
 
 logger = configure_logger(__name__)
 
+
 async def trigger_api(url, method, param, api_token, meta_info, run_id, **kwargs):
     try:
         request_body, api_params = None, None
         if param:
+            if isinstance(param, dict):
+                param = json.dumps(param)
             code = compile(param % kwargs, "<string>", "exec")
             exec(code, globals(), kwargs)
             request_body = param % kwargs
