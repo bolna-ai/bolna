@@ -1224,10 +1224,10 @@ class TaskManager(BaseManager):
 
                 # A hack as during the 'await' part control passes to llm streaming function parameters
                 # So we have to make sure we've commited the filler message
-                if text_chunk == PRE_FUNCTION_CALL_MESSAGE.get(self.language, DEFAULT_LANGUAGE_CODE):
+                if text_chunk == PRE_FUNCTION_CALL_MESSAGE.get(self.language, PRE_FUNCTION_CALL_MESSAGE[DEFAULT_LANGUAGE_CODE]):
                     logger.info("Got a pre function call message")
-                    messages.append({'role':'assistant', 'content': PRE_FUNCTION_CALL_MESSAGE.get(self.language, DEFAULT_LANGUAGE_CODE)})
-                    self.history.append({'role': 'assistant', 'content': PRE_FUNCTION_CALL_MESSAGE.get(self.language, DEFAULT_LANGUAGE_CODE)})
+                    messages.append({'role':'assistant', 'content': PRE_FUNCTION_CALL_MESSAGE.get(self.language, PRE_FUNCTION_CALL_MESSAGE[DEFAULT_LANGUAGE_CODE])})
+                    self.history.append({'role': 'assistant', 'content': PRE_FUNCTION_CALL_MESSAGE.get(self.language, PRE_FUNCTION_CALL_MESSAGE[DEFAULT_LANGUAGE_CODE])})
                     self.interim_history = copy.deepcopy(messages)
 
                 await self._handle_llm_output(next_step, text_chunk, should_bypass_synth, meta_info)
@@ -1239,7 +1239,7 @@ class TaskManager(BaseManager):
                 await self._handle_llm_output(next_step, llm_response, should_bypass_synth, meta_info)
                 convert_to_request_log(message=llm_response, meta_info=meta_info, component="llm", direction="response", model=self.llm_config["model"], run_id= self.run_id)
 
-        if self.stream and llm_response != PRE_FUNCTION_CALL_MESSAGE.get(self.language, DEFAULT_LANGUAGE_CODE):
+        if self.stream and llm_response != PRE_FUNCTION_CALL_MESSAGE.get(self.language, PRE_FUNCTION_CALL_MESSAGE[DEFAULT_LANGUAGE_CODE]):
             logger.info(f"Storing {llm_response} into history should_trigger_function_call {should_trigger_function_call}")
             self.__store_into_history(meta_info, messages, llm_response, should_trigger_function_call= should_trigger_function_call)
 
