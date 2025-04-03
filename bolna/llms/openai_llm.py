@@ -4,8 +4,8 @@ from dotenv import load_dotenv
 from openai import AsyncOpenAI, OpenAI
 import json, requests, time
 
-from bolna.constants import CHECKING_THE_DOCUMENTS_FILLER, PRE_FUNCTION_CALL_MESSAGE, TRANSFERING_CALL_FILLER, DEFAULT_LANGUAGE_CODE
-from bolna.helpers.utils import convert_to_request_log, format_messages
+from bolna.constants import CHECKING_THE_DOCUMENTS_FILLER, DEFAULT_LANGUAGE_CODE
+from bolna.helpers.utils import convert_to_request_log, compute_function_pre_call_message
 from .llm import BaseLLM
 from bolna.helpers.logger_config import configure_logger
 
@@ -96,7 +96,7 @@ class OpenAiLLM(BaseLLM):
             delta = chunk.choices[0].delta
             if hasattr(delta, 'tool_calls') and delta.tool_calls:
                 if buffer:
-                    yield buffer, True, latency, False
+                    yield buffer, True, latency, False, None, None
                     buffer = ""
 
                 # This for loop is going to cover the case of multiple tool calls. Currently, we are not allowing parallel
@@ -119,8 +119,9 @@ class OpenAiLLM(BaseLLM):
                         final_tool_calls_data[index]["function"]["arguments"] += tool_call.function.arguments
 
                 if not self.gave_out_prefunction_call_message and not received_textual_response:
-                    filler = PRE_FUNCTION_CALL_MESSAGE.get(self.language, PRE_FUNCTION_CALL_MESSAGE[DEFAULT_LANGUAGE_CODE]) if not called_fun.startswith("transfer_call") else TRANSFERING_CALL_FILLER.get(self.language, DEFAULT_LANGUAGE_CODE)
-                    yield filler, True, latency, False
+                    api_tool_pre_call_message = self.api_params[called_fun].get('pre_call_message', None)
+                    filler = compute_function_pre_call_message(self.language, called_fun, api_tool_pre_call_message)
+                    yield filler, True, latency, False, called_fun, api_tool_pre_call_message
                     self.gave_out_prefunction_call_message = True
 
             elif hasattr(delta, 'content') and delta.content is not None:
@@ -130,7 +131,7 @@ class OpenAiLLM(BaseLLM):
                 if len(buffer) >= self.buffer_size and synthesize:
                     buffer_words = buffer.split(" ")
                     text = ' '.join(buffer_words[:-1])
-                    yield text, False, latency, False
+                    yield text, False, latency, False, None, None
                     buffer = buffer_words[-1]
 
         if self.trigger_function_call and final_tool_calls_data and final_tool_calls_data[0]["function"]["name"] in self.api_params:
@@ -162,12 +163,12 @@ class OpenAiLLM(BaseLLM):
                 api_call_return = {**api_call_return, **arguments_received}
             else:
                 api_call_return['resp'] = None
-            yield api_call_return, False, latency, True
+            yield api_call_return, False, latency, True, None, None
 
         if synthesize:  # This is used only in streaming sense
-            yield buffer, True, latency, False
+            yield buffer, True, latency, False, None, None
         else:
-            yield answer, True, latency, False
+            yield answer, True, latency, False, None, None
         self.started_streaming = False
     
     async def generate(self, messages, request_json=False):
@@ -211,7 +212,7 @@ class OpenAiLLM(BaseLLM):
             logger.info(f"chunk received : {chunk}")
             if self.trigger_function_call and chunk.event == "thread.run.step.delta":
                 if chunk.data.delta.step_details.tool_calls[0].type == "file_search" or chunk.data.delta.step_details.tool_calls[0].type == "search_files":
-                    yield CHECKING_THE_DOCUMENTS_FILLER, False, time.time() - start_time, False
+                    yield CHECKING_THE_DOCUMENTS_FILLER, False, time.time() - start_time, False, None, None
                     continue
                 textual_response = False
                 if not self.started_streaming:
@@ -226,13 +227,14 @@ class OpenAiLLM(BaseLLM):
                     i = [i for i in range(len(tools)) if called_fun == tools[i].function.name][0]
                     
                 if not self.gave_out_prefunction_call_message and not textual_response:
-                    filler = PRE_FUNCTION_CALL_MESSAGE.get(self.language, PRE_FUNCTION_CALL_MESSAGE[DEFAULT_LANGUAGE_CODE]) if not called_fun.startswith("transfer_call_") else TRANSFERING_CALL_FILLER.get(self.language, DEFAULT_LANGUAGE_CODE)
-                    yield filler, True, latency, False
+                    api_tool_pre_call_message = self.api_params[called_fun].get('pre_call_message', None)
+                    filler = compute_function_pre_call_message(self.language, called_fun, api_tool_pre_call_message)
+                    yield filler, True, latency, False, called_fun, api_tool_pre_call_message
                     self.gave_out_prefunction_call_message = True
                 if len(buffer) > 0:
-                    yield buffer, False, latency, False
+                    yield buffer, False, latency, False, None, None
                     buffer = ''
-                yield buffer, False, latency, False
+                yield buffer, False, latency, False, None, None
                 buffer = ''
                 
                 if (text_chunk := chunk.data.delta.step_details.tool_calls[0].function.arguments):
@@ -254,7 +256,7 @@ class OpenAiLLM(BaseLLM):
 
                     if not self.started_streaming:
                         self.started_streaming = True
-                    yield text, False, latency, False
+                    yield text, False, latency, False, None, None
                     buffer = buffer_words[-1]
         
         if self.trigger_function_call and called_fun in self.api_params:
@@ -286,12 +288,12 @@ class OpenAiLLM(BaseLLM):
             else:
                 logger.info(f"No parameters in function call")
                 api_call_return['resp'] = None
-            yield api_call_return, False, latency, True
+            yield api_call_return, False, latency, True, None, None
 
         if synthesize:  # This is used only in streaming sense
-            yield buffer, True, latency, False
+            yield buffer, True, latency, False, None, None
         else:
-            yield answer, True, latency, False
+            yield answer, True, latency, False, None, None
         self.started_streaming = False
 
     def get_response_format(self, is_json_format: bool):
