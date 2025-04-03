@@ -20,7 +20,7 @@ from contextlib import AsyncExitStack
 from dotenv import load_dotenv
 from pydantic import create_model
 from .logger_config import configure_logger
-from bolna.constants import PREPROCESS_DIR
+from bolna.constants import PREPROCESS_DIR, PRE_FUNCTION_CALL_MESSAGE, DEFAULT_LANGUAGE_CODE, TRANSFERING_CALL_FILLER
 from pydub import AudioSegment
 
 logger = configure_logger(__name__)
@@ -608,3 +608,12 @@ def safe_format_with_context(template_dict, context):
         else:
             result[key] = value  # pass non-strings as-is
     return result
+
+
+def compute_function_pre_call_message(language, function_name, api_tool_pre_call_message):
+    default_filler = PRE_FUNCTION_CALL_MESSAGE.get(language, PRE_FUNCTION_CALL_MESSAGE.get(DEFAULT_LANGUAGE_CODE))
+    if function_name and function_name.startswith("transfer_call"):
+        default_filler = TRANSFERING_CALL_FILLER.get(language, TRANSFERING_CALL_FILLER.get(DEFAULT_LANGUAGE_CODE))
+
+    filler = api_tool_pre_call_message if api_tool_pre_call_message else default_filler
+    return filler

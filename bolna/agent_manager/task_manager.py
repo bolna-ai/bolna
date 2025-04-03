@@ -13,14 +13,14 @@ import pytz
 
 import aiohttp
 
-from bolna.constants import ACCIDENTAL_INTERRUPTION_PHRASES, DEFAULT_USER_ONLINE_MESSAGE, DEFAULT_USER_ONLINE_MESSAGE_TRIGGER_DURATION, FILLER_DICT, PRE_FUNCTION_CALL_MESSAGE, DEFAULT_LANGUAGE_CODE, DEFAULT_TIMEZONE
+from bolna.constants import ACCIDENTAL_INTERRUPTION_PHRASES, DEFAULT_USER_ONLINE_MESSAGE, DEFAULT_USER_ONLINE_MESSAGE_TRIGGER_DURATION, FILLER_DICT, DEFAULT_LANGUAGE_CODE, DEFAULT_TIMEZONE
 from bolna.helpers.function_calling_helpers import trigger_api, computed_api_response
 from bolna.memory.cache.vector_cache import VectorCache
 from .base_manager import BaseManager
 from bolna.agent_types import *
 from bolna.providers import *
 from bolna.prompts import *
-from bolna.helpers.utils import get_date_time_from_timezone, get_route_info, calculate_audio_duration, create_ws_data_packet, get_file_names_in_directory, get_raw_audio_bytes, is_valid_md5, \
+from bolna.helpers.utils import compute_function_pre_call_message, get_date_time_from_timezone, get_route_info, calculate_audio_duration, create_ws_data_packet, get_file_names_in_directory, get_raw_audio_bytes, is_valid_md5, \
     get_required_input_types, format_messages, get_prompt_responses, resample, save_audio_file_to_s3, update_prompt_with_context, get_md5_hash, clean_json_string, wav_bytes_to_pcm, convert_to_request_log, yield_chunks_from_memory, process_task_cancellation
 from bolna.helpers.logger_config import configure_logger
 from semantic_router import Route
@@ -1182,14 +1182,14 @@ class TaskManager(BaseManager):
                 #self.__update_transcripts()
 
     async def __do_llm_generation(self, messages, meta_info, next_step, should_bypass_synth=False, should_trigger_function_call=False):
-        llm_response = ""
+        llm_response, function_tool, function_tool_message = '', '', ''
         synthesize = True
         if should_bypass_synth:
             synthesize = False
 
         async for llm_message in self.tools['llm_agent'].generate(messages, synthesize=synthesize, meta_info=meta_info):
             logger.info(f"llm_message {llm_message}")
-            data, end_of_llm_stream, latency, trigger_function_call = llm_message
+            data, end_of_llm_stream, latency, trigger_function_call, function_tool, function_tool_message = llm_message
 
             if trigger_function_call:
                 logger.info(f"Triggering function call for {data}")
@@ -1204,16 +1204,6 @@ class TaskManager(BaseManager):
 
             llm_response += " " + data
 
-            # Checking the size of the llm_response as it should be less than 20 words
-            # if len(llm_response.strip()) > 20:
-            #     # Let's make a gpt3.5 turbo openai async call to summarize the text and make it shorter
-            #     summary_prompt = f"Summarize the following text in less than 100 characters and the answer should be precise:\n\n{llm_response}"
-            #     summary_response = ""
-            #     async for summarized_response in self.tools['llm_agent'].generate([{'role': 'user', 'content': summary_prompt}]):
-            #         logger.info(f"Summarized response : {summary_response}")
-
-            #     llm_response = summarized_response
-
             logger.info(f"Got a response from LLM {llm_response}")
             if end_of_llm_stream:
                 meta_info["end_of_llm_stream"] = True
@@ -1224,10 +1214,12 @@ class TaskManager(BaseManager):
 
                 # A hack as during the 'await' part control passes to llm streaming function parameters
                 # So we have to make sure we've commited the filler message
-                if text_chunk == PRE_FUNCTION_CALL_MESSAGE.get(self.language, PRE_FUNCTION_CALL_MESSAGE[DEFAULT_LANGUAGE_CODE]):
+                filler_message = compute_function_pre_call_message(self.language, function_tool, function_tool_message)
+                #filler_message = PRE_FUNCTION_CALL_MESSAGE.get(self.language, PRE_FUNCTION_CALL_MESSAGE[DEFAULT_LANGUAGE_CODE])
+                if text_chunk == filler_message:
                     logger.info("Got a pre function call message")
-                    messages.append({'role':'assistant', 'content': PRE_FUNCTION_CALL_MESSAGE.get(self.language, PRE_FUNCTION_CALL_MESSAGE[DEFAULT_LANGUAGE_CODE])})
-                    self.history.append({'role': 'assistant', 'content': PRE_FUNCTION_CALL_MESSAGE.get(self.language, PRE_FUNCTION_CALL_MESSAGE[DEFAULT_LANGUAGE_CODE])})
+                    messages.append({'role':'assistant', 'content': filler_message})
+                    self.history.append({'role': 'assistant', 'content': filler_message})
                     self.interim_history = copy.deepcopy(messages)
 
                 await self._handle_llm_output(next_step, text_chunk, should_bypass_synth, meta_info)
@@ -1239,7 +1231,8 @@ class TaskManager(BaseManager):
                 await self._handle_llm_output(next_step, llm_response, should_bypass_synth, meta_info)
                 convert_to_request_log(message=llm_response, meta_info=meta_info, component="llm", direction="response", model=self.llm_config["model"], run_id= self.run_id)
 
-        if self.stream and llm_response != PRE_FUNCTION_CALL_MESSAGE.get(self.language, PRE_FUNCTION_CALL_MESSAGE[DEFAULT_LANGUAGE_CODE]):
+        filler_message = compute_function_pre_call_message(self.language, function_tool, function_tool_message)
+        if self.stream and llm_response != filler_message:
             logger.info(f"Storing {llm_response} into history should_trigger_function_call {should_trigger_function_call}")
             self.__store_into_history(meta_info, messages, llm_response, should_trigger_function_call= should_trigger_function_call)
 

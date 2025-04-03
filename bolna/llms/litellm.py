@@ -66,14 +66,14 @@ class LiteLLM(BaseLLM):
                     if synthesize:
                         if not self.started_streaming:
                             self.started_streaming = True
-                        yield text, False, latency, False
+                        yield text, False, latency, False, None, None
                     buffer = buffer.split(" ")[-1]
 
         if synthesize:
             if buffer != "":
-                yield buffer, True, latency, False
+                yield buffer, True, latency, False, None, None
         else:
-            yield answer, True, latency, False
+            yield answer, True, latency, False, None, None
         self.started_streaming = False
         logger.info(f"Time to generate response {time.time() - start_time} {answer}")
 
