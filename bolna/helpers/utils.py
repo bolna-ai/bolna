@@ -616,4 +616,4 @@ def compute_function_pre_call_message(language, function_name, api_tool_pre_call
         default_filler = TRANSFERING_CALL_FILLER.get(language, TRANSFERING_CALL_FILLER.get(DEFAULT_LANGUAGE_CODE))
 
     filler = api_tool_pre_call_message if api_tool_pre_call_message else default_filler
-    return filler
+    return filler.strip()

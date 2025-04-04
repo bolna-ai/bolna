@@ -1,18 +1,21 @@
 import asyncio
 import traceback
-import torch
-import websockets
+#import torch
 import os
 import json
 import aiohttp
 import time
 from urllib.parse import urlencode
 from dotenv import load_dotenv
+import websockets
+from websockets.asyncio.client import ClientConnection
+
 from .base_transcriber import BaseTranscriber
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.utils import create_ws_data_packet
 
-torch.set_num_threads(1)
+
+#torch.set_num_threads(1)
 
 logger = configure_logger(__name__)
 load_dotenv()
@@ -116,7 +119,7 @@ class DeepgramTranscriber(BaseTranscriber):
         logger.info(f"Deepgram websocket url: {websocket_url}")
         return websocket_url
 
-    async def send_heartbeat(self, ws):
+    async def send_heartbeat(self, ws: ClientConnection):
         try:
             while True:
                 data = {'type': 'KeepAlive'}
@@ -196,7 +199,7 @@ class DeepgramTranscriber(BaseTranscriber):
             logger.error('Error while sending: ' + str(e))
             raise Exception("Something went wrong")
 
-    async def sender_stream(self, ws=None):
+    async def sender_stream(self, ws: ClientConnection):
         try:
             while True:
                 ws_data_packet = await self.input_queue.get()
@@ -219,7 +222,7 @@ class DeepgramTranscriber(BaseTranscriber):
             logger.error('Error while sending: ' + str(e))
             raise Exception("Something went wrong")
 
-    async def receiver(self, ws):
+    async def receiver(self, ws: ClientConnection):
         async for msg in ws:
             try:
                 msg = json.loads(msg)
@@ -288,12 +291,12 @@ class DeepgramTranscriber(BaseTranscriber):
     async def push_to_transcriber_queue(self, data_packet):
         await self.transcriber_output_queue.put(data_packet)
 
-    def deepgram_connect(self):
+    async def deepgram_connect(self):
         websocket_url = self.get_deepgram_ws_url()
-        extra_headers = {
+        additional_headers = {
             'Authorization': 'Token {}'.format(os.getenv('DEEPGRAM_AUTH_TOKEN'))
         }
-        deepgram_ws = websockets.connect(websocket_url, extra_headers=extra_headers)
+        deepgram_ws = await websockets.connect(websocket_url, additional_headers=additional_headers)
         return deepgram_ws
 
     async def run(self):
@@ -331,7 +334,7 @@ class DeepgramTranscriber(BaseTranscriber):
         logger.info(f"STARTED TRANSCRIBING")
         try:
             start_time = time.perf_counter()
-            async with self.deepgram_connect() as deepgram_ws:
+            async with await self.deepgram_connect() as deepgram_ws:
                 connection_time = time.perf_counter() - start_time
                 logger.info(f"WebSocket connection established in {connection_time:.3f} seconds")
 
