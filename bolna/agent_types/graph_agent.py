@@ -236,12 +236,12 @@ class GraphAgent(BaseAgent):
                 
                 if len(buffer.split()) >= buffer_size or i == len(words) - 1:
                     is_final = (i == len(words) - 1)
-                    yield buffer.strip(), is_final, latency, False
+                    yield buffer.strip(), is_final, latency, False, None, None
                     buffer = ""
             
             if buffer:
-                yield buffer.strip(), True, latency, False
+                yield buffer.strip(), True, latency, False, None, None
 
         except Exception as e:
             logger.error(f"Error in generate function: {e}")
-            yield f"An error occurred: {str(e)}", True, time.time() - start_time, False
+            yield f"An error occurred: {str(e)}", True, time.time() - start_time, False, None, None

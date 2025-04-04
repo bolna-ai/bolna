@@ -120,9 +120,9 @@ class RAGAgent(BaseAgent):
                 latency = time.time() - start_time
             buffer += token + " "
             if len(buffer.split()) >= self.buffer or buffer[-1] in {'.', '!', '?'}:
-                yield buffer.strip(), False, latency, False
+                yield buffer.strip(), False, latency, False, None, None
                 logger.info(f"LLM BUFFER FULL BUFFER OUTPUT: {buffer}")
                 buffer = ""
         if buffer:
-            yield buffer.strip(), True, latency, False
+            yield buffer.strip(), True, latency, False, None, None
             logger.info(f"LLM BUFFER FLUSH BUFFER OUTPUT: {buffer}")
