@@ -71,7 +71,7 @@ class GraphAgent(BaseAgent):
             rag_context = ""
 
             try:
-                async for chunk, is_final, latency, truncated in rag_agent.generate(history):
+                async for chunk, is_final, latency, truncated, function_tool, function_tool_message in rag_agent.generate(history):
                     if is_final:
                         rag_context = chunk
                         break
