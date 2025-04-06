@@ -7,9 +7,9 @@ from .providers import *
 AGENT_WELCOME_MESSAGE = "This call is being recorded for quality assurance and training. Please speak now."
 
 
-def validate_attribute(value, allowed_values):
+def validate_attribute(value, allowed_values, value_type='provider'):
     if value not in allowed_values:
-        raise ValidationError(f"Invalid provider {value}. Supported values: {allowed_values}")
+        raise ValueError(f"Invalid value for {value_type}:'{value}' provided. Supported values: {allowed_values}.")
     return value
 
 
