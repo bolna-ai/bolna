@@ -3,11 +3,11 @@ aiofiles==23.2.1
 aiohttp==3.9.1
 azure-cognitiveservices-speech==1.38.0
 daily-python==0.9.1
-fastapi==0.108.0
+fastapi==0.109.1
 fastembed==0.3.5
 huggingface-hub==0.24.3
-litellm==1.40.20
-llama_index==0.10.65
+litellm==1.61.15
+llama_index==0.12.9
 llama-index-vector-stores-lancedb==0.1.7
 numpy==1.26.1
 openai>=1.10.0
@@ -18,7 +18,7 @@ pymongo==4.8.0
 python-dateutil==2.8.2
 python-dotenv==1.0.0
 redis==5.0.1
-requests==2.31.0
+requests==2.32
 tiktoken>=0.6.0
 torchaudio==2.0.1
 twilio==8.9.0

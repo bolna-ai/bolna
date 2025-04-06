@@ -60,11 +60,6 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
     def get_engine(self):
         return self.model
 
-    # async def flush_synthesizer_stream(self):
-    #     if self.websocket_holder["websocket"] and not self.websocket_holder["websocket"].closed:
-    #         await self.websocket_holder["websocket"].close()
-    #         self.websocket_holder["websocket"] = None
-
     async def sender(self, text, sequence_id, end_of_llm_stream=False):
         try:
             if self.conversation_ended:
@@ -312,7 +307,7 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
     async def monitor_connection(self):
         # Periodically check if the connection is still alive
         while True:
-            if self.websocket_holder["websocket"] is None or not self.websocket_holder["websocket"].closed:
+            if self.websocket_holder["websocket"] is None or self.websocket_holder["websocket"].state is websockets.protocol.State.CLOSED:
                 logger.info("Re-establishing elevenlabs connection...")
                 self.websocket_holder["websocket"] = await self.establish_connection()
             await asyncio.sleep(1)
