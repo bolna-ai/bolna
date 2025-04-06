@@ -71,7 +71,7 @@ class GraphAgent(BaseAgent):
             rag_context = ""
 
             try:
-                async for chunk, is_final, latency, truncated in rag_agent.generate(history):
+                async for chunk, is_final, latency, truncated, function_tool, function_tool_message in rag_agent.generate(history):
                     if is_final:
                         rag_context = chunk
                         break
@@ -240,7 +240,7 @@ class GraphAgent(BaseAgent):
                     buffer = ""
             
             if buffer:
-                yield buffer.strip(), True, latency, False
+                yield buffer.strip(), True, latency, False, None, None
 
         except Exception as e:
             logger.error(f"Error in generate function: {e}")
