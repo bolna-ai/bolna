@@ -856,20 +856,14 @@ class TaskManager(BaseManager):
             trimmed = current_stream
         return trimmed
 
-    async def __cleanup_downstream_tasks(self):
-        logger.info(f"Cleaning up downstream task")
-        start_time = time.time()
-        await self.tools["synthesizer"].handle_interruption()
-        await self.tools["output"].handle_interruption()
-
-        cleared_mark_events_data = [{'mark_id': k, 'mark_data': v} for k, v in self.mark_event_meta_data.fetch_cleared_mark_event_data().items()]
+    async def sync_history(self, mark_events_data, interruption_processed_at):
+        cleared_mark_events_data = [{'mark_id': k, 'mark_data': v} for k, v in mark_events_data]
         logger.info(f"all cleared_mark_events_data: {cleared_mark_events_data}")
         if cleared_mark_events_data:
             if cleared_mark_events_data[0]['mark_data'].get('type', '') == 'pre_mark_message' and len(cleared_mark_events_data) > 1:
                 start_ts = self.tools["input"].get_current_mark_started_time()
-                current_ts = time.time()
-                diff_ts = current_ts - start_ts
-                logger.info(f"interrupted data times: {start_ts}, {current_ts}")
+                diff_ts = interruption_processed_at - start_ts
+                logger.info(f"interrupted data times: {start_ts}, {interruption_processed_at}")
                 spoken_so_far = self.get_partial_combined_text(cleared_mark_events_data, diff_ts)
 
                 if self.history[-1]['role'] == 'assistant':
@@ -877,10 +871,14 @@ class TaskManager(BaseManager):
 
                 if self.interim_history[-1]['role'] == 'assistant':
                     self.interim_history[-1]['content'] = self.update_transcript_for_interruption(self.interim_history[-1]['content'], spoken_so_far)
-            # this means a partial assistant message would be there
-            else:
-                # TODO
-                a = 1
+
+    async def __cleanup_downstream_tasks(self):
+        current_ts = time.time()
+        logger.info(f"Cleaning up downstream task")
+        start_time = time.time()
+        await self.tools["synthesizer"].handle_interruption()
+        await self.tools["output"].handle_interruption()
+        await self.sync_history(self.mark_event_meta_data.fetch_cleared_mark_event_data().items(), current_ts)
 
         self.sequence_ids = {-1}
         await self.tools["synthesizer"].flush_synthesizer_stream()
@@ -2226,6 +2224,8 @@ class TaskManager(BaseManager):
                     traceback.print_exc()
                     logger.error(f"Error: {e}")
 
+                current_ts = time.time()
+                await self.sync_history(self.mark_event_meta_data.mark_event_meta_data.items(), current_ts)
                 logger.info("Conversation completed")
                 self.conversation_ended = True
             else:
