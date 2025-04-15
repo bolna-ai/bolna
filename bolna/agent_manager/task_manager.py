@@ -279,7 +279,7 @@ class TaskManager(BaseManager):
             self.nitro = True
             self.conversation_config = task.get("task_config", {})
             logger.info(f"Conversation config {self.conversation_config}")
-            self.kwargs["is_precise_transcript_generation_enabled"] = self.conversation_config.get('generate_precise_transcript', False)
+            self.generate_precise_transcript = self.conversation_config.get('generate_precise_transcript', False)
 
             self.trigger_user_online_message_after = self.conversation_config.get("trigger_user_online_message_after", DEFAULT_USER_ONLINE_MESSAGE_TRIGGER_DURATION)
             self.check_if_user_online = self.conversation_config.get("check_if_user_online", True)
@@ -878,7 +878,9 @@ class TaskManager(BaseManager):
         start_time = time.time()
         await self.tools["synthesizer"].handle_interruption()
         await self.tools["output"].handle_interruption()
-        await self.sync_history(self.mark_event_meta_data.fetch_cleared_mark_event_data().items(), current_ts)
+
+        if self.generate_precise_transcript:
+            await self.sync_history(self.mark_event_meta_data.fetch_cleared_mark_event_data().items(), current_ts)
 
         self.sequence_ids = {-1}
         await self.tools["synthesizer"].flush_synthesizer_stream()
@@ -1459,33 +1461,6 @@ class TaskManager(BaseManager):
 
     async def _handle_transcriber_output(self, next_task, transcriber_message, meta_info):
         self.history.append({"role": "user", "content": transcriber_message})
-
-        message_heard_by_user = self.tools["input"].get_response_heard_by_user()
-        if not self.is_web_based_call and self.kwargs["is_precise_transcript_generation_enabled"]:
-            if self.tools["input"].welcome_message_played() and self.history[-2][
-                "role"] == "assistant" and message_heard_by_user:
-                logger.info(
-                    f"Updating the chat history with the message heard by the user. Original message = {self.history[-2]['content']} | Message heard by user - {message_heard_by_user}")
-                audio_chunk_sent = self.tools['synthesizer'].get_audio_chunks_sent()
-                audio_chunk_received = self.tools['input'].get_audio_chunks_received()
-                logger.info(f"Audio chunks sent = {audio_chunk_sent} | audio chunks received = {audio_chunk_received}")
-                if audio_chunk_received == audio_chunk_sent:
-                    self.history[-2]["content"] = message_heard_by_user
-                else:
-                    try:
-                        message_heard_by_user_words = message_heard_by_user.split(" ")
-                        number_of_words_to_append = math.floor(
-                            (audio_chunk_received / audio_chunk_sent) * len(message_heard_by_user_words))
-                        logger.info(
-                            f"Total number of words - {len(message_heard_by_user_words)} | Number of words to append - {number_of_words_to_append} | Words to append - {message_heard_by_user_words[:number_of_words_to_append]}")
-                        self.history[-2]["content"] = " ".join(message_heard_by_user_words[:number_of_words_to_append])
-                    except Exception as e:
-                        logger.error(f"Error occurred in getting number of words to append - {e}")
-                        self.history[-2]["content"] = message_heard_by_user
-        # else:
-        #     if self.tools["input"].welcome_message_played() and self.history[-2]["role"] == "assistant" and message_heard_by_user:
-        #         logger.info(f"Updating the chat history with the message heard by the user. Original message = {self.history[-2]['content']} | Message heard by user - {message_heard_by_user}")
-        #         self.history[-2]["content"] = message_heard_by_user
 
         convert_to_request_log(message=transcriber_message, meta_info= meta_info, model = "deepgram", run_id= self.run_id)
         if next_task == "llm":
@@ -2224,8 +2199,9 @@ class TaskManager(BaseManager):
                     traceback.print_exc()
                     logger.error(f"Error: {e}")
 
-                current_ts = time.time()
-                await self.sync_history(self.mark_event_meta_data.mark_event_meta_data.items(), current_ts)
+                if self.generate_precise_transcript:
+                    current_ts = time.time()
+                    await self.sync_history(self.mark_event_meta_data.mark_event_meta_data.items(), current_ts)
                 logger.info("Conversation completed")
                 self.conversation_ended = True
             else:

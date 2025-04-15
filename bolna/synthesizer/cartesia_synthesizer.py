@@ -21,8 +21,7 @@ logger = configure_logger(__name__)
 class CartesiaSynthesizer(BaseSynthesizer):
     def __init__(self, voice_id, voice, model="sonic-english", audio_format="mp3", sampling_rate="16000",
                  stream=False, buffer_size=400, synthesizer_key=None, caching=True, **kwargs):
-        super().__init__(kwargs.get("task_manager_instance", None), stream, is_web_based_call=kwargs.get("is_web_based_call", False),
-                         is_precise_transcript_generation_enabled=kwargs.get("is_precise_transcript_generation_enabled"))
+        super().__init__(kwargs.get("task_manager_instance", None), stream)
         self.api_key = os.environ["CARTESIA_API_KEY"] if synthesizer_key is None else synthesizer_key
         self.version = '2024-06-10'
         self.voice_id = voice_id
@@ -202,7 +201,6 @@ class CartesiaSynthesizer(BaseSynthesizer):
 
     async def generate(self):
         try:
-            # TODO changes wrt mark event and precise transcription generation are yet to be done for Cartesia. For reference you could look at the changes done in elevenlabs_synthesizer
             async for message in self.receiver():
                 if len(self.text_queue) > 0:
                     self.meta_info = self.text_queue.popleft()
