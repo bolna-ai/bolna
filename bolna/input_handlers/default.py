@@ -29,6 +29,7 @@ class DefaultInputHandler:
         self.observable_variables = observable_variables
         self.mark_event_meta_data = mark_event_meta_data
         self.audio_chunks_received = 0
+        self.update_start_ts = time.time()
 
     def get_audio_chunks_received(self):
         audio_chunks_received = self.audio_chunks_received
@@ -58,6 +59,9 @@ class DefaultInputHandler:
     def get_stream_sid(self):
         return str(uuid.uuid4())
 
+    def get_current_mark_started_time(self):
+        return self.update_start_ts
+
     def welcome_message_played(self):
         return self.is_welcome_message_played
 
@@ -80,6 +84,7 @@ class DefaultInputHandler:
 
         self.audio_chunks_received += 1
         self.response_heard_by_user += mark_event_meta_data_obj.get("text_synthesized")
+        self.update_start_ts = time.time()
 
         if mark_event_meta_data_obj.get("is_final_chunk"):
             if message_type != "is_user_online_message":

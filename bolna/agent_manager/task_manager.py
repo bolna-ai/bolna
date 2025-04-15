@@ -820,6 +820,31 @@ class TaskManager(BaseManager):
         #     text_chunk = text_chunk[index+2:]
         return text_chunk
 
+
+    def get_partial_combined_text(self, mark_events, diff_ts):
+        chunks = [x['mark_data']['text_synthesized']
+                  for x in mark_events
+                  if 'text_synthesized' in x['mark_data']]
+        combined_text = "".join(chunks)
+
+        total_duration = sum(
+            x['mark_data'].get('duration', 0.0)
+            for x in mark_events
+            if 'text_synthesized' in x['mark_data']
+        )
+
+        if total_duration == 0:
+            return ""
+
+        proportion = min(diff_ts / total_duration, 1.0)
+        char_count = int(len(combined_text) * proportion)
+        partial_text = combined_text[:char_count]
+
+        if not partial_text.endswith(" "):
+            partial_text = partial_text.rsplit(" ", 1)[0]
+
+        return partial_text.strip()
+
     async def __cleanup_downstream_tasks(self):
         logger.info(f"Cleaning up downstream task")
         start_time = time.time()
@@ -830,11 +855,16 @@ class TaskManager(BaseManager):
         logger.info(f"all cleared_mark_events_data: {cleared_mark_events_data}")
         if cleared_mark_events_data:
             if cleared_mark_events_data[0]['mark_data'].get('type', '') == 'pre_mark_message' and len(cleared_mark_events_data) > 1:
+                start_ts = self.tools["input"].get_current_mark_started_time()
+                current_ts = time.time()
+                diff_ts = current_ts - start_ts
+                spoken_so_far = self.get_partial_combined_text(cleared_mark_events_data, diff_ts)
+
                 if self.history[-1]['role'] == 'assistant':
-                    self.history[-1]['content'] = ""
+                    self.history[-1]['content'] = spoken_so_far
 
                 if self.interim_history[-1]['role'] == 'assistant':
-                    self.interim_history[-1]['content'] = ""
+                    self.interim_history[-1]['content'] = spoken_so_far
             # this means a partial assistant message would be there
             else:
                 # TODO
