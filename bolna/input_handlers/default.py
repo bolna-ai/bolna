@@ -38,6 +38,9 @@ class DefaultInputHandler:
         
     def update_is_audio_being_played(self, value):
         logger.info(f"Audio is being updated - {value}")
+        if value is True:
+            self.update_start_ts = time.time()
+            logger.info(f"updating ts as mark_message received: {self.update_start_ts}")
         self._is_audio_being_played_to_user = value
 
     def is_audio_being_played_to_user(self):
@@ -80,8 +83,6 @@ class DefaultInputHandler:
 
         if message_type == "pre_mark_message":
             self.update_is_audio_being_played(True)
-            self.update_start_ts = time.time()
-            logger.info(f"updating ts as mark_message received: {self.update_start_ts}")
             return
 
         self.audio_chunks_received += 1
