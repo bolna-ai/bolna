@@ -825,6 +825,20 @@ class TaskManager(BaseManager):
         start_time = time.time()
         await self.tools["synthesizer"].handle_interruption()
         await self.tools["output"].handle_interruption()
+
+        cleared_mark_events_data = [{'mark_id': k, 'mark_data': v} for k, v in self.mark_event_meta_data.fetch_cleared_mark_event_data().items()]
+        if cleared_mark_events_data:
+            if cleared_mark_events_data[0]['mark_data'].get('type', '') == 'pre_mark_message':
+                if self.history[-1]['role'] == 'assistant':
+                    self.history[-1]['content'] = ""
+
+                if self.interim_history[-1]['role'] == 'assistant':
+                    self.interim_history[-1]['content'] = ""
+            # this means a partial assistant message would be there
+            else:
+                # TODO
+                a = 1
+
         self.sequence_ids = {-1}
         await self.tools["synthesizer"].flush_synthesizer_stream()
 

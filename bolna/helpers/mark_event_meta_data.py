@@ -1,10 +1,14 @@
+import copy
+
 from bolna.helpers.logger_config import configure_logger
 
 logger = configure_logger(__name__)
 
+
 class MarkEventMetaData:
     def __init__(self):
         self.mark_event_meta_data = {}
+        self.previous_mark_event_meta_data = {}
 
     def update_data(self, mark_id, value):
         logger.info(f"Updating mark_id = {mark_id} with value = {value}")
@@ -16,7 +20,12 @@ class MarkEventMetaData:
 
     def clear_data(self):
         logger.info(f"Clearing mark meta data dict")
+        self.previous_mark_event_meta_data = copy.deepcopy(self.mark_event_meta_data)
         self.mark_event_meta_data = {}
+
+    def fetch_cleared_mark_event_data(self):
+        return self.previous_mark_event_meta_data
+
 
     def __str__(self):
         return f"{self.mark_event_meta_data}"
