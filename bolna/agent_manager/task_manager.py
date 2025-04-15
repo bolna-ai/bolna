@@ -848,9 +848,10 @@ class TaskManager(BaseManager):
         return combined_text[:char_count].strip()
 
     def update_transcript_for_interruption(self, original_stream, current_stream):
+        logger.info(f"updating transcript: {original_stream} -- with -- {current_stream}")
         index = original_stream.find(current_stream)
         if index != -1:
-            trimmed = original_stream[:index + len(current_stream)]
+            trimmed = original_stream[:index]
         else:
             trimmed = current_stream
         return trimmed
