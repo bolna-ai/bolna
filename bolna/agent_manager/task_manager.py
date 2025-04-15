@@ -827,8 +827,9 @@ class TaskManager(BaseManager):
         await self.tools["output"].handle_interruption()
 
         cleared_mark_events_data = [{'mark_id': k, 'mark_data': v} for k, v in self.mark_event_meta_data.fetch_cleared_mark_event_data().items()]
+        logger.info(f"all cleared_mark_events_data: {cleared_mark_events_data}")
         if cleared_mark_events_data:
-            if cleared_mark_events_data[0]['mark_data'].get('type', '') == 'pre_mark_message':
+            if cleared_mark_events_data[0]['mark_data'].get('type', '') == 'pre_mark_message' and len(cleared_mark_events_data) > 1:
                 if self.history[-1]['role'] == 'assistant':
                     self.history[-1]['content'] = ""
 
