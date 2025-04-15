@@ -1841,22 +1841,6 @@ class TaskManager(BaseManager):
             await asyncio.sleep(0.1)
         self.handle_accumulated_message_task = None
 
-    # async def __handle_initial_silence(self, duration=5):
-    #     while True:
-    #         logger.info(f"Checking for initial silence {duration}")
-    #         #logger.info(f"Woke up from my slumber {self.callee_silent}, {self.history}, {self.interim_history}")
-    #         logger.info(f"welcome_message_played = {self.tools['input'].welcome_message_played()} | self.callee_silent = {self.callee_silent} | self.history = {self.history} | self.interim_history = {self.interim_history} | self.first_message_passing_time = {self.first_message_passing_time} | time.time() = {time.time()}")
-    #         if (self.tools["input"].welcome_message_played() and self.callee_silent and len(self.history) == 2 and
-    #                 len(self.interim_history) == 2 and self.first_message_passing_time and
-    #                 time.time() - self.first_message_passing_time > duration):
-    #             logger.info(f"Callee was silent and hence speaking Hello on callee's behalf")
-    #             await self.__send_first_message("Hello")
-    #             break
-    #         elif len(self.history) > 2:
-    #             break
-    #         await asyncio.sleep(3)
-    #     self.initial_silence_task = None
-
     def __process_latency_data(self, message):
         utterance_end = message['meta_info'].get("utterance_end", None)
         overall_first_byte_latency = time.time() - message['meta_info']['utterance_end'] if utterance_end is not None else 0
@@ -2157,7 +2141,6 @@ class TaskManager(BaseManager):
                 tasks = [asyncio.create_task(self.tools['input'].handle())]
                 if not self.turn_based_conversation:
                     self.first_message_passing_time = None
-                    # self.initial_silence_task = asyncio.create_task(self.__handle_initial_silence(duration=10))
                     self.handle_accumulated_message_task = asyncio.create_task(self.__handle_accumulated_message())
                 if "transcriber" in self.tools:
                     tasks.append(asyncio.create_task(self._listen_transcriber()))
