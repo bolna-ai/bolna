@@ -851,7 +851,7 @@ class TaskManager(BaseManager):
         logger.info(f"updating transcript: {original_stream} -- with -- {current_stream}")
         index = original_stream.find(current_stream)
         if index != -1:
-            trimmed = original_stream[:index]
+            trimmed = original_stream[:index + len(current_stream)]
         else:
             trimmed = current_stream
         return trimmed
@@ -869,6 +869,7 @@ class TaskManager(BaseManager):
                 start_ts = self.tools["input"].get_current_mark_started_time()
                 current_ts = time.time()
                 diff_ts = current_ts - start_ts
+                logger.info(f"interrupted data times: {start_ts}, {current_ts}")
                 spoken_so_far = self.get_partial_combined_text(cleared_mark_events_data, diff_ts)
 
                 if self.history[-1]['role'] == 'assistant':
