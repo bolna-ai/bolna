@@ -820,7 +820,6 @@ class TaskManager(BaseManager):
         #     text_chunk = text_chunk[index+2:]
         return text_chunk
 
-
     def get_partial_combined_text(self, mark_events, diff_ts):
         chunks = [x['mark_data']['text_synthesized']
                   for x in mark_events
@@ -838,12 +837,23 @@ class TaskManager(BaseManager):
 
         proportion = min(diff_ts / total_duration, 1.0)
         char_count = int(len(combined_text) * proportion)
-        partial_text = combined_text[:char_count]
 
-        if not partial_text.endswith(" "):
-            partial_text = partial_text.rsplit(" ", 1)[0]
+        if char_count >= len(combined_text):
+            return combined_text
 
-        return partial_text.strip()
+        if combined_text[char_count].isalnum():
+            while char_count < len(combined_text) and combined_text[char_count].isalnum():
+                char_count += 1
+
+        return combined_text[:char_count].strip()
+
+    def update_transcript_for_interruption(self, original_stream, current_stream):
+        index = original_stream.find(current_stream)
+        if index != -1:
+            trimmed = original_stream[:index + len(current_stream)]
+        else:
+            trimmed = current_stream
+        return trimmed
 
     async def __cleanup_downstream_tasks(self):
         logger.info(f"Cleaning up downstream task")
@@ -861,10 +871,10 @@ class TaskManager(BaseManager):
                 spoken_so_far = self.get_partial_combined_text(cleared_mark_events_data, diff_ts)
 
                 if self.history[-1]['role'] == 'assistant':
-                    self.history[-1]['content'] = spoken_so_far
+                    self.history[-1]['content'] = self.update_transcript_for_interruption(self.history[-1]['content'], spoken_so_far)
 
                 if self.interim_history[-1]['role'] == 'assistant':
-                    self.interim_history[-1]['content'] = spoken_so_far
+                    self.interim_history[-1]['content'] = self.update_transcript_for_interruption(self.interim_history[-1]['content'], spoken_so_far)
             # this means a partial assistant message would be there
             else:
                 # TODO
