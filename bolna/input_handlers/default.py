@@ -80,12 +80,12 @@ class DefaultInputHandler:
 
         if message_type == "pre_mark_message":
             self.update_is_audio_being_played(True)
+            self.update_start_ts = time.time()
+            logger.info(f"updating ts as mark_message received: {self.update_start_ts}")
             return
 
         self.audio_chunks_received += 1
         self.response_heard_by_user += mark_event_meta_data_obj.get("text_synthesized")
-        self.update_start_ts = time.time()
-        logger.info(f"updating ts as mark_message received: {self.update_start_ts}")
 
         if mark_event_meta_data_obj.get("is_final_chunk"):
             if message_type != "is_user_online_message":
