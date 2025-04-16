@@ -29,6 +29,7 @@ class DefaultInputHandler:
         self.observable_variables = observable_variables
         self.mark_event_meta_data = mark_event_meta_data
         self.audio_chunks_received = 0
+        self.update_start_ts = time.time()
 
     def get_audio_chunks_received(self):
         audio_chunks_received = self.audio_chunks_received
@@ -37,6 +38,9 @@ class DefaultInputHandler:
         
     def update_is_audio_being_played(self, value):
         logger.info(f"Audio is being updated - {value}")
+        if value is True:
+            self.update_start_ts = time.time()
+            logger.info(f"updating ts as mark_message received: {self.update_start_ts}")
         self._is_audio_being_played_to_user = value
 
     def is_audio_being_played_to_user(self):
@@ -57,6 +61,9 @@ class DefaultInputHandler:
 
     def get_stream_sid(self):
         return str(uuid.uuid4())
+
+    def get_current_mark_started_time(self):
+        return self.update_start_ts
 
     def welcome_message_played(self):
         return self.is_welcome_message_played
