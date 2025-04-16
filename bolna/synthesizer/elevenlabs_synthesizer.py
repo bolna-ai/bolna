@@ -21,8 +21,7 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
     def __init__(self, voice, voice_id, model="eleven_turbo_v2_5", audio_format="mp3", sampling_rate="16000",
                  stream=False, buffer_size=400, temperature=0.5, similarity_boost=0.8, synthesizer_key=None,
                  caching=True, **kwargs):
-        super().__init__(kwargs.get("task_manager_instance", None), stream, is_web_based_call=kwargs.get("is_web_based_call", False),
-                         is_precise_transcript_generation_enabled=kwargs.get("is_precise_transcript_generation_enabled"))
+        super().__init__(kwargs.get("task_manager_instance", None), stream)
         self.api_key = os.environ["ELEVENLABS_API_KEY"] if synthesizer_key is None else synthesizer_key
         self.voice = voice_id
         self.model = model
@@ -47,7 +46,6 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
         self.sender_task = None
         self.conversation_ended = False
         self.current_text = ""
-        self.slicing_range = int(16000 / 4)
 
     # Ensuring we only do wav output for now
     def get_format(self, format, sampling_rate):
@@ -59,11 +57,6 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
 
     def get_engine(self):
         return self.model
-
-    # async def flush_synthesizer_stream(self):
-    #     if self.websocket_holder["websocket"] and not self.websocket_holder["websocket"].closed:
-    #         await self.websocket_holder["websocket"].close()
-    #         self.websocket_holder["websocket"] = None
 
     async def sender(self, text, sequence_id, end_of_llm_stream=False):
         try:
@@ -77,7 +70,7 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
                 return
 
             # Ensure the WebSocket connection is established
-            while self.websocket_holder["websocket"] is None or self.websocket_holder["websocket"].closed:
+            while self.websocket_holder["websocket"] is None or self.websocket_holder["websocket"].state is websockets.protocol.State.CLOSED:
                 logger.info("Waiting for elevenlabs ws connection to be established...")
                 await asyncio.sleep(1)
 
@@ -116,7 +109,8 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
                 if self.conversation_ended:
                     return
 
-                if self.websocket_holder["websocket"] is None or self.websocket_holder["websocket"].closed:
+                if (self.websocket_holder["websocket"] is None or
+                        self.websocket_holder["websocket"].state is websockets.protocol.State.CLOSED):
                     logger.info("WebSocket is not connected, skipping receive.")
                     await asyncio.sleep(5)
                     continue
@@ -236,12 +230,8 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
 
                     self.meta_info["text_synthesized"] = text_synthesized
 
-                    if not self.is_web_based_call and self.is_precise_transcript_generation_enabled and audio != b'\x00':
-                        async for chunk in self.break_audio_into_chunks(audio, self.slicing_range, self.meta_info):
-                            yield chunk
-                    else:
-                        self.meta_info["mark_id"] = str(uuid.uuid4())
-                        yield create_ws_data_packet(audio, self.meta_info)
+                    self.meta_info["mark_id"] = str(uuid.uuid4())
+                    yield create_ws_data_packet(audio, self.meta_info)
             else:
                 while True:
                     message = await self.internal_queue.get()
@@ -311,7 +301,7 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
     async def monitor_connection(self):
         # Periodically check if the connection is still alive
         while True:
-            if self.websocket_holder["websocket"] is None or self.websocket_holder["websocket"].closed:
+            if self.websocket_holder["websocket"] is None or self.websocket_holder["websocket"].state is websockets.protocol.State.CLOSED:
                 logger.info("Re-establishing elevenlabs connection...")
                 self.websocket_holder["websocket"] = await self.establish_connection()
             await asyncio.sleep(1)
