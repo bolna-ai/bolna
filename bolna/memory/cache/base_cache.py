@@ -1,6 +1,11 @@
-class BaseCache:
-    def set(self, key, value, **kwargs):
-        raise NotImplementedError
+from abc import ABC, abstractmethod
 
-    def get(self, key, **kwargs):
-        raise NotImplementedError
+
+class BaseCache(ABC):
+    @abstractmethod
+    def set(self, *args, **kwargs):
+        pass
+
+    @abstractmethod
+    def get(self, *args, **kwargs):
+        pass
