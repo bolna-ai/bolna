@@ -242,7 +242,7 @@ def get_required_input_types(task):
     return input_types
 
 
-def format_messages(messages, use_system_prompt=False):
+def format_messages(messages, use_system_prompt=False, include_tools=False):
     formatted_string = ""
     for message in messages:
         role = message['role']
@@ -260,6 +260,8 @@ def format_messages(messages, use_system_prompt=False):
             formatted_string += "assistant: " + content + "\n"
         elif role == 'user':
             formatted_string += "user: " + content + "\n"
+        elif include_tools and role == 'tool':
+            formatted_string += "tool_response: " + content + "\n"
 
     return formatted_string
 
