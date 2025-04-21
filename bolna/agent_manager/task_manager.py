@@ -1007,9 +1007,7 @@ class TaskManager(BaseManager):
             self.tools["output"].set_hangup_sent()
             await self.__process_end_of_conversation()
 
-    async def __process_end_of_conversation(self, web_call_timeout=False):
-        logger.info("Got end of conversation. I'm stopping now")
-
+    async def wait_for_current_message(self):
         while True:
             # Convert dict to list of mark items in insertion order
             mark_items_list = [{'mark_id': k, 'mark_data': v} for k, v in self.mark_event_meta_data.mark_event_meta_data.items()]
@@ -1024,9 +1022,15 @@ class TaskManager(BaseManager):
 
             await asyncio.sleep(0.5)
 
-        # Check completion of agent_hangup_message sent from output
-
         logger.info('__process_end_of_conversation: reached here')
+        return
+
+    async def __process_end_of_conversation(self, web_call_timeout=False):
+        logger.info("Got end of conversation. I'm stopping now")
+
+        await self.wait_for_current_message()
+
+        # Check completion of agent_hangup_message sent from output
         while True and self.hangup_triggered:
             try:
                 if self.tools["output"].hangup_sent():
@@ -1399,6 +1403,7 @@ class TaskManager(BaseManager):
         if not self.call_hangup_message:
             await self.__process_end_of_conversation()
         else:
+            await self.wait_for_current_message()
             await self.__cleanup_downstream_tasks()
             meta_info = {'io': self.tools["output"].get_provider(), "request_id": str(uuid.uuid4()),
                              "cached": False, "sequence_id": -1, 'format': 'pcm', 'message_category': 'agent_hangup',
