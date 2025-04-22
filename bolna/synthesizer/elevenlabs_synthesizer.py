@@ -147,6 +147,7 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
                             yield b'\x00', ""
                     except Exception as e:
                         logger.error(f"Error occurred while getting chars from response - {e}")
+                        yield b'\x00', ""
 
                 else:
                     logger.info("No audio data in the response")
