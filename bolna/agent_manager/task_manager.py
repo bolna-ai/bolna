@@ -1009,20 +1009,22 @@ class TaskManager(BaseManager):
 
     async def wait_for_current_message(self):
         while True:
-            # Convert dict to list of mark items in insertion order
-            mark_items_list = [{'mark_id': k, 'mark_data': v} for k, v in self.mark_event_meta_data.mark_event_meta_data.items()]
+            mark_events = self.mark_event_meta_data.mark_event_meta_data
+            mark_items_list = [{'mark_id': k, 'mark_data': v} for k, v in mark_events.items()]
             logger.info(f"current_list: {mark_items_list}")
 
             if not mark_items_list:
                 break
 
             first_item = mark_items_list[0]['mark_data']
+            if len(mark_items_list) == 1 and first_item.get('type') == 'pre_mark_message':
+                break
+
             if first_item.get('text_synthesized') and first_item.get('is_final_chunk') is True:
                 break
 
             await asyncio.sleep(0.5)
 
-        logger.info('__process_end_of_conversation: reached here')
         return
 
     async def __process_end_of_conversation(self, web_call_timeout=False):
