@@ -45,21 +45,21 @@ class BaseSynthesizer:
         pass
 
     def text_chunker(self, text):
-        """Split text into chunks, ensuring to not break sentences."""
+        """Used during input streaming to chunk text blocks and set last char to space"""
         splitters = (".", ",", "?", "!", ";", ":", "—", "-", "(", ")", "[", "]", "}", " ")
-
         buffer = ""
         for char in text:
-            buffer += char
-            if char in splitters:
-                if buffer != " ":
-                    yield buffer.strip() + " "
-                else:
-                    logger.info(f"In else condition of text chunker where buffer = {buffer}")
-                buffer = ""
-
-        if buffer:
-            yield buffer.strip() + " "
+            if buffer.endswith(splitters):
+                yield buffer if buffer.endswith(" ") else buffer + " "
+                buffer = char
+            elif char.startswith(splitters):
+                output = buffer + char[0]
+                yield output if output.endswith(" ") else output + " "
+                buffer = char[1:]
+            else:
+                buffer += char
+        if buffer != "":
+            yield buffer + " "
 
     def resample(self, audio_bytes):
         audio_buffer = io.BytesIO(audio_bytes)
