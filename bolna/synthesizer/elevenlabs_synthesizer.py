@@ -142,8 +142,12 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
                         if self.current_text.replace('"', "").strip().endswith(last_four_words_text):
                             logger.info('send end_of_synthesizer_stream')
                             yield b'\x00', ""
+                        elif self.current_text.replace('"', "").replace(' ', '').strip().endswith(last_four_words_text.replace(' ', '')):
+                            logger.info('send end_of_synthesizer_stream on fallback')
+                            yield b'\x00', ""
                     except Exception as e:
                         logger.error(f"Error occurred while getting chars from response - {e}")
+                        yield b'\x00', ""
 
                 else:
                     logger.info("No audio data in the response")
