@@ -1008,7 +1008,7 @@ class TaskManager(BaseManager):
             await self.__process_end_of_conversation()
 
     async def wait_for_current_message(self):
-        while True:
+        while not self.conversation_ended:
             mark_events = self.mark_event_meta_data.mark_event_meta_data
             mark_items_list = [{'mark_id': k, 'mark_data': v} for k, v in mark_events.items()]
             logger.info(f"current_list: {mark_items_list}")
@@ -1024,7 +1024,6 @@ class TaskManager(BaseManager):
                 break
 
             await asyncio.sleep(0.5)
-
         return
 
     async def __process_end_of_conversation(self, web_call_timeout=False):
