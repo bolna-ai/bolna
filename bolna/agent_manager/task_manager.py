@@ -1204,7 +1204,12 @@ class TaskManager(BaseManager):
                 mock_response = f"This is a mocked response demonstrating a successful transfer of call to {call_transfer_number}"
                 convert_to_request_log(str(payload), meta_info, None, "function_call", direction="request", run_id=self.run_id)
                 convert_to_request_log(mock_response, meta_info, None, "function_call", direction="response", run_id=self.run_id)
+
+                bos_packet = create_ws_data_packet("<beginning_of_stream>", meta_info)
+                await self.tools["output"].handle(bos_packet)
                 await self.tools["output"].handle(create_ws_data_packet(mock_response, meta_info))
+                eos_packet = create_ws_data_packet("<end_of_stream>", meta_info)
+                await self.tools["output"].handle(eos_packet)
                 return
 
             async with aiohttp.ClientSession() as session:
