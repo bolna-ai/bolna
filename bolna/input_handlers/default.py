@@ -30,6 +30,7 @@ class DefaultInputHandler:
         self.mark_event_meta_data = mark_event_meta_data
         self.audio_chunks_received = 0
         self.update_start_ts = time.time()
+        self.io_provider = 'default'
 
     def get_audio_chunks_received(self):
         audio_chunks_received = self.audio_chunks_received
