@@ -1162,16 +1162,15 @@ class TaskManager(BaseManager):
         self.check_if_user_online = False
 
         if called_fun.startswith("transfer_call"):
-            logger.info(f"Transfer call function called param {param}. First sleeping for 2 seconds to make sure we're done speaking the filler")
-            await asyncio.sleep(2) #Sleep for 1 second to ensure that the filler is spoken before transfering call
-            call_sid = self.tools["input"].get_call_sid()
+            await asyncio.sleep(2)
 
             try:
                 from_number = self.context_data['recipient_data']['from_number']
             except Exception as e:
                 from_number = None
 
-            # self.history = copy.deepcopy(model_args["messages"])
+            call_sid = None
+            call_transfer_number = None
             payload = {
                 'call_sid': call_sid,
                 'provider': self.tools['input'].io_provider,
@@ -1179,6 +1178,10 @@ class TaskManager(BaseManager):
                 'from_number': from_number,
                 'execution_id': self.run_id
             }
+
+            if self.tools['input'].io_provider != 'default':
+                call_sid = self.tools["input"].get_call_sid()
+                payload['call_sid'] = call_sid
 
             if url is None:
                 url = os.getenv("CALL_TRANSFER_WEBHOOK_URL")
@@ -1196,6 +1199,13 @@ class TaskManager(BaseManager):
             if param is not None:
                 logger.info(f"Gotten response {resp}")
                 payload = {**payload, **resp}
+
+            if self.tools['input'].io_provider == 'default':
+                mock_response = f"This is a mocked response demonstrating a successful transfer of call to {call_transfer_number}"
+                convert_to_request_log(str(payload), meta_info, None, "function_call", direction="request", run_id=self.run_id)
+                convert_to_request_log(mock_response, meta_info, None, "function_call", direction="response", run_id=self.run_id)
+                await self.tools["output"].handle(create_ws_data_packet(mock_response, meta_info))
+                return
 
             async with aiohttp.ClientSession() as session:
                 logger.info(f"Sending the payload to stop the conversation {payload} url {url}")

@@ -536,7 +536,7 @@ def get_file_names_in_directory(directory):
     return os.listdir(directory)
 
 
-def convert_to_request_log(message, meta_info, model, component="transcriber", direction='response', is_cached = False, engine=None, run_id=None):
+def convert_to_request_log(message, meta_info, model, component="transcriber", direction='response', is_cached=False, engine=None, run_id=None):
     log = dict()
     log['direction'] = direction
     log['data'] = message
