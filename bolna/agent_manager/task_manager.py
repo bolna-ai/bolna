@@ -1612,6 +1612,11 @@ class TaskManager(BaseManager):
 
                 else:
                     logger.info(f"Processing http transcription for message {message}")
+                    if message["data"] == "transcriber_connection_closed":
+                        logger.info(f"Transcriber connection has been closed")
+                        self.transcriber_duration += message.get("meta_info", {}).get("transcriber_duration", 0) if message["meta_info"] is not None else 0
+                        break
+
                     await self.__process_http_transcription(message)
 
         except Exception as e:
@@ -1624,12 +1629,9 @@ class TaskManager(BaseManager):
         if include_latency:
             self.latency_dict[meta_info['request_id']]["transcriber"] = {"total_latency":  meta_info["transcriber_latency"], "audio_duration": meta_info["audio_duration"], "last_vocal_frame_timestamp": meta_info["last_vocal_frame_timestamp"] }
 
-        sequence = message["meta_info"]["sequence"]
+        sequence = message["meta_info"].get('sequence', meta_info['sequence_id'])
         next_task = self._get_next_step(sequence, "transcriber")
         self.transcriber_duration += message["meta_info"]["transcriber_duration"] if "transcriber_duration" in message["meta_info"] else 0
-        #self.history.append({'role': 'user', 'content': message['data']})
-        if self._is_preprocessed_flow():
-            self.__update_preprocessed_tree_node()
 
         await self._handle_transcriber_output(next_task, message['data'], meta_info)
 
