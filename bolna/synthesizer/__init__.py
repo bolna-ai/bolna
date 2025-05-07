@@ -5,3 +5,4 @@ from .deepgram_synthesizer import DeepgramSynthesizer
 from .azure_synthesizer import AzureSynthesizer
 from .cartesia_synthesizer import CartesiaSynthesizer
 from .smallest_synthesizer import SmallestSynthesizer
+from .sarvam_synthesizer import SarvamSynthesizer
