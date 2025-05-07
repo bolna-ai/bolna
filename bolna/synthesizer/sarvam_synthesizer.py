@@ -2,6 +2,7 @@ import aiohttp
 import os
 import uuid
 import traceback
+import base64
 from .base_synthesizer import BaseSynthesizer
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.utils import create_ws_data_packet
@@ -95,6 +96,8 @@ class SarvamSynthesizer(BaseSynthesizer):
                 audio = await self.__generate_http(text)
                 if not audio:
                     audio = b'\x00'
+                else:
+                    audio = base64.b64decode(audio)
 
                 meta_info['text'] = text
                 if not self.first_chunk_generated:
