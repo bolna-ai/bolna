@@ -2080,7 +2080,6 @@ class TaskManager(BaseManager):
                         logger.info(f"Got stream sid and hence sending the first message {stream_sid}")
                         self.stream_sid = stream_sid
                         text = self.kwargs.get('agent_welcome_message', None)
-                        logger.info(f"Generating {text}")
                         meta_info = {'io': self.tools["output"].get_provider(), 'message_category': 'agent_welcome_message', 'stream_sid': stream_sid, "request_id": str(uuid.uuid4()), "cached": True, "sequence_id": -1, 'format': self.task_config["tools_config"]["output"]["format"], 'text': text, 'end_of_llm_stream': True}
                         if self.turn_based_conversation:
                             meta_info['type'] = 'text'
@@ -2169,6 +2168,11 @@ class TaskManager(BaseManager):
             if self._is_conversation_task():
                 # Create transcriber and synthesizer tasks
                 tasks = [asyncio.create_task(self.tools['input'].handle())]
+
+                # In the case of web call we would play the first message once we receive the init event
+                if not self.is_web_based_call:
+                    self.first_message_task = asyncio.create_task(self.__first_message())
+
                 if not self.turn_based_conversation:
                     self.first_message_passing_time = None
                     self.handle_accumulated_message_task = asyncio.create_task(self.__handle_accumulated_message())
@@ -2189,9 +2193,6 @@ class TaskManager(BaseManager):
                         traceback.print_exc()
 
                 self.output_task = asyncio.create_task(self.__process_output_loop())
-                # In the case of web call we would play the first message once we receive the init event
-                if not self.is_web_based_call:
-                    self.first_message_task = asyncio.create_task(self.__first_message())
                 if not self.turn_based_conversation or self.enforce_streaming:
                     logger.info(f"Setting up other servers")
                     self.hangup_task = asyncio.create_task(self.__check_for_completion())
