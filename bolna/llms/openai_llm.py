@@ -156,7 +156,6 @@ class OpenAiLLM(BaseLLM):
             all_required_keys = tools[i]["function"]["parameters"]["properties"].keys() and tools[i]["function"]["parameters"].get(
                 "required", [])
             if tools[i]["function"].get("parameters", None) is not None and (all(key in arguments_received for key in all_required_keys)):
-                logger.info(f"Function call parameters: {arguments_received}")
                 convert_to_request_log(arguments_received, meta_info, self.model, "llm", direction="response", is_cached=False,
                                        run_id=self.run_id)
                 arguments_received = json.loads(arguments_received)
@@ -209,7 +208,6 @@ class OpenAiLLM(BaseLLM):
         await self.async_client.beta.threads.messages.create(thread_id=model_args["thread_id"], role="user", content=message[-1]['content'])
 
         async for chunk in await self.async_client.beta.threads.runs.create(**model_args):
-            logger.info(f"chunk received : {chunk}")
             if self.trigger_function_call and chunk.event == "thread.run.step.delta":
                 if chunk.data.delta.step_details.tool_calls[0].type == "file_search" or chunk.data.delta.step_details.tool_calls[0].type == "search_files":
                     yield CHECKING_THE_DOCUMENTS_FILLER, False, time.time() - start_time, False, None, None
@@ -239,7 +237,6 @@ class OpenAiLLM(BaseLLM):
                 
                 if (text_chunk := chunk.data.delta.step_details.tool_calls[0].function.arguments):
                     resp += text_chunk
-                    logger.info(f"Response from LLM {resp}")
             elif chunk.event == 'thread.message.delta':
                 if not self.started_streaming:
                     first_chunk_time = time.time()
@@ -261,7 +258,7 @@ class OpenAiLLM(BaseLLM):
         
         if self.trigger_function_call and called_fun in self.api_params:
             func_dict = self.api_params[called_fun]
-            logger.info(f"PAyload to send {resp} func_dict {func_dict} and tools {tools}")
+            logger.info(f"Payload to send {resp} func_dict {func_dict} and tools {tools}")
             self.gave_out_prefunction_call_message = False
 
             url = func_dict['url']
