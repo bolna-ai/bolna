@@ -125,7 +125,6 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
                     try:
                         text_spoken = ''.join(data.get('alignment', {}).get('chars', []))
                     except Exception as e:
-                        logger.error(f"Error occurred while getting chars from response - {e}")
                         text_spoken = ""
                     yield chunk, text_spoken
 

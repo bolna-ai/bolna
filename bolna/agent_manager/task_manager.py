@@ -196,7 +196,6 @@ class TaskManager(BaseManager):
         #Tasks
         self.extracted_data = None
         self.summarized_data = None
-        logger.info(f"TASK CONFIG {self.task_config['tools_config'] }")
         self.stream = (self.task_config["tools_config"]['synthesizer'] is not None and self.task_config["tools_config"]["synthesizer"]["stream"]) and (self.enforce_streaming or not self.turn_based_conversation)
 
         self.is_local = False
@@ -406,7 +405,6 @@ class TaskManager(BaseManager):
 
         # setting llm
         if self.llm_config is not None:
-            logger.info(f"LLM CONFIG IS NOT NONE {self.task_config['task_type']} llm agent config {self.llm_agent_config}")
             llm = self.__setup_llm(self.llm_config, task_id)
             #Setup tasks
             agent_params = {
@@ -1257,7 +1255,6 @@ class TaskManager(BaseManager):
                 #Assuming that callee was silent
                 # self.history = copy.deepcopy(self.interim_history)
             else:
-                logger.info(f"There was no function call {messages}")
                 messages.append({"role": "assistant", "content": llm_response})
                 self.history.append({"role": "assistant", "content": llm_response})
                 self.interim_history = copy.deepcopy(messages)
@@ -1273,7 +1270,6 @@ class TaskManager(BaseManager):
             synthesize = False
 
         async for llm_message in self.tools['llm_agent'].generate(messages, synthesize=synthesize, meta_info=meta_info):
-            logger.info(f"llm_message {llm_message}")
             data, end_of_llm_stream, latency, trigger_function_call, function_tool, function_tool_message = llm_message
 
             if trigger_function_call:
@@ -1295,7 +1291,6 @@ class TaskManager(BaseManager):
 
             if self.stream:
                 text_chunk = self.__process_stop_words(data, meta_info)
-                logger.info(f"##### O/P from LLM {text_chunk} {llm_response}")
 
                 # A hack as during the 'await' part control passes to llm streaming function parameters
                 # So we have to make sure we've commited the filler message
@@ -1318,7 +1313,6 @@ class TaskManager(BaseManager):
 
         filler_message = compute_function_pre_call_message(self.language, function_tool, function_tool_message)
         if self.stream and llm_response != filler_message:
-            logger.info(f"Storing {llm_response} into history should_trigger_function_call {should_trigger_function_call}")
             self.__store_into_history(meta_info, messages, llm_response, should_trigger_function_call= should_trigger_function_call)
 
     async def _process_conversation_task(self, message, sequence, meta_info):
@@ -1446,7 +1440,6 @@ class TaskManager(BaseManager):
 
     async def _run_llm_task(self, message):
         sequence, meta_info = self._extract_sequence_and_meta(message)
-        logger.info(f"After adding {self.curr_sequence_id} into sequence id {self.sequence_ids} for message {message}")
 
         try:
             if self._is_extraction_task() or self._is_summarization_task():
