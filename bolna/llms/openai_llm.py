@@ -85,22 +85,28 @@ class OpenAiLLM(BaseLLM):
 
         start_time = time.time()
         first_token_time = None
-        latency = None
+        latency_data = None
 
         async for chunk in await self.async_client.chat.completions.create(**model_args):
             now = time.time()
             if not first_token_time:
                 first_token_time = now
                 latency = first_token_time - start_time
-                logger.info(f"First token latency: {latency * 1000:.1f} ms")
                 self.started_streaming = True
+
+                latency_data = {
+                    "turn_id": meta_info.get("turn_id"),
+                    "model": self.model,
+                    "first_token_latency_ms": round(latency * 1000),
+                    "total_stream_duration_ms": None  # Will be filled at end
+                }
 
             delta = chunk.choices[0].delta
 
             # Function call chunk
             if hasattr(delta, 'tool_calls') and delta.tool_calls:
                 if buffer:
-                    yield buffer, True, latency, False, None, None
+                    yield buffer, True, latency_data, False, None, None
                     buffer = ""
 
                 # This for loop is going to cover the case of multiple tool calls. Currently, we are not allowing parallel
@@ -125,7 +131,7 @@ class OpenAiLLM(BaseLLM):
                 if not self.gave_out_prefunction_call_message and not received_textual_response:
                     api_tool_pre_call_message = self.api_params[called_fun].get('pre_call_message', None)
                     pre_msg = compute_function_pre_call_message(self.language, called_fun, api_tool_pre_call_message)
-                    yield pre_msg, True, latency, False, called_fun, api_tool_pre_call_message
+                    yield pre_msg, True, latency_data, False, called_fun, api_tool_pre_call_message
                     self.gave_out_prefunction_call_message = True
 
             # Normal text delta
@@ -135,8 +141,13 @@ class OpenAiLLM(BaseLLM):
                 buffer += delta.content
                 if synthesize and len(buffer) >= self.buffer_size:
                     split = buffer.rsplit(" ", 1)
-                    yield split[0], False, latency, False, None, None
+                    yield split[0], False, latency_data, False, None, None
                     buffer = split[1] if len(split) > 1 else ""
+
+        # Set final duration
+        total_duration = time.time() - start_time
+        if latency_data:
+            latency_data["total_stream_duration_ms"] = round(total_duration * 1000)
 
         # Post-processing for function call payload
         if self.trigger_function_call and final_tool_calls_data and final_tool_calls_data[0]["function"]["name"] in self.api_params:
@@ -167,15 +178,13 @@ class OpenAiLLM(BaseLLM):
                 api_call_payload.update(json.loads(arguments_received))
             else:
                 api_call_payload['resp'] = None
-            yield api_call_payload, False, latency, True, None, None
+            yield api_call_payload, False, latency_data, True, None, None
 
         if synthesize:  # This is used only in streaming sense
-            yield buffer, True, latency, False, None, None
+            yield buffer, True, latency_data, False, None, None
         else:
-            yield answer, True, latency, False, None, None
+            yield answer, True, latency_data, False, None, None
 
-        total_duration = time.time() - start_time
-        logger.info(f"LLM streaming complete. Total duration: {total_duration * 1000:.1f} ms")
         self.started_streaming = False
     
     async def generate(self, messages, request_json=False):
