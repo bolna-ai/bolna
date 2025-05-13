@@ -2174,7 +2174,9 @@ class TaskManager(BaseManager):
                     "stream_sid": self.stream_sid,
                     "transcriber_duration": self.transcriber_duration,
                     "synthesizer_characters": self.tools['synthesizer'].get_synthesized_characters(), "ended_by_assistant": self.ended_by_assistant,
-                    "llm_latencies": self.llm_latencies
+                    "latency_dict": {
+                        "llm_latencies": self.llm_latencies
+                    }
                 }
 
                 tasks_to_cancel.append(process_task_cancellation(self.output_task,'output_task'))
