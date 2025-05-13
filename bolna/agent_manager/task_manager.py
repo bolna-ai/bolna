@@ -1788,7 +1788,6 @@ class TaskManager(BaseManager):
                             await self._synthesize(create_ws_data_packet(meta_info['text'], meta_info= meta_info))
                             return
                         else:
-                            logger.info(f"Sending the agent welcome message")
                             meta_info['is_first_chunk'] = True
                 meta_info["end_of_synthesizer_stream"] = True
                 if yield_in_chunks and audio_chunk is not None:
@@ -1803,7 +1802,6 @@ class TaskManager(BaseManager):
                     meta_info["is_first_chunk_of_entire_response"] = True
                     meta_info["is_final_chunk_of_entire_response"] = True
                     message = create_ws_data_packet(audio_chunk, meta_info)
-                    logger.info(f"Yield in chunks is false and hence sending a full")
                     self.buffered_output_queue.put_nowait(message)
 
         except Exception as e:
@@ -1941,7 +1939,6 @@ class TaskManager(BaseManager):
                     await self.tools["output"].handle(message)
                     try:
                         duration = calculate_audio_duration(len(message["data"]), self.sampling_rate, format = message['meta_info']['format'])
-                        logger.info(f"Duration of the byte {duration}")
                         self.conversation_recording['output'].append({'data': message['data'], "start_time": time.time(), "duration": duration})
                     except Exception as e:
                         duration = 0.256
@@ -2194,13 +2191,11 @@ class TaskManager(BaseManager):
 
                 self.output_task = asyncio.create_task(self.__process_output_loop())
                 if not self.turn_based_conversation or self.enforce_streaming:
-                    logger.info(f"Setting up other servers")
                     self.hangup_task = asyncio.create_task(self.__check_for_completion())
 
                     if self.should_backchannel:
                         self.backchanneling_task = asyncio.create_task(self.__check_for_backchanneling())
                     if self.ambient_noise:
-                        logger.info(f"Transmitting ambient noise")
                         self.ambient_noise_task = asyncio.create_task(self.__start_transmitting_ambient_noise())
                 try:
                     await asyncio.gather(*tasks)
