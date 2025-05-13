@@ -318,16 +318,13 @@ class TaskManager(BaseManager):
             if self.conversation_config is not None:
                 # TODO need to get this for azure - for azure the subtraction would not happen
                 self.minimum_wait_duration = self.task_config["tools_config"]["transcriber"]["endpointing"]
-                logger.info(f"minimum wait duration {self.minimum_wait_duration}")
                 self.last_spoken_timestamp = time.time() * 1000
                 self.incremental_delay = self.conversation_config.get("incremental_delay", 100)
-                logger.info(f"incremental_delay - {self.incremental_delay}")
                 self.required_delay_before_speaking = max(self.minimum_wait_duration - self.incremental_delay, 0)  #Everytime we get a message we increase it by 100 miliseconds
                 self.time_since_first_interim_result = -1
 
                 #Cut conversation
                 self.hang_conversation_after = self.conversation_config.get("hangup_after_silence", 10)
-                logger.info(f"hangup_after_silence {self.hang_conversation_after}")
                 self.last_transmitted_timestamp = 0
                 self.let_remaining_audio_pass_through = False #Will be used to let remaining audio pass through in case of utterenceEnd event and there's still audio left to be sent
 
@@ -375,7 +372,6 @@ class TaskManager(BaseManager):
                         logger.error(f"Something went wrong an putting should backchannel to false {e}")
                         self.should_backchannel = False
                 else:
-                    logger.info(f"Not setting up backchanneling")
                     self.backchanneling_audio_map = []
                 # Agent welcome message
                 if "agent_welcome_message" in self.kwargs:
@@ -579,7 +575,6 @@ class TaskManager(BaseManager):
     def __setup_transcriber(self):
         try:
             if self.task_config["tools_config"]["transcriber"] is not None:
-                logger.info("Setting up transcriber")
                 self.language = self.task_config["tools_config"]["transcriber"].get('language', DEFAULT_LANGUAGE_CODE)
                 if self.turn_based_conversation:
                     provider = "playground"
@@ -710,7 +705,6 @@ class TaskManager(BaseManager):
         return f"{enriched_prompt}\n{notes}\n{DATE_PROMPT.format(today, current_time, current_timezone)}"
 
     async def load_prompt(self, assistant_name, task_id, local, **kwargs):
-        logger.info("prompt and config setup started")
         if self.task_config["task_type"] == "webhook":
             return
 
@@ -728,7 +722,6 @@ class TaskManager(BaseManager):
         if not prompt_responses:
             prompt_responses = await get_prompt_responses(assistant_id=self.assistant_id, local=self.is_local)
 
-        logger.info(f"GOT prompt responses {prompt_responses}")
         current_task = "task_{}".format(task_id + 1)
         if self.__is_multiagent():
             logger.info(f"Getting {current_task} from prompt responses of type {type(prompt_responses)}, prompt responses key {prompt_responses.keys()}")
@@ -753,7 +746,6 @@ class TaskManager(BaseManager):
         if "system_prompt" in self.prompts:
             # This isn't a graph based agent
             enriched_prompt = self.prompts["system_prompt"]
-            logger.info("There's a system prompt")
             if self.context_data is not None:
                 # In the case of web call skipping prompt updation with context data as it would be updated when the init event is received
                 if not self.is_web_based_call:
@@ -2176,7 +2168,6 @@ class TaskManager(BaseManager):
         try:
             if self._is_conversation_task():
                 # Create transcriber and synthesizer tasks
-                logger.info("starting task_id {}".format(self.task_id))
                 tasks = [asyncio.create_task(self.tools['input'].handle())]
                 if not self.turn_based_conversation:
                     self.first_message_passing_time = None
@@ -2191,14 +2182,12 @@ class TaskManager(BaseManager):
                     self.llm_queue_task = asyncio.create_task(self._listen_llm_input_queue())
 
                 if "synthesizer" in self.tools and self._is_conversation_task() and not self.turn_based_conversation:
-                    logger.info("Starting synthesizer task")
                     try:
                         self.synthesizer_task = asyncio.create_task(self.__listen_synthesizer())
                     except asyncio.CancelledError as e:
                         logger.error(f'Synth task got cancelled {e}')
                         traceback.print_exc()
 
-                logger.info(f"Starting the first message task {self.enforce_streaming}")
                 self.output_task = asyncio.create_task(self.__process_output_loop())
                 # In the case of web call we would play the first message once we receive the init event
                 if not self.is_web_based_call:
