@@ -83,7 +83,6 @@ class GraphAgent(BaseAgent):
                 # Emphasize the latest message
                 latest_message = history[-1]["content"]
                 combined_context = f"{prompt}\n\nHere is some additional information:\n{rag_context}\n\nPlease respond based on the latest user message: '{latest_message}'."
-                logger.info(f"Combined context: {combined_context}")
 
                 return await self._generate_response_from_openai(combined_context, history)
 
@@ -96,7 +95,6 @@ class GraphAgent(BaseAgent):
                 return await self._generate_fallback_response(prompt, history)
 
         else:
-            logger.info(f"No RAGAgent for node {self.current_node_id}, using prompt directly.")
             return await self._generate_fallback_response(prompt, history)
 
 
@@ -158,9 +156,7 @@ class GraphAgent(BaseAgent):
 
     async def decide_next_move_cyclic(self, history: List[dict]) -> Optional[str]:
         current_node = self.get_node_by_id(self.current_node_id)
-        logger.info(f"Current node: {current_node}")
         accessible_nodes = self.get_accessible_nodes(current_node['id'])
-        logger.info(f"Accessible nodes: {accessible_nodes}")
 
         node_info = {}
         for node_id in accessible_nodes:
@@ -184,7 +180,6 @@ class GraphAgent(BaseAgent):
         """
 
         messages = [{"role": "system", "content": prompt}] + [{"role": item["role"], "content": item["content"]} for item in history[-3:]]
-        logger.info(f"Next node logic message: {messages}")
 
         try:
             response = self.openai.chat.completions.create(
@@ -206,7 +201,6 @@ class GraphAgent(BaseAgent):
         return next_node_id
 
     async def generate(self, message: List[dict], **kwargs) -> AsyncGenerator[Tuple[str, bool, float, bool], None]:
-        logger.info(f"Generating response for message: {message}")
         start_time = time.time()
         first_token_time = None
         buffer = ""
@@ -218,7 +212,6 @@ class GraphAgent(BaseAgent):
             # Decide next move
             next_node_id = await self.decide_next_move_cyclic(message)
             if next_node_id:
-                logger.info(f"Next node: {next_node_id}")
                 self.current_node_id = next_node_id
                 if self.current_node_id == "end":
                     response_text = "\nThank you for using our service. Goodbye!"

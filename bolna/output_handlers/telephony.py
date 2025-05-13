@@ -36,8 +36,6 @@ class TelephonyOutputHandler(DefaultOutputHandler):
             if self.stream_sid is None:
                 self.stream_sid = meta_info.get('stream_sid', None)
 
-            logger.info(f"Sending Message {self.current_request_id} and {self.stream_sid} and {meta_info}")
-
             try:
                 if len(audio_chunk) == 1:
                     audio_chunk += b'\x00'
@@ -45,7 +43,6 @@ class TelephonyOutputHandler(DefaultOutputHandler):
                 if audio_chunk and self.stream_sid and len(audio_chunk) != 1:
                     if audio_chunk != b'\x00\x00':
                         audio_format = meta_info.get("format", "wav")
-                        logger.info(f"Sending message {len(audio_chunk)} {audio_format}")
 
                         # sending of pre-mark message
                         pre_mark_event_meta_data = {
