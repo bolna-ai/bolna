@@ -57,43 +57,47 @@ class OpenAiLLM(BaseLLM):
         self.gave_out_prefunction_call_message = False
 
     async def generate_stream(self, messages, synthesize=True, request_json=False, meta_info=None):
-        if len(messages) == 0:
+        if not messages or len(messages) == 0:
             raise Exception("No messages provided")
         
         response_format = self.get_response_format(request_json)
+        model_args = {
+            **self.model_args,
+            "response_format": response_format,
+            "messages": messages,
+            "stream": True,
+            "stop": ["User:"],
+            "user": f"{self.run_id}#{meta_info['turn_id']}"
+        }
 
-        answer, buffer, arguments_received, called_fun, i = "", "", "", "", 0
-
-        model_args = self.model_args
-        model_args["response_format"] = response_format
-        model_args["messages"] = messages
-        model_args["stream"] = True
-        model_args["stop"] = ["User:"]
-        model_args["user"] = f"{self.run_id}#{meta_info['turn_id']}"
-        
-        latency = False
-        start_time = time.time()
-        tools = []
         if self.trigger_function_call:
-            if type(self.tools) is str:
-                tools = json.loads(self.tools)
-            else:
-                tools = self.tools
-            model_args["tools"] = tools
+            model_args["tools"] = json.loads(self.tools) if isinstance(self.tools, str) else self.tools
             model_args["tool_choice"] = "auto"
             model_args["parallel_tool_calls"] = False
-        received_textual_response = False
+
         self.gave_out_prefunction_call_message = False
+
+        answer, buffer = "", ""
+        tools = model_args.get("tools", [])
         final_tool_calls_data = {}
+        received_textual_response = False
+        called_fun = None
+
+        start_time = time.time()
+        first_token_time = None
+        latency = None
 
         async for chunk in await self.async_client.chat.completions.create(**model_args):
-            if not self.started_streaming:
-                first_chunk_time = time.time()
-                latency = first_chunk_time - start_time
-                logger.info(f"LLM Latency: {latency:.2f} s")
+            now = time.time()
+            if not first_token_time:
+                first_token_time = now
+                latency = first_token_time - start_time
+                logger.info(f"First token latency: {latency * 1000:.1f} ms")
                 self.started_streaming = True
 
             delta = chunk.choices[0].delta
+
+            # Function call chunk
             if hasattr(delta, 'tool_calls') and delta.tool_calls:
                 if buffer:
                     yield buffer, True, latency, False, None, None
@@ -102,11 +106,11 @@ class OpenAiLLM(BaseLLM):
                 # This for loop is going to cover the case of multiple tool calls. Currently, we are not allowing parallel
                 # tool calls but if enabled in the future then this code should take care of accumulating the tool call data
                 for tool_call in delta.tool_calls or []:
-                    index = tool_call.index
-                    if index not in final_tool_calls_data:
+                    idx = tool_call.index
+                    if idx not in final_tool_calls_data:
                         called_fun = tool_call.function.name
                         logger.info(f"Function given by LLM to trigger is - {called_fun}")
-                        final_tool_calls_data[index] = {
+                        final_tool_calls_data[idx] = {
                             "index": tool_call.index,
                             "id": tool_call.id,
                             "function": {
@@ -116,36 +120,38 @@ class OpenAiLLM(BaseLLM):
                             "type": "function"
                         }
                     else:
-                        final_tool_calls_data[index]["function"]["arguments"] += tool_call.function.arguments
+                        final_tool_calls_data[idx]["function"]["arguments"] += tool_call.function.arguments
 
                 if not self.gave_out_prefunction_call_message and not received_textual_response:
                     api_tool_pre_call_message = self.api_params[called_fun].get('pre_call_message', None)
-                    filler = compute_function_pre_call_message(self.language, called_fun, api_tool_pre_call_message)
-                    yield filler, True, latency, False, called_fun, api_tool_pre_call_message
+                    pre_msg = compute_function_pre_call_message(self.language, called_fun, api_tool_pre_call_message)
+                    yield pre_msg, True, latency, False, called_fun, api_tool_pre_call_message
                     self.gave_out_prefunction_call_message = True
 
+            # Normal text delta
             elif hasattr(delta, 'content') and delta.content is not None:
                 received_textual_response = True
                 answer += delta.content
                 buffer += delta.content
-                if len(buffer) >= self.buffer_size and synthesize:
-                    buffer_words = buffer.split(" ")
-                    text = ' '.join(buffer_words[:-1])
-                    yield text, False, latency, False, None, None
-                    buffer = buffer_words[-1]
+                if synthesize and len(buffer) >= self.buffer_size:
+                    split = buffer.rsplit(" ", 1)
+                    yield split[0], False, latency, False, None, None
+                    buffer = split[1] if len(split) > 1 else ""
 
+        # Post-processing for function call payload
         if self.trigger_function_call and final_tool_calls_data and final_tool_calls_data[0]["function"]["name"] in self.api_params:
             i = [i for i in range(len(tools)) if called_fun == tools[i]["function"]["name"]][0]
-            func_dict = self.api_params[called_fun]
+            func_conf = self.api_params[called_fun]
             arguments_received = final_tool_calls_data[0]["function"]["arguments"]
-            logger.info(f"Payload to send {arguments_received} func_dict {func_dict}")
+
+            logger.info(f"Payload to send {arguments_received} func_dict {func_conf}")
             self.gave_out_prefunction_call_message = False
 
-            api_call_return = {
-                "url": func_dict['url'],
-                "method": None if func_dict['method'] is None else func_dict['method'].lower(),
-                "param": func_dict['param'],
-                "api_token": func_dict['api_token'],
+            api_call_payload = {
+                "url": func_conf['url'],
+                "method": None if func_conf['method'] is None else func_conf['method'].lower(),
+                "param": func_conf['param'],
+                "api_token": func_conf['api_token'],
                 "model_args": model_args,
                 "meta_info": meta_info,
                 "called_fun": called_fun,
@@ -158,16 +164,18 @@ class OpenAiLLM(BaseLLM):
             if tools[i]["function"].get("parameters", None) is not None and (all(key in arguments_received for key in all_required_keys)):
                 convert_to_request_log(arguments_received, meta_info, self.model, "llm", direction="response", is_cached=False,
                                        run_id=self.run_id)
-                arguments_received = json.loads(arguments_received)
-                api_call_return = {**api_call_return, **arguments_received}
+                api_call_payload.update(json.loads(arguments_received))
             else:
-                api_call_return['resp'] = None
-            yield api_call_return, False, latency, True, None, None
+                api_call_payload['resp'] = None
+            yield api_call_payload, False, latency, True, None, None
 
         if synthesize:  # This is used only in streaming sense
             yield buffer, True, latency, False, None, None
         else:
             yield answer, True, latency, False, None, None
+
+        total_duration = time.time() - start_time
+        logger.info(f"LLM streaming complete. Total duration: {total_duration * 1000:.1f} ms")
         self.started_streaming = False
     
     async def generate(self, messages, request_json=False):
