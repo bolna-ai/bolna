@@ -215,8 +215,7 @@ class DeepgramTranscriber(BaseTranscriber):
                 self.audio_cursor = self.num_frames * self.audio_frame_duration
                 await ws.send(ws_data_packet.get('data'))
         except Exception as e:
-            logger.error('Error while sending: ' + str(e))
-            raise Exception("Something went wrong")
+            logger.info('Error while sending: ' + str(e))
 
     async def receiver(self, ws: ClientConnection):
         async for msg in ws:
@@ -281,7 +280,6 @@ class DeepgramTranscriber(BaseTranscriber):
 
             except Exception as e:
                 traceback.print_exc()
-                logger.error(f"Error while getting transcriptions {e}")
                 self.interruption_signalled = False
 
     async def push_to_transcriber_queue(self, data_packet):
