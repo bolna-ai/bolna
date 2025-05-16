@@ -118,7 +118,8 @@ class AzureTranscriber(BaseTranscriber):
             start_time = time.perf_counter()
             self.recognizer.start_continuous_recognition_async().get()
             logger.info("Azure speech recognition started successfully")
-            self.connection_time = round((time.perf_counter() - start_time) * 1000)
+            if not self.connection_time:
+                self.connection_time = round((time.perf_counter() - start_time) * 1000)
 
         except Exception as e:
             logger.error(f"Error in initialize_connection - {e}")

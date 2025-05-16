@@ -328,7 +328,8 @@ class DeepgramTranscriber(BaseTranscriber):
         try:
             start_time = time.perf_counter()
             async with await self.deepgram_connect() as deepgram_ws:
-                self.connection_time = round((time.perf_counter() - start_time) * 1000)
+                if not self.connection_time:
+                    self.connection_time = round((time.perf_counter() - start_time) * 1000)
 
                 if self.stream:
                     self.sender_task = asyncio.create_task(self.sender_stream(deepgram_ws))
