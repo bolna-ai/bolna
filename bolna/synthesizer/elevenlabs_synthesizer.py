@@ -1,6 +1,7 @@
 import asyncio
 import copy
 import uuid
+import time
 import websockets
 import base64
 import json
@@ -285,6 +286,7 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
 
     async def establish_connection(self):
         try:
+            start_time = time.perf_counter()
             websocket = await websockets.connect(self.ws_url)
             bos_message = {
                 "text": " ",
@@ -295,6 +297,9 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
                 "xi_api_key": self.api_key
             }
             await websocket.send(json.dumps(bos_message))
+            if not self.connection_time:
+                self.connection_time = round((time.perf_counter() - start_time) * 1000)
+
             logger.info(f"Connected to {self.ws_url}")
             return websocket
         except Exception as e:

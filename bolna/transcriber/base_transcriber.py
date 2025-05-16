@@ -19,6 +19,7 @@ class BaseTranscriber:
         self.last_vocal_frame_time = None
         self.previous_request_id = None
         self.current_request_id = None
+        self.connection_time = None
 
     def update_meta_info(self):
         self.meta_info['request_id'] = self.current_request_id if self.current_request_id else None

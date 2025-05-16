@@ -115,8 +115,11 @@ class AzureTranscriber(BaseTranscriber):
             self.recognizer.session_stopped.connect(self._sync_session_stopped_handler)
 
             # Start continuous recognition asynchronously (blocking until it starts)
+            start_time = time.perf_counter()
             self.recognizer.start_continuous_recognition_async().get()
             logger.info("Azure speech recognition started successfully")
+            if not self.connection_time:
+                self.connection_time = round((time.perf_counter() - start_time) * 1000)
 
         except Exception as e:
             logger.error(f"Error in initialize_connection - {e}")

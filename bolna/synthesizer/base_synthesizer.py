@@ -12,6 +12,7 @@ class BaseSynthesizer:
         self.buffer_size = buffer_size
         self.internal_queue = asyncio.Queue()
         self.task_manager_instance = task_manager_instance
+        self.connection_time = None
 
     def clear_internal_queue(self):
         logger.info(f"Clearing out internal queue")
