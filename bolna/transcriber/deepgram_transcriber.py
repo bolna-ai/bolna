@@ -127,7 +127,6 @@ class DeepgramTranscriber(BaseTranscriber):
                 await asyncio.sleep(5)  # Send a heartbeat message every 5 seconds
         except Exception as e:
             logger.info('Error while sending: ' + str(e))
-            raise Exception("Something went wrong while sending heartbeats to {}".format(self.model))
 
     async def toggle_connection(self):
         self.connection_on = False
@@ -195,9 +194,6 @@ class DeepgramTranscriber(BaseTranscriber):
         except asyncio.CancelledError:
             logger.info("Cancelled sender task")
             return
-        except Exception as e:
-            logger.error('Error while sending: ' + str(e))
-            raise Exception("Something went wrong")
 
     async def sender_stream(self, ws: ClientConnection):
         try:
@@ -331,12 +327,10 @@ class DeepgramTranscriber(BaseTranscriber):
         return None
 
     async def transcribe(self):
-        logger.info(f"STARTED TRANSCRIBING")
         try:
             start_time = time.perf_counter()
             async with await self.deepgram_connect() as deepgram_ws:
-                connection_time = time.perf_counter() - start_time
-                logger.info(f"WebSocket connection established in {connection_time:.3f} seconds")
+                self.connection_time = round((time.perf_counter() - start_time) * 1000)
 
                 if self.stream:
                     self.sender_task = asyncio.create_task(self.sender_stream(deepgram_ws))

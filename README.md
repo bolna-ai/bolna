@@ -6,8 +6,8 @@
 
 <h4 align="center">
   <a href="https://discord.gg/59kQWGgnm8">Discord</a> |
-  <a href="https://docs.bolna.dev">Hosted Docs</a> |
-  <a href="https://bolna.dev">Website</a>
+  <a href="https://docs.bolna.ai">Hosted Docs</a> |
+  <a href="https://bolna.ai">Website</a>
 </h4>
 
 <h4 align="center">
@@ -27,7 +27,7 @@
 
 ## Introduction
 
-**[Bolna](https://bolna.dev)** is the end-to-end open source production ready framework for quickly building LLM based voice driven conversational applications.
+**[Bolna](https://bolna.ai)** is the end-to-end open source production ready framework for quickly building LLM based voice driven conversational applications.
 
 ## Demo
 https://github.com/bolna-ai/bolna/assets/1313096/2237f64f-1c5b-4723-b7e7-d11466e9b226
@@ -41,8 +41,8 @@ This repository contains the entire orchestration platform to build voice AI app
 Bolna helps you create AI Voice Agents which can be instructed to do tasks beginning with:
 
 1. Orchestration platform (this open source repository)
-2. Hosted APIs (https://docs.bolna.dev/api-reference/introduction) built on top of this orchestration platform [currently closed source]
-3. No-code UI playground at https://playground.bolna.dev/ using the hosted APIs + tailwind CSS [currently closed source]
+2. Hosted APIs (https://docs.bolna.ai/api-reference/introduction) built on top of this orchestration platform [currently closed source]
+3. No-code UI playground at https://platform.bolna.ai/ using the hosted APIs + tailwind CSS [currently closed source]
 
 
 ## Development philosophy
@@ -63,7 +63,7 @@ graph LR;
 4. Synthesizing LLM responses back to telephony using `AWS Polly`, `ElevenLabs`, `Deepgram`, `OpenAI`, `Azure`, `Cartesia`, `Smallest` etc.
 
 
-Refer to the [docs](https://docs.bolna.dev/providers) for a deepdive into all supported providers.
+Refer to the [docs](https://docs.bolna.ai/providers) for a deepdive into all supported providers.
 
 
 ## Local example setup [will be moved to a different repository]

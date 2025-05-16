@@ -41,7 +41,9 @@ class TaskManager(BaseManager):
         super().__init__()
         self.kwargs = kwargs
         self.kwargs["task_manager_instance"] = self
-        self.llm_latencies = []
+        self.llm_latencies = {'connection_latency_ms': None, 'turn_latencies': []}
+        self.transcriber_latencies = {'connection_latency_ms': None, 'turn_latencies': []}
+        self.synthesizer_latencies = {'connection_latency_ms': None, 'turn_latencies': []}
 
         self.task_config = task
 
@@ -127,7 +129,6 @@ class TaskManager(BaseManager):
             self.observable_variables["final_chunk_played_observable"] = ObservableVariable(False)
             self.observable_variables["final_chunk_played_observable"].add_observer(self.final_chunk_played_observer)
 
-            self.observable_variables["init_event_observable"] = None
             if self.is_web_based_call:
                 self.observable_variables["init_event_observable"] = ObservableVariable(None)
                 self.observable_variables["init_event_observable"].add_observer(self.handle_init_event)
@@ -587,7 +588,7 @@ class TaskManager(BaseManager):
                     else:
                         transcriber_class = SUPPORTED_TRANSCRIBER_MODELS.get(
                             self.task_config["tools_config"]["transcriber"]["model"])
-                    self.tools["transcriber"] = transcriber_class( provider, **self.task_config["tools_config"]["transcriber"], **self.kwargs)
+                    self.tools["transcriber"] = transcriber_class(provider, **self.task_config["tools_config"]["transcriber"], **self.kwargs)
         except Exception as e:
             logger.error(f"Something went wrong with starting transcriber {e}")
 
@@ -1260,7 +1261,7 @@ class TaskManager(BaseManager):
                 return
 
             if latency:
-                self.llm_latencies.append(latency)
+                self.llm_latencies['turn_latencies'].append(latency)
 
             llm_response += " " + data
 
@@ -1481,7 +1482,6 @@ class TaskManager(BaseManager):
 
     async def _listen_transcriber(self):
         temp_transcriber_message = ""
-        logger.info(f"Starting transcriber task")
         try:
             while True:
                 message = await self.transcriber_output_queue.get()
@@ -2166,6 +2166,7 @@ class TaskManager(BaseManager):
                 tasks_to_cancel.append(process_task_cancellation(self.synthesizer_monitor_task, 'synthesizer_monitor_task'))
 
             if self._is_conversation_task():
+                self.transcriber_latencies['connection_latency_ms'] = self.tools["transcriber"].connection_time
                 output = {
                     "messages": self.history,
                     "conversation_time": time.time() - self.start_time,
@@ -2175,7 +2176,8 @@ class TaskManager(BaseManager):
                     "transcriber_duration": self.transcriber_duration,
                     "synthesizer_characters": self.tools['synthesizer'].get_synthesized_characters(), "ended_by_assistant": self.ended_by_assistant,
                     "latency_dict": {
-                        "llm_latencies": self.llm_latencies
+                        "llm_latencies": self.llm_latencies,
+                        "transcriber_latencies": self.transcriber_latencies
                     }
                 }
 
