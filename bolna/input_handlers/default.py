@@ -81,19 +81,24 @@ class DefaultInputHandler:
 
         logger.info(f"Mark event meta data object retrieved = {mark_event_meta_data_obj}")
         message_type = mark_event_meta_data_obj.get("type")
-
+        
+        # Only update audio playing status for content sequences (not ambient/system)
+        sequence_id = mark_event_meta_data_obj.get("sequence_id", -1)
+        is_content_audio = sequence_id > 0 and message_type not in ['ambient_noise', 'backchanneling', 'is_user_online_message']
+        
         if message_type == "pre_mark_message":
-            self.update_is_audio_being_played(True)
+            # Only set audio playing flag for content audio
+            if is_content_audio:
+                self.update_is_audio_being_played(True)
             return
 
         self.audio_chunks_received += 1
         self.response_heard_by_user += mark_event_meta_data_obj.get("text_synthesized")
 
         if mark_event_meta_data_obj.get("is_final_chunk"):
-            if message_type != "is_user_online_message":
-                self.observable_variables["final_chunk_played_observable"].value = not self.observable_variables["final_chunk_played_observable"].value
-
-            self.update_is_audio_being_played(False)
+            # Only set audio playing flag to False for content audio
+            if is_content_audio:
+                self.update_is_audio_being_played(False)
 
             if message_type == "agent_welcome_message":
                 logger.info("Received mark event for agent_welcome_message")
