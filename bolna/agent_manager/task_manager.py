@@ -1554,11 +1554,24 @@ class TaskManager(BaseManager):
                     # Whenever speech_final or UtteranceEnd is received from Deepgram, this condition would get triggered
                     elif isinstance(message.get("data"), dict) and message["data"].get("type", "") == "transcript":
                         logger.info(f"Received transcript, sending for further processing")
-                        if self.tools["input"].welcome_message_played() and self.tools["input"].is_audio_being_played_to_user() and \
-                                len(message["data"].get("content").strip().split(" ")) <= self.number_of_words_for_interruption and \
-                                message["data"].get("content").strip() not in self.accidental_interruption_phrases:
-                            logger.info(f"Continuing the loop and ignoring the transcript received ({message['data'].get('content')}) in speech final as it is false interruption")
-                            continue
+                        
+                        # Check if content audio is playing to the user (not ambient/backchanneling)
+                        # Only ignore transcript if content audio is playing
+                        if self.tools["input"].welcome_message_played() and self.tools["input"].is_audio_being_played_to_user():
+                            # Get current mark event meta data to check if it's content audio
+                            mark_meta = self.mark_event_meta_data.fetch_last_mark_event_data()
+                            is_content_audio = False
+                            
+                            if mark_meta:
+                                sequence_id = mark_meta.get("sequence_id", -1)
+                                message_type = mark_meta.get("type", "")
+                                is_content_audio = (sequence_id > 0 or message_type == "agent_welcome_message") and message_type not in ['ambient_noise', 'backchanneling', 'is_user_online_message']
+                            
+                            # Only ignore the transcript if it's content audio playing and the transcript is likely a false interruption
+                            if is_content_audio and len(message["data"].get("content").strip().split(" ")) <= self.number_of_words_for_interruption and \
+                                    message["data"].get("content").strip() not in self.accidental_interruption_phrases:
+                                logger.info(f"Continuing the loop and ignoring the transcript received ({message['data'].get('content')}) in speech final as it is false interruption")
+                                continue
 
                         self.callee_speaking = False
                         # self.callee_silent = True

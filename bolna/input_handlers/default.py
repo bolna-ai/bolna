@@ -84,7 +84,7 @@ class DefaultInputHandler:
         
         # Only update audio playing status for content sequences (not ambient/system)
         sequence_id = mark_event_meta_data_obj.get("sequence_id", -1)
-        is_content_audio = sequence_id > 0 and message_type not in ['ambient_noise', 'backchanneling', 'is_user_online_message']
+        is_content_audio = (sequence_id > 0 or message_type == "agent_welcome_message") and message_type not in ['ambient_noise', 'backchanneling', 'is_user_online_message']
         
         if message_type == "pre_mark_message":
             # Only set audio playing flag for content audio
