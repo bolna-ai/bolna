@@ -65,28 +65,28 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
                 return
 
             if not self.should_synthesize_response(sequence_id):
-                logger.info(
+                logger.synt(
                     f"Not synthesizing text as the sequence_id ({sequence_id}) of it is not in the list of sequence_ids present in the task manager.")
                 await self.flush_synthesizer_stream()
                 return
 
             # Ensure the WebSocket connection is established
             while self.websocket_holder["websocket"] is None or self.websocket_holder["websocket"].state is websockets.protocol.State.CLOSED:
-                logger.info("Waiting for elevenlabs ws connection to be established...")
+                logger.synt("Waiting for elevenlabs ws connection to be established...")
                 await asyncio.sleep(1)
 
             if text != "":
-                logger.info(f"Sending text: {text}")
+                logger.synt(f"Sending text: {text}")
                 for text_chunk in self.text_chunker(text):
                     if not self.should_synthesize_response(sequence_id):
-                        logger.info(
+                        logger.synt(
                             f"Not synthesizing text as the sequence_id ({sequence_id}) of it is not in the list of sequence_ids present in the task manager (inner loop).")
                         await self.flush_synthesizer_stream()
                         return
                     try:
                         await self.websocket_holder["websocket"].send(json.dumps({"text": text_chunk}))
                     except Exception as e:
-                        logger.info(f"Error sending chunk: {e}")
+                        logger.synt(f"Error sending chunk: {e}")
                         return
 
             # If end_of_llm_stream is True, mark the last chunk and send an empty message
@@ -97,10 +97,10 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
             try:
                 await self.websocket_holder["websocket"].send(json.dumps({"text": "", "flush": True}))
             except Exception as e:
-                logger.info(f"Error sending end-of-stream signal: {e}")
+                logger.synt(f"Error sending end-of-stream signal: {e}")
 
         except asyncio.CancelledError:
-            logger.info("Sender task was cancelled.")
+            logger.synt("Sender task was cancelled.")
         except Exception as e:
             logger.error(f"Unexpected error in sender: {e}")
 
@@ -112,14 +112,14 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
 
                 if (self.websocket_holder["websocket"] is None or
                         self.websocket_holder["websocket"].state is websockets.protocol.State.CLOSED):
-                    logger.info("WebSocket is not connected, skipping receive.")
+                    logger.synt("WebSocket is not connected, skipping receive.")
                     await asyncio.sleep(5)
                     continue
 
                 response = await self.websocket_holder["websocket"].recv()
                 data = json.loads(response)
-                logger.info("response for isFinal: {}".format(data.get('isFinal', False)))
-                # logger.info(f"Response from elevenlabs - {data}")
+                logger.synt("response for isFinal: {}".format(data.get('isFinal', False)))
+                # logger.synt(f"Response from elevenlabs - {data}")
 
                 if "audio" in data and data["audio"]:
                     chunk = base64.b64decode(data["audio"])
@@ -138,19 +138,19 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
                         response_text = ''.join(response_chars)
                         last_four_words_text = ' '.join(response_text.split(" ")[-4:]).strip()
                         last_four_words_text = last_four_words_text.replace('"', "").strip()
-                        logger.info(f'Last four char - {last_four_words_text} | current text - {self.current_text.strip()}')
+                        logger.synt(f'Last four char - {last_four_words_text} | current text - {self.current_text.strip()}')
                         if self.current_text.replace('"', "").strip().endswith(last_four_words_text):
-                            logger.info('send end_of_synthesizer_stream')
+                            logger.synt('send end_of_synthesizer_stream')
                             yield b'\x00', ""
                         elif self.current_text.replace('"', "").replace(' ', '').strip().endswith(last_four_words_text.replace(' ', '')):
-                            logger.info('send end_of_synthesizer_stream on fallback')
+                            logger.synt('send end_of_synthesizer_stream on fallback')
                             yield b'\x00', ""
                     except Exception as e:
                         logger.error(f"Error occurred while getting chars from response - {e}")
                         yield b'\x00', ""
 
                 else:
-                    logger.info("No audio data in the response")
+                    logger.synt("No audio data in the response")
 
             except websockets.exceptions.ConnectionClosed:
                 break
@@ -171,7 +171,7 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
                     else:
                         logger.error(f"Error: {response.status} - {await response.text()}")
             else:
-                logger.info("Payload was null")
+                logger.synt("Payload was null")
 
     async def synthesize(self, text):
         audio = await self.__generate_http(text, format="mp3_44100_128")
@@ -179,7 +179,7 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
 
     async def __generate_http(self, text, format=None):
         payload = None
-        logger.info(f"text {text}")
+        logger.synt(f"text {text}")
         payload = {
             "text": text,
             "model_id": self.model,
@@ -200,7 +200,7 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
         try:
             if self.stream:
                 async for message, text_synthesized in self.receiver():
-                    logger.info(f"Received message from server")
+                    logger.synt(f"Received message from server")
 
                     if len(self.text_queue) > 0:
                         self.meta_info = self.text_queue.popleft()
@@ -228,7 +228,7 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
                         self.last_text_sent = True
 
                     if message == b'\x00':
-                        logger.info("received null byte and hence end of stream")
+                        logger.synt("received null byte and hence end of stream")
                         self.meta_info["end_of_synthesizer_stream"] = True
                         self.first_chunk_generated = False
 
@@ -239,18 +239,18 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
             else:
                 while True:
                     message = await self.internal_queue.get()
-                    logger.info(f"Generating TTS response for message: {message}, using mulaw {self.use_mulaw}")
+                    logger.synt(f"Generating TTS response for message: {message}, using mulaw {self.use_mulaw}")
                     meta_info, text = message.get("meta_info"), message.get("data")
                     audio = None
                     if self.caching:
                         if self.cache.get(text):
-                            logger.info(f"Cache hit and hence returning quickly {text}")
+                            logger.synt(f"Cache hit and hence returning quickly {text}")
                             audio = self.cache.get(text)
                             meta_info['is_cached'] = True
                         else:
                             c = len(text)
                             self.synthesized_characters += c
-                            logger.info(
+                            logger.synt(
                                 f"Not a cache hit {list(self.cache.data_dict)} and hence increasing characters by {c}")
                             meta_info['is_cached'] = False
                             audio = await self.__generate_http(text)
@@ -273,13 +273,13 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
                     else:
                         meta_info['format'] = "wav"
                         wav_bytes = convert_audio_to_wav(audio, source_format="mp3")
-                        logger.info(f"self.sampling_rate {self.sampling_rate}")
+                        logger.synt(f"self.sampling_rate {self.sampling_rate}")
                         audio = resample(wav_bytes, int(self.sampling_rate), format="wav")
                     yield create_ws_data_packet(audio, meta_info)
 
         except Exception as e:
             traceback.print_exc()
-            logger.info(f"Error in eleven labs generate {e}")
+            logger.synt(f"Error in eleven labs generate {e}")
 
     def supports_websocket(self):
         return True
@@ -300,17 +300,17 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
             if not self.connection_time:
                 self.connection_time = round((time.perf_counter() - start_time) * 1000)
 
-            logger.info(f"Connected to {self.ws_url}")
+            logger.synt(f"Connected to {self.ws_url}")
             return websocket
         except Exception as e:
-            logger.info(f"Failed to connect: {e}")
+            logger.synt(f"Failed to connect: {e}")
             return None
 
     async def monitor_connection(self):
         # Periodically check if the connection is still alive
         while True:
             if self.websocket_holder["websocket"] is None or self.websocket_holder["websocket"].state is websockets.protocol.State.CLOSED:
-                logger.info("Re-establishing elevenlabs connection...")
+                logger.synt("Re-establishing elevenlabs connection...")
                 self.websocket_holder["websocket"] = await self.establish_connection()
             await asyncio.sleep(1)
 
@@ -318,12 +318,12 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
         return self.sender_task
 
     async def push(self, message):
-        logger.info(f"Pushed message to internal queue {message}")
+        logger.synt(f"Pushed message to internal queue {message}")
         if self.stream:
             meta_info, text, self.current_text = message.get("meta_info"), message.get("data"), message.get("data")
             self.synthesized_characters += len(text) if text is not None else 0
             end_of_llm_stream = "end_of_llm_stream" in meta_info and meta_info["end_of_llm_stream"]
-            logger.info(f"end_of_llm_stream: {end_of_llm_stream}")
+            logger.synt(f"end_of_llm_stream: {end_of_llm_stream}")
             self.meta_info = copy.deepcopy(meta_info)
             meta_info["text"] = text
             self.sender_task = asyncio.create_task(self.sender(text, meta_info.get("sequence_id"), end_of_llm_stream))
@@ -333,15 +333,15 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
 
     async def cleanup(self):
         self.conversation_ended = True
-        logger.info("cleaning elevenlabs synthesizer tasks")
+        logger.synt("cleaning elevenlabs synthesizer tasks")
         if self.sender_task:
             try:
                 self.sender_task.cancel()
                 await self.sender_task
             except asyncio.CancelledError:
-                logger.info("Sender task was successfully cancelled during WebSocket cleanup.")
+                logger.synt("Sender task was successfully cancelled during WebSocket cleanup.")
 
         if self.websocket_holder["websocket"]:
             await self.websocket_holder["websocket"].close()
         self.websocket_holder["websocket"] = None
-        logger.info("WebSocket connection closed.")
+        logger.synt("WebSocket connection closed.")

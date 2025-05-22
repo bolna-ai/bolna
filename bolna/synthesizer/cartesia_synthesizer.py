@@ -63,7 +63,7 @@ class CartesiaSynthesizer(BaseSynthesizer):
                     "cancel": True
                 }
 
-                logger.info('handle_interruption: {}'.format(interrupt_message))
+                logger.synt('handle_interruption: {}'.format(interrupt_message))
                 await self.websocket_holder["websocket"].send(json.dumps(interrupt_message))
         except Exception as e:
             pass
@@ -95,15 +95,15 @@ class CartesiaSynthesizer(BaseSynthesizer):
                 return
 
             if not self.should_synthesize_response(sequence_id):
-                logger.info(f"Not synthesizing text as the sequence_id ({sequence_id}) of it is not in the list of sequence_ids present in the task manager.")
+                logger.synt(f"Not synthesizing text as the sequence_id ({sequence_id}) of it is not in the list of sequence_ids present in the task manager.")
                 return
 
             while self.websocket_holder["websocket"] is None or self.websocket_holder["websocket"].state is websockets.protocol.State.CLOSED:
-                logger.info("Waiting for webSocket connection to be established...")
+                logger.synt("Waiting for webSocket connection to be established...")
                 await asyncio.sleep(1)
 
             if text != "":
-                logger.info(f"Sending text_chunk: {text}")
+                logger.synt(f"Sending text_chunk: {text}")
                 try:
                     input_message = self.form_payload(text)
                     await self.websocket_holder["websocket"].send(json.dumps(input_message))
@@ -119,11 +119,11 @@ class CartesiaSynthesizer(BaseSynthesizer):
             try:
                 input_message = self.form_payload("")
                 await self.websocket_holder["websocket"].send(json.dumps(input_message))
-                logger.info("Sent end-of-stream signal.")
+                logger.synt("Sent end-of-stream signal.")
             except Exception as e:
                 logger.error(f"Error sending end-of-stream signal: {e}")
         except asyncio.CancelledError:
-            logger.info("Sender task was cancelled.")
+            logger.synt("Sender task was cancelled.")
         except Exception as e:
             logger.error(f"Unexpected error in sender: {e}")
 
@@ -134,7 +134,7 @@ class CartesiaSynthesizer(BaseSynthesizer):
                     return
 
                 if self.websocket_holder["websocket"] is None or self.websocket_holder["websocket"].state is websockets.protocol.State.CLOSED:
-                    logger.info("WebSocket is not connected, skipping receive.")
+                    logger.synt("WebSocket is not connected, skipping receive.")
                     await asyncio.sleep(5)
                     continue
 
@@ -152,7 +152,7 @@ class CartesiaSynthesizer(BaseSynthesizer):
                 elif "done" in data and data["done"]:
                     yield b'\x00'
                 else:
-                    logger.info("No audio data in the response")
+                    logger.synt("No audio data in the response")
             except websockets.exceptions.ConnectionClosed:
                 break
 
@@ -171,7 +171,7 @@ class CartesiaSynthesizer(BaseSynthesizer):
                     else:
                         logger.error(f"Error: {response.status} - {await response.text()}")
             else:
-                logger.info("Payload was null")
+                logger.synt("Payload was null")
 
     async def synthesize(self, text):
         audio = await self.__generate_http(text)
@@ -179,7 +179,7 @@ class CartesiaSynthesizer(BaseSynthesizer):
 
     async def __generate_http(self, text,):
         payload = None
-        logger.info(f"text {text}")
+        logger.synt(f"text {text}")
         payload = {
             "model_id": self.model,
             "transcript": text,
@@ -226,7 +226,7 @@ class CartesiaSynthesizer(BaseSynthesizer):
                     self.last_text_sent = True
 
                 if message == b'\x00':
-                    logger.info("received null byte and hence end of stream")
+                    logger.synt("received null byte and hence end of stream")
                     self.meta_info["end_of_synthesizer_stream"] = True
                     self.first_chunk_generated = False
 
@@ -239,17 +239,17 @@ class CartesiaSynthesizer(BaseSynthesizer):
     async def establish_connection(self):
         try:
             websocket = await websockets.connect(self.ws_url)
-            logger.info(f"Connected to {self.ws_url}")
+            logger.synt(f"Connected to {self.ws_url}")
             return websocket
         except Exception as e:
-            logger.info(f"Failed to connect: {e}")
+            logger.synt(f"Failed to connect: {e}")
             return None
 
     async def monitor_connection(self):
         # Periodically check if the connection is still alive
         while True:
             if self.websocket_holder["websocket"] is None or self.websocket_holder["websocket"].state is websockets.protocol.State.CLOSED:
-                logger.info("Re-establishing connection...")
+                logger.synt("Re-establishing connection...")
                 self.websocket_holder["websocket"] = await self.establish_connection()
             await asyncio.sleep(1)
 
@@ -259,7 +259,7 @@ class CartesiaSynthesizer(BaseSynthesizer):
         self.sequence_id = meta_info.get('sequence_id', 0)
 
     async def push(self, message):
-        logger.info(f"Pushed message to internal queue {message}")
+        logger.synt(f"Pushed message to internal queue {message}")
         if self.stream:
             meta_info, text, self.current_text = message.get("meta_info"), message.get("data"), message.get("data")
             self.synthesized_characters += len(text) if text is not None else 0
@@ -279,15 +279,15 @@ class CartesiaSynthesizer(BaseSynthesizer):
 
     async def cleanup(self):
         self.conversation_ended = True
-        logger.info("cleaning cartesia synthesizer tasks")
+        logger.synt("cleaning cartesia synthesizer tasks")
         if self.sender_task:
             try:
                 self.sender_task.cancel()
                 await self.sender_task
             except asyncio.CancelledError:
-                logger.info("Sender task was successfully cancelled during WebSocket cleanup.")
+                logger.synt("Sender task was successfully cancelled during WebSocket cleanup.")
 
         if self.websocket_holder["websocket"]:
             await self.websocket_holder["websocket"].close()
         self.websocket_holder["websocket"] = None
-        logger.info("WebSocket connection closed.")
+        logger.synt("WebSocket connection closed.")

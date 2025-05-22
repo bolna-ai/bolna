@@ -56,7 +56,7 @@ class AzureTranscriber(BaseTranscriber):
 
     def _check_and_process_end_of_stream(self, ws_data_packet):
         if 'eos' in ws_data_packet['meta_info'] and ws_data_packet['meta_info']['eos'] is True:
-            logger.info("End of stream detected")
+            logger.trans("End of stream detected")
             self.cleanup()
             return True
         return False
@@ -75,7 +75,7 @@ class AzureTranscriber(BaseTranscriber):
                 end_of_stream = self._check_and_process_end_of_stream(ws_data_packet)
                 if end_of_stream:
                     break
-                # logger.info(f"Sending audio packet to Azure - {ws_data_packet.get('data')}")
+                # logger.trans(f"Sending audio packet to Azure - {ws_data_packet.get('data')}")
                 if ws_data_packet.get('data'):
                     self.push_stream.write(ws_data_packet.get('data'))
         except Exception as e:
@@ -117,7 +117,7 @@ class AzureTranscriber(BaseTranscriber):
             # Start continuous recognition asynchronously (blocking until it starts)
             start_time = time.perf_counter()
             self.recognizer.start_continuous_recognition_async().get()
-            logger.info("Azure speech recognition started successfully")
+            logger.trans("Azure speech recognition started successfully")
             if not self.connection_time:
                 self.connection_time = round((time.perf_counter() - start_time) * 1000)
 
@@ -142,7 +142,7 @@ class AzureTranscriber(BaseTranscriber):
 
     # Async handlers
     async def recognizing_handler(self, evt):
-        logger.info(f"Intermediate results: {evt.result.text} | run_id - {self.run_id}")
+        logger.trans(f"Intermediate results: {evt.result.text} | run_id - {self.run_id}")
         if evt.result.text.strip():
             data = {
                 "type": "interim_transcript_received",
@@ -152,7 +152,7 @@ class AzureTranscriber(BaseTranscriber):
 
     async def recognized_handler(self, evt):
         # Final recognized text for an utterance.
-        logger.info(f"Final transcript: {evt.result.text} | run_id - {self.run_id}")
+        logger.trans(f"Final transcript: {evt.result.text} | run_id - {self.run_id}")
         if evt.result.text.strip():
             data = {
                 "type": "transcript",
@@ -162,14 +162,14 @@ class AzureTranscriber(BaseTranscriber):
             self.duration += evt.result.duration
 
     async def canceled_handler(self, evt):
-        logger.info(f"Canceled event received: {evt} | run_id - {self.run_id}")
+        logger.trans(f"Canceled event received: {evt} | run_id - {self.run_id}")
 
     async def session_started_handler(self, evt):
-        logger.info(f"Session start event received: {evt} | run_id - {self.run_id}")
+        logger.trans(f"Session start event received: {evt} | run_id - {self.run_id}")
         self.start_time = time.time()
 
     async def session_stopped_handler(self, evt):
-        logger.info(f"Session stop event received: {evt} | run_id - {self.run_id}")
+        logger.trans(f"Session stop event received: {evt} | run_id - {self.run_id}")
         # TODO add the code for getting transcript duration for billing
         self.end_time = time.time()
         self.meta_info["transcriber_duration"] = self.end_time - self.start_time
@@ -191,7 +191,7 @@ class AzureTranscriber(BaseTranscriber):
 
     def cleanup(self):
         try:
-            logger.info(f"Cleaning up azure connections")
+            logger.trans(f"Cleaning up azure connections")
             if self.push_stream:
                 self.push_stream.close()
                 self.push_stream = None
@@ -208,8 +208,8 @@ class AzureTranscriber(BaseTranscriber):
 
             if not self.end_time:
                 self.end_time = time.time()
-            logger.info("Connections to azure have been successfully closed")
-            logger.info(f"Time duration as per azure - {self.duration} | Time duration as per self calculation - {self.end_time - self.start_time}" )
+            logger.trans("Connections to azure have been successfully closed")
+            logger.trans(f"Time duration as per azure - {self.duration} | Time duration as per self calculation - {self.end_time - self.start_time}" )
         except Exception as e:
             logger.error(f"Error occurred while cleaning up - {e}")
 

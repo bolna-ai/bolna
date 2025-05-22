@@ -47,14 +47,14 @@ class LiteLLM(BaseLLM):
         model_args["messages"] = messages
         model_args["stream"] = True
 
-        logger.info(f"request to model: {self.model}: {messages} and model args {model_args}")
+        logger.llm(f"request to model: {self.model}: {messages} and model args {model_args}")
         latency = False
         start_time = time.time()
         async for chunk in await litellm.acompletion(**model_args):
             if not self.started_streaming:
                 first_chunk_time = time.time()
                 latency = first_chunk_time - start_time
-                logger.info(f"LLM Latency: {latency:.2f} s")
+                logger.llm(f"LLM Latency: {latency:.2f} s")
                 self.started_streaming = True
             if (text_chunk := chunk['choices'][0]['delta'].content) and not chunk['choices'][0].finish_reason:
                 answer += text_chunk
@@ -75,7 +75,7 @@ class LiteLLM(BaseLLM):
         else:
             yield answer, True, latency, False, None, None
         self.started_streaming = False
-        logger.info(f"Time to generate response {time.time() - start_time} {answer}")
+        logger.llm(f"Time to generate response {time.time() - start_time} {answer}")
 
     async def generate(self, messages, stream=False, request_json=False, meta_info = None):
         text = ""
@@ -89,7 +89,7 @@ class LiteLLM(BaseLLM):
                 "type": "json_object",
                 "schema": json_to_pydantic_schema('{"classification_label": "classification label goes here"}')
             }
-        logger.info(f'Request to litellm {model_args}')
+        logger.llm(f'Request to litellm {model_args}')
         try:
             completion = await litellm.acompletion(**model_args)
             text = completion.choices[0].message.content
