@@ -3,20 +3,10 @@ import os
 import sys
 from contextvars import ContextVar
 from logging.handlers import RotatingFileHandler
-
+from constants import CUSTOM_LEVELS, COMPONENT_LEVELS
 
 # --- Custom log levels ---
-CUSTOM_LEVELS = {
-    "TRANSCRIBER": 25,
-    "LLM": 35,
-    "SYNTHESIZER": 45,
-}
 
-COMPONENT_LEVELS = {
-    "transcriber": CUSTOM_LEVELS["TRANSCRIBER"],
-    "llm": CUSTOM_LEVELS["LLM"],
-    "synthesizer": CUSTOM_LEVELS["SYNTHESIZER"],
-}
 
 for name, level in CUSTOM_LEVELS.items():
     logging.addLevelName(level, name)
@@ -28,7 +18,6 @@ os.makedirs(LOGS_DIR, exist_ok=True)
 
 MAX_LOG_SIZE = int(os.getenv("MAX_LOG_SIZE", 10 * 1024 * 1024))
 BACKUP_COUNT = int(os.getenv("BACKUP_LOG_COUNT", 5))
-
 original_factory = logging.getLogRecordFactory()
 
 def dynamic_log_record_factory(*args, **kwargs):
