@@ -66,7 +66,7 @@ class PollySynthesizer(BaseSynthesizer):
         session = AioSession()
         async with AsyncExitStack() as exit_stack:
             polly = await self.create_client("polly", session, exit_stack)
-            logger.info(f"Generating TTS response for text: {text}, SampleRate {self.sample_rate} format {self.format}")
+            logger.synt(f"Generating TTS response for text: {text}, SampleRate {self.sample_rate} format {self.format}")
             # input = f"""
             # <speak> 
             #     <amazon:auto-breaths volume= "x-loud" frequency="x-high" duration="x-long"> 
@@ -105,27 +105,27 @@ class PollySynthesizer(BaseSynthesizer):
 
     async def generate(self):
         while True:
-            logger.info("Generating TTS response")
+            logger.synt("Generating TTS response")
             message = await self.internal_queue.get()
-            logger.info(f"Generating TTS response for message: {message}")
+            logger.synt(f"Generating TTS response for message: {message}")
             meta_info, text = message.get("meta_info"), message.get("data")
 
             if not self.should_synthesize_response(meta_info.get('sequence_id')):
-                logger.info(f"Not synthesizing text as the sequence_id ({meta_info.get('sequence_id')}) of it is not in the list of sequence_ids present in the task manager.")
+                logger.synt(f"Not synthesizing text as the sequence_id ({meta_info.get('sequence_id')}) of it is not in the list of sequence_ids present in the task manager.")
                 return
 
             if self.caching:
-                logger.info(f"Caching is on")
+                logger.synt(f"Caching is on")
                 if self.cache.get(text):
-                    logger.info(f"Cache hit and hence returning quickly {text}")
+                    logger.synt(f"Cache hit and hence returning quickly {text}")
                     message = self.cache.get(text)
                 else:
-                    logger.info(f"Not a cache hit {list(self.cache.data_dict)}")
+                    logger.synt(f"Not a cache hit {list(self.cache.data_dict)}")
                     self.synthesized_characters += len(text)
                     message = await self.__generate_http(text)
                     self.cache.set(text, message)
             else:
-                logger.info(f"No caching present")
+                logger.synt(f"No caching present")
                 self.synthesized_characters += len(text)
                 message = await self.__generate_http(text)
             if self.format == "mp3":
@@ -145,5 +145,5 @@ class PollySynthesizer(BaseSynthesizer):
             yield create_ws_data_packet(message, meta_info)
 
     async def push(self, message):
-        logger.info("Pushed message to internal queue")
+        logger.synt("Pushed message to internal queue")
         self.internal_queue.put_nowait(message)

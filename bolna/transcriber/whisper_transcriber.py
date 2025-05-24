@@ -31,7 +31,7 @@ class WhisperTranscriber(BaseTranscriber):
     def __init__(self, telephony_provider, input_queue=None, model='whisper', stream=True, language="en", endpointing="400",
                  sampling_rate="16000", encoding="PCM", output_queue=None, keywords=None,
                  process_interim_results="true", *args,**kwargs):
-        logger.info(f"Initializing transcriber")
+        logger.trans(f"Initializing transcriber")
         super().__init__(input_queue)
 
         self.endpointing = endpointing
@@ -104,9 +104,9 @@ class WhisperTranscriber(BaseTranscriber):
     # TODO: add a server end  process in the server code
     async def _check_and_process_end_of_stream(self, ws_data_packet, ws):
         if 'eos' in ws_data_packet['meta_info'] and ws_data_packet['meta_info']['eos'] is True:
-            logger.info("First closing transcription websocket")
+            logger.trans("First closing transcription websocket")
             await self.heartbeat_task.send(b"END_OF_AUDIO")
-            logger.info("Closed transcription websocket and now closing transcription task")
+            logger.trans("Closed transcription websocket and now closing transcription task")
             return True  # Indicates end of processing
 
         return False
@@ -138,7 +138,7 @@ class WhisperTranscriber(BaseTranscriber):
                 audio_chunk:bytes = ws_data_packet.get('data')
 
                 if self.provider in ["twilio", "exotel", "plivo"]:
-                    logger.info(f"It is a telephony provider")
+                    logger.trans(f"It is a telephony provider")
                     audio_chunk = ulaw2lin(audio_chunk, 2)
                     audio_chunk = ratecv(audio_chunk, 2, 1, 8000, 16000, None)[0]
                     
@@ -158,12 +158,12 @@ class WhisperTranscriber(BaseTranscriber):
                 # If connection_start_time is None, it is the duratons of frame submitted till now minus current time
                 if self.connection_start_time is None:
                     self.connection_start_time = (time.time() - (self.num_frames * self.audio_frame_duration))
-                    logger.info(
+                    logger.trans(
                         f"Connecton start time {self.connection_start_time} {self.num_frames} and {self.audio_frame_duration}")
 
-                logger.info(f"###### ######### ############# Message from the transcriber {msg}")
+                logger.trans(f"###### ######### ############# Message from the transcriber {msg}")
                 if "message" in msg and msg["message"] == "DISCONNECT":
-                    logger.info(f"Got a summary object {msg}")
+                    logger.trans(f"Got a summary object {msg}")
                     self.meta_info["transcriber_duration"] = msg["duration"]
                     yield create_ws_data_packet("transcriber_connection_closed", self.meta_info)
                     self.curr_message:str = ''
@@ -177,15 +177,15 @@ class WhisperTranscriber(BaseTranscriber):
 
                 # TODO LATENCY STUFF
                 if "message" in msg and msg["message"] == "UTTERANCE_END":
-                    logger.info(f"segmeny list{self.segments_list}")
+                    logger.trans(f"segmeny list{self.segments_list}")
                     if len(self.segments_list) >= 0:
                         self.finalized_transcript = self.finalized_transcript + " " + self.segments_list[-1].get("text")
                     
 
-                    logger.info(
+                    logger.trans(
                         "Transcriber Latency: {} for request id {}".format(time.time() - self.audio_submission_time,
                                                                            self.current_request_id))
-                    logger.info(f"Current message during UtteranceEnd {self.curr_message}")
+                    logger.trans(f"Current message during UtteranceEnd {self.curr_message}")
                     self.meta_info["start_time"] = self.audio_submission_time
                     self.meta_info["end_time"] = time.time() - 100
                     self.meta_info['speech_final'] = True
@@ -197,7 +197,7 @@ class WhisperTranscriber(BaseTranscriber):
                     self.meta_info["transcriber_latency"] = None
                     # if self.curr_message == "":
                     #     continue
-                    logger.info(f"Signalling the Task manager to start speaking")
+                    logger.trans(f"Signalling the Task manager to start speaking")
                     yield create_ws_data_packet(self.finalized_transcript, self.meta_info)
                     self.curr_message = ""
                     self.finalized_transcript = ""
@@ -208,11 +208,11 @@ class WhisperTranscriber(BaseTranscriber):
                     if not self.speech_started:
                         self.speech_started = True
                         if self.curr_message != "" and not self.process_interim_results:
-                            logger.info("Current messsage is null and hence inetrrupting")
+                            logger.trans("Current messsage is null and hence inetrrupting")
                             self.meta_info["should_interrupt"] = True
                         elif self.process_interim_results:
                             self.meta_info["should_interrupt"] = False
-                        logger.info(f"YIELDING TRANSCRIBER BEGIN")
+                        logger.trans(f"YIELDING TRANSCRIBER BEGIN")
                         yield create_ws_data_packet("TRANSCRIBER_BEGIN", self.meta_info)
                         await asyncio.sleep(0.05) #Sleep for 50ms to pass the control to task manager
                         continue
@@ -228,14 +228,14 @@ class WhisperTranscriber(BaseTranscriber):
 
                 if self.process_interim_results:
                     self.curr_message = self.finalized_transcript + " " + transcript
-                    logger.info(f"Yielding interim-message current_message = {self.curr_message}")
+                    logger.trans(f"Yielding interim-message current_message = {self.curr_message}")
                     self.meta_info["include_latency"] = False
                     self.meta_info["utterance_end"] = self.__calculate_utterance_end(msg)
                     # Calculate latency
                     self.__set_transcription_cursor(msg)
                     latency = self.__calculate_latency()
                     self.meta_info['transcriber_latency'] = latency
-                    logger.info(f'Transcription latency is : {latency}')
+                    logger.trans(f'Transcription latency is : {latency}')
                     yield create_ws_data_packet(self.curr_message, self.meta_info)
                     
                     # If is_final is true simply update the finalized transcript
@@ -245,7 +245,7 @@ class WhisperTranscriber(BaseTranscriber):
                             self.finalized_transcript += " " + self.segments_list[self.seg_ptr].get("text")  # Just get the whole transcript as there's mismatch at times
                             self.meta_info["is_final"] = True
                             self.current_seg_ptr = self.seg_ptr
-                            logger.info(f"final segment {self.finalized_transcript}")
+                            logger.trans(f"final segment {self.finalized_transcript}")
 
                     # if  msg["is_final"] is True:
                     #     self.finalized_transcript += " " + transcript  # Just get the whole transcript as there's mismatch at times
@@ -277,18 +277,18 @@ class WhisperTranscriber(BaseTranscriber):
         if self.segments_list is not None:
             # TODO: ASK it
             utterance_end = self.connection_start_time + float(self.whole_segment_list[-1].get('end'))
-            logger.info(f"Final word ended at {utterance_end}")
+            logger.trans(f"Final word ended at {utterance_end}")
         return utterance_end
 
     def __set_transcription_cursor(self, data):
         if self.segments_list is not None:
             self.transcription_cursor = float(self.whole_segment_list[-1].get('end'))
-            logger.info(f"Setting transcription cursor at {self.transcription_cursor}")
+            logger.trans(f"Setting transcription cursor at {self.transcription_cursor}")
         return self.transcription_cursor
 
     def __calculate_latency(self):
         if self.transcription_cursor is not None:
-            logger.info(f'audio cursor is at {self.audio_cursor} & transcription cursor is at {self.transcription_cursor}')
+            logger.trans(f'audio cursor is at {self.audio_cursor} & transcription cursor is at {self.transcription_cursor}')
             return self.audio_cursor - self.transcription_cursor
         return None
 
@@ -326,7 +326,7 @@ class WhisperTranscriber(BaseTranscriber):
     
     # TRANSCRIBER
     async def transcribe(self):
-        logger.info(f"STARTED TRANSCRIBING")
+        logger.trans(f"STARTED TRANSCRIBING")
         try:
             async with self.whisper_connect() as whisper_ws:
                 self.current_request_id = self.generate_request_id()
@@ -340,7 +340,7 @@ class WhisperTranscriber(BaseTranscriber):
                         "use_vad": True
                     }
                 ))
-                logger.info(f"the server is connect to WHISPER {await whisper_ws.recv()}")
+                logger.trans(f"the server is connect to WHISPER {await whisper_ws.recv()}")
                 if self.stream:
                     self.sender_task = asyncio.create_task(self.sender_stream(whisper_ws))
                     # self.heartbeat_task = asyncio.create_task(self.send_heartbeat(whisper_ws))
@@ -349,7 +349,7 @@ class WhisperTranscriber(BaseTranscriber):
                         if self.connection_on:
                             await self.push_to_transcriber_queue(message)
                         else:
-                            logger.info("closing the deepgram connection")
+                            logger.trans("closing the deepgram connection")
                             await self._close(whisper_ws, data={"type": "CloseStream"})
                 else:
                     async for message in self.sender():

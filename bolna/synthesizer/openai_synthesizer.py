@@ -64,12 +64,12 @@ class OPENAISynthesizer(BaseSynthesizer):
         try:
             while True:
                 message = await self.internal_queue.get()
-                logger.info(f"Generating TTS response for message: {message}")
+                logger.synt(f"Generating TTS response for message: {message}")
                 meta_info, text = message.get("meta_info"), message.get("data")
                 meta_info["text"] = text
 
                 if not self.should_synthesize_response(meta_info.get('sequence_id')):
-                    logger.info(
+                    logger.synt(
                         f"Not synthesizing text as the sequence_id ({meta_info.get('sequence_id')}) of it is not in the list of sequence_ids present in the task manager.")
                     return
 
@@ -86,7 +86,7 @@ class OPENAISynthesizer(BaseSynthesizer):
                         yield create_ws_data_packet(b"\x00", meta_info)
 
                 else:
-                    logger.info(f"Generating without a stream")
+                    logger.synt(f"Generating without a stream")
                     audio = await self.__generate_http(text)
                     if not self.first_chunk_generated:
                         meta_info["is_first_chunk"] = True
@@ -104,5 +104,5 @@ class OPENAISynthesizer(BaseSynthesizer):
         pass
 
     async def push(self, message):
-        logger.info(f"Pushed message to internal queue {message}")
+        logger.synt(f"Pushed message to internal queue {message}")
         self.internal_queue.put_nowait(message)

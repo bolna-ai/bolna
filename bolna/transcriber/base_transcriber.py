@@ -45,10 +45,10 @@ class BaseTranscriber:
     async def log_latency_info(self):
         transcription_completion_time = time.time()
         if self.last_vocal_frame_time:
-            logger.info(
+            logger.trans(
                 f"################ Time latency: For request {self.meta_info['request_id']}, user started speaking at {self.transcription_start_time}, last audio frame received at {self.last_vocal_frame_time} transcription_completed_at {transcription_completion_time} overall latency {transcription_completion_time - self.last_vocal_frame_time}")
         else:
-            logger.info(
+            logger.trans(
                 f"No confidence for the last vocal timeframe. Over transcription time {transcription_completion_time - self.transcription_start_time}")
 
     async def _close(self, ws, data):

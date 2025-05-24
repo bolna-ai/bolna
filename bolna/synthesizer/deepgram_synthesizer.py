@@ -45,7 +45,7 @@ class DeepgramSynthesizer(BaseSynthesizer):
             self.format, self.sample_rate, self.model
         )
 
-        logger.info(f"Sending deepgram request {url}")
+        logger.synt(f"Sending deepgram request {url}")
 
         payload = {
             "text": text
@@ -56,13 +56,13 @@ class DeepgramSynthesizer(BaseSynthesizer):
                     async with session.post(url, headers=headers, json=payload) as response:
                         if response.status == 200:
                             chunk = await response.read()
-                            logger.info(f"status for deepgram request {response.status} response {len(await response.read())}")
+                            logger.synt(f"status for deepgram request {response.status} response {len(await response.read())}")
                             return chunk
                         else:
-                            logger.info(f"status for deepgram reques {response.status} response {await response.read()}")
+                            logger.synt(f"status for deepgram reques {response.status} response {await response.read()}")
                             return b'\x00'
                 else:
-                    logger.info("Payload was null")
+                    logger.synt("Payload was null")
         except Exception as e:
             logger.error("something went wrong")
 
@@ -85,23 +85,23 @@ class DeepgramSynthesizer(BaseSynthesizer):
     async def generate(self):
         while True:
             message = await self.internal_queue.get()
-            logger.info(f"Generating TTS response for message: {message}")
+            logger.synt(f"Generating TTS response for message: {message}")
             meta_info, text = message.get("meta_info"), message.get("data")
             if not self.should_synthesize_response(meta_info.get('sequence_id')):
-                logger.info(f"Not synthesizing text as the sequence_id ({meta_info.get('sequence_id')}) of it is not in the list of sequence_ids present in the task manager.")
+                logger.synt(f"Not synthesizing text as the sequence_id ({meta_info.get('sequence_id')}) of it is not in the list of sequence_ids present in the task manager.")
                 return
             if self.caching:
-                logger.info(f"Caching is on")
+                logger.synt(f"Caching is on")
                 if self.cache.get(text):
-                    logger.info(f"Cache hit and hence returning quickly {text}")
+                    logger.synt(f"Cache hit and hence returning quickly {text}")
                     message = self.cache.get(text)
                 else:
-                    logger.info(f"Not a cache hit {list(self.cache.data_dict)}")
+                    logger.synt(f"Not a cache hit {list(self.cache.data_dict)}")
                     self.synthesized_characters += len(text)
                     message = await self.__generate_http(text)
                     self.cache.set(text, message)
             else:
-                logger.info(f"No caching present")
+                logger.synt(f"No caching present")
                 self.synthesized_characters += len(text)
                 message = await self.__generate_http(text)
 
@@ -122,5 +122,5 @@ class DeepgramSynthesizer(BaseSynthesizer):
             yield create_ws_data_packet(message, meta_info)
 
     async def push(self, message):
-        logger.info(f"Pushed message to internal queue {message}")
+        logger.synt(f"Pushed message to internal queue {message}")
         self.internal_queue.put_nowait(copy.deepcopy(message))

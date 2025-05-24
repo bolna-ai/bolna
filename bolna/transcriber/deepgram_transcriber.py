@@ -25,7 +25,7 @@ class DeepgramTranscriber(BaseTranscriber):
     def __init__(self, telephony_provider, input_queue=None, model='nova-2', stream=True, language="en", endpointing="400",
                  sampling_rate="16000", encoding="linear16", output_queue=None, keywords=None,
                  process_interim_results="true", **kwargs):
-        logger.info(f"Initializing transcriber")
+        logger.trans(f"Initializing transcriber")
         super().__init__(input_queue)
         self.endpointing = endpointing
         self.language = language if model == "nova-2" else "en"
@@ -43,7 +43,7 @@ class DeepgramTranscriber(BaseTranscriber):
         self.keywords = keywords
         self.audio_cursor = 0.0
         self.transcription_cursor = 0.0
-        logger.info(f"self.stream: {self.stream}")
+        logger.trans(f"self.stream: {self.stream}")
         self.interruption_signalled = False
         if 'nova-2' not in self.model:
             self.model = "nova-2"
@@ -67,7 +67,7 @@ class DeepgramTranscriber(BaseTranscriber):
         self.is_transcript_sent_for_processing = False
 
     def get_deepgram_ws_url(self):
-        logger.info(f"GETTING DEEPGRAM WS")
+        logger.trans(f"GETTING DEEPGRAM WS")
         dg_params = {
             'model': self.model,
             'filler_words': 'true',
@@ -104,7 +104,7 @@ class DeepgramTranscriber(BaseTranscriber):
             dg_params['channels'] = "1"
 
         if self.provider == "playground":
-            logger.info(f"CONNECTED THROUGH PLAYGROUND")
+            logger.trans(f"CONNECTED THROUGH PLAYGROUND")
             self.sampling_rate = 8000
             self.audio_frame_duration = 0.0  # There's no streaming from the playground
 
@@ -116,7 +116,7 @@ class DeepgramTranscriber(BaseTranscriber):
 
         websocket_api = 'wss://{}/v1/listen?'.format(self.deepgram_host)
         websocket_url = websocket_api + urlencode(dg_params)
-        logger.info(f"Deepgram websocket url: {websocket_url}")
+        logger.trans(f"Deepgram websocket url: {websocket_url}")
         return websocket_url
 
     async def send_heartbeat(self, ws: ClientConnection):
@@ -126,7 +126,7 @@ class DeepgramTranscriber(BaseTranscriber):
                 await ws.send(json.dumps(data))
                 await asyncio.sleep(5)  # Send a heartbeat message every 5 seconds
         except Exception as e:
-            logger.info('Error while sending: ' + str(e))
+            logger.trans('Error while sending: ' + str(e))
 
     async def toggle_connection(self):
         self.connection_on = False
@@ -151,17 +151,17 @@ class DeepgramTranscriber(BaseTranscriber):
                 response_data = await response.json()
                 self.meta_info["start_time"] = start_time
                 self.meta_info['transcriber_latency'] = time.time() - start_time
-                logger.info(f"response_data {response_data} transcriber_latency time {time.time() - start_time}")
+                logger.trans(f"response_data {response_data} transcriber_latency time {time.time() - start_time}")
                 transcript = response_data["results"]["channels"][0]["alternatives"][0]["transcript"]
-                logger.info(f"transcript {transcript} total time {time.time() - start_time}")
+                logger.trans(f"transcript {transcript} total time {time.time() - start_time}")
                 self.meta_info['transcriber_duration'] = response_data["metadata"]["duration"]
                 return create_ws_data_packet(transcript, self.meta_info)
 
     async def _check_and_process_end_of_stream(self, ws_data_packet, ws):
         if 'eos' in ws_data_packet['meta_info'] and ws_data_packet['meta_info']['eos'] is True:
-            logger.info("First closing transcription websocket")
+            logger.trans("First closing transcription websocket")
             await self._close(ws, data={"type": "CloseStream"})
-            logger.info("Closed transcription websocket and now closing transcription task")
+            logger.trans("Closed transcription websocket and now closing transcription task")
             return True  # Indicates end of processing
 
         return False
@@ -192,7 +192,7 @@ class DeepgramTranscriber(BaseTranscriber):
             if self.transcription_task is not None:
                 self.transcription_task.cancel()
         except asyncio.CancelledError:
-            logger.info("Cancelled sender task")
+            logger.trans("Cancelled sender task")
             return
 
     async def sender_stream(self, ws: ClientConnection):
@@ -225,10 +225,10 @@ class DeepgramTranscriber(BaseTranscriber):
                 # If connection_start_time is None, it is the durations of frame submitted till now minus current time
                 if self.connection_start_time is None:
                     self.connection_start_time = (time.time() - (self.num_frames * self.audio_frame_duration))
-                    logger.info(f"Connection start time {self.connection_start_time} {self.num_frames} and {self.audio_frame_duration}")
+                    logger.trans(f"Connection start time {self.connection_start_time} {self.num_frames} and {self.audio_frame_duration}")
 
                 if msg["type"] == "SpeechStarted":
-                    logger.info("Received SpeechStarted event from deepgram")
+                    logger.trans("Received SpeechStarted event from deepgram")
                     yield create_ws_data_packet("speech_started", self.meta_info)
                     pass
 
@@ -243,7 +243,7 @@ class DeepgramTranscriber(BaseTranscriber):
                         yield create_ws_data_packet(data, self.meta_info)
 
                     if msg["is_final"] and transcript.strip():
-                        logger.info(f"Received interim result with is_final set as True - {transcript}")
+                        logger.trans(f"Received interim result with is_final set as True - {transcript}")
                         self.final_transcript += f' {transcript}'
 
                         if self.is_transcript_sent_for_processing:
@@ -251,7 +251,7 @@ class DeepgramTranscriber(BaseTranscriber):
 
                     if msg["speech_final"] and self.final_transcript.strip():
                         if not self.is_transcript_sent_for_processing and self.final_transcript.strip():
-                            logger.info(f"Received speech final hence yielding the following transcript - {self.final_transcript}")
+                            logger.trans(f"Received speech final hence yielding the following transcript - {self.final_transcript}")
                             data = {
                                 "type": "transcript",
                                 "content": self.final_transcript
@@ -261,9 +261,9 @@ class DeepgramTranscriber(BaseTranscriber):
                             yield create_ws_data_packet(data, self.meta_info)
 
                 elif msg["type"] == "UtteranceEnd":
-                    logger.info(f"Value of is_transcript_sent_for_processing in utterance end - {self.is_transcript_sent_for_processing}")
+                    logger.trans(f"Value of is_transcript_sent_for_processing in utterance end - {self.is_transcript_sent_for_processing}")
                     if not self.is_transcript_sent_for_processing and self.final_transcript.strip():
-                        logger.info(f"Received UtteranceEnd hence yielding the following transcript - {self.final_transcript}")
+                        logger.trans(f"Received UtteranceEnd hence yielding the following transcript - {self.final_transcript}")
                         data = {
                             "type": "transcript",
                             "content": self.final_transcript
@@ -273,7 +273,7 @@ class DeepgramTranscriber(BaseTranscriber):
                         yield create_ws_data_packet(data, self.meta_info)
 
                 elif msg["type"] == "Metadata":
-                    logger.info(f"Received Metadata from deepgram - {msg}")
+                    logger.trans(f"Received Metadata from deepgram - {msg}")
                     self.meta_info["transcriber_duration"] = msg["duration"]
                     yield create_ws_data_packet("transcriber_connection_closed", self.meta_info)
                     return
@@ -306,7 +306,7 @@ class DeepgramTranscriber(BaseTranscriber):
                 if 'words' in alternative:
                     final_word = alternative['words'][-1]
                     utterance_end = self.connection_start_time + final_word['end']
-                    logger.info(f"Final word ended at {utterance_end}")
+                    logger.trans(f"Final word ended at {utterance_end}")
         return utterance_end
 
     def __set_transcription_cursor(self, data):
@@ -315,12 +315,12 @@ class DeepgramTranscriber(BaseTranscriber):
                 if 'words' in alternative:
                     final_word = alternative['words'][-1]
                     self.transcription_cursor = final_word['end']
-        logger.info(f"Setting transcription cursor at {self.transcription_cursor}")
+        logger.trans(f"Setting transcription cursor at {self.transcription_cursor}")
         return self.transcription_cursor
 
     def __calculate_latency(self):
         if self.transcription_cursor is not None:
-            logger.info(f'audio cursor is at {self.audio_cursor} & transcription cursor is at {self.transcription_cursor}')
+            logger.trans(f'audio cursor is at {self.audio_cursor} & transcription cursor is at {self.transcription_cursor}')
             return self.audio_cursor - self.transcription_cursor
         return None
 
@@ -338,7 +338,7 @@ class DeepgramTranscriber(BaseTranscriber):
                         if self.connection_on:
                             await self.push_to_transcriber_queue(message)
                         else:
-                            logger.info("closing the deepgram connection")
+                            logger.trans("closing the deepgram connection")
                             await self._close(deepgram_ws, data={"type": "CloseStream"})
                 else:
                     async for message in self.sender():
@@ -346,4 +346,4 @@ class DeepgramTranscriber(BaseTranscriber):
 
             await self.push_to_transcriber_queue(create_ws_data_packet("transcriber_connection_closed", self.meta_info))
         except Exception as e:
-            logger.info(f"Error in transcribe: {e}")
+            logger.trans(f"Error in transcribe: {e}")

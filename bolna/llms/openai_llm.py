@@ -20,17 +20,17 @@ class OpenAiLLM(BaseLLM):
 
         self.custom_tools = kwargs.get("api_tools", None)
         self.language = language
-        logger.info(f"API Tools {self.custom_tools}")
+        logger.llm(f"API Tools {self.custom_tools}")
         if self.custom_tools is not None:
             self.trigger_function_call = True
             self.api_params = self.custom_tools['tools_params']
-            logger.info(f"Function dict {self.api_params}")
+            logger.llm(f"Function dict {self.api_params}")
             self.tools = self.custom_tools['tools']
         else:
             self.trigger_function_call = False
 
         self.started_streaming = False
-        logger.info(f"Initializing OpenAI LLM with model: {self.model} and maxc tokens {max_tokens}")
+        logger.llm(f"Initializing OpenAI LLM with model: {self.model} and maxc tokens {max_tokens}")
         self.max_tokens = max_tokens
         self.temperature = temperature
         self.model_args = {"max_tokens": self.max_tokens, "temperature": self.temperature, "model": self.model}
@@ -45,14 +45,14 @@ class OpenAiLLM(BaseLLM):
             api_key = llm_key
         self.assistant_id = kwargs.get("assistant_id", None)
         if self.assistant_id:
-            logger.info(f"Initializing OpenAI assistant with assistant id {self.assistant_id}")
+            logger.llm(f"Initializing OpenAI assistant with assistant id {self.assistant_id}")
             self.openai = OpenAI(api_key=api_key)
             #self.thread_id = self.openai.beta.threads.create().id
             self.model_args = {"max_completion_tokens": self.max_tokens, "temperature": self.temperature}
             my_assistant = self.openai.beta.assistants.retrieve(self.assistant_id)
             if my_assistant.tools is not None:
                 self.tools = [i for i in my_assistant.tools if i.type == "function"]
-            #logger.info(f'thread id : {self.thread_id}')
+            #logger.llm(f'thread id : {self.thread_id}')
         self.run_id = kwargs.get("run_id", None)
         self.gave_out_prefunction_call_message = False
 
@@ -115,8 +115,8 @@ class OpenAiLLM(BaseLLM):
                     idx = tool_call.index
                     if idx not in final_tool_calls_data:
                         called_fun = tool_call.function.name
-                        logger.info(f"Function given by LLM to trigger is - {called_fun}")
-                        final_tool_calls_data[idx] = {
+                        logger.llm(f"Function given by LLM to trigger is - {called_fun}")
+                        final_tool_calls_data[index] = {
                             "index": tool_call.index,
                             "id": tool_call.id,
                             "function": {
@@ -154,8 +154,7 @@ class OpenAiLLM(BaseLLM):
             i = [i for i in range(len(tools)) if called_fun == tools[i]["function"]["name"]][0]
             func_conf = self.api_params[called_fun]
             arguments_received = final_tool_calls_data[0]["function"]["arguments"]
-
-            logger.info(f"Payload to send {arguments_received} func_dict {func_conf}")
+            logger.llm(f"Payload to send {arguments_received} func_dict {func_dict}")
             self.gave_out_prefunction_call_message = False
 
             api_call_payload = {
@@ -173,6 +172,7 @@ class OpenAiLLM(BaseLLM):
             all_required_keys = tools[i]["function"]["parameters"]["properties"].keys() and tools[i]["function"]["parameters"].get(
                 "required", [])
             if tools[i]["function"].get("parameters", None) is not None and (all(key in arguments_received for key in all_required_keys)):
+                logger.llm(f"Function call parameters: {arguments_received}")
                 convert_to_request_log(arguments_received, meta_info, self.model, "llm", direction="response", is_cached=False,
                                        run_id=self.run_id)
                 api_call_payload.update(json.loads(arguments_received))
@@ -225,6 +225,7 @@ class OpenAiLLM(BaseLLM):
         await self.async_client.beta.threads.messages.create(thread_id=model_args["thread_id"], role="user", content=message[-1]['content'])
 
         async for chunk in await self.async_client.beta.threads.runs.create(**model_args):
+            logger.llm(f"chunk received : {chunk}")
             if self.trigger_function_call and chunk.event == "thread.run.step.delta":
                 if chunk.data.delta.step_details.tool_calls[0].type == "file_search" or chunk.data.delta.step_details.tool_calls[0].type == "search_files":
                     yield CHECKING_THE_DOCUMENTS_FILLER, False, time.time() - start_time, False, None, None
@@ -233,11 +234,11 @@ class OpenAiLLM(BaseLLM):
                 if not self.started_streaming:
                     first_chunk_time = time.time()
                     latency = first_chunk_time - start_time
-                    logger.info(f"LLM Latency: {latency:.2f} s")
+                    logger.llm(f"LLM Latency: {latency:.2f} s")
                     self.started_streaming = True
                 
                 if chunk.data.delta.step_details.tool_calls[0].function.name and chunk.data.delta.step_details.tool_calls[0].function.arguments is not None:
-                    logger.info(f"Should do a function call {chunk.data.delta.step_details.tool_calls[0].function.name}")
+                    logger.llm(f"Should do a function call {chunk.data.delta.step_details.tool_calls[0].function.name}")
                     called_fun = str(chunk.data.delta.step_details.tool_calls[0].function.name)
                     i = [i for i in range(len(tools)) if called_fun == tools[i].function.name][0]
                     
@@ -254,11 +255,12 @@ class OpenAiLLM(BaseLLM):
                 
                 if (text_chunk := chunk.data.delta.step_details.tool_calls[0].function.arguments):
                     resp += text_chunk
+                    logger.llm(f"Response from LLM {resp}")
             elif chunk.event == 'thread.message.delta':
                 if not self.started_streaming:
                     first_chunk_time = time.time()
                     latency = first_chunk_time - start_time
-                    logger.info(f"LLM Latency: {latency:.2f} s")
+                    logger.llm(f"LLM Latency: {latency:.2f} s")
                     self.started_streaming = True
                 textual_response = True
                 text_chunk = chunk.data.delta.content[0].text.value
@@ -275,7 +277,7 @@ class OpenAiLLM(BaseLLM):
         
         if self.trigger_function_call and called_fun in self.api_params:
             func_dict = self.api_params[called_fun]
-            logger.info(f"Payload to send {resp} func_dict {func_dict} and tools {tools}")
+            logger.llm(f"PAyload to send {resp} func_dict {func_dict} and tools {tools}")
             self.gave_out_prefunction_call_message = False
 
             url = func_dict['url']
@@ -295,12 +297,12 @@ class OpenAiLLM(BaseLLM):
             }
         
             if tools[i].function.parameters is not None and (all(key in resp for key in tools[i].function.parameters["properties"].keys())):
-                logger.info(f"Function call paramaeters {resp}")
+                logger.llm(f"Function call paramaeters {resp}")
                 convert_to_request_log(resp, meta_info, self.model, "llm", direction = "response", is_cached= False, run_id = self.run_id)
                 resp  = json.loads(resp)
                 api_call_return = {**api_call_return, **resp}
             else:
-                logger.info(f"No parameters in function call")
+                logger.llm(f"No parameters in function call")
                 api_call_return['resp'] = None
             yield api_call_return, False, latency, True, None, None
 

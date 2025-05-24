@@ -51,7 +51,7 @@ class SarvamSynthesizer(BaseSynthesizer):
                     else:
                         logger.error(f"Error: {response.status} - {await response.text()}")
             else:
-                logger.info("Payload was null")
+                logger.synt("Payload was null")
 
     async def synthesize(self, text):
         audio = await self.__generate_http(text)
@@ -61,7 +61,7 @@ class SarvamSynthesizer(BaseSynthesizer):
         return False
 
     async def __generate_http(self, text):
-        logger.info(f"text {text}")
+        logger.synt(f"text {text}")
 
         payload = {
             "target_language_code": self.language,
@@ -83,11 +83,11 @@ class SarvamSynthesizer(BaseSynthesizer):
         try:
             while True:
                 message = await self.internal_queue.get()
-                logger.info(f"Generating TTS response for message: {message}")
+                logger.synt(f"Generating TTS response for message: {message}")
                 meta_info, text = message.get("meta_info"), message.get("data")
 
                 if not self.should_synthesize_response(meta_info.get('sequence_id')):
-                    logger.info(
+                    logger.synt(
                         f"Not synthesizing text as the sequence_id ({meta_info.get('sequence_id')}) of it is not in the list of sequence_ids present in the task manager.")
                     return
 
@@ -114,8 +114,8 @@ class SarvamSynthesizer(BaseSynthesizer):
 
         except Exception as e:
             traceback.print_exc()
-            logger.info(f"Error in sarvam generate {e}")
+            logger.synt(f"Error in sarvam generate {e}")
 
     async def push(self, message):
-        logger.info(f"Pushed message to internal queue {message}")
+        logger.synt(f"Pushed message to internal queue {message}")
         self.internal_queue.put_nowait(message)

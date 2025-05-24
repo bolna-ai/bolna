@@ -15,7 +15,7 @@ class BaseSynthesizer:
         self.connection_time = None
 
     def clear_internal_queue(self):
-        logger.info(f"Clearing out internal queue")
+        logger.synt(f"Clearing out internal queue")
         self.internal_queue = asyncio.Queue()
 
     def should_synthesize_response(self, sequence_id):
@@ -56,7 +56,7 @@ class BaseSynthesizer:
                 if buffer != " ":
                     yield buffer.strip() + " "
                 else:
-                    logger.info(f"In else condition of text chunker where buffer = {buffer}")
+                    logger.synt(f"In else condition of text chunker where buffer = {buffer}")
                 buffer = ""
 
         if buffer:
