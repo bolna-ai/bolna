@@ -68,9 +68,7 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
                     "close_context": True
                 }
 
-                logger.info('context_id before handle_interruption: {}'.format(self.context_id))
                 self.context_id = str(uuid.uuid4())
-                logger.info('context_id after handle_interruption: {}'.format(self.context_id))
                 await self.websocket_holder["websocket"].send(json.dumps(interrupt_message))
         except Exception as e:
             pass
@@ -106,11 +104,9 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
                         return
 
             # If end_of_llm_stream is True, mark the last chunk and send an empty message
-            logger.info('context_id before end_of_llm_stream: {}'.format(self.context_id))
             if end_of_llm_stream:
                 self.last_text_sent = True
                 self.context_id = str(uuid.uuid4())
-            logger.info('context_id after end_of_llm_stream: {}'.format(self.context_id))
 
             # Send the end-of-stream signal with an empty string as text
             try:
