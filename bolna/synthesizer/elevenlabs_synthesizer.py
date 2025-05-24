@@ -46,6 +46,7 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
         self.sender_task = None
         self.conversation_ended = False
         self.current_text = ""
+        self.context_id = None
 
     # Ensuring we only do wav output for now
     def get_format(self, format, sampling_rate):
@@ -57,6 +58,21 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
 
     def get_engine(self):
         return self.model
+
+    async def handle_interruption(self):
+        try:
+            if self.context_id:
+                interrupt_message = {
+                    "context_id": self.context_id,
+                    "close_context": True
+                }
+
+                logger.info('context_id before handle_interruption: {}'.format(self.context_id))
+                self.context_id = str(uuid.uuid4())
+                logger.info('context_id after handle_interruption: {}'.format(self.context_id))
+                await self.websocket_holder["websocket"].send(json.dumps(interrupt_message))
+        except Exception as e:
+            pass
 
     async def sender(self, text, sequence_id, end_of_llm_stream=False):
         try:
@@ -89,8 +105,11 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
                         return
 
             # If end_of_llm_stream is True, mark the last chunk and send an empty message
+            logger.info('context_id before end_of_llm_stream: {}'.format(self.context_id))
             if end_of_llm_stream:
                 self.last_text_sent = True
+                self.context_id = str(uuid.uuid4())
+            logger.info('context_id after end_of_llm_stream: {}'.format(self.context_id))
 
             # Send the end-of-stream signal with an empty string as text
             try:
@@ -321,6 +340,9 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
             logger.info(f"end_of_llm_stream: {end_of_llm_stream}")
             self.meta_info = copy.deepcopy(meta_info)
             meta_info["text"] = text
+            if not self.context_id:
+                self.context_id = str(uuid.uuid4())
+            logger.info(f"context_id: {self.context_id}")
             self.sender_task = asyncio.create_task(self.sender(text, meta_info.get("sequence_id"), end_of_llm_stream))
             self.text_queue.append(meta_info)
         else:
