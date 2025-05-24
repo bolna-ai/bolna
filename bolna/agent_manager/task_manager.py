@@ -1554,11 +1554,24 @@ class TaskManager(BaseManager):
                     # Whenever speech_final or UtteranceEnd is received from Deepgram, this condition would get triggered
                     elif isinstance(message.get("data"), dict) and message["data"].get("type", "") == "transcript":
                         logger.info(f"Received transcript, sending for further processing")
-                        if self.tools["input"].welcome_message_played() and self.tools["input"].is_audio_being_played_to_user() and \
-                                len(message["data"].get("content").strip().split(" ")) <= self.number_of_words_for_interruption and \
-                                message["data"].get("content").strip() not in self.accidental_interruption_phrases:
-                            logger.info(f"Continuing the loop and ignoring the transcript received ({message['data'].get('content')}) in speech final as it is false interruption")
-                            continue
+                        
+                        # Check if content audio is playing to the user (not ambient/backchanneling)
+                        # Only ignore transcript if content audio is playing
+                        if self.tools["input"].welcome_message_played() and self.tools["input"].is_audio_being_played_to_user():
+                            # Get current mark event meta data to check if it's content audio
+                            mark_meta = self.mark_event_meta_data.fetch_last_mark_event_data()
+                            is_content_audio = False
+                            
+                            if mark_meta:
+                                sequence_id = mark_meta.get("sequence_id", -1)
+                                message_type = mark_meta.get("type", "")
+                                is_content_audio = (sequence_id > 0 or message_type == "agent_welcome_message") and message_type not in ['ambient_noise', 'backchanneling', 'is_user_online_message']
+                            
+                            # Only ignore the transcript if it's content audio playing and the transcript is likely a false interruption
+                            if is_content_audio and len(message["data"].get("content").strip().split(" ")) <= self.number_of_words_for_interruption and \
+                                    message["data"].get("content").strip() not in self.accidental_interruption_phrases:
+                                logger.info(f"Continuing the loop and ignoring the transcript received ({message['data'].get('content')}) in speech final as it is false interruption")
+                                continue
 
                         self.callee_speaking = False
                         # self.callee_silent = True
@@ -2026,7 +2039,7 @@ class TaskManager(BaseManager):
 
     async def __start_transmitting_ambient_noise(self):
         try:
-            audio = await get_raw_audio_bytes(f'{os.getenv("AMBIENT_NOISE_PRESETS_DIR")}/{self.soundtrack}', local= True, is_location=True)
+            audio = await get_raw_audio_bytes(f'{os.getenv("AMBIENT_NOISE_PRESETS_DIR")}/{self.soundtrack}', local=True, is_location=True)
             audio = resample(audio, self.sampling_rate, format = "wav")
             if self.task_config["tools_config"]["output"]["provider"] in SUPPORTED_OUTPUT_TELEPHONY_HANDLERS.keys():
                 audio = wav_bytes_to_pcm(audio)
@@ -2039,8 +2052,12 @@ class TaskManager(BaseManager):
                 meta_info={'io': self.tools["output"].get_provider(), 'message_category': 'ambient_noise', 'stream_sid': self.stream_sid , "request_id": str(uuid.uuid4()), "cached": True, "type":'audio', "sequence_id": -1, 'format': 'pcm'}
             while True:
                 logger.info(f"Before yielding ambient noise")
-                for chunk in yield_chunks_from_memory(audio, self.output_chunk_size*2 ):
-                    if not self.started_transmitting_audio:
+                for chunk in yield_chunks_from_memory(audio, self.output_chunk_size*2):
+                    # Only play ambient noise if no content is being transmitted
+                    # Check if any real content audio (sequence_id > 0) is being played
+                    is_content_playing = self.tools["input"].is_audio_being_played_to_user()
+                    
+                    if not is_content_playing:
                         logger.info(f"Transmitting ambient noise {len(chunk)}")
                         await self.tools["output"].handle(create_ws_data_packet(chunk, meta_info=meta_info))
                     logger.info("Sleeping for 800 ms")

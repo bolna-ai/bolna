@@ -30,5 +30,18 @@ class MarkEventMetaData:
     def fetch_cleared_mark_event_data(self):
         return self.previous_mark_event_meta_data
 
+    def fetch_last_mark_event_data(self):
+        """
+        Returns the most recent mark event data based on the counter value.
+        """
+        if not self.mark_event_meta_data:
+            # If no current mark events, check previous ones
+            if not self.previous_mark_event_meta_data:
+                return None
+            return max(self.previous_mark_event_meta_data.values(), key=lambda x: x.get('counter', -1))
+        
+        # Return the mark event with the highest counter value
+        return max(self.mark_event_meta_data.values(), key=lambda x: x.get('counter', -1))
+
     def __str__(self):
         return f"{self.mark_event_meta_data}"
