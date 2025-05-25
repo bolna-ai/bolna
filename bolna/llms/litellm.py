@@ -15,12 +15,7 @@ class LiteLLM(BaseLLM):
     def __init__(self, model, max_tokens=30, buffer_size=40, temperature=0.0, language=DEFAULT_LANGUAGE_CODE, **kwargs):
         super().__init__(max_tokens, buffer_size)
         self.model = model
-        # self hosted azure
-        if 'azure_model' in kwargs and kwargs['azure_model']:
-            self.model = kwargs['azure_model']
-
         self.started_streaming = False
-
         self.language = language
         self.model_args = {"max_tokens": max_tokens, "temperature": temperature, "model": self.model}
         self.api_key = kwargs.get("llm_key", os.getenv('LITELLM_MODEL_API_KEY'))
