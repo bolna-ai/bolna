@@ -1,6 +1,7 @@
 import asyncio
 import copy
 import uuid
+import time
 import websockets
 import base64
 import json
@@ -29,7 +30,7 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
         self.sampling_rate = sampling_rate
         self.audio_format = "mp3"
         self.use_mulaw = kwargs.get("use_mulaw", True)
-        self.ws_url = f"wss://api.elevenlabs.io/v1/text-to-speech/{self.voice}/stream-input?model_id={self.model}&output_format={'ulaw_8000' if self.use_mulaw else 'mp3_44100_128'}&inactivity_timeout=170&sync_alignment=true"
+        self.ws_url = f"wss://api.elevenlabs.io/v1/text-to-speech/{self.voice}/multi-stream-input?model_id={self.model}&output_format={'ulaw_8000' if self.use_mulaw else 'mp3_44100_128'}&inactivity_timeout=170&sync_alignment=true"
         self.api_url = f"https://api.elevenlabs.io/v1/text-to-speech/{self.voice}?optimize_streaming_latency=2&output_format="
         self.first_chunk_generated = False
         self.last_text_sent = False
@@ -46,6 +47,7 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
         self.sender_task = None
         self.conversation_ended = False
         self.current_text = ""
+        self.context_id = None
 
     # Ensuring we only do wav output for now
     def get_format(self, format, sampling_rate):
@@ -57,6 +59,19 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
 
     def get_engine(self):
         return self.model
+
+    async def handle_interruption(self):
+        try:
+            if self.context_id:
+                interrupt_message = {
+                    "context_id": self.context_id,
+                    "close_context": True
+                }
+
+                self.context_id = str(uuid.uuid4())
+                await self.websocket_holder["websocket"].send(json.dumps(interrupt_message))
+        except Exception as e:
+            pass
 
     async def sender(self, text, sequence_id, end_of_llm_stream=False):
         try:
@@ -91,6 +106,7 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
             # If end_of_llm_stream is True, mark the last chunk and send an empty message
             if end_of_llm_stream:
                 self.last_text_sent = True
+                self.context_id = str(uuid.uuid4())
 
             # Send the end-of-stream signal with an empty string as text
             try:
@@ -285,6 +301,7 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
 
     async def establish_connection(self):
         try:
+            start_time = time.perf_counter()
             websocket = await websockets.connect(self.ws_url)
             bos_message = {
                 "text": " ",
@@ -295,6 +312,9 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
                 "xi_api_key": self.api_key
             }
             await websocket.send(json.dumps(bos_message))
+            if not self.connection_time:
+                self.connection_time = round((time.perf_counter() - start_time) * 1000)
+
             logger.info(f"Connected to {self.ws_url}")
             return websocket
         except Exception as e:
@@ -321,6 +341,9 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
             logger.info(f"end_of_llm_stream: {end_of_llm_stream}")
             self.meta_info = copy.deepcopy(meta_info)
             meta_info["text"] = text
+            if not self.context_id:
+                self.context_id = str(uuid.uuid4())
+            logger.info(f"context_id: {self.context_id}")
             self.sender_task = asyncio.create_task(self.sender(text, meta_info.get("sequence_id"), end_of_llm_stream))
             self.text_queue.append(meta_info)
         else:

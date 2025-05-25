@@ -6,8 +6,8 @@
 
 <h4 align="center">
   <a href="https://discord.gg/59kQWGgnm8">Discord</a> |
-  <a href="https://docs.bolna.dev">Hosted Docs</a> |
-  <a href="https://bolna.dev">Website</a>
+  <a href="https://docs.bolna.ai">Hosted Docs</a> |
+  <a href="https://bolna.ai">Website</a>
 </h4>
 
 <h4 align="center">
@@ -27,7 +27,7 @@
 
 ## Introduction
 
-**[Bolna](https://bolna.dev)** is the end-to-end open source production ready framework for quickly building LLM based voice driven conversational applications.
+**[Bolna](https://bolna.ai)** is the end-to-end open source production ready framework for quickly building LLM based voice driven conversational applications.
 
 ## Demo
 https://github.com/bolna-ai/bolna/assets/1313096/2237f64f-1c5b-4723-b7e7-d11466e9b226
@@ -41,8 +41,8 @@ This repository contains the entire orchestration platform to build voice AI app
 Bolna helps you create AI Voice Agents which can be instructed to do tasks beginning with:
 
 1. Orchestration platform (this open source repository)
-2. Hosted APIs (https://docs.bolna.dev/api-reference/introduction) built on top of this orchestration platform [currently closed source]
-3. No-code UI playground at https://playground.bolna.dev/ using the hosted APIs + tailwind CSS [currently closed source]
+2. Hosted APIs (https://docs.bolna.ai/api-reference/introduction) built on top of this orchestration platform [currently closed source]
+3. No-code UI playground at https://platform.bolna.ai/ using the hosted APIs + tailwind CSS [currently closed source]
 
 
 ## Development philosophy
@@ -63,7 +63,7 @@ graph LR;
 4. Synthesizing LLM responses back to telephony using `AWS Polly`, `ElevenLabs`, `Deepgram`, `OpenAI`, `Azure`, `Cartesia`, `Smallest` etc.
 
 
-Refer to the [docs](https://docs.bolna.dev/providers) for a deepdive into all supported providers.
+Refer to the [docs](https://docs.bolna.ai/providers) for a deepdive into all supported providers.
 
 
 ## Local example setup [will be moved to a different repository]
@@ -78,9 +78,44 @@ The setup consists of four containers:
 3. `ngrok`: for tunneling. One will need to add the `authtoken` to `ngrok-config.yml`
 4. `redis`: for persisting agents & prompt data
 
-Use docker to build the images using `.env` file as the environment file and run them locally
-1. `docker-compose build --no-cache bolna-app <twilio-app | plivo-app>`: rebuild images
-2. `docker-compose up bolna-app <twilio-app | plivo-app>`: run the build images
+### Quick Start
+
+The easiest way to get started is to use the provided script:
+
+```bash
+cd local_setup
+chmod +x start.sh
+./start.sh
+```
+
+This script will check for Docker dependencies, build all services with BuildKit enabled, and start them in detached mode.
+
+### Manual Setup
+
+Alternatively, you can manually build and run the services:
+
+1. Make sure you have Docker with Docker Compose V2 installed
+2. Enable BuildKit for faster builds:
+   ```bash
+   export DOCKER_BUILDKIT=1
+   export COMPOSE_DOCKER_CLI_BUILD=1
+   ```
+3. Build the images:
+   ```bash
+   docker compose build
+   ```
+4. Run the services:
+   ```bash
+   docker compose up -d
+   ```
+
+To run specific services only:
+
+```bash
+docker compose up -d bolna-app twilio-app
+# or
+docker compose up -d bolna-app plivo-app
+```
 
 Once the docker containers are up, you can now start to create your agents and instruct them to initiate calls.
 

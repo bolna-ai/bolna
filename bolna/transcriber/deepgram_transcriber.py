@@ -28,7 +28,7 @@ class DeepgramTranscriber(BaseTranscriber):
         logger.info(f"Initializing transcriber")
         super().__init__(input_queue)
         self.endpointing = endpointing
-        self.language = language if model == "nova-2" else "en"
+        self.language = language
         self.stream = stream
         self.provider = telephony_provider
         self.heartbeat_task = None
@@ -45,8 +45,6 @@ class DeepgramTranscriber(BaseTranscriber):
         self.transcription_cursor = 0.0
         logger.info(f"self.stream: {self.stream}")
         self.interruption_signalled = False
-        if 'nova-2' not in self.model:
-            self.model = "nova-2"
         if not self.stream:
             self.api_url = f"https://{self.deepgram_host}/v1/listen?model={self.model}&filler_words=true&language={self.language}"
             self.session = aiohttp.ClientSession()
@@ -127,7 +125,6 @@ class DeepgramTranscriber(BaseTranscriber):
                 await asyncio.sleep(5)  # Send a heartbeat message every 5 seconds
         except Exception as e:
             logger.info('Error while sending: ' + str(e))
-            raise Exception("Something went wrong while sending heartbeats to {}".format(self.model))
 
     async def toggle_connection(self):
         self.connection_on = False
@@ -195,9 +192,6 @@ class DeepgramTranscriber(BaseTranscriber):
         except asyncio.CancelledError:
             logger.info("Cancelled sender task")
             return
-        except Exception as e:
-            logger.error('Error while sending: ' + str(e))
-            raise Exception("Something went wrong")
 
     async def sender_stream(self, ws: ClientConnection):
         try:
@@ -219,8 +213,7 @@ class DeepgramTranscriber(BaseTranscriber):
                 self.audio_cursor = self.num_frames * self.audio_frame_duration
                 await ws.send(ws_data_packet.get('data'))
         except Exception as e:
-            logger.error('Error while sending: ' + str(e))
-            raise Exception("Something went wrong")
+            logger.info('Error while sending: ' + str(e))
 
     async def receiver(self, ws: ClientConnection):
         async for msg in ws:
@@ -285,7 +278,6 @@ class DeepgramTranscriber(BaseTranscriber):
 
             except Exception as e:
                 traceback.print_exc()
-                logger.error(f"Error while getting transcriptions {e}")
                 self.interruption_signalled = False
 
     async def push_to_transcriber_queue(self, data_packet):
@@ -331,12 +323,11 @@ class DeepgramTranscriber(BaseTranscriber):
         return None
 
     async def transcribe(self):
-        logger.info(f"STARTED TRANSCRIBING")
         try:
             start_time = time.perf_counter()
             async with await self.deepgram_connect() as deepgram_ws:
-                connection_time = time.perf_counter() - start_time
-                logger.info(f"WebSocket connection established in {connection_time:.3f} seconds")
+                if not self.connection_time:
+                    self.connection_time = round((time.perf_counter() - start_time) * 1000)
 
                 if self.stream:
                     self.sender_task = asyncio.create_task(self.sender_stream(deepgram_ws))
