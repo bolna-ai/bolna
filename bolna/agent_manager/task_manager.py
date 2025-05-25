@@ -886,10 +886,10 @@ class TaskManager(BaseManager):
 
         # self.synthesizer_task.cancel()
         # self.synthesizer_task = asyncio.create_task(self.__listen_synthesizer())
-        for task in self.synthesizer_tasks:
-            task.cancel()
+        #for task in self.synthesizer_tasks:
+        #    task.cancel()
 
-        self.synthesizer_tasks = []
+        #self.synthesizer_tasks = []
 
         logger.info(f"Synth Task cancelled seconds")
         if not self.buffered_output_queue.empty():
