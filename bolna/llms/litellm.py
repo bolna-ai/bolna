@@ -3,9 +3,10 @@ import time
 import json
 from litellm import acompletion
 from dotenv import load_dotenv
-from .llm import BaseLLM
+
 from bolna.constants import DEFAULT_LANGUAGE_CODE
 from bolna.helpers.utils import json_to_pydantic_schema
+from .llm import BaseLLM
 from bolna.helpers.logger_config import configure_logger
 
 logger = configure_logger(__name__)
@@ -16,10 +17,6 @@ class LiteLLM(BaseLLM):
     def __init__(self, model, max_tokens=30, buffer_size=40, temperature=0.0, language=DEFAULT_LANGUAGE_CODE, **kwargs):
         super().__init__(max_tokens, buffer_size)
         self.model = model
-        # self hosted azure
-        if 'azure_model' in kwargs and kwargs['azure_model']:
-            self.model = kwargs['azure_model']
-
         self.started_streaming = False
 
         self.language = language

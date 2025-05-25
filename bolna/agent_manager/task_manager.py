@@ -1490,11 +1490,6 @@ class TaskManager(BaseManager):
                 message = await self.transcriber_output_queue.get()
                 logger.info(f"Message from the transcriber class {message}")
 
-                # TODO whenever latency needs to be implemented we need to add the relevant code to the transcriber class
-                # if message['meta_info'] is not None and message['meta_info'].get('transcriber_latency', False):
-                #     self.transcriber_latencies.append(message['meta_info']['transcriber_latency'])
-                #     self.average_transcriber_latency = sum(self.transcriber_latencies) / len(self.transcriber_latencies)
-
                 if self.hangup_triggered:
                     if message["data"] == "transcriber_connection_closed":
                         logger.info(f"Transcriber connection has been closed")
