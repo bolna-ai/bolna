@@ -33,6 +33,14 @@ class StreamingContextualAgent(BaseAgent):
             logger.error('check_for_completion exception: {}'.format(str(e)))
             return {'hangup': 'No'}
 
+    @property
+    def interrupted(self):
+        return self.llm.interrupted
+
+    @interrupted.setter
+    def interrupted(self, value):
+        self.llm.interrupted = value
+
     async def generate(self, history, synthesize=False, meta_info = None):
         async for token in self.llm.generate_stream(history, synthesize=synthesize, meta_info = meta_info):
             yield token

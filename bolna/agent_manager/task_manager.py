@@ -873,10 +873,13 @@ class TaskManager(BaseManager):
             self.output_task.cancel()
         self.output_task = None
 
-        if self.llm_task is not None:
-            logger.info(f"Cancelling LLM Task")
-            self.llm_task.cancel()
-            self.llm_task = None
+        self.tools["llm_agent"].interrupted = True
+        if self.llm_task and not self.llm_task.done():
+            logger.info("interruption in llm tasks")
+        # if self.llm_task is not None:
+        #     logger.info(f"Cancelling LLM Task")
+        #     self.llm_task.cancel()
+        #     self.llm_task = None
 
         if self.first_message_task is not None:
             logger.info("Cancelling first message task")

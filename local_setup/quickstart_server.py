@@ -51,7 +51,6 @@ async def get_agent(agent_id: str):
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
-
 @app.post("/agent")
 async def create_agent(agent_data: CreateAgentPayload):
     agent_uuid = str(uuid.uuid4())
