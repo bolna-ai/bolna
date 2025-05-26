@@ -1,11 +1,13 @@
 import os
-import litellm
-from dotenv import load_dotenv
-from .llm import BaseLLM
-from bolna.constants import DEFAULT_LANGUAGE_CODE
-from bolna.helpers.utils import json_to_pydantic_schema
-from bolna.helpers.logger_config import configure_logger
+import json
 import time
+from litellm import acompletion
+from dotenv import load_dotenv
+
+from bolna.constants import DEFAULT_LANGUAGE_CODE
+from bolna.helpers.utils import json_to_pydantic_schema, convert_to_request_log, compute_function_pre_call_message
+from .llm import BaseLLM
+from bolna.helpers.logger_config import configure_logger
 
 logger = configure_logger(__name__)
 load_dotenv()
@@ -15,10 +17,6 @@ class LiteLLM(BaseLLM):
     def __init__(self, model, max_tokens=30, buffer_size=40, temperature=0.0, language=DEFAULT_LANGUAGE_CODE, **kwargs):
         super().__init__(max_tokens, buffer_size)
         self.model = model
-        # self hosted azure
-        if 'azure_model' in kwargs and kwargs['azure_model']:
-            self.model = kwargs['azure_model']
-
         self.started_streaming = False
 
         self.language = language
@@ -41,41 +39,149 @@ class LiteLLM(BaseLLM):
             if "api_version" in kwargs:
                 self.model_args["api_version"] = kwargs["api_version"]
 
-    async def generate_stream(self, messages, synthesize=True, meta_info = None):
+        self.custom_tools = kwargs.get("api_tools", None)
+        logger.info(f"API Tools {self.custom_tools}")
+        if self.custom_tools is not None:
+            self.trigger_function_call = True
+            self.api_params = self.custom_tools['tools_params']
+            logger.info(f"Function dict {self.api_params}")
+            self.tools = self.custom_tools['tools']
+        else:
+            self.trigger_function_call = False
+        self.run_id = kwargs.get("run_id", None)
+        self.gave_out_prefunction_call_message = False
+
+    async def generate_stream(self, messages, synthesize=True, meta_info=None):
         answer, buffer = "", ""
+        final_tool_calls_data = {}
+        received_textual_response = False
+        first_token_time = None
+        called_fun = None
+
         model_args = self.model_args.copy()
         model_args["messages"] = messages
         model_args["stream"] = True
 
-        logger.info(f"request to model: {self.model}: {messages} and model args {model_args}")
-        latency = False
+        if self.trigger_function_call:
+            model_args["tools"] = json.loads(self.tools) if isinstance(self.tools, str) else self.tools
+            model_args["tool_choice"] = "auto"
+            model_args["parallel_tool_calls"] = False
+
+        logger.info(f"Request to model {self.model}: {messages} with args: {model_args}")
         start_time = time.time()
-        async for chunk in await litellm.acompletion(**model_args):
-            if not self.started_streaming:
-                first_chunk_time = time.time()
-                latency = first_chunk_time - start_time
-                logger.info(f"LLM Latency: {latency:.2f} s")
+        latency_data = {
+            "turn_id": meta_info.get("turn_id") if meta_info else None,
+            "model": self.model,
+            "first_token_latency_ms": None,
+            "total_stream_duration_ms": None,
+        }
+
+        async for chunk in await acompletion(**model_args):
+            choice = chunk["choices"][0]
+            delta = choice.get("delta", {})
+
+            now = time.time()
+            if not first_token_time:
+                first_token_time = now
+                latency_data["first_token_latency_ms"] = round((now - start_time) * 1000)
                 self.started_streaming = True
-            if (text_chunk := chunk['choices'][0]['delta'].content) and not chunk['choices'][0].finish_reason:
-                answer += text_chunk
-                buffer += text_chunk
 
-                if len(buffer) >= self.buffer_size and synthesize:
-                    text = ' '.join(buffer.split(" ")[:-1])
+            # Handle tool_calls
+            if hasattr(delta, "tool_calls") and delta.tool_calls:
+                if buffer:
+                    yield buffer, True, latency_data, False, None, None
+                    buffer = ""
 
-                    if synthesize:
-                        if not self.started_streaming:
-                            self.started_streaming = True
-                        yield text, False, latency, False, None, None
-                    buffer = buffer.split(" ")[-1]
+                for tool_call in delta.tool_calls:
+                    idx = tool_call.index
+                    called_fun = tool_call.function.name
 
-        if synthesize:
-            if buffer != "":
-                yield buffer, True, latency, False, None, None
-        else:
-            yield answer, True, latency, False, None, None
+                    if idx not in final_tool_calls_data:
+                        logger.info(f"Tool function triggered: {called_fun}")
+                        final_tool_calls_data[idx] = {
+                            "index": tool_call.index,
+                            "id": tool_call.id,
+                            "function": {
+                                "name": called_fun,
+                                "arguments": tool_call.function.arguments or ""
+                            },
+                            "type": "function"
+                        }
+                    else:
+                        final_tool_calls_data[idx]["function"]["arguments"] += tool_call.function.arguments or ""
+
+                # Pre-function call message (if any)
+                if not self.gave_out_prefunction_call_message and not received_textual_response:
+                    api_tool_pre_call_message = self.api_params.get(called_fun, {}).get("pre_call_message", None)
+                    pre_msg = compute_function_pre_call_message(self.language, called_fun, api_tool_pre_call_message)
+                    yield pre_msg, True, latency_data, False, called_fun, api_tool_pre_call_message
+                    self.gave_out_prefunction_call_message = True
+
+            # Normal streamed tokens
+            elif hasattr(delta, "content") and delta.content:
+                received_textual_response = True
+                answer += delta.content
+                buffer += delta.content
+
+                if synthesize and len(buffer) >= self.buffer_size:
+                    split = buffer.rsplit(" ", 1)
+                    yield split[0], False, latency_data, False, None, None
+                    buffer = split[1] if len(split) > 1 else ""
+
+        # After streaming ends
+        latency_data["total_stream_duration_ms"] = round((time.time() - start_time) * 1000)
+
+        # Handle final function call logic
+        if self.trigger_function_call and final_tool_calls_data:
+            # Safely get the first tool call
+            first_tool_call = final_tool_calls_data[0]["function"]
+            func_name = first_tool_call["name"]
+            args_str = first_tool_call["arguments"]
+
+            tool_spec = next((t for t in model_args["tools"] if t["function"]["name"] == func_name), None)
+            func_conf = self.api_params.get(func_name)
+
+            if not func_conf:
+                logger.warning(f"No API config found for tool: {func_name}")
+                return
+
+            try:
+                parsed_args = json.loads(args_str)
+            except json.JSONDecodeError:
+                parsed_args = args_str
+
+            logger.info(f"Tool payload: {parsed_args} | Config: {func_conf}")
+            api_call_payload = {
+                "url": func_conf.get("url"),
+                "method": (func_conf.get("method") or "").lower(),
+                "param": func_conf.get("param"),
+                "api_token": func_conf.get("api_token"),
+                "model_args": model_args,
+                "meta_info": meta_info,
+                "called_fun": func_name,
+                "model_response": list(final_tool_calls_data.values()),
+                "tool_call_id": final_tool_calls_data[0].get("id")
+            }
+
+            # Merge function arguments into payload if all required keys exist
+            if tool_spec:
+                required_keys = tool_spec["function"].get("parameters", {}).get("required", [])
+                if all(k in parsed_args for k in required_keys):
+                    convert_to_request_log(parsed_args, meta_info, self.model, "llm", direction="response",
+                                           is_cached=False, run_id=self.run_id)
+                    api_call_payload.update(parsed_args)
+                else:
+                    api_call_payload["resp"] = None
+
+            yield api_call_payload, False, latency_data, True, None, None
+
+        # Final buffer flush
+        if synthesize and buffer.strip():
+            yield buffer, True, latency_data, False, None, None
+        elif not synthesize:
+            yield answer, True, latency_data, False, None, None
+
         self.started_streaming = False
-        logger.info(f"Time to generate response {time.time() - start_time} {answer}")
 
     async def generate(self, messages, stream=False, request_json=False, meta_info = None):
         text = ""
@@ -91,7 +197,7 @@ class LiteLLM(BaseLLM):
             }
         logger.info(f'Request to litellm {model_args}')
         try:
-            completion = await litellm.acompletion(**model_args)
+            completion = await acompletion(**model_args)
             text = completion.choices[0].message.content
         except Exception as e:
             logger.error(f'Error generating response {e}')
