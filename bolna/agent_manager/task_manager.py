@@ -164,13 +164,10 @@ class TaskManager(BaseManager):
         self.previous_request_id = None
         self.llm_rejected_request_ids = set()
         self.llm_processed_request_ids = set()
-        self.was_long_pause = False
         self.buffers = []
         self.should_respond = False
         self.last_response_time = time.time()
-        self.is_an_ivr_call = self._is_conversation_task() and self._is_preprocessed_flow() and not self.turn_based_conversation
         self.consider_next_transcript_after = time.time()
-        self.duration_to_prevent_accidental_interruption = 3 if self.is_an_ivr_call else 0
         self.callee_speaking = False
         self.callee_speaking_start_time = -1
         self.llm_response_generated = False
@@ -1400,8 +1397,6 @@ class TaskManager(BaseManager):
                 # self.history.append({'role': 'user', 'content': ws_data_packet['data']})
                 await self._run_llm_task(
                     create_ws_data_packet(ws_data_packet['data'], meta_info))
-                if self._is_preprocessed_flow():
-                    self.__update_preprocessed_tree_node()
                 eos_packet = create_ws_data_packet("<end_of_stream>", meta_info)
                 await self.tools["output"].handle(eos_packet)
 
@@ -1417,15 +1412,7 @@ class TaskManager(BaseManager):
             if self._is_extraction_task() or self._is_summarization_task():
                 await self._process_followup_task(message)
             elif self._is_conversation_task():
-                if self._is_preprocessed_flow():
-                    if time.time() < self.consider_next_transcript_after:
-                        logger.info("Not considering transcript as we're still in cool down period")
-                        await asyncio.sleep(self.consider_next_transcript_after - time.time())
-                    logger.info(f"Running preprocessedf task")
-                    await self._process_conversation_preprocessed_task(message, sequence, meta_info)
-
-                else:
-                    await self._process_conversation_task(message, sequence, meta_info)
+                await self._process_conversation_task(message, sequence, meta_info)
             else:
                 logger.error("unsupported task type: {}".format(self.task_config["task_type"]))
             self.llm_task = None
