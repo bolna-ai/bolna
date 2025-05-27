@@ -41,8 +41,9 @@ class AzureSynthesizer(BaseSynthesizer):
             "request_count": 0,
             "total_first_byte_latency": 0,
             "min_latency": float('inf'),
-            "max_latency": 0
+            "max_latency": 0.0
         }
+        self.connection_requested_at = None
 
         # Implement connection pooling with a synthesizer factory
         self.synthesizer_pool = []
@@ -107,13 +108,17 @@ class AzureSynthesizer(BaseSynthesizer):
 
                 # Create synthesizer for each request to avoid blocking
                 synthesizer = speechsdk.SpeechSynthesizer(speech_config=self.speech_config, audio_config=None)
-                
+
                 # Set up streaming events
                 chunk_queue = asyncio.Queue()
                 done_event = asyncio.Event()
-                
+                start_time = time.perf_counter()
+
                 def speech_synthesizer_synthesizing_handler(evt):
                     try:
+                        if self.connection_time is None:
+                            self.connection_time = round((time.perf_counter() - start_time) * 1000)
+
                         # Use run_coroutine_threadsafe to safely put data from another thread
                         asyncio.run_coroutine_threadsafe(
                             chunk_queue.put(evt.result.audio_data), 
@@ -121,19 +126,18 @@ class AzureSynthesizer(BaseSynthesizer):
                         )
                     except Exception as e:
                         logger.error(f"Error in synthesizing handler: {e}")
-                    
+
                 def speech_synthesizer_completed_handler(evt):
-                    # Use run_coroutine_threadsafe to safely set event from another thread
-                    asyncio.run_coroutine_threadsafe(
-                        done_event.set(), 
-                        self.loop
-                    )
-                
+                    async def set_done_event():
+                        done_event.set()
+
+                    asyncio.run_coroutine_threadsafe(set_done_event(), self.loop)
+
                 synthesizer.synthesizing.connect(speech_synthesizer_synthesizing_handler)
                 synthesizer.synthesis_completed.connect(speech_synthesizer_completed_handler)
                 
                 # Start the synthesis (non-blocking)
-                start_time = time.time()
+                start_time = time.perf_counter()
                 synthesizer.speak_text_async(text)
                 logger.debug(f"Azure TTS request sent for {len(text)} chars")
                 full_audio = bytearray()
@@ -150,13 +154,12 @@ class AzureSynthesizer(BaseSynthesizer):
                         
                         # Log first chunk latency
                         if not self.first_chunk_generated:
-                            first_chunk_time = time.time() - start_time
+                            first_chunk_time = round((time.perf_counter() - start_time) * 1000)
                             self.latency_stats["request_count"] += 1
                             self.latency_stats["total_first_byte_latency"] += first_chunk_time
                             self.latency_stats["min_latency"] = min(self.latency_stats["min_latency"], first_chunk_time)
                             self.latency_stats["max_latency"] = max(self.latency_stats["max_latency"], first_chunk_time)
-                            logger.debug(f"Azure TTS first chunk latency: {first_chunk_time:.2f}s")
-                        
+
                         # Process chunk
                         if not self.first_chunk_generated:
                             meta_info["is_first_chunk"] = True
@@ -186,7 +189,6 @@ class AzureSynthesizer(BaseSynthesizer):
                     self.cache.set(text, bytes(full_audio))
                 
                 self.synthesized_characters += len(text)
-                
         except asyncio.CancelledError:
             logger.debug("Azure synthesizer task was cancelled - shutting down cleanly")
             raise
@@ -200,12 +202,3 @@ class AzureSynthesizer(BaseSynthesizer):
     async def push(self, message):
         logger.debug(f"Pushed message to internal queue {message}")
         self.internal_queue.put_nowait(message)
-
-    async def get_synthesizer_from_pool(self):
-        if not self.synthesizer_pool:
-            return speechsdk.SpeechSynthesizer(speech_config=self.speech_config)
-        return self.synthesizer_pool.pop()
-
-    def return_synthesizer_to_pool(self, synthesizer):
-        if len(self.synthesizer_pool) < self.max_pool_size:
-            self.synthesizer_pool.append(synthesizer)
