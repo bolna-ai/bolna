@@ -423,11 +423,6 @@ class TaskManager(BaseManager):
                 llm_agent = self.__setup_tasks(**agent_params)
                 self.llm_agent_map[agent] = llm_agent
 
-        elif self.__is_openai_assistant():
-            # if self.task_config['tools_config']["llm_agent"].get("agent_type", None) is None:
-            #     assistant_config = {"assistant_id": self.task_config['tools_config']["llm_agent"]['assistant_id']}
-            self.__setup_tasks(agent_type="openai_assistant", assistant_config=task['tools_config']["llm_agent"]['llm_config'])
-
         elif self.task_config["task_type"] == "webhook":
             if "webhookURL" in self.task_config["tools_config"]["api_tools"]:
                 webhook_url = self.task_config["tools_config"]["api_tools"]["webhookURL"]
@@ -640,9 +635,6 @@ class TaskManager(BaseManager):
         if agent_type == "simple_llm_agent":
             logger.info(f"Simple llm agent")
             llm_agent = StreamingContextualAgent(llm)
-        elif agent_type == "openai_assistant":
-            logger.info(f"setting up backend as openai_assistants {assistant_config}")
-            llm_agent = OpenAIAssistantAgent(**assistant_config)
         elif agent_type == "knowledgebase_agent":
             logger.info("Setting up knowledgebase_agent agent ####")
             llm_config = self.task_config["tools_config"]["llm_agent"].get("llm_config", {})
