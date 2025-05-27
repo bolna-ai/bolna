@@ -56,9 +56,6 @@ class TaskManager(BaseManager):
         if task['tools_config']["llm_agent"] and task['tools_config']["llm_agent"]['llm_config'].get('assistant_id', None) is not None:
             self.kwargs['assistant_id'] = task['tools_config']["llm_agent"]['llm_config']['assistant_id']
 
-        if self.__is_openai_assistant():
-            self.kwargs['assistant_id'] = task['tools_config']["llm_agent"]['llm_config']['assistant_id']
-
         logger.info(f"doing task {task}")
         self.task_id = task_id
         self.assistant_name = assistant_name
@@ -199,9 +196,7 @@ class TaskManager(BaseManager):
                 self.llm_config_map[agent] = config.copy()
                 self.llm_config_map[agent]['buffer_size'] = self.task_config["tools_config"]["synthesizer"][
                     'buffer_size']
-                if 'assistant_id' in config:
-                    self.llm_config_map[agent]['agent_type'] = "openai_assistant"
-        elif not self.__is_openai_assistant():
+        else:
             if self.task_config["tools_config"]["llm_agent"] is not None:
                 if self.__is_knowledgebase_agent():
                     self.llm_agent_config = self.task_config["tools_config"]["llm_agent"]
@@ -402,14 +397,12 @@ class TaskManager(BaseManager):
                 if 'routes' in self.llm_config_map[agent]:
                     del self.llm_config_map[agent]['routes'] #Remove routes from here as it'll create conflict ahead
                 llm = self.__setup_llm(self.llm_config_map[agent])
-                agent_type = self.llm_config_map[agent].get("agent_type","simple_llm_agent")
+                agent_type = self.llm_config_map[agent].get("agent_type", "simple_llm_agent")
                 logger.info(f"Getting response for {llm} and agent type {agent_type} and {agent}")
                 agent_params = {
                     'llm': llm,
                     'agent_type': agent_type
                 }
-                if agent_type == "openai_assistant":
-                    agent_params['assistant_config'] = self.llm_config_map[agent]
                 llm_agent = self.__setup_tasks(**agent_params)
                 self.llm_agent_map[agent] = llm_agent
 
@@ -420,12 +413,6 @@ class TaskManager(BaseManager):
                 webhook_url = self.task_config["tools_config"]["api_tools"]["tools_params"]["webhook"]["url"]
             logger.info(f"Webhook URL {webhook_url}")
             self.tools["webhook_agent"] = WebhookAgent(webhook_url=webhook_url)
-
-    def __is_openai_assistant(self):
-        if self.task_config["task_type"] == "webhook":
-            return False
-        agent_type = self.task_config['tools_config']["llm_agent"].get("agent_type", self.task_config['tools_config']["llm_agent"].get("agent_flow_type"))
-        return agent_type == "openai_assistant"
 
     def __is_multiagent(self):
         if self.task_config["task_type"] == "webhook":
@@ -682,7 +669,7 @@ class TaskManager(BaseManager):
             return
 
         agent_type = self.task_config["tools_config"]["llm_agent"].get("agent_type", "simple_llm_agent")
-        if agent_type in ["openai_assistant", "knowledgebase_agent"]:
+        if agent_type in ["knowledgebase_agent"]:
             return
 
         self.is_local = local

@@ -119,16 +119,6 @@ class Routes(BaseModel):
     routes: Optional[List[Route]] = []
 
 
-class OpenaiAssistant(BaseModel):
-    name: Optional[str] = None
-    assistant_id: str = None
-    max_tokens: Optional[int] =100
-    temperature: Optional[float] = 0.2
-    buffer_size: Optional[int] = 100
-    provider: Optional[str] = "openai"
-    model: Optional[str] = "gpt-3.5-turbo"
-
-
 class MongoDBProviderConfig(BaseModel):
     connection_string: Optional[str] = None
     db_name: Optional[str] = None
@@ -217,7 +207,7 @@ class AgentRouteConfig(BaseModel):
 
 
 class MultiAgent(BaseModel):
-    agent_map: Dict[str, Union[Llm, OpenaiAssistant]]
+    agent_map: Dict[str, Union[Llm]]
     agent_routing_config: Dict[str, AgentRouteConfig]
     default_agent: str
     embedding_model: Optional[str] = "Snowflake/snowflake-arctic-embed-l"
@@ -233,14 +223,13 @@ class LlmAgent(BaseModel):
     agent_flow_type: str
     agent_type: str
     routes: Optional[Routes] = None
-    llm_config: Union[OpenaiAssistant, KnowledgebaseAgent, LlmAgentGraph, MultiAgent, SimpleLlmAgent, GraphAgentConfig]
+    llm_config: Union[KnowledgebaseAgent, LlmAgentGraph, MultiAgent, SimpleLlmAgent, GraphAgentConfig]
 
     @field_validator('llm_config', mode='before')
     def validate_llm_config(cls, value, info):
         agent_type = info.data.get('agent_type')
 
         valid_config_types = {
-            'openai_assistant': OpenaiAssistant,
             'knowledgebase_agent': KnowledgebaseAgent,
             'graph_agent': GraphAgentConfig,
             'llm_agent_graph': LlmAgentGraph,
