@@ -41,8 +41,9 @@ class AzureSynthesizer(BaseSynthesizer):
             "request_count": 0,
             "total_first_byte_latency": 0,
             "min_latency": float('inf'),
-            "max_latency": 0
+            "max_latency": 0.0
         }
+        self.connection_requested_at = None
 
         # Implement connection pooling with a synthesizer factory
         self.synthesizer_pool = []
@@ -106,14 +107,18 @@ class AzureSynthesizer(BaseSynthesizer):
                     continue
 
                 # Create synthesizer for each request to avoid blocking
-                synthesizer = speechsdk.SpeechSynthesizer(speech_config=self.speech_config, audio_config=None)
-                
+                synthesizer = await self.get_synthesizer_from_pool()
+
                 # Set up streaming events
                 chunk_queue = asyncio.Queue()
                 done_event = asyncio.Event()
-                
+                start_time = time.time()
+
                 def speech_synthesizer_synthesizing_handler(evt):
                     try:
+                        if self.connection_time is None:
+                            self.connection_time = time.time() - start_time
+
                         # Use run_coroutine_threadsafe to safely put data from another thread
                         asyncio.run_coroutine_threadsafe(
                             chunk_queue.put(evt.result.audio_data), 
@@ -121,14 +126,13 @@ class AzureSynthesizer(BaseSynthesizer):
                         )
                     except Exception as e:
                         logger.error(f"Error in synthesizing handler: {e}")
-                    
+
                 def speech_synthesizer_completed_handler(evt):
-                    # Use run_coroutine_threadsafe to safely set event from another thread
-                    asyncio.run_coroutine_threadsafe(
-                        done_event.set(), 
-                        self.loop
-                    )
-                
+                    async def set_done_event():
+                        done_event.set()
+
+                    asyncio.run_coroutine_threadsafe(set_done_event(), self.loop)
+
                 synthesizer.synthesizing.connect(speech_synthesizer_synthesizing_handler)
                 synthesizer.synthesis_completed.connect(speech_synthesizer_completed_handler)
                 
@@ -155,8 +159,7 @@ class AzureSynthesizer(BaseSynthesizer):
                             self.latency_stats["total_first_byte_latency"] += first_chunk_time
                             self.latency_stats["min_latency"] = min(self.latency_stats["min_latency"], first_chunk_time)
                             self.latency_stats["max_latency"] = max(self.latency_stats["max_latency"], first_chunk_time)
-                            logger.debug(f"Azure TTS first chunk latency: {first_chunk_time:.2f}s")
-                        
+
                         # Process chunk
                         if not self.first_chunk_generated:
                             meta_info["is_first_chunk"] = True
@@ -186,7 +189,7 @@ class AzureSynthesizer(BaseSynthesizer):
                     self.cache.set(text, bytes(full_audio))
                 
                 self.synthesized_characters += len(text)
-                
+                self.return_synthesizer_to_pool(synthesizer)
         except asyncio.CancelledError:
             logger.debug("Azure synthesizer task was cancelled - shutting down cleanly")
             raise
