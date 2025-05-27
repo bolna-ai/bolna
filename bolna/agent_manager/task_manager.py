@@ -230,13 +230,6 @@ class TaskManager(BaseManager):
                         "provider": self.llm_agent_config['provider']
                     }
 
-        # if self.task_config["tools_config"]["llm_agent"] is not None:
-        #     self.llm_config = {
-        #         "model": self.llm_agent_config["model"],
-        #         "max_tokens": self.task_config["tools_config"]["llm_agent"]["max_tokens"],
-        #         "provider": self.task_config["tools_config"]["llm_agent"]["provider"]
-        #     }
-
         # Output stuff
         self.output_task = None
         self.buffered_output_queue = asyncio.Queue()
@@ -720,8 +713,6 @@ class TaskManager(BaseManager):
             logger.info(f"Initialised prompt dict {self.prompt_map}, Set default prompt {self.system_prompt}")
         else:
             self.prompts = self.__prefill_prompts(self.task_config, prompt_responses.get(current_task, None), self.task_config['task_type'])
-            if self.task_config["tools_config"]["llm_agent"]['agent_flow_type'] == "preprocessed":
-                self.tools["llm_agent"].load_prompts_and_create_graph(self.prompts)
 
         if "system_prompt" in self.prompts:
             # This isn't a graph based agent
@@ -919,12 +910,6 @@ class TaskManager(BaseManager):
 
     def _is_conversation_task(self):
         return self.task_config["task_type"] == "conversation"
-
-    def __is_openai_assistant_agent(self):
-        return self.task_config["tools_config"]["llm_agent"].get("agent_type", None) == "openai_assistant"
-
-    def _is_preprocessed_flow(self):
-        return "agent_flow_type" in self.task_config["tools_config"]["llm_agent"] and self.task_config["tools_config"]["llm_agent"]['agent_flow_type'] == "preprocessed"
 
     def _get_next_step(self, sequence, origin):
         try:
@@ -1285,10 +1270,6 @@ class TaskManager(BaseManager):
             self.__store_into_history(meta_info, messages, llm_response, should_trigger_function_call= should_trigger_function_call)
 
     async def _process_conversation_task(self, message, sequence, meta_info):
-        next_step = None
-        logger.info("agent flow is not preprocessed")
-
-        start_time = time.time()
         should_bypass_synth = 'bypass_synth' in meta_info and meta_info['bypass_synth'] is True
         next_step = self._get_next_step(sequence, "llm")
         meta_info['llm_start_time'] = time.time()
