@@ -107,7 +107,7 @@ class AzureSynthesizer(BaseSynthesizer):
                     continue
 
                 # Create synthesizer for each request to avoid blocking
-                synthesizer = await self.get_synthesizer_from_pool()
+                synthesizer = speechsdk.SpeechSynthesizer(speech_config=self.speech_config, audio_config=None)
 
                 # Set up streaming events
                 chunk_queue = asyncio.Queue()
@@ -189,7 +189,6 @@ class AzureSynthesizer(BaseSynthesizer):
                     self.cache.set(text, bytes(full_audio))
                 
                 self.synthesized_characters += len(text)
-                self.return_synthesizer_to_pool(synthesizer)
         except asyncio.CancelledError:
             logger.debug("Azure synthesizer task was cancelled - shutting down cleanly")
             raise
