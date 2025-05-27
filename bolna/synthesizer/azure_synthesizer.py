@@ -202,12 +202,3 @@ class AzureSynthesizer(BaseSynthesizer):
     async def push(self, message):
         logger.debug(f"Pushed message to internal queue {message}")
         self.internal_queue.put_nowait(message)
-
-    async def get_synthesizer_from_pool(self):
-        if not self.synthesizer_pool:
-            return speechsdk.SpeechSynthesizer(speech_config=self.speech_config)
-        return self.synthesizer_pool.pop()
-
-    def return_synthesizer_to_pool(self, synthesizer):
-        if len(self.synthesizer_pool) < self.max_pool_size:
-            self.synthesizer_pool.append(synthesizer)
