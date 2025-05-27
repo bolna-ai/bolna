@@ -112,12 +112,12 @@ class AzureSynthesizer(BaseSynthesizer):
                 # Set up streaming events
                 chunk_queue = asyncio.Queue()
                 done_event = asyncio.Event()
-                start_time = time.time()
+                start_time = time.perf_counter()
 
                 def speech_synthesizer_synthesizing_handler(evt):
                     try:
                         if self.connection_time is None:
-                            self.connection_time = time.time() - start_time
+                            self.connection_time = round((time.perf_counter() - start_time) * 1000)
 
                         # Use run_coroutine_threadsafe to safely put data from another thread
                         asyncio.run_coroutine_threadsafe(
@@ -137,7 +137,7 @@ class AzureSynthesizer(BaseSynthesizer):
                 synthesizer.synthesis_completed.connect(speech_synthesizer_completed_handler)
                 
                 # Start the synthesis (non-blocking)
-                start_time = time.time()
+                start_time = time.perf_counter()
                 synthesizer.speak_text_async(text)
                 logger.debug(f"Azure TTS request sent for {len(text)} chars")
                 full_audio = bytearray()
@@ -154,7 +154,7 @@ class AzureSynthesizer(BaseSynthesizer):
                         
                         # Log first chunk latency
                         if not self.first_chunk_generated:
-                            first_chunk_time = time.time() - start_time
+                            first_chunk_time = round((time.perf_counter() - start_time) * 1000)
                             self.latency_stats["request_count"] += 1
                             self.latency_stats["total_first_byte_latency"] += first_chunk_time
                             self.latency_stats["min_latency"] = min(self.latency_stats["min_latency"], first_chunk_time)
