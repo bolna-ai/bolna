@@ -2021,7 +2021,7 @@ class TaskManager(BaseManager):
 
     async def __start_transmitting_ambient_noise(self):
         try:
-            audio = await get_raw_audio_bytes(f'{os.getenv("AMBIENT_NOISE_PRESETS_DIR")}/{self.soundtrack}', local= True, is_location=True)
+            audio = await get_raw_audio_bytes(f'{os.getenv("AMBIENT_NOISE_PRESETS_DIR")}/{self.soundtrack}', local=True, is_location=True)
             audio = resample(audio, self.sampling_rate, format = "wav")
             if self.task_config["tools_config"]["output"]["provider"] in SUPPORTED_OUTPUT_TELEPHONY_HANDLERS.keys():
                 audio = wav_bytes_to_pcm(audio)
@@ -2034,8 +2034,12 @@ class TaskManager(BaseManager):
                 meta_info={'io': self.tools["output"].get_provider(), 'message_category': 'ambient_noise', 'stream_sid': self.stream_sid , "request_id": str(uuid.uuid4()), "cached": True, "type":'audio', "sequence_id": -1, 'format': 'pcm'}
             while True:
                 logger.info(f"Before yielding ambient noise")
-                for chunk in yield_chunks_from_memory(audio, self.output_chunk_size*2 ):
-                    if not self.started_transmitting_audio:
+                for chunk in yield_chunks_from_memory(audio, self.output_chunk_size*2):
+                    # Only play ambient noise if no content is being transmitted
+                    # Check if any real content audio (sequence_id > 0) is being played
+                    is_content_playing = self.tools["input"].is_audio_being_played_to_user()
+                    
+                    if not is_content_playing:
                         logger.info(f"Transmitting ambient noise {len(chunk)}")
                         await self.tools["output"].handle(create_ws_data_packet(chunk, meta_info=meta_info))
                     logger.info("Sleeping for 800 ms")
