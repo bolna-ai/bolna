@@ -110,7 +110,10 @@ class DeepgramTranscriber(BaseTranscriber):
             dg_params['language'] = self.language
 
         if self.keywords and len(self.keywords.split(",")) > 0:
-            dg_params['keywords'] = "&keywords=".join(self.keywords.split(","))
+            if self.model.startswith('nova-3'):
+                dg_params['keyterm'] = "&keyterm=".join(self.keywords.split(","))
+            else:
+                dg_params['keywords'] = "&keywords=".join(self.keywords.split(","))
 
         websocket_api = 'wss://{}/v1/listen?'.format(self.deepgram_host)
         websocket_url = websocket_api + urlencode(dg_params)
