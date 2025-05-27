@@ -28,7 +28,7 @@ class DeepgramTranscriber(BaseTranscriber):
         logger.info(f"Initializing transcriber")
         super().__init__(input_queue)
         self.endpointing = endpointing
-        self.language = language if model == "nova-2" else "en"
+        self.language = language
         self.stream = stream
         self.provider = telephony_provider
         self.heartbeat_task = None
@@ -45,8 +45,6 @@ class DeepgramTranscriber(BaseTranscriber):
         self.transcription_cursor = 0.0
         logger.info(f"self.stream: {self.stream}")
         self.interruption_signalled = False
-        if 'nova-2' not in self.model:
-            self.model = "nova-2"
         if not self.stream:
             self.api_url = f"https://{self.deepgram_host}/v1/listen?model={self.model}&filler_words=true&language={self.language}"
             self.session = aiohttp.ClientSession()
