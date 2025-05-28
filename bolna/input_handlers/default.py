@@ -85,9 +85,7 @@ class DefaultInputHandler:
         is_content_audio = message_type not in ['ambient_noise', 'backchanneling']
         
         if message_type == "pre_mark_message":
-            # Only set audio playing flag for content audio
-            if is_content_audio:
-                self.update_is_audio_being_played(True)
+            self.update_is_audio_being_played(True)
             return
 
         self.audio_chunks_received += 1
