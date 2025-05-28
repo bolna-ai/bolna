@@ -203,7 +203,6 @@ class SmallestSynthesizer(BaseSynthesizer):
 
                 response = await self.websocket_holder["websocket"].recv()
                 data = json.loads(response)
-                logger.info(f"output chunks data: {data}")
 
                 if "status" in data and data["status"] == 'chunk':
                     chunk = base64.b64decode(data["data"]["audio"])
