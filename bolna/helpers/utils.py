@@ -351,7 +351,7 @@ def yield_chunks_from_memory(audio_bytes, chunk_size=512):
         yield audio_bytes[i:i + chunk_size]
 
 
-def pcm_to_wav_bytes(pcm_data, sample_rate = 16000, num_channels = 1, sample_width = 2):
+def pcm_to_wav_bytes(pcm_data, sample_rate=16000, num_channels=1, sample_width=2):
     buffer = io.BytesIO()
     bit_depth = 16 
     if len(pcm_data)%2 == 1:

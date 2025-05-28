@@ -4,7 +4,7 @@ import asyncio
 import time
 from dotenv import load_dotenv
 from bolna.helpers.logger_config import configure_logger
-from bolna.helpers.utils import convert_audio_to_wav, create_ws_data_packet, pcm_to_wav_bytes, resample, wav_bytes_to_pcm
+from bolna.helpers.utils import create_ws_data_packet
 from bolna.memory.cache.inmemory_scalar_cache import InmemoryScalarCache
 from .base_synthesizer import BaseSynthesizer
 import azure.cognitiveservices.speech as speechsdk
