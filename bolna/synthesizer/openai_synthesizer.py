@@ -2,7 +2,7 @@ from collections import deque
 import os
 from dotenv import load_dotenv
 from bolna.helpers.logger_config import configure_logger
-from bolna.helpers.utils import convert_audio_to_wav, create_ws_data_packet, pcm_to_wav_bytes, resample
+from bolna.helpers.utils import convert_audio_to_wav, create_ws_data_packet, resample
 from .base_synthesizer import BaseSynthesizer
 from openai import AsyncOpenAI
 import io

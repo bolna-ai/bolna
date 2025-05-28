@@ -13,7 +13,7 @@ from collections import deque
 from bolna.memory.cache.inmemory_scalar_cache import InmemoryScalarCache
 from .base_synthesizer import BaseSynthesizer
 from bolna.helpers.logger_config import configure_logger
-from bolna.helpers.utils import convert_audio_to_wav, create_ws_data_packet, pcm_to_wav_bytes, resample
+from bolna.helpers.utils import convert_audio_to_wav, create_ws_data_packet, resample
 
 logger = configure_logger(__name__)
 
