@@ -112,6 +112,8 @@ class DeepgramTranscriber(BaseTranscriber):
         if self.keywords and len(self.keywords.split(",")) > 0:
             if self.model.startswith('nova-3'):
                 dg_params['keyterm'] = "&keyterm=".join(self.keywords.split(","))
+                if self.language != 'en':
+                    dg_params.pop('keyterm', None)
             else:
                 dg_params['keywords'] = "&keywords=".join(self.keywords.split(","))
 
