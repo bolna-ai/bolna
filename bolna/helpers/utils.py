@@ -122,12 +122,21 @@ def raw_to_mulaw(raw_bytes):
     mulaw_encoded = mu_law_encode(samples)
     return mulaw_encoded
 
+def get_s3_client():
+    hetzner_endpoint = os.getenv("HETZNER_ENDPOINT")
+    session = AioSession()
+    kwargs = {}
+    if hetzner_endpoint:
+        kwargs["endpoint_url"] = hetzner_endpoint
+    return session.create_client('s3', **kwargs)
+
 
 async def get_s3_file(bucket_name = BUCKET_NAME, file_key = ""):
     session = AioSession()
 
     async with AsyncExitStack() as exit_stack:
-        s3_client = await exit_stack.enter_async_context(session.create_client('s3'))
+        s3_client = await exit_stack.enter_async_context(get_s3_client())
+        # s3_client = await exit_stack.enter_async_context(session.create_client('s3'))
         try:
             response = await s3_client.get_object(Bucket=bucket_name, Key=file_key)
         except (BotoCoreError, ClientError) as error:
@@ -139,7 +148,8 @@ async def get_s3_file(bucket_name = BUCKET_NAME, file_key = ""):
 async def delete_s3_file_by_prefix(bucket_name,file_key):
     session = AioSession()
     async with AsyncExitStack() as exit_stack:
-        s3_client = await exit_stack.enter_async_context(session.create_client('s3'))
+        s3_client = await exit_stack.enter_async_context(get_s3_client())
+        # s3_client = await exit_stack.enter_async_context(session.create_client('s3'))
         try:
             paginator = s3_client.get_paginator('list_objects')
             async for result in paginator.paginate(Bucket=bucket_name, Prefix=file_key):
@@ -157,7 +167,8 @@ async def store_file(bucket_name=None, file_key=None, file_data=None, content_ty
         session = AioSession()
 
         async with AsyncExitStack() as exit_stack:
-            s3_client = await exit_stack.enter_async_context(session.create_client('s3'))
+            s3_client = await exit_stack.enter_async_context(get_s3_client())
+            # s3_client = await exit_stack.enter_async_context(session.create_client('s3'))
             data = None
             if content_type == "json":
                 data = json.dumps(file_data)
