@@ -122,6 +122,17 @@ def raw_to_mulaw(raw_bytes):
     mulaw_encoded = mu_law_encode(samples)
     return mulaw_encoded
 
+async def get_s3_client_args():
+    args = {
+        "region_name": os.getenv("AWS_REGION"),
+        "aws_access_key_id": os.getenv("AWS_ACCESS_KEY_ID"),
+        "aws_secret_access_key": os.getenv("AWS_SECRET_ACCESS_KEY"),
+    }
+    hetzner_endpoint = os.getenv("HETZNER_ENDPOINT")
+    if hetzner_endpoint:
+        args["endpoint_url"] = hetzner_endpoint
+    return args
+
 
 async def get_s3_file(bucket_name = BUCKET_NAME, file_key = ""):
     session = AioSession()
@@ -157,7 +168,11 @@ async def store_file(bucket_name=None, file_key=None, file_data=None, content_ty
         session = AioSession()
 
         async with AsyncExitStack() as exit_stack:
-            s3_client = await exit_stack.enter_async_context(session.create_client('s3'))
+            s3_client_args = await get_s3_client_args()
+            s3_client = await exit_stack.enter_async_context(
+                session.create_client('s3', **s3_client_args)
+            )
+            # s3_client = await exit_stack.enter_async_context(session.create_client('s3'))
             data = None
             if content_type == "json":
                 data = json.dumps(file_data)
