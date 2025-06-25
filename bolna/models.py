@@ -34,8 +34,8 @@ class OpenAIConfig(BaseModel):
     model: str
 
 
-
 class DeepgramConfig(BaseModel):
+    voice_id: str
     voice: str
     model: str
 
