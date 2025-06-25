@@ -15,15 +15,19 @@ DEEPGRAM_TTS_URL = "https://{}/v1/speak".format(DEEPGRAM_HOST)
 
 
 class DeepgramSynthesizer(BaseSynthesizer):
-    def __init__(self, voice, audio_format="pcm", sampling_rate="8000", stream=False, buffer_size=400, caching=True,
+    def __init__(self, voice_id, voice, audio_format="pcm", sampling_rate="8000", stream=False, buffer_size=400, caching=True,
                  model="aura-zeus-en", **kwargs):
         super().__init__(kwargs.get("task_manager_instance", None), stream, buffer_size)
         self.format = "mulaw" if audio_format in ["pcm", 'wav'] else audio_format
         self.voice = voice
+        self.voice_id = voice_id
         self.sample_rate = str(sampling_rate)
         self.model = model
         self.first_chunk_generated = False
         self.api_key = kwargs.get("transcriber_key", os.getenv('DEEPGRAM_AUTH_TOKEN'))
+
+        if len(self.model.split('-')) == 2:
+            self.model = f"{self.model}-{self.voice_id}"
         
         self.synthesized_characters = 0
         self.caching = caching
