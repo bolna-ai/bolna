@@ -965,6 +965,12 @@ class TaskManager(BaseManager):
             if len(mark_items_list) == 1 and first_item.get('type') == 'pre_mark_message':
                 break
 
+            # plivo mark_event bug
+            if len(mark_items_list) == 2:
+                second_item = mark_items_list[1]['mark_data']
+                if first_item.get('type') == 'agent_hangup' and first_item.get('text_synthesized') == '' and second_item.get('type') == 'pre_mark_message':
+                    break
+
             if first_item.get('text_synthesized') and first_item.get('is_final_chunk') is True:
                 break
 

@@ -136,6 +136,7 @@ async def get_s3_file(bucket_name = BUCKET_NAME, file_key = ""):
             file_content = await response['Body'].read()
             return file_content
 
+
 async def delete_s3_file_by_prefix(bucket_name,file_key):
     session = AioSession()
     async with AsyncExitStack() as exit_stack:
@@ -151,6 +152,7 @@ async def delete_s3_file_by_prefix(bucket_name,file_key):
         except (BotoCoreError, ClientError) as error:
             logger.error(error)
             return error
+
 
 async def store_file(bucket_name=None, file_key=None, file_data=None, content_type="json", local=False, preprocess_dir=None):
     if not local:
@@ -274,6 +276,7 @@ def update_prompt_with_context(prompt, context_data):
     except Exception as e:
         return prompt
 
+
 async def get_prompt_responses(assistant_id, local=False):
     filepath = f"{PREPROCESS_DIR}/{assistant_id}/conversation_details.json"
     data = ""
@@ -329,10 +332,10 @@ def infer_type(value):
 
 def json_to_pydantic_schema(json_data):
     parsed_json = json.loads(json_data)
-    
+
     fields = {key: infer_type(value) for key, value in parsed_json.items()}
     dynamic_model = create_model('DynamicModel', **fields)
-    
+
     return dynamic_model.schema_json(indent=2)
 
 
@@ -411,10 +414,10 @@ def create_empty_wav_file(duration_seconds, sampling_rate = 24000):
     wav_io = io.BytesIO()
     with wave.open(wav_io, 'wb') as wav_file:
         wav_file.setnchannels(1)
-        wav_file.setsampwidth(2) 
+        wav_file.setsampwidth(2)
         wav_file.setframerate(sampling_rate)
         wav_file.setnframes(total_frames)
-        wav_file.writeframes(b'\x00' * total_frames * 2) 
+        wav_file.writeframes(b'\x00' * total_frames * 2)
     wav_io.seek(0)
     return wav_io
 
@@ -540,10 +543,10 @@ def convert_to_request_log(message, meta_info, model, component="transcriber", d
     log = dict()
     log['direction'] = direction
     log['data'] = message
-    log['leg_id'] = meta_info['request_id'] if "request_id" in meta_info else "1234"
+    log['leg_id'] = meta_info['request_id'] if "request_id" in meta_info else "-"
     log['time'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     log['component'] = component
-    log['sequence_id'] = meta_info['sequence_id']
+    log['sequence_id'] = meta_info.get('sequence_id', None)
     log['model'] = model
     log['cached'] = is_cached
     if component == "llm":
