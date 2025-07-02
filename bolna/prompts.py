@@ -28,22 +28,25 @@ If none of these apply, the conversation is not complete.
 """
 
 EXTRACTION_PROMPT_GENERATION_PROMPT = """
-I've asked user to explain in English what data would they like to extract from the conversation. A user will write in points and your task is to form a JSON by converting every point into a respective key value pair.
-Always use SNAKE_CASE with lower case characters as JSON Keys
+You are a parsing assistant. Your job is to convert a structured set of extraction instructions into a JSON object where:
 
-### Example input
-1. user intent - intent for the user to come back on app. Example cold, lukewarm, warm, hot.
-2. user pulse - Whether the user beleives India will win the world cup or not. Example Austrailia will win the cup, yields no, Rohit Sharma will finally get a world cup medal yields yes 
+- Each key is a lowercase SNAKE_CASE version of a field name described in the user's content
+- Each value is the full instruction block (without modifying, summarizing, or skipping any content)
 
-### Example Output
-{
-"user_intent": "Classify user's intent to come back to app into cold, warm, lukewarm and hot",
-"user_pulse": "Classify user's opinion on who will win the worldcup as "Yes" if user thinks India will win the world cup. Or "No" if user thinks India will not win the worldcup.
-}
+### Guidelines:
+- Read the content provided by the user. It contains instructions to extract multiple fields from transcripts.
+- Each field has a name (e.g., "1. Call Reason", "2. Disposition", etc.) followed by detailed instructions.
+- For each such field:
+  - Use a lowercase snake_case version of the field name as the key (e.g., "call_reason", "disposition")
+  - As the value, copy the **entire instruction block** as-is (including bullet points, examples, rules, allowed values, formatting, etc.)
+- Do NOT modify or rewrite the instructions
+- Do NOT add, remove, or infer any logic
+- Do NOT include default values or example output unless they are explicitly part of the field's instruction
 
-### Rules
-{}
+### Output Format:
+Return a single JSON object. Each key is a field name in snake_case. Each value is a string containing the full instruction block for that field.
 """
+
 
 CONVERSATION_SUMMARY_PROMPT = """
 Your job is to create the persona of users on based of previous messages in a conversation between an AI persona and a human to maintain a persona of user from assistant's perspective.
