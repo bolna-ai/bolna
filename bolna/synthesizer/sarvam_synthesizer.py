@@ -26,10 +26,6 @@ class SarvamSynthesizer(BaseSynthesizer):
         self.pace = 1.0
         self.enable_preprocessing = True
 
-        self.first_chunk_generated = False
-        self.last_text_sent = False
-        self.meta_info = None
-        self.synthesized_characters = 0
         self.previous_request_ids = []
 
     def get_engine(self):
@@ -100,22 +96,11 @@ class SarvamSynthesizer(BaseSynthesizer):
                     audio = base64.b64decode(audio)
 
                 meta_info['text'] = text
-                if not self.first_chunk_generated:
-                    meta_info["is_first_chunk"] = True
-                    self.first_chunk_generated = True
+                self.set_first_chunk_metadata(meta_info)
+                self.set_end_of_stream_metadata(meta_info)
 
-                if "end_of_llm_stream" in meta_info and meta_info["end_of_llm_stream"]:
-                    meta_info["end_of_synthesizer_stream"] = True
-                    self.first_chunk_generated = False
-
-                meta_info["text_synthesized"] = f"{text} "
-                meta_info["mark_id"] = str(uuid.uuid4())
-                yield create_ws_data_packet(audio, meta_info)
+                yield self.create_audio_packet(audio, meta_info, f"{text} ")
 
         except Exception as e:
             traceback.print_exc()
             logger.info(f"Error in sarvam generate {e}")
-
-    async def push(self, message):
-        logger.info(f"Pushed message to internal queue {message}")
-        self.internal_queue.put_nowait(message)

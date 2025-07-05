@@ -102,7 +102,3 @@ class OPENAISynthesizer(BaseSynthesizer):
 
     async def open_connection(self):
         pass
-
-    async def push(self, message):
-        logger.info(f"Pushed message to internal queue {message}")
-        self.internal_queue.put_nowait(message)

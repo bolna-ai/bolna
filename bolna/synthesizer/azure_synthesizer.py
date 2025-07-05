@@ -21,9 +21,7 @@ class AzureSynthesizer(BaseSynthesizer):
         self.voice = f"{language}-{voice}{model}"
         logger.debug(f"{self.voice} initialized")
         self.sample_rate = str(sampling_rate)
-        self.first_chunk_generated = False
         self.stream = stream
-        self.synthesized_characters = 0
         self.caching = caching
         if caching:
             self.cache = InmemoryScalarCache()
@@ -89,21 +87,12 @@ class AzureSynthesizer(BaseSynthesizer):
                     audio_data = self.cache.get(text)
                     
                     # Set metadata and yield the cached audio
-                    if not self.first_chunk_generated:
-                        meta_info["is_first_chunk"] = True
-                        self.first_chunk_generated = True
-                    else:
-                        meta_info["is_first_chunk"] = False
-                        
-                    if "end_of_llm_stream" in meta_info and meta_info["end_of_llm_stream"]:
-                        meta_info["end_of_synthesizer_stream"] = True
-                        self.first_chunk_generated = False
+                    self.set_first_chunk_metadata(meta_info)
+                    self.set_end_of_stream_metadata(meta_info)
                     
                     meta_info['text'] = text
                     meta_info['format'] = 'wav'
-                    meta_info["text_synthesized"] = f"{text} "
-                    meta_info["mark_id"] = str(uuid.uuid4())
-                    yield create_ws_data_packet(audio_data, meta_info)
+                    yield self.create_audio_packet(audio_data, meta_info, f"{text} ")
                     continue
 
                 # Create synthesizer for each request to avoid blocking
@@ -161,23 +150,15 @@ class AzureSynthesizer(BaseSynthesizer):
                             self.latency_stats["max_latency"] = max(self.latency_stats["max_latency"], first_chunk_time)
 
                         # Process chunk
-                        if not self.first_chunk_generated:
-                            meta_info["is_first_chunk"] = True
-                            self.first_chunk_generated = True
-                        else:
-                            meta_info["is_first_chunk"] = False
+                        self.set_first_chunk_metadata(meta_info)
                         
                         # Track if this is the end
                         if done_event.is_set() and chunk_queue.empty():
-                            if "end_of_llm_stream" in meta_info and meta_info["end_of_llm_stream"]:
-                                meta_info["end_of_synthesizer_stream"] = True
-                                self.first_chunk_generated = False
+                            self.set_end_of_stream_metadata(meta_info)
                         
                         meta_info['text'] = text
                         meta_info['format'] = 'wav'
-                        meta_info["text_synthesized"] = f"{text} "
-                        meta_info["mark_id"] = str(uuid.uuid4())
-                        yield create_ws_data_packet(chunk, meta_info)
+                        yield self.create_audio_packet(chunk, meta_info, f"{text} ")
                         
                     except asyncio.TimeoutError:
                         # No chunk ready, just continue and check done_event again
@@ -198,7 +179,3 @@ class AzureSynthesizer(BaseSynthesizer):
 
     async def open_connection(self):
         pass
-
-    async def push(self, message):
-        logger.debug(f"Pushed message to internal queue {message}")
-        self.internal_queue.put_nowait(message)

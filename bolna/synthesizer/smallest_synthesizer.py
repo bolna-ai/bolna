@@ -29,16 +29,7 @@ class SmallestSynthesizer(BaseSynthesizer):
         self.language = language
         self.api_url = f"https://waves-api.smallest.ai/api/v1/{self.model}/get_speech"
         self.ws_url = "wss://waves-api.smallest.ai/api/v1/lightning-v2/get_speech/stream?timeout=60"
-        self.first_chunk_generated = False
-        self.last_text_sent = False
-        self.meta_info = None
-        self.synthesized_characters = 0
         self.previous_request_ids = []
-        self.websocket_holder = {"websocket": None}
-        self.sender_task = None
-        self.conversation_ended = False
-        self.text_queue = deque()
-        self.current_text = ""
 
     def get_engine(self):
         return self.model
@@ -48,17 +39,7 @@ class SmallestSynthesizer(BaseSynthesizer):
             'Authorization': 'Bearer {}'.format(self.api_key),
             'Content-Type': 'application/json'
         }
-
-        async with aiohttp.ClientSession() as session:
-            if payload is not None:
-                async with session.post(self.api_url, headers=headers, json=payload) as response:
-                    if response.status == 200:
-                        data = await response.read()
-                        return data
-                    else:
-                        logger.error(f"Error: {response.status} - {await response.text()}")
-            else:
-                logger.info("Payload was null")
+        return await self.send_http_request(self.api_url, headers, payload)
 
     async def synthesize(self, text):
         audio = await self.__generate_http(text)
@@ -93,11 +74,7 @@ class SmallestSynthesizer(BaseSynthesizer):
                     self.meta_info['format'] = 'wav'
                     audio = message
 
-                    if not self.first_chunk_generated:
-                        self.meta_info["is_first_chunk"] = True
-                        self.first_chunk_generated = True
-                    else:
-                        self.meta_info["is_first_chunk"] = False
+                    self.set_first_chunk_metadata(self.meta_info)
 
                     if self.last_text_sent:
                         # Reset the last_text_sent and first_chunk converted to reset synth latency
@@ -109,8 +86,7 @@ class SmallestSynthesizer(BaseSynthesizer):
                         self.meta_info["end_of_synthesizer_stream"] = True
                         self.first_chunk_generated = False
 
-                    self.meta_info["mark_id"] = str(uuid.uuid4())
-                    yield create_ws_data_packet(audio, self.meta_info)
+                    yield self.create_audio_packet(audio, self.meta_info)
             else:
                 while True:
                     message = await self.internal_queue.get()
@@ -129,18 +105,11 @@ class SmallestSynthesizer(BaseSynthesizer):
                         audio = b'\x00'
 
                     meta_info['text'] = text
-                    if not self.first_chunk_generated:
-                        meta_info["is_first_chunk"] = True
-                        self.first_chunk_generated = True
-
-                    if "end_of_llm_stream" in meta_info and meta_info["end_of_llm_stream"]:
-                        meta_info["end_of_synthesizer_stream"] = True
-                        self.first_chunk_generated = False
+                    self.set_first_chunk_metadata(meta_info)
+                    self.set_end_of_stream_metadata(meta_info)
 
                     meta_info['format'] = "wav"
-                    meta_info["text_synthesized"] = f"{text} "
-                    meta_info["mark_id"] = str(uuid.uuid4())
-                    yield create_ws_data_packet(audio, meta_info)
+                    yield self.create_audio_packet(audio, meta_info, f"{text} ")
 
         except Exception as e:
             traceback.print_exc()
@@ -157,7 +126,10 @@ class SmallestSynthesizer(BaseSynthesizer):
                 return
 
             # Ensure the WebSocket connection is established
-            while self.websocket_holder["websocket"] is None or self.websocket_holder["websocket"].state is websockets.protocol.State.CLOSED:
+            while (self.websocket_holder["websocket"] is None or 
+                   (hasattr(self.websocket_holder["websocket"], 'state') and 
+                    hasattr(self.websocket_holder["websocket"].state, 'name') and
+                    self.websocket_holder["websocket"].state.name == 'CLOSED')):
                 logger.info("Waiting for smallest ws connection to be established...")
                 await asyncio.sleep(1)
 
@@ -165,7 +137,9 @@ class SmallestSynthesizer(BaseSynthesizer):
                 logger.info(f"Sending text: {text}")
                 try:
                     input_message = self.form_payload(text)
-                    await self.websocket_holder["websocket"].send(json.dumps(input_message))
+                    websocket = self.websocket_holder.get("websocket")
+                    if websocket and hasattr(websocket, 'send'):
+                        await websocket.send(json.dumps(input_message))
                 except Exception as e:
                     logger.error(f"Error sending chunk: {e}")
                     return
@@ -196,12 +170,18 @@ class SmallestSynthesizer(BaseSynthesizer):
                     return
 
                 if (self.websocket_holder["websocket"] is None or
-                        self.websocket_holder["websocket"].state is websockets.protocol.State.CLOSED):
+                        (hasattr(self.websocket_holder["websocket"], 'state') and 
+                         hasattr(self.websocket_holder["websocket"].state, 'name') and
+                         self.websocket_holder["websocket"].state.name == 'CLOSED')):
                     logger.info("WebSocket is not connected, skipping receive.")
                     await asyncio.sleep(5)
                     continue
 
-                response = await self.websocket_holder["websocket"].recv()
+                websocket = self.websocket_holder.get("websocket")
+                if websocket and hasattr(websocket, 'recv'):
+                    response = await websocket.recv()
+                else:
+                    continue
                 data = json.loads(response)
 
                 if "status" in data and data["status"] == 'chunk':
@@ -233,42 +213,6 @@ class SmallestSynthesizer(BaseSynthesizer):
             logger.info(f"Failed to connect: {e}")
             return None
 
-    async def monitor_connection(self):
-        # Periodically check if the connection is still alive
-        while True:
-            if self.websocket_holder["websocket"] is None or self.websocket_holder["websocket"].state is websockets.protocol.State.CLOSED:
-                logger.info("Re-establishing smallest connection...")
-                self.websocket_holder["websocket"] = await self.establish_connection()
-            await asyncio.sleep(1)
 
     async def get_sender_task(self):
         return self.sender_task
-
-    async def push(self, message):
-        logger.info(f"Pushed message to internal queue {message}")
-        if self.stream:
-            meta_info, text, self.current_text = message.get("meta_info"), message.get("data"), message.get("data")
-            self.synthesized_characters += len(text) if text is not None else 0
-            end_of_llm_stream = "end_of_llm_stream" in meta_info and meta_info["end_of_llm_stream"]
-            logger.info(f"end_of_llm_stream: {end_of_llm_stream}")
-            self.meta_info = copy.deepcopy(meta_info)
-            meta_info["text"] = text
-            self.sender_task = asyncio.create_task(self.sender(text, meta_info.get("sequence_id"), end_of_llm_stream))
-            self.text_queue.append(meta_info)
-        else:
-            self.internal_queue.put_nowait(message)
-
-    async def cleanup(self):
-        self.conversation_ended = True
-        logger.info("cleaning smallest synthesizer tasks")
-        if self.sender_task:
-            try:
-                self.sender_task.cancel()
-                await self.sender_task
-            except asyncio.CancelledError:
-                logger.info("Sender task was successfully cancelled during WebSocket cleanup.")
-
-        if self.websocket_holder["websocket"]:
-            await self.websocket_holder["websocket"].close()
-        self.websocket_holder["websocket"] = None
-        logger.info("WebSocket connection closed.")
