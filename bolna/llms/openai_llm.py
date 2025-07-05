@@ -109,17 +109,7 @@ class OpenAiLLM(BaseLLM):
             if api_call_payload:
                 logger.info(f"Payload to send {api_call_payload['parsed_args']} func_dict {self.api_params[called_fun]}")
                 self.gave_out_prefunction_call_message = False
-                
-                arguments_received = final_tool_calls_data[0]["function"]["arguments"]
-                api_call_payload.update(json.loads(arguments_received))
-                
-                tools = model_args.get("tools", [])
-                i = [i for i in range(len(tools)) if called_fun == tools[i]["function"]["name"]][0]
-                all_required_keys = tools[i]["function"]["parameters"]["properties"].keys() and tools[i]["function"]["parameters"].get("required", [])
-                if tools[i]["function"].get("parameters", None) is not None and (all(key in arguments_received for key in all_required_keys)):
-                    convert_to_request_log(arguments_received, meta_info, self.model, "llm", direction="response", is_cached=False, run_id=self.run_id)
-                else:
-                    api_call_payload['resp'] = None
+                self.validate_and_log_tool_call(api_call_payload, model_args)
                 yield api_call_payload, False, latency_data, True, None, None
 
         if synthesize:
