@@ -130,20 +130,8 @@ class PollySynthesizer(BaseSynthesizer):
                 message = await self.__generate_http(text)
             if self.format == "mp3":
                 message = convert_audio_to_wav(message, source_format="mp3")
-            if not self.first_chunk_generated:
-                meta_info["is_first_chunk"] = True
-                self.first_chunk_generated = True
-            else:
-                meta_info["is_first_chunk"] = False
-            if "end_of_llm_stream" in meta_info and meta_info["end_of_llm_stream"]:
-                meta_info["end_of_synthesizer_stream"] = True
-                self.first_chunk_generated = False
+            self.set_first_chunk_metadata(meta_info)
+            self.set_end_of_stream_metadata(meta_info)
             meta_info['text'] = text
             meta_info['format'] = 'wav'
-            meta_info["text_synthesized"] = f"{text} "
-            meta_info["mark_id"] = str(uuid.uuid4())
-            yield create_ws_data_packet(message, meta_info)
-
-    async def push(self, message):
-        logger.info("Pushed message to internal queue")
-        self.internal_queue.put_nowait(message)
+            yield self.create_audio_packet(message, meta_info, f"{text} ")
