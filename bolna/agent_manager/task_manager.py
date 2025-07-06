@@ -1629,8 +1629,8 @@ class TaskManager(BaseManager):
                         else:
                             logger.info(f"Skipping message with sequence_id: {sequence_id}")
 
-                        # Give control to other tasks
-                        await asyncio.sleep(0.2)
+                        # Give control to other tasks with minimal delay for audio continuity
+                        await asyncio.sleep(0.01)
 
                 except asyncio.CancelledError:
                     logger.info("Synthesizer task was cancelled.")
