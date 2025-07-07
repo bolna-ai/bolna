@@ -1630,7 +1630,10 @@ class TaskManager(BaseManager):
                             logger.info(f"Skipping message with sequence_id: {sequence_id}")
 
                         # Give control to other tasks
-                        await asyncio.sleep(0.2)
+                        sleep_time = 0.2
+                        if self.synthesizer_provider in ('cartesia', 'rime', 'sarvam', 'azuretts'):
+                            sleep_time = 0.01
+                        await asyncio.sleep(sleep_time)
 
                 except asyncio.CancelledError:
                     logger.info("Synthesizer task was cancelled.")
