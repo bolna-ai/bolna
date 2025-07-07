@@ -1631,7 +1631,7 @@ class TaskManager(BaseManager):
 
                         # Give control to other tasks
                         sleep_time = 0.2
-                        if self.synthesizer_provider in ('cartesia', 'rime'):
+                        if self.synthesizer_provider in ('cartesia', 'rime', 'sarvam', 'azuretts'):
                             sleep_time = 0.01
                         await asyncio.sleep(sleep_time)
 
