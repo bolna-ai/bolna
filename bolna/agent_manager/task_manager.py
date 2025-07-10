@@ -112,6 +112,7 @@ class TaskManager(BaseManager):
         }
 
         self.welcome_message_audio = self.kwargs.pop('welcome_message_audio', None)
+        self._cached_welcome_audio = None
         self.observable_variables = {}
         #IO HANDLERS
         if task_id == 0:
@@ -1680,7 +1681,9 @@ class TaskManager(BaseManager):
                         meta_info["format"] = "pcm"
                 else:
                     start_time = time.perf_counter()
-                    audio_chunk = base64.b64decode(self.welcome_message_audio) if self.welcome_message_audio else None
+                    if self.welcome_message_audio and self._cached_welcome_audio is None:
+                        self._cached_welcome_audio = base64.b64decode(self.welcome_message_audio)
+                    audio_chunk = self._cached_welcome_audio
                     if meta_info['text'] == '':
                         audio_chunk = None
                     logger.info(f"Time to get response from S3 {time.perf_counter() - start_time }")
@@ -1786,11 +1789,11 @@ class TaskManager(BaseManager):
                     time_since_first_interim_result = (time.time() * 1000) - self.time_since_first_interim_result if self.time_since_first_interim_result != -1 else -1
                     logger.info(f"##### It's been {time_since_first_interim_result} ms since first  interim result and required time to wait for it is {self.required_delay_before_speaking}. Hence sleeping for 100ms. self.time_since_first_interim_result {self.time_since_first_interim_result}")
                     if time_since_first_interim_result != -1 and time_since_first_interim_result < self.required_delay_before_speaking:
-                        await asyncio.sleep(0.1) #sleep for 100ms and continue
+                        await asyncio.sleep(0.01)
                         continue
                     else:
                         logger.info(f"First interim result hasn't been gotten yet and hence sleeping ")
-                        await asyncio.sleep(0.1)
+                        await asyncio.sleep(0.01)
 
                     logger.info(f"##### Got to wait {self.required_delay_before_speaking} ms before speaking and alreasy waited {time_since_first_interim_result} since the first interim result")
 
@@ -1798,7 +1801,7 @@ class TaskManager(BaseManager):
                     time_since_first_interim_result = (time.time() *1000)- self.time_since_first_interim_result if self.time_since_first_interim_result != -1 else -1
                     logger.info(f"##### In elif been {time_since_first_interim_result} ms since first  interim result and required time to wait for it is {self.required_delay_before_speaking}. Hence sleeping for 100ms. self.time_since_first_interim_result {self.time_since_first_interim_result}")
                     if time_since_first_interim_result != -1 and time_since_first_interim_result < self.required_delay_before_speaking:
-                        await asyncio.sleep(0.1) #sleep for 100ms and continue
+                        await asyncio.sleep(0.01)
                         continue
                 else:
                     logger.info(f"Started transmitting at {time.time()}")
@@ -1950,6 +1953,7 @@ class TaskManager(BaseManager):
                     stream_sid = self.tools["input"].get_stream_sid()
                     if stream_sid is not None:
                         logger.info(f"Got stream sid and hence sending the first message {stream_sid}")
+                        welcome_start_time = time.perf_counter()
                         self.stream_sid = stream_sid
                         text = self.kwargs.get('agent_welcome_message', None)
                         meta_info = {'io': self.tools["output"].get_provider(), 'message_category': 'agent_welcome_message', 'stream_sid': stream_sid, "request_id": str(uuid.uuid4()), "cached": True, "sequence_id": -1, 'format': self.task_config["tools_config"]["output"]["format"], 'text': text, 'end_of_llm_stream': True}
@@ -1962,10 +1966,12 @@ class TaskManager(BaseManager):
                             await self.tools["output"].handle(eos_packet)
                         else:
                             await self._synthesize(create_ws_data_packet(text, meta_info=meta_info))
+                        welcome_end_time = time.perf_counter()
+                        logger.info(f"Welcome message processing took {(welcome_end_time - welcome_start_time) * 1000:.2f}ms")
                         break
                     else:
                         logger.info(f"Stream id is still None, so not passing it")
-                        await asyncio.sleep(0.01) #Sleep for half a second to see if stream id goes past None
+                        await asyncio.sleep(0.001)
                 elif self.default_io:
                     logger.info(f"Shouldn't record")
                     # meta_info={'io': 'default', 'is_first_message': True, "request_id": str(uuid.uuid4()), "cached": True, "sequence_id": -1, 'format': 'wav'}

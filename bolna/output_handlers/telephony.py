@@ -4,6 +4,7 @@ import os
 import audioop
 import uuid
 import traceback
+import time
 from dotenv import load_dotenv
 from .default import DefaultOutputHandler
 from bolna.helpers.logger_config import configure_logger
@@ -58,8 +59,9 @@ class TelephonyOutputHandler(DefaultOutputHandler):
                         if audio_format == 'pcm' and meta_info.get('message_category', '') == 'agent_welcome_message' and self.io_provider == 'plivo' and meta_info['cached'] is True:
                             audio_format = 'wav'
                         media_message = await self.form_media_message(audio_chunk, audio_format)
+                        send_start_time = time.perf_counter()
                         await self.websocket.send_text(json.dumps(media_message))
-                        logger.info(f"Meta info received - {meta_info}")
+                        logger.info(f"Audio sent to telephony in {(time.perf_counter() - send_start_time) * 1000:.2f}ms, meta: {meta_info}")
 
                     # sending of post-mark message
                     mark_event_meta_data = {
