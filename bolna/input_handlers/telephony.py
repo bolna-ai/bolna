@@ -27,6 +27,9 @@ class TelephonyInputHandler(DefaultInputHandler):
     def get_stream_sid(self):
         return self.stream_sid
 
+    def set_stream_sid(self, stream_sid):
+        self.stream_sid = stream_sid
+
     def get_call_sid(self):
         return self.call_sid
 

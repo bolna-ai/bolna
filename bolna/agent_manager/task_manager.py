@@ -172,7 +172,7 @@ class TaskManager(BaseManager):
 
         # Call conversations
         self.call_sid = None
-        self.stream_sid = None
+        self.stream_sid = kwargs.get("stream_sid", None)
 
         # metering
         self.transcriber_duration = 0
@@ -485,7 +485,6 @@ class TaskManager(BaseManager):
 
                 if self.task_config["tools_config"]["output"]["provider"] in SUPPORTED_OUTPUT_TELEPHONY_HANDLERS.keys():
                     output_kwargs['mark_event_meta_data'] = self.mark_event_meta_data
-                    logger.info(f"Making sure that the sampling rate for output handler is 8000")
                     self.task_config['tools_config']['synthesizer']['provider_config']['sampling_rate'] = 8000
                     self.task_config['tools_config']['synthesizer']['audio_format'] = 'pcm'
                 else:
@@ -532,6 +531,8 @@ class TaskManager(BaseManager):
 
                 input_kwargs["observable_variables"] = self.observable_variables
             self.tools["input"] = input_handler_class(**input_kwargs)
+            if self.stream_sid:
+                self.tools["input"].set_stream_sid(self.stream_sid)
         else:
             raise "Other input handlers not supported yet"
 
@@ -1946,6 +1947,15 @@ class TaskManager(BaseManager):
                     logger.warning("Timeout reached while waiting for stream_sid")
                     break
 
+                if self.stream_sid:
+                    text = self.kwargs.get('agent_welcome_message', None)
+                    meta_info = {'io': self.tools["output"].get_provider(), 'message_category': 'agent_welcome_message',
+                                 'stream_sid': self.stream_sid, "request_id": str(uuid.uuid4()), "cached": True,
+                                 "sequence_id": -1, 'format': self.task_config["tools_config"]["output"]["format"],
+                                 'text': text, 'end_of_llm_stream': True}
+                    await self._synthesize(create_ws_data_packet(text, meta_info=meta_info))
+                    break
+
                 if not self.stream_sid and not self.default_io:
                     stream_sid = self.tools["input"].get_stream_sid()
                     if stream_sid is not None:
@@ -1965,7 +1975,7 @@ class TaskManager(BaseManager):
                         break
                     else:
                         logger.info(f"Stream id is still None, so not passing it")
-                        await asyncio.sleep(0.01) #Sleep for half a second to see if stream id goes past None
+                        await asyncio.sleep(0.01)
                 elif self.default_io:
                     logger.info(f"Shouldn't record")
                     # meta_info={'io': 'default', 'is_first_message': True, "request_id": str(uuid.uuid4()), "cached": True, "sequence_id": -1, 'format': 'wav'}
