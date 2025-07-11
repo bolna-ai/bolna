@@ -503,7 +503,6 @@ class TaskManager(BaseManager):
 
     def __setup_input_handlers(self, turn_based_conversation, input_queue, should_record):
         if self.task_config["tools_config"]["input"]["provider"] in SUPPORTED_INPUT_HANDLERS.keys():
-            logger.info(f"Connected through dashboard {turn_based_conversation}")
             input_kwargs = {
                 "queues": self.queues,
                 "websocket": self.websocket,
@@ -519,7 +518,6 @@ class TaskManager(BaseManager):
                 input_kwargs['conversation_recording'] = self.conversation_recording
 
             if self.turn_based_conversation:
-                logger.info("Connected through dashboard and hence using default input handler")
                 input_kwargs['turn_based_conversation'] = True
                 input_handler_class = SUPPORTED_INPUT_HANDLERS.get("default")
                 input_kwargs['queue'] = input_queue
@@ -565,7 +563,6 @@ class TaskManager(BaseManager):
             logger.error(f"Something went wrong with starting transcriber {e}")
 
     def __setup_synthesizer(self, llm_config=None):
-        logger.info(f"Synthesizer config: {self.task_config['tools_config']['synthesizer']}")
         if self._is_conversation_task():
             self.kwargs["use_turbo"] = self.task_config["tools_config"]["transcriber"]["language"] == DEFAULT_LANGUAGE_CODE
         if self.task_config["tools_config"]["synthesizer"] is not None:
@@ -590,10 +587,8 @@ class TaskManager(BaseManager):
 
     def __setup_llm(self, llm_config, task_id=0):
         if self.task_config["tools_config"]["llm_agent"] is not None:
-            logger.info(f'### PROVIDER {llm_config["provider"] }')
             if llm_config["provider"] in SUPPORTED_LLM_PROVIDERS.keys():
                 llm_class = SUPPORTED_LLM_PROVIDERS.get(llm_config["provider"])
-                logger.info(f"LLM CONFIG {llm_config}")
 
                 if task_id and task_id > 0:
                     self.kwargs.pop('llm_key', None)
@@ -610,7 +605,6 @@ class TaskManager(BaseManager):
     def __get_agent_object(self, llm, agent_type, assistant_config=None):
         self.agent_type = agent_type
         if agent_type == "simple_llm_agent":
-            logger.info(f"Simple llm agent")
             llm_agent = StreamingContextualAgent(llm)
         elif agent_type == "knowledgebase_agent":
             logger.info("Setting up knowledgebase_agent agent ####")
