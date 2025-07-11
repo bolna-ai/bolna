@@ -25,7 +25,6 @@ class DeepgramTranscriber(BaseTranscriber):
     def __init__(self, telephony_provider, input_queue=None, model='nova-2', stream=True, language="en", endpointing="400",
                  sampling_rate="16000", encoding="linear16", output_queue=None, keywords=None,
                  process_interim_results="true", **kwargs):
-        logger.info(f"Initializing transcriber")
         super().__init__(input_queue)
         self.endpointing = endpointing
         self.language = language
@@ -43,7 +42,6 @@ class DeepgramTranscriber(BaseTranscriber):
         self.keywords = keywords
         self.audio_cursor = 0.0
         self.transcription_cursor = 0.0
-        logger.info(f"self.stream: {self.stream}")
         self.interruption_signalled = False
         if not self.stream:
             self.api_url = f"https://{self.deepgram_host}/v1/listen?model={self.model}&filler_words=true&language={self.language}"
@@ -65,7 +63,6 @@ class DeepgramTranscriber(BaseTranscriber):
         self.is_transcript_sent_for_processing = False
 
     def get_deepgram_ws_url(self):
-        logger.info(f"GETTING DEEPGRAM WS")
         dg_params = {
             'model': self.model,
             'filler_words': 'true',
@@ -102,7 +99,6 @@ class DeepgramTranscriber(BaseTranscriber):
             dg_params['channels'] = "1"
 
         if self.provider == "playground":
-            logger.info(f"CONNECTED THROUGH PLAYGROUND")
             self.sampling_rate = 8000
             self.audio_frame_duration = 0.0  # There's no streaming from the playground
 
@@ -119,7 +115,6 @@ class DeepgramTranscriber(BaseTranscriber):
 
         websocket_api = 'wss://{}/v1/listen?'.format(self.deepgram_host)
         websocket_url = websocket_api + urlencode(dg_params)
-        logger.info(f"Deepgram websocket url: {websocket_url}")
         return websocket_url
 
     async def send_heartbeat(self, ws: ClientConnection):
@@ -154,17 +149,13 @@ class DeepgramTranscriber(BaseTranscriber):
                 response_data = await response.json()
                 self.meta_info["start_time"] = start_time
                 self.meta_info['transcriber_latency'] = time.time() - start_time
-                logger.info(f"response_data {response_data} transcriber_latency time {time.time() - start_time}")
                 transcript = response_data["results"]["channels"][0]["alternatives"][0]["transcript"]
-                logger.info(f"transcript {transcript} total time {time.time() - start_time}")
                 self.meta_info['transcriber_duration'] = response_data["metadata"]["duration"]
                 return create_ws_data_packet(transcript, self.meta_info)
 
     async def _check_and_process_end_of_stream(self, ws_data_packet, ws):
         if 'eos' in ws_data_packet['meta_info'] and ws_data_packet['meta_info']['eos'] is True:
-            logger.info("First closing transcription websocket")
             await self._close(ws, data={"type": "CloseStream"})
-            logger.info("Closed transcription websocket and now closing transcription task")
             return True  # Indicates end of processing
 
         return False
@@ -228,7 +219,6 @@ class DeepgramTranscriber(BaseTranscriber):
                 # If connection_start_time is None, it is the durations of frame submitted till now minus current time
                 if self.connection_start_time is None:
                     self.connection_start_time = (time.time() - (self.num_frames * self.audio_frame_duration))
-                    logger.info(f"Connection start time {self.connection_start_time} {self.num_frames} and {self.audio_frame_duration}")
 
                 if msg["type"] == "SpeechStarted":
                     logger.info("Received SpeechStarted event from deepgram")
