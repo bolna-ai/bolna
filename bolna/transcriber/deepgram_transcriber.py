@@ -291,7 +291,7 @@ class DeepgramTranscriber(BaseTranscriber):
     async def deepgram_connect(self):
         websocket_url = self.get_deepgram_ws_url()
         additional_headers = {
-            'Authorization': 'Token {}'.format(os.getenv('DEEPGRAM_AUTH_TOKEN'))
+            'Authorization': 'Token {}'.format(self.api_key)
         }
         deepgram_ws = await websockets.connect(websocket_url, additional_headers=additional_headers)
         return deepgram_ws
