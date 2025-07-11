@@ -101,7 +101,7 @@ class DefaultOutputHandler:
                         "type": "mark",
                         "name": mark_id
                     }
-                    logger.info(f"Sending mark event - {mark_message}")
+                    logger.info(f"Sending post-mark event - {mark_message}")
                     await self.websocket.send_text(json.dumps(mark_message))
             else:
                 logger.error("Other modalities are not implemented yet")
