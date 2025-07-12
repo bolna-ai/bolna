@@ -530,8 +530,43 @@ class TaskManager(BaseManager):
 
                 input_kwargs["observable_variables"] = self.observable_variables
             self.tools["input"] = input_handler_class(**input_kwargs)
+            if self._is_conversation_task() and not self.turn_based_conversation:
+                asyncio.create_task(self.tools['input'].handle())
+                asyncio.create_task(self.__forced_first_message())
         else:
             raise "Other input handlers not supported yet"
+
+    async def __forced_first_message(self, timeout=10.0):
+        logger.info(f"Executing the first message task")
+        try:
+            start_time = asyncio.get_running_loop().time()
+            while True:
+                elapsed_time = asyncio.get_running_loop().time() - start_time
+                if elapsed_time > timeout:
+                    await self.__process_end_of_conversation()
+                    logger.warning("Timeout reached while waiting for stream_sid")
+                    break
+
+                if not self.stream_sid and not self.default_io:
+                    stream_sid = self.tools["input"].get_stream_sid()
+                    if stream_sid is not None:
+                        logger.info(f"Got stream sid and hence sending the first message {stream_sid}")
+                        self.stream_sid = stream_sid
+                        text = self.kwargs.get('agent_welcome_message', None)
+                        meta_info = {'io': self.tools["output"].get_provider(), 'message_category': 'agent_welcome_message', 'stream_sid': stream_sid, "request_id": str(uuid.uuid4()), "cached": True, "sequence_id": -1, 'format': self.task_config["tools_config"]["output"]["format"], 'text': text, 'end_of_llm_stream': True}
+                        await self._synthesize(create_ws_data_packet(text, meta_info=meta_info))
+                        break
+                    else:
+                        logger.info(f"Stream id is still None, so not passing it")
+                        await asyncio.sleep(0.01) #Sleep for half a second to see if stream id goes past None
+                elif self.default_io:
+                    logger.info(f"Shouldn't record")
+                    # meta_info={'io': 'default', 'is_first_message': True, "request_id": str(uuid.uuid4()), "cached": True, "sequence_id": -1, 'format': 'wav'}
+                    # await self._synthesize(create_ws_data_packet(self.kwargs['agent_welcome_message'], meta_info= meta_info))
+                    break
+
+        except Exception as e:
+            logger.error(f"Exception in __forced_first_message {str(e)}")
 
     def __setup_transcriber(self):
         try:
@@ -2037,11 +2072,12 @@ class TaskManager(BaseManager):
         try:
             if self._is_conversation_task():
                 # Create transcriber and synthesizer tasks
-                tasks = [asyncio.create_task(self.tools['input'].handle())]
+                tasks = []
+                #tasks = [asyncio.create_task(self.tools['input'].handle())]
 
                 # In the case of web call we would play the first message once we receive the init event
-                if not self.is_web_based_call:
-                    self.first_message_task = asyncio.create_task(self.__first_message())
+                # if not self.is_web_based_call:
+                #     self.first_message_task = asyncio.create_task(self.__first_message())
 
                 if not self.turn_based_conversation:
                     self.first_message_passing_time = None
