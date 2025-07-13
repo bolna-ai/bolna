@@ -116,6 +116,7 @@ class TaskManager(BaseManager):
         self.preloaded_welcome_audio = base64.b64decode(self.welcome_message_audio) if self.welcome_message_audio else None
         self.observable_variables = {}
         self.output_handler_set = False
+        self.websocket_ready_event = asyncio.Event()
         #IO HANDLERS
         if task_id == 0:
             if self.is_web_based_call:
@@ -511,7 +512,8 @@ class TaskManager(BaseManager):
                 "websocket": self.websocket,
                 "input_types": get_required_input_types(self.task_config),
                 "mark_event_meta_data": self.mark_event_meta_data,
-                "is_welcome_message_played": True if self.task_config["tools_config"]["output"]["provider"] == 'default' and not self.is_web_based_call else False
+                "is_welcome_message_played": True if self.task_config["tools_config"]["output"]["provider"] == 'default' and not self.is_web_based_call else False,
+                "websocket_ready_event": self.websocket_ready_event
             }
 
             if self.task_config["tools_config"]["input"]["provider"] == "daily":
@@ -533,6 +535,10 @@ class TaskManager(BaseManager):
 
                 input_kwargs["observable_variables"] = self.observable_variables
             self.tools["input"] = input_handler_class(**input_kwargs)
+            
+            if self.task_config['tools_config']['input']['provider'] == 'default':
+                self.websocket_ready_event.set()
+            
             if self._is_conversation_task() and not self.turn_based_conversation:
                 await asyncio.gather(
                     self.tools['input'].handle(),
@@ -544,6 +550,10 @@ class TaskManager(BaseManager):
     async def __forced_first_message(self, timeout=10.0):
         logger.info(f"Executing the first message task")
         try:
+            logger.info("Waiting for websocket connection to be ready...")
+            await asyncio.wait_for(self.websocket_ready_event.wait(), timeout=timeout)
+            logger.info("Websocket connection is ready, proceeding with first message")
+            
             start_time = asyncio.get_running_loop().time()
             while True:
                 elapsed_time = asyncio.get_running_loop().time() - start_time
