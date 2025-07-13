@@ -47,10 +47,6 @@ class TelephonyOutputHandler(DefaultOutputHandler):
                     if audio_chunk != b'\x00\x00':
                         audio_format = meta_info.get("format", "wav")
 
-                        if not self.websocket or not self.stream_sid:
-                            logger.warning(f"Skipping message send - websocket: {self.websocket is not None}, stream_sid: {self.stream_sid}")
-                            return
-
                         # sending of pre-mark message
                         pre_mark_event_meta_data = {
                             "type": "pre_mark_message",
@@ -65,8 +61,6 @@ class TelephonyOutputHandler(DefaultOutputHandler):
                         if audio_format == 'pcm' and meta_info.get('message_category', '') == 'agent_welcome_message' and self.io_provider == 'plivo' and meta_info['cached'] is True:
                             audio_format = 'wav'
                         media_message = await self.form_media_message(audio_chunk, audio_format)
-                        if self.websocket and self.stream_sid:
-                            await self.websocket.send_text(json.dumps(media_message))
                         logger.info(f"Meta info received - {meta_info}")
 
                     # sending of post-mark message
@@ -83,8 +77,6 @@ class TelephonyOutputHandler(DefaultOutputHandler):
                     self.mark_event_meta_data.update_data(mark_id, mark_event_meta_data)
                     mark_message = await self.form_mark_message(mark_id)
                     logger.info(f"Sending post-mark event - {mark_message}")
-                    if self.websocket and self.stream_sid:
-                        await self.websocket.send_text(json.dumps(mark_message))
                 else:
                     logger.info("Not sending")
             except Exception as e:
