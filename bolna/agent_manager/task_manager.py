@@ -600,7 +600,7 @@ class TaskManager(BaseManager):
                         logger.error("Exception in __forced_first_message for duration calculation: {}".format(str(e)))
                     break
                 else:
-                    logger.info(f"Stream id is still None, so not passing it")
+                    logger.info(f"Stream id is still None ({stream_sid}) or output handler not set ({self.output_handler_set}), waiting...")
                     await asyncio.sleep(0.01)
         except Exception as e:
             logger.error(f"Exception in __forced_first_message {str(e)}")
