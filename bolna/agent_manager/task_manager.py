@@ -117,6 +117,7 @@ class TaskManager(BaseManager):
         self.observable_variables = {}
         self.output_handler_set = False
         self.websocket_ready_event = asyncio.Event()
+        self.output_handler_ready_event = asyncio.Event()
         #IO HANDLERS
         if task_id == 0:
             if self.is_web_based_call:
@@ -142,8 +143,10 @@ class TaskManager(BaseManager):
             else:
                 self.should_record = self.task_config["tools_config"]["output"]["provider"] == 'default' and self.enforce_streaming #In this case, this is a websocket connection and we should record
 
-            asyncio.create_task(self.__setup_input_handlers(turn_based_conversation, input_queue, self.should_record))
-        asyncio.create_task(self.__setup_output_handlers(turn_based_conversation, output_queue))
+            await self.__setup_output_handlers(turn_based_conversation, output_queue)
+            await self.__setup_input_handlers(turn_based_conversation, input_queue, self.should_record)
+        else:
+            await self.__setup_output_handlers(turn_based_conversation, output_queue)
 
         # Agent stuff
         # Need to maintain current conversation history and overall persona/history kinda thing.
@@ -474,6 +477,7 @@ class TaskManager(BaseManager):
 
         if self.task_config["tools_config"]["output"] is None:
             logger.info("Not setting up any output handler as it is none")
+            self.output_handler_ready_event.set()
         elif self.task_config["tools_config"]["output"]["provider"] in SUPPORTED_OUTPUT_HANDLERS.keys():
             #Explicitly use default for turn based conversation as we expect to use HTTP endpoints
             if turn_based_conversation:
@@ -501,7 +505,8 @@ class TaskManager(BaseManager):
 
             self.tools["output"] = output_handler_class(**output_kwargs)
             self.output_handler_set = True
-            logger.info("output handler set")
+            self.output_handler_ready_event.set()
+            logger.info("output handler set and ready event signaled")
         else:
             raise "Other input handlers not supported yet"
 
@@ -550,9 +555,10 @@ class TaskManager(BaseManager):
     async def __forced_first_message(self, timeout=10.0):
         logger.info(f"Executing the first message task")
         try:
-            logger.info("Waiting for websocket connection to be ready...")
+            logger.info("Waiting for websocket connection and output handler to be ready...")
             await asyncio.wait_for(self.websocket_ready_event.wait(), timeout=timeout)
-            logger.info("Websocket connection is ready, proceeding with first message")
+            await asyncio.wait_for(self.output_handler_ready_event.wait(), timeout=timeout)
+            logger.info("Websocket connection and output handler are ready, proceeding with first message")
             
             start_time = asyncio.get_running_loop().time()
             while True:
