@@ -115,6 +115,7 @@ class TaskManager(BaseManager):
         # Pre-decode welcome audio for faster playback
         self.preloaded_welcome_audio = base64.b64decode(self.welcome_message_audio) if self.welcome_message_audio else None
         self.observable_variables = {}
+        self.output_handler_set = False
         #IO HANDLERS
         if task_id == 0:
             if self.is_web_based_call:
@@ -498,6 +499,8 @@ class TaskManager(BaseManager):
                 output_kwargs['mark_event_meta_data'] = self.mark_event_meta_data
 
             self.tools["output"] = output_handler_class(**output_kwargs)
+            self.output_handler_set = True
+            logger.info("output handler set")
         else:
             raise "Other input handlers not supported yet"
 
@@ -568,9 +571,10 @@ class TaskManager(BaseManager):
                 meta_info['chunk_id'] = 1
                 meta_info["is_first_chunk_of_entire_response"] = True
                 meta_info["is_final_chunk_of_entire_response"] = True
+                message = create_ws_data_packet(audio_chunk, meta_info)
 
                 stream_sid = self.tools["input"].get_stream_sid()
-                if stream_sid is not None or not self.tools["output"]:
+                if stream_sid is not None or not self.output_handler_set:
                     logger.info(f"Got stream sid and hence sending the first message {stream_sid}")
                     self.stream_sid = stream_sid
                     await self.tools["output"].set_stream_sid(stream_sid)
@@ -584,11 +588,14 @@ class TaskManager(BaseManager):
                     except Exception as e:
                         duration = 0.256
                         logger.error("Exception in __forced_first_message for duration calculation: {}".format(str(e)))
+                    break
                 else:
                     logger.info(f"Stream id is still None, so not passing it")
                     await asyncio.sleep(0.01)
         except Exception as e:
             logger.error(f"Exception in __forced_first_message {str(e)}")
+
+        return
 
     async def __setup_transcriber(self):
         try:
