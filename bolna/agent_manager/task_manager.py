@@ -112,6 +112,8 @@ class TaskManager(BaseManager):
         }
 
         self.welcome_message_audio = self.kwargs.pop('welcome_message_audio', None)
+        # Pre-decode welcome audio for faster playback
+        self.preloaded_welcome_audio = base64.b64decode(self.welcome_message_audio) if self.welcome_message_audio else None
         self.observable_variables = {}
         #IO HANDLERS
         if task_id == 0:
@@ -138,8 +140,8 @@ class TaskManager(BaseManager):
             else:
                 self.should_record = self.task_config["tools_config"]["output"]["provider"] == 'default' and self.enforce_streaming #In this case, this is a websocket connection and we should record
 
-            self.__setup_input_handlers(turn_based_conversation, input_queue, self.should_record)
-        self.__setup_output_handlers(turn_based_conversation, output_queue)
+            asyncio.create_task(self.__setup_input_handlers(turn_based_conversation, input_queue, self.should_record))
+        asyncio.create_task(self.__setup_output_handlers(turn_based_conversation, output_queue))
 
         # Agent stuff
         # Need to maintain current conversation history and overall persona/history kinda thing.
@@ -372,10 +374,8 @@ class TaskManager(BaseManager):
                 else:
                     self.filler_preset_directory = f"{os.getenv('FILLERS_PRESETS_DIR')}/{self.synthesizer_voice.lower()}"
 
-        # setting transcriber
-        self.__setup_transcriber()
-        # setting synthesizer
-        self.__setup_synthesizer(self.llm_config)
+        # setting transcriber and synthesizer in parallel
+        asyncio.create_task(self.__async_setup_tools())
         # # setting llm
         # llm = self.__setup_llm(self.llm_config)
         # # Setup tasks
@@ -467,7 +467,7 @@ class TaskManager(BaseManager):
         self.route_layer = RouteLayer(encoder=route_encoder, routes=routes_list)
         logger.info("Routes are set")
 
-    def __setup_output_handlers(self, turn_based_conversation, output_queue):
+    async def __setup_output_handlers(self, turn_based_conversation, output_queue):
         output_kwargs = {"websocket": self.websocket}
 
         if self.task_config["tools_config"]["output"] is None:
@@ -501,7 +501,7 @@ class TaskManager(BaseManager):
         else:
             raise "Other input handlers not supported yet"
 
-    def __setup_input_handlers(self, turn_based_conversation, input_queue, should_record):
+    async def __setup_input_handlers(self, turn_based_conversation, input_queue, should_record):
         if self.task_config["tools_config"]["input"]["provider"] in SUPPORTED_INPUT_HANDLERS.keys():
             input_kwargs = {
                 "queues": self.queues,
@@ -531,8 +531,10 @@ class TaskManager(BaseManager):
                 input_kwargs["observable_variables"] = self.observable_variables
             self.tools["input"] = input_handler_class(**input_kwargs)
             if self._is_conversation_task() and not self.turn_based_conversation:
-                asyncio.create_task(self.tools['input'].handle())
-                asyncio.create_task(self.__forced_first_message())
+                await asyncio.gather(
+                    self.tools['input'].handle(),
+                    self.__forced_first_message()
+                )
         else:
             raise "Other input handlers not supported yet"
 
@@ -547,28 +549,48 @@ class TaskManager(BaseManager):
                     logger.warning("Timeout reached while waiting for stream_sid")
                     break
 
-                if not self.stream_sid and not self.default_io:
-                    stream_sid = self.tools["input"].get_stream_sid()
-                    if stream_sid is not None:
-                        logger.info(f"Got stream sid and hence sending the first message {stream_sid}")
-                        self.stream_sid = stream_sid
-                        text = self.kwargs.get('agent_welcome_message', None)
-                        meta_info = {'io': self.tools["output"].get_provider(), 'message_category': 'agent_welcome_message', 'stream_sid': stream_sid, "request_id": str(uuid.uuid4()), "cached": True, "sequence_id": -1, 'format': self.task_config["tools_config"]["output"]["format"], 'text': text, 'end_of_llm_stream': True}
-                        await self._synthesize(create_ws_data_packet(text, meta_info=meta_info))
-                        break
-                    else:
-                        logger.info(f"Stream id is still None, so not passing it")
-                        await asyncio.sleep(0.01) #Sleep for half a second to see if stream id goes past None
-                elif self.default_io:
-                    logger.info(f"Shouldn't record")
-                    # meta_info={'io': 'default', 'is_first_message': True, "request_id": str(uuid.uuid4()), "cached": True, "sequence_id": -1, 'format': 'wav'}
-                    # await self._synthesize(create_ws_data_packet(self.kwargs['agent_welcome_message'], meta_info= meta_info))
-                    break
+                text = self.kwargs.get('agent_welcome_message', None)
+                meta_info = {'io': self.tools["output"].get_provider(), 'message_category': 'agent_welcome_message', "request_id": str(uuid.uuid4()), "cached": True, "sequence_id": -1, 'format': self.task_config["tools_config"]["output"]["format"], 'text': text, 'end_of_llm_stream': True}
+                ws_data_packet = create_ws_data_packet(text, meta_info=meta_info)
 
+                meta_info = ws_data_packet["meta_info"]
+                text = ws_data_packet["data"]
+                meta_info["type"] = "audio"
+                meta_info["synthesizer_start_time"] = time.time()
+
+                audio_chunk = self.preloaded_welcome_audio if self.preloaded_welcome_audio else None
+                if meta_info['text'] == '':
+                    audio_chunk = None
+
+                meta_info["format"] = "pcm"
+                meta_info['is_first_chunk'] = True
+                meta_info["end_of_synthesizer_stream"] = True
+                meta_info['chunk_id'] = 1
+                meta_info["is_first_chunk_of_entire_response"] = True
+                meta_info["is_final_chunk_of_entire_response"] = True
+
+                stream_sid = self.tools["input"].get_stream_sid()
+                if stream_sid is not None or not self.tools["output"]:
+                    logger.info(f"Got stream sid and hence sending the first message {stream_sid}")
+                    self.stream_sid = stream_sid
+                    await self.tools["output"].set_stream_sid(stream_sid)
+                    self.tools["input"].update_is_audio_being_played(True)
+                    await self.tools["output"].handle(message)
+                    try:
+                        duration = calculate_audio_duration(len(message["data"]), self.sampling_rate,
+                                                            format=message['meta_info']['format'])
+                        self.conversation_recording['output'].append(
+                            {'data': message['data'], "start_time": time.time(), "duration": duration})
+                    except Exception as e:
+                        duration = 0.256
+                        logger.error("Exception in __forced_first_message for duration calculation: {}".format(str(e)))
+                else:
+                    logger.info(f"Stream id is still None, so not passing it")
+                    await asyncio.sleep(0.01)
         except Exception as e:
             logger.error(f"Exception in __forced_first_message {str(e)}")
 
-    def __setup_transcriber(self):
+    async def __setup_transcriber(self):
         try:
             if self.task_config["tools_config"]["transcriber"] is not None:
                 self.language = self.task_config["tools_config"]["transcriber"].get('language', DEFAULT_LANGUAGE_CODE)
@@ -597,7 +619,7 @@ class TaskManager(BaseManager):
         except Exception as e:
             logger.error(f"Something went wrong with starting transcriber {e}")
 
-    def __setup_synthesizer(self, llm_config=None):
+    async def __setup_synthesizer(self, llm_config=None):
         if self._is_conversation_task():
             self.kwargs["use_turbo"] = self.task_config["tools_config"]["transcriber"]["language"] == DEFAULT_LANGUAGE_CODE
         if self.task_config["tools_config"]["synthesizer"] is not None:
@@ -619,6 +641,17 @@ class TaskManager(BaseManager):
                 self.synthesizer_monitor_task = asyncio.create_task(self.tools['synthesizer'].monitor_connection())
             if self.task_config["tools_config"]["llm_agent"] is not None and llm_config is not None:
                 llm_config["buffer_size"] = self.task_config["tools_config"]["synthesizer"].get('buffer_size')
+
+    async def __async_setup_tools(self):
+        """Setup transcriber and synthesizer in parallel to avoid blocking each other"""
+        try:
+            await asyncio.gather(
+                self.__setup_transcriber(),
+                self.__setup_synthesizer(self.llm_config)
+            )
+            logger.info("Parallel setup of transcriber and synthesizer completed")
+        except Exception as e:
+            logger.error(f"Error during parallel setup of tools: {e}")
 
     def __setup_llm(self, llm_config, task_id=0):
         if self.task_config["tools_config"]["llm_agent"] is not None:
@@ -1709,7 +1742,7 @@ class TaskManager(BaseManager):
                         meta_info["format"] = "pcm"
                 else:
                     start_time = time.perf_counter()
-                    audio_chunk = base64.b64decode(self.welcome_message_audio) if self.welcome_message_audio else None
+                    audio_chunk = self.preloaded_welcome_audio if self.preloaded_welcome_audio else None
                     if meta_info['text'] == '':
                         audio_chunk = None
                     logger.info(f"Time to get response from S3 {time.perf_counter() - start_time }")
