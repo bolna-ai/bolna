@@ -141,8 +141,10 @@ class TaskManager(BaseManager):
             else:
                 self.should_record = self.task_config["tools_config"]["output"]["provider"] == 'default' and self.enforce_streaming #In this case, this is a websocket connection and we should record
 
-            asyncio.create_task(self.__setup_input_handlers(turn_based_conversation, input_queue, self.should_record))
-        asyncio.create_task(self.__setup_output_handlers(turn_based_conversation, output_queue))
+            self.__setup_input_handlers(turn_based_conversation, input_queue, self.should_record)
+        self.__setup_output_handlers(turn_based_conversation, output_queue)
+
+        self.first_message_task_new = asyncio.create_task(self.message_task_new())
 
         # Agent stuff
         # Need to maintain current conversation history and overall persona/history kinda thing.
@@ -376,7 +378,12 @@ class TaskManager(BaseManager):
                     self.filler_preset_directory = f"{os.getenv('FILLERS_PRESETS_DIR')}/{self.synthesizer_voice.lower()}"
 
         # setting transcriber and synthesizer in parallel
-        asyncio.create_task(self.__async_setup_tools())
+        self.__setup_transcriber()
+        self.__setup_synthesizer(self.llm_config)
+        if not self.turn_based_conversation:
+            self.synthesizer_monitor_task = asyncio.create_task(self.tools['synthesizer'].monitor_connection())
+
+        # asyncio.create_task(self.__async_setup_tools())
         # # setting llm
         # llm = self.__setup_llm(self.llm_config)
         # # Setup tasks
@@ -468,7 +475,7 @@ class TaskManager(BaseManager):
         self.route_layer = RouteLayer(encoder=route_encoder, routes=routes_list)
         logger.info("Routes are set")
 
-    async def __setup_output_handlers(self, turn_based_conversation, output_queue):
+    def __setup_output_handlers(self, turn_based_conversation, output_queue):
         output_kwargs = {"websocket": self.websocket}
 
         if self.task_config["tools_config"]["output"] is None:
@@ -504,7 +511,15 @@ class TaskManager(BaseManager):
         else:
             raise "Other input handlers not supported yet"
 
-    async def __setup_input_handlers(self, turn_based_conversation, input_queue, should_record):
+    async def message_task_new(self):
+        if self._is_conversation_task() and not self.turn_based_conversation:
+            await asyncio.gather(
+                self.tools['input'].handle(),
+                self.__forced_first_message()
+            )
+
+
+    def __setup_input_handlers(self, turn_based_conversation, input_queue, should_record):
         if self.task_config["tools_config"]["input"]["provider"] in SUPPORTED_INPUT_HANDLERS.keys():
             input_kwargs = {
                 "queues": self.queues,
@@ -533,11 +548,6 @@ class TaskManager(BaseManager):
 
                 input_kwargs["observable_variables"] = self.observable_variables
             self.tools["input"] = input_handler_class(**input_kwargs)
-            if self._is_conversation_task() and not self.turn_based_conversation:
-                await asyncio.gather(
-                    self.tools['input'].handle(),
-                    self.__forced_first_message()
-                )
         else:
             raise "Other input handlers not supported yet"
 
@@ -574,7 +584,7 @@ class TaskManager(BaseManager):
                 message = create_ws_data_packet(audio_chunk, meta_info)
 
                 stream_sid = self.tools["input"].get_stream_sid()
-                if stream_sid is not None or not self.output_handler_set:
+                if stream_sid is not None and self.output_handler_set:
                     logger.info(f"Got stream sid and hence sending the first message {stream_sid}")
                     self.stream_sid = stream_sid
                     await self.tools["output"].set_stream_sid(stream_sid)
@@ -597,7 +607,7 @@ class TaskManager(BaseManager):
 
         return
 
-    async def __setup_transcriber(self):
+    def __setup_transcriber(self):
         try:
             if self.task_config["tools_config"]["transcriber"] is not None:
                 self.language = self.task_config["tools_config"]["transcriber"].get('language', DEFAULT_LANGUAGE_CODE)
@@ -626,7 +636,7 @@ class TaskManager(BaseManager):
         except Exception as e:
             logger.error(f"Something went wrong with starting transcriber {e}")
 
-    async def __setup_synthesizer(self, llm_config=None):
+    def __setup_synthesizer(self, llm_config=None):
         if self._is_conversation_task():
             self.kwargs["use_turbo"] = self.task_config["tools_config"]["transcriber"]["language"] == DEFAULT_LANGUAGE_CODE
         if self.task_config["tools_config"]["synthesizer"] is not None:
@@ -644,8 +654,8 @@ class TaskManager(BaseManager):
                 self.task_config["tools_config"]["synthesizer"]["stream"] = True if self.enforce_streaming else False #Hardcode stream to be False as we don't want to get blocked by a __listen_synthesizer co-routine
 
             self.tools["synthesizer"] = synthesizer_class(**self.task_config["tools_config"]["synthesizer"], **provider_config, **self.kwargs, caching=caching)
-            if not self.turn_based_conversation:
-                self.synthesizer_monitor_task = asyncio.create_task(self.tools['synthesizer'].monitor_connection())
+            # if not self.turn_based_conversation:
+            #     self.synthesizer_monitor_task = asyncio.create_task(self.tools['synthesizer'].monitor_connection())
             if self.task_config["tools_config"]["llm_agent"] is not None and llm_config is not None:
                 llm_config["buffer_size"] = self.task_config["tools_config"]["synthesizer"].get('buffer_size')
 
@@ -2111,13 +2121,14 @@ class TaskManager(BaseManager):
     async def run(self):
         try:
             if self._is_conversation_task():
+                logger.info("started running")
                 # Create transcriber and synthesizer tasks
                 tasks = []
                 #tasks = [asyncio.create_task(self.tools['input'].handle())]
 
                 # In the case of web call we would play the first message once we receive the init event
-                # if not self.is_web_based_call:
-                #     self.first_message_task = asyncio.create_task(self.__first_message())
+                #if not self.is_web_based_call:
+                #    self.first_message_task = asyncio.create_task(self.__first_message())
 
                 if not self.turn_based_conversation:
                     self.first_message_passing_time = None

@@ -23,6 +23,7 @@ class TelephonyInputHandler(DefaultInputHandler):
         # self.mark_event_meta_data = mark_event_meta_data
         self.last_media_received = 0
         self.io_provider = None
+        self.websocket_listen_task = None
 
     def get_stream_sid(self):
         return self.stream_sid
@@ -118,4 +119,5 @@ class TelephonyInputHandler(DefaultInputHandler):
                 break
 
     async def handle(self):
-        self.websocket_listen_task = asyncio.create_task(self._listen())
+        if not self.websocket_listen_task:
+            self.websocket_listen_task = asyncio.create_task(self._listen())
