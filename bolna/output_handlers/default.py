@@ -66,7 +66,6 @@ class DefaultOutputHandler:
 
                 # sending of pre-mark message
                 if packet["meta_info"]['type'] == 'audio':
-
                     pre_mark_event_meta_data = {
                         "type": "pre_mark_message",
                     }
