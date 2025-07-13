@@ -24,7 +24,8 @@ class DefaultOutputHandler:
     async def handle_interruption(self):
         logger.info("#######   Sending interruption message ####################")
         response = {"data": None, "type": "clear"}
-        await self.websocket.send_json(response)
+        if self.websocket:
+            await self.websocket.send_json(response)
 
     def process_in_chunks(self, yield_chunks=False):
         return self.is_chunking_supported and yield_chunks
@@ -46,7 +47,8 @@ class DefaultOutputHandler:
             "type": "ack"
         }
         logger.info(f"Sending ack event")
-        await self.websocket.send_text(json.dumps(data))
+        if self.websocket:
+            await self.websocket.send_text(json.dumps(data))
 
     async def handle(self, packet):
         try:
@@ -66,6 +68,10 @@ class DefaultOutputHandler:
 
                 # sending of pre-mark message
                 if packet["meta_info"]['type'] == 'audio':
+                    if not self.websocket:
+                        logger.warning("Skipping pre-mark message send - websocket not available")
+                        return
+                    
                     pre_mark_event_meta_data = {
                         "type": "pre_mark_message",
                     }
@@ -80,7 +86,8 @@ class DefaultOutputHandler:
 
                 logger.info(f"Sending to the frontend {len(data)}")
                 response = {"data": data, "type": packet["meta_info"]['type']}
-                await self.websocket.send_json(response)
+                if self.websocket:
+                    await self.websocket.send_json(response)
 
                 # sending of post-mark message
                 if packet["meta_info"]['type'] == 'audio':
@@ -102,7 +109,8 @@ class DefaultOutputHandler:
                         "name": mark_id
                     }
                     logger.info(f"Sending post-mark event - {mark_message}")
-                    await self.websocket.send_text(json.dumps(mark_message))
+                    if self.websocket:
+                        await self.websocket.send_text(json.dumps(mark_message))
             else:
                 logger.error("Other modalities are not implemented yet")
         except Exception as e:

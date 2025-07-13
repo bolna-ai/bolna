@@ -594,7 +594,6 @@ class TaskManager(BaseManager):
                     await asyncio.sleep(0.01)
         except Exception as e:
             logger.error(f"Exception in __forced_first_message {str(e)}")
-            break
 
         return
 

@@ -19,6 +19,10 @@ class TwilioOutputHandler(TelephonyOutputHandler):
 
     async def handle_interruption(self):
         logger.info("interrupting because user spoke in between")
+        if not self.websocket or not self.stream_sid:
+            logger.warning(f"Skipping interruption message - websocket: {self.websocket is not None}, stream_sid: {self.stream_sid}")
+            return
+        
         message_clear = {
             "event": "clear",
             "streamSid": self.stream_sid,
