@@ -17,7 +17,6 @@ class ExotelOutputHandler(TelephonyOutputHandler):
 
     async def handle_interruption(self):
         logger.info("interrupting because user spoke in between")
-
         message_clear = {
             "event": "clear",
             "stream_sid": self.stream_sid,

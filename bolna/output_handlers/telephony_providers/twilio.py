@@ -19,7 +19,6 @@ class TwilioOutputHandler(TelephonyOutputHandler):
 
     async def handle_interruption(self):
         logger.info("interrupting because user spoke in between")
-
         message_clear = {
             "event": "clear",
             "streamSid": self.stream_sid,

@@ -66,10 +66,7 @@ class DefaultOutputHandler:
 
                 # sending of pre-mark message
                 if packet["meta_info"]['type'] == 'audio':
-                    if not self.websocket:
-                        logger.warning("Skipping pre-mark message send - websocket not available")
-                        return
-                    
+
                     pre_mark_event_meta_data = {
                         "type": "pre_mark_message",
                     }

@@ -17,7 +17,6 @@ class PlivoOutputHandler(TelephonyOutputHandler):
 
     async def handle_interruption(self):
         logger.info("interrupting because user spoke in between")
-
         message_clear = {
             "event": "clearAudio",
             "streamId": self.stream_sid,
