@@ -574,7 +574,7 @@ class TaskManager(BaseManager):
                 message = create_ws_data_packet(audio_chunk, meta_info)
 
                 stream_sid = self.tools["input"].get_stream_sid()
-                if stream_sid is not None or not self.output_handler_set:
+                if stream_sid is not None and self.output_handler_set:
                     logger.info(f"Got stream sid and hence sending the first message {stream_sid}")
                     self.stream_sid = stream_sid
                     await self.tools["output"].set_stream_sid(stream_sid)
@@ -590,10 +590,11 @@ class TaskManager(BaseManager):
                         logger.error("Exception in __forced_first_message for duration calculation: {}".format(str(e)))
                     break
                 else:
-                    logger.info(f"Stream id is still None, so not passing it")
+                    logger.info(f"Stream id is still None ({stream_sid}) or output handler not set ({self.output_handler_set}), waiting...")
                     await asyncio.sleep(0.01)
         except Exception as e:
             logger.error(f"Exception in __forced_first_message {str(e)}")
+            break
 
         return
 
