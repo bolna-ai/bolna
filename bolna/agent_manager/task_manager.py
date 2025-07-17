@@ -1328,8 +1328,8 @@ class TaskManager(BaseManager):
                             {'role': 'system', 'content': self.check_for_completion_prompt},
                             {'role': 'user', 'content': format_messages(self.history, use_system_prompt= True)}]
                     logger.info(f"##### Answer from the LLM {completion_res}")
-                    convert_to_request_log(message=format_messages(prompt, use_system_prompt= True), meta_info= meta_info, component="llm_hangup", direction="request", model=self.llm_config["model"], run_id= self.run_id)
-                    convert_to_request_log(message=completion_res, meta_info= meta_info, component="llm_hangup", direction="response", model= self.check_for_completion_llm, run_id= self.run_id)
+                    convert_to_request_log(message=format_messages(prompt, use_system_prompt= True), meta_info= meta_info, component="llm_hangup", direction="request", model=self.check_for_completion_llm, run_id= self.run_id)
+                    convert_to_request_log(message=completion_res, meta_info= meta_info, component="llm_hangup", direction="response", model=self.check_for_completion_llm, run_id= self.run_id)
 
                     if should_hangup:
                         await self.process_call_hangup()
