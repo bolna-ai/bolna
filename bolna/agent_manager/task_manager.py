@@ -378,12 +378,12 @@ class TaskManager(BaseManager):
                     self.filler_preset_directory = f"{os.getenv('FILLERS_PRESETS_DIR')}/{self.synthesizer_voice.lower()}"
 
         # setting transcriber and synthesizer in parallel
-        # self.__setup_transcriber()
-        # self.__setup_synthesizer(self.llm_config)
-        # if not self.turn_based_conversation:
-        #     self.synthesizer_monitor_task = asyncio.create_task(self.tools['synthesizer'].monitor_connection())
+        self.__setup_transcriber()
+        self.__setup_synthesizer(self.llm_config)
+        if not self.turn_based_conversation:
+            self.synthesizer_monitor_task = asyncio.create_task(self.tools['synthesizer'].monitor_connection())
 
-        asyncio.create_task(self.__async_setup_tools())
+        #asyncio.create_task(self.__async_setup_tools())
         # # setting llm
         # llm = self.__setup_llm(self.llm_config)
         # # Setup tasks
@@ -607,7 +607,7 @@ class TaskManager(BaseManager):
 
         return
 
-    async def __setup_transcriber(self):
+    def __setup_transcriber(self):
         try:
             if self.task_config["tools_config"]["transcriber"] is not None:
                 self.language = self.task_config["tools_config"]["transcriber"].get('language', DEFAULT_LANGUAGE_CODE)
@@ -636,7 +636,7 @@ class TaskManager(BaseManager):
         except Exception as e:
             logger.error(f"Something went wrong with starting transcriber {e}")
 
-    async def __setup_synthesizer(self, llm_config=None):
+    def __setup_synthesizer(self, llm_config=None):
         if self._is_conversation_task():
             self.kwargs["use_turbo"] = self.task_config["tools_config"]["transcriber"]["language"] == DEFAULT_LANGUAGE_CODE
         if self.task_config["tools_config"]["synthesizer"] is not None:
