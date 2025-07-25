@@ -380,7 +380,7 @@ class TaskManager(BaseManager):
         # setting transcriber and synthesizer in parallel
         self.__setup_transcriber()
         self.__setup_synthesizer(self.llm_config)
-        if not self.turn_based_conversation:
+        if not self.turn_based_conversation and task_id == 0:
             self.synthesizer_monitor_task = asyncio.create_task(self.tools['synthesizer'].monitor_connection())
 
         #asyncio.create_task(self.__async_setup_tools())
