@@ -29,6 +29,9 @@ class TelephonyOutputHandler(DefaultOutputHandler):
     async def form_mark_message(self, mark_id):
         pass
 
+    async def set_stream_sid(self, stream_id):
+        self.stream_sid = stream_id
+
     async def handle(self, ws_data_packet):
         try:
             audio_chunk = ws_data_packet.get('data')
