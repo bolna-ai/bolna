@@ -513,10 +513,10 @@ class TaskManager(BaseManager):
 
     async def message_task_new(self):
         tasks = []
-        if self._is_conversation_task() and not self.turn_based_conversation:
+        if self._is_conversation_task():
             tasks.append(self.tools['input'].handle())
 
-            if not self.is_web_based_call:
+            if not self.turn_based_conversation and not self.is_web_based_call:
                 tasks.append(self.__forced_first_message())
 
         if tasks:
@@ -2133,8 +2133,8 @@ class TaskManager(BaseManager):
                 #tasks = [asyncio.create_task(self.tools['input'].handle())]
 
                 # In the case of web call we would play the first message once we receive the init event
-                #if not self.is_web_based_call:
-                #    self.first_message_task = asyncio.create_task(self.__first_message())
+                if self.turn_based_conversation:
+                    self.first_message_task = asyncio.create_task(self.__first_message())
 
                 if not self.turn_based_conversation:
                     self.first_message_passing_time = None
