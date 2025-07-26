@@ -16,7 +16,6 @@ class TelephonyOutputHandler(DefaultOutputHandler):
         super().__init__(io_provider, websocket, log_dir_name, mark_event_meta_data=mark_event_meta_data)
         self.mark_event_meta_data = mark_event_meta_data
 
-        self.stream_sid = None
         self.current_request_id = None
         self.rejected_request_ids = set()
 

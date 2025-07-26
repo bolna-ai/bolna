@@ -512,12 +512,15 @@ class TaskManager(BaseManager):
             raise "Other input handlers not supported yet"
 
     async def message_task_new(self):
+        tasks = []
         if self._is_conversation_task() and not self.turn_based_conversation:
-            await asyncio.gather(
-                self.tools['input'].handle(),
-                self.__forced_first_message()
-            )
+            tasks.append(self.tools['input'].handle())
 
+            if not self.is_web_based_call:
+                tasks.append(self.__forced_first_message())
+
+        if tasks:
+            await asyncio.gather(*tasks)
 
     def __setup_input_handlers(self, turn_based_conversation, input_queue, should_record):
         if self.task_config["tools_config"]["input"]["provider"] in SUPPORTED_INPUT_HANDLERS.keys():

@@ -14,6 +14,7 @@ class DefaultOutputHandler:
         self.is_interruption_task_on = False
         self.queue = queue
         self.io_provider = io_provider
+        self.stream_sid = None
         self.is_chunking_supported = True
         self.is_last_hangup_chunk_sent = False
         # self.is_welcome_message_sent = False
@@ -31,6 +32,9 @@ class DefaultOutputHandler:
 
     def get_provider(self):
         return self.io_provider
+
+    async def set_stream_sid(self, stream_id):
+        self.stream_sid = stream_id
 
     def set_hangup_sent(self):
         self.is_last_hangup_chunk_sent = True
