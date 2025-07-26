@@ -2164,6 +2164,11 @@ class TaskManager(BaseManager):
 
     async def handle_cancellation(self, message):
         try:
+            llm_agent = self.tools.get('llm_agent')
+            if llm_agent and hasattr(llm_agent, 'cleanup_connections'):
+                await llm_agent.cleanup_connections()
+                logger.info("Cleaned up LLM connection pools")
+            
             # Cancel all tasks on cancellation
             tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
             logger.info(f"tasks {len(tasks)}")

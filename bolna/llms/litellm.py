@@ -1,6 +1,7 @@
 import os
 import json
 import time
+import aiohttp
 from litellm import acompletion
 from dotenv import load_dotenv
 
@@ -24,6 +25,13 @@ class LiteLLM(BaseLLM):
         self.api_key = kwargs.get("llm_key", os.getenv('LITELLM_MODEL_API_KEY'))
         self.api_base = kwargs.get("base_url", os.getenv('LITELLM_MODEL_API_BASE'))
         self.api_version = kwargs.get("api_version", os.getenv('LITELLM_MODEL_API_VERSION'))
+        
+        self.provider_key = f"litellm:{self.model}:{self.api_base or 'default'}"
+        
+        logger.info(f"Initialized LiteLLM with connection pooling")
+        logger.debug(f"Provider key: {self.provider_key}")
+        logger.debug("Note: LiteLLM uses internal connection management - pooling benefits may be limited")
+        
         if self.api_key:
             self.model_args["api_key"] = self.api_key
         if self.api_base:
