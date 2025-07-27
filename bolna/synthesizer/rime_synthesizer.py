@@ -94,12 +94,8 @@ class RimeSynthesizer(BaseSynthesizer):
                     async with session.post(self.api_url, headers=headers, json=payload) as response:
                         if response.status == 200:
                             chunk = await response.read()
-                            logger.info(
-                                f"status for rime request {response.status} response {len(await response.read())}")
                             return chunk
                         else:
-                            logger.info(
-                                f"status for rime request {response.status} response {await response.read()}")
                             return b'\x00'
                 else:
                     logger.info("Payload was null")
@@ -139,7 +135,6 @@ class RimeSynthesizer(BaseSynthesizer):
                 await asyncio.sleep(1)
 
             if text != "":
-                logger.info(f"Sending text: {text}")
                 for text_chunk in self.text_chunker(text):
                     if not self.should_synthesize_response(sequence_id):
                         logger.info(
@@ -309,17 +304,14 @@ class RimeSynthesizer(BaseSynthesizer):
         return self.sender_task
 
     async def push(self, message):
-        logger.info(f"Pushed message to internal queue {message}")
         if self.stream:
             meta_info, text, self.current_text = message.get("meta_info"), message.get("data"), message.get("data")
             self.synthesized_characters += len(text) if text is not None else 0
             end_of_llm_stream = "end_of_llm_stream" in meta_info and meta_info["end_of_llm_stream"]
-            logger.info(f"end_of_llm_stream: {end_of_llm_stream}")
             self.meta_info = copy.deepcopy(meta_info)
             meta_info["text"] = text
             if not self.context_id:
                 self.context_id = str(uuid.uuid4())
-            logger.info(f"context_id: {self.context_id}")
             self.sender_task = asyncio.create_task(self.sender(text, meta_info.get("sequence_id"), end_of_llm_stream))
             self.text_queue.append(meta_info)
         else:

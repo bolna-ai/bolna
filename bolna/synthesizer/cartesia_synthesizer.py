@@ -103,7 +103,6 @@ class CartesiaSynthesizer(BaseSynthesizer):
                 await asyncio.sleep(1)
 
             if text != "":
-                logger.info(f"Sending text_chunk: {text}")
                 try:
                     input_message = self.form_payload(text)
                     await self.websocket_holder["websocket"].send(json.dumps(input_message))
