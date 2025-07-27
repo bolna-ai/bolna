@@ -64,7 +64,6 @@ class TelephonyInputHandler(DefaultInputHandler):
 
                 packet = json.loads(message)
                 if packet['event'] == 'start':
-                    logger.info(f"Received start packet: {packet}")
                     await self.call_start(packet)
                 elif packet['event'] == 'media':
                     media_data = packet['media']

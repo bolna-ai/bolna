@@ -55,8 +55,6 @@ class BaseSynthesizer:
             if char in splitters:
                 if buffer != " ":
                     yield buffer.strip() + " "
-                else:
-                    logger.info(f"In else condition of text chunker where buffer = {buffer}")
                 buffer = ""
 
         if buffer:

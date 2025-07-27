@@ -62,7 +62,7 @@ class TelephonyOutputHandler(DefaultOutputHandler):
                             audio_format = 'wav'
                         media_message = await self.form_media_message(audio_chunk, audio_format)
                         await self.websocket.send_text(json.dumps(media_message))
-                        logger.info(f"Meta info received - {meta_info}")
+                        logger.info(f"Sending media event - {meta_info.get('mark_id')}")
 
                     # sending of post-mark message
                     mark_event_meta_data = {
