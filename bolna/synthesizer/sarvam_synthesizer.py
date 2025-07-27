@@ -77,8 +77,6 @@ class SarvamSynthesizer(BaseSynthesizer):
         return True
 
     async def __generate_http(self, text):
-        logger.info(f"text {text}")
-
         payload = {
             "target_language_code": self.language,
             "text": text,
@@ -108,7 +106,6 @@ class SarvamSynthesizer(BaseSynthesizer):
                 await asyncio.sleep(1)
 
             if text != "":
-                logger.info(f"Sending text: {text}")
                 try:
                     await self.websocket_holder["websocket"].send(json.dumps({"type": "text", "data": {"text": text}}))
                 except Exception as e:
@@ -255,12 +252,10 @@ class SarvamSynthesizer(BaseSynthesizer):
             logger.info(f"Error in sarvam generate {e}")
 
     async def push(self, message):
-        logger.info(f"Pushed message to internal queue {message}")
         if self.stream:
             meta_info, text, self.current_text = message.get("meta_info"), message.get("data"), message.get("data")
             self.synthesized_characters += len(text) if text is not None else 0
             end_of_llm_stream = "end_of_llm_stream" in meta_info and meta_info["end_of_llm_stream"]
-            logger.info(f"end_of_llm_stream: {end_of_llm_stream}")
             self.meta_info = copy.deepcopy(meta_info)
             meta_info["text"] = text
             self.sender_task = asyncio.create_task(self.sender(text, meta_info.get("sequence_id"), end_of_llm_stream))
