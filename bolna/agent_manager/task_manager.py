@@ -30,7 +30,6 @@ from semantic_router.encoders import FastEmbedEncoder
 from ..helpers.mark_event_meta_data import MarkEventMetaData
 from ..helpers.observable_variable import ObservableVariable
 
-asyncio.get_event_loop().set_debug(True)
 logger = configure_logger(__name__)
 
 
@@ -1101,7 +1100,6 @@ class TaskManager(BaseManager):
     # LLM task
     ##############################################################
     async def _handle_llm_output(self, next_step, text_chunk, should_bypass_synth, meta_info, is_filler = False):
-        logger.info("received text from LLM for output processing: {} which belongs to sequence id {}".format(text_chunk, meta_info['sequence_id']))
         if "request_id" not in meta_info:
             meta_info["request_id"] = str(uuid.uuid4())
 
@@ -1815,7 +1813,6 @@ class TaskManager(BaseManager):
                     # self.sequence_ids.add(meta_info["sequence_id"])
                     # logger.info(f"After adding into sequence id {self.sequence_ids}")
                     convert_to_request_log(message = text, meta_info= meta_info, component="synthesizer", direction="request", model = self.synthesizer_provider, engine=self.tools['synthesizer'].get_engine(), run_id= self.run_id)
-                    logger.info('##### sending text to {} for generation: {} '.format(self.synthesizer_provider, text))
                     if 'cached' in message['meta_info'] and meta_info['cached'] is True:
                         logger.info(f"Cached response and hence sending preprocessed text")
                         convert_to_request_log(message = text, meta_info= meta_info, component="synthesizer", direction="response", model = self.synthesizer_provider, is_cached= True, engine=self.tools['synthesizer'].get_engine(), run_id= self.run_id)
@@ -1890,7 +1887,6 @@ class TaskManager(BaseManager):
 
                 message = await self.buffered_output_queue.get()
 
-                logger.info("Start response is True and hence starting to speak {} Current sequence ids {}".format(message['meta_info'], self.sequence_ids))
                 if "end_of_conversation" in message['meta_info']:
                     await self.__process_end_of_conversation()
 
@@ -1969,7 +1965,6 @@ class TaskManager(BaseManager):
                 break
 
             if self.tools["input"].is_audio_being_played_to_user():
-                logger.info(f"Continuing since audio is being played by AI")
                 continue
 
             time_since_last_spoken_ai_word = (time.time() - self.last_transmitted_timestamp)
