@@ -1987,7 +1987,6 @@ class TaskManager(BaseManager):
 
                 # Just in case we need to clear messages sent before
                 await self.tools["output"].handle_interruption()
-
             else:
                 logger.info(f"Only {time_since_last_spoken_ai_word} seconds since last spoken time stamp and hence not cutting the phone call")
 
