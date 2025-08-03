@@ -44,6 +44,7 @@ SUPPORTED_LLM_PROVIDERS = {
     'groq': LiteLLM,
     'anthropic': LiteLLM,
     'deepseek': LiteLLM,
+    'openrouter': LiteLLM,
     'azure': LiteLLM #Backwards compatibility
 }
 SUPPORTED_INPUT_HANDLERS = {
