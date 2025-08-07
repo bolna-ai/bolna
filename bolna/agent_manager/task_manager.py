@@ -1562,7 +1562,7 @@ class TaskManager(BaseManager):
                             self.callee_speaking = True
 
                         interim_transcript_len += len(message["data"].get("content").strip().split(" "))
-                        if self.tools["input"].welcome_message_played() and self.number_of_words_for_interruption != 0:
+                        if self.tools["input"].is_audio_being_played_to_user() and self.tools["input"].welcome_message_played() and self.number_of_words_for_interruption != 0:
                             if interim_transcript_len > self.number_of_words_for_interruption or \
                                     message["data"].get("content").strip() in self.accidental_interruption_phrases:
                                 logger.info(f"Condition for interruption hit")
