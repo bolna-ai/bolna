@@ -1634,13 +1634,25 @@ class TaskManager(BaseManager):
             logger.error(f"Error in transcriber {e}")
 
     async def __process_http_transcription(self, message):
+        logger.info(f"Processing HTTP transcription message: {message}")
         meta_info = self.__get_updated_meta_info(message["meta_info"])
 
         sequence = message["meta_info"].get('sequence', meta_info['sequence_id'])
         next_task = self._get_next_step(sequence, "transcriber")
         self.transcriber_duration += message["meta_info"]["transcriber_duration"] if "transcriber_duration" in message["meta_info"] else 0
+        logger.info("Processing_sarvam_message: {message}")
+        # Handle both old string format and new structured format
+        if isinstance(message['data'], dict) and message['data'].get('type') == 'transcript':
+            # New structured format from Sarvam
+            transcriber_message = message['data'].get('content', '')
+            logger.info(f"Processing HTTP transcript (structured): '{transcriber_message}'")
+        else:
+            # Old string format
+            transcriber_message = message['data']
+            logger.info(f"Processing HTTP transcript (old format): '{transcriber_message}'")
 
-        await self._handle_transcriber_output(next_task, message['data'], meta_info)
+        logger.info(f"Calling _handle_transcriber_output with message: '{transcriber_message}', next_task: {next_task}")
+        await self._handle_transcriber_output(next_task, transcriber_message, meta_info)
 
 
     #################################################################
@@ -2202,8 +2214,10 @@ class TaskManager(BaseManager):
                 tasks_to_cancel.append(process_task_cancellation(self.synthesizer_monitor_task, 'synthesizer_monitor_task'))
 
             if self._is_conversation_task():
-                self.transcriber_latencies['connection_latency_ms'] = self.tools["transcriber"].connection_time
-                self.synthesizer_latencies['connection_latency_ms'] = self.tools["synthesizer"].connection_time
+                if "transcriber" in self.tools and self.tools["transcriber"]:
+                    self.transcriber_latencies['connection_latency_ms'] = self.tools["transcriber"].connection_time
+                if "synthesizer" in self.tools and self.tools["synthesizer"]:
+                    self.synthesizer_latencies['connection_latency_ms'] = self.tools["synthesizer"].connection_time
                 output = {
                     "messages": self.history,
                     "conversation_time": time.time() - self.start_time,
