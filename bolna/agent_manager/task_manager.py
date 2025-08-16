@@ -1201,7 +1201,7 @@ class TaskManager(BaseManager):
                 'stream_sid': self.stream_sid,
                 'from_number': from_number,
                 'execution_id': self.run_id,
-                **self.transfer_call_params
+                **(self.transfer_call_params or {})
             }
 
             if self.tools['input'].io_provider != 'default':
