@@ -48,6 +48,7 @@ class TaskManager(BaseManager):
 
         self.timezone = pytz.timezone(DEFAULT_TIMEZONE)
         self.language = DEFAULT_LANGUAGE_CODE
+        self.transfer_call_params = self.kwargs.get('transfer_call_params', None)
 
         if task['tools_config'].get('api_tools', None) is not None:
             self.kwargs['api_tools'] = task['tools_config']['api_tools']
@@ -1201,7 +1202,8 @@ class TaskManager(BaseManager):
                 'provider': self.tools['input'].io_provider,
                 'stream_sid': self.stream_sid,
                 'from_number': from_number,
-                'execution_id': self.run_id
+                'execution_id': self.run_id,
+                **(self.transfer_call_params or {})
             }
 
             if self.tools['input'].io_provider != 'default':
