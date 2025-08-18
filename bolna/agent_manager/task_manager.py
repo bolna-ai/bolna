@@ -266,6 +266,8 @@ class TaskManager(BaseManager):
             self.trigger_user_online_message_after = self.conversation_config.get("trigger_user_online_message_after", DEFAULT_USER_ONLINE_MESSAGE_TRIGGER_DURATION)
             self.check_if_user_online = self.conversation_config.get("check_if_user_online", True)
             self.check_user_online_message = self.conversation_config.get("check_user_online_message", DEFAULT_USER_ONLINE_MESSAGE)
+            if self.check_if_user_online and self.context_data:
+                self.check_if_user_online = update_prompt_with_context(self.check_if_user_online, self.context_data)
 
             self.kwargs["process_interim_results"] = "true" if self.conversation_config.get("optimize_latency", False) is True else "false"
             logger.info(f"Processing interim results {self.kwargs['process_interim_results'] }")
