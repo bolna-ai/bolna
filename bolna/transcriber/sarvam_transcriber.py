@@ -53,7 +53,7 @@ class SarvamTranscriber(BaseTranscriber):
     def get_sarvam_ws_url(self):
         sarvam_params = {
             'model': self.model,
-            'language_code': self.language,
+            'language-code': self.language,
             'vad_signals': 'true' if self.vad_signals else 'false',
             'high_vad_sensitivity': 'true' if self.high_vad_sensitivity else 'false'
         }
@@ -76,7 +76,7 @@ class SarvamTranscriber(BaseTranscriber):
             self.sampling_rate = 8000
             self.audio_frame_duration = 0.0
 
-        websocket_api = f'wss://{self.sarvam_host}/speech-to-text/streaming?'
+        websocket_api = f'wss://{self.sarvam_host}//speech-to-text/ws?'
         websocket_url = websocket_api + urlencode(sarvam_params)
         return websocket_url
 
