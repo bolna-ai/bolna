@@ -128,19 +128,17 @@ class SarvamTranscriber(BaseTranscriber):
                             pass
 
                         if message['data']['signal_type'] == 'END_SPEECH':
-                            logger.info("Received speech_end event from Sarvam")
-                            if (not self.is_transcript_sent_for_processing) and self.final_transcript.strip():
-                                logger.info(f"Received speech_end, yielding transcript: {self.final_transcript}")
-                                data = {"type": "transcript", "content": self.final_transcript.strip()}
-                                self.is_transcript_sent_for_processing = True
-                                self.final_transcript = ""
-                                yield create_ws_data_packet(data, self.meta_info)
+                            logger.info(f"Received speech_end, yielding transcript: {self.final_transcript}")
+                            data = {"type": "transcript", "content": self.final_transcript.strip()}
+                            #self.is_transcript_sent_for_processing = True
+                            #self.final_transcript = ""
+                            #yield create_ws_data_packet(data, self.meta_info)
 
                     elif message['type'] == 'data':
-                        transcript = message['data']['transcript']
-                        if transcript and transcript.strip():
-                            logger.info(f"Received final transcript: {transcript}")
-                            data = {"type": "transcript", "content": transcript.strip()}
+                        self.final_transcript = message['data']['transcript']
+                        if self.final_transcript and self.final_transcript.strip():
+                            logger.info(f"Received final final_transcript: {self.final_transcript}")
+                            data = {"type": "transcript", "content": self.final_transcript.strip()}
                             yield create_ws_data_packet(data, self.meta_info)
 
         except asyncio.CancelledError:
