@@ -33,3 +33,4 @@ tokenizers==0.15.2
 optimum[onnxruntime]
 lancedb==0.12.0
 pymongo==4.8.0
+sarvamai==0.1.19
