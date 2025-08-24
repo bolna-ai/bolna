@@ -172,11 +172,6 @@ class SarvamTranscriber(BaseTranscriber):
     async def push_to_transcriber_queue(self, data_packet):
         await self.transcriber_output_queue.put(data_packet)
 
-    async def sarvam_connect(self):
-        client = AsyncSarvamAI(api_subscription_key=self.api_key)
-        connection_params = self.get_sarvam_connection_params()
-        sarvam_ws = await client.speech_to_text_translate_streaming.connect(**connection_params)
-        return sarvam_ws
 
     async def flush_signal(self, ws):
         try:
@@ -194,7 +189,10 @@ class SarvamTranscriber(BaseTranscriber):
     async def transcribe(self):
         try:
             start_time = time.perf_counter()
-            async with await self.sarvam_connect() as sarvam_ws:
+            client = AsyncSarvamAI(api_subscription_key=self.api_key)
+            connection_params = self.get_sarvam_connection_params()
+            
+            async with client.speech_to_text_translate_streaming.connect(**connection_params) as sarvam_ws:
                 if not self.connection_time:
                     self.connection_time = round((time.perf_counter() - start_time) * 1000)
 
