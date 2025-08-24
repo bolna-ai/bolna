@@ -3,10 +3,8 @@ import json
 import os
 import time
 import base64
-from urllib.parse import urlencode
 from dotenv import load_dotenv
-import websockets
-from websockets.asyncio.client import ClientConnection
+from sarvamai import AsyncSarvamAI
 
 from .base_transcriber import BaseTranscriber
 from bolna.helpers.logger_config import configure_logger
@@ -50,14 +48,7 @@ class SarvamTranscriber(BaseTranscriber):
         self.vad_signals = kwargs.get("vad_signals", True)
         self.high_vad_sensitivity = kwargs.get("high_vad_sensitivity", False)
 
-    def get_sarvam_ws_url(self):
-        sarvam_params = {
-            'model': self.model,
-            'language-code': self.language,
-            'vad_signals': 'true' if self.vad_signals else 'false',
-            'high_vad_sensitivity': 'true' if self.high_vad_sensitivity else 'false'
-        }
-
+    def get_sarvam_connection_params(self):
         self.audio_frame_duration = 0.5
 
         if self.provider in ('twilio', 'exotel', 'plivo'):
@@ -76,11 +67,14 @@ class SarvamTranscriber(BaseTranscriber):
             self.sampling_rate = 8000
             self.audio_frame_duration = 0.0
 
-        websocket_api = f'wss://{self.sarvam_host}//speech-to-text/ws?'
-        websocket_url = websocket_api + urlencode(sarvam_params)
-        return websocket_url
+        return {
+            'model': self.model,
+            'language_code': self.language,
+            'vad_signals': self.vad_signals,
+            'high_vad_sensitivity': self.high_vad_sensitivity
+        }
 
-    async def send_heartbeat(self, ws: ClientConnection):
+    async def send_heartbeat(self, ws):
         try:
             while True:
                 await asyncio.sleep(30)
@@ -103,7 +97,7 @@ class SarvamTranscriber(BaseTranscriber):
     def get_meta_info(self):
         return self.meta_info
 
-    async def sender_stream(self, ws: ClientConnection):
+    async def sender_stream(self, ws):
         try:
             while True:
                 ws_data_packet = await self.input_queue.get()
@@ -125,21 +119,19 @@ class SarvamTranscriber(BaseTranscriber):
                 if audio_data:
                     audio_b64 = base64.b64encode(audio_data).decode('utf-8')
                     
-                    message = {
-                        "audio": audio_b64,
-                        "encoding": "audio/wav" if self.encoding == "linear16" else "audio/mulaw",
-                        "sample_rate": self.sampling_rate
-                    }
-                    await ws.send(json.dumps(message))
+                    encoding = "audio/wav" if self.encoding == "linear16" else "audio/mulaw"
+                    await ws.translate(
+                        audio=audio_b64,
+                        encoding=encoding,
+                        sample_rate=self.sampling_rate
+                    )
                     
         except Exception as e:
             logger.error('Error while sending audio to Sarvam: ' + str(e))
 
-    async def receiver(self, ws: ClientConnection):
+    async def receiver(self, ws):
         async for msg in ws:
             try:
-                msg = json.loads(msg)
-                
                 if self.connection_start_time is None:
                     self.connection_start_time = (time.time() - (self.num_frames * self.audio_frame_duration))
 
@@ -181,18 +173,14 @@ class SarvamTranscriber(BaseTranscriber):
         await self.transcriber_output_queue.put(data_packet)
 
     async def sarvam_connect(self):
-        websocket_url = self.get_sarvam_ws_url()
-        additional_headers = {
-            'Authorization': f'Bearer {self.api_key}',
-            'Content-Type': 'application/json'
-        }
-        sarvam_ws = await websockets.connect(websocket_url, additional_headers=additional_headers)
+        client = AsyncSarvamAI(api_subscription_key=self.api_key)
+        connection_params = self.get_sarvam_connection_params()
+        sarvam_ws = await client.speech_to_text_translate_streaming.connect(**connection_params)
         return sarvam_ws
 
-    async def flush_signal(self, ws: ClientConnection):
+    async def flush_signal(self, ws):
         try:
-            flush_message = {"type": "flush"}
-            await ws.send(json.dumps(flush_message))
+            await ws.flush()
             logger.info("Sent flush signal to Sarvam")
         except Exception as e:
             logger.error(f"Error sending flush signal: {e}")
