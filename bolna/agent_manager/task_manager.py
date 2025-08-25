@@ -1588,7 +1588,16 @@ class TaskManager(BaseManager):
 
                     # Whenever speech_final or UtteranceEnd is received from Deepgram, this condition would get triggered
                     elif isinstance(message.get("data"), dict) and message["data"].get("type", "") == "transcript":
-                        logger.info(f"Received transcript, sending for further processing")
+                        logger.info(f"Received transcript, sending for further processing: {message['data'].get('content')}")
+
+                        if self.task_config["tools_config"]["transcriber"]["provider"] in ('sarvam') and self.tools["input"].is_audio_being_played_to_user() and self.tools["input"].welcome_message_played() and self.number_of_words_for_interruption != 0:
+                            if message['data'].get('content').strip() > self.number_of_words_for_interruption or \
+                                    message["data"].get("content").strip() in self.accidental_interruption_phrases:
+                                logger.info(f"Condition for interruption hit")
+                                self.turn_id += 1
+                                self.tools["input"].update_is_audio_being_played(False)
+                                await self.__cleanup_downstream_tasks()
+
                         if self.tools["input"].welcome_message_played() and self.tools["input"].is_audio_being_played_to_user() and \
                                 len(message["data"].get("content").strip().split(" ")) <= self.number_of_words_for_interruption and \
                                 message["data"].get("content").strip() not in self.accidental_interruption_phrases:
