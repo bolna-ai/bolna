@@ -102,6 +102,7 @@ class Synthesizer(BaseModel):
         return validate_attribute(value, ["polly", "elevenlabs", "openai", "deepgram", "azuretts", "cartesia", "smallest", "sarvam", "rime"])
 
 
+
 class IOModel(BaseModel):
     provider: str
     format: Optional[str] = "wav"
