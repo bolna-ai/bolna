@@ -325,37 +325,9 @@ class DeepgramTranscriber(BaseTranscriber):
     async def push_to_transcriber_queue(self, data_packet):
         await self.transcriber_output_queue.put(data_packet)
 
-    async def validate_api_key(self):
-        """Validate API key by making a test request to Deepgram API"""
-        if not self.api_key:
-            raise ValueError("Deepgram API key is not provided")
-        
-        test_url = f"https://{self.deepgram_host}/v1/projects"
-        headers = {
-            'Authorization': f'Token {self.api_key}',
-            'Content-Type': 'application/json'
-        }
-        
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(test_url, headers=headers) as response:
-                    if response.status == 401:
-                        raise ValueError("Invalid Deepgram API key - authentication failed")
-                    elif response.status == 403:
-                        raise ValueError("Deepgram API key does not have required permissions")
-                    elif response.status >= 400:
-                        raise ValueError(f"Deepgram API validation failed with status {response.status}")
-                    
-                    logger.info("Deepgram API key validation successful")
-                    return True
-        except aiohttp.ClientError as e:
-            raise ValueError(f"Failed to validate Deepgram API key due to network error: {e}")
-
     async def deepgram_connect(self):
         """Establish websocket connection to Deepgram with proper error handling"""
         try:
-            await self.validate_api_key()
-            
             websocket_url = self.get_deepgram_ws_url()
             additional_headers = {
                 'Authorization': 'Token {}'.format(self.api_key)
@@ -393,9 +365,6 @@ class DeepgramTranscriber(BaseTranscriber):
         except ConnectionClosedError as e:
             logger.error(f"Deepgram websocket connection closed unexpectedly: {e}")
             raise ConnectionError(f"Deepgram websocket connection closed unexpectedly: {e}")
-        except ValueError as e:
-            logger.error(f"Deepgram API validation error: {e}")
-            raise
         except Exception as e:
             logger.error(f"Unexpected error connecting to Deepgram websocket: {e}")
             raise ConnectionError(f"Unexpected error connecting to Deepgram websocket: {e}")
