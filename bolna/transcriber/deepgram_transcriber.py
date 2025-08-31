@@ -9,7 +9,7 @@ from urllib.parse import urlencode
 from dotenv import load_dotenv
 import websockets
 from websockets.asyncio.client import ClientConnection
-from websockets.exceptions import ConnectionClosedError, InvalidStatusCode, InvalidHandshake
+from websockets.exceptions import ConnectionClosedError, InvalidHandshake
 
 from .base_transcriber import BaseTranscriber
 from bolna.helpers.logger_config import configure_logger
@@ -341,16 +341,6 @@ class DeepgramTranscriber(BaseTranscriber):
         except asyncio.TimeoutError:
             logger.error("Timeout while connecting to Deepgram websocket")
             raise ConnectionError("Timeout while connecting to Deepgram websocket")
-        except InvalidStatusCode as e:
-            if e.status_code == 401:
-                logger.error("Authentication failed - invalid Deepgram API key")
-                raise ValueError("Authentication failed - invalid Deepgram API key")
-            elif e.status_code == 403:
-                logger.error("Access forbidden - check Deepgram API key permissions")
-                raise ValueError("Access forbidden - check Deepgram API key permissions")
-            else:
-                logger.error(f"Deepgram websocket connection failed with status {e.status_code}")
-                raise ConnectionError(f"Deepgram websocket connection failed with status {e.status_code}")
         except InvalidHandshake as e:
             logger.error(f"Invalid handshake during Deepgram websocket connection: {e}")
             raise ConnectionError(f"Invalid handshake during Deepgram websocket connection: {e}")
@@ -437,9 +427,8 @@ class DeepgramTranscriber(BaseTranscriber):
         finally:
             if deepgram_ws is not None:
                 try:
-                    if not deepgram_ws.closed:
-                        await deepgram_ws.close()
-                        logger.info("Deepgram websocket closed in finally block")
+                    await deepgram_ws.close()
+                    logger.info("Deepgram websocket closed in finally block")
                 except Exception as e:
                     logger.error(f"Error closing websocket in finally block: {e}")
                 finally:
