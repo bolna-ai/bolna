@@ -9,6 +9,7 @@ from urllib.parse import urlencode
 from dotenv import load_dotenv
 import websockets
 from websockets.asyncio.client import ClientConnection
+from websockets.exceptions import ConnectionClosedError, InvalidStatusCode, InvalidHandshake
 
 from .base_transcriber import BaseTranscriber
 from bolna.helpers.logger_config import configure_logger
@@ -61,6 +62,8 @@ class DeepgramTranscriber(BaseTranscriber):
         self.finalized_transcript = ""
         self.final_transcript = ""
         self.is_transcript_sent_for_processing = False
+        self.websocket_connection = None
+        self.connection_authenticated = False
 
     def get_deepgram_ws_url(self):
         dg_params = {
@@ -120,17 +123,44 @@ class DeepgramTranscriber(BaseTranscriber):
     async def send_heartbeat(self, ws: ClientConnection):
         try:
             while True:
+                if ws.closed:
+                    logger.info("Websocket connection is closed, stopping heartbeat")
+                    break
+                    
                 data = {'type': 'KeepAlive'}
-                await ws.send(json.dumps(data))
+                try:
+                    await ws.send(json.dumps(data))
+                except ConnectionClosedError as e:
+                    logger.info(f"Connection closed while sending heartbeat: {e}")
+                    break
+                except Exception as e:
+                    logger.error(f"Error sending heartbeat: {e}")
+                    break
+                    
                 await asyncio.sleep(5)  # Send a heartbeat message every 5 seconds
+        except asyncio.CancelledError:
+            logger.info("Heartbeat task cancelled")
+            raise
         except Exception as e:
-            logger.info('Error while sending: ' + str(e))
+            logger.error('Error in send_heartbeat: ' + str(e))
+            raise
 
     async def toggle_connection(self):
         self.connection_on = False
         if self.heartbeat_task is not None:
             self.heartbeat_task.cancel()
-        self.sender_task.cancel()
+        if self.sender_task is not None:
+            self.sender_task.cancel()
+        
+        if self.websocket_connection is not None:
+            try:
+                await self.websocket_connection.close()
+                logger.info("Websocket connection closed successfully")
+            except Exception as e:
+                logger.error(f"Error closing websocket connection: {e}")
+            finally:
+                self.websocket_connection = None
+                self.connection_authenticated = False
 
     async def _get_http_transcription(self, audio_data):
         if self.session is None or self.session.closed:
@@ -192,6 +222,10 @@ class DeepgramTranscriber(BaseTranscriber):
     async def sender_stream(self, ws: ClientConnection):
         try:
             while True:
+                if ws.closed:
+                    logger.error("Websocket connection is closed, stopping sender")
+                    break
+                    
                 ws_data_packet = await self.input_queue.get()
                 # Initialise new request
                 if not self.audio_submitted:
@@ -207,9 +241,22 @@ class DeepgramTranscriber(BaseTranscriber):
                 self.num_frames += 1
                 # save the audio cursor here
                 self.audio_cursor = self.num_frames * self.audio_frame_duration
-                await ws.send(ws_data_packet.get('data'))
+                
+                try:
+                    await ws.send(ws_data_packet.get('data'))
+                except ConnectionClosedError as e:
+                    logger.error(f"Connection closed while sending data: {e}")
+                    break
+                except Exception as e:
+                    logger.error(f"Error sending data to websocket: {e}")
+                    break
+                    
+        except asyncio.CancelledError:
+            logger.info("Sender stream task cancelled")
+            raise
         except Exception as e:
-            logger.info('Error while sending: ' + str(e))
+            logger.error('Error in sender_stream: ' + str(e))
+            raise
 
     async def receiver(self, ws: ClientConnection):
         async for msg in ws:
@@ -278,13 +325,80 @@ class DeepgramTranscriber(BaseTranscriber):
     async def push_to_transcriber_queue(self, data_packet):
         await self.transcriber_output_queue.put(data_packet)
 
-    async def deepgram_connect(self):
-        websocket_url = self.get_deepgram_ws_url()
-        additional_headers = {
-            'Authorization': 'Token {}'.format(self.api_key)
+    async def validate_api_key(self):
+        """Validate API key by making a test request to Deepgram API"""
+        if not self.api_key:
+            raise ValueError("Deepgram API key is not provided")
+        
+        test_url = f"https://{self.deepgram_host}/v1/projects"
+        headers = {
+            'Authorization': f'Token {self.api_key}',
+            'Content-Type': 'application/json'
         }
-        deepgram_ws = await websockets.connect(websocket_url, additional_headers=additional_headers)
-        return deepgram_ws
+        
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(test_url, headers=headers) as response:
+                    if response.status == 401:
+                        raise ValueError("Invalid Deepgram API key - authentication failed")
+                    elif response.status == 403:
+                        raise ValueError("Deepgram API key does not have required permissions")
+                    elif response.status >= 400:
+                        raise ValueError(f"Deepgram API validation failed with status {response.status}")
+                    
+                    logger.info("Deepgram API key validation successful")
+                    return True
+        except aiohttp.ClientError as e:
+            raise ValueError(f"Failed to validate Deepgram API key due to network error: {e}")
+
+    async def deepgram_connect(self):
+        """Establish websocket connection to Deepgram with proper error handling"""
+        try:
+            await self.validate_api_key()
+            
+            websocket_url = self.get_deepgram_ws_url()
+            additional_headers = {
+                'Authorization': 'Token {}'.format(self.api_key)
+            }
+            
+            logger.info(f"Attempting to connect to Deepgram websocket: {websocket_url}")
+            
+            deepgram_ws = await asyncio.wait_for(
+                websockets.connect(websocket_url, additional_headers=additional_headers),
+                timeout=10.0  # 10 second timeout
+            )
+            
+            self.websocket_connection = deepgram_ws
+            self.connection_authenticated = True
+            logger.info("Successfully connected to Deepgram websocket")
+            
+            return deepgram_ws
+            
+        except asyncio.TimeoutError:
+            logger.error("Timeout while connecting to Deepgram websocket")
+            raise ConnectionError("Timeout while connecting to Deepgram websocket")
+        except InvalidStatusCode as e:
+            if e.status_code == 401:
+                logger.error("Authentication failed - invalid Deepgram API key")
+                raise ValueError("Authentication failed - invalid Deepgram API key")
+            elif e.status_code == 403:
+                logger.error("Access forbidden - check Deepgram API key permissions")
+                raise ValueError("Access forbidden - check Deepgram API key permissions")
+            else:
+                logger.error(f"Deepgram websocket connection failed with status {e.status_code}")
+                raise ConnectionError(f"Deepgram websocket connection failed with status {e.status_code}")
+        except InvalidHandshake as e:
+            logger.error(f"Invalid handshake during Deepgram websocket connection: {e}")
+            raise ConnectionError(f"Invalid handshake during Deepgram websocket connection: {e}")
+        except ConnectionClosedError as e:
+            logger.error(f"Deepgram websocket connection closed unexpectedly: {e}")
+            raise ConnectionError(f"Deepgram websocket connection closed unexpectedly: {e}")
+        except ValueError as e:
+            logger.error(f"Deepgram API validation error: {e}")
+            raise
+        except Exception as e:
+            logger.error(f"Unexpected error connecting to Deepgram websocket: {e}")
+            raise ConnectionError(f"Unexpected error connecting to Deepgram websocket: {e}")
 
     async def run(self):
         try:
@@ -318,25 +432,76 @@ class DeepgramTranscriber(BaseTranscriber):
         return None
 
     async def transcribe(self):
+        deepgram_ws = None
         try:
             start_time = time.perf_counter()
-            async with await self.deepgram_connect() as deepgram_ws:
-                if not self.connection_time:
-                    self.connection_time = round((time.perf_counter() - start_time) * 1000)
+            
+            try:
+                deepgram_ws = await self.deepgram_connect()
+            except (ValueError, ConnectionError) as e:
+                logger.error(f"Failed to establish Deepgram connection: {e}")
+                error_packet = create_ws_data_packet(
+                    {"type": "transcriber_error", "error": str(e)}, 
+                    getattr(self, 'meta_info', {})
+                )
+                await self.push_to_transcriber_queue(error_packet)
+                return
+            
+            if not self.connection_time:
+                self.connection_time = round((time.perf_counter() - start_time) * 1000)
 
-                if self.stream:
-                    self.sender_task = asyncio.create_task(self.sender_stream(deepgram_ws))
-                    self.heartbeat_task = asyncio.create_task(self.send_heartbeat(deepgram_ws))
+            if self.stream:
+                self.sender_task = asyncio.create_task(self.sender_stream(deepgram_ws))
+                self.heartbeat_task = asyncio.create_task(self.send_heartbeat(deepgram_ws))
+                
+                try:
                     async for message in self.receiver(deepgram_ws):
                         if self.connection_on:
                             await self.push_to_transcriber_queue(message)
                         else:
                             logger.info("closing the deepgram connection")
                             await self._close(deepgram_ws, data={"type": "CloseStream"})
-                else:
-                    async for message in self.sender():
-                        await self.push_to_transcriber_queue(message)
+                            break
+                except ConnectionClosedError as e:
+                    logger.error(f"Deepgram websocket connection closed during streaming: {e}")
+                except Exception as e:
+                    logger.error(f"Error during streaming: {e}")
+                    raise
+            else:
+                async for message in self.sender():
+                    await self.push_to_transcriber_queue(message)
 
-            await self.push_to_transcriber_queue(create_ws_data_packet("transcriber_connection_closed", self.meta_info))
+        except (ValueError, ConnectionError) as e:
+            logger.error(f"Connection error in transcribe: {e}")
+            error_packet = create_ws_data_packet(
+                {"type": "transcriber_error", "error": str(e)}, 
+                getattr(self, 'meta_info', {})
+            )
+            await self.push_to_transcriber_queue(error_packet)
         except Exception as e:
-            logger.error(f"Error in transcribe: {e}")
+            logger.error(f"Unexpected error in transcribe: {e}")
+            error_packet = create_ws_data_packet(
+                {"type": "transcriber_error", "error": f"Unexpected error: {str(e)}"}, 
+                getattr(self, 'meta_info', {})
+            )
+            await self.push_to_transcriber_queue(error_packet)
+        finally:
+            if deepgram_ws is not None:
+                try:
+                    if not deepgram_ws.closed:
+                        await deepgram_ws.close()
+                        logger.info("Deepgram websocket closed in finally block")
+                except Exception as e:
+                    logger.error(f"Error closing websocket in finally block: {e}")
+                finally:
+                    self.websocket_connection = None
+                    self.connection_authenticated = False
+            
+            if hasattr(self, 'sender_task') and self.sender_task is not None:
+                self.sender_task.cancel()
+            if hasattr(self, 'heartbeat_task') and self.heartbeat_task is not None:
+                self.heartbeat_task.cancel()
+            
+            await self.push_to_transcriber_queue(
+                create_ws_data_packet("transcriber_connection_closed", getattr(self, 'meta_info', {}))
+            )
