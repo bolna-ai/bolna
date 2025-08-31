@@ -72,7 +72,6 @@ class LiteLLM(BaseLLM):
             model_args["tool_choice"] = "auto"
             model_args["parallel_tool_calls"] = False
 
-        logger.info(f"Request to model {self.model}: {messages} with args: {model_args}")
         start_time = time.time()
         latency_data = {
             "turn_id": meta_info.get("turn_id") if meta_info else None,
