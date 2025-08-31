@@ -409,11 +409,6 @@ class DeepgramTranscriber(BaseTranscriber):
                 deepgram_ws = await self.deepgram_connect()
             except (ValueError, ConnectionError) as e:
                 logger.error(f"Failed to establish Deepgram connection: {e}")
-                error_packet = create_ws_data_packet(
-                    {"type": "transcriber_error", "error": str(e)}, 
-                    getattr(self, 'meta_info', {})
-                )
-                await self.push_to_transcriber_queue(error_packet)
                 await self.toggle_connection()
                 return
             
@@ -443,19 +438,9 @@ class DeepgramTranscriber(BaseTranscriber):
 
         except (ValueError, ConnectionError) as e:
             logger.error(f"Connection error in transcribe: {e}")
-            error_packet = create_ws_data_packet(
-                {"type": "transcriber_error", "error": str(e)}, 
-                getattr(self, 'meta_info', {})
-            )
-            await self.push_to_transcriber_queue(error_packet)
             await self.toggle_connection()
         except Exception as e:
             logger.error(f"Unexpected error in transcribe: {e}")
-            error_packet = create_ws_data_packet(
-                {"type": "transcriber_error", "error": f"Unexpected error: {str(e)}"}, 
-                getattr(self, 'meta_info', {})
-            )
-            await self.push_to_transcriber_queue(error_packet)
             await self.toggle_connection()
         finally:
             if deepgram_ws is not None:
