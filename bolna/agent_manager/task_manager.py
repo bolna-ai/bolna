@@ -993,7 +993,7 @@ class TaskManager(BaseManager):
             logger.error(f"Error getting next step: {e}")
 
     def _set_call_details(self, message):
-        if self.call_sid is not None and self.stream_sid is not None and message.get("meta_info") and "call_sid" not in message['meta_info'] and "stream_sid" not in message['meta_info']:
+        if self.call_sid is not None and self.stream_sid is not None and message and message.get("meta_info") and "call_sid" not in message['meta_info'] and "stream_sid" not in message['meta_info']:
             return
 
         if "call_sid" in message['meta_info']:
