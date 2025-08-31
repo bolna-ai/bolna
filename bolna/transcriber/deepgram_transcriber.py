@@ -8,6 +8,7 @@ import time
 from urllib.parse import urlencode
 from dotenv import load_dotenv
 import websockets
+import websockets.protocol
 from websockets.asyncio.client import ClientConnection
 from websockets.exceptions import ConnectionClosedError, InvalidStatusCode, InvalidHandshake
 
@@ -437,7 +438,7 @@ class DeepgramTranscriber(BaseTranscriber):
         finally:
             if deepgram_ws is not None:
                 try:
-                    if not deepgram_ws.closed:
+                    if deepgram_ws.state is not websockets.protocol.State.CLOSED:
                         await deepgram_ws.close()
                         logger.info("Deepgram websocket closed in finally block")
                 except Exception as e:
