@@ -3,6 +3,7 @@ import copy
 import uuid
 import time
 import websockets
+import websockets.exceptions
 import base64
 import json
 import aiohttp
@@ -49,6 +50,10 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
         self.conversation_ended = False
         self.current_text = ""
         self.context_id = None
+        self.websocket_connection = None
+        self.connection_authenticated = False
+        self.connection_retry_count = 0
+        self.max_connection_retries = 5
 
     # Ensuring we only do wav output for now
     def get_format(self, format, sampling_rate):
@@ -85,8 +90,22 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
                 await self.flush_synthesizer_stream()
                 return
 
-            # Ensure the WebSocket connection is established
-            while self.websocket_holder["websocket"] is None or self.websocket_holder["websocket"].state is websockets.protocol.State.CLOSED:
+            # Ensure the WebSocket connection is established with timeout
+            connection_wait_timeout = 30  # 30 seconds max wait
+            connection_wait_start = time.time()
+            
+            while (self.websocket_holder["websocket"] is None or 
+                   (hasattr(self.websocket_holder["websocket"], 'closed') and 
+                    self.websocket_holder["websocket"].closed)):
+                
+                if time.time() - connection_wait_start > connection_wait_timeout:
+                    logger.error("Timeout waiting for ElevenLabs websocket connection")
+                    return
+                    
+                if self.conversation_ended:
+                    logger.info("Conversation ended while waiting for connection")
+                    return
+                    
                 logger.info("Waiting for elevenlabs ws connection to be established...")
                 await asyncio.sleep(1)
 
@@ -126,7 +145,8 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
                     return
 
                 if (self.websocket_holder["websocket"] is None or
-                        self.websocket_holder["websocket"].state is websockets.protocol.State.CLOSED):
+                        (hasattr(self.websocket_holder["websocket"], 'closed') and 
+                         self.websocket_holder["websocket"].closed)):
                     logger.info("WebSocket is not connected, skipping receive.")
                     await asyncio.sleep(5)
                     continue
@@ -300,9 +320,16 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
         return True
 
     async def establish_connection(self):
+        """Establish websocket connection to ElevenLabs with proper error handling"""
         try:
             start_time = time.perf_counter()
-            websocket = await websockets.connect(self.ws_url)
+            logger.info(f"Attempting to connect to ElevenLabs websocket: {self.ws_url}")
+            
+            websocket = await asyncio.wait_for(
+                websockets.connect(self.ws_url),
+                timeout=10.0  # 10 second timeout
+            )
+            
             bos_message = {
                 "text": " ",
                 "voice_settings": {
@@ -312,22 +339,59 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
                 "xi_api_key": self.api_key
             }
             await websocket.send(json.dumps(bos_message))
+            
             if not self.connection_time:
                 self.connection_time = round((time.perf_counter() - start_time) * 1000)
 
-            logger.info(f"Connected to {self.ws_url}")
+            self.websocket_connection = websocket
+            self.connection_authenticated = True
+            self.connection_retry_count = 0  # Reset retry count on successful connection
+            logger.info(f"Successfully connected to ElevenLabs websocket: {self.ws_url}")
             return websocket
+            
+        except asyncio.TimeoutError:
+            logger.error("Timeout while connecting to ElevenLabs websocket")
+            raise ConnectionError("Timeout while connecting to ElevenLabs websocket")
+        except websockets.exceptions.InvalidHandshake as e:
+            logger.error(f"Invalid handshake during ElevenLabs websocket connection: {e}")
+            raise ConnectionError(f"Invalid handshake during ElevenLabs websocket connection: {e}")
+        except websockets.exceptions.ConnectionClosedError as e:
+            logger.error(f"ElevenLabs websocket connection closed unexpectedly: {e}")
+            raise ConnectionError(f"ElevenLabs websocket connection closed unexpectedly: {e}")
         except Exception as e:
-            logger.info(f"Failed to connect: {e}")
-            return None
+            logger.error(f"Unexpected error connecting to ElevenLabs websocket: {e}")
+            raise ConnectionError(f"Unexpected error connecting to ElevenLabs websocket: {e}")
 
     async def monitor_connection(self):
-        # Periodically check if the connection is still alive
+        """Periodically check if the connection is still alive with exponential backoff"""
         while True:
-            if self.websocket_holder["websocket"] is None or self.websocket_holder["websocket"].state is websockets.protocol.State.CLOSED:
-                logger.info("Re-establishing elevenlabs connection...")
-                self.websocket_holder["websocket"] = await self.establish_connection()
-            await asyncio.sleep(1)
+            try:
+                if self.websocket_holder["websocket"] is None or (
+                    self.websocket_holder["websocket"] and 
+                    hasattr(self.websocket_holder["websocket"], 'closed') and 
+                    self.websocket_holder["websocket"].closed
+                ):
+                    if self.connection_retry_count >= self.max_connection_retries:
+                        logger.error(f"Max connection retries ({self.max_connection_retries}) reached. Stopping connection attempts.")
+                        self.conversation_ended = True
+                        break
+                    
+                    logger.info(f"Re-establishing ElevenLabs connection... (attempt {self.connection_retry_count + 1}/{self.max_connection_retries})")
+                    
+                    try:
+                        self.connection_retry_count += 1
+                        self.websocket_holder["websocket"] = await self.establish_connection()
+                    except (ValueError, ConnectionError) as e:
+                        logger.error(f"Failed to establish ElevenLabs connection: {e}")
+                        backoff_time = min(2 ** self.connection_retry_count, 30)
+                        logger.info(f"Waiting {backoff_time} seconds before next retry...")
+                        await asyncio.sleep(backoff_time)
+                        continue
+                        
+                await asyncio.sleep(1)
+            except Exception as e:
+                logger.error(f"Error in monitor_connection: {e}")
+                await asyncio.sleep(5)
 
     async def get_sender_task(self):
         return self.sender_task
@@ -357,6 +421,12 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
                 logger.info("Sender task was successfully cancelled during WebSocket cleanup.")
 
         if self.websocket_holder["websocket"]:
-            await self.websocket_holder["websocket"].close()
-        self.websocket_holder["websocket"] = None
-        logger.info("WebSocket connection closed.")
+            try:
+                await self.websocket_holder["websocket"].close()
+                logger.info("ElevenLabs websocket closed successfully")
+            except Exception as e:
+                logger.error(f"Error closing ElevenLabs websocket: {e}")
+            finally:
+                self.websocket_holder["websocket"] = None
+                self.websocket_connection = None
+                self.connection_authenticated = False
