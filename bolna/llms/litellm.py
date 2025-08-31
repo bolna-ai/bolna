@@ -1,6 +1,7 @@
 import os
 import json
 import time
+import logging
 from litellm import acompletion
 from dotenv import load_dotenv
 
@@ -11,6 +12,10 @@ from bolna.helpers.logger_config import configure_logger
 
 logger = configure_logger(__name__)
 load_dotenv()
+
+logging.getLogger("LiteLLM").setLevel(logging.WARNING)
+logging.getLogger("LiteLLM Router").setLevel(logging.WARNING)
+logging.getLogger("LiteLLM Proxy").setLevel(logging.WARNING)
 
 
 class LiteLLM(BaseLLM):
@@ -67,7 +72,6 @@ class LiteLLM(BaseLLM):
             model_args["tool_choice"] = "auto"
             model_args["parallel_tool_calls"] = False
 
-        logger.info(f"Request to model {self.model}: {messages} with args: {model_args}")
         start_time = time.time()
         latency_data = {
             "turn_id": meta_info.get("turn_id") if meta_info else None,
