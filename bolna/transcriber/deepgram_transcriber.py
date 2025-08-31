@@ -414,6 +414,7 @@ class DeepgramTranscriber(BaseTranscriber):
                     getattr(self, 'meta_info', {})
                 )
                 await self.push_to_transcriber_queue(error_packet)
+                await self.toggle_connection()
                 return
             
             if not self.connection_time:
@@ -447,6 +448,7 @@ class DeepgramTranscriber(BaseTranscriber):
                 getattr(self, 'meta_info', {})
             )
             await self.push_to_transcriber_queue(error_packet)
+            await self.toggle_connection()
         except Exception as e:
             logger.error(f"Unexpected error in transcribe: {e}")
             error_packet = create_ws_data_packet(
@@ -454,6 +456,7 @@ class DeepgramTranscriber(BaseTranscriber):
                 getattr(self, 'meta_info', {})
             )
             await self.push_to_transcriber_queue(error_packet)
+            await self.toggle_connection()
         finally:
             if deepgram_ws is not None:
                 try:
