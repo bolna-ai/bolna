@@ -123,10 +123,6 @@ class DeepgramTranscriber(BaseTranscriber):
     async def send_heartbeat(self, ws: ClientConnection):
         try:
             while True:
-                if ws.closed:
-                    logger.info("Websocket connection is closed, stopping heartbeat")
-                    break
-                    
                 data = {'type': 'KeepAlive'}
                 try:
                     await ws.send(json.dumps(data))
@@ -222,10 +218,6 @@ class DeepgramTranscriber(BaseTranscriber):
     async def sender_stream(self, ws: ClientConnection):
         try:
             while True:
-                if ws.closed:
-                    logger.error("Websocket connection is closed, stopping sender")
-                    break
-                    
                 ws_data_packet = await self.input_queue.get()
                 # Initialise new request
                 if not self.audio_submitted:
