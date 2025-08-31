@@ -996,9 +996,9 @@ class TaskManager(BaseManager):
         if self.call_sid is not None and self.stream_sid is not None and "call_sid" not in message['meta_info'] and "stream_sid" not in message['meta_info']:
             return
 
-        if "call_sid" in message['meta_info']:
+        if "call_sid" in message.get("meta_info", {}):
             self.call_sid = message['meta_info']["call_sid"]
-        if "stream_sid" in message:
+        if "stream_sid" in message.get("meta_info", {}):
             self.stream_sid = message['meta_info']["stream_sid"]
 
     async def _process_followup_task(self, message=None):
