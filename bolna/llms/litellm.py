@@ -57,6 +57,9 @@ class LiteLLM(BaseLLM):
         self.gave_out_prefunction_call_message = False
 
     async def generate_stream(self, messages, synthesize=True, meta_info=None):
+        if not messages or len(messages) == 0:
+            raise Exception("No messages provided")
+
         answer, buffer = "", ""
         final_tool_calls_data = {}
         received_textual_response = False
@@ -66,6 +69,7 @@ class LiteLLM(BaseLLM):
         model_args = self.model_args.copy()
         model_args["messages"] = messages
         model_args["stream"] = True
+        model_args["stop"] = ["User:"]
 
         if self.trigger_function_call:
             model_args["tools"] = json.loads(self.tools) if isinstance(self.tools, str) else self.tools
@@ -81,14 +85,21 @@ class LiteLLM(BaseLLM):
         }
 
         async for chunk in await acompletion(**model_args):
-            choice = chunk["choices"][0]
-            delta = choice.get("delta", {})
-
             now = time.time()
             if not first_token_time:
                 first_token_time = now
-                latency_data["first_token_latency_ms"] = round((now - start_time) * 1000)
+                latency = first_token_time - start_time
                 self.started_streaming = True
+
+                latency_data = {
+                    "turn_id": meta_info.get("turn_id"),
+                    "model": self.model,
+                    "first_token_latency_ms": round(latency * 1000),
+                    "total_stream_duration_ms": None  # Will be filled at end
+                }
+
+            choice = chunk["choices"][0]
+            delta = choice.get("delta", {})
 
             # Handle tool_calls
             if hasattr(delta, "tool_calls") and delta.tool_calls:

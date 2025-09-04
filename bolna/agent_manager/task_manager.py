@@ -62,7 +62,6 @@ class TaskManager(BaseManager):
         self.tools = {}
         self.websocket = ws
         self.context_data = context_data
-        logger.info(f"turn_based_conversation {turn_based_conversation}")
         self.turn_based_conversation = turn_based_conversation
         self.enforce_streaming = kwargs.get("enforce_streaming", False)
         self.room_url = kwargs.get("room_url", None)
@@ -112,6 +111,7 @@ class TaskManager(BaseManager):
         }
 
         self.welcome_message_audio = self.kwargs.pop('welcome_message_audio', None)
+        self.welcome_message_user_speech_words = []
         # Pre-decode welcome audio for faster playback
         self.preloaded_welcome_audio = base64.b64decode(self.welcome_message_audio) if self.welcome_message_audio else None
         self.observable_variables = {}
@@ -133,8 +133,6 @@ class TaskManager(BaseManager):
                 self.observable_variables["init_event_observable"] = ObservableVariable(None)
                 self.observable_variables["init_event_observable"].add_observer(self.handle_init_event)
 
-            logger.info(f"Connected via websocket")
-
             # TODO revert this temporary change for web based call
             if self.is_web_based_call:
                 self.should_record = False
@@ -151,7 +149,6 @@ class TaskManager(BaseManager):
         # Soon we will maintain a separate history for this
         self.history = [] if conversation_history is None else conversation_history
         self.interim_history = copy.deepcopy(self.history.copy())
-        logger.info(f'History {self.history}')
         self.label_flow = []
 
         # Setup IO SERVICE, TRANSCRIBER, LLM, SYNTHESIZER
@@ -236,7 +233,6 @@ class TaskManager(BaseManager):
 
         # Memory
         self.cache = cache
-        logger.info("task initialization completed")
 
         # Sequence id for interruption
         self.curr_sequence_id = 0
@@ -270,7 +266,6 @@ class TaskManager(BaseManager):
                 self.check_user_online_message = update_prompt_with_context(self.check_user_online_message, self.context_data)
 
             self.kwargs["process_interim_results"] = "true" if self.conversation_config.get("optimize_latency", False) is True else "false"
-            logger.info(f"Processing interim results {self.kwargs['process_interim_results'] }")
             # Routes
             self.routes = task['tools_config']['llm_agent'].get("routes", None)
             self.route_layer = None
@@ -359,7 +354,7 @@ class TaskManager(BaseManager):
                     self.backchanneling_audio_map = []
                 # Agent welcome message
                 if "agent_welcome_message" in self.kwargs:
-                    logger.info(f"Agent welcome message present {self.kwargs['agent_welcome_message']}")
+                    logger.info(f"Agent welcome message: {self.kwargs['agent_welcome_message']}")
                     self.first_message_task = None
                     self.transcriber_message = ''
 
@@ -1557,8 +1552,6 @@ class TaskManager(BaseManager):
                         temp_transcriber_message = message["data"].get("content")
 
                         if not self.tools["input"].welcome_message_played():
-                            # logger.info(f"Since first message has not been sent, adding the transcript to self.transcriber_message")
-                            # self.transcriber_message += f' {message["data"].get("content")}'
                             continue
 
                         if not self.callee_speaking:
@@ -1588,6 +1581,21 @@ class TaskManager(BaseManager):
 
                     # Whenever speech_final or UtteranceEnd is received from Deepgram, this condition would get triggered
                     elif isinstance(message.get("data"), dict) and message["data"].get("type", "") == "transcript":
+                        transcriber_content = message["data"].get("content").strip()
+                        if not self.tools["input"].welcome_message_played():
+                            if transcriber_content in self.welcome_message_user_speech_words:
+                                continue
+                            else:
+                                self.welcome_message_user_speech_words.append(transcriber_content)
+                        elif (len(self.history) == 3 or len(self.history) == 4):
+                            if len(self.history) == 3:
+                                previous_content = self.history[-1]['content']
+                            else:
+                                previous_content = self.history[-2]['content']
+                            logger.info(f"transcriber_content: {transcriber_content}, previous_content: {previous_content}")
+                            if transcriber_content == previous_content:
+                                continue
+
                         logger.info(f"Received transcript, sending for further processing")
                         if self.tools["input"].welcome_message_played() and self.tools["input"].is_audio_being_played_to_user() and \
                                 len(message["data"].get("content").strip().split(" ")) <= self.number_of_words_for_interruption and \
