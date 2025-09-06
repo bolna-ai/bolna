@@ -485,9 +485,6 @@ class TaskManager(BaseManager):
             else:
                 output_handler_class = SUPPORTED_OUTPUT_HANDLERS.get(self.task_config["tools_config"]["output"]["provider"])
 
-                if self.task_config["tools_config"]["output"]["provider"] == "daily":
-                    output_kwargs['room_url'] = self.room_url
-
                 if self.task_config["tools_config"]["output"]["provider"] in SUPPORTED_OUTPUT_TELEPHONY_HANDLERS.keys():
                     output_kwargs['mark_event_meta_data'] = self.mark_event_meta_data
                     logger.info(f"Making sure that the sampling rate for output handler is 8000")
@@ -528,9 +525,6 @@ class TaskManager(BaseManager):
                 "mark_event_meta_data": self.mark_event_meta_data,
                 "is_welcome_message_played": True if self.task_config["tools_config"]["output"]["provider"] == 'default' and not self.is_web_based_call else False
             }
-
-            if self.task_config["tools_config"]["input"]["provider"] == "daily":
-                input_kwargs['room_url'] = self.room_url
 
             if should_record:
                 input_kwargs['conversation_recording'] = self.conversation_recording
@@ -2243,11 +2237,6 @@ class TaskManager(BaseManager):
                 output['recording_url'] = ""
                 if self.should_record:
                     output['recording_url'] = await save_audio_file_to_s3(self.conversation_recording, self.sampling_rate, self.assistant_id, self.run_id)
-
-                if self.task_config['tools_config']['output']['provider'] == "daily":
-                    logger.info("calling release function")
-                    await self.tools['output'].release_call()
-
             else:
                 output = self.input_parameters
                 if self.task_config["task_type"] == "extraction":

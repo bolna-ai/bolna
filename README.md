@@ -58,7 +58,7 @@ graph LR;
 
 ## Supported providers and models
 1. Initiating a phone call using telephony providers like `Twilio`, `Plivo`, `Exotel` (coming soon), `Vonage` (coming soon) etc.
-2. Transcribing the conversations using `Deepgram`, etc.
+2. Transcribing the conversations using `Deepgram`, `Azure` etc.
 3. Using LLMs like `OpenAI`, `DeepSeek`, `Llama`, `Cohere`, `Mistral`,  etc to handle conversations
 4. Synthesizing LLM responses back to telephony using `AWS Polly`, `ElevenLabs`, `Deepgram`, `OpenAI`, `Azure`, `Cartesia`, `Smallest` etc.
 
