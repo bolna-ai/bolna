@@ -171,6 +171,7 @@ class LiteLLM(BaseLLM):
                 "method": (func_conf.get("method") or "").lower(),
                 "param": func_conf.get("param"),
                 "api_token": func_conf.get("api_token"),
+                "headers": func_conf.get('headers', None),
                 "model_args": model_args,
                 "meta_info": meta_info,
                 "called_fun": func_name,

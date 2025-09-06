@@ -282,6 +282,7 @@ class APIParams(BaseModel):
     method: Optional[str] = "POST"
     api_token: Optional[str] = None
     param: Optional[Union[str, dict]] = None
+    headers: Optional[Union[str, dict]] = None
 
 
 class ToolModel(BaseModel):

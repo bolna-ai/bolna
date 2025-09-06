@@ -1179,7 +1179,7 @@ class TaskManager(BaseManager):
         filler = random.choice((FILLER_DICT[filler_class]))
         await self._handle_llm_output(next_step, filler, should_bypass_synth, new_meta_info, is_filler = True)
 
-    async def __execute_function_call(self, url, method, param, api_token, model_args, meta_info, next_step, called_fun, **resp):
+    async def __execute_function_call(self, url, method, param, api_token, headers, model_args, meta_info, next_step, called_fun, **resp):
         self.check_if_user_online = False
 
         if called_fun.startswith("transfer_call"):
@@ -1244,7 +1244,7 @@ class TaskManager(BaseManager):
                     convert_to_request_log(str(response_text), meta_info, None, "function_call", direction="response", is_cached=False, run_id=self.run_id)
                     return
 
-        response = await trigger_api(url= url, method=method.lower(), param=param, api_token=api_token, meta_info=meta_info, run_id=self.run_id, **resp)
+        response = await trigger_api(url=url, method=method.lower(), param=param, api_token=api_token, headers_data=headers, meta_info=meta_info, run_id=self.run_id, **resp)
         function_response = str(response)
         get_res_keys, get_res_values = await computed_api_response(function_response)
         if called_fun.startswith('check_availability_of_slots') and (not get_res_values or (len(get_res_values) == 1 and len(get_res_values[0]) == 0)):
