@@ -1091,7 +1091,7 @@ class TaskManager(BaseManager):
     ##############################################################
     # LLM task
     ##############################################################
-    async def _handle_llm_output(self, next_step, text_chunk, should_bypass_synth, meta_info, is_filler = False):
+    async def _handle_llm_output(self, next_step, text_chunk, should_bypass_synth, meta_info, is_filler=False, is_function_call=False):
         if "request_id" not in meta_info:
             meta_info["request_id"] = str(uuid.uuid4())
 
@@ -1113,7 +1113,14 @@ class TaskManager(BaseManager):
             logger.info("Synthesizer not the next step and hence simply returning back")
             overall_time = time.time() - meta_info["llm_start_time"]
             #self.history = copy.deepcopy(self.interim_history)
-            await self.tools["output"].handle(create_ws_data_packet(text_chunk, meta_info))
+            if is_function_call:
+                bos_packet = create_ws_data_packet("<beginning_of_stream>", meta_info)
+                await self.tools["output"].handle(bos_packet)
+                await self.tools["output"].handle(create_ws_data_packet(text_chunk, meta_info))
+                eos_packet = create_ws_data_packet("<end_of_stream>", meta_info)
+                await self.tools["output"].handle(eos_packet)
+            else:
+                await self.tools["output"].handle(create_ws_data_packet(text_chunk, meta_info))
 
     async def _process_conversation_preprocessed_task(self, message, sequence, meta_info):
         if self.task_config["tools_config"]["llm_agent"]['agent_flow_type'] == "preprocessed":
@@ -1171,7 +1178,7 @@ class TaskManager(BaseManager):
         self.current_filler = filler_class
         should_bypass_synth = 'bypass_synth' in meta_info and meta_info['bypass_synth'] == True
         filler = random.choice((FILLER_DICT[filler_class]))
-        await self._handle_llm_output(next_step, filler, should_bypass_synth, new_meta_info, is_filler = True)
+        await self._handle_llm_output(next_step, filler, should_bypass_synth, new_meta_info, is_filler=True)
 
     async def __execute_function_call(self, url, method, param, api_token, headers, model_args, meta_info, next_step, called_fun, **resp):
         self.check_if_user_online = False
@@ -1331,7 +1338,7 @@ class TaskManager(BaseManager):
                     self.history.append({"role": "assistant", "content": llm_response})
                 # messages.append({"role": "assistant", "content": llm_response})
                 # self.history = copy.deepcopy(messages)
-                await self._handle_llm_output(next_step, llm_response, should_bypass_synth, meta_info)
+                await self._handle_llm_output(next_step, llm_response, should_bypass_synth, meta_info, is_function_call=should_trigger_function_call)
                 convert_to_request_log(message=llm_response, meta_info=meta_info, component="llm", direction="response", model=self.llm_config["model"], run_id= self.run_id)
 
         filler_message = compute_function_pre_call_message(self.language, function_tool, function_tool_message)
