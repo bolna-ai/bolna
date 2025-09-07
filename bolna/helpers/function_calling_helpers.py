@@ -8,7 +8,7 @@ from bolna.helpers.utils import convert_to_request_log
 logger = configure_logger(__name__)
 
 
-async def trigger_api(url, method, param, api_token, meta_info, run_id, **kwargs):
+async def trigger_api(url, method, param, api_token, headers_data, meta_info, run_id, **kwargs):
     try:
         request_body, api_params = None, None
         if param:
@@ -26,6 +26,10 @@ async def trigger_api(url, method, param, api_token, meta_info, run_id, **kwargs
         headers = {'Content-Type': 'application/json'}
         if api_token:
             headers['Authorization'] = api_token
+
+        if headers_data and isinstance(headers_data, dict):
+            for k, v in headers_data.items():
+                headers[k] = v
 
         convert_to_request_log(request_body, meta_info , None, "function_call", direction="request", is_cached=False, run_id=run_id)
 

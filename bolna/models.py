@@ -109,7 +109,7 @@ class IOModel(BaseModel):
 
     @field_validator("provider")
     def validate_provider(cls, value):
-        return validate_attribute(value, ["twilio", "default", "database", "exotel", "plivo", "daily"])
+        return validate_attribute(value, ["twilio", "default", "database", "exotel", "plivo"])
 
 
 # Can be used to route across multiple prompts as well
@@ -282,6 +282,7 @@ class APIParams(BaseModel):
     method: Optional[str] = "POST"
     api_token: Optional[str] = None
     param: Optional[Union[str, dict]] = None
+    headers: Optional[Union[str, dict]] = None
 
 
 class ToolModel(BaseModel):
