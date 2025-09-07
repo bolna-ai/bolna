@@ -1,0 +1,51 @@
+{
+  "agent_config": {
+    "agent_name": "Working Test Agent",
+    "agent_type": "other",
+    "agent_welcome_message": "Hello! I'm working correctly.",
+    "tasks": [
+      {
+        "tools_config": {
+          "llm_agent": {
+            "agent_flow_type": "streaming",
+            "agent_type": "simple_llm_agent",
+            "llm_config": {
+              "model": "gpt-3.5-turbo",
+              "max_tokens": 100,
+              "temperature": 0.7,
+              "provider": "openai"
+            }
+          },
+          "transcriber": {
+            "provider": "deepgram",
+            "model": "nova-2",
+            "language": "en",
+            "stream": true,
+            "encoding": "linear16"
+          },
+          "synthesizer": {
+            "provider": "elevenlabs",
+            "provider_config": {
+              "voice": "Rachel",
+              "voice_id": "21m00Tcm4TlvDq8ikWAM",
+              "model": "eleven_turbo_v2_5"
+            },
+            "stream": true,
+            "audio_format": "wav"
+          },
+          "input": {"provider": "twilio", "format": "wav"},
+          "output": {"provider": "twilio", "format": "wav"}
+        },
+        "toolchain": {
+          "execution": "parallel",
+          "pipelines": [["transcriber", "llm", "synthesizer"]]
+        },
+        "task_type": "conversation",
+        "task_config": {
+          "optimize_latency": true,
+          "hangup_after_silence": 10
+        }
+      }
+    ]
+  }
+}

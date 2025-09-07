@@ -1,0 +1,72 @@
+{
+    "agent_config": {
+        "agent_name": "Whisper Test Assistant",
+        "agent_type": "other",
+        "agent_welcome_message": "Hello! I can hear you using OpenAI Whisper.",
+        "tasks": [
+            {
+                "task_type": "conversation",
+                "toolchain": {
+                    "execution": "parallel",
+                    "pipelines": [
+                        [
+                            "transcriber",
+                            "llm",
+                            "synthesizer"
+                        ]
+                    ]
+                },
+                "tools_config": {
+                    "input": {
+                        "format": "wav",
+                        "provider": "twilio"
+                    },
+                    "transcriber": {
+                        "provider": "whisper",
+                        "model": "whisper",
+                        "language": "en",
+                        "stream": true,
+                        "encoding": "linear16"
+                    },
+                    "llm_agent": {
+                        "agent_type": "simple_llm_agent",
+                        "agent_flow_type": "streaming",
+                        "llm_config": {
+                            "provider": "openai",
+                            "model": "gpt-3.5-turbo",
+                            "temperature": 0.7,
+                            "request_json": false,
+                            "max_tokens": 100
+                        }
+                    },
+                    "synthesizer": {
+                        "provider": "elevenlabs",
+                        "provider_config": {
+                            "voice": "Rachel",
+                            "voice_id": "21m00Tcm4TlvDq8ikWAM",
+                            "model": "eleven_turbo_v2_5"
+                        },
+                        "stream": true,
+                        "buffer_size": 100.0,
+                        "audio_format": "wav"
+                    },
+                    "output": {
+                        "format": "wav",
+                        "provider": "twilio"
+                    }
+                },
+                "task_config": {
+                    "hangup_after_silence": 10.0,
+                    "interruption_backoff_period": 100,
+                    "backchanneling": false,
+                    "optimize_latency": true
+                }
+            }
+        ]
+    },
+    "agent_prompts": {
+        "task_1": {
+            "system_prompt": "You are a helpful assistant. Keep responses brief and conversational."
+        }
+    }
+}

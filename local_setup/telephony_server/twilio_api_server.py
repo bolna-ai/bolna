@@ -8,10 +8,16 @@ from dotenv import load_dotenv
 import redis.asyncio as redis
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import PlainTextResponse
+from pydantic import BaseModel
 
 app = FastAPI()
 load_dotenv()
 port = 8001
+
+# Request models
+class CallRequest(BaseModel):
+    agent_id: str
+    recipient_phone_number: str
 
 twilio_account_sid = os.getenv('TWILIO_ACCOUNT_SID')
 twilio_auth_token = os.getenv('TWILIO_AUTH_TOKEN')
@@ -40,16 +46,16 @@ def populate_ngrok_tunnels():
 
 
 @app.post('/call')
-async def make_call(request: Request):
+async def make_call(call_request: CallRequest):
+    """
+    Initiate a phone call using Twilio
+    
+    - **agent_id**: ID of the agent to use for the call
+    - **recipient_phone_number**: Phone number to call (include country code, e.g., +1234567890)
+    """
     try:
-        call_details = await request.json()
-        agent_id = call_details.get('agent_id', None)
-
-        if not agent_id:
-            raise HTTPException(status_code=404, detail="Agent not provided")
-        
-        if not call_details or "recipient_phone_number" not in call_details:
-            raise HTTPException(status_code=404, detail="Recipient phone number not provided")
+        agent_id = call_request.agent_id
+        recipient_phone_number = call_request.recipient_phone_number
 
         telephony_host, bolna_host = populate_ngrok_tunnels()
 
@@ -58,7 +64,7 @@ async def make_call(request: Request):
 
         try:
             call = twilio_client.calls.create(
-                to=call_details.get('recipient_phone_number'),
+                to=recipient_phone_number,
                 from_=twilio_phone_number,
                 url=f"{telephony_host}/twilio_connect?bolna_host={bolna_host}&agent_id={agent_id}",
                 method="POST",
