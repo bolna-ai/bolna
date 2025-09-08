@@ -62,7 +62,6 @@ class TaskManager(BaseManager):
         self.tools = {}
         self.websocket = ws
         self.context_data = context_data
-        logger.info(f"turn_based_conversation {turn_based_conversation}")
         self.turn_based_conversation = turn_based_conversation
         self.enforce_streaming = kwargs.get("enforce_streaming", False)
         self.room_url = kwargs.get("room_url", None)
@@ -112,6 +111,7 @@ class TaskManager(BaseManager):
         }
 
         self.welcome_message_audio = self.kwargs.pop('welcome_message_audio', None)
+        self.welcome_message_user_speech_words = []
         # Pre-decode welcome audio for faster playback
         self.preloaded_welcome_audio = base64.b64decode(self.welcome_message_audio) if self.welcome_message_audio else None
         self.observable_variables = {}
@@ -133,8 +133,6 @@ class TaskManager(BaseManager):
                 self.observable_variables["init_event_observable"] = ObservableVariable(None)
                 self.observable_variables["init_event_observable"].add_observer(self.handle_init_event)
 
-            logger.info(f"Connected via websocket")
-
             # TODO revert this temporary change for web based call
             if self.is_web_based_call:
                 self.should_record = False
@@ -151,7 +149,6 @@ class TaskManager(BaseManager):
         # Soon we will maintain a separate history for this
         self.history = [] if conversation_history is None else conversation_history
         self.interim_history = copy.deepcopy(self.history.copy())
-        logger.info(f'History {self.history}')
         self.label_flow = []
 
         # Setup IO SERVICE, TRANSCRIBER, LLM, SYNTHESIZER
@@ -236,7 +233,6 @@ class TaskManager(BaseManager):
 
         # Memory
         self.cache = cache
-        logger.info("task initialization completed")
 
         # Sequence id for interruption
         self.curr_sequence_id = 0
@@ -270,7 +266,6 @@ class TaskManager(BaseManager):
                 self.check_user_online_message = update_prompt_with_context(self.check_user_online_message, self.context_data)
 
             self.kwargs["process_interim_results"] = "true" if self.conversation_config.get("optimize_latency", False) is True else "false"
-            logger.info(f"Processing interim results {self.kwargs['process_interim_results'] }")
             # Routes
             self.routes = task['tools_config']['llm_agent'].get("routes", None)
             self.route_layer = None
@@ -359,7 +354,7 @@ class TaskManager(BaseManager):
                     self.backchanneling_audio_map = []
                 # Agent welcome message
                 if "agent_welcome_message" in self.kwargs:
-                    logger.info(f"Agent welcome message present {self.kwargs['agent_welcome_message']}")
+                    logger.info(f"Agent welcome message: {self.kwargs['agent_welcome_message']}")
                     self.first_message_task = None
                     self.transcriber_message = ''
 
@@ -490,9 +485,6 @@ class TaskManager(BaseManager):
             else:
                 output_handler_class = SUPPORTED_OUTPUT_HANDLERS.get(self.task_config["tools_config"]["output"]["provider"])
 
-                if self.task_config["tools_config"]["output"]["provider"] == "daily":
-                    output_kwargs['room_url'] = self.room_url
-
                 if self.task_config["tools_config"]["output"]["provider"] in SUPPORTED_OUTPUT_TELEPHONY_HANDLERS.keys():
                     output_kwargs['mark_event_meta_data'] = self.mark_event_meta_data
                     logger.info(f"Making sure that the sampling rate for output handler is 8000")
@@ -533,9 +525,6 @@ class TaskManager(BaseManager):
                 "mark_event_meta_data": self.mark_event_meta_data,
                 "is_welcome_message_played": True if self.task_config["tools_config"]["output"]["provider"] == 'default' and not self.is_web_based_call else False
             }
-
-            if self.task_config["tools_config"]["input"]["provider"] == "daily":
-                input_kwargs['room_url'] = self.room_url
 
             if should_record:
                 input_kwargs['conversation_recording'] = self.conversation_recording
@@ -1102,7 +1091,7 @@ class TaskManager(BaseManager):
     ##############################################################
     # LLM task
     ##############################################################
-    async def _handle_llm_output(self, next_step, text_chunk, should_bypass_synth, meta_info, is_filler = False):
+    async def _handle_llm_output(self, next_step, text_chunk, should_bypass_synth, meta_info, is_filler=False, is_function_call=False):
         if "request_id" not in meta_info:
             meta_info["request_id"] = str(uuid.uuid4())
 
@@ -1124,7 +1113,14 @@ class TaskManager(BaseManager):
             logger.info("Synthesizer not the next step and hence simply returning back")
             overall_time = time.time() - meta_info["llm_start_time"]
             #self.history = copy.deepcopy(self.interim_history)
-            await self.tools["output"].handle(create_ws_data_packet(text_chunk, meta_info))
+            if is_function_call:
+                bos_packet = create_ws_data_packet("<beginning_of_stream>", meta_info)
+                await self.tools["output"].handle(bos_packet)
+                await self.tools["output"].handle(create_ws_data_packet(text_chunk, meta_info))
+                eos_packet = create_ws_data_packet("<end_of_stream>", meta_info)
+                await self.tools["output"].handle(eos_packet)
+            else:
+                await self.tools["output"].handle(create_ws_data_packet(text_chunk, meta_info))
 
     async def _process_conversation_preprocessed_task(self, message, sequence, meta_info):
         if self.task_config["tools_config"]["llm_agent"]['agent_flow_type'] == "preprocessed":
@@ -1182,9 +1178,9 @@ class TaskManager(BaseManager):
         self.current_filler = filler_class
         should_bypass_synth = 'bypass_synth' in meta_info and meta_info['bypass_synth'] == True
         filler = random.choice((FILLER_DICT[filler_class]))
-        await self._handle_llm_output(next_step, filler, should_bypass_synth, new_meta_info, is_filler = True)
+        await self._handle_llm_output(next_step, filler, should_bypass_synth, new_meta_info, is_filler=True)
 
-    async def __execute_function_call(self, url, method, param, api_token, model_args, meta_info, next_step, called_fun, **resp):
+    async def __execute_function_call(self, url, method, param, api_token, headers, model_args, meta_info, next_step, called_fun, **resp):
         self.check_if_user_online = False
 
         if called_fun.startswith("transfer_call"):
@@ -1249,7 +1245,7 @@ class TaskManager(BaseManager):
                     convert_to_request_log(str(response_text), meta_info, None, "function_call", direction="response", is_cached=False, run_id=self.run_id)
                     return
 
-        response = await trigger_api(url= url, method=method.lower(), param=param, api_token=api_token, meta_info=meta_info, run_id=self.run_id, **resp)
+        response = await trigger_api(url=url, method=method.lower(), param=param, api_token=api_token, headers_data=headers, meta_info=meta_info, run_id=self.run_id, **resp)
         function_response = str(response)
         get_res_keys, get_res_values = await computed_api_response(function_response)
         if called_fun.startswith('check_availability_of_slots') and (not get_res_values or (len(get_res_values) == 1 and len(get_res_values[0]) == 0)):
@@ -1342,7 +1338,7 @@ class TaskManager(BaseManager):
                     self.history.append({"role": "assistant", "content": llm_response})
                 # messages.append({"role": "assistant", "content": llm_response})
                 # self.history = copy.deepcopy(messages)
-                await self._handle_llm_output(next_step, llm_response, should_bypass_synth, meta_info)
+                await self._handle_llm_output(next_step, llm_response, should_bypass_synth, meta_info, is_function_call=should_trigger_function_call)
                 convert_to_request_log(message=llm_response, meta_info=meta_info, component="llm", direction="response", model=self.llm_config["model"], run_id= self.run_id)
 
         filler_message = compute_function_pre_call_message(self.language, function_tool, function_tool_message)
@@ -1557,8 +1553,6 @@ class TaskManager(BaseManager):
                         temp_transcriber_message = message["data"].get("content")
 
                         if not self.tools["input"].welcome_message_played():
-                            # logger.info(f"Since first message has not been sent, adding the transcript to self.transcriber_message")
-                            # self.transcriber_message += f' {message["data"].get("content")}'
                             continue
 
                         if not self.callee_speaking:
@@ -1588,6 +1582,21 @@ class TaskManager(BaseManager):
 
                     # Whenever speech_final or UtteranceEnd is received from Deepgram, this condition would get triggered
                     elif isinstance(message.get("data"), dict) and message["data"].get("type", "") == "transcript":
+                        transcriber_content = message["data"].get("content").strip()
+                        if not self.tools["input"].welcome_message_played():
+                            if transcriber_content in self.welcome_message_user_speech_words:
+                                continue
+                            else:
+                                self.welcome_message_user_speech_words.append(transcriber_content)
+                        elif (len(self.history) == 3 or len(self.history) == 4):
+                            if len(self.history) == 3:
+                                previous_content = self.history[-1]['content']
+                            else:
+                                previous_content = self.history[-2]['content']
+                            logger.info(f"transcriber_content: {transcriber_content}, previous_content: {previous_content}")
+                            if transcriber_content == previous_content:
+                                continue
+
                         logger.info(f"Received transcript, sending for further processing")
                         if self.tools["input"].welcome_message_played() and self.tools["input"].is_audio_being_played_to_user() and \
                                 len(message["data"].get("content").strip().split(" ")) <= self.number_of_words_for_interruption and \
@@ -2235,11 +2244,6 @@ class TaskManager(BaseManager):
                 output['recording_url'] = ""
                 if self.should_record:
                     output['recording_url'] = await save_audio_file_to_s3(self.conversation_recording, self.sampling_rate, self.assistant_id, self.run_id)
-
-                if self.task_config['tools_config']['output']['provider'] == "daily":
-                    logger.info("calling release function")
-                    await self.tools['output'].release_call()
-
             else:
                 output = self.input_parameters
                 if self.task_config["task_type"] == "extraction":

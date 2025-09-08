@@ -163,6 +163,7 @@ class OpenAiLLM(BaseLLM):
                 "method": None if func_conf['method'] is None else func_conf['method'].lower(),
                 "param": func_conf['param'],
                 "api_token": func_conf['api_token'],
+                "headers": func_conf.get('headers', None),
                 "model_args": model_args,
                 "meta_info": meta_info,
                 "called_fun": called_fun,

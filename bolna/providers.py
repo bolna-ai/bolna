@@ -1,7 +1,9 @@
 from .synthesizer import PollySynthesizer, ElevenlabsSynthesizer, OPENAISynthesizer, DeepgramSynthesizer, AzureSynthesizer, CartesiaSynthesizer, SmallestSynthesizer, SarvamSynthesizer, RimeSynthesizer
+
 from .transcriber import DeepgramTranscriber, WhisperTranscriber, AzureTranscriber, SarvamTranscriber
 from .input_handlers import DefaultInputHandler, TwilioInputHandler, ExotelInputHandler, PlivoInputHandler, DailyInputHandler
 from .output_handlers import DefaultOutputHandler, TwilioOutputHandler, ExotelOutputHandler, PlivoOutputHandler, DailyOutputHandler
+
 from .llms import OpenAiLLM, LiteLLM
 
 SUPPORTED_SYNTHESIZER_MODELS = {
@@ -18,15 +20,16 @@ SUPPORTED_SYNTHESIZER_MODELS = {
 
 SUPPORTED_TRANSCRIBER_PROVIDERS = {
     'deepgram': DeepgramTranscriber,
+
     'whisper': WhisperTranscriber,
     'azure': AzureTranscriber,
     'sarvam': SarvamTranscriber,
+
 }
 
 #Backwards compatibility
 SUPPORTED_TRANSCRIBER_MODELS = {
-    'deepgram': DeepgramTranscriber,
-    'whisper': WhisperTranscriber #Seperate out a transcriber for https://github.com/bolna-ai/streaming-transcriber-server or build a deepgram compatible proxy
+    'deepgram': DeepgramTranscriber
 }
 
 SUPPORTED_LLM_PROVIDERS = {
@@ -52,25 +55,21 @@ SUPPORTED_INPUT_HANDLERS = {
     'default': DefaultInputHandler,
     'twilio': TwilioInputHandler,
     'exotel': ExotelInputHandler,
-    'plivo': PlivoInputHandler,
-    'daily': DailyInputHandler
+    'plivo': PlivoInputHandler
 }
 SUPPORTED_INPUT_TELEPHONY_HANDLERS = {
     'twilio': TwilioInputHandler,
     'exotel': ExotelInputHandler,
-    'plivo': PlivoInputHandler,
-    'daily': DailyInputHandler
+    'plivo': PlivoInputHandler
 }
 SUPPORTED_OUTPUT_HANDLERS = {
     'default': DefaultOutputHandler,
     'twilio': TwilioOutputHandler,
     'exotel': ExotelOutputHandler,
-    'plivo': PlivoOutputHandler,
-    'daily': DailyOutputHandler
+    'plivo': PlivoOutputHandler
 }
 SUPPORTED_OUTPUT_TELEPHONY_HANDLERS = {
     'twilio': TwilioOutputHandler,
     'exotel': ExotelOutputHandler,
-    'plivo': PlivoOutputHandler,
-    'daily': DailyOutputHandler
+    'plivo': PlivoOutputHandler
 }
