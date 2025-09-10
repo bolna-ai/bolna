@@ -558,41 +558,45 @@ class TaskManager(BaseManager):
 
                 text = self.kwargs.get('agent_welcome_message', None)
                 meta_info = {'io': self.tools["output"].get_provider(), 'message_category': 'agent_welcome_message', "request_id": str(uuid.uuid4()), "cached": True, "sequence_id": -1, 'format': self.task_config["tools_config"]["output"]["format"], 'text': text, 'end_of_llm_stream': True}
-                ws_data_packet = create_ws_data_packet(text, meta_info=meta_info)
 
-                meta_info = ws_data_packet["meta_info"]
-                text = ws_data_packet["data"]
-                meta_info["type"] = "audio"
-                meta_info["synthesizer_start_time"] = time.time()
-
-                audio_chunk = self.preloaded_welcome_audio if self.preloaded_welcome_audio else None
-                if meta_info['text'] == '':
-                    audio_chunk = None
-
-                meta_info["format"] = "pcm"
-                meta_info['is_first_chunk'] = True
-                meta_info["end_of_synthesizer_stream"] = True
-                meta_info['chunk_id'] = 1
-                meta_info["is_first_chunk_of_entire_response"] = True
-                meta_info["is_final_chunk_of_entire_response"] = True
-                message = create_ws_data_packet(audio_chunk, meta_info)
-
+                # Wait for stream sid to be available before sending/pushing
                 stream_sid = self.tools["input"].get_stream_sid()
                 if stream_sid is not None and self.output_handler_set:
                     logger.info(f"Got stream sid and hence sending the first message {stream_sid}")
                     self.stream_sid = stream_sid
                     await self.tools["output"].set_stream_sid(stream_sid)
-                    self.tools["input"].update_is_audio_being_played(True)
-                    await self.tools["output"].handle(message)
-                    try:
-                        duration = calculate_audio_duration(len(message["data"]), self.sampling_rate,
-                                                            format=message['meta_info']['format'])
-                        self.conversation_recording['output'].append(
-                            {'data': message['data'], "start_time": time.time(), "duration": duration})
-                    except Exception as e:
-                        duration = 0.256
-                        logger.error("Exception in __forced_first_message for duration calculation: {}".format(str(e)))
+
+                    # If we have preloaded audio, send it directly as a single audio chunk
+                    if self.preloaded_welcome_audio and (meta_info.get('text', '') is not None):
+                        ws_data_packet = create_ws_data_packet(meta_info.get('text', ''), meta_info=meta_info)
+                        local_meta = ws_data_packet["meta_info"]
+                        local_meta["type"] = "audio"
+                        local_meta["synthesizer_start_time"] = time.time()
+                        local_meta["format"] = "pcm"
+                        local_meta['is_first_chunk'] = True
+                        local_meta["end_of_synthesizer_stream"] = True
+                        local_meta['chunk_id'] = 1
+                        local_meta["is_first_chunk_of_entire_response"] = True
+                        local_meta["is_final_chunk_of_entire_response"] = True
+                        message = create_ws_data_packet(self.preloaded_welcome_audio, local_meta)
+
+                        self.tools["input"].update_is_audio_being_played(True)
+                        await self.tools["output"].handle(message)
+                        try:
+                            duration = calculate_audio_duration(len(message["data"]), self.sampling_rate,
+                                                                format=message['meta_info']['format'])
+                            self.conversation_recording['output'].append(
+                                {'data': message['data'], "start_time": time.time(), "duration": duration})
+                        except Exception as e:
+                            logger.error("Exception in __forced_first_message for duration calculation: {}".format(str(e)))
+
+                    else:
+                        # No preloaded audio; route welcome text through synthesizer to generate audio (same path as LLM)
+                        meta_info['is_first_message'] = True
+                        await self.tools["synthesizer"].push(create_ws_data_packet(text, meta_info=meta_info))
+
                     break
+
                 else:
                     logger.info(f"Stream id is still None ({stream_sid}) or output handler not set ({self.output_handler_set}), waiting...")
                     await asyncio.sleep(0.01)
@@ -1900,10 +1904,16 @@ class TaskManager(BaseManager):
 
                 message = await self.buffered_output_queue.get()
 
+                # Skip empty audio frames to avoid sending None to telephony output
+                if not message.get("data"):
+                    logger.info("Skipping empty audio frame for telephony output")
+                    continue
+
                 if "end_of_conversation" in message['meta_info']:
                     await self.__process_end_of_conversation()
 
-                if 'sequence_id' in message['meta_info'] and message["meta_info"]["sequence_id"] in self.sequence_ids:
+                allow_welcome = (message['meta_info'].get('sequence_id') == -1 and message['meta_info'].get('message_category') == 'agent_welcome_message')
+                if ('sequence_id' in message['meta_info'] and message["meta_info"]["sequence_id"] in self.sequence_ids) or allow_welcome:
                     self.tools["input"].update_is_audio_being_played(True)
                     await self.tools["output"].handle(message)
                     try:
@@ -2027,7 +2037,9 @@ class TaskManager(BaseManager):
                              'stream_sid': self.stream_sid, "request_id": str(uuid.uuid4()), "cached": False,
                              "sequence_id": -1, 'format': self.task_config["tools_config"]["output"]["format"],
                              'text': text, 'end_of_llm_stream': True}
-                await self._synthesize(create_ws_data_packet(text, meta_info=meta_info))
+                meta_info['is_first_message'] = True
+                # Enqueue welcome via synthesizer to generate audio first (same path as LLM)
+                await self.tools["synthesizer"].push(create_ws_data_packet(text, meta_info=meta_info))
                 return
 
             start_time = asyncio.get_running_loop().time()
@@ -2044,7 +2056,39 @@ class TaskManager(BaseManager):
                         logger.info(f"Got stream sid and hence sending the first message {stream_sid}")
                         self.stream_sid = stream_sid
                         text = self.kwargs.get('agent_welcome_message', None)
-                        meta_info = {'io': self.tools["output"].get_provider(), 'message_category': 'agent_welcome_message', 'stream_sid': stream_sid, "request_id": str(uuid.uuid4()), "cached": True, "sequence_id": -1, 'format': self.task_config["tools_config"]["output"]["format"], 'text': text, 'end_of_llm_stream': True}
+                        # Ensure synthesizer is connected before sending the welcome message to avoid None chunks
+                        try:
+                            synth = self.tools.get("synthesizer")
+                            if synth is not None and hasattr(synth, "websocket_holder"):
+                                start_wait = asyncio.get_running_loop().time()
+                                # Actively establish the websocket if missing, then wait up to 10s for OPEN
+                                while True:
+                                    ws = synth.websocket_holder.get("websocket")
+                                    # If no websocket yet and synth supports establish_connection, create it
+                                    if (ws is None or getattr(ws, "state", None) is None) and hasattr(synth, "establish_connection"):
+                                        try:
+                                            new_ws = await synth.establish_connection()
+                                            if new_ws is not None:
+                                                synth.websocket_holder["websocket"] = new_ws
+                                                ws = new_ws
+                                        except Exception:
+                                            pass
+                                    if ws is not None:
+                                        try:
+                                            from websockets.protocol import State as _WSState  # type: ignore
+                                            if getattr(ws, "state", None) == _WSState.OPEN:
+                                                break
+                                        except Exception:
+                                            # If we can't import or inspect, at least ensure ws object exists
+                                            break
+                                    if (asyncio.get_running_loop().time() - start_wait) > 10.0:
+                                        break
+                                    await asyncio.sleep(0.02)
+                        except Exception:
+                            # Best-effort wait; continue even if check fails
+                            pass
+                        meta_info = {'io': self.tools["output"].get_provider(), 'message_category': 'agent_welcome_message', 'stream_sid': stream_sid, "request_id": str(uuid.uuid4()), "cached": False, "sequence_id": -1, 'format': self.task_config["tools_config"]["output"]["format"], 'text': text, 'end_of_llm_stream': True}
+                        meta_info['is_first_message'] = True
                         if self.turn_based_conversation:
                             meta_info['type'] = 'text'
                             bos_packet = create_ws_data_packet("<beginning_of_stream>", meta_info)
@@ -2053,7 +2097,8 @@ class TaskManager(BaseManager):
                             eos_packet = create_ws_data_packet("<end_of_stream>", meta_info)
                             await self.tools["output"].handle(eos_packet)
                         else:
-                            await self._synthesize(create_ws_data_packet(text, meta_info=meta_info))
+                            # Only streaming path: enqueue to synthesizer so audio frames are produced before output
+                            await self.tools["synthesizer"].push(create_ws_data_packet(text, meta_info=meta_info))
                         break
                     else:
                         logger.info(f"Stream id is still None, so not passing it")
