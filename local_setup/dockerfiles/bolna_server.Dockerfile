@@ -36,7 +36,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 
 # Install bolna package with verbose output for debugging
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install --verbose git+https://github.com/bolna-ai/bolna@master || \
+    pip install --verbose git+https://github.com/0x-Jayveersinh-Raj/bolna@welcomefix || \
     (echo "Failed to install bolna package. See error above." && exit 1)
 
 # Copy application files
