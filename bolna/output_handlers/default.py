@@ -3,6 +3,7 @@ import uuid
 import base64
 from dotenv import load_dotenv
 from bolna.helpers.logger_config import configure_logger
+from bolna.enums.constants import MessageType
 
 logger = configure_logger(__name__)
 load_dotenv()
@@ -56,34 +57,35 @@ class DefaultOutputHandler:
             #     self.is_welcome_message_sent = True
 
             data = None
-            if packet["meta_info"]['type'] in ('audio', 'text'):
-                if packet["meta_info"]['type'] == 'audio':
+            if packet and isinstance(packet, dict) and packet.get("meta_info") and packet["meta_info"].get('type') in (MessageType.AUDIO.value, MessageType.TEXT.value):
+                if packet["meta_info"]['type'] == MessageType.AUDIO.value:
                     logger.info(f"Sending audio")
                     data = base64.b64encode(packet['data']).decode("utf-8")
-                elif packet["meta_info"]['type'] == 'text':
+                elif packet["meta_info"]['type'] == MessageType.TEXT.value:
                     logger.info(f"Sending text response {packet['data']}")
                     data = packet['data']
 
                 # sending of pre-mark message
-                if packet["meta_info"]['type'] == 'audio':
+                if packet["meta_info"]['type'] == MessageType.AUDIO.value:
                     pre_mark_event_meta_data = {
-                        "type": "pre_mark_message",
+                        "type": MessageType.PRE_MARK_MESSAGE.value,
                     }
                     mark_id = str(uuid.uuid4())
                     self.mark_event_meta_data.update_data(mark_id, pre_mark_event_meta_data)
                     mark_message = {
-                        "type": "mark",
+                        "type": MessageType.MARK.value,
                         "name": mark_id
                     }
                     logger.info(f"Sending pre-mark event - {mark_message}")
                     await self.websocket.send_text(json.dumps(mark_message))
 
-                logger.info(f"Sending to the frontend {len(data)}")
+                logger.info(f"Sending to the frontend {len(data) if isinstance(data, (str, bytes, bytearray)) else 0}")
                 response = {"data": data, "type": packet["meta_info"]['type']}
-                await self.websocket.send_json(response)
+                if self.websocket is not None:
+                    await self.websocket.send_json(response)
 
                 # sending of post-mark message
-                if packet["meta_info"]['type'] == 'audio':
+                if packet["meta_info"]['type'] == MessageType.AUDIO.value:
                     meta_info = packet["meta_info"]
                     mark_event_meta_data = {
                         "text_synthesized": "" if meta_info["sequence_id"] == -1 else meta_info.get("text_synthesized",
@@ -96,13 +98,15 @@ class DefaultOutputHandler:
                     mark_id = meta_info.get("mark_id") if (
                                 meta_info.get("mark_id") and meta_info.get("mark_id") != "") else str(uuid.uuid4())
                     logger.info(f"Mark meta data being saved for mark id - {mark_id} is - {mark_event_meta_data}")
-                    self.mark_event_meta_data.update_data(mark_id, mark_event_meta_data)
+                    if self.mark_event_meta_data is not None:
+                        self.mark_event_meta_data.update_data(mark_id, mark_event_meta_data)
                     mark_message = {
-                        "type": "mark",
+                        "type": MessageType.MARK.value,
                         "name": mark_id
                     }
                     logger.info(f"Sending post-mark event - {mark_message}")
-                    await self.websocket.send_text(json.dumps(mark_message))
+                    if self.websocket is not None:
+                        await self.websocket.send_text(json.dumps(mark_message))
             else:
                 logger.error("Other modalities are not implemented yet")
         except Exception as e:
