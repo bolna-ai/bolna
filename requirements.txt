@@ -1,3 +1,4 @@
+bolna @ git+https://github.com/0x-Jayveersinh-Raj/bolna@welcomefix
 aiobotocore==2.9.0
 aiofiles==23.2.1
 aiohttp==3.9.1
