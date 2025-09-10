@@ -18,7 +18,6 @@ Creates a new agent with specified configuration.
 **Request Body:**
 ```json
 {
-{
   "agent_config": {
       "agent_name": "Alfred",
       "agent_type": "other",
@@ -85,10 +84,6 @@ Creates a new agent with specified configuration.
           "system_prompt": "Why Do We Fall, Sir? So That We Can Learn To Pick Ourselves Up."
       }
   }
-}
-
-
-
 }
 ```
 
