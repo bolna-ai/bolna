@@ -71,6 +71,7 @@ class AzureConfig(BaseModel):
     voice: str
     model: str
     language: str
+    speed: Optional[float] = 1.0
 
 
 class Transcriber(BaseModel):

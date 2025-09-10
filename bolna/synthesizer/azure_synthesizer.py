@@ -2,6 +2,7 @@ import os
 import uuid
 import asyncio
 import time
+import xml.sax.saxutils as sax
 from dotenv import load_dotenv
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.utils import create_ws_data_packet
@@ -14,7 +15,7 @@ load_dotenv()
 
 
 class AzureSynthesizer(BaseSynthesizer):
-    def __init__(self, voice, language, model="neural", stream=False, sampling_rate=8000, buffer_size=150, caching=True, **kwargs):
+    def __init__(self, voice, language, model="neural", stream=False, sampling_rate=8000, buffer_size=150, caching=True, speed=None, **kwargs):
         super().__init__(kwargs.get("task_manager_instance", None), stream, buffer_size)
         self.model = model
         self.language = language
@@ -25,6 +26,7 @@ class AzureSynthesizer(BaseSynthesizer):
         self.stream = stream
         self.synthesized_characters = 0
         self.caching = caching
+        self.speed = speed
         if caching:
             self.cache = InmemoryScalarCache()
         self.loop = asyncio.get_event_loop()
@@ -63,9 +65,33 @@ class AzureSynthesizer(BaseSynthesizer):
         audio = await self.__generate_http(text)
         return audio
 
+    def _build_ssml(self, text: str):
+        body = sax.escape(text)
+        # If nothing to tweak, return None to signal plain-text mode
+        if not any([self.speed]):
+            return None
+
+        prosody_attrs = []
+        if self.speed is not None:
+            prosody_attrs.append(f'rate="{self.speed}"')
+        prosody_attr_str = " ".join(prosody_attrs)
+
+        # NOTE: avoid <lang xml:lang> with <prosody>; docs state they are incompatible. :contentReference[oaicite:1]{index=1}
+        return f'''<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" xml:lang="{self.language}">
+          <voice name="{self.voice}">
+            <prosody {prosody_attr_str}>{body}</prosody>
+          </voice>
+        </speak>'''
+
+
     async def __generate_http(self, text):
         synthesizer = speechsdk.SpeechSynthesizer(speech_config=self.speech_config, audio_config=None)
-        result = synthesizer.speak_text_async(text).get()
+        ssml = self._build_ssml(text)
+        if ssml:
+            result = synthesizer.speak_ssml_async(ssml).get()
+        else:
+            result = synthesizer.speak_text_async(text).get()
+
         if result.reason == speechsdk.ResultReason.SynthesizingAudioCompleted:
             return result.audio_data
         else:
@@ -135,10 +161,13 @@ class AzureSynthesizer(BaseSynthesizer):
 
                 synthesizer.synthesizing.connect(speech_synthesizer_synthesizing_handler)
                 synthesizer.synthesis_completed.connect(speech_synthesizer_completed_handler)
-                
-                # Start the synthesis (non-blocking)
+
+                ssml = self._build_ssml(text)
                 start_time = time.perf_counter()
-                synthesizer.speak_text_async(text)
+                if ssml:
+                    synthesizer.speak_ssml_async(ssml)
+                else:
+                    synthesizer.speak_text_async(text)
                 logger.debug(f"Azure TTS request sent for {len(text)} chars")
                 full_audio = bytearray()
                 
