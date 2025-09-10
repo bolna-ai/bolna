@@ -107,7 +107,7 @@ class Synthesizer(BaseModel):
     provider_config: Union[PollyConfig, ElevenLabsConfig, AzureConfig, RimeConfig, SmallestConfig, SarvamConfig, CartesiaConfig, DeepgramConfig, OpenAIConfig] = Field(union_mode='smart')
     stream: bool = False
     buffer_size: Optional[int] = 40  # 40 characters in a buffer
-    audio_format: Optional[str] = "pcm"
+    audio_format: Optional[str] = AudioFormat.PCM
     caching: Optional[bool] = True
 
     @field_validator("provider")
@@ -119,7 +119,7 @@ class Synthesizer(BaseModel):
 
 class IOModel(BaseModel):
     provider: str
-    format: Optional[str] = "wav"
+    format: Optional[str] = AudioFormat.WAV
 
     @field_validator("provider")
     def validate_provider(cls, value):

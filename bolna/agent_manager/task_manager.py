@@ -22,7 +22,8 @@ from bolna.providers import *
 from bolna.prompts import *
 
 
-from bolna.enums.tasks import TaskType
+from bolna.enums.tasks import TaskType, AudioFormat
+from bolna.enums.providers import TelephonyProvider
 from bolna.helpers.utils import compute_function_pre_call_message, get_date_time_from_timezone, get_route_info, calculate_audio_duration, create_ws_data_packet, get_file_names_in_directory, get_raw_audio_bytes, is_valid_md5, \
     get_required_input_types, format_messages, get_prompt_responses, resample, save_audio_file_to_s3, update_prompt_with_context, get_md5_hash, clean_json_string, wav_bytes_to_pcm, convert_to_request_log, yield_chunks_from_memory, process_task_cancellation
 from bolna.helpers.logger_config import configure_logger
@@ -122,10 +123,10 @@ class TaskManager(BaseManager):
         #IO HANDLERS
         if task_id == 0:
             if self.is_web_based_call:
-                self.task_config["tools_config"]["input"]["provider"] = "default"
-                self.task_config["tools_config"]["output"]["provider"] = "default"
+                self.task_config["tools_config"]["input"]["provider"] = TelephonyProvider.DEFAULT
+                self.task_config["tools_config"]["output"]["provider"] = TelephonyProvider.DEFAULT
 
-            self.default_io = self.task_config["tools_config"]["output"]["provider"] == 'default'
+            self.default_io = self.task_config["tools_config"]["output"]["provider"] == TelephonyProvider.DEFAULT
             self.observable_variables["agent_hangup_observable"] = ObservableVariable(False)
             self.observable_variables["agent_hangup_observable"].add_observer(self.agent_hangup_observer)
 
@@ -492,7 +493,7 @@ class TaskManager(BaseManager):
                     output_kwargs['mark_event_meta_data'] = self.mark_event_meta_data
                     logger.info(f"Making sure that the sampling rate for output handler is 8000")
                     self.task_config['tools_config']['synthesizer']['provider_config']['sampling_rate'] = 8000
-                    self.task_config['tools_config']['synthesizer']['audio_format'] = 'pcm'
+                    self.task_config['tools_config']['synthesizer']['audio_format'] = AudioFormat.PCM
                 else:
                     self.task_config['tools_config']['synthesizer']['provider_config']['sampling_rate'] = 24000
                     output_kwargs['queue'] = output_queue
@@ -647,7 +648,7 @@ class TaskManager(BaseManager):
             provider_config = self.task_config["tools_config"]["synthesizer"].pop("provider_config")
             self.synthesizer_voice = provider_config["voice"]
             if self.turn_based_conversation:
-                self.task_config["tools_config"]["synthesizer"]["audio_format"] = "mp3" # Hard code mp3 if we're connected through dashboard
+                self.task_config["tools_config"]["synthesizer"]["audio_format"] = AudioFormat.MP3  # Use MP3 for dashboard connections
                 self.task_config["tools_config"]["synthesizer"]["stream"] = True if self.enforce_streaming else False #Hardcode stream to be False as we don't want to get blocked by a __listen_synthesizer co-routine
 
             self.tools["synthesizer"] = synthesizer_class(**self.task_config["tools_config"]["synthesizer"], **provider_config, **self.kwargs, caching=caching)
