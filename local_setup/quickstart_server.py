@@ -12,8 +12,6 @@ from bolna.helpers.logger_config import configure_logger
 from bolna.models import *
 from bolna.llms import LiteLLM
 from bolna.agent_manager.assistant_manager import AssistantManager
-
-# Import task type enum
 from bolna.enums.tasks import TaskType
 
 load_dotenv()
