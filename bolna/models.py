@@ -4,6 +4,18 @@ from pydantic import BaseModel, Field, field_validator, ValidationError, Json
 from pydantic_core import PydanticCustomError
 from .providers import *
 
+# Import enums for validation
+from .enums.providers import (
+    SynthesizerProvider,
+    TranscriberProvider,
+    LLMProvider,
+    TelephonyProvider,
+    get_all_synthesizer_providers,
+    get_all_transcriber_providers,
+    get_all_telephony_providers
+)
+from .enums.tasks import AudioFormat, TaskType, get_all_task_types
+
 AGENT_WELCOME_MESSAGE = "This call is being recorded for quality assurance and training. Please speak now."
 
 
@@ -86,7 +98,8 @@ class Transcriber(BaseModel):
 
     @field_validator("provider")
     def validate_model(cls, value):
-        return validate_attribute(value, list(SUPPORTED_TRANSCRIBER_PROVIDERS.keys()))
+        # Use enum-based validation while maintaining backward compatibility
+        return validate_attribute(value, get_all_transcriber_providers())
 
 
 class Synthesizer(BaseModel):
@@ -94,22 +107,25 @@ class Synthesizer(BaseModel):
     provider_config: Union[PollyConfig, ElevenLabsConfig, AzureConfig, RimeConfig, SmallestConfig, SarvamConfig, CartesiaConfig, DeepgramConfig, OpenAIConfig] = Field(union_mode='smart')
     stream: bool = False
     buffer_size: Optional[int] = 40  # 40 characters in a buffer
-    audio_format: Optional[str] = "pcm"
+    audio_format: Optional[str] = AudioFormat.PCM
     caching: Optional[bool] = True
 
     @field_validator("provider")
     def validate_model(cls, value):
-        return validate_attribute(value, ["polly", "elevenlabs", "openai", "deepgram", "azuretts", "cartesia", "smallest", "sarvam", "rime"])
+        # Use enum-based validation - now centralized and easier to maintain
+        return validate_attribute(value, get_all_synthesizer_providers())
 
 
 
 class IOModel(BaseModel):
     provider: str
-    format: Optional[str] = "wav"
+    format: Optional[str] = AudioFormat.WAV
 
     @field_validator("provider")
     def validate_provider(cls, value):
-        return validate_attribute(value, ["twilio", "default", "database", "exotel", "plivo"])
+        # Use enum-based validation - now supports all telephony providers
+        telephony_providers = get_all_telephony_providers() + ["database"]  # Keep legacy support
+        return validate_attribute(value, telephony_providers)
 
 
 # Can be used to route across multiple prompts as well
@@ -332,8 +348,13 @@ class ConversationConfig(BaseModel):
 class Task(BaseModel):
     tools_config: ToolsConfig
     toolchain: ToolsChainModel
-    task_type: Optional[str] = "conversation"  # extraction, summarization, notification
+    task_type: Optional[str] = TaskType.CONVERSATION  # Now uses enum default
     task_config: ConversationConfig = dict()
+    
+    @field_validator("task_type")
+    def validate_task_type(cls, value):
+        # Use enum-based validation for task types
+        return validate_attribute(value, get_all_task_types(), "task_type")
 
 
 class AgentModel(BaseModel):

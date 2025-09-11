@@ -9,6 +9,10 @@ from bolna.helpers.utils import convert_to_request_log, compute_function_pre_cal
 from .llm import BaseLLM
 from bolna.helpers.logger_config import configure_logger
 
+# Import the new model compatibility system
+from bolna.enums.models import supports_json_mode
+from bolna.enums.tasks import ResponseFormat
+
 logger = configure_logger(__name__)
 load_dotenv()
     
@@ -197,7 +201,14 @@ class OpenAiLLM(BaseLLM):
         return res
 
     def get_response_format(self, is_json_format: bool):
-        if is_json_format and self.model in ('gpt-4-1106-preview', 'gpt-3.5-turbo-1106', 'gpt-4o-mini'):
-            return {"type": "json_object"}
+        """
+        Get response format for OpenAI API calls.
+        
+        This now uses the enum-based model capability system which supports
+        newer models like gpt-4.1-nano, gpt-4o, gpt-4-turbo that were previously
+        hardcoded out.
+        """
+        if is_json_format and supports_json_mode(self.model):
+            return {"type": ResponseFormat.JSON_OBJECT}
         else:
-            return {"type": "text"}
+            return {"type": ResponseFormat.TEXT}

@@ -20,6 +20,10 @@ from .base_manager import BaseManager
 from bolna.agent_types import *
 from bolna.providers import *
 from bolna.prompts import *
+
+
+from bolna.enums.tasks import TaskType, AudioFormat
+from bolna.enums.providers import TelephonyProvider
 from bolna.helpers.utils import compute_function_pre_call_message, get_date_time_from_timezone, get_route_info, calculate_audio_duration, create_ws_data_packet, get_file_names_in_directory, get_raw_audio_bytes, is_valid_md5, \
     get_required_input_types, format_messages, get_prompt_responses, resample, save_audio_file_to_s3, update_prompt_with_context, get_md5_hash, clean_json_string, wav_bytes_to_pcm, convert_to_request_log, yield_chunks_from_memory, process_task_cancellation
 from bolna.helpers.logger_config import configure_logger
@@ -119,10 +123,10 @@ class TaskManager(BaseManager):
         #IO HANDLERS
         if task_id == 0:
             if self.is_web_based_call:
-                self.task_config["tools_config"]["input"]["provider"] = "default"
-                self.task_config["tools_config"]["output"]["provider"] = "default"
+                self.task_config["tools_config"]["input"]["provider"] = TelephonyProvider.DEFAULT
+                self.task_config["tools_config"]["output"]["provider"] = TelephonyProvider.DEFAULT
 
-            self.default_io = self.task_config["tools_config"]["output"]["provider"] == 'default'
+            self.default_io = self.task_config["tools_config"]["output"]["provider"] == TelephonyProvider.DEFAULT
             self.observable_variables["agent_hangup_observable"] = ObservableVariable(False)
             self.observable_variables["agent_hangup_observable"].add_observer(self.agent_hangup_observer)
 
@@ -411,7 +415,7 @@ class TaskManager(BaseManager):
                 llm_agent = self.__setup_tasks(**agent_params)
                 self.llm_agent_map[agent] = llm_agent
 
-        elif self.task_config["task_type"] == "webhook":
+        elif self.task_config["task_type"] == TaskType.WEBHOOK:
             if "webhookURL" in self.task_config["tools_config"]["api_tools"]:
                 webhook_url = self.task_config["tools_config"]["api_tools"]["webhookURL"]
             else:
@@ -420,19 +424,19 @@ class TaskManager(BaseManager):
             self.tools["webhook_agent"] = WebhookAgent(webhook_url=webhook_url)
 
     def __is_multiagent(self):
-        if self.task_config["task_type"] == "webhook":
+        if self.task_config["task_type"] == TaskType.WEBHOOK:
             return False
         agent_type = self.task_config['tools_config']["llm_agent"].get("agent_type", None)
         return agent_type == "multiagent"
 
     def __is_knowledgebase_agent(self):
-        if self.task_config["task_type"] == "webhook":
+        if self.task_config["task_type"] == TaskType.WEBHOOK:
             return False
         agent_type = self.task_config['tools_config']["llm_agent"].get("agent_type", None)
         return agent_type == "knowledgebase_agent"
 
     def __is_graph_agent(self):
-        if self.task_config["task_type"] == "webhook":
+        if self.task_config["task_type"] == TaskType.WEBHOOK:
             return False
         agent_type = self.task_config['tools_config']["llm_agent"].get("agent_type", None)
         return agent_type == "graph_agent"
@@ -489,7 +493,7 @@ class TaskManager(BaseManager):
                     output_kwargs['mark_event_meta_data'] = self.mark_event_meta_data
                     logger.info(f"Making sure that the sampling rate for output handler is 8000")
                     self.task_config['tools_config']['synthesizer']['provider_config']['sampling_rate'] = 8000
-                    self.task_config['tools_config']['synthesizer']['audio_format'] = 'pcm'
+                    self.task_config['tools_config']['synthesizer']['audio_format'] = AudioFormat.PCM
                 else:
                     self.task_config['tools_config']['synthesizer']['provider_config']['sampling_rate'] = 24000
                     output_kwargs['queue'] = output_queue
@@ -644,7 +648,7 @@ class TaskManager(BaseManager):
             provider_config = self.task_config["tools_config"]["synthesizer"].pop("provider_config")
             self.synthesizer_voice = provider_config["voice"]
             if self.turn_based_conversation:
-                self.task_config["tools_config"]["synthesizer"]["audio_format"] = "mp3" # Hard code mp3 if we're connected through dashboard
+                self.task_config["tools_config"]["synthesizer"]["audio_format"] = AudioFormat.MP3  # Use MP3 for dashboard connections
                 self.task_config["tools_config"]["synthesizer"]["stream"] = True if self.enforce_streaming else False #Hardcode stream to be False as we don't want to get blocked by a __listen_synthesizer co-routine
 
             self.tools["synthesizer"] = synthesizer_class(**self.task_config["tools_config"]["synthesizer"], **provider_config, **self.kwargs, caching=caching)
@@ -712,15 +716,15 @@ class TaskManager(BaseManager):
         return llm_agent
 
     def __setup_tasks(self, llm=None, agent_type=None, assistant_config=None):
-        if self.task_config["task_type"] == "conversation" and not self.__is_multiagent():
+        if self.task_config["task_type"] == TaskType.CONVERSATION and not self.__is_multiagent():
             self.tools["llm_agent"] = self.__get_agent_object(llm, agent_type, assistant_config)
         elif self.__is_multiagent():
             return self.__get_agent_object(llm, agent_type, assistant_config)
-        elif self.task_config["task_type"] == "extraction":
+        elif self.task_config["task_type"] == TaskType.EXTRACTION:
             logger.info("Setting up extraction agent")
             self.tools["llm_agent"] = ExtractionContextualAgent(llm, prompt=self.system_prompt)
             self.extracted_data = None
-        elif self.task_config["task_type"] == "summarization":
+        elif self.task_config["task_type"] == TaskType.SUMMARIZATION:
             logger.info("Setting up summarization agent")
             self.tools["llm_agent"] = SummarizationContextualAgent(llm, prompt=self.system_prompt)
             self.summarized_data = None
@@ -741,7 +745,7 @@ class TaskManager(BaseManager):
         return f"{enriched_prompt}\n{notes}\n{DATE_PROMPT.format(today, current_time, current_timezone)}"
 
     async def load_prompt(self, assistant_name, task_id, local, **kwargs):
-        if self.task_config["task_type"] == "webhook":
+        if self.task_config["task_type"] == TaskType.WEBHOOK:
             return
 
         agent_type = self.task_config["tools_config"]["llm_agent"].get("agent_type", "simple_llm_agent")
@@ -824,12 +828,12 @@ class TaskManager(BaseManager):
             self.timezone = pytz.timezone(self.context_data['recipient_data']['timezone'])
         current_date, current_time = get_date_time_from_timezone(self.timezone)
 
-        if not prompt and task_type in ('extraction', 'summarization'):
-            if task_type == 'extraction':
+        if not prompt and task_type in (TaskType.EXTRACTION, TaskType.SUMMARIZATION):
+            if task_type == TaskType.EXTRACTION:
                 extraction_json = task.get("tools_config").get('llm_agent', {}).get('llm_config', {}).get('extraction_json')
                 prompt = EXTRACTION_PROMPT.format(current_date, current_time, self.timezone, extraction_json)
                 return {"system_prompt": prompt}
-            elif task_type == 'summarization':
+            elif task_type == TaskType.SUMMARIZATION:
                 return {"system_prompt": SUMMARIZATION_PROMPT}
         return prompt
 
@@ -966,13 +970,13 @@ class TaskManager(BaseManager):
         return sequence, meta_info
 
     def _is_extraction_task(self):
-        return self.task_config["task_type"] == "extraction"
+        return self.task_config["task_type"] == TaskType.EXTRACTION
 
     def _is_summarization_task(self):
-        return self.task_config["task_type"] == "summarization"
+        return self.task_config["task_type"] == TaskType.SUMMARIZATION
 
     def _is_conversation_task(self):
-        return self.task_config["task_type"] == "conversation"
+        return self.task_config["task_type"] == TaskType.CONVERSATION
 
     def _get_next_step(self, sequence, origin):
         try:
@@ -992,7 +996,7 @@ class TaskManager(BaseManager):
 
     async def _process_followup_task(self, message=None):
         logger.info(f" TASK CONFIG  {self.task_config['task_type']}")
-        if self.task_config["task_type"] == "webhook":
+        if self.task_config["task_type"] == TaskType.WEBHOOK:
             logger.info(f"Input patrameters {self.input_parameters}")
             extraction_details = self.input_parameters.get('extraction_details', {})
             logger.info(f"DOING THE POST REQUEST TO WEBHOOK {extraction_details}")
@@ -1006,7 +1010,7 @@ class TaskManager(BaseManager):
             })
 
             json_data = await self.tools["llm_agent"].generate(self.history)
-            if self.task_config["task_type"] == "summarization":
+            if self.task_config["task_type"] == TaskType.SUMMARIZATION:
                 logger.info(f'Summary {json_data["summary"]}')
                 self.summarized_data = json_data["summary"]
                 logger.info(f"self.summarize {self.summarized_data}")
@@ -2187,7 +2191,7 @@ class TaskManager(BaseManager):
             else:
                 # Run agent followup tasks
                 try:
-                    if self.task_config["task_type"] == "webhook":
+                    if self.task_config["task_type"] == TaskType.WEBHOOK:
                         await self._process_followup_task()
                     else:
                         await self._run_llm_task(self.input_parameters)
@@ -2246,13 +2250,13 @@ class TaskManager(BaseManager):
                     output['recording_url'] = await save_audio_file_to_s3(self.conversation_recording, self.sampling_rate, self.assistant_id, self.run_id)
             else:
                 output = self.input_parameters
-                if self.task_config["task_type"] == "extraction":
-                    output = { "extracted_data" : self.extracted_data, "task_type": "extraction"}
-                elif self.task_config["task_type"] == "summarization":
+                if self.task_config["task_type"] == TaskType.EXTRACTION:
+                    output = { "extracted_data" : self.extracted_data, "task_type": TaskType.EXTRACTION}
+                elif self.task_config["task_type"] == TaskType.SUMMARIZATION:
                     logger.info(f"self.summarized_data {self.summarized_data}")
-                    output = {"summary" : self.summarized_data, "task_type": "summarization"}
-                elif self.task_config["task_type"] == "webhook":
-                    output = {"status": self.webhook_response, "task_type": "webhook"}
+                    output = {"summary" : self.summarized_data, "task_type": TaskType.SUMMARIZATION}
+                elif self.task_config["task_type"] == TaskType.WEBHOOK:
+                    output = {"status": self.webhook_response, "task_type": TaskType.WEBHOOK}
 
             await asyncio.gather(*tasks_to_cancel)
             return output
