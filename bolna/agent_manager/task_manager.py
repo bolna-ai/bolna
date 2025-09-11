@@ -30,6 +30,8 @@ from semantic_router.encoders import FastEmbedEncoder
 from ..helpers.mark_event_meta_data import MarkEventMetaData
 from ..helpers.observable_variable import ObservableVariable
 
+from websockets.protocol import State as _WSState  # type: ignore
+
 logger = configure_logger(__name__)
 
 
@@ -2075,7 +2077,6 @@ class TaskManager(BaseManager):
                                             pass
                                     if ws is not None:
                                         try:
-                                            from websockets.protocol import State as _WSState  # type: ignore
                                             if getattr(ws, "state", None) == _WSState.OPEN:
                                                 break
                                         except Exception:
