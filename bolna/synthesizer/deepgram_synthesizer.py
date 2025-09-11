@@ -89,7 +89,7 @@ class DeepgramSynthesizer(BaseSynthesizer):
 
             if not self.should_synthesize_response(meta_info.get("sequence_id")):
                 logger.info(f"Skipping synthesis (seq_id {meta_info.get('sequence_id')} not in task manager)")
-                return
+                continue
 
             if self.caching and self.cache.get(text):
                 logger.info(f"Cache hit for text: {text}")
