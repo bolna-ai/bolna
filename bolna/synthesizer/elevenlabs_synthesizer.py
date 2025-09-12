@@ -309,7 +309,8 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
                 "text": " ",
                 "voice_settings": {
                     "stability": self.temperature,
-                    "similarity_boost": self.similarity_boost
+                    "similarity_boost": self.similarity_boost,
+                    "speed": self.speed
                 },
                 "xi_api_key": self.api_key
             }
