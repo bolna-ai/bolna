@@ -68,7 +68,7 @@ class AzureSynthesizer(BaseSynthesizer):
     def _build_ssml(self, text: str):
         body = sax.escape(text)
         # If nothing to tweak, return None to signal plain-text mode
-        if not any([self.speed]):
+        if not any([self.speed]) or self.speed == 1:
             return None
 
         prosody_attrs = []
