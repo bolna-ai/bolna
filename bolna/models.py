@@ -27,6 +27,7 @@ class ElevenLabsConfig(BaseModel):
     model: str
     temperature: Optional[float] = 0.5
     similarity_boost: Optional[float] = 0.5
+    speed: Optional[float] = 1.0
 
 
 class OpenAIConfig(BaseModel):
@@ -65,6 +66,7 @@ class SarvamConfig(BaseModel):
     language: str
     voice: str
     model: str
+    speed: Optional[float] = 1.0
 
 
 class AzureConfig(BaseModel):
@@ -100,7 +102,7 @@ class Synthesizer(BaseModel):
 
     @field_validator("provider")
     def validate_model(cls, value):
-        return validate_attribute(value, ["polly", "elevenlabs", "openai", "deepgram", "azuretts", "cartesia", "smallest", "sarvam", "rime"])
+        return validate_attribute(value, ["polly", "elevenlabs", "azuretts", "openai", "deepgram", "cartesia", "smallest", "sarvam", "rime"])
 
 
 

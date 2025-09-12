@@ -17,7 +17,7 @@ logger = configure_logger(__name__)
 
 
 class SarvamSynthesizer(BaseSynthesizer):
-    def __init__(self, voice_id, model, language, sampling_rate="8000", stream=False, buffer_size=400, synthesizer_key=None, **kwargs):
+    def __init__(self, voice_id, model, language, sampling_rate="8000", stream=False, buffer_size=400, speed=1.0, synthesizer_key=None, **kwargs):
         super().__init__(kwargs.get("task_manager_instance", None), stream)
         self.api_key = os.environ["SARVAM_API_KEY"] if synthesizer_key is None else synthesizer_key
         self.voice_id = voice_id
@@ -34,7 +34,7 @@ class SarvamSynthesizer(BaseSynthesizer):
         self.language = language
         self.loudness = 1.0
         self.pitch = 0.0
-        self.pace = 1.0
+        self.pace = speed
         self.enable_preprocessing = True
 
         self.first_chunk_generated = False
