@@ -1567,6 +1567,9 @@ class TaskManager(BaseManager):
                                 self.turn_id += 1
                                 self.tools["input"].update_is_audio_being_played(False)
                                 await self.__cleanup_downstream_tasks()
+                            else:
+                                logger.info(f"Ignoring transcript: {message['data'].get('content').strip()}")
+                                continue
 
                         # Doing changes for incremental delay
                         self.required_delay_before_speaking += self.incremental_delay
