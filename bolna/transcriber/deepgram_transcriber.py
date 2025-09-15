@@ -62,6 +62,8 @@ class DeepgramTranscriber(BaseTranscriber):
         self.finalized_transcript = ""
         self.final_transcript = ""
         self.is_transcript_sent_for_processing = False
+        self.current_turn_start_time = None
+        self.current_turn_id = None
         self.websocket_connection = None
         self.connection_authenticated = False
 
@@ -169,12 +171,9 @@ class DeepgramTranscriber(BaseTranscriber):
 
         self.current_request_id = self.generate_request_id()
         self.meta_info['request_id'] = self.current_request_id
-        start_time = time.time()
         async with self.session as session:
             async with session.post(self.api_url, data=audio_data, headers=headers) as response:
                 response_data = await response.json()
-                self.meta_info["start_time"] = start_time
-                self.meta_info['transcriber_latency'] = time.time() - start_time
                 transcript = response_data["results"]["channels"][0]["alternatives"][0]["transcript"]
                 self.meta_info['transcriber_duration'] = response_data["metadata"]["duration"]
                 return create_ws_data_packet(transcript, self.meta_info)
@@ -200,8 +199,9 @@ class DeepgramTranscriber(BaseTranscriber):
                     # Mark per-turn start (monotonic)
                     try:
                         self.meta_info = ws_data_packet.get('meta_info') if self.meta_info is None else self.meta_info
-                        if self.meta_info is not None:
-                            self.meta_info['transcriber_start_time'] = time.perf_counter()
+                        if self.meta_info is not None and not self.current_turn_start_time:
+                            self.current_turn_start_time = time.perf_counter()
+                            self.current_turn_id = self.meta_info.get('turn_id') or self.meta_info.get('request_id')
                     except Exception:
                         pass
                 end_of_stream = await self._check_and_process_end_of_stream(ws_data_packet, ws)
@@ -241,7 +241,9 @@ class DeepgramTranscriber(BaseTranscriber):
                     self.current_request_id = self.generate_request_id()
                     self.meta_info['request_id'] = self.current_request_id
                     try:
-                        self.meta_info['transcriber_start_time'] = time.perf_counter()
+                        if not self.current_turn_start_time:
+                            self.current_turn_start_time = time.perf_counter()
+                            self.current_turn_id = self.meta_info.get('turn_id') or self.meta_info.get('request_id')
                     except Exception:
                         pass
 
@@ -292,8 +294,10 @@ class DeepgramTranscriber(BaseTranscriber):
                         }
                         # First actionable interim → first result latency
                         try:
-                            if 'transcriber_start_time' in self.meta_info and 'transcriber_first_result_latency' not in self.meta_info:
-                                self.meta_info['transcriber_first_result_latency'] = time.perf_counter() - self.meta_info['transcriber_start_time']
+                            if self.current_turn_start_time is not None and 'transcriber_first_result_latency' not in self.meta_info:
+                                first_result_latency = time.perf_counter() - self.current_turn_start_time
+                                self.meta_info['transcriber_first_result_latency'] = first_result_latency
+                                self.meta_info['transcriber_latency'] = first_result_latency  # For CSV compatibility
                         except Exception:
                             pass
                         yield create_ws_data_packet(data, self.meta_info)
@@ -316,8 +320,22 @@ class DeepgramTranscriber(BaseTranscriber):
                             self.final_transcript = ""
                             # Total stream duration at final
                             try:
-                                if 'transcriber_start_time' in self.meta_info:
-                                    self.meta_info['transcriber_total_stream_duration'] = time.perf_counter() - self.meta_info['transcriber_start_time']
+                                if self.current_turn_start_time is not None:
+                                    total_stream_duration = time.perf_counter() - self.current_turn_start_time
+                                    self.meta_info['transcriber_total_stream_duration'] = total_stream_duration
+                                    self.meta_info['transcriber_latency'] = total_stream_duration  # For CSV compatibility
+                                    
+                                    # Append to turn_latencies
+                                    self.turn_latencies.append({
+                                        'turn_id': self.current_turn_id,
+                                        'sequence_id': self.current_turn_id,
+                                        'first_result_latency_ms': round((self.meta_info.get('transcriber_first_result_latency', 0)) * 1000),
+                                        'total_stream_duration_ms': round(total_stream_duration * 1000)
+                                    })
+                                    
+                                    # Reset turn tracking
+                                    self.current_turn_start_time = None
+                                    self.current_turn_id = None
                             except Exception:
                                 pass
                             yield create_ws_data_packet(data, self.meta_info)
@@ -333,8 +351,22 @@ class DeepgramTranscriber(BaseTranscriber):
                         self.is_transcript_sent_for_processing = True
                         self.final_transcript = ""
                         try:
-                            if 'transcriber_start_time' in self.meta_info:
-                                self.meta_info['transcriber_total_stream_duration'] = time.perf_counter() - self.meta_info['transcriber_start_time']
+                            if self.current_turn_start_time is not None:
+                                total_stream_duration = time.perf_counter() - self.current_turn_start_time
+                                self.meta_info['transcriber_total_stream_duration'] = total_stream_duration
+                                self.meta_info['transcriber_latency'] = total_stream_duration  # For CSV compatibility
+                                
+                                # Append to turn_latencies
+                                self.turn_latencies.append({
+                                    'turn_id': self.current_turn_id,
+                                    'sequence_id': self.current_turn_id,
+                                    'first_result_latency_ms': round((self.meta_info.get('transcriber_first_result_latency', 0)) * 1000),
+                                    'total_stream_duration_ms': round(total_stream_duration * 1000)
+                                })
+                                
+                                # Reset turn tracking
+                                self.current_turn_start_time = None
+                                self.current_turn_id = None
                         except Exception:
                             pass
                         yield create_ws_data_packet(data, self.meta_info)

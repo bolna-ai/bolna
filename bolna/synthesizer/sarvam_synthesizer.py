@@ -45,6 +45,8 @@ class SarvamSynthesizer(BaseSynthesizer):
         self.websocket_holder = {"websocket": None}
         self.sender_task = None
         self.conversation_ended = False
+        self.current_turn_start_time = None
+        self.current_turn_id = None
         self.text_queue = deque()
         self.current_text = ""
 
@@ -223,9 +225,9 @@ class SarvamSynthesizer(BaseSynthesizer):
                         self.meta_info = self.text_queue.popleft()
                         # Compute first-result latency on first audio chunk
                         try:
-                            if self.meta_info and 'synthesizer_start_time' in self.meta_info and 'synthesizer_first_result_latency' not in self.meta_info:
-                                self.meta_info['synthesizer_first_result_latency'] = time.perf_counter() - self.meta_info['synthesizer_start_time']
-                                self.meta_info['synthesizer_latency'] = self.meta_info['synthesizer_first_result_latency']
+                            if self.current_turn_start_time is not None:
+                                first_result_latency = time.perf_counter() - self.current_turn_start_time
+                                self.meta_info['synthesizer_latency'] = first_result_latency
                         except Exception:
                             pass
 
@@ -249,8 +251,16 @@ class SarvamSynthesizer(BaseSynthesizer):
                         self.first_chunk_generated = False
                         # Compute total stream duration for this synthesizer turn
                         try:
-                            if self.meta_info and 'synthesizer_start_time' in self.meta_info:
-                                self.meta_info['synthesizer_total_stream_duration'] = time.perf_counter() - self.meta_info['synthesizer_start_time']
+                            if self.current_turn_start_time is not None:
+                                total_stream_duration = time.perf_counter() - self.current_turn_start_time
+                                self.turn_latencies.append({
+                                    'turn_id': self.current_turn_id,
+                                    'sequence_id': self.current_turn_id,
+                                    'first_result_latency_ms': round((self.meta_info.get('synthesizer_latency', 0)) * 1000),
+                                    'total_stream_duration_ms': round(total_stream_duration * 1000)
+                                })
+                                self.current_turn_start_time = None
+                                self.current_turn_id = None
                         except Exception:
                             pass
                     else:
@@ -273,7 +283,8 @@ class SarvamSynthesizer(BaseSynthesizer):
             meta_info["text"] = text
             # Stamp synthesizer turn start time
             try:
-                meta_info['synthesizer_start_time'] = time.perf_counter()
+                self.current_turn_start_time = time.perf_counter()
+                self.current_turn_id = meta_info.get('turn_id') or meta_info.get('sequence_id')
             except Exception:
                 pass
             self.sender_task = asyncio.create_task(self.sender(text, meta_info.get("sequence_id"), end_of_llm_stream))
