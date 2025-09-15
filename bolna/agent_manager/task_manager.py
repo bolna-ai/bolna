@@ -1631,6 +1631,20 @@ class TaskManager(BaseManager):
                         meta_info = self.__get_updated_meta_info(meta_info)
                         await self._handle_transcriber_output(next_task, transcriber_message, meta_info)
 
+                        # Append standardized transcriber per-turn latencies if present
+                        try:
+                            first_s = meta_info.get('transcriber_first_result_latency')
+                            total_s = meta_info.get('transcriber_total_stream_duration')
+                            if first_s is not None or total_s is not None:
+                                self.transcriber_latencies['turn_latencies'].append({
+                                    'turn_id': meta_info.get('turn_id') or meta_info.get('request_id'),
+                                    'sequence_id': meta_info.get('sequence_id'),
+                                    'first_result_latency_ms': round(first_s * 1000) if first_s is not None else None,
+                                    'total_stream_duration_ms': round(total_s * 1000) if total_s is not None else None
+                                })
+                        except Exception:
+                            pass
+
                     elif message["data"] == "transcriber_connection_closed":
                         logger.info(f"Transcriber connection has been closed")
                         self.transcriber_duration += message.get("meta_info", {}).get("transcriber_duration", 0) if message["meta_info"] is not None else 0
@@ -1657,6 +1671,20 @@ class TaskManager(BaseManager):
         self.transcriber_duration += message["meta_info"]["transcriber_duration"] if "transcriber_duration" in message["meta_info"] else 0
 
         await self._handle_transcriber_output(next_task, message['data'], meta_info)
+
+        # Append standardized transcriber per-turn latencies for HTTP path
+        try:
+            first_s = meta_info.get('transcriber_first_result_latency')
+            total_s = meta_info.get('transcriber_total_stream_duration')
+            if first_s is not None or total_s is not None:
+                self.transcriber_latencies['turn_latencies'].append({
+                    'turn_id': meta_info.get('turn_id') or meta_info.get('request_id'),
+                    'sequence_id': meta_info.get('sequence_id'),
+                    'first_result_latency_ms': round(first_s * 1000) if first_s is not None else None,
+                    'total_stream_duration_ms': round(total_s * 1000) if total_s is not None else None
+                })
+        except Exception:
+            pass
 
 
     #################################################################
@@ -1725,6 +1753,21 @@ class TaskManager(BaseManager):
                                 engine=self.tools['synthesizer'].get_engine(),
                                 run_id=self.run_id
                             )
+
+                            # Append synthesizer per-turn latencies when end of stream
+                            try:
+                                if meta_info.get('end_of_synthesizer_stream', False):
+                                    first_s = meta_info.get('synthesizer_first_result_latency')
+                                    total_s = meta_info.get('synthesizer_total_stream_duration')
+                                    if first_s is not None or total_s is not None:
+                                        self.synthesizer_latencies['turn_latencies'].append({
+                                            'turn_id': meta_info.get('turn_id'),
+                                            'sequence_id': meta_info.get('sequence_id'),
+                                            'first_result_latency_ms': round(first_s * 1000) if first_s is not None else None,
+                                            'total_stream_duration_ms': round(total_s * 1000) if total_s is not None else None
+                                        })
+                            except Exception:
+                                pass
                         else:
                             logger.info(f"Skipping message with sequence_id: {sequence_id}")
 
