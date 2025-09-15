@@ -221,6 +221,13 @@ class SarvamSynthesizer(BaseSynthesizer):
 
                     if len(self.text_queue) > 0:
                         self.meta_info = self.text_queue.popleft()
+                        # Compute first-result latency on first audio chunk
+                        try:
+                            if self.meta_info and 'synthesizer_start_time' in self.meta_info and 'synthesizer_first_result_latency' not in self.meta_info:
+                                self.meta_info['synthesizer_first_result_latency'] = time.perf_counter() - self.meta_info['synthesizer_start_time']
+                                self.meta_info['synthesizer_latency'] = self.meta_info['synthesizer_first_result_latency']
+                        except Exception:
+                            pass
 
                     self.meta_info['format'] = 'wav'
                     audio = message
@@ -240,6 +247,12 @@ class SarvamSynthesizer(BaseSynthesizer):
                         logger.info("received null byte and hence end of stream")
                         self.meta_info["end_of_synthesizer_stream"] = True
                         self.first_chunk_generated = False
+                        # Compute total stream duration for this synthesizer turn
+                        try:
+                            if self.meta_info and 'synthesizer_start_time' in self.meta_info:
+                                self.meta_info['synthesizer_total_stream_duration'] = time.perf_counter() - self.meta_info['synthesizer_start_time']
+                        except Exception:
+                            pass
                     else:
                         resampled_audio = resample(audio, int(self.sampling_rate), format="wav")
                         audio = wav_bytes_to_pcm(resampled_audio)
@@ -258,6 +271,11 @@ class SarvamSynthesizer(BaseSynthesizer):
             end_of_llm_stream = "end_of_llm_stream" in meta_info and meta_info["end_of_llm_stream"]
             self.meta_info = copy.deepcopy(meta_info)
             meta_info["text"] = text
+            # Stamp synthesizer turn start time
+            try:
+                meta_info['synthesizer_start_time'] = time.perf_counter()
+            except Exception:
+                pass
             self.sender_task = asyncio.create_task(self.sender(text, meta_info.get("sequence_id"), end_of_llm_stream))
             self.text_queue.append(meta_info)
         else:

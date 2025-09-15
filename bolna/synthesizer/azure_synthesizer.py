@@ -162,6 +162,12 @@ class AzureSynthesizer(BaseSynthesizer):
                 synthesizer.synthesizing.connect(speech_synthesizer_synthesizing_handler)
                 synthesizer.synthesis_completed.connect(speech_synthesizer_completed_handler)
 
+                # Stamp synthesizer turn start time
+                try:
+                    meta_info['synthesizer_start_time'] = time.perf_counter()
+                except Exception:
+                    pass
+
                 ssml = self._build_ssml(text)
                 start_time = time.perf_counter()
                 if ssml:
@@ -188,6 +194,13 @@ class AzureSynthesizer(BaseSynthesizer):
                             self.latency_stats["total_first_byte_latency"] += first_chunk_time
                             self.latency_stats["min_latency"] = min(self.latency_stats["min_latency"], first_chunk_time)
                             self.latency_stats["max_latency"] = max(self.latency_stats["max_latency"], first_chunk_time)
+                            # Expose first-result latency via meta_info
+                            try:
+                                if 'synthesizer_first_result_latency' not in meta_info:
+                                    meta_info['synthesizer_first_result_latency'] = (time.perf_counter() - meta_info.get('synthesizer_start_time', start_time))
+                                    meta_info['synthesizer_latency'] = meta_info['synthesizer_first_result_latency']
+                            except Exception:
+                                pass
 
                         # Process chunk
                         if not self.first_chunk_generated:
@@ -218,6 +231,11 @@ class AzureSynthesizer(BaseSynthesizer):
                     self.cache.set(text, bytes(full_audio))
                 
                 self.synthesized_characters += len(text)
+                # Compute total stream duration
+                try:
+                    meta_info['synthesizer_total_stream_duration'] = (time.perf_counter() - meta_info.get('synthesizer_start_time', start_time))
+                except Exception:
+                    pass
         except asyncio.CancelledError:
             logger.debug("Azure synthesizer task was cancelled - shutting down cleanly")
             raise
