@@ -197,16 +197,30 @@ class DeepgramTranscriber(BaseTranscriber):
                 if not self.audio_submitted:
                     self.audio_submitted = True
                     self.audio_submission_time = time.time()
+                    # Mark per-turn start (monotonic)
+                    try:
+                        self.meta_info = ws_data_packet.get('meta_info') if self.meta_info is None else self.meta_info
+                        if self.meta_info is not None:
+                            self.meta_info['transcriber_start_time'] = time.perf_counter()
+                    except Exception:
+                        pass
                 end_of_stream = await self._check_and_process_end_of_stream(ws_data_packet, ws)
                 if end_of_stream:
                     break
                 self.meta_info = ws_data_packet.get('meta_info')
-                start_time = time.time()
+                start_time = time.perf_counter()
                 transcription = await self._get_http_transcription(ws_data_packet.get('data'))
                 transcription['meta_info']["include_latency"] = True
-                transcription['meta_info']["transcriber_latency"] = time.time() - start_time
+                # HTTP path: first and total are same
+                try:
+                    elapsed = time.perf_counter() - start_time
+                    transcription['meta_info']["transcriber_first_result_latency"] = elapsed
+                    transcription['meta_info']["transcriber_total_stream_duration"] = elapsed
+                    transcription['meta_info']["transcriber_latency"] = elapsed
+                except Exception:
+                    pass
                 transcription['meta_info']['audio_duration'] = transcription['meta_info']['transcriber_duration']
-                transcription['meta_info']['last_vocal_frame_timestamp'] = start_time
+                transcription['meta_info']['last_vocal_frame_timestamp'] = time.time()
                 yield transcription
 
             if self.transcription_task is not None:
@@ -226,6 +240,10 @@ class DeepgramTranscriber(BaseTranscriber):
                     self.audio_submission_time = time.time()
                     self.current_request_id = self.generate_request_id()
                     self.meta_info['request_id'] = self.current_request_id
+                    try:
+                        self.meta_info['transcriber_start_time'] = time.perf_counter()
+                    except Exception:
+                        pass
 
                 end_of_stream = await self._check_and_process_end_of_stream(ws_data_packet, ws)
                 if end_of_stream:
@@ -272,6 +290,12 @@ class DeepgramTranscriber(BaseTranscriber):
                             "type": "interim_transcript_received",
                             "content": transcript
                         }
+                        # First actionable interim → first result latency
+                        try:
+                            if 'transcriber_start_time' in self.meta_info and 'transcriber_first_result_latency' not in self.meta_info:
+                                self.meta_info['transcriber_first_result_latency'] = time.perf_counter() - self.meta_info['transcriber_start_time']
+                        except Exception:
+                            pass
                         yield create_ws_data_packet(data, self.meta_info)
 
                     if msg["is_final"] and transcript.strip():
@@ -290,6 +314,12 @@ class DeepgramTranscriber(BaseTranscriber):
                             }
                             self.is_transcript_sent_for_processing = True
                             self.final_transcript = ""
+                            # Total stream duration at final
+                            try:
+                                if 'transcriber_start_time' in self.meta_info:
+                                    self.meta_info['transcriber_total_stream_duration'] = time.perf_counter() - self.meta_info['transcriber_start_time']
+                            except Exception:
+                                pass
                             yield create_ws_data_packet(data, self.meta_info)
 
                 elif msg["type"] == "UtteranceEnd":
@@ -302,6 +332,11 @@ class DeepgramTranscriber(BaseTranscriber):
                         }
                         self.is_transcript_sent_for_processing = True
                         self.final_transcript = ""
+                        try:
+                            if 'transcriber_start_time' in self.meta_info:
+                                self.meta_info['transcriber_total_stream_duration'] = time.perf_counter() - self.meta_info['transcriber_start_time']
+                        except Exception:
+                            pass
                         yield create_ws_data_packet(data, self.meta_info)
 
                 elif msg["type"] == "Metadata":
