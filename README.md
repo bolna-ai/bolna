@@ -44,6 +44,11 @@ Bolna helps you create AI Voice Agents which can be instructed to do tasks begin
 2. Hosted APIs (https://docs.bolna.ai/api-reference/introduction) built on top of this orchestration platform [currently closed source]
 3. No-code UI playground at https://platform.bolna.ai/ using the hosted APIs + tailwind CSS [currently closed source]
 
+## Sub-Accounts
+For enterprise users, Bolna provides sub-account functionality to organize and manage multiple customer accounts or business units under a single main account. Sub-accounts enable logical separation of agents, calls, logs, recordings, and usage data while maintaining centralized management.
+
+For detailed information about sub-accounts, see [SUB_ACCOUNTS.md](SUB_ACCOUNTS.md).
+
 
 ## Development philosophy
 1. Any integration, enhancement or feature initially lands on this open source package since it forms the backbone of our Hosted APIs and dashboard
