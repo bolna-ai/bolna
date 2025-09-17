@@ -54,6 +54,7 @@ async def trigger_api(url, method, param, api_token, headers_data, meta_info, ru
                 elif content_type == "form":
                     async with session.post(url, data=api_params, headers=headers) as response:
                         response_text = await response.text()
+                        logger.info(f"Response from the server: {response_text}")
 
             return response_text
     except Exception as e:
