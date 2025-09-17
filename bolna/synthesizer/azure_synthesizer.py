@@ -47,9 +47,34 @@ class AzureSynthesizer(BaseSynthesizer):
         }
         self.connection_requested_at = None
 
-        # Implement connection pooling with a synthesizer factory
+        # Implement connection pooling with actual synthesizer management
         self.synthesizer_pool = []
         self.max_pool_size = 5  # Tune based on your traffic
+        self.pool_lock = asyncio.Lock()
+        self._initialize_pool()
+
+    def _initialize_pool(self):
+        """Initialize the synthesizer pool with pre-created instances"""
+        for _ in range(min(2, self.max_pool_size)):  # Start with 2 instances
+            synthesizer = speechsdk.SpeechSynthesizer(speech_config=self.speech_config, audio_config=None)
+            self.synthesizer_pool.append(synthesizer)
+
+    async def get_synthesizer(self):
+        """Get a synthesizer from the pool or create a new one"""
+        async with self.pool_lock:
+            if self.synthesizer_pool:
+                return self.synthesizer_pool.pop()
+            else:
+                logger.debug("Creating new synthesizer instance (pool empty)")
+                return speechsdk.SpeechSynthesizer(speech_config=self.speech_config, audio_config=None)
+
+    async def return_synthesizer(self, synthesizer):
+        """Return a synthesizer to the pool for reuse"""
+        async with self.pool_lock:
+            if len(self.synthesizer_pool) < self.max_pool_size:
+                self.synthesizer_pool.append(synthesizer)
+            else:
+                pass
 
     def get_synthesized_characters(self):
         return self.synthesized_characters
@@ -132,90 +157,98 @@ class AzureSynthesizer(BaseSynthesizer):
                     yield create_ws_data_packet(audio_data, meta_info)
                     continue
 
-                # Create synthesizer for each request to avoid blocking
-                synthesizer = speechsdk.SpeechSynthesizer(speech_config=self.speech_config, audio_config=None)
+                synthesizer = await self.get_synthesizer()
 
-                # Set up streaming events
-                chunk_queue = asyncio.Queue()
-                done_event = asyncio.Event()
-                start_time = time.perf_counter()
+                try:
+                    # Set up streaming events
+                    chunk_queue = asyncio.Queue()
+                    done_event = asyncio.Event()
+                    start_time = time.perf_counter()
+                    full_audio = bytearray() if self.caching else None
 
-                def speech_synthesizer_synthesizing_handler(evt):
-                    try:
-                        if self.connection_time is None:
-                            self.connection_time = round((time.perf_counter() - start_time) * 1000)
+                    def speech_synthesizer_synthesizing_handler(evt):
+                        try:
+                            if self.connection_time is None:
+                                self.connection_time = round((time.perf_counter() - start_time) * 1000)
 
-                        # Use run_coroutine_threadsafe to safely put data from another thread
-                        asyncio.run_coroutine_threadsafe(
-                            chunk_queue.put(evt.result.audio_data), 
-                            self.loop
-                        )
-                    except Exception as e:
-                        logger.error(f"Error in synthesizing handler: {e}")
+                            # Use run_coroutine_threadsafe to safely put data from another thread
+                            asyncio.run_coroutine_threadsafe(
+                                chunk_queue.put(evt.result.audio_data), 
+                                self.loop
+                            )
+                        except Exception as e:
+                            logger.error(f"Error in synthesizing handler: {e}")
 
-                def speech_synthesizer_completed_handler(evt):
-                    async def set_done_event():
-                        done_event.set()
+                    def speech_synthesizer_completed_handler(evt):
+                        async def set_done_event():
+                            done_event.set()
 
-                    asyncio.run_coroutine_threadsafe(set_done_event(), self.loop)
+                        asyncio.run_coroutine_threadsafe(set_done_event(), self.loop)
 
-                synthesizer.synthesizing.connect(speech_synthesizer_synthesizing_handler)
-                synthesizer.synthesis_completed.connect(speech_synthesizer_completed_handler)
+                    synthesizer.synthesizing.connect(speech_synthesizer_synthesizing_handler)
+                    synthesizer.synthesis_completed.connect(speech_synthesizer_completed_handler)
 
-                ssml = self._build_ssml(text)
-                start_time = time.perf_counter()
-                if ssml:
-                    synthesizer.speak_ssml_async(ssml)
-                else:
-                    synthesizer.speak_text_async(text)
-                logger.debug(f"Azure TTS request sent for {len(text)} chars")
-                full_audio = bytearray()
+                    ssml = self._build_ssml(text)
+                    start_time = time.perf_counter()
+                    if ssml:
+                        synthesizer.speak_ssml_async(ssml)
+                    else:
+                        synthesizer.speak_text_async(text)
+                    logger.debug(f"Azure TTS request sent for {len(text)} chars")
+                    
+                    # Process chunks as they arrive - optimized for streaming
+                    while not done_event.is_set() or not chunk_queue.empty():
+                        try:
+                            if not chunk_queue.empty():
+                                chunk = chunk_queue.get_nowait()
+                            elif not done_event.is_set():
+                                chunk = await chunk_queue.get()
+                            else:
+                                break
+                            
+                            # Collect full audio for caching only if enabled and not streaming
+                            if self.caching and full_audio is not None:
+                                full_audio.extend(chunk)
+                            
+                            # Log first chunk latency
+                            if not self.first_chunk_generated:
+                                first_chunk_time = round((time.perf_counter() - start_time) * 1000)
+                                self.latency_stats["request_count"] += 1
+                                self.latency_stats["total_first_byte_latency"] += first_chunk_time
+                                self.latency_stats["min_latency"] = min(self.latency_stats["min_latency"], first_chunk_time)
+                                self.latency_stats["max_latency"] = max(self.latency_stats["max_latency"], first_chunk_time)
+
+                            # Process chunk
+                            if not self.first_chunk_generated:
+                                meta_info["is_first_chunk"] = True
+                                self.first_chunk_generated = True
+                            else:
+                                meta_info["is_first_chunk"] = False
+                            
+                            # Track if this is the end
+                            if done_event.is_set() and chunk_queue.empty():
+                                if "end_of_llm_stream" in meta_info and meta_info["end_of_llm_stream"]:
+                                    meta_info["end_of_synthesizer_stream"] = True
+                                    self.first_chunk_generated = False
+                            
+                            meta_info['text'] = text
+                            meta_info['format'] = 'wav'
+                            meta_info["text_synthesized"] = f"{text} "
+                            meta_info["mark_id"] = str(uuid.uuid4())
+                            yield create_ws_data_packet(chunk, meta_info)
+                            
+                        except asyncio.QueueEmpty:
+                            if done_event.is_set():
+                                break
+                            await asyncio.sleep(0)
+                    
+                    # Cache the complete audio if enabled
+                    if self.caching and full_audio:
+                        logger.debug(f"Caching audio for text: {text}")
+                        self.cache.set(text, bytes(full_audio))
                 
-                # Process chunks as they arrive
-                while not done_event.is_set() or not chunk_queue.empty():
-                    try:
-                        # Get available chunk or wait briefly
-                        chunk = await asyncio.wait_for(chunk_queue.get(), timeout=0.01)
-                        
-                        # Collect full audio for caching if enabled
-                        if self.caching:
-                            full_audio.extend(chunk)
-                        
-                        # Log first chunk latency
-                        if not self.first_chunk_generated:
-                            first_chunk_time = round((time.perf_counter() - start_time) * 1000)
-                            self.latency_stats["request_count"] += 1
-                            self.latency_stats["total_first_byte_latency"] += first_chunk_time
-                            self.latency_stats["min_latency"] = min(self.latency_stats["min_latency"], first_chunk_time)
-                            self.latency_stats["max_latency"] = max(self.latency_stats["max_latency"], first_chunk_time)
-
-                        # Process chunk
-                        if not self.first_chunk_generated:
-                            meta_info["is_first_chunk"] = True
-                            self.first_chunk_generated = True
-                        else:
-                            meta_info["is_first_chunk"] = False
-                        
-                        # Track if this is the end
-                        if done_event.is_set() and chunk_queue.empty():
-                            if "end_of_llm_stream" in meta_info and meta_info["end_of_llm_stream"]:
-                                meta_info["end_of_synthesizer_stream"] = True
-                                self.first_chunk_generated = False
-                        
-                        meta_info['text'] = text
-                        meta_info['format'] = 'wav'
-                        meta_info["text_synthesized"] = f"{text} "
-                        meta_info["mark_id"] = str(uuid.uuid4())
-                        yield create_ws_data_packet(chunk, meta_info)
-                        
-                    except asyncio.TimeoutError:
-                        # No chunk ready, just continue and check done_event again
-                        continue
-                
-                # Cache the complete audio if enabled
-                if self.caching and full_audio:
-                    logger.debug(f"Caching audio for text: {text}")
-                    self.cache.set(text, bytes(full_audio))
+                finally:
+                    await self.return_synthesizer(synthesizer)
                 
                 self.synthesized_characters += len(text)
         except asyncio.CancelledError:
@@ -226,6 +259,17 @@ class AzureSynthesizer(BaseSynthesizer):
             raise
 
     async def open_connection(self):
+        """Initialize connection - Azure SDK handles connections internally"""
+        pass
+
+    async def cleanup(self):
+        """Clean up synthesizer pool and resources"""
+        async with self.pool_lock:
+            self.synthesizer_pool.clear()
+        logger.debug("Azure synthesizer pool cleaned up")
+
+    async def monitor_connection(self):
+        """Monitor connection health - Azure SDK handles reconnection internally"""
         pass
 
     async def push(self, message):
