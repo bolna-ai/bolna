@@ -19,6 +19,9 @@ class BaseSynthesizer:
         self.internal_queue = asyncio.Queue()
 
     def should_synthesize_response(self, sequence_id):
+        # Allow special system messages like the welcome message (sequence_id == -1)
+        if sequence_id == -1:
+            return True
         return self.task_manager_instance.is_sequence_id_in_current_ids(sequence_id)
 
     async def flush_synthesizer_stream(self):
