@@ -24,6 +24,7 @@ async def trigger_api(url, method, param, api_token, headers_data, meta_info, ru
             logger.info(f"Params {param} \n {type(request_body)} \n {param} \n {kwargs} \n\n {request_body}")
 
         headers = {'Content-Type': 'application/json'}
+        content_type = "json"
         if api_token:
             headers['Authorization'] = api_token
 
@@ -31,6 +32,8 @@ async def trigger_api(url, method, param, api_token, headers_data, meta_info, ru
             for k, v in headers_data.items():
                 headers[k] = v
 
+        if headers.get('Content-Type') == 'application/x-www-form-urlencoded':
+            content_type = 'form'
         convert_to_request_log(request_body, meta_info , None, "function_call", direction="request", is_cached=False, run_id=run_id)
 
         logger.info(f"Sleeping for 700 ms to make sure that we do not send the same message multiple times")
@@ -44,10 +47,15 @@ async def trigger_api(url, method, param, api_token, headers_data, meta_info, ru
                     logger.info(f"Response from the server: {response_text}")
             elif method.lower() == "post":
                 logger.info(f"Sending request {api_params}, {url}, {headers}")
-                async with session.post(url, json=api_params, headers=headers) as response:
-                    response_text = await response.text()
-                    logger.info(f"Response from the server: {response_text}")
-            
+                if content_type == "json":
+                    async with session.post(url, json=api_params, headers=headers) as response:
+                        response_text = await response.text()
+                        logger.info(f"Response from the server: {response_text}")
+                elif content_type == "form":
+                    async with session.post(url, data=api_params, headers=headers) as response:
+                        response_text = await response.text()
+                        logger.info(f"Response from the server: {response_text}")
+
             return response_text
     except Exception as e:
         message = f"ERROR CALLING API: There was an error calling the API: {e}"
