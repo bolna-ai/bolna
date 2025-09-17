@@ -1,4 +1,5 @@
 import copy
+import time
 import aiohttp
 import os
 import uuid
@@ -91,6 +92,11 @@ class DeepgramSynthesizer(BaseSynthesizer):
             message = await self.internal_queue.get()
             logger.info(f"Generating TTS response for message: {message}")
             meta_info, text = message.get("meta_info"), message.get("data")
+            # Stamp synthesizer turn start time for HTTP flow
+            try:
+                meta_info['synthesizer_start_time'] = time.perf_counter()
+            except Exception:
+                pass
             if not self.should_synthesize_response(meta_info.get('sequence_id')):
                 logger.info(f"Not synthesizing text as the sequence_id ({meta_info.get('sequence_id')}) of it is not in the list of sequence_ids present in the task manager.")
                 return
@@ -120,9 +126,22 @@ class DeepgramSynthesizer(BaseSynthesizer):
                 meta_info["end_of_synthesizer_stream"] = True
                 self.first_chunk_generated = False
             meta_info['text'] = text
+            # Compute first-result latency for HTTP (first and only audio message)
+            try:
+                if 'synthesizer_start_time' in meta_info and 'synthesizer_first_result_latency' not in meta_info:
+                    meta_info['synthesizer_first_result_latency'] = time.perf_counter() - meta_info['synthesizer_start_time']
+                    meta_info['synthesizer_latency'] = meta_info['synthesizer_first_result_latency']
+            except Exception:
+                pass
             meta_info['format'] = 'mulaw'
             meta_info["text_synthesized"] = f"{text} "
             meta_info["mark_id"] = str(uuid.uuid4())
+            # Compute total stream duration (HTTP single-shot)
+            try:
+                if 'synthesizer_start_time' in meta_info:
+                    meta_info['synthesizer_total_stream_duration'] = time.perf_counter() - meta_info['synthesizer_start_time']
+            except Exception:
+                pass
             yield create_ws_data_packet(message, meta_info)
 
     async def push(self, message):

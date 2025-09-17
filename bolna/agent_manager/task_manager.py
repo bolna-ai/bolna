@@ -2220,6 +2220,9 @@ class TaskManager(BaseManager):
             if self._is_conversation_task():
                 self.transcriber_latencies['connection_latency_ms'] = self.tools["transcriber"].connection_time
                 self.synthesizer_latencies['connection_latency_ms'] = self.tools["synthesizer"].connection_time
+                
+                self.transcriber_latencies['turn_latencies'] = self.tools["transcriber"].turn_latencies
+                self.synthesizer_latencies['turn_latencies'] = self.tools["synthesizer"].turn_latencies
                 output = {
                     "messages": self.history,
                     "conversation_time": time.time() - self.start_time,

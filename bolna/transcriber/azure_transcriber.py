@@ -71,6 +71,10 @@ class AzureTranscriber(BaseTranscriber):
                     self.audio_submission_time = time.time()
                     self.current_request_id = self.generate_request_id()
                     self.meta_info['request_id'] = self.current_request_id
+                    try:
+                        self.meta_info['transcriber_start_time'] = time.perf_counter()
+                    except Exception:
+                        pass
 
                 end_of_stream = self._check_and_process_end_of_stream(ws_data_packet)
                 if end_of_stream:
@@ -148,6 +152,11 @@ class AzureTranscriber(BaseTranscriber):
                 "type": "interim_transcript_received",
                 "content": evt.result.text.strip()
             }
+            try:
+                if 'transcriber_start_time' in self.meta_info and 'transcriber_first_result_latency' not in self.meta_info:
+                    self.meta_info['transcriber_first_result_latency'] = time.perf_counter() - self.meta_info['transcriber_start_time']
+            except Exception:
+                pass
             await self.transcriber_output_queue.put(create_ws_data_packet(data, self.meta_info))
 
     async def recognized_handler(self, evt):
@@ -158,6 +167,11 @@ class AzureTranscriber(BaseTranscriber):
                 "type": "transcript",
                 "content": evt.result.text.strip()
             }
+            try:
+                if 'transcriber_start_time' in self.meta_info:
+                    self.meta_info['transcriber_total_stream_duration'] = time.perf_counter() - self.meta_info['transcriber_start_time']
+            except Exception:
+                pass
             await self.transcriber_output_queue.put(create_ws_data_packet(data, self.meta_info))
             self.duration += evt.result.duration
 

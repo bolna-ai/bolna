@@ -48,6 +48,8 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
         self.websocket_holder = {"websocket": None}
         self.sender_task = None
         self.conversation_ended = False
+        self.current_turn_start_time = None
+        self.current_turn_id = None
         self.current_text = ""
         self.context_id = None
 
@@ -221,6 +223,13 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
 
                     if len(self.text_queue) > 0:
                         self.meta_info = self.text_queue.popleft()
+                        # Compute first-result latency on first audio chunk
+                        try:
+                            if self.current_turn_start_time is not None:
+                                first_result_latency = time.perf_counter() - self.current_turn_start_time
+                                self.meta_info['synthesizer_latency'] = first_result_latency
+                        except Exception:
+                            pass
                     audio = ""
 
                     if self.use_mulaw:
@@ -248,6 +257,20 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
                         logger.info("received null byte and hence end of stream")
                         self.meta_info["end_of_synthesizer_stream"] = True
                         self.first_chunk_generated = False
+                        # Compute total stream duration for this synthesizer turn
+                        try:
+                            if self.current_turn_start_time is not None:
+                                total_stream_duration = time.perf_counter() - self.current_turn_start_time
+                                self.turn_latencies.append({
+                                    'turn_id': self.current_turn_id,
+                                    'sequence_id': self.current_turn_id,
+                                    'first_result_latency_ms': round((self.meta_info.get('synthesizer_latency', 0)) * 1000),
+                                    'total_stream_duration_ms': round(total_stream_duration * 1000)
+                                })
+                                self.current_turn_start_time = None
+                                self.current_turn_id = None
+                        except Exception:
+                            pass
 
                     self.meta_info["text_synthesized"] = text_synthesized
 
@@ -342,6 +365,12 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
             end_of_llm_stream = "end_of_llm_stream" in meta_info and meta_info["end_of_llm_stream"]
             self.meta_info = copy.deepcopy(meta_info)
             meta_info["text"] = text
+            # Stamp synthesizer turn start time
+            try:
+                self.current_turn_start_time = time.perf_counter()
+                self.current_turn_id = meta_info.get('turn_id') or meta_info.get('sequence_id')
+            except Exception:
+                pass
             if not self.context_id:
                 self.context_id = str(uuid.uuid4())
             self.sender_task = asyncio.create_task(self.sender(text, meta_info.get("sequence_id"), end_of_llm_stream))
