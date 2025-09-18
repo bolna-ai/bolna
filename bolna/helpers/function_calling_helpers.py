@@ -32,7 +32,7 @@ async def trigger_api(url, method, param, api_token, headers_data, meta_info, ru
             for k, v in headers_data.items():
                 headers[k] = v
 
-        if headers.get('Content-Type') == 'application/x-www-form-urlencoded':
+        if headers.get('Content-Type').lower().startswith('application/x-www-form-urlencoded'):
             content_type = 'form'
         convert_to_request_log(request_body, meta_info , None, "function_call", direction="request", is_cached=False, run_id=run_id)
 
