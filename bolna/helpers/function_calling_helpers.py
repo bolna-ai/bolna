@@ -46,13 +46,15 @@ async def trigger_api(url, method, param, api_token, headers_data, meta_info, ru
                     response_text = await response.text()
                     logger.info(f"Response from the server: {response_text}")
             elif method.lower() == "post":
-                logger.info(f"Sending request {api_params}, {url}, {headers}")
                 if content_type == "json":
+                    logger.info(f"Sending request {api_params}, {url}, {headers}")
                     async with session.post(url, json=api_params, headers=headers) as response:
                         response_text = await response.text()
                         logger.info(f"Response from the server: {response_text}")
                 elif content_type == "form":
-                    async with session.post(url, data=api_params, headers=headers) as response:
+                    normalized_api_params = normalize_for_form(api_params)
+                    logger.info(f"Sending request {api_params}, {url}, {headers}, {normalized_api_params}")
+                    async with session.post(url, data=normalized_api_params, headers=headers) as response:
                         response_text = await response.text()
                         logger.info(f"Response from the server: {response_text}")
 
@@ -72,3 +74,10 @@ async def computed_api_response(response):
         pass
 
     return get_res_keys, get_res_values
+
+
+def normalize_for_form(data: dict) -> dict:
+    return {
+        k: json.dumps(v) if isinstance(v, (dict, list)) else str(v)
+        for k, v in data.items()
+    }
