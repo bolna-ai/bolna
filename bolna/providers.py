@@ -1,5 +1,5 @@
 from .synthesizer import PollySynthesizer, ElevenlabsSynthesizer, OPENAISynthesizer, DeepgramSynthesizer, AzureSynthesizer, CartesiaSynthesizer, SmallestSynthesizer, SarvamSynthesizer, RimeSynthesizer
-from .transcriber import DeepgramTranscriber, AzureTranscriber
+from .transcriber import DeepgramTranscriber, AzureTranscriber, AssemblyAITranscriber
 from .input_handlers import DefaultInputHandler, TwilioInputHandler, ExotelInputHandler, PlivoInputHandler
 from .output_handlers import DefaultOutputHandler, TwilioOutputHandler, ExotelOutputHandler, PlivoOutputHandler
 from .llms import OpenAiLLM, LiteLLM
@@ -18,12 +18,14 @@ SUPPORTED_SYNTHESIZER_MODELS = {
 
 SUPPORTED_TRANSCRIBER_PROVIDERS = {
     'deepgram': DeepgramTranscriber,
-    'azure': AzureTranscriber
+    'azure': AzureTranscriber,
+    'assembly': AssemblyAITranscriber
 }
 
 #Backwards compatibility
 SUPPORTED_TRANSCRIBER_MODELS = {
-    'deepgram': DeepgramTranscriber
+    'deepgram': DeepgramTranscriber,
+    'assembly': AssemblyAITranscriber
 }
 
 SUPPORTED_LLM_PROVIDERS = {
