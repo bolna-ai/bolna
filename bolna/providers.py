@@ -24,8 +24,7 @@ SUPPORTED_TRANSCRIBER_PROVIDERS = {
 
 #Backwards compatibility
 SUPPORTED_TRANSCRIBER_MODELS = {
-    'deepgram': DeepgramTranscriber,
-    'assembly': AssemblyAITranscriber
+    'deepgram': DeepgramTranscriber
 }
 
 SUPPORTED_LLM_PROVIDERS = {
