@@ -1237,6 +1237,8 @@ class TaskManager(BaseManager):
 
             async with aiohttp.ClientSession() as session:
                 logger.info(f"Sending the payload to stop the conversation {payload} url {url}")
+                while self.tools["input"].is_audio_being_played_to_user():
+                    await asyncio.sleep(1)
                 convert_to_request_log(str(payload), meta_info, None, "function_call", direction="request", is_cached=False,
                                        run_id=self.run_id)
                 async with session.post(url, json = payload) as response:
