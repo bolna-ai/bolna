@@ -4,4 +4,5 @@ from .graph_based_conversational_agent import GraphBasedConversationAgent
 from .summarization_agent import SummarizationContextualAgent
 from .webhook_agent import WebhookAgent
 from .graph_agent import GraphAgent
+from .knowledge_agent import KnowledgeAgent
 from .knowledgebase_agent import RAGAgent
