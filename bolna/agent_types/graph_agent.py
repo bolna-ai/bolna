@@ -3,11 +3,12 @@ import time
 import asyncio
 from openai import OpenAI
 from dotenv import load_dotenv
+import json
 
-from bolna.agent_types.knowledgebase_agent import RAGAgent
 from bolna.models import *
 from bolna.agent_types.base_agent import BaseAgent
 from bolna.helpers.logger_config import configure_logger
+from bolna.helpers.rag_service_client import RAGServiceClient, RAGServiceClientSingleton
 
 from typing import List, Tuple, Generator, AsyncGenerator
 
@@ -25,20 +26,45 @@ class GraphAgent(BaseAgent):
         self.openai = OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
         self.node_history = ["root"]
         self.node_structure = self.build_node_structure()
-        self.rag_agents = self.initialize_rag_agents()
+        self.rag_configs = self.initialize_rag_configs()
+        self.rag_service_url = os.getenv('RAG_SERVICE_URL', 'http://localhost:8000')
 
-    def initialize_rag_agents(self) -> Dict[str, RAGAgent]:
-        rag_agents = {}
+    def initialize_rag_configs(self) -> Dict[str, Dict]:
+        """Initialize RAG configurations for each node."""
+        rag_configs = {}
         for node in self.config.get('nodes', []):
             rag_config = node.get('rag_config')
             if rag_config:
-                rag_agents[node['id']] = RAGAgent(
-                    provider_config=rag_config,
-                    temperature=rag_config.get('temperature', 0.7),
-                    model=rag_config.get('model', 'gpt-4'),
-                    max_tokens=rag_config.get('max_tokens', 150)
-                )
-        return rag_agents
+                # Extract collection/vector IDs
+                collections = []
+                # Legacy: direct vector_id on rag_config
+                if 'vector_id' in rag_config:
+                    collections.append(rag_config['vector_id'])
+                # Legacy: rag_config.provider_config.vector_id
+                elif 'provider_config' in rag_config and isinstance(rag_config.get('provider_config'), dict) and 'vector_id' in rag_config['provider_config']:
+                    collections.append(rag_config['provider_config']['vector_id'])
+                # New: rag_config.vector_store.provider_config.vector_id
+                else:
+                    try:
+                        vector_store = rag_config.get('vector_store') or {}
+                        provider_config = vector_store.get('provider_config') or {}
+                        vs_vector_id = provider_config.get('vector_id')
+                        if vs_vector_id:
+                            collections.append(vs_vector_id)
+                    except Exception:
+                        pass
+                
+                rag_configs[node['id']] = {
+                    'collections': collections,
+                    'similarity_top_k': rag_config.get('similarity_top_k', 10),
+                    'temperature': rag_config.get('temperature', 0.7),
+                    'model': rag_config.get('model', 'gpt-4o'),
+                    'max_tokens': rag_config.get('max_tokens', 150)
+                }
+                
+                logger.info(f"Initialized RAG config for node {node['id']} with collections: {collections}")
+                
+        return rag_configs
 
     def build_node_structure(self) -> Dict[str, List[str]]:
         structure = {}
@@ -63,35 +89,46 @@ class GraphAgent(BaseAgent):
             raise ValueError("Current node is not found in the configuration.")
 
         prompt = current_node['prompt']
-        rag_agent = self.rag_agents.get(self.current_node_id)
+        rag_config = self.rag_configs.get(self.current_node_id)
 
-        if rag_agent:
-            logger.info(f"Using RAGAgent for node {self.current_node_id}")
-
-            rag_context = ""
+        if rag_config and rag_config.get('collections'):
+            logger.info(f"Using RAG service for node {self.current_node_id}")
 
             try:
-                async for chunk, is_final, latency, truncated, function_tool, function_tool_message in rag_agent.generate(history):
-                    if is_final:
-                        rag_context = chunk
-                        break
+                # Get RAG service client
+                client = await RAGServiceClientSingleton.get_client(self.rag_service_url)
+                
+                # Get user query
+                latest_message = history[-1]["content"]
+                
+                # Query RAG service
+                rag_response = await client.query_for_conversation(
+                    query=latest_message,
+                    collections=rag_config['collections'],
+                    max_results=rag_config.get('similarity_top_k', 10),
+                    similarity_threshold=0.1
+                )
 
-                if not rag_context:
+                if not rag_response.contexts:
                     logger.warning(f"No relevant context retrieved from RAG for node {self.current_node_id}")
                     return await self._generate_fallback_response(prompt, history)
 
-                # Emphasize the latest message
-                latest_message = history[-1]["content"]
-                combined_context = f"{prompt}\n\nHere is some additional information:\n{rag_context}\n\nPlease respond based on the latest user message: '{latest_message}'."
+                # Format context
+                rag_context = await client.format_context_for_prompt(rag_response.contexts)
+                
+                logger.info(f"Retrieved {rag_response.total_results} contexts in {rag_response.processing_time:.3f}s")
+
+                # Combine prompt with RAG context
+                combined_context = f"{prompt}\n\nRelevant Information:\n{rag_context}\n\nPlease respond based on the latest user message: '{latest_message}'."
 
                 return await self._generate_response_from_openai(combined_context, history)
 
             except asyncio.TimeoutError:
-                logger.error(f"Timeout occurred while fetching data from RAG for node {self.current_node_id}")
+                logger.error(f"Timeout occurred while fetching data from RAG service for node {self.current_node_id}")
                 return await self._generate_fallback_response(prompt, history)
 
             except Exception as e:
-                logger.error(f"An error occurred while processing the RAG agent: {e}")
+                logger.error(f"An error occurred while processing the RAG service: {e}")
                 return await self._generate_fallback_response(prompt, history)
 
         else:

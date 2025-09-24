@@ -692,24 +692,35 @@ class TaskManager(BaseManager):
         if agent_type == "simple_llm_agent":
             llm_agent = StreamingContextualAgent(llm)
         elif agent_type == "knowledgebase_agent":
-            logger.info("Setting up knowledgebase_agent agent ####")
+            logger.info("Setting up RAG-enhanced agent using rag-proxy-server ####")
             llm_config = self.task_config["tools_config"]["llm_agent"].get("llm_config", {})
-            vector_store_config = llm_config.get("vector_store", {})
-            llm_agent = RAGAgent(
+            rag_service_url = self.kwargs.get('rag_service_url', os.getenv('RAG_SERVICE_URL', 'http://localhost:8000'))
+            
+            # Import the new RAG enhanced agent
+            from bolna.agent_types.rag_enhanced_agent import RAGEnhancedAgent
+            
+            llm_agent = RAGEnhancedAgent(
                 temperature=llm_config.get("temperature", 0.1),
                 model=llm_config.get("model", "gpt-3.5-turbo-16k"),
-                buffer=self.task_config["tools_config"]["synthesizer"].get('buffer_size'),
-                max_tokens=self.llm_agent_config['llm_config']['max_tokens'],
-                provider_config=vector_store_config
+                buffer=self.task_config["tools_config"]["synthesizer"].get('buffer_size', 20),
+                max_tokens=llm_config.get('max_tokens', 100),
+                provider_config=llm_config,
+                rag_service_url=rag_service_url
             )
-            logger.info("Llama-index rag agent is created")
+            logger.info("RAG-enhanced agent created using rag-proxy-server")
         elif agent_type == "graph_agent":
-            logger.info("Setting up graph agent")
+            logger.info("Setting up graph agent with rag-proxy-server support")
             llm_config = self.task_config["tools_config"]["llm_agent"].get("llm_config", {})
-            logger.info(f"Getting this llm config : {llm_config}")
+            rag_service_url = self.kwargs.get('rag_service_url', os.getenv('RAG_SERVICE_URL', 'http://localhost:8000'))
+            
+            logger.info(f"Graph agent config: {llm_config}")
+            logger.info(f"RAG service URL: {rag_service_url}")
+            
+            # Set RAG service URL in environment for GraphAgent to use
+            os.environ['RAG_SERVICE_URL'] = rag_service_url
+            
             llm_agent = GraphAgent(llm_config)
-            logger.info(f"Graph agent is created")
-            logger.info("Knowledge Base Agent created")
+            logger.info("Graph agent created with rag-proxy-server support")
         else:
             raise f"{agent_type} Agent type is not created yet"
         return llm_agent
