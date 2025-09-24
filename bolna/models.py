@@ -259,6 +259,13 @@ class GraphAgentConfig(Llm):
     current_node_id: str
     context_data: Optional[dict] = None
 
+class KnowledgeAgentConfig(Llm):
+    agent_information: Optional[str] = "Knowledge-based AI assistant"
+    prompt: Optional[str] = None
+    rag_config: Optional[Dict] = None
+    llm_provider: Optional[str] = "openai"
+    context_data: Optional[dict] = None
+
 class AgentRouteConfig(BaseModel):
     utterances: List[str]
     threshold: Optional[float] = 0.85
@@ -281,7 +288,7 @@ class LlmAgent(BaseModel):
     agent_flow_type: str
     agent_type: str
     routes: Optional[Routes] = None
-    llm_config: Union[KnowledgebaseAgent, LlmAgentGraph, MultiAgent, SimpleLlmAgent, GraphAgentConfig]
+    llm_config: Union[KnowledgebaseAgent, LlmAgentGraph, MultiAgent, SimpleLlmAgent, GraphAgentConfig, KnowledgeAgentConfig]
 
     @field_validator('llm_config', mode='before')
     def validate_llm_config(cls, value, info):
@@ -289,6 +296,7 @@ class LlmAgent(BaseModel):
 
         valid_config_types = {
             'knowledgebase_agent': KnowledgebaseAgent,
+            'knowledge_agent': KnowledgeAgentConfig,
             'graph_agent': GraphAgentConfig,
             'llm_agent_graph': LlmAgentGraph,
             'multiagent': MultiAgent,
