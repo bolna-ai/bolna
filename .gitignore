@@ -170,3 +170,5 @@ agent_data/**/mp3
 logs/
 agent_data/
 testing/
+
+test_3.wav
