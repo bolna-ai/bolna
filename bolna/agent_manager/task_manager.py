@@ -182,6 +182,9 @@ class TaskManager(BaseManager):
         self.ended_by_assistant = False
         self.start_time = time.time()
 
+        self.previous_start_ts = None
+        self.current_start_ts = None
+
         #Tasks
         self.extracted_data = None
         self.summarized_data = None
@@ -1500,6 +1503,13 @@ class TaskManager(BaseManager):
         return sequence
 
     async def _handle_transcriber_output(self, next_task, transcriber_message, meta_info):
+        current_ts = self.tools["input"].get_current_mark_started_time()
+        self.previous_start_ts = self.current_start_ts
+        self.current_start_ts = current_ts
+
+        if self.current_start_ts == self.previous_start_ts and not self.tools['input'].is_audio_being_played_to_user():
+            logger.info(f"handle_transcriber_output -> skip as previous user message {self.history[-1]}")
+            return
         self.history.append({"role": "user", "content": transcriber_message})
 
         convert_to_request_log(message=transcriber_message, meta_info= meta_info, model = "deepgram", run_id= self.run_id)
@@ -1587,21 +1597,6 @@ class TaskManager(BaseManager):
 
                     # Whenever speech_final or UtteranceEnd is received from Deepgram, this condition would get triggered
                     elif isinstance(message.get("data"), dict) and message["data"].get("type", "") == "transcript":
-                        transcriber_content = message["data"].get("content").strip()
-                        if not self.tools["input"].welcome_message_played():
-                            if transcriber_content in self.welcome_message_user_speech_words:
-                                continue
-                            else:
-                                self.welcome_message_user_speech_words.append(transcriber_content)
-                        elif (len(self.history) == 3 or len(self.history) == 4):
-                            if len(self.history) == 3:
-                                previous_content = self.history[-1]['content']
-                            else:
-                                previous_content = self.history[-2]['content']
-                            logger.info(f"transcriber_content: {transcriber_content}, previous_content: {previous_content}")
-                            if transcriber_content == previous_content:
-                                continue
-
                         logger.info(f"Received transcript, sending for further processing")
                         if self.tools["input"].welcome_message_played() and self.tools["input"].is_audio_being_played_to_user() and \
                                 len(message["data"].get("content").strip().split(" ")) <= self.number_of_words_for_interruption and \
