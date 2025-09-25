@@ -217,13 +217,6 @@ class TaskManager(BaseManager):
                         "max_tokens": self.llm_agent_config['llm_config']['max_tokens'],
                         "provider": self.llm_agent_config['llm_config']['provider'],
                     }
-                elif self.__is_knowledge_agent():
-                    self.llm_agent_config = self.task_config["tools_config"]["llm_agent"]
-                    self.llm_config = {
-                        "model": self.llm_agent_config['llm_config']['model'],
-                        "max_tokens": self.llm_agent_config['llm_config']['max_tokens'],
-                        "provider": self.llm_agent_config['llm_config']['provider'],
-                    }
                 else:
                     agent_type = self.task_config["tools_config"]["llm_agent"].get("agent_type", None)
                     if not agent_type:
@@ -447,11 +440,11 @@ class TaskManager(BaseManager):
         agent_type = self.task_config['tools_config']["llm_agent"].get("agent_type", None)
         return agent_type == "graph_agent"
     
-    def __is_knowledge_agent(self):
-        if self.task_config["task_type"] == "webhook":
-            return False
-        agent_type = self.task_config['tools_config']["llm_agent"].get("agent_type", None)
-        return agent_type == "knowledge_agent"
+    # def __is_knowledge_agent(self):
+    #     if self.task_config["task_type"] == "webhook":
+    #         return False
+    #     agent_type = self.task_config['tools_config']["llm_agent"].get("agent_type", None)
+    #     return agent_type == "knowledge_agent"
 
     def __setup_routes(self, routes):
         embedding_model = routes.get("embedding_model", os.getenv("ROUTE_EMBEDDING_MODEL"))
@@ -704,23 +697,6 @@ class TaskManager(BaseManager):
         self.agent_type = agent_type
         if agent_type == "simple_llm_agent":
             llm_agent = StreamingContextualAgent(llm)
-        # elif agent_type == "knowledgebase_agent":
-        #     logger.info("Setting up RAG-enhanced agent using rag-proxy-server ####")
-        #     llm_config = self.task_config["tools_config"]["llm_agent"].get("llm_config", {})
-        #     rag_service_url = self.kwargs.get('rag_service_url', os.getenv('RAG_SERVICE_URL', 'http://localhost:8000'))
-            
-        #     # Import the new RAG enhanced agent
-        #     from bolna.agent_types.rag_enhanced_agent import RAGEnhancedAgent
-            
-        #     llm_agent = RAGEnhancedAgent(
-        #         temperature=llm_config.get("temperature", 0.1),
-        #         model=llm_config.get("model", "gpt-3.5-turbo-16k"),
-        #         buffer=self.task_config["tools_config"]["synthesizer"].get('buffer_size', 20),
-        #         max_tokens=llm_config.get('max_tokens', 100),
-        #         provider_config=llm_config,
-        #         rag_service_url=rag_service_url
-        #     )
-        #     logger.info("RAG-enhanced agent created using rag-proxy-server")
         elif agent_type == "graph_agent":
             logger.info("Setting up graph agent with rag-proxy-server support")
             llm_config = self.task_config["tools_config"]["llm_agent"].get("llm_config", {})
@@ -734,7 +710,7 @@ class TaskManager(BaseManager):
             
             llm_agent = GraphAgent(llm_config)
             logger.info("Graph agent created with rag-proxy-server support")
-        elif agent_type == "knowledge_agent":
+        elif agent_type == "knowledgebase_agent":
             logger.info("Setting up knowledge agent with rag-proxy-server support")
             llm_config = self.task_config["tools_config"]["llm_agent"].get("llm_config", {})
             rag_service_url = self.kwargs.get('rag_service_url', os.getenv('RAG_SERVICE_URL', 'http://localhost:8000'))
@@ -754,7 +730,7 @@ class TaskManager(BaseManager):
             if 'api_version' in self.kwargs:
                 injected_cfg['api_version'] = self.kwargs['api_version']
 
-            llm_agent = KnowledgeAgent(injected_cfg)
+            llm_agent = KnowledgeBaseAgent(injected_cfg)
             logger.info("Knowledge agent created with rag-proxy-server support")
         else:
             raise f"{agent_type} Agent type is not created yet"
@@ -863,7 +839,7 @@ class TaskManager(BaseManager):
 
         # If using knowledge_agent, inject the prompt into agent config so agent can read it
         try:
-            if self.__is_knowledge_agent() and 'llm_agent' in self.task_config['tools_config']:
+            if self.__is_knowledgebase_agent() and 'llm_agent' in self.task_config['tools_config']:
                 if 'llm_config' in self.task_config['tools_config']['llm_agent']:
                     self.task_config['tools_config']['llm_agent']['llm_config']['prompt'] = self.system_prompt['content']
         except Exception as e:
@@ -1468,7 +1444,7 @@ class TaskManager(BaseManager):
             await self.__do_llm_generation(messages, meta_info, next_step, should_bypass_synth)
             # TODO : Write a better check for completion prompt
 
-            if self.agent_type not in ["graph_agent", "knowledge_agent", "knowledgebase_agent"]:
+            if self.agent_type not in ["graph_agent", "knowledgebase_agent"]:
                 if self.use_llm_to_determine_hangup and not self.turn_based_conversation:
                     completion_res = await self.tools["llm_agent"].check_for_completion(messages, self.check_for_completion_prompt)
                     should_hangup = completion_res['hangup'].lower() == "yes"

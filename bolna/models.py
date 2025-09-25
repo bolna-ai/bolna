@@ -295,8 +295,7 @@ class LlmAgent(BaseModel):
         agent_type = info.data.get('agent_type')
 
         valid_config_types = {
-            'knowledgebase_agent': KnowledgebaseAgent,
-            'knowledge_agent': KnowledgeAgentConfig,
+            'knowledgebase_agent': KnowledgeAgentConfig,
             'graph_agent': GraphAgentConfig,
             'llm_agent_graph': LlmAgentGraph,
             'multiagent': MultiAgent,
