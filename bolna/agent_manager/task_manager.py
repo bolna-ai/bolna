@@ -116,6 +116,12 @@ class TaskManager(BaseManager):
         self.preloaded_welcome_audio = base64.b64decode(self.welcome_message_audio) if self.welcome_message_audio else None
         self.observable_variables = {}
         self.output_handler_set = False
+        
+        # Transcript buffering for consolidating speech segments
+        self.transcript_buffer = ""
+        self.transcript_buffer_timeout = 1.5  # seconds to wait for additional segments
+        self.transcript_buffer_task = None
+        self.last_transcript_time = None
         #IO HANDLERS
         if task_id == 0:
             if self.is_web_based_call:
@@ -927,6 +933,14 @@ class TaskManager(BaseManager):
             self.first_message_task.cancel()
             self.first_message_task = None
 
+        if self.transcript_buffer_task is not None:
+            logger.info("Cancelling transcript buffer task")
+            self.transcript_buffer_task.cancel()
+            self.transcript_buffer_task = None
+            if self.transcript_buffer.strip():
+                logger.info(f"Clearing transcript buffer: {self.transcript_buffer}")
+                self.transcript_buffer = ""
+
         # self.synthesizer_task.cancel()
         # self.synthesizer_task = asyncio.create_task(self.__listen_synthesizer())
         #for task in self.synthesizer_tasks:
@@ -1518,6 +1532,42 @@ class TaskManager(BaseManager):
         else:
             logger.info(f"Need to separate out output task")
 
+    async def _process_buffered_transcript(self, next_task, meta_info):
+        """Process the buffered transcript after timeout or when explicitly called"""
+        if self.transcript_buffer.strip():
+            logger.info(f"Processing buffered transcript: {self.transcript_buffer}")
+            await self._handle_transcriber_output(next_task, self.transcript_buffer.strip(), meta_info)
+            self.transcript_buffer = ""
+        self.transcript_buffer_task = None
+
+    async def _add_to_transcript_buffer(self, transcript_content, next_task, meta_info):
+        """Add transcript to buffer and manage timeout"""
+        current_time = time.time()
+        
+        if self.transcript_buffer_task is not None:
+            self.transcript_buffer_task.cancel()
+            self.transcript_buffer_task = None
+        
+        if self.transcript_buffer.strip():
+            self.transcript_buffer += f" {transcript_content}"
+        else:
+            self.transcript_buffer = transcript_content
+        
+        self.last_transcript_time = current_time
+        logger.info(f"Added to transcript buffer: '{transcript_content}'. Buffer now: '{self.transcript_buffer}'")
+        
+        self.transcript_buffer_task = asyncio.create_task(
+            self._transcript_buffer_timeout(next_task, meta_info)
+        )
+
+    async def _transcript_buffer_timeout(self, next_task, meta_info):
+        """Wait for timeout then process buffered transcript"""
+        try:
+            await asyncio.sleep(self.transcript_buffer_timeout)
+            await self._process_buffered_transcript(next_task, meta_info)
+        except asyncio.CancelledError:
+            pass
+
     async def _listen_transcriber(self):
         temp_transcriber_message = ""
         try:
@@ -1631,7 +1681,9 @@ class TaskManager(BaseManager):
 
                         transcriber_message = message["data"].get("content")
                         meta_info = self.__get_updated_meta_info(meta_info)
-                        await self._handle_transcriber_output(next_task, transcriber_message, meta_info)
+                        
+                        # Use transcript buffering to consolidate speech segments
+                        await self._add_to_transcript_buffer(transcriber_message, next_task, meta_info)
 
                     elif message["data"] == "transcriber_connection_closed":
                         logger.info(f"Transcriber connection has been closed")
