@@ -119,7 +119,7 @@ class TaskManager(BaseManager):
         
         # Transcript buffering for consolidating speech segments
         self.transcript_buffer = ""
-        self.transcript_buffer_timeout = 1.5  # seconds to wait for additional segments
+        self.transcript_buffer_timeout = 0.4  # seconds to wait for additional segments
         self.transcript_buffer_task = None
         self.last_transcript_time = None
         #IO HANDLERS
