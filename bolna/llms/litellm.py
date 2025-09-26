@@ -208,8 +208,7 @@ class LiteLLM(BaseLLM):
 
         if request_json is True:
             model_args['response_format'] = {
-                "type": "json_object",
-                "schema": json_to_pydantic_schema('{"classification_label": "classification label goes here"}')
+                "type": "json_object"
             }
         logger.info(f'Request to litellm {model_args}')
         try:
