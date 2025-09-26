@@ -1237,6 +1237,8 @@ class TaskManager(BaseManager):
 
             async with aiohttp.ClientSession() as session:
                 logger.info(f"Sending the payload to stop the conversation {payload} url {url}")
+                while self.tools["input"].is_audio_being_played_to_user():
+                    await asyncio.sleep(1)
                 convert_to_request_log(str(payload), meta_info, None, "function_call", direction="request", is_cached=False,
                                        run_id=self.run_id)
                 async with session.post(url, json = payload) as response:
@@ -1567,6 +1569,9 @@ class TaskManager(BaseManager):
                                 self.turn_id += 1
                                 self.tools["input"].update_is_audio_being_played(False)
                                 await self.__cleanup_downstream_tasks()
+                            else:
+                                logger.info(f"Ignoring transcript: {message['data'].get('content').strip()}")
+                                continue
 
                         # Doing changes for incremental delay
                         self.required_delay_before_speaking += self.incremental_delay
@@ -2217,6 +2222,9 @@ class TaskManager(BaseManager):
             if self._is_conversation_task():
                 self.transcriber_latencies['connection_latency_ms'] = self.tools["transcriber"].connection_time
                 self.synthesizer_latencies['connection_latency_ms'] = self.tools["synthesizer"].connection_time
+                
+                self.transcriber_latencies['turn_latencies'] = self.tools["transcriber"].turn_latencies
+                self.synthesizer_latencies['turn_latencies'] = self.tools["synthesizer"].turn_latencies
                 output = {
                     "messages": self.history,
                     "conversation_time": time.time() - self.start_time,
