@@ -25,7 +25,7 @@ load_dotenv()
 class DeepgramTranscriber(BaseTranscriber):
     def __init__(self, telephony_provider, input_queue=None, model='nova-2', stream=True, language="en", endpointing="400",
                  sampling_rate="16000", encoding="linear16", output_queue=None, keywords=None,
-                 process_interim_results="true", **kwargs):
+                 process_interim_results="true", prefer_speech_final=False, **kwargs):
         super().__init__(input_queue)
         self.endpointing = endpointing
         self.language = language
@@ -66,6 +66,8 @@ class DeepgramTranscriber(BaseTranscriber):
         self.current_turn_id = None
         self.websocket_connection = None
         self.connection_authenticated = False
+
+        self.prefer_speech_final = prefer_speech_final
 
     def get_deepgram_ws_url(self):
         dg_params = {
@@ -270,106 +272,82 @@ class DeepgramTranscriber(BaseTranscriber):
             logger.error('Error in sender_stream: ' + str(e))
             raise
 
+    async def _finalize_turn(self, reason: str):
+        """Finalize current transcript if not already sent."""
+        if not self.is_transcript_sent_for_processing and self.final_transcript.strip():
+            logger.info(f"Finalizing turn due to {reason} → {self.final_transcript}")
+            data = {
+                "type": "transcript",
+                "content": self.final_transcript
+            }
+            self.is_transcript_sent_for_processing = True
+            self.final_transcript = ""
+
+            # Track latency
+            try:
+                if self.current_turn_start_time is not None:
+                    total_stream_duration = time.perf_counter() - self.current_turn_start_time
+                    self.meta_info['transcriber_total_stream_duration'] = total_stream_duration
+                    self.meta_info['transcriber_latency'] = total_stream_duration
+
+                    self.turn_latencies.append({
+                        'turn_id': self.current_turn_id,
+                        'sequence_id': self.current_turn_id,
+                        'first_result_latency_ms': round((self.meta_info.get('transcriber_first_result_latency', 0)) * 1000),
+                        'total_stream_duration_ms': round(total_stream_duration * 1000)
+                    })
+
+                    # Reset turn tracking
+                    self.current_turn_start_time = None
+                    self.current_turn_id = None
+            except Exception:
+                pass
+
+            yield create_ws_data_packet(data, self.meta_info)
+
     async def receiver(self, ws: ClientConnection):
         async for msg in ws:
             try:
                 msg = json.loads(msg)
 
-                # If connection_start_time is None, it is the durations of frame submitted till now minus current time
                 if self.connection_start_time is None:
                     self.connection_start_time = (time.time() - (self.num_frames * self.audio_frame_duration))
 
                 if msg["type"] == "SpeechStarted":
                     logger.info("Received SpeechStarted event from deepgram")
                     yield create_ws_data_packet("speech_started", self.meta_info)
-                    pass
 
                 elif msg["type"] == "Results":
                     transcript = msg["channel"]["alternatives"][0]["transcript"]
 
                     if transcript.strip():
-                        data = {
-                            "type": "interim_transcript_received",
-                            "content": transcript
-                        }
-                        # First actionable interim → first result latency
+                        yield create_ws_data_packet(
+                            {"type": "interim_transcript_received", "content": transcript},
+                            self.meta_info
+                        )
+                        # Capture first result latency
                         try:
                             if self.current_turn_start_time is not None and 'transcriber_first_result_latency' not in self.meta_info:
                                 first_result_latency = time.perf_counter() - self.current_turn_start_time
                                 self.meta_info['transcriber_first_result_latency'] = first_result_latency
-                                self.meta_info['transcriber_latency'] = first_result_latency  # For CSV compatibility
+                                self.meta_info['transcriber_latency'] = first_result_latency
                         except Exception:
                             pass
-                        yield create_ws_data_packet(data, self.meta_info)
 
                     if msg["is_final"] and transcript.strip():
                         logger.info(f"Received interim result with is_final set as True - {transcript}")
                         self.final_transcript += f' {transcript}'
+                        self.is_transcript_sent_for_processing = False  # keep ready for finalization
 
-                        if self.is_transcript_sent_for_processing:
-                            self.is_transcript_sent_for_processing = False
-
-                    if msg["speech_final"] and self.final_transcript.strip():
-                        if not self.is_transcript_sent_for_processing and self.final_transcript.strip():
-                            logger.info(f"Received speech final hence yielding the following transcript - {self.final_transcript}")
-                            data = {
-                                "type": "transcript",
-                                "content": self.final_transcript
-                            }
-                            self.is_transcript_sent_for_processing = True
-                            self.final_transcript = ""
-                            # Total stream duration at final
-                            try:
-                                if self.current_turn_start_time is not None:
-                                    total_stream_duration = time.perf_counter() - self.current_turn_start_time
-                                    self.meta_info['transcriber_total_stream_duration'] = total_stream_duration
-                                    self.meta_info['transcriber_latency'] = total_stream_duration  # For CSV compatibility
-                                    
-                                    # Append to turn_latencies
-                                    self.turn_latencies.append({
-                                        'turn_id': self.current_turn_id,
-                                        'sequence_id': self.current_turn_id,
-                                        'first_result_latency_ms': round((self.meta_info.get('transcriber_first_result_latency', 0)) * 1000),
-                                        'total_stream_duration_ms': round(total_stream_duration * 1000)
-                                    })
-                                    
-                                    # Reset turn tracking
-                                    self.current_turn_start_time = None
-                                    self.current_turn_id = None
-                            except Exception:
-                                pass
-                            yield create_ws_data_packet(data, self.meta_info)
+                    if msg.get("speech_final") and self.prefer_speech_final:
+                        async for packet in self._finalize_turn("speech_final"):
+                            yield packet
 
                 elif msg["type"] == "UtteranceEnd":
-                    logger.info(f"Value of is_transcript_sent_for_processing in utterance end - {self.is_transcript_sent_for_processing}")
-                    if not self.is_transcript_sent_for_processing and self.final_transcript.strip():
-                        logger.info(f"Received UtteranceEnd hence yielding the following transcript - {self.final_transcript}")
-                        data = {
-                            "type": "transcript",
-                            "content": self.final_transcript
-                        }
-                        self.is_transcript_sent_for_processing = True
-                        self.final_transcript = ""
-                        try:
-                            if self.current_turn_start_time is not None:
-                                total_stream_duration = time.perf_counter() - self.current_turn_start_time
-                                self.meta_info['transcriber_total_stream_duration'] = total_stream_duration
-                                self.meta_info['transcriber_latency'] = total_stream_duration  # For CSV compatibility
-                                
-                                # Append to turn_latencies
-                                self.turn_latencies.append({
-                                    'turn_id': self.current_turn_id,
-                                    'sequence_id': self.current_turn_id,
-                                    'first_result_latency_ms': round((self.meta_info.get('transcriber_first_result_latency', 0)) * 1000),
-                                    'total_stream_duration_ms': round(total_stream_duration * 1000)
-                                })
-                                
-                                # Reset turn tracking
-                                self.current_turn_start_time = None
-                                self.current_turn_id = None
-                        except Exception:
-                            pass
-                        yield create_ws_data_packet(data, self.meta_info)
+                    logger.info(f"UtteranceEnd received, transcript_sent={self.is_transcript_sent_for_processing}")
+                    if not self.prefer_speech_final:
+                        async for packet in self._finalize_turn("utterance_end"):
+                            yield packet
 
                 elif msg["type"] == "Metadata":
                     logger.info(f"Received Metadata from deepgram - {msg}")
@@ -377,7 +355,7 @@ class DeepgramTranscriber(BaseTranscriber):
                     yield create_ws_data_packet("transcriber_connection_closed", self.meta_info)
                     return
 
-            except Exception as e:
+            except Exception:
                 traceback.print_exc()
                 self.interruption_signalled = False
 
