@@ -2,8 +2,11 @@ import asyncio
 import base64
 import json
 import os
+import io
+import wave
 import time
 import traceback
+import audioop
 from dotenv import load_dotenv
 import aiohttp
 import websockets
@@ -130,8 +133,6 @@ class SarvamTranscriber(BaseTranscriber):
             return create_ws_data_packet("", self.meta_info)
 
         try:
-            import io
-
             data = aiohttp.FormData()
             data.add_field("file", io.BytesIO(wav_data), filename="audio.wav", content_type="audio/wav")
             data.add_field("model", self.model)
@@ -174,18 +175,15 @@ class SarvamTranscriber(BaseTranscriber):
                 audio_bytes = audio_data
 
             if self.encoding == "mulaw":
-                import audioop
                 audio_bytes = audioop.ulaw2lin(audio_bytes, 2)
 
             try:
                 current_rate = getattr(self, "input_sampling_rate", self.sampling_rate)
                 if current_rate != self.sampling_rate:
-                    import audioop
                     audio_bytes, _ = audioop.ratecv(audio_bytes, 2, 1, current_rate, self.sampling_rate, None)
             except Exception:
                 audio_bytes = self.normalize_to_16k(audio_bytes, current_rate)
 
-            import io, wave
             audio_array = np.frombuffer(audio_bytes, dtype=np.int16)
             wav_buffer = io.BytesIO()
             with wave.open(wav_buffer, "wb") as wav_file:
@@ -409,12 +407,15 @@ class SarvamTranscriber(BaseTranscriber):
 
     async def sarvam_connect(self, retries: int = 3, timeout: float = 10.0) -> ClientConnection:
         ws_url = self._get_ws_url()
+        additional_headers = {
+            'api-subscription-key': self.api_key,
+        }
         attempt = 0
         last_err = None
         while attempt < retries:
             try:
                 ws = await asyncio.wait_for(
-                    websockets.connect(ws_url, subprotocols=[f"api-subscription-key.{self.api_key}"]),
+                    websockets.connect(ws_url, additional_headers=additional_headers),
                     timeout=timeout,
                 )
                 self.websocket_connection = ws
