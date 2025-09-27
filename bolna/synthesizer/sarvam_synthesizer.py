@@ -171,7 +171,6 @@ class SarvamSynthesizer(BaseSynthesizer):
     async def establish_connection(self):
         try:
             start_time = time.perf_counter()
-            websocket_url = self.ws_url
             additional_headers = {
                 'api-subscription-key': self.api_key,
             }
