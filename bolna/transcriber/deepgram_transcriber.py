@@ -37,7 +37,7 @@ class DeepgramTranscriber(BaseTranscriber):
         self.sampling_rate = 16000
         self.encoding = encoding
         self.api_key = kwargs.get("transcriber_key", os.getenv('DEEPGRAM_AUTH_TOKEN'))
-        self.deepgram_host = kwargs.get("deepgram_host", os.getenv('DEEPGRAM_HOST', 'api.deepgram.com'))
+        self.deepgram_host = os.getenv('DEEPGRAM_HOST', 'api.deepgram.com')
         self.transcriber_output_queue = output_queue
         self.transcription_task = None
         self.keywords = keywords
