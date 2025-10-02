@@ -12,14 +12,17 @@ class MarkEventMetaData:
         self.counter = 0
 
     def update_data(self, mark_id, value):
-        logger.info(f"Updating mark_id = {mark_id} with value = {value}")
+        if value.get('type') != 'ambient_noise':
+            logger.info(f"Updating mark_id = {mark_id} with value = {value}")
         value['counter'] = self.counter
         self.counter += 1
         self.mark_event_meta_data[mark_id] = value
 
     def fetch_data(self, mark_id):
-        logger.info(f"Fetching meta data details for mark_id = {mark_id}")
-        return self.mark_event_meta_data.pop(mark_id, {})
+        data = self.mark_event_meta_data.pop(mark_id, {})
+        if data.get('type') != 'ambient_noise':
+            logger.info(f"Fetching meta data details for mark_id = {mark_id}")
+        return data
 
     def clear_data(self):
         logger.info(f"Clearing mark meta data dict")
