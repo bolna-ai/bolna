@@ -355,14 +355,19 @@ def yield_chunks_from_memory(audio_bytes, chunk_size=512):
 
 
 def pcm_to_wav_bytes(pcm_data, sample_rate=16000, num_channels=1, sample_width=2):
-    buffer = io.BytesIO()
-    bit_depth = 16 
-    if len(pcm_data)%2 == 1:
+    """Convert raw PCM bytes to WAV format with proper headers"""
+    # Ensure even length for int16 samples
+    if len(pcm_data) % 2 == 1:
         pcm_data += b'\x00'
-    tensor_pcm = torch.frombuffer(pcm_data, dtype=torch.int16)
-    tensor_pcm = tensor_pcm.float() / (2**(bit_depth - 1))  
-    tensor_pcm = tensor_pcm.unsqueeze(0)  
-    torchaudio.save(buffer, tensor_pcm, sample_rate, format='wav')
+
+    buffer = io.BytesIO()
+    with wave.open(buffer, 'wb') as wav_file:
+        wav_file.setnchannels(num_channels)
+        wav_file.setsampwidth(sample_width)  # 2 bytes = 16-bit
+        wav_file.setframerate(sample_rate)
+        wav_file.writeframes(pcm_data)
+
+    buffer.seek(0)
     return buffer.getvalue()
 
 
@@ -377,16 +382,42 @@ def convert_audio_to_wav(audio_bytes, source_format = 'flac'):
 
 
 def resample(audio_bytes, target_sample_rate, format = "mp3"):
+    """Resample audio to target sample rate"""
+    from scipy.io import wavfile
+    from scipy import signal
+
     audio_buffer = io.BytesIO(audio_bytes)
-    waveform, orig_sample_rate = torchaudio.load(audio_buffer, format = format)
-    if orig_sample_rate == target_sample_rate:
-        return audio_bytes
-    resampler = torchaudio.transforms.Resample(orig_sample_rate, target_sample_rate)
-    audio_waveform = resampler(waveform)
-    audio_buffer = io.BytesIO()
-    logger.info(f"Resampling from {orig_sample_rate} to {target_sample_rate}")
-    torchaudio.save(audio_buffer, audio_waveform, target_sample_rate, format="wav")
-    return audio_buffer.getvalue()
+
+    # For WAV format, use scipy for better quality
+    if format == "wav":
+        orig_sample_rate, waveform = wavfile.read(audio_buffer)
+        if orig_sample_rate == target_sample_rate:
+            return audio_bytes
+
+        # Use scipy's high-quality resampler
+        num_samples = int(len(waveform) * target_sample_rate / orig_sample_rate)
+        resampled = signal.resample(waveform, num_samples)
+
+        # Preserve int16 format
+        if waveform.dtype == np.int16:
+            resampled = np.clip(resampled, -32768, 32767).astype(np.int16)
+
+        # Write back to WAV
+        output_buffer = io.BytesIO()
+        wavfile.write(output_buffer, target_sample_rate, resampled)
+        logger.info(f"Resampling from {orig_sample_rate} to {target_sample_rate}")
+        return output_buffer.getvalue()
+    else:
+        # For other formats, fall back to torchaudio
+        waveform, orig_sample_rate = torchaudio.load(audio_buffer, format = format)
+        if orig_sample_rate == target_sample_rate:
+            return audio_bytes
+        resampler = torchaudio.transforms.Resample(orig_sample_rate, target_sample_rate)
+        audio_waveform = resampler(waveform)
+        audio_buffer = io.BytesIO()
+        logger.info(f"Resampling from {orig_sample_rate} to {target_sample_rate}")
+        torchaudio.save(audio_buffer, audio_waveform, target_sample_rate, format="wav")
+        return audio_buffer.getvalue()
 
 
 def merge_wav_bytes(wav_files_bytes):
@@ -400,6 +431,56 @@ def merge_wav_bytes(wav_files_bytes):
     buffer = io.BytesIO()
     combined.export(buffer, format="wav")
     return buffer.getvalue()
+
+
+def apply_volume_to_wav(audio_bytes, volume_factor):
+    """Apply volume adjustment to WAV audio (0.0 to 1.0)"""
+    try:
+        wav_buffer = io.BytesIO(audio_bytes)
+        rate, data = wavfile.read(wav_buffer)
+
+        # Clamp volume factor to safe range
+        volume_factor = max(0.0, min(1.0, volume_factor))
+
+        # Apply volume factor with clipping prevention
+        if data.dtype == np.int16:
+            data = np.clip(data * volume_factor, -32768, 32767).astype(np.int16)
+        elif data.dtype == np.float32:
+            # float32 is already normalized to -1.0 to 1.0
+            # Apply volume and keep in float32 range
+            data = np.clip(data * volume_factor, -1.0, 1.0).astype(np.float32)
+        else:
+            # Convert other types to int16 first, then apply volume
+            logger.warning(f"Unexpected audio dtype {data.dtype}, converting to int16")
+            if np.issubdtype(data.dtype, np.floating):
+                data = (np.clip(data, -1.0, 1.0) * 32767).astype(np.int16)
+            data = np.clip(data * volume_factor, -32768, 32767).astype(np.int16)
+
+        # Write back to bytes
+        output_buffer = io.BytesIO()
+        wavfile.write(output_buffer, rate, data)
+        return output_buffer.getvalue()
+    except Exception as e:
+        logger.error(f"Error applying volume to WAV: {e}")
+        return audio_bytes  # Return original on error
+
+
+def apply_volume_to_pcm(pcm_bytes, volume_factor):
+    """Apply volume adjustment to PCM audio (0.0 to 1.0)"""
+    try:
+        # Clamp volume factor to safe range
+        volume_factor = max(0.0, min(1.0, volume_factor))
+
+        # Convert to numpy array
+        samples = np.frombuffer(pcm_bytes, dtype=np.int16)
+
+        # Apply volume with clipping
+        samples = np.clip(samples * volume_factor, -32768, 32767).astype(np.int16)
+
+        return samples.tobytes()
+    except Exception as e:
+        logger.error(f"Error applying volume to PCM: {e}")
+        return pcm_bytes  # Return original on error
 
 
 def calculate_audio_duration(size_bytes, sampling_rate, bit_depth = 16, channels = 1, format = "wav"):
