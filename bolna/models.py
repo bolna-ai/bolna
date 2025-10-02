@@ -1,6 +1,6 @@
 import json
 from typing import Optional, List, Union, Dict, Callable
-from pydantic import BaseModel, Field, field_validator, ValidationError, Json
+from pydantic import BaseModel, Field, field_validator, ValidationError, Json, model_validator
 from pydantic_core import PydanticCustomError
 from .providers import *
 
@@ -99,6 +99,17 @@ class Synthesizer(BaseModel):
     buffer_size: Optional[int] = 40  # 40 characters in a buffer
     audio_format: Optional[str] = "pcm"
     caching: Optional[bool] = True
+
+    @model_validator(mode="before")
+    def preprocess(cls, values):
+        provider = values.get("provider")
+        config = values.get("provider_config", {})
+
+        if provider == "elevenlabs":
+            if not config.get("voice") or not config.get("voice_id"):
+                raise ValueError("ElevenLabs config requires 'voice' or 'voice_id'.")
+
+        return values
 
     @field_validator("provider")
     def validate_model(cls, value):
