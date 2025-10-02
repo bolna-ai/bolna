@@ -14,6 +14,7 @@ import aiofiles
 import torch
 import torchaudio
 from scipy.io import wavfile
+from scipy import signal
 from botocore.exceptions import BotoCoreError, ClientError
 from aiobotocore.session import AioSession
 from contextlib import AsyncExitStack
@@ -383,9 +384,6 @@ def convert_audio_to_wav(audio_bytes, source_format = 'flac'):
 
 def resample(audio_bytes, target_sample_rate, format = "mp3"):
     """Resample audio to target sample rate"""
-    from scipy.io import wavfile
-    from scipy import signal
-
     audio_buffer = io.BytesIO(audio_bytes)
 
     # For WAV format, use scipy for better quality

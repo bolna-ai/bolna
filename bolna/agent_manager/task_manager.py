@@ -10,6 +10,8 @@ import uuid
 import copy
 import base64
 import pytz
+from io import BytesIO
+from scipy.io import wavfile
 
 import aiohttp
 
@@ -2082,8 +2084,6 @@ class TaskManager(BaseManager):
             )
 
             # Resample if needed
-            from scipy.io import wavfile
-            from io import BytesIO
             buf = BytesIO(audio)
             current_rate, _ = wavfile.read(buf)
 
@@ -2176,7 +2176,6 @@ class TaskManager(BaseManager):
 
         except Exception as e:
             logger.error(f"Error in ambient noise transmission: {e}")
-            import traceback
             traceback.print_exc()
 
     async def handle_init_event(self, init_meta_data):
