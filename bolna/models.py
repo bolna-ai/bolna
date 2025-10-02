@@ -329,8 +329,11 @@ class ConversationConfig(BaseModel):
     backchanneling: Optional[bool] = False
     backchanneling_message_gap: Optional[int] = 5
     backchanneling_start_delay: Optional[int] = 5
-    ambient_noise: Optional[bool] = False 
-    ambient_noise_track: Optional[str] = "convention_hall"
+    ambient_noise: Optional[bool] = False
+    ambient_noise_track: Optional[str] = "call-center"
+    ambient_noise_volume: Optional[float] = 0.15  # 15% volume - subtle background
+    ambient_noise_ducked_volume: Optional[float] = 0.05  # 5% when agent speaks
+    ambient_noise_fade_duration: Optional[float] = 0.3  # 300ms fade transition
     call_terminate: Optional[int] = 90
     use_fillers: Optional[bool] = False
     trigger_user_online_message_after: Optional[int] = 10
