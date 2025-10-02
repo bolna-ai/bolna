@@ -21,7 +21,8 @@ from bolna.agent_types import *
 from bolna.providers import *
 from bolna.prompts import *
 from bolna.helpers.utils import compute_function_pre_call_message, get_date_time_from_timezone, get_route_info, calculate_audio_duration, create_ws_data_packet, get_file_names_in_directory, get_raw_audio_bytes, is_valid_md5, \
-    get_required_input_types, format_messages, get_prompt_responses, resample, save_audio_file_to_s3, update_prompt_with_context, get_md5_hash, clean_json_string, wav_bytes_to_pcm, convert_to_request_log, yield_chunks_from_memory, process_task_cancellation
+    get_required_input_types, format_messages, get_prompt_responses, resample, save_audio_file_to_s3, update_prompt_with_context, get_md5_hash, clean_json_string, wav_bytes_to_pcm, convert_to_request_log, yield_chunks_from_memory, process_task_cancellation, \
+    apply_volume_to_wav, apply_volume_to_pcm
 from bolna.helpers.logger_config import configure_logger
 from semantic_router import Route
 from semantic_router.layer import RouteLayer
@@ -367,6 +368,10 @@ class TaskManager(BaseManager):
                 if self.ambient_noise:
                     logger.info(f"Ambient noise is True {self.ambient_noise}")
                     self.soundtrack = f"{self.conversation_config.get('ambient_noise_track', 'coffee-shop')}.wav"
+                    self.ambient_volume = self.conversation_config.get('ambient_noise_volume', 0.3)
+                    self.ambient_ducked_volume = self.conversation_config.get('ambient_noise_ducked_volume', 0.1)
+                    self.ambient_fade_duration = self.conversation_config.get('ambient_noise_fade_duration', 0.3)
+                    self.ambient_current_volume = self.ambient_volume  # Track current volume for smooth transitions
 
             # Classifier for filler
             self.use_fillers = self.conversation_config.get("use_fillers", False)
@@ -2069,31 +2074,110 @@ class TaskManager(BaseManager):
 
     async def __start_transmitting_ambient_noise(self):
         try:
-            audio = await get_raw_audio_bytes(f'{os.getenv("AMBIENT_NOISE_PRESETS_DIR")}/{self.soundtrack}', local=True, is_location=True)
-            audio = resample(audio, self.sampling_rate, format = "wav")
-            if self.task_config["tools_config"]["output"]["provider"] in SUPPORTED_OUTPUT_TELEPHONY_HANDLERS.keys():
-                audio = wav_bytes_to_pcm(audio)
-            logger.info(f"Length of audio {len(audio)} {self.sampling_rate}")
-            # TODO whenever this feature is redone ensure to have a look at the metadata of other messages which have the sequence_id of -1. Fields such as end_of_synthesizer_stream and end_of_llm_stream would need to be added here
-            if self.should_record:
-                meta_info={'io': 'default', 'message_category': 'ambient_noise', "request_id": str(uuid.uuid4()), "sequence_id": -1, "type":'audio', 'format': 'wav'}
-            else:
+            # Load ambient noise audio file
+            audio = await get_raw_audio_bytes(
+                f'{os.getenv("AMBIENT_NOISE_PRESETS_DIR")}/{self.soundtrack}',
+                local=True,
+                is_location=True
+            )
 
-                meta_info={'io': self.tools["output"].get_provider(), 'message_category': 'ambient_noise', 'stream_sid': self.stream_sid , "request_id": str(uuid.uuid4()), "cached": True, "type":'audio', "sequence_id": -1, 'format': 'pcm'}
+            # Resample if needed
+            from scipy.io import wavfile
+            from io import BytesIO
+            buf = BytesIO(audio)
+            current_rate, _ = wavfile.read(buf)
+
+            if current_rate != self.sampling_rate:
+                logger.info(f"Resampling ambient from {current_rate}Hz to {self.sampling_rate}Hz")
+                audio = resample(audio, self.sampling_rate, format="wav")
+            else:
+                logger.info(f"Ambient audio already at target rate: {self.sampling_rate}Hz")
+
+            # Apply volume
+            audio = apply_volume_to_wav(audio, self.ambient_volume)
+
+            # Determine output format by provider
+            output_provider = self.task_config["tools_config"]["output"]["provider"]
+
+            if output_provider == 'plivo':
+                pcm_audio = wav_bytes_to_pcm(audio)
+                format_type = 'wav'
+                use_pcm_for_chunking = True
+            elif output_provider in ['twilio', 'exotel']:
+                pcm_audio = wav_bytes_to_pcm(audio)
+                format_type = 'pcm'
+                use_pcm_for_chunking = True
+            else:
+                pcm_audio = audio
+                format_type = 'wav'
+                use_pcm_for_chunking = False
+
+            logger.info(f"Ambient noise prepared: {len(pcm_audio if use_pcm_for_chunking else audio)} bytes at {self.sampling_rate}Hz, volume: {self.ambient_volume}, format: {format_type}")
+
+            # Align chunk size to frame boundaries (must be even for 16-bit PCM)
+            chunk_size = self.output_chunk_size
+            if chunk_size % 2 != 0:
+                chunk_size += 1
+
+            # Volume ducking variables
+            target_volume = self.ambient_volume
+            fade_steps_per_second = 20
+
+            # Continuous loop
             while True:
-                logger.info(f"Before yielding ambient noise")
-                for chunk in yield_chunks_from_memory(audio, self.output_chunk_size*2):
-                    # Only play ambient noise if no content is being transmitted
-                    # Check if any real content audio (sequence_id > 0) is being played
+                for pcm_chunk in yield_chunks_from_memory(pcm_audio, chunk_size):
                     is_content_playing = self.tools["input"].is_audio_being_played_to_user()
-                    
-                    if not is_content_playing:
-                        logger.info(f"Transmitting ambient noise {len(chunk)}")
-                        await self.tools["output"].handle(create_ws_data_packet(chunk, meta_info=meta_info))
-                    logger.info("Sleeping for 800 ms")
-                    await asyncio.sleep(0.5)
+
+                    # Duck volume when agent speaks
+                    target_volume = self.ambient_ducked_volume if is_content_playing else self.ambient_volume
+
+                    # Smooth fade transition
+                    if self.ambient_current_volume != target_volume:
+                        volume_step = (target_volume - self.ambient_current_volume) / (self.ambient_fade_duration * fade_steps_per_second)
+                        self.ambient_current_volume += volume_step
+
+                        if volume_step > 0:
+                            self.ambient_current_volume = min(self.ambient_current_volume, target_volume)
+                        else:
+                            self.ambient_current_volume = max(self.ambient_current_volume, target_volume)
+
+                    # Apply ducking volume
+                    if self.ambient_current_volume != self.ambient_volume:
+                        relative_volume = self.ambient_current_volume / self.ambient_volume if self.ambient_volume > 0 else 0
+                        volume_adjusted_pcm = apply_volume_to_pcm(pcm_chunk, relative_volume)
+                    else:
+                        volume_adjusted_pcm = pcm_chunk
+
+                    # Convert to provider format
+                    if output_provider == 'plivo':
+                        from bolna.helpers.utils import pcm_to_wav_bytes
+                        final_chunk = pcm_to_wav_bytes(volume_adjusted_pcm, self.sampling_rate)
+                    else:
+                        final_chunk = volume_adjusted_pcm
+
+                    meta_info = {
+                        'io': self.tools["output"].get_provider(),
+                        'message_category': 'ambient_noise',
+                        'stream_sid': self.stream_sid,
+                        'request_id': str(uuid.uuid4()),
+                        'cached': True,
+                        'type': 'audio',
+                        'sequence_id': -1,
+                        'format': format_type,
+                        'end_of_synthesizer_stream': False,
+                        'end_of_llm_stream': False
+                    }
+
+                    await self.tools["output"].handle(create_ws_data_packet(final_chunk, meta_info=meta_info))
+
+                    # Sleep for chunk duration to maintain proper timing
+                    chunk_duration_seconds = len(volume_adjusted_pcm) / (2 * self.sampling_rate)
+                    await asyncio.sleep(chunk_duration_seconds)
+
         except Exception as e:
-            logger.error(f"Something went wrong while transmitting noise {e}")
+            logger.error(f"Error in ambient noise transmission: {e}")
+            import traceback
+            traceback.print_exc()
 
     async def handle_init_event(self, init_meta_data):
         """
