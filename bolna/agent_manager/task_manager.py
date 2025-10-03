@@ -770,9 +770,6 @@ class TaskManager(BaseManager):
             return
 
         agent_type = self.task_config["tools_config"]["llm_agent"].get("agent_type", "simple_llm_agent")
-        if agent_type in ["knowledgebase_agent"]:
-            return
-
         self.is_local = local
         if task_id == 0:
             if self.context_data and 'recipient_data' in self.context_data and self.context_data['recipient_data'] and self.context_data['recipient_data'].get('timezone', None):
