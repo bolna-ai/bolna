@@ -1,6 +1,6 @@
 import json
 from typing import Optional, List, Union, Dict, Callable
-from pydantic import BaseModel, Field, field_validator, ValidationError, Json
+from pydantic import BaseModel, Field, field_validator, ValidationError, Json, model_validator
 from pydantic_core import PydanticCustomError
 from .providers import *
 
@@ -100,6 +100,17 @@ class Synthesizer(BaseModel):
     audio_format: Optional[str] = "pcm"
     caching: Optional[bool] = True
 
+    @model_validator(mode="before")
+    def preprocess(cls, values):
+        provider = values.get("provider")
+        config = values.get("provider_config", {})
+
+        if provider == "elevenlabs":
+            if not config.get("voice") or not config.get("voice_id"):
+                raise ValueError("ElevenLabs config requires 'voice' or 'voice_id'.")
+
+        return values
+
     @field_validator("provider")
     def validate_model(cls, value):
         return validate_attribute(value, ["polly", "elevenlabs", "azuretts", "openai", "deepgram", "cartesia", "smallest", "sarvam", "rime"])
@@ -140,8 +151,37 @@ class MongoDBProviderConfig(BaseModel):
     embedding_dimensions: Optional[int] = 256
 
 
+class RerankerConfig(BaseModel):
+    """Configuration for document reranking in RAG systems."""
+    enabled: bool = False
+    model_type: str = "minilm-l6-v2"  # bge-base, bge-large, bge-multilingual, minilm-l6-v2
+    candidate_count: int = 20     # How many candidates to retrieve before reranking
+    final_count: int = 5          # Final number of results to return after reranking
+    
+    @field_validator("model_type")
+    def validate_reranker_model(cls, value):
+        allowed_models = ["bge-base", "bge-large", "bge-multilingual", "minilm-l6-v2"]
+        if value not in allowed_models:
+            raise ValueError(f"Invalid reranker model: '{value}'. Supported models: {allowed_models}")
+        return value
+    
+    @field_validator("candidate_count")
+    def validate_candidate_count(cls, value):
+        if value < 1 or value > 100:
+            raise ValueError("candidate_count must be between 1 and 100")
+        return value
+    
+    @field_validator("final_count") 
+    def validate_final_count(cls, value):
+        if value < 1 or value > 50:
+            raise ValueError("final_count must be between 1 and 50")
+        return value
+
 class LanceDBProviderConfig(BaseModel):
     vector_id: str
+    similarity_top_k: Optional[int] = 5
+    score_threshold: Optional[float] = 0.1
+    reranker: Optional[RerankerConfig] = RerankerConfig()  # Default to disabled reranker
 
 
 class VectorStore(BaseModel):
@@ -197,19 +237,33 @@ class GraphEdge(BaseModel):
     to_node_id: str
     condition: str
 
+class GraphNodeRAGConfig(BaseModel):
+    """RAG configuration for Graph Agent nodes."""
+    vector_store: VectorStore
+    temperature: Optional[float] = 0.7
+    model: Optional[str] = "gpt-4" 
+    max_tokens: Optional[int] = 150
+
 class GraphNode(BaseModel):
     id: str
     description: Optional[str] = None
     prompt: str
     edges: List[GraphEdge] = Field(default_factory=list)
     completion_check: Optional[Callable[[List[dict]], bool]] = None
-    rag_config: Optional[dict] = None
+    rag_config: Optional[GraphNodeRAGConfig] = None
 
 
 class GraphAgentConfig(Llm):
     agent_information: str
     nodes: List[GraphNode]
     current_node_id: str
+    context_data: Optional[dict] = None
+
+class KnowledgeAgentConfig(Llm):
+    agent_information: Optional[str] = "Knowledge-based AI assistant"
+    prompt: Optional[str] = None
+    rag_config: Optional[Dict] = None
+    llm_provider: Optional[str] = "openai"
     context_data: Optional[dict] = None
 
 class AgentRouteConfig(BaseModel):
@@ -234,14 +288,14 @@ class LlmAgent(BaseModel):
     agent_flow_type: str
     agent_type: str
     routes: Optional[Routes] = None
-    llm_config: Union[KnowledgebaseAgent, LlmAgentGraph, MultiAgent, SimpleLlmAgent, GraphAgentConfig]
+    llm_config: Union[KnowledgebaseAgent, LlmAgentGraph, MultiAgent, SimpleLlmAgent, GraphAgentConfig, KnowledgeAgentConfig]
 
     @field_validator('llm_config', mode='before')
     def validate_llm_config(cls, value, info):
         agent_type = info.data.get('agent_type')
 
         valid_config_types = {
-            'knowledgebase_agent': KnowledgebaseAgent,
+            'knowledgebase_agent': KnowledgeAgentConfig,
             'graph_agent': GraphAgentConfig,
             'llm_agent_graph': LlmAgentGraph,
             'multiagent': MultiAgent,

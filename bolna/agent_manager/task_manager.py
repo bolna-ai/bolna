@@ -439,6 +439,12 @@ class TaskManager(BaseManager):
             return False
         agent_type = self.task_config['tools_config']["llm_agent"].get("agent_type", None)
         return agent_type == "graph_agent"
+    
+    # def __is_knowledge_agent(self):
+    #     if self.task_config["task_type"] == "webhook":
+    #         return False
+    #     agent_type = self.task_config['tools_config']["llm_agent"].get("agent_type", None)
+    #     return agent_type == "knowledge_agent"
 
     def __setup_routes(self, routes):
         embedding_model = routes.get("embedding_model", os.getenv("ROUTE_EMBEDDING_MODEL"))
@@ -691,25 +697,41 @@ class TaskManager(BaseManager):
         self.agent_type = agent_type
         if agent_type == "simple_llm_agent":
             llm_agent = StreamingContextualAgent(llm)
-        elif agent_type == "knowledgebase_agent":
-            logger.info("Setting up knowledgebase_agent agent ####")
-            llm_config = self.task_config["tools_config"]["llm_agent"].get("llm_config", {})
-            vector_store_config = llm_config.get("vector_store", {})
-            llm_agent = RAGAgent(
-                temperature=llm_config.get("temperature", 0.1),
-                model=llm_config.get("model", "gpt-3.5-turbo-16k"),
-                buffer=self.task_config["tools_config"]["synthesizer"].get('buffer_size'),
-                max_tokens=self.llm_agent_config['llm_config']['max_tokens'],
-                provider_config=vector_store_config
-            )
-            logger.info("Llama-index rag agent is created")
         elif agent_type == "graph_agent":
-            logger.info("Setting up graph agent")
+            logger.info("Setting up graph agent with rag-proxy-server support")
             llm_config = self.task_config["tools_config"]["llm_agent"].get("llm_config", {})
-            logger.info(f"Getting this llm config : {llm_config}")
+            rag_service_url = self.kwargs.get('rag_service_url', os.getenv('RAG_SERVICE_URL', 'http://localhost:8000'))
+            
+            logger.info(f"Graph agent config: {llm_config}")
+            logger.info(f"RAG service URL: {rag_service_url}")
+            
+            # Set RAG service URL in environment for GraphAgent to use
+            os.environ['RAG_SERVICE_URL'] = rag_service_url
+            
             llm_agent = GraphAgent(llm_config)
-            logger.info(f"Graph agent is created")
-            logger.info("Knowledge Base Agent created")
+            logger.info("Graph agent created with rag-proxy-server support")
+        elif agent_type == "knowledgebase_agent":
+            logger.info("Setting up knowledge agent with rag-proxy-server support")
+            llm_config = self.task_config["tools_config"]["llm_agent"].get("llm_config", {})
+            rag_service_url = self.kwargs.get('rag_service_url', os.getenv('RAG_SERVICE_URL', 'http://localhost:8000'))
+            
+            logger.info(f"Knowledge agent config: {llm_config}")
+            logger.info(f"RAG service URL: {rag_service_url}")
+            
+            # Set RAG service URL in environment for KnowledgeAgent to use
+            os.environ['RAG_SERVICE_URL'] = rag_service_url
+            
+            # Inject provider credentials and endpoints into KnowledgeAgent config
+            injected_cfg = dict(llm_config)
+            if 'llm_key' in self.kwargs:
+                injected_cfg['llm_key'] = self.kwargs['llm_key']
+            if 'base_url' in self.kwargs:
+                injected_cfg['base_url'] = self.kwargs['base_url']
+            if 'api_version' in self.kwargs:
+                injected_cfg['api_version'] = self.kwargs['api_version']
+
+            llm_agent = KnowledgeBaseAgent(injected_cfg)
+            logger.info("Knowledge agent created with rag-proxy-server support")
         else:
             raise f"{agent_type} Agent type is not created yet"
         return llm_agent
@@ -814,6 +836,14 @@ class TaskManager(BaseManager):
             self.history = [] if len(self.history) == 0 else self.history
         else:
             self.history = [self.system_prompt] if len(self.history) == 0 else [self.system_prompt] + self.history
+
+        # If using knowledge_agent, inject the prompt into agent config so agent can read it
+        try:
+            if self.__is_knowledgebase_agent() and 'llm_agent' in self.task_config['tools_config']:
+                if 'llm_config' in self.task_config['tools_config']['llm_agent']:
+                    self.task_config['tools_config']['llm_agent']['llm_config']['prompt'] = self.system_prompt['content']
+        except Exception as e:
+            logger.error(f"Failed to inject prompt into knowledge agent config: {e}")
 
         #If history is empty and agent welcome message is not empty add it to history
         if task_id == 0 and len(self.history) == 1 and len(self.kwargs['agent_welcome_message']) != 0:
