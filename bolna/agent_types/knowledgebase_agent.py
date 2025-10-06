@@ -32,7 +32,7 @@ class KnowledgeBaseAgent(BaseAgent):
         
         # Initialize RAG configurations - simplified from GraphAgent's approach
         self.rag_config = self._initialize_rag_config()
-        self.rag_service_url = os.getenv('RAG_SERVICE_URL', 'http://localhost:8000')
+        self.rag_server_url = os.getenv('RAG_SERVER_URL', 'http://localhost:8000')
         
         logger.info(f"KnowledgeAgent initialized with RAG collections: {self.rag_config.get('collections', [])}")
 
@@ -116,7 +116,7 @@ class KnowledgeBaseAgent(BaseAgent):
             return await self._generate_standard_response(history)
 
         try:
-            client = await RAGServiceClientSingleton.get_client(self.rag_service_url)
+            client = await RAGServiceClientSingleton.get_client(self.rag_server_url)
             latest_message = history[-1]["content"]
 
             rag_response = await client.query_for_conversation(
@@ -177,7 +177,7 @@ class KnowledgeBaseAgent(BaseAgent):
 
     async def _generate_response_with_knowledge(self, history: List[dict], rag_contexts: List) -> dict:
         """Generate response augmented with RAG knowledge base context."""
-        client = await RAGServiceClientSingleton.get_client(self.rag_service_url)
+        client = await RAGServiceClientSingleton.get_client(self.rag_server_url)
         rag_context = await client.format_context_for_prompt(rag_contexts)
 
         if history and history[0].get('role') == 'system':
