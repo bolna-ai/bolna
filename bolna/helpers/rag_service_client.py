@@ -23,15 +23,15 @@ class RAGServiceClient:
     This replaces all local RAG functionality in bolna agents.
     """
     
-    def __init__(self, rag_service_url: str, timeout: int = 30):
+    def __init__(self, rag_server_url: str, timeout: int = 30):
         """
         Initialize the RAG service client.
         
         Args:
-            rag_service_url: Base URL of the rag-proxy-server
+            rag_server_url: Base URL of the rag-proxy-server
             timeout: Request timeout in seconds
         """
-        self.base_url = rag_service_url.rstrip('/')
+        self.base_url = rag_server_url.rstrip('/')
         self.timeout = aiohttp.ClientTimeout(total=timeout)
         self.session: Optional[aiohttp.ClientSession] = None
         self.logger = logging.getLogger(__name__)
@@ -251,18 +251,18 @@ class RAGServiceClientSingleton:
     _client = None
     
     @classmethod
-    async def get_client(cls, rag_service_url: str) -> RAGServiceClient:
+    async def get_client(cls, rag_server_url: str) -> RAGServiceClient:
         """
         Get or create a RAG service client instance.
         
         Args:
-            rag_service_url: Base URL of the rag-proxy-server
+            rag_server_url: Base URL of the rag-proxy-server
             
         Returns:
             RAGServiceClient instance
         """
         if cls._instance is None or cls._client is None:
-            cls._client = RAGServiceClient(rag_service_url)
+            cls._client = RAGServiceClient(rag_server_url)
             cls._instance = cls
             
         return cls._client

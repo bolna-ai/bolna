@@ -700,26 +700,26 @@ class TaskManager(BaseManager):
         elif agent_type == "graph_agent":
             logger.info("Setting up graph agent with rag-proxy-server support")
             llm_config = self.task_config["tools_config"]["llm_agent"].get("llm_config", {})
-            rag_service_url = self.kwargs.get('rag_service_url', os.getenv('RAG_SERVICE_URL', 'http://localhost:8000'))
+            rag_server_url = self.kwargs.get('rag_server_url', os.getenv('RAG_SERVER_URL', 'http://localhost:8000'))
             
             logger.info(f"Graph agent config: {llm_config}")
-            logger.info(f"RAG service URL: {rag_service_url}")
+            logger.info(f"RAG server URL: {rag_server_url}")
             
-            # Set RAG service URL in environment for GraphAgent to use
-            os.environ['RAG_SERVICE_URL'] = rag_service_url
+            # Set RAG server URL in environment for GraphAgent to use
+            os.environ['RAG_SERVER_URL'] = rag_server_url
             
             llm_agent = GraphAgent(llm_config)
             logger.info("Graph agent created with rag-proxy-server support")
         elif agent_type == "knowledgebase_agent":
             logger.info("Setting up knowledge agent with rag-proxy-server support")
             llm_config = self.task_config["tools_config"]["llm_agent"].get("llm_config", {})
-            rag_service_url = self.kwargs.get('rag_service_url', os.getenv('RAG_SERVICE_URL', 'http://localhost:8000'))
+            rag_server_url = self.kwargs.get('rag_server_url', os.getenv('RAG_SERVER_URL', 'http://localhost:8000'))
             
             logger.info(f"Knowledge agent config: {llm_config}")
-            logger.info(f"RAG service URL: {rag_service_url}")
+            logger.info(f"RAG server URL: {rag_server_url}")
             
-            # Set RAG service URL in environment for KnowledgeAgent to use
-            os.environ['RAG_SERVICE_URL'] = rag_service_url
+            # Set RAG server URL in environment for KnowledgeAgent to use
+            os.environ['RAG_SERVER_URL'] = rag_server_url
             
             # Inject provider credentials and endpoints into KnowledgeAgent config
             injected_cfg = dict(llm_config)

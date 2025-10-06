@@ -27,7 +27,7 @@ class GraphAgent(BaseAgent):
         self.node_history = ["root"]
         self.node_structure = self.build_node_structure()
         self.rag_configs = self.initialize_rag_configs()
-        self.rag_service_url = os.getenv('RAG_SERVICE_URL', 'http://localhost:8000')
+        self.rag_server_url = os.getenv('RAG_SERVER_URL', 'http://localhost:8000')
 
     def initialize_rag_configs(self) -> Dict[str, Dict]:
         """Initialize RAG configurations for each node."""
@@ -93,7 +93,7 @@ class GraphAgent(BaseAgent):
 
         if rag_config and rag_config.get('collections'):
             try:
-                client = await RAGServiceClientSingleton.get_client(self.rag_service_url)
+                client = await RAGServiceClientSingleton.get_client(self.rag_server_url)
                 latest_message = history[-1]["content"]
 
                 rag_response = await client.query_for_conversation(
