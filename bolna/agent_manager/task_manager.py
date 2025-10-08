@@ -1533,8 +1533,8 @@ class TaskManager(BaseManager):
         self.previous_start_ts = self.current_start_ts
         self.current_start_ts = current_ts
 
-        if not self.tools["input"].welcome_message_played() and len(self.history) > 1:
-            logger.info(f"Welcome message is playing while spoken: {transcriber_message}, {self.history}")
+        if not self.tools["input"].welcome_message_played() and len(self.history) > 2:
+            logger.info(f"Welcome message is playing while spoken: {transcriber_message}")
             return
 
         if self.current_start_ts == self.previous_start_ts and not self.tools['input'].is_audio_being_played_to_user():
