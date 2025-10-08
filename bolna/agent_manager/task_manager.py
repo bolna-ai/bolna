@@ -111,7 +111,6 @@ class TaskManager(BaseManager):
         }
 
         self.welcome_message_audio = self.kwargs.pop('welcome_message_audio', None)
-        self.welcome_message_user_speech_words = []
         # Pre-decode welcome audio for faster playback
         self.preloaded_welcome_audio = base64.b64decode(self.welcome_message_audio) if self.welcome_message_audio else None
         self.observable_variables = {}
@@ -1533,6 +1532,10 @@ class TaskManager(BaseManager):
         current_ts = self.tools["input"].get_current_mark_started_time()
         self.previous_start_ts = self.current_start_ts
         self.current_start_ts = current_ts
+
+        if not self.tools["input"].welcome_message_played() and len(self.history) > 1:
+            logger.info(f"Welcome message is playing while spoken: {transcriber_message}, {self.history}")
+            return
 
         if self.current_start_ts == self.previous_start_ts and not self.tools['input'].is_audio_being_played_to_user():
             logger.info(f"handle_transcriber_output -> skip as previous user message {self.history[-1]}")
