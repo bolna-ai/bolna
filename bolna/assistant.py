@@ -1,4 +1,4 @@
-from bolna.models import *
+from bolna.models import ToolsChainModel, Task, ToolsConfig
 from bolna.agent_manager import AssistantManager
 
 class Assistant:
@@ -8,35 +8,38 @@ class Assistant:
 
     def add_task(self, task_type, llm_agent, input_queue = None, output_queue = None, transcriber = None, synthesizer = None, enable_textual_input = False):
         pipelines = []
-        toolchain_args = {}
         tools_config_args = {}
-        toolchain_args['execution'] = 'parallel'
-        toolchain_args['pipelines'] = pipelines
+
+        # Always include the LLM agent and default IO
         tools_config_args['llm_agent'] = llm_agent
         tools_config_args['input'] = {
             "format": "wav",
             "provider": "default"
         }
-
         tools_config_args['output'] = {
             "format": "wav",
             "provider": "default"
         }
-        if transcriber is None:
-            pipelines.append(["llm"])
+
+        # Build the primary pipeline based on provided tools
+        if transcriber is not None:
             tools_config_args['transcriber'] = transcriber
-        
-        pipeline = ["transcriber", "llm"]
+            pipeline = ["transcriber", "llm"]
+        else:
+            pipeline = ["llm"]
+
         if synthesizer is not None:
-            pipeline.append("synthesizer") 
-            tools_config_args["synthesizer"] = synthesizer
+            tools_config_args['synthesizer'] = synthesizer
+            pipeline.append("synthesizer")
+
         pipelines.append(pipeline)
 
+        # Optionally add a secondary text-only pipeline
         if enable_textual_input:
             pipelines.append(["llm"])
-        
-        toolchain = ToolsChainModel(execution = "parallel", pipelines = pipelines)
-        task = Task(tools_config = ToolsConfig(**tools_config_args), toolchain = toolchain, task_type = task_type).dict()
+
+        toolchain = ToolsChainModel(execution="parallel", pipelines=pipelines)
+        task = Task(tools_config=ToolsConfig(**tools_config_args), toolchain=toolchain, task_type=task_type).dict()
         self.tasks.append(task)
 
 
