@@ -19,4 +19,5 @@ class ExotelInputHandler(TelephonyInputHandler):
         self.stream_sid = start['stream_sid']
 
     def get_mark_event_meta_data_obj(self, packet):
-        pass
+        mark_id = packet["mark"]["name"]
+        return self.mark_event_meta_data.fetch_data(mark_id)
