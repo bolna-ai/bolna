@@ -123,6 +123,133 @@ Once the docker containers are up, you can now start to create your agents and i
 ## Example agents to create, use and start making calls
 You may try out different agents from [example.bolna.dev](https://examples.bolna.dev).
 
+## Programmatic usage (minimal example)
+
+You can also build and run an agent directly in Python without the local telephony setup.
+
+Example script: `examples/simple_assistant.py`
+
+```python
+import asyncio
+from bolna.assistant import Assistant
+from bolna.models import (
+    Transcriber,
+    Synthesizer,
+    ElevenLabsConfig,
+    LlmAgent,
+    SimpleLlmAgent,
+)
+
+
+async def main():
+    assistant = Assistant(name="demo_agent")
+
+    # Configure audio input (ASR)
+    transcriber = Transcriber(provider="deepgram", model="nova-2", stream=True, language="en")
+
+    # Configure LLM
+    llm_agent = LlmAgent(
+        agent_type="simple_llm_agent",
+        agent_flow_type="streaming",
+        llm_config=SimpleLlmAgent(
+            provider="openai",
+            model="gpt-4o-mini",
+            temperature=0.3,
+        ),
+    )
+
+    # Configure audio output (TTS)
+    synthesizer = Synthesizer(
+        provider="elevenlabs",
+        provider_config=ElevenLabsConfig(
+            voice="George", voice_id="JBFqnCBsd6RMkjVDRZzb", model="eleven_turbo_v2_5"
+        ),
+        stream=True,
+        audio_format="wav",
+    )
+
+    # Build a single coherent pipeline: transcriber -> llm -> synthesizer
+    assistant.add_task(
+        task_type="conversation",
+        llm_agent=llm_agent,
+        transcriber=transcriber,
+        synthesizer=synthesizer,
+        enable_textual_input=False,
+    )
+
+    # Stream results
+    async for chunk in assistant.execute():
+        print(chunk)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+How to run:
+
+```bash
+export OPENAI_API_KEY=...
+export DEEPGRAM_AUTH_TOKEN=...
+export ELEVENLABS_API_KEY=...
+python examples/simple_assistant.py
+```
+
+This demonstrates orchestration and streaming output. For telephony, use the services in `local_setup/`.
+
+Note: For REST-based usage (Agent CRUD over HTTP), see `API.md` in the repo root.
+
+Expected output shape: `assistant.execute()` is an async generator yielding per-task result dicts (event-like chunks). The exact keys depend on configured tools/providers; treat it as a stream and process incrementally.
+
+### Text-only pipeline example
+
+If you want a text-only flow (no transcriber/synthesizer), you can enable a text-only pipeline:
+
+Example script: `examples/text_only_assistant.py`
+
+```python
+import asyncio
+from bolna.assistant import Assistant
+from bolna.models import LlmAgent, SimpleLlmAgent
+
+
+async def main():
+    assistant = Assistant(name="text_only_agent")
+
+    llm_agent = LlmAgent(
+        agent_type="simple_llm_agent",
+        agent_flow_type="streaming",
+        llm_config=SimpleLlmAgent(
+            provider="openai",
+            model="gpt-4o-mini",
+            temperature=0.2,
+        ),
+    )
+
+    # No transcriber/synthesizer; enable a text-only pipeline
+    assistant.add_task(
+        task_type="conversation",
+        llm_agent=llm_agent,
+        enable_textual_input=True,
+    )
+
+    async for chunk in assistant.execute():
+        print(chunk)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+How to run (text-only):
+
+```bash
+export OPENAI_API_KEY=...
+python examples/text_only_assistant.py
+```
+
+Expected output shape: `assistant.execute()` yields streaming dicts per task step; fields vary by configuration. Handle chunk-by-chunk.
+
 
 ## Using your own providers
 You can populate the `.env` file to use your own keys for providers.
