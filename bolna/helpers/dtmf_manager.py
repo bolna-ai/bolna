@@ -40,11 +40,6 @@ class DTMFManager:
         self.task_manager.interim_history.append(user_message)
         logger.info(f"DTMF injected {len(digits)} digits")
 
-    def reset(self):
-        """Reset collection state."""
-        self.is_collecting = False
-
-
 def get_dtmf_manager(run_id: str, config=None, task_manager=None):
     """Get or create DTMFManager. Returns None if not found and no config."""
     if run_id not in _dtmf_managers:

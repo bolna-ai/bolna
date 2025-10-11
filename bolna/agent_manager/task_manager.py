@@ -270,7 +270,7 @@ class TaskManager(BaseManager):
                 from bolna.models import DTMFConfig
                 dtmf_config_obj = DTMFConfig(**dtmf_config)
                 self.dtmf_manager = get_dtmf_manager(self.run_id, dtmf_config_obj, task_manager=self)
-                logger.info(f"DTMF enabled for run_id={self.run_id} in passive mode: strategy={dtmf_config_obj.injection_strategy}")
+                logger.info(f"DTMF enabled for run_id={self.run_id} in passive mode")
 
                 # Start passive DTMF listening - will auto-inject digits when collected
                 asyncio.create_task(self.dtmf_manager.start_passive_listening())

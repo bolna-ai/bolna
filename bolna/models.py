@@ -395,8 +395,6 @@ class DTMFConfig(BaseModel):
     enabled: bool = True
     max_digits: Optional[int] = 20
     termination_key: Optional[str] = '#'
-    injection_strategy: str = "transcript"
-    pause_audio_during_collection: bool = True
     
     @field_validator('max_digits')
     def validate_max_digits(cls, v):
