@@ -372,7 +372,7 @@ class ConversationConfig(BaseModel):
     backchanneling: Optional[bool] = False
     backchanneling_message_gap: Optional[int] = 5
     backchanneling_start_delay: Optional[int] = 5
-    ambient_noise: Optional[bool] = False 
+    ambient_noise: Optional[bool] = False
     ambient_noise_track: Optional[str] = "convention_hall"
     call_terminate: Optional[int] = 90
     use_fillers: Optional[bool] = False
@@ -380,10 +380,35 @@ class ConversationConfig(BaseModel):
     check_user_online_message: Optional[str] = "Hey, are you still there"
     check_if_user_online: Optional[bool] = True
     generate_precise_transcript: Optional[bool] = False
+    dtmf_config: Optional['DTMFConfig'] = None
 
     @field_validator('hangup_after_silence', mode='before')
     def set_hangup_after_silence(cls, v):
         return v if v is not None else 10  # Set default value if None is passed
+
+
+class DTMFConfig(BaseModel):
+    """
+    Passive DTMF: always listens, injects on termination_key or max_digits.
+    No timeout - explicit completion only.
+    """
+    enabled: bool = True
+    max_digits: Optional[int] = 20
+    termination_key: Optional[str] = '#'
+    injection_strategy: str = "transcript"
+    pause_audio_during_collection: bool = True
+    
+    @field_validator('max_digits')
+    def validate_max_digits(cls, v):
+        if v and (v < 1 or v > 50):
+            raise ValueError("max_digits must be between 1 and 50")
+        return v
+    
+    @field_validator('termination_key')
+    def validate_termination_key(cls, v):
+        if v and len(v) != 1:
+            raise ValueError("termination_key must be single character")
+        return v
 
 
 class Task(BaseModel):
@@ -398,3 +423,7 @@ class AgentModel(BaseModel):
     agent_type: str = "other"
     tasks: List[Task]
     agent_welcome_message: Optional[str] = AGENT_WELCOME_MESSAGE
+
+
+# Resolve forward references for ConversationConfig
+ConversationConfig.model_rebuild()

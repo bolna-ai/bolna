@@ -10,6 +10,7 @@ import uuid
 import copy
 import base64
 import pytz
+from typing import Optional
 
 import aiohttp
 
@@ -23,6 +24,7 @@ from bolna.prompts import *
 from bolna.helpers.utils import compute_function_pre_call_message, get_date_time_from_timezone, get_route_info, calculate_audio_duration, create_ws_data_packet, get_file_names_in_directory, get_raw_audio_bytes, is_valid_md5, \
     get_required_input_types, format_messages, get_prompt_responses, resample, save_audio_file_to_s3, update_prompt_with_context, get_md5_hash, clean_json_string, wav_bytes_to_pcm, convert_to_request_log, yield_chunks_from_memory, process_task_cancellation
 from bolna.helpers.logger_config import configure_logger
+from bolna.helpers.dtmf_manager import get_dtmf_manager, cleanup_dtmf_manager
 from semantic_router import Route
 from semantic_router.layer import RouteLayer
 from semantic_router.encoders import FastEmbedEncoder
@@ -245,7 +247,8 @@ class TaskManager(BaseManager):
         self.hangup_task = None
 
         self.conversation_config = None
-
+        self.call_hangup_message = None
+        self.dtmf_manager = None
         if task_id == 0:
             provider_config = self.task_config["tools_config"]["synthesizer"].get("provider_config")
             self.synthesizer_voice = provider_config["voice"]
@@ -260,6 +263,17 @@ class TaskManager(BaseManager):
             self.conversation_config = task.get("task_config", {})
             logger.info(f"Conversation config {self.conversation_config}")
             self.generate_precise_transcript = self.conversation_config.get('generate_precise_transcript', False)
+            
+            # Initialize DTMF manager if enabled (passive listening mode)
+            dtmf_config = self.conversation_config.get('dtmf_config', None)
+            if dtmf_config and dtmf_config.get('enabled', False):
+                from bolna.models import DTMFConfig
+                dtmf_config_obj = DTMFConfig(**dtmf_config)
+                self.dtmf_manager = get_dtmf_manager(self.run_id, dtmf_config_obj, task_manager=self)
+                logger.info(f"DTMF enabled for run_id={self.run_id} in passive mode: strategy={dtmf_config_obj.injection_strategy}")
+
+                # Start passive DTMF listening - will auto-inject digits when collected
+                asyncio.create_task(self.dtmf_manager.start_passive_listening())
 
             self.trigger_user_online_message_after = self.conversation_config.get("trigger_user_online_message_after", DEFAULT_USER_ONLINE_MESSAGE_TRIGGER_DURATION)
             self.check_if_user_online = self.conversation_config.get("check_if_user_online", True)
@@ -531,7 +545,8 @@ class TaskManager(BaseManager):
                 "websocket": self.websocket,
                 "input_types": get_required_input_types(self.task_config),
                 "mark_event_meta_data": self.mark_event_meta_data,
-                "is_welcome_message_played": True if self.task_config["tools_config"]["output"]["provider"] == 'default' and not self.is_web_based_call else False
+                "is_welcome_message_played": True if self.task_config["tools_config"]["output"]["provider"] == 'default' and not self.is_web_based_call else False,
+                "run_id": self.run_id
             }
 
             if should_record:
@@ -2288,6 +2303,10 @@ class TaskManager(BaseManager):
                     output = {"status": self.webhook_response, "task_type": "webhook"}
 
             await asyncio.gather(*tasks_to_cancel)
+
+            # Cleanup DTMF manager on conversation end
+            cleanup_dtmf_manager(self.run_id)
+
             return output
 
     async def handle_cancellation(self, message):
