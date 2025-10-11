@@ -360,33 +360,6 @@ class ToolsChainModel(BaseModel):
     pipelines: List[List[str]]
 
 
-class ConversationConfig(BaseModel):
-    optimize_latency: Optional[bool] = True  # This will work on in conversation
-    hangup_after_silence: Optional[int] = 20
-    incremental_delay: Optional[int] = 900  # use this to incrementally delay to handle long pauses
-    number_of_words_for_interruption: Optional[
-        int] = 1  # Maybe send half second of empty noise if needed for a while as soon as we get speaking true in nitro, use that to delay
-    interruption_backoff_period: Optional[int] = 100
-    hangup_after_LLMCall: Optional[bool] = False
-    call_cancellation_prompt: Optional[str] = None
-    backchanneling: Optional[bool] = False
-    backchanneling_message_gap: Optional[int] = 5
-    backchanneling_start_delay: Optional[int] = 5
-    ambient_noise: Optional[bool] = False
-    ambient_noise_track: Optional[str] = "convention_hall"
-    call_terminate: Optional[int] = 90
-    use_fillers: Optional[bool] = False
-    trigger_user_online_message_after: Optional[int] = 10
-    check_user_online_message: Optional[str] = "Hey, are you still there"
-    check_if_user_online: Optional[bool] = True
-    generate_precise_transcript: Optional[bool] = False
-    dtmf_config: Optional['DTMFConfig'] = None
-
-    @field_validator('hangup_after_silence', mode='before')
-    def set_hangup_after_silence(cls, v):
-        return v if v is not None else 10  # Set default value if None is passed
-
-
 class DTMFConfig(BaseModel):
     """
     Passive DTMF: always listens, injects on termination_key or max_digits.
@@ -409,6 +382,33 @@ class DTMFConfig(BaseModel):
         return v
 
 
+class ConversationConfig(BaseModel):
+    optimize_latency: Optional[bool] = True  # This will work on in conversation
+    hangup_after_silence: Optional[int] = 20
+    incremental_delay: Optional[int] = 900  # use this to incrementally delay to handle long pauses
+    number_of_words_for_interruption: Optional[
+        int] = 1  # Maybe send half second of empty noise if needed for a while as soon as we get speaking true in nitro, use that to delay
+    interruption_backoff_period: Optional[int] = 100
+    hangup_after_LLMCall: Optional[bool] = False
+    call_cancellation_prompt: Optional[str] = None
+    backchanneling: Optional[bool] = False
+    backchanneling_message_gap: Optional[int] = 5
+    backchanneling_start_delay: Optional[int] = 5
+    ambient_noise: Optional[bool] = False
+    ambient_noise_track: Optional[str] = "convention_hall"
+    call_terminate: Optional[int] = 90
+    use_fillers: Optional[bool] = False
+    trigger_user_online_message_after: Optional[int] = 10
+    check_user_online_message: Optional[str] = "Hey, are you still there"
+    check_if_user_online: Optional[bool] = True
+    generate_precise_transcript: Optional[bool] = False
+    dtmf_config: Optional[DTMFConfig] = None
+
+    @field_validator('hangup_after_silence', mode='before')
+    def set_hangup_after_silence(cls, v):
+        return v if v is not None else 10  # Set default value if None is passed
+
+
 class Task(BaseModel):
     tools_config: ToolsConfig
     toolchain: ToolsChainModel
@@ -423,5 +423,4 @@ class AgentModel(BaseModel):
     agent_welcome_message: Optional[str] = AGENT_WELCOME_MESSAGE
 
 
-# Resolve forward references for ConversationConfig
-ConversationConfig.model_rebuild()
+ 
