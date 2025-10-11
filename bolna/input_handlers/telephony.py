@@ -13,7 +13,7 @@ load_dotenv()
 
 class TelephonyInputHandler(DefaultInputHandler):
     def __init__(self, queues, websocket=None, input_types=None, mark_event_meta_data=None, turn_based_conversation=False,
-                 is_welcome_message_played=False, observable_variables=None):
+                 is_welcome_message_played=False, observable_variables=None, run_id=None):
         super().__init__(queues, websocket, input_types, mark_event_meta_data, turn_based_conversation,
                          is_welcome_message_played=is_welcome_message_played, observable_variables=observable_variables)
         self.stream_sid = None
@@ -24,6 +24,8 @@ class TelephonyInputHandler(DefaultInputHandler):
         self.last_media_received = 0
         self.io_provider = None
         self.websocket_listen_task = None
+        self.run_id = run_id
+        self.dtmf_digits = ""
 
     def get_stream_sid(self):
         return self.stream_sid
@@ -55,6 +57,30 @@ class TelephonyInputHandler(DefaultInputHandler):
     async def ingest_audio(self, audio_data, meta_info):
         ws_data_packet = create_ws_data_packet(data=audio_data, meta_info=meta_info)
         self.queues['transcriber'].put_nowait(ws_data_packet)
+    
+    async def _handle_dtmf_digit(self, digit: str) -> bool:
+        """Handle digit. Returns True if complete (# or max_digits)."""
+        from bolna.helpers.dtmf_manager import get_dtmf_manager
+        
+        dtmf_manager = get_dtmf_manager(self.run_id)
+        if not dtmf_manager or not dtmf_manager.is_collecting:
+            return False
+        
+        config = dtmf_manager.current_config
+        termination_key = config.get('termination_key', '#')
+        max_digits = config.get('max_digits', 20)
+        
+        if digit == termination_key:
+            logger.info("DTMF termination key pressed")
+            return True
+        
+        self.dtmf_digits += digit
+        
+        if len(self.dtmf_digits) >= max_digits:
+            logger.info(f"DTMF max digits reached: {max_digits}")
+            return True
+        
+        return False
 
     async def _listen(self):
         buffer = []
@@ -98,6 +124,22 @@ class TelephonyInputHandler(DefaultInputHandler):
 
                 elif packet['event'] == 'mark' or packet['event'] == 'playedStream':
                     self.process_mark_message(packet)
+
+                elif packet['event'] == 'dtmf':
+                    digit = packet.get('dtmf', {}).get('digit', '')
+                    if not digit:
+                        continue
+                    
+                    is_complete = await self._handle_dtmf_digit(digit)
+                    
+                    if is_complete and self.dtmf_digits:
+                        from bolna.helpers.dtmf_manager import get_dtmf_manager
+                        dtmf_manager = get_dtmf_manager(self.run_id)
+                        
+                        if dtmf_manager and dtmf_manager.is_collecting:
+                            await dtmf_manager.inject_digits_to_conversation(self.dtmf_digits)
+                        
+                        self.dtmf_digits = ""
 
                 elif packet['event'] == 'stop':
                     logger.info('call stopping')
