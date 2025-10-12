@@ -20,12 +20,12 @@ class AzureSynthesizer(BaseSynthesizer):
         self.model = model
         self.language = language
         self.voice = f"{language}-{voice}{model}"
-        logger.debug(f"{self.voice} initialized")
+        logger.info(f"{self.voice} initialized")
         self.sample_rate = str(sampling_rate)
         self.first_chunk_generated = False
         self.stream = stream
         self.synthesized_characters = 0
-        self.caching = caching
+        self.caching = False
         self.speed = speed
         if caching:
             self.cache = InmemoryScalarCache()
@@ -102,16 +102,16 @@ class AzureSynthesizer(BaseSynthesizer):
         try:
             while True:
                 message = await self.internal_queue.get()
-                logger.debug(f"Generating TTS response for message: {message}")
+                logger.info(f"Generating TTS response for message: {message}")
                 meta_info, text = message.get("meta_info"), message.get("data")
 
                 if not self.should_synthesize_response(meta_info.get('sequence_id')):
-                    logger.debug(f"Not synthesizing text as the sequence_id ({meta_info.get('sequence_id')}) of it is not in the list of sequence_ids present in the task manager.")
+                    logger.info(f"Not synthesizing text as the sequence_id ({meta_info.get('sequence_id')}) of it is not in the list of sequence_ids present in the task manager.")
                     return
 
                 # Check cache if enabled
                 if self.caching and self.cache.get(text):
-                    logger.debug(f"Cache hit and hence returning quickly {text}")
+                    logger.info(f"Cache hit and hence returning quickly {text}")
                     audio_data = self.cache.get(text)
                     
                     # Set metadata and yield the cached audio
@@ -174,7 +174,7 @@ class AzureSynthesizer(BaseSynthesizer):
                     synthesizer.speak_ssml_async(ssml)
                 else:
                     synthesizer.speak_text_async(text)
-                logger.debug(f"Azure TTS request sent for {len(text)} chars")
+                logger.info(f"Azure TTS request sent for {len(text)} chars")
                 full_audio = bytearray()
                 
                 # Process chunks as they arrive
@@ -227,7 +227,7 @@ class AzureSynthesizer(BaseSynthesizer):
                 
                 # Cache the complete audio if enabled
                 if self.caching and full_audio:
-                    logger.debug(f"Caching audio for text: {text}")
+                    logger.info(f"Caching audio for text: {text}")
                     self.cache.set(text, bytes(full_audio))
                 
                 self.synthesized_characters += len(text)
@@ -237,7 +237,7 @@ class AzureSynthesizer(BaseSynthesizer):
                 except Exception:
                     pass
         except asyncio.CancelledError:
-            logger.debug("Azure synthesizer task was cancelled - shutting down cleanly")
+            logger.info("Azure synthesizer task was cancelled - shutting down cleanly")
             raise
         except Exception as e:
             logger.error(f"Error in Azure TTS generate method: {e}")
@@ -247,5 +247,5 @@ class AzureSynthesizer(BaseSynthesizer):
         pass
 
     async def push(self, message):
-        logger.debug(f"Pushed message to internal queue {message}")
+        logger.info(f"Pushed message to internal queue {message}")
         self.internal_queue.put_nowait(message)
