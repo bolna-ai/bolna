@@ -32,7 +32,7 @@ class KnowledgeBaseAgent(BaseAgent):
         
         # Initialize RAG configurations - simplified from GraphAgent's approach
         self.rag_config = self._initialize_rag_config()
-        self.rag_service_url = os.getenv('RAG_SERVICE_URL', 'http://localhost:8000')
+        self.rag_server_url = os.getenv('RAG_SERVER_URL', 'http://localhost:8000')
         
         logger.info(f"KnowledgeAgent initialized with RAG collections: {self.rag_config.get('collections', [])}")
 
@@ -70,7 +70,6 @@ class KnowledgeBaseAgent(BaseAgent):
 
         except Exception as e:
             logger.error(f"Error initializing provider LLM: {e}")
-            # Final fallback to OpenAI client (import lazily to avoid lints when not installed)
             import importlib
             openai_mod = importlib.import_module('openai')
             OpenAI = getattr(openai_mod, 'OpenAI')
@@ -111,67 +110,47 @@ class KnowledgeBaseAgent(BaseAgent):
         return processed_config
 
     async def generate_response(self, history: List[dict]) -> dict:
-        """Generate response with RAG context - simplified from GraphAgent's approach."""
-        
-        if not self.rag_config.get('collections'):
-            logger.info("No RAG collections configured, generating fallback response")
-            return await self._generate_fallback_response(history)
+        """Generate response with natural conversation flow and optional RAG augmentation."""
 
-        logger.info(f"Using RAG service for knowledge-based response")
+        if not self.rag_config.get('collections'):
+            return await self._generate_standard_response(history)
 
         try:
-            # Get RAG service client (same as GraphAgent)
-            client = await RAGServiceClientSingleton.get_client(self.rag_service_url)
-            
-            # Get user query
+            client = await RAGServiceClientSingleton.get_client(self.rag_server_url)
             latest_message = history[-1]["content"]
-            
-            # Query RAG service (same parameters as GraphAgent)
+
             rag_response = await client.query_for_conversation(
                 query=latest_message,
                 collections=self.rag_config['collections'],
                 max_results=self.rag_config.get('similarity_top_k', 10),
-                similarity_threshold=0.1
+                similarity_threshold=0.0
             )
 
-            if not rag_response.contexts:
-                logger.warning(f"No relevant context retrieved from RAG")
-                return await self._generate_fallback_response(history)
+            if not rag_response.contexts or len(rag_response.contexts) == 0:
+                return await self._generate_standard_response(history)
 
-            # Format context (same as GraphAgent)
-            rag_context = await client.format_context_for_prompt(rag_response.contexts)
-            
-            logger.info(f"Retrieved {rag_response.total_results} contexts in {rag_response.processing_time:.3f}s")
+            top_score = rag_response.contexts[0].score if rag_response.contexts else 0.0
+            logger.info(f"RAG: Retrieved {rag_response.total_results} contexts, top score: {top_score:.3f}")
 
-            # Combine prompt with RAG context (simplified from GraphAgent)
-            system_prompt = self.config.get('prompt', f"You are {self.agent_information}. Answer questions based on the provided context.")
-            combined_context = f"{system_prompt}\n\nRelevant Information:\n{rag_context}\n\nPlease respond based on the latest user message: '{latest_message}'."
-
-            return await self._generate_response_with_llm(combined_context, history)
+            return await self._generate_response_with_knowledge(history, rag_response.contexts)
 
         except asyncio.TimeoutError:
-            logger.error(f"Timeout occurred while fetching data from RAG service")
-            return await self._generate_fallback_response(history)
+            logger.error("RAG service timeout, using standard conversation")
+            return await self._generate_standard_response(history)
 
         except Exception as e:
-            logger.error(f"An error occurred while processing the RAG service: {e}")
-            return await self._generate_fallback_response(history)
+            logger.error(f"RAG service error: {e}")
+            return await self._generate_standard_response(history)
 
-    async def _generate_response_with_llm(self, context: str, history: List[dict]) -> dict:
-        """Generate response using LLM with the provided context (same logic as GraphAgent)."""
-        latest_message = history[-1]["content"]
-        system_message = f"{context}\n\nPlease respond based on the latest user message: '{latest_message}'."
-        
-        messages = [{"role": "system", "content": system_message}] + [
-            {"role": item["role"], "content": item["content"]} for item in history[-5:]
-        ]
-        
+    async def _generate_standard_response(self, history: List[dict]) -> dict:
+        """Generate response using conversation history without RAG augmentation."""
+        max_history = 50
+        messages = history[-max_history:] if len(history) > max_history else history
+
         try:
-            # Use provider LLM instance like simple agents
             if hasattr(self.llm, 'generate'):
                 response_text = await self.llm.generate(messages)
             else:
-                # Very rare case: directly use OpenAI-compatible client
                 response = self.llm.chat.completions.create(
                     model=self.llm_model,
                     messages=messages,
@@ -181,8 +160,7 @@ class KnowledgeBaseAgent(BaseAgent):
                 response_text = response.choices[0].message.content
 
         except Exception as e:
-            logger.error(f"Error generating response with LLM provider: {e}")
-            # Emergency fallback - same as GraphAgent
+            logger.error(f"Standard response error: {e}")
             import importlib
             openai_mod = importlib.import_module('openai')
             OpenAI = getattr(openai_mod, 'OpenAI')
@@ -194,58 +172,72 @@ class KnowledgeBaseAgent(BaseAgent):
                 temperature=self.config.get('temperature', 0.7),
             )
             response_text = response.choices[0].message.content
-        
+
         return {"role": "assistant", "content": response_text}
 
-    async def _generate_fallback_response(self, history: List[dict]) -> dict:
-        """Generate a fallback response when RAG is not available (same as GraphAgent)."""
-        latest_message = history[-1]["content"]
-        system_prompt = self.config.get('prompt', f"You are {self.agent_information}. Respond helpfully to user questions.")
-        system_message = f"{system_prompt}\n\nPlease respond based on the latest user message: '{latest_message}'."
+    async def _generate_response_with_knowledge(self, history: List[dict], rag_contexts: List) -> dict:
+        """Generate response augmented with RAG knowledge base context."""
+        client = await RAGServiceClientSingleton.get_client(self.rag_server_url)
+        rag_context = await client.format_context_for_prompt(rag_contexts)
 
-        messages = [{"role": "system", "content": system_message}] + [
-            {"role": item["role"], "content": item["content"]} for item in history[-5:]
-        ]
-        
+        if history and history[0].get('role') == 'system':
+            original_system_prompt = history[0]['content']
+            rest_of_history = history[1:]
+        else:
+            original_system_prompt = self.config.get('prompt', f"You are {self.agent_information}.")
+            rest_of_history = history
+
+        augmented_system_prompt = f"""{original_system_prompt}
+
+You have access to relevant information from the knowledge base:
+
+{rag_context}
+
+Use this information naturally when it helps answer the user's questions. Don't force references if not relevant to the conversation."""
+
+        augmented_history = [{"role": "system", "content": augmented_system_prompt}] + rest_of_history
+
+        max_history = 50
+        if len(augmented_history) > max_history:
+            logger.warning(f"History truncated from {len(augmented_history)} to {max_history}")
+            augmented_history = [augmented_history[0]] + augmented_history[-(max_history-1):]
+
         try:
             if hasattr(self.llm, 'generate'):
-                response_text = await self.llm.generate(messages)
+                response_text = await self.llm.generate(augmented_history)
             else:
                 response = self.llm.chat.completions.create(
                     model=self.llm_model,
-                    messages=messages,
+                    messages=augmented_history,
                     max_tokens=self.config.get('max_tokens', 150),
                     temperature=self.config.get('temperature', 0.7),
                 )
                 response_text = response.choices[0].message.content
 
         except Exception as e:
-            logger.error(f"Error in fallback response generation: {e}")
+            logger.error(f"Knowledge-augmented response error: {e}")
             import importlib
             openai_mod = importlib.import_module('openai')
             OpenAI = getattr(openai_mod, 'OpenAI')
             fallback_client = OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
             response = fallback_client.chat.completions.create(
                 model=self.llm_model,
-                messages=messages,
+                messages=augmented_history,
                 max_tokens=self.config.get('max_tokens', 150),
                 temperature=self.config.get('temperature', 0.7),
             )
             response_text = response.choices[0].message.content
-            
+
         return {"role": "assistant", "content": response_text}
     
     async def generate(self, message: List[dict], **kwargs) -> AsyncGenerator[Tuple[str, bool, float, bool, None, None], None]:
-        """
-        Main generate method that streams response - same pattern as GraphAgent but simplified.
-        """
+        """Main generate method that streams response."""
         start_time = time.time()
         first_token_time = None
         buffer = ""
-        buffer_size = 20  # Default buffer size of 20 words
-        
+        buffer_size = 20
+
         try:
-            # Generate response using RAG
             response = await self.generate_response(message)
             response_text = response["content"]
 
@@ -254,14 +246,14 @@ class KnowledgeBaseAgent(BaseAgent):
                 if first_token_time is None:
                     first_token_time = time.time()
                     latency = first_token_time - start_time
-                
+
                 buffer += word + " "
-                
+
                 if len(buffer.split()) >= buffer_size or i == len(words) - 1:
                     is_final = (i == len(words) - 1)
                     yield buffer.strip(), is_final, latency, False, None, None
                     buffer = ""
-            
+
             if buffer:
                 yield buffer.strip(), True, latency, False, None, None
 
