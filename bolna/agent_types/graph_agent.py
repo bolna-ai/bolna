@@ -27,7 +27,7 @@ class GraphAgent(BaseAgent):
         self.node_history = ["root"]
         self.node_structure = self.build_node_structure()
         self.rag_configs = self.initialize_rag_configs()
-        self.rag_service_url = os.getenv('RAG_SERVICE_URL', 'http://localhost:8000')
+        self.rag_server_url = os.getenv('RAG_SERVER_URL', 'http://localhost:8000')
 
     def initialize_rag_configs(self) -> Dict[str, Dict]:
         """Initialize RAG configurations for each node."""
@@ -92,59 +92,47 @@ class GraphAgent(BaseAgent):
         rag_config = self.rag_configs.get(self.current_node_id)
 
         if rag_config and rag_config.get('collections'):
-            logger.info(f"Using RAG service for node {self.current_node_id}")
-
             try:
-                # Get RAG service client
-                client = await RAGServiceClientSingleton.get_client(self.rag_service_url)
-                
-                # Get user query
+                client = await RAGServiceClientSingleton.get_client(self.rag_server_url)
                 latest_message = history[-1]["content"]
-                
-                # Query RAG service
+
                 rag_response = await client.query_for_conversation(
                     query=latest_message,
                     collections=rag_config['collections'],
                     max_results=rag_config.get('similarity_top_k', 10),
-                    similarity_threshold=0.1
+                    similarity_threshold=0.0
                 )
 
-                if not rag_response.contexts:
-                    logger.warning(f"No relevant context retrieved from RAG for node {self.current_node_id}")
-                    return await self._generate_fallback_response(prompt, history)
+                if not rag_response.contexts or len(rag_response.contexts) == 0:
+                    return await self._generate_standard_response(prompt, history)
 
-                # Format context
+                top_score = rag_response.contexts[0].score if rag_response.contexts else 0.0
+                logger.info(f"RAG (node {self.current_node_id}): Retrieved {rag_response.total_results} contexts, top score: {top_score:.3f}")
+
                 rag_context = await client.format_context_for_prompt(rag_response.contexts)
-                
-                logger.info(f"Retrieved {rag_response.total_results} contexts in {rag_response.processing_time:.3f}s")
-
-                # Combine prompt with RAG context
-                combined_context = f"{prompt}\n\nRelevant Information:\n{rag_context}\n\nPlease respond based on the latest user message: '{latest_message}'."
-
-                return await self._generate_response_from_openai(combined_context, history)
+                return await self._generate_response_with_knowledge(prompt, history, rag_context)
 
             except asyncio.TimeoutError:
-                logger.error(f"Timeout occurred while fetching data from RAG service for node {self.current_node_id}")
-                return await self._generate_fallback_response(prompt, history)
+                logger.error(f"RAG service timeout for node {self.current_node_id}")
+                return await self._generate_standard_response(prompt, history)
 
             except Exception as e:
-                logger.error(f"An error occurred while processing the RAG service: {e}")
-                return await self._generate_fallback_response(prompt, history)
+                logger.error(f"RAG service error: {e}")
+                return await self._generate_standard_response(prompt, history)
 
         else:
-            return await self._generate_fallback_response(prompt, history)
+            return await self._generate_standard_response(prompt, history)
 
 
-    async def _generate_response_from_openai(self, context: str, history: List[dict]) -> dict:
-        """
-        Generate response using OpenAI API with the provided context and explicitly focus on the latest user message.
-        """
-        latest_message = history[-1]["content"]
-        system_message = f"{context}\n\nPlease respond based on the latest user message: '{latest_message}'."
-        
-        messages = [{"role": "system", "content": system_message}] + [
-            {"role": item["role"], "content": item["content"]} for item in history[-5:]
+    async def _generate_standard_response(self, node_prompt: str, history: List[dict]) -> dict:
+        """Generate response using node prompt + conversation history without RAG."""
+        max_history = 50
+        history_subset = history[-max_history:] if len(history) > max_history else history
+
+        messages = [{"role": "system", "content": node_prompt}] + [
+            {"role": item["role"], "content": item["content"]} for item in history_subset
         ]
+
         response = self.openai.chat.completions.create(
             model=self.llm_model,
             messages=messages,
@@ -157,10 +145,39 @@ class GraphAgent(BaseAgent):
         response_text = response.choices[0].message.content
         return {"role": "assistant", "content": response_text}
 
+    async def _generate_response_with_knowledge(self, node_prompt: str, history: List[dict], rag_context: str) -> dict:
+        """Generate response with node prompt augmented by RAG knowledge."""
+        augmented_prompt = f"""{node_prompt}
+
+You have access to relevant information from the knowledge base:
+
+{rag_context}
+
+Use this information naturally when it helps answer the user's questions. Don't force references if not relevant to the conversation."""
+
+        max_history = 50
+        history_subset = history[-max_history:] if len(history) > max_history else history
+
+        messages = [{"role": "system", "content": augmented_prompt}] + [
+            {"role": item["role"], "content": item["content"]} for item in history_subset
+        ]
+
+        response = self.openai.chat.completions.create(
+            model=self.llm_model,
+            messages=messages,
+            max_tokens=self.config.get('max_tokens', 150),
+            temperature=self.config.get('temperature', 0.7),
+            top_p=self.config.get('top_p', 1.0),
+            frequency_penalty=self.config.get('frequency_penalty', 0),
+            presence_penalty=self.config.get('presence_penalty', 0),
+        )
+        response_text = response.choices[0].message.content
+        return {"role": "assistant", "content": response_text}
 
     async def _generate_fallback_response(self, prompt: str, history: List[dict]) -> dict:
         """
-        Generate a fallback response that emphasizes the latest user message.
+        Deprecated: Use _generate_standard_response instead.
+        Kept for backward compatibility.
         """
         latest_message = history[-1]["content"]
         system_message = f"{prompt}\n\nPlease respond based on the latest user message: '{latest_message}'."
@@ -241,18 +258,16 @@ class GraphAgent(BaseAgent):
         start_time = time.time()
         first_token_time = None
         buffer = ""
-        buffer_size = 20  # Default buffer size of 20 words
+        buffer_size = 20
+
         try:
-            # Generate response
-            
-            
             # Decide next move
             next_node_id = await self.decide_next_move_cyclic(message)
             if next_node_id:
                 self.current_node_id = next_node_id
                 if self.current_node_id == "end":
                     response_text = "\nThank you for using our service. Goodbye!"
-                    
+
             response = await self.generate_response(message)
             response_text = response["content"]
 
@@ -261,14 +276,14 @@ class GraphAgent(BaseAgent):
                 if first_token_time is None:
                     first_token_time = time.time()
                     latency = first_token_time - start_time
-                
+
                 buffer += word + " "
-                
+
                 if len(buffer.split()) >= buffer_size or i == len(words) - 1:
                     is_final = (i == len(words) - 1)
                     yield buffer.strip(), is_final, latency, False, None, None
                     buffer = ""
-            
+
             if buffer:
                 yield buffer.strip(), True, latency, False, None, None
 

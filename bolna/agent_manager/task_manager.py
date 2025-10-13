@@ -111,7 +111,6 @@ class TaskManager(BaseManager):
         }
 
         self.welcome_message_audio = self.kwargs.pop('welcome_message_audio', None)
-        self.welcome_message_user_speech_words = []
         # Pre-decode welcome audio for faster playback
         self.preloaded_welcome_audio = base64.b64decode(self.welcome_message_audio) if self.welcome_message_audio else None
         self.observable_variables = {}
@@ -700,26 +699,26 @@ class TaskManager(BaseManager):
         elif agent_type == "graph_agent":
             logger.info("Setting up graph agent with rag-proxy-server support")
             llm_config = self.task_config["tools_config"]["llm_agent"].get("llm_config", {})
-            rag_service_url = self.kwargs.get('rag_service_url', os.getenv('RAG_SERVICE_URL', 'http://localhost:8000'))
+            rag_server_url = self.kwargs.get('rag_server_url', os.getenv('RAG_SERVER_URL', 'http://localhost:8000'))
             
             logger.info(f"Graph agent config: {llm_config}")
-            logger.info(f"RAG service URL: {rag_service_url}")
+            logger.info(f"RAG server URL: {rag_server_url}")
             
-            # Set RAG service URL in environment for GraphAgent to use
-            os.environ['RAG_SERVICE_URL'] = rag_service_url
+            # Set RAG server URL in environment for GraphAgent to use
+            os.environ['RAG_SERVER_URL'] = rag_server_url
             
             llm_agent = GraphAgent(llm_config)
             logger.info("Graph agent created with rag-proxy-server support")
         elif agent_type == "knowledgebase_agent":
             logger.info("Setting up knowledge agent with rag-proxy-server support")
             llm_config = self.task_config["tools_config"]["llm_agent"].get("llm_config", {})
-            rag_service_url = self.kwargs.get('rag_service_url', os.getenv('RAG_SERVICE_URL', 'http://localhost:8000'))
+            rag_server_url = self.kwargs.get('rag_server_url', os.getenv('RAG_SERVER_URL', 'http://localhost:8000'))
             
             logger.info(f"Knowledge agent config: {llm_config}")
-            logger.info(f"RAG service URL: {rag_service_url}")
+            logger.info(f"RAG server URL: {rag_server_url}")
             
-            # Set RAG service URL in environment for KnowledgeAgent to use
-            os.environ['RAG_SERVICE_URL'] = rag_service_url
+            # Set RAG server URL in environment for KnowledgeAgent to use
+            os.environ['RAG_SERVER_URL'] = rag_server_url
             
             # Inject provider credentials and endpoints into KnowledgeAgent config
             injected_cfg = dict(llm_config)
@@ -770,9 +769,6 @@ class TaskManager(BaseManager):
             return
 
         agent_type = self.task_config["tools_config"]["llm_agent"].get("agent_type", "simple_llm_agent")
-        if agent_type in ["knowledgebase_agent"]:
-            return
-
         self.is_local = local
         if task_id == 0:
             if self.context_data and 'recipient_data' in self.context_data and self.context_data['recipient_data'] and self.context_data['recipient_data'].get('timezone', None):
@@ -1536,6 +1532,10 @@ class TaskManager(BaseManager):
         current_ts = self.tools["input"].get_current_mark_started_time()
         self.previous_start_ts = self.current_start_ts
         self.current_start_ts = current_ts
+
+        if not self.tools["input"].welcome_message_played() and len(self.history) > 2:
+            logger.info(f"Welcome message is playing while spoken: {transcriber_message}")
+            return
 
         if self.current_start_ts == self.previous_start_ts and not self.tools['input'].is_audio_being_played_to_user():
             logger.info(f"handle_transcriber_output -> skip as previous user message {self.history[-1]}")
