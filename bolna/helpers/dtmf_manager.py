@@ -28,15 +28,23 @@ class DTMFManager:
         logger.info("DTMF listening enabled with termination_key '#'")
 
     async def inject_digits_to_conversation(self, digits: str) -> None:
-        """Inject digits as user message to conversation history."""
+        """Inject digits as user message to conversation history and trigger LLM response."""
         if not self.task_manager:
             logger.warning("No task_manager for DTMF injection")
             return
 
-        user_message = {"role": "user", "content": digits}
-        self.task_manager.history.append(user_message)
-        self.task_manager.interim_history.append(user_message)
-        logger.info(f"DTMF injected {len(digits)} digits")
+        logger.info(f"DTMF collected {len(digits)} digits: {digits}")
+        
+        base_meta_info = {
+            'io': 'default',
+            'type': 'text',
+            'sequence': 0,
+            'origin': 'dtmf'
+        }
+        meta_info = self.task_manager._TaskManager__get_updated_meta_info(base_meta_info)
+        
+        await self.task_manager._handle_transcriber_output("llm", digits, meta_info)
+        logger.info(f"DTMF LLM processing triggered with sequence_id={meta_info['sequence_id']}")
 
 def get_dtmf_manager(run_id: str, task_manager=None):
     """Get or create DTMFManager."""
