@@ -13,9 +13,8 @@ _dtmf_managers = {}
 class DTMFManager:
     """Passive DTMF: collects digits, injects to conversation on completion."""
 
-    def __init__(self, run_id: str, config, task_manager=None):
+    def __init__(self, run_id: str, task_manager=None):
         self.run_id = run_id
-        self.config = config
         self.task_manager = task_manager
         self.current_config = None
         self.is_collecting = False
@@ -24,10 +23,9 @@ class DTMFManager:
         """Enable passive DTMF listening."""
         self.is_collecting = True
         self.current_config = {
-            'max_digits': getattr(self.config, 'max_digits', 20),
-            'termination_key': getattr(self.config, 'termination_key', '#')
+            'termination_key': '#'
         }
-        logger.info(f"DTMF listening enabled: max_digits={self.current_config['max_digits']}")
+        logger.info("DTMF listening enabled with termination_key '#'")
 
     async def inject_digits_to_conversation(self, digits: str) -> None:
         """Inject digits as user message to conversation history."""
@@ -40,12 +38,10 @@ class DTMFManager:
         self.task_manager.interim_history.append(user_message)
         logger.info(f"DTMF injected {len(digits)} digits")
 
-def get_dtmf_manager(run_id: str, config=None, task_manager=None):
-    """Get or create DTMFManager. Returns None if not found and no config."""
+def get_dtmf_manager(run_id: str, task_manager=None):
+    """Get or create DTMFManager."""
     if run_id not in _dtmf_managers:
-        if config is None:
-            return None
-        _dtmf_managers[run_id] = DTMFManager(run_id, config, task_manager)
+        _dtmf_managers[run_id] = DTMFManager(run_id, task_manager)
     return _dtmf_managers[run_id]
 
 

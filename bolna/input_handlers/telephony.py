@@ -1,4 +1,6 @@
 import traceback
+
+from bolna.helpers.dtmf_manager import get_dtmf_manager
 from .default import DefaultInputHandler
 import asyncio
 import base64
@@ -59,26 +61,19 @@ class TelephonyInputHandler(DefaultInputHandler):
         self.queues['transcriber'].put_nowait(ws_data_packet)
     
     async def _handle_dtmf_digit(self, digit: str) -> bool:
-        """Handle digit. Returns True if complete (# or max_digits)."""
-        from bolna.helpers.dtmf_manager import get_dtmf_manager
+        """Handle digit. Returns True if complete (termination '#')."""
         
         dtmf_manager = get_dtmf_manager(self.run_id)
         if not dtmf_manager or not dtmf_manager.is_collecting:
             return False
         
-        config = dtmf_manager.current_config
-        termination_key = config.get('termination_key', '#')
-        max_digits = config.get('max_digits', 20)
-        
+        termination_key = '#'
+
         if digit == termination_key:
             logger.info("DTMF termination key pressed")
             return True
         
         self.dtmf_digits += digit
-        
-        if len(self.dtmf_digits) >= max_digits:
-            logger.info(f"DTMF max digits reached: {max_digits}")
-            return True
         
         return False
 

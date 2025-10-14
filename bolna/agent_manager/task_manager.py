@@ -265,11 +265,9 @@ class TaskManager(BaseManager):
             self.generate_precise_transcript = self.conversation_config.get('generate_precise_transcript', False)
             
             # Initialize DTMF manager if enabled (passive listening mode)
-            dtmf_config = self.conversation_config.get('dtmf_config', None)
-            if dtmf_config and dtmf_config.get('enabled', False):
-                from bolna.models import DTMFConfig
-                dtmf_config_obj = DTMFConfig(**dtmf_config)
-                self.dtmf_manager = get_dtmf_manager(self.run_id, dtmf_config_obj, task_manager=self)
+            dtmf_enabled = self.conversation_config.get('dtmf_enabled', False)
+            if dtmf_enabled:
+                self.dtmf_manager = get_dtmf_manager(self.run_id, task_manager=self)
                 logger.info(f"DTMF enabled for run_id={self.run_id} in passive mode")
 
                 # Start passive DTMF listening - will auto-inject digits when collected
