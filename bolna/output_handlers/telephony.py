@@ -20,7 +20,6 @@ class TelephonyOutputHandler(DefaultOutputHandler):
         self.stream_sid = None
         self.current_request_id = None
         self.rejected_request_ids = set()
-        self.welcome_message_sent_ts = None
 
     async def handle_interruption(self):
         pass
@@ -33,9 +32,6 @@ class TelephonyOutputHandler(DefaultOutputHandler):
 
     async def set_stream_sid(self, stream_id):
         self.stream_sid = stream_id
-
-    def get_welcome_message_sent_ts(self):
-        return self.welcome_message_sent_ts
 
     async def handle(self, ws_data_packet):
         try:

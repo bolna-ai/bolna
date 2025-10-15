@@ -19,6 +19,7 @@ class DefaultOutputHandler:
         # self.is_welcome_message_sent = False
         self.is_web_based_call = is_web_based_call
         self.mark_event_meta_data = mark_event_meta_data
+        self.welcome_message_sent_ts = None
 
     # @TODO Figure out the best way to handle this
     async def handle_interruption(self):
@@ -37,6 +38,9 @@ class DefaultOutputHandler:
 
     def hangup_sent(self):
         return self.is_last_hangup_chunk_sent
+
+    def get_welcome_message_sent_ts(self):
+        return self.welcome_message_sent_ts
 
     # def welcome_message_sent(self):
     #     return self.is_welcome_message_sent
