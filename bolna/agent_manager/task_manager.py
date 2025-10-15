@@ -2268,7 +2268,9 @@ class TaskManager(BaseManager):
                     "latency_dict": {
                         "llm_latencies": self.llm_latencies,
                         "transcriber_latencies": self.transcriber_latencies,
-                        "synthesizer_latencies": self.synthesizer_latencies
+                        "synthesizer_latencies": self.synthesizer_latencies,
+                        "welcome_message_sent_ts": None,
+                        "stream_sid_ts": None
                     }
                 }
 
