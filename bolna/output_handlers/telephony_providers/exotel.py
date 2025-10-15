@@ -1,5 +1,6 @@
 import base64
 import json
+import audioop
 from dotenv import load_dotenv
 from bolna.output_handlers.telephony import TelephonyOutputHandler
 from bolna.helpers.logger_config import configure_logger
@@ -25,6 +26,12 @@ class ExotelOutputHandler(TelephonyOutputHandler):
         self.mark_event_meta_data.clear_data()
 
     async def form_media_message(self, audio_data, audio_format):
+        # Exotel expects PCM format (16-bit linear)
+        # If audio is mulaw, convert it to PCM
+        if audio_format == "mulaw":
+            logger.info(f"Converting mulaw to PCM for Exotel")
+            audio_data = audioop.ulaw2lin(audio_data, 2)
+
         base64_audio = base64.b64encode(audio_data).decode("ascii")
         message = {
             'event': 'media',
