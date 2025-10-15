@@ -1,5 +1,6 @@
 import json
 import uuid
+import time
 import base64
 from dotenv import load_dotenv
 from bolna.helpers.logger_config import configure_logger
@@ -19,6 +20,7 @@ class DefaultOutputHandler:
         # self.is_welcome_message_sent = False
         self.is_web_based_call = is_web_based_call
         self.mark_event_meta_data = mark_event_meta_data
+        self.welcome_message_sent_ts = None
 
     # @TODO Figure out the best way to handle this
     async def handle_interruption(self):
@@ -37,6 +39,9 @@ class DefaultOutputHandler:
 
     def hangup_sent(self):
         return self.is_last_hangup_chunk_sent
+
+    def get_welcome_message_sent_ts(self):
+        return self.welcome_message_sent_ts
 
     # def welcome_message_sent(self):
     #     return self.is_welcome_message_sent
@@ -79,6 +84,9 @@ class DefaultOutputHandler:
                     await self.websocket.send_text(json.dumps(mark_message))
 
                 logger.info(f"Sending to the frontend {len(data)}")
+                if packet['meta_info'].get('message_category') == 'agent_welcome_message' and not self.welcome_message_sent_ts:
+                    self.welcome_message_sent_ts = time.time() * 1000
+
                 response = {"data": data, "type": packet["meta_info"]['type']}
                 await self.websocket.send_json(response)
 

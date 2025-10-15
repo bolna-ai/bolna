@@ -453,7 +453,6 @@ class DeepgramTranscriber(BaseTranscriber):
         deepgram_ws = None
         try:
             start_time = time.perf_counter()
-            
             try:
                 deepgram_ws = await self.deepgram_connect()
             except (ValueError, ConnectionError) as e:

@@ -40,9 +40,12 @@ class TaskManager(BaseManager):
         super().__init__()
         self.kwargs = kwargs
         self.kwargs["task_manager_instance"] = self
+
+        self.conversation_start_init_ts = time.time() * 1000
         self.llm_latencies = {'connection_latency_ms': None, 'turn_latencies': []}
         self.transcriber_latencies = {'connection_latency_ms': None, 'turn_latencies': []}
         self.synthesizer_latencies = {'connection_latency_ms': None, 'turn_latencies': []}
+        self.stream_sid_ts = None
 
         self.task_config = task
 
@@ -587,6 +590,7 @@ class TaskManager(BaseManager):
 
                 stream_sid = self.tools["input"].get_stream_sid()
                 if stream_sid is not None and self.output_handler_set:
+                    self.stream_sid_ts = time.time() * 1000
                     logger.info(f"Got stream sid and hence sending the first message {stream_sid}")
                     self.stream_sid = stream_sid
                     await self.tools["output"].set_stream_sid(stream_sid)
@@ -2057,6 +2061,7 @@ class TaskManager(BaseManager):
                              'stream_sid': self.stream_sid, "request_id": str(uuid.uuid4()), "cached": False,
                              "sequence_id": -1, 'format': self.task_config["tools_config"]["output"]["format"],
                              'text': text, 'end_of_llm_stream': True}
+                self.stream_sid_ts = time.time() * 1000
                 await self._synthesize(create_ws_data_packet(text, meta_info=meta_info))
                 return
 
@@ -2071,6 +2076,7 @@ class TaskManager(BaseManager):
                 if not self.stream_sid and not self.default_io:
                     stream_sid = self.tools["input"].get_stream_sid()
                     if stream_sid is not None:
+                        self.stream_sid_ts = time.time() * 1000
                         logger.info(f"Got stream sid and hence sending the first message {stream_sid}")
                         self.stream_sid = stream_sid
                         text = self.kwargs.get('agent_welcome_message', None)
@@ -2250,6 +2256,9 @@ class TaskManager(BaseManager):
                 
                 self.transcriber_latencies['turn_latencies'] = self.tools["transcriber"].turn_latencies
                 self.synthesizer_latencies['turn_latencies'] = self.tools["synthesizer"].turn_latencies
+
+                welcome_message_sent_ts = self.tools["output"].get_welcome_message_sent_ts()
+
                 output = {
                     "messages": self.history,
                     "conversation_time": time.time() - self.start_time,
@@ -2261,9 +2270,17 @@ class TaskManager(BaseManager):
                     "latency_dict": {
                         "llm_latencies": self.llm_latencies,
                         "transcriber_latencies": self.transcriber_latencies,
-                        "synthesizer_latencies": self.synthesizer_latencies
+                        "synthesizer_latencies": self.synthesizer_latencies,
+                        "welcome_message_sent_ts": None,
+                        "stream_sid_ts": None
                     }
                 }
+
+                try:
+                    output["latency_dict"]["welcome_message_sent_ts"] = welcome_message_sent_ts - self.conversation_start_init_ts
+                    output["latency_dict"]["stream_sid_ts"] = self.stream_sid_ts - self.conversation_start_init_ts
+                except Exception as e:
+                    logger.error(f"error in logging audio latency ts {str(e)}")
 
                 tasks_to_cancel.append(process_task_cancellation(self.output_task,'output_task'))
                 tasks_to_cancel.append(process_task_cancellation(self.hangup_task,'hangup_task'))
