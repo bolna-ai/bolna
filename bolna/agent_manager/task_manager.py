@@ -2061,6 +2061,7 @@ class TaskManager(BaseManager):
                              'stream_sid': self.stream_sid, "request_id": str(uuid.uuid4()), "cached": False,
                              "sequence_id": -1, 'format': self.task_config["tools_config"]["output"]["format"],
                              'text': text, 'end_of_llm_stream': True}
+                self.stream_sid_ts = time.time() * 1000
                 await self._synthesize(create_ws_data_packet(text, meta_info=meta_info))
                 return
 

@@ -83,6 +83,9 @@ class DefaultOutputHandler:
                     await self.websocket.send_text(json.dumps(mark_message))
 
                 logger.info(f"Sending to the frontend {len(data)}")
+                if packet['meta_info'].get('message_category') == 'agent_welcome_message' and not self.welcome_message_sent_ts:
+                    self.welcome_message_sent_ts = time.time() * 1000
+
                 response = {"data": data, "type": packet["meta_info"]['type']}
                 await self.websocket.send_json(response)
 
