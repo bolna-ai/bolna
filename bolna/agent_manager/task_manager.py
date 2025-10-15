@@ -41,7 +41,7 @@ class TaskManager(BaseManager):
         self.kwargs = kwargs
         self.kwargs["task_manager_instance"] = self
 
-        self.conversation_start_init_ts = time.perf_counter()
+        self.conversation_start_init_ts = time.time() * 1000
         self.llm_latencies = {'connection_latency_ms': None, 'turn_latencies': []}
         self.transcriber_latencies = {'connection_latency_ms': None, 'turn_latencies': []}
         self.synthesizer_latencies = {'connection_latency_ms': None, 'turn_latencies': []}
@@ -590,7 +590,7 @@ class TaskManager(BaseManager):
 
                 stream_sid = self.tools["input"].get_stream_sid()
                 if stream_sid is not None and self.output_handler_set:
-                    self.stream_sid_ts = time.perf_counter()
+                    self.stream_sid_ts = time.time() * 1000
                     logger.info(f"Got stream sid and hence sending the first message {stream_sid}")
                     self.stream_sid = stream_sid
                     await self.tools["output"].set_stream_sid(stream_sid)

@@ -64,7 +64,7 @@ class TelephonyOutputHandler(DefaultOutputHandler):
                         media_message = await self.form_media_message(audio_chunk, audio_format)
                         await self.websocket.send_text(json.dumps(media_message))
                         if meta_info.get('message_category', '') == 'agent_welcome_message' and not self.welcome_message_sent_ts:
-                            self.welcome_message_sent_ts = time.perf_counter()
+                            self.welcome_message_sent_ts = time.time() * 1000
                         logger.info(f"Sending media event - {meta_info.get('mark_id')}")
 
                     # sending of post-mark message
