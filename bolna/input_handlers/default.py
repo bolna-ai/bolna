@@ -13,7 +13,7 @@ load_dotenv()
 class DefaultInputHandler:
     def __init__(self, queues=None, websocket=None, input_types=None, mark_event_meta_data=None, queue=None,
                  turn_based_conversation=False, conversation_recording=None, is_welcome_message_played=False,
-                 observable_variables=None):
+                 observable_variables=None, run_id=None):
         self.queues = queues
         self.websocket = websocket
         self.input_types = input_types
@@ -31,6 +31,7 @@ class DefaultInputHandler:
         self.audio_chunks_received = 0
         self.update_start_ts = time.time()
         self.io_provider = 'default'
+        self.run_id = run_id
 
     def get_audio_chunks_received(self):
         audio_chunks_received = self.audio_chunks_received
