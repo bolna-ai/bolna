@@ -2075,6 +2075,7 @@ class TaskManager(BaseManager):
                 if not self.stream_sid and not self.default_io:
                     stream_sid = self.tools["input"].get_stream_sid()
                     if stream_sid is not None:
+                        self.stream_sid_ts = time.time() * 1000
                         logger.info(f"Got stream sid and hence sending the first message {stream_sid}")
                         self.stream_sid = stream_sid
                         text = self.kwargs.get('agent_welcome_message', None)
