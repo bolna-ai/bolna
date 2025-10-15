@@ -34,6 +34,8 @@ class DTMFManager:
             return
 
         logger.info(f"DTMF collected {len(digits)} digits: {digits}")
+
+        msg= "dtmf_number: " + digits
         
         base_meta_info = {
             'io': 'default',
@@ -43,7 +45,7 @@ class DTMFManager:
         }
         meta_info = self.task_manager._TaskManager__get_updated_meta_info(base_meta_info)
         
-        await self.task_manager._handle_transcriber_output("llm", digits, meta_info)
+        await self.task_manager._handle_transcriber_output("llm", msg, meta_info)
         logger.info(f"DTMF LLM processing triggered with sequence_id={meta_info['sequence_id']}")
 
 def get_dtmf_manager(run_id: str, task_manager=None):
