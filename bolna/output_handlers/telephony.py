@@ -2,6 +2,7 @@ import base64
 import json
 import os
 import audioop
+import time
 import uuid
 import traceback
 from dotenv import load_dotenv
@@ -19,6 +20,7 @@ class TelephonyOutputHandler(DefaultOutputHandler):
         self.stream_sid = None
         self.current_request_id = None
         self.rejected_request_ids = set()
+        self.welcome_message_sent_ts = None
 
     async def handle_interruption(self):
         pass
@@ -31,6 +33,9 @@ class TelephonyOutputHandler(DefaultOutputHandler):
 
     async def set_stream_sid(self, stream_id):
         self.stream_sid = stream_id
+
+    def get_welcome_message_sent_ts(self):
+        return self.welcome_message_sent_ts
 
     async def handle(self, ws_data_packet):
         try:
@@ -62,6 +67,8 @@ class TelephonyOutputHandler(DefaultOutputHandler):
                             audio_format = 'wav'
                         media_message = await self.form_media_message(audio_chunk, audio_format)
                         await self.websocket.send_text(json.dumps(media_message))
+                        if meta_info.get('message_category', '') == 'agent_welcome_message' and not self.welcome_message_sent_ts:
+                            self.welcome_message_sent_ts = time.perf_counter()
                         logger.info(f"Sending media event - {meta_info.get('mark_id')}")
 
                     # sending of post-mark message

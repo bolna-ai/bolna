@@ -40,9 +40,12 @@ class TaskManager(BaseManager):
         super().__init__()
         self.kwargs = kwargs
         self.kwargs["task_manager_instance"] = self
+
+        self.conversation_start_init_ts = time.perf_counter()
         self.llm_latencies = {'connection_latency_ms': None, 'turn_latencies': []}
         self.transcriber_latencies = {'connection_latency_ms': None, 'turn_latencies': []}
         self.synthesizer_latencies = {'connection_latency_ms': None, 'turn_latencies': []}
+        self.stream_sid_ts = None
 
         self.task_config = task
 
@@ -587,6 +590,7 @@ class TaskManager(BaseManager):
 
                 stream_sid = self.tools["input"].get_stream_sid()
                 if stream_sid is not None and self.output_handler_set:
+                    self.stream_sid_ts = time.perf_counter()
                     logger.info(f"Got stream sid and hence sending the first message {stream_sid}")
                     self.stream_sid = stream_sid
                     await self.tools["output"].set_stream_sid(stream_sid)
@@ -2250,6 +2254,9 @@ class TaskManager(BaseManager):
                 
                 self.transcriber_latencies['turn_latencies'] = self.tools["transcriber"].turn_latencies
                 self.synthesizer_latencies['turn_latencies'] = self.tools["synthesizer"].turn_latencies
+
+                welcome_message_sent_ts = self.tools["output"].get_welcome_message_sent_ts()
+
                 output = {
                     "messages": self.history,
                     "conversation_time": time.time() - self.start_time,
@@ -2264,6 +2271,12 @@ class TaskManager(BaseManager):
                         "synthesizer_latencies": self.synthesizer_latencies
                     }
                 }
+
+                try:
+                    output["latency_dict"]["welcome_message_sent_ts"] = welcome_message_sent_ts - self.conversation_start_init_ts
+                    output["latency_dict"]["stream_sid_ts"] = self.stream_sid_ts - self.conversation_start_init_ts
+                except Exception as e:
+                    logger.error(f"error in logging audio latency ts {str(e)}")
 
                 tasks_to_cancel.append(process_task_cancellation(self.output_task,'output_task'))
                 tasks_to_cancel.append(process_task_cancellation(self.hangup_task,'hangup_task'))
