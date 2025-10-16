@@ -2276,11 +2276,18 @@ class TaskManager(BaseManager):
                     }
                 }
 
-                try:
-                    output["latency_dict"]["welcome_message_sent_ts"] = welcome_message_sent_ts - self.conversation_start_init_ts
-                    output["latency_dict"]["stream_sid_ts"] = self.stream_sid_ts - self.conversation_start_init_ts
-                except Exception as e:
-                    logger.error(f"error in logging audio latency ts {str(e)}")
+                if self.conversation_start_init_ts:
+                    if welcome_message_sent_ts:
+                        try:
+                            output["latency_dict"]["welcome_message_sent_ts"] = welcome_message_sent_ts - self.conversation_start_init_ts
+                        except Exception as e:
+                            logger.error(f"error in logging audio latency welcome_message_sent_ts {str(e)}")
+
+                    if self.stream_sid_ts:
+                        try:
+                            output["latency_dict"]["stream_sid_ts"] = self.stream_sid_ts - self.conversation_start_init_ts
+                        except Exception as e:
+                            logger.error(f"error in logging audio latency stream_sid_ts {str(e)}")
 
                 tasks_to_cancel.append(process_task_cancellation(self.output_task,'output_task'))
                 tasks_to_cancel.append(process_task_cancellation(self.hangup_task,'hangup_task'))
