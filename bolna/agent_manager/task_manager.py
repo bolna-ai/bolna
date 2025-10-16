@@ -1103,7 +1103,7 @@ class TaskManager(BaseManager):
 
                 dtmf_message = "dtmf_number: " + dtmf_digits
                 base_meta_info = {
-                    'io': 'default',
+                    'io': self.tools['input'].io_provider,
                     'type': 'text',
                     'sequence': 0,
                     'origin': 'dtmf'
