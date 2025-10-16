@@ -77,7 +77,9 @@ class TaskManager(BaseManager):
         self.llm_queue = asyncio.Queue()
         self.synthesizer_queue = asyncio.Queue()
         self.transcriber_output_queue = asyncio.Queue()
+        self.dtmf_queue = asyncio.Queue()
         self.queues = {
+            "dtmf": self.dtmf_queue,
             "transcriber": self.audio_queue,
             "llm": self.llm_queue,
             "synthesizer": self.synthesizer_queue
@@ -159,6 +161,7 @@ class TaskManager(BaseManager):
         self.synthesizer_tasks = []
         self.synthesizer_task = None
         self.synthesizer_monitor_task = None
+        self.dtmf_task = None
 
         # state of conversation
         self.current_request_id = None
@@ -263,6 +266,12 @@ class TaskManager(BaseManager):
             self.conversation_config = task.get("task_config", {})
             logger.info(f"Conversation config {self.conversation_config}")
             self.generate_precise_transcript = self.conversation_config.get('generate_precise_transcript', False)
+
+            # Enable DTMF flow
+            dtmf_enabled = self.conversation_config.get('dtmf_enabled', False)
+            if dtmf_enabled:
+                self.tools['input'].is_dtmf_active = True
+                self.dtmf_task = asyncio.create_task(self.inject_digits_to_conversation())
 
             self.trigger_user_online_message_after = self.conversation_config.get("trigger_user_online_message_after", DEFAULT_USER_ONLINE_MESSAGE_TRIGGER_DURATION)
             self.check_if_user_online = self.conversation_config.get("check_if_user_online", True)
@@ -1085,6 +1094,25 @@ class TaskManager(BaseManager):
 
             await asyncio.sleep(0.5)
         return
+
+    async def inject_digits_to_conversation(self) -> None:
+        while True:
+            try:
+                dtmf_digits = await self.queues["dtmf"].get()
+                logger.info(f"DTMF collected {dtmf_digits}")
+
+                dtmf_message = "dtmf_number: " + dtmf_digits
+                base_meta_info = {
+                    'io': 'default',
+                    'type': 'text',
+                    'sequence': 0,
+                    'origin': 'dtmf'
+                }
+                meta_info = self.__get_updated_meta_info(base_meta_info)
+                await self._handle_transcriber_output("llm", dtmf_message, meta_info)
+                logger.info(f"DTMF LLM processing triggered with sequence_id={meta_info['sequence_id']}")
+            except Exception as e:
+                logger.info(f"DTMF LLM processing triggered with exception {e}")
 
     async def __process_end_of_conversation(self, web_call_timeout=False):
         logger.info("Got end of conversation. I'm stopping now")
@@ -2288,6 +2316,7 @@ class TaskManager(BaseManager):
                 tasks_to_cancel.append(process_task_cancellation(self.ambient_noise_task, 'ambient_noise_task'))
                 # tasks_to_cancel.append(process_task_cancellation(self.initial_silence_task, 'initial_silence_task'))
                 tasks_to_cancel.append(process_task_cancellation(self.first_message_task, 'first_message_task'))
+                tasks_to_cancel.append(process_task_cancellation(self.dtmf_task, 'dtmf_task'))
                 tasks_to_cancel.append(
                     process_task_cancellation(self.handle_accumulated_message_task, "handle_accumulated_message_task"))
 

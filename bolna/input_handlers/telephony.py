@@ -56,6 +56,20 @@ class TelephonyInputHandler(DefaultInputHandler):
         ws_data_packet = create_ws_data_packet(data=audio_data, meta_info=meta_info)
         self.queues['transcriber'].put_nowait(ws_data_packet)
 
+    async def _handle_dtmf_digit(self, digit: str) -> bool:
+        """Handle digit. Returns True if complete (termination '#')."""
+        if not self.is_dtmf_active:
+            return False
+
+        termination_key = '#'
+
+        if digit == termination_key:
+            logger.info("DTMF termination key pressed")
+            return True
+
+        self.dtmf_digits += digit
+        return False
+
     async def _listen(self):
         buffer = []
         while True:
@@ -98,6 +112,17 @@ class TelephonyInputHandler(DefaultInputHandler):
 
                 elif packet['event'] == 'mark' or packet['event'] == 'playedStream':
                     self.process_mark_message(packet)
+
+                elif packet['event'] == 'dtmf':
+                    digit = packet.get('dtmf', {}).get('digit', '')
+                    if not digit:
+                        continue
+
+                    is_complete = await self._handle_dtmf_digit(digit)
+                    if is_complete and self.dtmf_digits:
+                        if self.is_dtmf_active:
+                            self.queues['dtmf'].put_nowait(self.dtmf_digits)
+                        self.dtmf_digits = ""
 
                 elif packet['event'] == 'stop':
                     logger.info('call stopping')
