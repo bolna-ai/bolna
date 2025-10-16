@@ -372,7 +372,7 @@ class ConversationConfig(BaseModel):
     backchanneling: Optional[bool] = False
     backchanneling_message_gap: Optional[int] = 5
     backchanneling_start_delay: Optional[int] = 5
-    ambient_noise: Optional[bool] = False 
+    ambient_noise: Optional[bool] = False
     ambient_noise_track: Optional[str] = "convention_hall"
     call_terminate: Optional[int] = 90
     use_fillers: Optional[bool] = False
@@ -380,6 +380,7 @@ class ConversationConfig(BaseModel):
     check_user_online_message: Optional[str] = "Hey, are you still there"
     check_if_user_online: Optional[bool] = True
     generate_precise_transcript: Optional[bool] = False
+    dtmf_enabled: Optional[bool] = False
 
     @field_validator('hangup_after_silence', mode='before')
     def set_hangup_after_silence(cls, v):

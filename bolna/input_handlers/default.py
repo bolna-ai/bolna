@@ -31,6 +31,8 @@ class DefaultInputHandler:
         self.audio_chunks_received = 0
         self.update_start_ts = time.time()
         self.io_provider = 'default'
+        self.is_dtmf_active = False
+        self.dtmf_digits = ""
 
     def get_audio_chunks_received(self):
         audio_chunks_received = self.audio_chunks_received
