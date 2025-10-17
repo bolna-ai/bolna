@@ -347,6 +347,31 @@ class ToolModel(BaseModel):
     tools_params: Dict[str, APIParams]
 
 
+class OpenAIRealtimeConfig(BaseModel):
+    model: str = "gpt-4o-mini-realtime-preview-2024-12-17"
+    voice: str = "alloy"
+    temperature: Optional[float] = 0.8
+    max_tokens: Optional[int] = 4096
+    modalities: Optional[List[str]] = ["audio", "text"]
+    turn_detection: Optional[Dict] = {
+        "type": "server_vad",
+        "threshold": 0.5,
+        "prefix_padding_ms": 300,
+        "silence_duration_ms": 500
+    }
+    input_audio_transcription: Optional[bool] = True
+
+
+class VoiceToVoiceConfig(BaseModel):
+    provider: str
+    instructions: str
+    provider_config: Optional[OpenAIRealtimeConfig] = OpenAIRealtimeConfig()
+    
+    @field_validator("provider")
+    def validate_provider(cls, value):
+        return validate_attribute(value, ["openai_realtime"])
+
+
 class ToolsConfig(BaseModel):
     llm_agent: Optional[Union[LlmAgent, SimpleLlmAgent]] = None
     synthesizer: Optional[Synthesizer] = None
@@ -354,6 +379,7 @@ class ToolsConfig(BaseModel):
     input: Optional[IOModel] = None
     output: Optional[IOModel] = None
     api_tools: Optional[ToolModel] = None
+    voice_to_voice: Optional[VoiceToVoiceConfig] = None
 
 class ToolsChainModel(BaseModel):
     execution: str = Field(..., pattern="^(parallel|sequential)$")
