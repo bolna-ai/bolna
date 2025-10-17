@@ -241,6 +241,8 @@ def get_required_input_types(task):
             input_types["audio"] = i
         elif chain[0] == "synthesizer" or chain[0] == "llm":
             input_types["text"] = i
+        elif chain[0] == "voice_to_voice":
+            input_types["audio"] = i
     return input_types
 
 
