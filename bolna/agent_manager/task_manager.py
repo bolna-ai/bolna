@@ -10,6 +10,7 @@ import uuid
 import copy
 import base64
 import pytz
+from typing import Dict, Any
 
 import aiohttp
 
@@ -138,10 +139,60 @@ class TaskManager(BaseManager):
             else:
                 self.should_record = self.task_config["tools_config"]["output"]["provider"] == 'default' and self.enforce_streaming #In this case, this is a websocket connection and we should record
 
+        # Voice-to-Voice mode detection and initialization (MUST be before setup_input/output_handlers)
+        self.voice_to_voice_mode = False
+        self.voice_to_voice_provider = None
+
+        self.last_interruption_time = 0
+        self.interruption_debounce_ms = 300
+
+        if task_id == 0 and task['tools_config'].get('voice_to_voice'):
+            self.voice_to_voice_mode = True
+            logger.info("Voice-to-voice mode detected")
+            
+            # Initialize v2v provider
+            v2v_config = task['tools_config']['voice_to_voice']
+            provider_name = v2v_config['provider']
+            
+            from bolna.providers import SUPPORTED_VOICE_TO_VOICE_PROVIDERS
+            V2VClass = SUPPORTED_VOICE_TO_VOICE_PROVIDERS.get(provider_name)
+            
+            if not V2VClass:
+                raise ValueError(f"Unsupported voice-to-voice provider: {provider_name}")
+            
+            api_key = kwargs.get('v2v_key')
+            if not api_key:
+                if provider_name == 'openai_realtime':
+                    api_key = os.getenv('OPENAI_API_KEY')
+                else:
+                    api_key = os.getenv(f"{provider_name.upper()}_API_KEY")
+            
+            if not api_key:
+                raise ValueError(f"API key not found for {provider_name}. Set v2v_key kwarg or OPENAI_API_KEY (for openai_realtime) or {provider_name.upper()}_API_KEY environment variable")
+            
+            provider_config = v2v_config.get('provider_config', {})
+            if isinstance(provider_config, dict):
+                config_params = provider_config
+            else:
+                config_params = provider_config.dict() if hasattr(provider_config, 'dict') else provider_config.model_dump()
+            
+            self.voice_to_voice_provider = V2VClass(
+                api_key=api_key,
+                instructions=v2v_config['instructions'],
+                task_manager_instance=self,
+                **config_params
+            )
+            
+            logger.info(f"Initialized {provider_name} voice-to-voice provider")
+
+
+        if self.task_config["tools_config"]["input"] is not None:
             self.__setup_input_handlers(turn_based_conversation, input_queue, self.should_record)
         self.__setup_output_handlers(turn_based_conversation, output_queue)
 
-        self.first_message_task_new = asyncio.create_task(self.message_task_new())
+
+        if not self.voice_to_voice_mode:
+            self.first_message_task_new = asyncio.create_task(self.message_task_new())
 
         # Agent stuff
         # Need to maintain current conversation history and overall persona/history kinda thing.
@@ -187,7 +238,10 @@ class TaskManager(BaseManager):
         #Tasks
         self.extracted_data = None
         self.summarized_data = None
-        self.stream = (self.task_config["tools_config"]['synthesizer'] is not None and self.task_config["tools_config"]["synthesizer"]["stream"]) and (self.enforce_streaming or not self.turn_based_conversation)
+        if task['tools_config'].get('voice_to_voice'):
+            self.stream = False
+        else:
+            self.stream = (self.task_config["tools_config"]['synthesizer'] is not None and self.task_config["tools_config"]["synthesizer"]["stream"]) and (self.enforce_streaming or not self.turn_based_conversation)
 
         self.is_local = False
         self.llm_config = None
@@ -198,8 +252,8 @@ class TaskManager(BaseManager):
         if self.__is_multiagent():
             for agent, config in self.task_config["tools_config"]["llm_agent"]['llm_config']['agent_map'].items():
                 self.llm_config_map[agent] = config.copy()
-                self.llm_config_map[agent]['buffer_size'] = self.task_config["tools_config"]["synthesizer"][
-                    'buffer_size']
+                if self.task_config["tools_config"]["synthesizer"] is not None:
+                    self.llm_config_map[agent]['buffer_size'] = self.task_config["tools_config"]["synthesizer"]['buffer_size']
         else:
             if self.task_config["tools_config"]["llm_agent"] is not None:
                 if self.__is_knowledgebase_agent():
@@ -247,8 +301,11 @@ class TaskManager(BaseManager):
         self.conversation_config = None
 
         if task_id == 0:
-            provider_config = self.task_config["tools_config"]["synthesizer"].get("provider_config")
-            self.synthesizer_voice = provider_config["voice"]
+            if not self.voice_to_voice_mode:
+                provider_config = self.task_config["tools_config"]["synthesizer"].get("provider_config")
+                self.synthesizer_voice = provider_config["voice"]
+            else:
+                self.synthesizer_voice = None
 
             self.handle_accumulated_message_task = None
             # self.initial_silence_task = None
@@ -268,8 +325,10 @@ class TaskManager(BaseManager):
                 self.check_user_online_message = update_prompt_with_context(self.check_user_online_message, self.context_data)
 
             self.kwargs["process_interim_results"] = "true" if self.conversation_config.get("optimize_latency", False) is True else "false"
-            # Routes
-            self.routes = task['tools_config']['llm_agent'].get("routes", None)
+            if not self.voice_to_voice_mode and task['tools_config']['llm_agent'] is not None:
+                self.routes = task['tools_config']['llm_agent'].get("routes", None)
+            else:
+                self.routes = None
             self.route_layer = None
 
             if self.routes:
@@ -298,7 +357,10 @@ class TaskManager(BaseManager):
             # for long pauses and rushing
             if self.conversation_config is not None:
                 # TODO need to get this for azure - for azure the subtraction would not happen
-                self.minimum_wait_duration = self.task_config["tools_config"]["transcriber"]["endpointing"]
+                if not self.voice_to_voice_mode:
+                    self.minimum_wait_duration = self.task_config["tools_config"]["transcriber"]["endpointing"]
+                else:
+                    self.minimum_wait_duration = 500  # Default for V2V mode
                 self.last_spoken_timestamp = time.time() * 1000
                 self.incremental_delay = self.conversation_config.get("incremental_delay", 100)
                 self.required_delay_before_speaking = max(self.minimum_wait_duration - self.incremental_delay, 0)  #Everytime we get a message we increase it by 100 miliseconds
@@ -376,11 +438,14 @@ class TaskManager(BaseManager):
                 else:
                     self.filler_preset_directory = f"{os.getenv('FILLERS_PRESETS_DIR')}/{self.synthesizer_voice.lower()}"
 
-        # setting transcriber and synthesizer in parallel
-        self.__setup_transcriber()
-        self.__setup_synthesizer(self.llm_config)
-        if not self.turn_based_conversation and task_id == 0:
-            self.synthesizer_monitor_task = asyncio.create_task(self.tools['synthesizer'].monitor_connection())
+
+        if not self.voice_to_voice_mode:
+            self.__setup_transcriber()
+            self.__setup_synthesizer(self.llm_config)
+            if not self.turn_based_conversation and task_id == 0:
+                self.synthesizer_monitor_task = asyncio.create_task(self.tools['synthesizer'].monitor_connection())
+        else:
+            logger.info("V2V mode: skipping transcriber and synthesizer setup")
 
         #asyncio.create_task(self.__async_setup_tools())
         # # setting llm
@@ -424,17 +489,23 @@ class TaskManager(BaseManager):
     def __is_multiagent(self):
         if self.task_config["task_type"] == "webhook":
             return False
+        if self.voice_to_voice_mode or self.task_config['tools_config']["llm_agent"] is None:
+            return False
         agent_type = self.task_config['tools_config']["llm_agent"].get("agent_type", None)
         return agent_type == "multiagent"
 
     def __is_knowledgebase_agent(self):
         if self.task_config["task_type"] == "webhook":
             return False
+        if self.voice_to_voice_mode or self.task_config['tools_config']["llm_agent"] is None:
+            return False
         agent_type = self.task_config['tools_config']["llm_agent"].get("agent_type", None)
         return agent_type == "knowledgebase_agent"
 
     def __is_graph_agent(self):
         if self.task_config["task_type"] == "webhook":
+            return False
+        if self.voice_to_voice_mode or self.task_config['tools_config']["llm_agent"] is None:
             return False
         agent_type = self.task_config['tools_config']["llm_agent"].get("agent_type", None)
         return agent_type == "graph_agent"
@@ -496,12 +567,22 @@ class TaskManager(BaseManager):
                 if self.task_config["tools_config"]["output"]["provider"] in SUPPORTED_OUTPUT_TELEPHONY_HANDLERS.keys():
                     output_kwargs['mark_event_meta_data'] = self.mark_event_meta_data
                     logger.info(f"Making sure that the sampling rate for output handler is 8000")
-                    self.task_config['tools_config']['synthesizer']['provider_config']['sampling_rate'] = 8000
-                    self.task_config['tools_config']['synthesizer']['audio_format'] = 'pcm'
+                    
+                    if not self.voice_to_voice_mode:
+                        self.task_config['tools_config']['synthesizer']['provider_config']['sampling_rate'] = 8000
+                        self.task_config['tools_config']['synthesizer']['audio_format'] = 'pcm'
+                        self.sampling_rate = self.task_config['tools_config']['synthesizer']['provider_config']['sampling_rate']
+                    else:
+                        self.sampling_rate = 8000
+                        logger.info("V2V mode: using 8kHz sampling rate for telephony output")
                 else:
-                    self.task_config['tools_config']['synthesizer']['provider_config']['sampling_rate'] = 24000
+                    if not self.voice_to_voice_mode:
+                        self.task_config['tools_config']['synthesizer']['provider_config']['sampling_rate'] = 24000
+                        self.sampling_rate = self.task_config['tools_config']['synthesizer']['provider_config']['sampling_rate']
+                    else:
+                        self.sampling_rate = 24000
+                        logger.info("V2V mode: using 24kHz sampling rate for web output")
                     output_kwargs['queue'] = output_queue
-                self.sampling_rate = self.task_config['tools_config']['synthesizer']['provider_config']['sampling_rate']
 
             if self.task_config["tools_config"]["output"]["provider"] == "default":
                 output_kwargs["is_web_based_call"] = self.is_web_based_call
@@ -554,18 +635,42 @@ class TaskManager(BaseManager):
             raise "Other input handlers not supported yet"
 
     async def __forced_first_message(self, timeout=10.0):
-        logger.info(f"Executing the first message task")
+        """
+        Play welcome message for both traditional and V2V modes.
+        Waits for stream_sid to become available before sending.
+        """
+        mode = "V2V" if self.voice_to_voice_mode else "traditional"
+        logger.info(f"Executing first message task ({mode} mode)")
+        
         try:
+            if not self.preloaded_welcome_audio:
+                logger.info("No preloaded welcome audio, skipping")
+                return
+                
             start_time = asyncio.get_running_loop().time()
-            while True:
-                elapsed_time = asyncio.get_running_loop().time() - start_time
-                if elapsed_time > timeout:
-                    await self.__process_end_of_conversation()
-                    logger.warning("Timeout reached while waiting for stream_sid")
-                    break
-
+            
+            if self.voice_to_voice_mode:
+                from bolna.helpers.audio_utils import convert_pcm16_to_target_format
+                output_provider = self.task_config["tools_config"]["output"]["provider"]
+                
+                audio_bytes, output_format = convert_pcm16_to_target_format(
+                    self.preloaded_welcome_audio,
+                    24000,
+                    output_provider
+                )
+                logger.info(f"V2V: Converted welcome audio to {output_format} format ({len(audio_bytes)} bytes)")
+            else:
                 text = self.kwargs.get('agent_welcome_message', None)
-                meta_info = {'io': self.tools["output"].get_provider(), 'message_category': 'agent_welcome_message', "request_id": str(uuid.uuid4()), "cached": True, "sequence_id": -1, 'format': self.task_config["tools_config"]["output"]["format"], 'text': text, 'end_of_llm_stream': True}
+                meta_info = {
+                    'io': self.tools["output"].get_provider(),
+                    'message_category': 'agent_welcome_message',
+                    "request_id": str(uuid.uuid4()),
+                    "cached": True,
+                    "sequence_id": -1,
+                    'format': self.task_config["tools_config"]["output"]["format"],
+                    'text': text,
+                    'end_of_llm_stream': True
+                }
                 ws_data_packet = create_ws_data_packet(text, meta_info=meta_info)
 
                 meta_info = ws_data_packet["meta_info"]
@@ -573,9 +678,9 @@ class TaskManager(BaseManager):
                 meta_info["type"] = "audio"
                 meta_info["synthesizer_start_time"] = time.time()
 
-                audio_chunk = self.preloaded_welcome_audio if self.preloaded_welcome_audio else None
+                audio_bytes = self.preloaded_welcome_audio if self.preloaded_welcome_audio else None
                 if meta_info['text'] == '':
-                    audio_chunk = None
+                    audio_bytes = None
 
                 meta_info["format"] = "pcm"
                 meta_info['is_first_chunk'] = True
@@ -583,29 +688,61 @@ class TaskManager(BaseManager):
                 meta_info['chunk_id'] = 1
                 meta_info["is_first_chunk_of_entire_response"] = True
                 meta_info["is_final_chunk_of_entire_response"] = True
-                message = create_ws_data_packet(audio_chunk, meta_info)
+                output_format = "pcm"
+
+            while True:
+                elapsed_time = asyncio.get_running_loop().time() - start_time
+                if elapsed_time > timeout:
+                    if not self.voice_to_voice_mode:
+                        await self.__process_end_of_conversation()
+                    logger.warning(f"Timeout reached while waiting for stream_sid ({mode} mode)")
+                    break
 
                 stream_sid = self.tools["input"].get_stream_sid()
                 if stream_sid is not None and self.output_handler_set:
-                    logger.info(f"Got stream sid and hence sending the first message {stream_sid}")
+                    logger.info(f"Got stream_sid ({stream_sid}), sending welcome message ({mode} mode)")
                     self.stream_sid = stream_sid
                     await self.tools["output"].set_stream_sid(stream_sid)
-                    self.tools["input"].update_is_audio_being_played(True)
+                    
+                    if self.voice_to_voice_mode:
+                        message = {
+                            'data': audio_bytes,
+                            'meta_info': {
+                                'format': output_format,
+                                'io': self.task_config["tools_config"]["output"]["provider"],
+                                'sequence_id': -1,
+                                'stream_sid': stream_sid,
+                                'message_category': 'agent_welcome_message',
+                                'is_first_chunk': True,
+                                'end_of_llm_stream': True,
+                                'end_of_synthesizer_stream': True,
+                                'type': 'audio'
+                            }
+                        }
+                    else:
+                        message = create_ws_data_packet(audio_bytes, meta_info)
+                        self.tools["input"].update_is_audio_being_played(True)
+                    
                     await self.tools["output"].handle(message)
-                    try:
-                        duration = calculate_audio_duration(len(message["data"]), self.sampling_rate,
-                                                            format=message['meta_info']['format'])
-                        self.conversation_recording['output'].append(
-                            {'data': message['data'], "start_time": time.time(), "duration": duration})
-                    except Exception as e:
-                        duration = 0.256
-                        logger.error("Exception in __forced_first_message for duration calculation: {}".format(str(e)))
+                    
+                    if not self.voice_to_voice_mode:
+                        try:
+                            duration = calculate_audio_duration(len(message["data"]), self.sampling_rate,
+                                                                format=message['meta_info']['format'])
+                            self.conversation_recording['output'].append(
+                                {'data': message['data'], "start_time": time.time(), "duration": duration})
+                        except Exception as e:
+                            duration = 0.256
+                            logger.error("Exception in __forced_first_message for duration calculation: {}".format(str(e)))
+
                     break
                 else:
-                    logger.info(f"Stream id is still None ({stream_sid}) or output handler not set ({self.output_handler_set}), waiting...")
+                    logger.debug(f"Stream_sid still None ({stream_sid}) or output not set ({self.output_handler_set}), waiting...")
                     await asyncio.sleep(0.01)
+                    
         except Exception as e:
-            logger.error(f"Exception in __forced_first_message {str(e)}")
+            logger.error(f"Exception in __forced_first_message ({mode} mode): {e}")
+            traceback.print_exc()
 
         return
 
@@ -640,7 +777,8 @@ class TaskManager(BaseManager):
 
     def __setup_synthesizer(self, llm_config=None):
         if self._is_conversation_task():
-            self.kwargs["use_turbo"] = self.task_config["tools_config"]["transcriber"]["language"] == DEFAULT_LANGUAGE_CODE
+            if not self.voice_to_voice_mode:
+                self.kwargs["use_turbo"] = self.task_config["tools_config"]["transcriber"]["language"] == DEFAULT_LANGUAGE_CODE
         if self.task_config["tools_config"]["synthesizer"] is not None:
             if "caching" in self.task_config['tools_config']['synthesizer']:
                 caching = self.task_config["tools_config"]["synthesizer"].pop("caching")
@@ -766,6 +904,10 @@ class TaskManager(BaseManager):
 
     async def load_prompt(self, assistant_name, task_id, local, **kwargs):
         if self.task_config["task_type"] == "webhook":
+            return
+        
+        if self.voice_to_voice_mode:
+            logger.info("V2V mode: skipping prompt loading")
             return
 
         agent_type = self.task_config["tools_config"]["llm_agent"].get("agent_type", "simple_llm_agent")
@@ -1936,6 +2078,7 @@ class TaskManager(BaseManager):
                 if 'sequence_id' in message['meta_info'] and message["meta_info"]["sequence_id"] in self.sequence_ids:
                     self.tools["input"].update_is_audio_being_played(True)
                     await self.tools["output"].handle(message)
+                    
                     try:
                         duration = calculate_audio_duration(len(message["data"]), self.sampling_rate, format = message['meta_info']['format'])
                         self.conversation_recording['output'].append({'data': message['data'], "start_time": time.time(), "duration": duration})
@@ -1943,7 +2086,7 @@ class TaskManager(BaseManager):
                         duration = 0.256
                         logger.info("Exception in __process_output_loop: {}".format(str(e)))
                 else:
-                    logger.info(f'{message["meta_info"]["sequence_id"]} is not in {self.sequence_ids} and hence not speaking')
+                    logger.debug(f'Audio dropped: sequence_id {message["meta_info"]["sequence_id"]} not in valid set {self.sequence_ids}')
                     continue
 
                 if (message['meta_info'].get("end_of_llm_stream", False) or message['meta_info'].get("end_of_synthesizer_stream", False)) and \
@@ -2161,7 +2304,351 @@ class TaskManager(BaseManager):
         except Exception as e:
             logger.error(f"Error occurred in handling init event - {e}")
 
+    # Voice-to-Voice execution methods
+    def _convert_api_tools_to_v2v_format(self) -> list:
+        """Convert bolna api_tools to v2v provider function calling format."""
+        api_tools = self.task_config["tools_config"].get('api_tools', {})
+        if not api_tools:
+            return []
+        
+        tools_list = api_tools.get('tools', [])
+        if not tools_list:
+            return []
+
+        converted_tools = []
+
+        for tool in tools_list:
+            if isinstance(tool, dict):
+                if tool.get('type') == 'function' and 'function' in tool:
+                    func = tool['function']
+                    converted_tools.append({
+                        'type': 'function',
+                        'name': func.get('name'),
+                        'description': func.get('description'),
+                        'parameters': func.get('parameters')
+                    })
+                elif tool.get('type') == 'function':
+                    converted_tools.append(tool)
+                else:
+                    converted_tools.append({
+                        'type': 'function',
+                        'name': tool.get('name'),
+                        'description': tool.get('description'),
+                        'parameters': tool.get('parameters')
+                    })
+            else:
+                tool_dict = tool.dict() if hasattr(tool, 'dict') else tool.model_dump()
+                if tool_dict.get('type') == 'function' and 'function' in tool_dict:
+                    func = tool_dict['function']
+                    converted_tools.append({
+                        'type': 'function',
+                        'name': func.get('name'),
+                        'description': func.get('description'),
+                        'parameters': func.get('parameters')
+                    })
+                elif tool_dict.get('type') == 'function':
+                    converted_tools.append(tool_dict)
+                else:
+                    converted_tools.append({
+                        'type': 'function',
+                        'name': tool_dict.get('name'),
+                        'description': tool_dict.get('description'),
+                        'parameters': tool_dict.get('parameters')
+                    })
+
+        return converted_tools
+
+    async def _handle_v2v_function_call(self, function_call: Dict[str, Any]):
+        function_name = function_call['name']
+        arguments_str = function_call['arguments']
+        call_id = function_call['call_id']
+
+        logger.info(f"Executing v2v function: {function_name}")
+
+        try:
+            if isinstance(arguments_str, str):
+                arguments = json.loads(arguments_str)
+            else:
+                arguments = arguments_str
+
+            api_tools = self.task_config["tools_config"].get('api_tools', {})
+            tools_params = api_tools.get('tools_params', {})
+
+            if function_name in tools_params:
+                result = await trigger_api(
+                    function_name,
+                    arguments,
+                    tools_params[function_name],
+                    context_data=self.context_data
+                )
+
+                if hasattr(self.voice_to_voice_provider, 'send_function_result'):
+                    await self.voice_to_voice_provider.send_function_result(call_id, result)
+                    logger.info(f"Function result sent for {function_name}")
+            else:
+                logger.warning(f"Function {function_name} not found in tools_params")
+                if hasattr(self.voice_to_voice_provider, 'send_function_result'):
+                    await self.voice_to_voice_provider.send_function_result(
+                        call_id,
+                        {"error": f"Function {function_name} not configured"}
+                    )
+
+        except Exception as e:
+            logger.error(f"Error executing v2v function {function_name}: {e}")
+            if hasattr(self.voice_to_voice_provider, 'send_function_result'):
+                await self.voice_to_voice_provider.send_function_result(
+                    call_id,
+                    {"error": str(e)}
+                )
+
+    async def _handle_v2v_interruption(self):
+        """Handle user interruption - cancel response, clear buffers, reset state."""
+        current_time = time.time() * 1000
+        if current_time - self.last_interruption_time < self.interruption_debounce_ms:
+            logger.debug(f"Ignoring rapid interruption (debounced within {self.interruption_debounce_ms}ms)")
+            return
+
+        self.last_interruption_time = current_time
+        logger.info("Handling v2v interruption - clearing queues and cancelling response")
+
+        await self.voice_to_voice_provider.handle_interruption(audio_end_ms=0)
+
+        if hasattr(self.tools.get("output"), 'handle_interruption'):
+            await self.tools["output"].handle_interruption()
+            logger.info("Called output handler interruption - telephony buffer cleared")
+
+        old_sequence_id = self.curr_sequence_id
+        self.sequence_ids = {-1}
+        self.curr_sequence_id += 1
+        self.sequence_ids.add(self.curr_sequence_id)
+
+        cleared_v2v_count = 0
+        while not self.voice_to_voice_provider.audio_output_queue.empty():
+            try:
+                self.voice_to_voice_provider.audio_output_queue.get_nowait()
+                cleared_v2v_count += 1
+            except:
+                break
+
+        cleared_buffer_count = 0
+        if not self.buffered_output_queue.empty():
+            while not self.buffered_output_queue.empty():
+                try:
+                    self.buffered_output_queue.get_nowait()
+                    cleared_buffer_count += 1
+                except:
+                    break
+            self.buffered_output_queue = asyncio.Queue()
+            logger.info("Recreated buffered_output_queue for clean state")
+
+        logger.info(f"V2V interruption complete: cleared {cleared_v2v_count} v2v packets, {cleared_buffer_count} buffer packets, sequence_id {old_sequence_id} -> {self.curr_sequence_id}")
+
+    async def _v2v_audio_input_loop(self):
+        logger.debug("Starting v2v audio input loop")
+        while not self.conversation_ended:
+            try:
+                ws_data_packet = await asyncio.wait_for(
+                    self.audio_queue.get(),
+                    timeout=1.0
+                )
+
+                audio_data = ws_data_packet.get('data')
+                meta_info = ws_data_packet.get('meta_info', {})
+
+                if meta_info.get('eos'):
+                    logger.info("End of audio stream in v2v input loop")
+                    self.conversation_ended = True
+                    break
+
+                if audio_data:
+                    audio_format = meta_info.get('format', 'pcm')
+                    io_provider = meta_info.get('io', 'default')
+
+                    from bolna.helpers.audio_utils import convert_mulaw_to_pcm16_24khz, resample_audio
+
+                    if io_provider == 'twilio' or audio_format == 'mulaw':
+                        audio_data = convert_mulaw_to_pcm16_24khz(audio_data)
+                    elif io_provider in ['plivo', 'exotel']:
+                        audio_data = resample_audio(audio_data, 8000, 24000, 'pcm', 'pcm')
+
+                    await self.voice_to_voice_provider.send_audio(audio_data, meta_info)
+
+            except asyncio.TimeoutError:
+                continue
+            except Exception as e:
+                logger.error(f"Error in v2v audio input loop: {e}")
+                traceback.print_exc()
+                break
+
+        logger.debug("V2V audio input loop ended")
+
+    async def _v2v_audio_output_loop(self):
+        logger.debug("Starting v2v audio output loop")
+        audio_packet_count = 0
+        while not self.conversation_ended:
+            try:
+                if not self.voice_to_voice_provider.audio_output_queue.empty():
+                    audio_chunk_data = await self.voice_to_voice_provider.audio_output_queue.get()
+                    audio_packet_count += 1
+
+                    try:
+                        await self.buffered_output_queue.put(audio_chunk_data)
+                        logger.debug(f"Forwarded v2v audio packet #{audio_packet_count}")
+                    except Exception as e:
+                        logger.warning(f"Failed to queue audio packet (likely during interruption): {e}")
+                        continue
+
+                await asyncio.sleep(0.01)
+
+            except Exception as e:
+                logger.error(f"Error in v2v audio output loop: {e}")
+                traceback.print_exc()
+                break
+
+        logger.debug(f"V2V audio output loop ended. Total packets forwarded: {audio_packet_count}")
+
+    async def _v2v_receive_loop(self):
+        logger.debug("Starting v2v receive loop")
+        while not self.conversation_ended:
+            try:
+                event_data = await self.voice_to_voice_provider.receive_audio()
+
+                if not event_data:
+                    await asyncio.sleep(0.01)
+                    continue
+
+                if event_data.get('interruption') or event_data.get('speech_started'):
+                    logger.info("[INTERRUPTION] User started speaking - handling interruption immediately")
+                    await self._handle_v2v_interruption()
+                    continue
+
+                if event_data.get('audio'):
+                    audio_bytes = event_data['audio']
+                    meta_info = event_data.get('meta_info', {})
+
+                    output_provider = self.task_config["tools_config"]["output"]["provider"]
+
+                    from bolna.helpers.audio_utils import convert_pcm16_to_target_format
+                    converted_bytes, output_format = convert_pcm16_to_target_format(
+                        audio_bytes,
+                        24000,
+                        output_provider
+                    )
+
+                    current_stream_sid = None
+                    if hasattr(self.tools.get("input"), 'get_stream_sid'):
+                        current_stream_sid = self.tools["input"].get_stream_sid()
+
+                    ws_data_packet = {
+                        'data': converted_bytes,
+                        'meta_info': {
+                            'format': output_format,
+                            'io': output_provider,
+                            'sequence_id': self.curr_sequence_id,
+                            'stream_sid': current_stream_sid,
+                            'is_first_chunk': False,
+                            'end_of_llm_stream': event_data.get('is_final', False),
+                            'end_of_synthesizer_stream': event_data.get('is_final', False),
+                            'message_category': 'assistant_response',
+                            'type': 'audio'
+                        }
+                    }
+
+                    self.sequence_ids.add(self.curr_sequence_id)
+
+                    await self.voice_to_voice_provider.audio_output_queue.put(ws_data_packet)
+
+                if event_data.get('function_call'):
+                    await self._handle_v2v_function_call(event_data['function_call'])
+
+                if event_data.get('response_done'):
+                    logger.debug("V2V response completed")
+
+            except Exception as e:
+                logger.error(f"Error in v2v receive loop: {e}")
+                traceback.print_exc()
+                break
+
+        logger.debug("V2V receive loop ended")
+
+    async def run_voice_to_voice(self):
+        logger.info("Starting voice-to-voice conversation")
+
+        try:
+            connected = await self.voice_to_voice_provider.connect()
+            if not connected:
+                raise Exception("Failed to connect to voice-to-voice provider")
+
+            session_config = {}
+
+            tools = self._convert_api_tools_to_v2v_format()
+            if tools:
+                session_config['tools'] = tools
+                logger.info(f"Configured {len(tools)} tools for v2v")
+
+            await self.voice_to_voice_provider.configure_session(session_config)
+
+            if hasattr(self.tools.get("input"), 'get_stream_sid'):
+                self.stream_sid = self.tools["input"].get_stream_sid()
+            if hasattr(self.tools.get("input"), 'get_call_sid'):
+                self.call_sid = self.tools["input"].get_call_sid()
+
+            if "input" in self.tools:
+                logger.debug("Starting input handler for v2v mode")
+                input_handler_task = asyncio.create_task(self.tools["input"].handle())
+                welcome_message_task = asyncio.create_task(self.__forced_first_message())
+            else:
+                input_handler_task = None
+                welcome_message_task = None
+            tasks = [
+                asyncio.create_task(self._v2v_audio_input_loop()),
+                asyncio.create_task(self._v2v_audio_output_loop()),
+                asyncio.create_task(self._v2v_receive_loop()),
+                asyncio.create_task(self.__process_output_loop())
+            ]
+
+            if input_handler_task:
+                tasks.append(input_handler_task)
+            if welcome_message_task:
+                tasks.append(welcome_message_task)
+
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+            metrics = await self.voice_to_voice_provider.get_metrics()
+            transcript = await self.voice_to_voice_provider.get_conversation_transcript()
+
+            task_output = {
+                "transcript": transcript,
+                "messages": self.voice_to_voice_provider.conversation_history,
+                "conversation_time": time.time() - self.start_time,
+                "v2v_metrics": metrics,
+                "ended_by_assistant": False,
+                "synthesizer_characters": 0,
+                "transcriber_duration": metrics['audio_input_duration'],
+                "call_sid": self.call_sid,
+                "stream_sid": self.stream_sid,
+                "label_flow": self.label_flow,
+                "latency_dict": {
+                    "v2v_connection_latency_ms": metrics.get('connection_time'),
+                    "v2v_turn_latencies": metrics.get('turn_latencies', [])
+                },
+                "recording_url": ""
+            }
+
+            logger.info(f"V2V conversation completed. Duration: {task_output['conversation_time']:.2f}s")
+            return task_output
+
+        except Exception as e:
+            logger.error(f"Error in voice-to-voice conversation: {e}")
+            traceback.print_exc()
+            raise
+        finally:
+            await self.voice_to_voice_provider.close()
+
     async def run(self):
+        if self.voice_to_voice_mode:
+            logger.info("Running in voice-to-voice mode")
+            return await self.run_voice_to_voice()
         try:
             if self._is_conversation_task():
                 logger.info("started running")
