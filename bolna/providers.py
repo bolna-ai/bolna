@@ -3,6 +3,7 @@ from .transcriber import DeepgramTranscriber, AzureTranscriber , SarvamTranscrib
 from .input_handlers import DefaultInputHandler, TwilioInputHandler, ExotelInputHandler, PlivoInputHandler
 from .output_handlers import DefaultOutputHandler, TwilioOutputHandler, ExotelOutputHandler, PlivoOutputHandler
 from .llms import OpenAiLLM, LiteLLM
+from .voice_to_voice import OpenAIRealtimeVoiceToVoice
 
 SUPPORTED_SYNTHESIZER_MODELS = {
     'polly': PollySynthesizer,
@@ -22,6 +23,10 @@ SUPPORTED_TRANSCRIBER_PROVIDERS = {
     'sarvam': SarvamTranscriber,
     'assembly': AssemblyAITranscriber,
     'google': GoogleTranscriber
+}
+
+SUPPORTED_VOICE_TO_VOICE_PROVIDERS = {
+    'openai_realtime': OpenAIRealtimeVoiceToVoice
 }
 
 #Backwards compatibility
