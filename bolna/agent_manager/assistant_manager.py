@@ -1,6 +1,7 @@
 import copy
 import time
 import uuid
+import asyncio
 
 from .base_manager import BaseManager
 from .task_manager import TaskManager
@@ -41,6 +42,27 @@ class AssistantManager(BaseManager):
         """
         if run_id:
             self.run_id = run_id
+
+        #  FIX STARTS HERE 
+        # Speak the welcome message before starting the tasks.
+        # This is crucial for outbound calls where the agent needs to speak first.
+        welcome_message = self.kwargs.get('agent_welcome_message')
+        if welcome_message:
+            logger.info(f"Sending welcome message to output queue: {welcome_message}")
+            # Create a payload in the format the output handler expects
+            welcome_payload = {
+                'data': welcome_message,
+                'type': 'text'
+            }
+            # Put the message in the output queue to be synthesized and spoken
+            await self.output_queue.put(welcome_payload)
+
+            # HACK: A small delay to allow the message to be processed.
+            # A more robust solution would be to wait for a "play finished" signal
+            # from the output handler, but this is a simple and effective fix.
+            await asyncio.sleep(1)
+        # Fix is Done by yashsahane-eng.
+
 
         input_parameters = None
         for task_id, task in enumerate(self.tasks):
