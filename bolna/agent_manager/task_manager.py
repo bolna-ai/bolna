@@ -2048,7 +2048,7 @@ class TaskManager(BaseManager):
     # but it shouldn't be the case.
     async def __process_output_loop(self):
         try:
-            while True:
+            while not self.conversation_ended:
                 if (not self.let_remaining_audio_pass_through) and self.tools["input"].welcome_message_played():
                     time_since_first_interim_result = (time.time() * 1000) - self.time_since_first_interim_result if self.time_since_first_interim_result != -1 else -1
                     logger.info(f"##### It's been {time_since_first_interim_result} ms since first  interim result and required time to wait for it is {self.required_delay_before_speaking}. Hence sleeping for 100ms. self.time_since_first_interim_result {self.time_since_first_interim_result}")
