@@ -178,12 +178,38 @@ class OpenAIRealtimeVoiceToVoice(BaseVoiceToVoice):
                 self.current_response_item_id = None
                 self.current_response_output_index = 0
                 self.current_response_content_index = 0
+
+                response_data = event.get('response', {})
+                usage = response_data.get('usage', {})
+
+                if usage:
+                    input_details = usage.get('input_token_details', {})
+                    self.input_text_tokens += input_details.get('text_tokens', 0)
+                    self.input_audio_tokens += input_details.get('audio_tokens', 0)
+
+                    cached_details = input_details.get('cached_tokens_details', {})
+                    if cached_details:
+                        self.cached_text_tokens += cached_details.get('text_tokens', 0)
+                        self.cached_audio_tokens += cached_details.get('audio_tokens', 0)
+
+                    output_details = usage.get('output_token_details', {})
+                    self.output_text_tokens += output_details.get('text_tokens', 0)
+                    self.output_audio_tokens += output_details.get('audio_tokens', 0)
+
+                    logger.info(f"Token usage - Input: {usage.get('input_tokens', 0)} "
+                               f"(text: {input_details.get('text_tokens', 0)}, "
+                               f"audio: {input_details.get('audio_tokens', 0)}), "
+                               f"Output: {usage.get('output_tokens', 0)} "
+                               f"(text: {output_details.get('text_tokens', 0)}, "
+                               f"audio: {output_details.get('audio_tokens', 0)})")
+
                 return {
                     'audio': None,
                     'transcript': None,
                     'is_final': True,
                     'response_done': True,
-                    'meta_info': event
+                    'meta_info': event,
+                    'usage': usage
                 }
 
             elif event_type == 'response.function_call_arguments.done':

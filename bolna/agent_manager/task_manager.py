@@ -2617,6 +2617,8 @@ class TaskManager(BaseManager):
             metrics = await self.voice_to_voice_provider.get_metrics()
             transcript = await self.voice_to_voice_provider.get_conversation_transcript()
 
+            metrics['model'] = self.voice_to_voice_provider.model
+
             task_output = {
                 "transcript": transcript,
                 "messages": self.voice_to_voice_provider.conversation_history,

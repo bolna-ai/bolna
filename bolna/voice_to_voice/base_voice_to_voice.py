@@ -42,6 +42,14 @@ class BaseVoiceToVoice(ABC):
         self.audio_input_duration = 0
         self.audio_output_duration = 0
 
+        # Token usage tracking
+        self.input_text_tokens = 0
+        self.input_audio_tokens = 0
+        self.output_text_tokens = 0
+        self.output_audio_tokens = 0
+        self.cached_text_tokens = 0
+        self.cached_audio_tokens = 0
+
     @abstractmethod
     async def connect(self) -> bool:
         """Establish WebSocket connection to v2v provider."""
@@ -86,11 +94,16 @@ class BaseVoiceToVoice(ABC):
         return "\n".join(transcript_parts)
 
     async def get_metrics(self) -> Dict[str, Any]:
-        """Get performance metrics."""
         return {
             "connection_time": self.connection_time,
             "turn_latencies": self.turn_latencies,
             "audio_input_duration": self.audio_input_duration,
             "audio_output_duration": self.audio_output_duration,
+            "input_text_tokens": self.input_text_tokens,
+            "input_audio_tokens": self.input_audio_tokens,
+            "output_text_tokens": self.output_text_tokens,
+            "output_audio_tokens": self.output_audio_tokens,
+            "cached_text_tokens": self.cached_text_tokens,
+            "cached_audio_tokens": self.cached_audio_tokens,
         }
 
