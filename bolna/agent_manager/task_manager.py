@@ -148,7 +148,6 @@ class TaskManager(BaseManager):
 
         if task_id == 0 and task['tools_config'].get('voice_to_voice'):
             self.voice_to_voice_mode = True
-            logger.info("Voice-to-voice mode detected")
             
             # Initialize v2v provider
             v2v_config = task['tools_config']['voice_to_voice']
@@ -183,8 +182,6 @@ class TaskManager(BaseManager):
                 **config_params
             )
             
-            logger.info(f"Initialized {provider_name} voice-to-voice provider")
-
 
         if self.task_config["tools_config"]["input"] is not None:
             self.__setup_input_handlers(turn_based_conversation, input_queue, self.should_record)
@@ -444,8 +441,6 @@ class TaskManager(BaseManager):
             self.__setup_synthesizer(self.llm_config)
             if not self.turn_based_conversation and task_id == 0:
                 self.synthesizer_monitor_task = asyncio.create_task(self.tools['synthesizer'].monitor_connection())
-        else:
-            logger.info("V2V mode: skipping transcriber and synthesizer setup")
 
         #asyncio.create_task(self.__async_setup_tools())
         # # setting llm
@@ -574,14 +569,14 @@ class TaskManager(BaseManager):
                         self.sampling_rate = self.task_config['tools_config']['synthesizer']['provider_config']['sampling_rate']
                     else:
                         self.sampling_rate = 8000
-                        logger.info("V2V mode: using 8kHz sampling rate for telephony output")
+                        logger.debug("V2V mode: using 8kHz sampling rate for telephony output")
                 else:
                     if not self.voice_to_voice_mode:
                         self.task_config['tools_config']['synthesizer']['provider_config']['sampling_rate'] = 24000
                         self.sampling_rate = self.task_config['tools_config']['synthesizer']['provider_config']['sampling_rate']
                     else:
                         self.sampling_rate = 24000
-                        logger.info("V2V mode: using 24kHz sampling rate for web output")
+                        logger.debug("V2V mode: using 24kHz sampling rate for web output")
                     output_kwargs['queue'] = output_queue
 
             if self.task_config["tools_config"]["output"]["provider"] == "default":
@@ -658,7 +653,6 @@ class TaskManager(BaseManager):
                     24000,
                     output_provider
                 )
-                logger.info(f"V2V: Converted welcome audio to {output_format} format ({len(audio_bytes)} bytes)")
             else:
                 text = self.kwargs.get('agent_welcome_message', None)
                 meta_info = {
@@ -907,7 +901,6 @@ class TaskManager(BaseManager):
             return
         
         if self.voice_to_voice_mode:
-            logger.info("V2V mode: skipping prompt loading")
             return
 
         agent_type = self.task_config["tools_config"]["llm_agent"].get("agent_type", "simple_llm_agent")
@@ -2363,7 +2356,7 @@ class TaskManager(BaseManager):
         arguments_str = function_call['arguments']
         call_id = function_call['call_id']
 
-        logger.info(f"Executing v2v function: {function_name}")
+        logger.debug(f"Executing v2v function: {function_name}")
 
         try:
             if isinstance(arguments_str, str):
@@ -2409,13 +2402,11 @@ class TaskManager(BaseManager):
             return
 
         self.last_interruption_time = current_time
-        logger.info("Handling v2v interruption - clearing queues and cancelling response")
 
         await self.voice_to_voice_provider.handle_interruption(audio_end_ms=0)
 
         if hasattr(self.tools.get("output"), 'handle_interruption'):
             await self.tools["output"].handle_interruption()
-            logger.info("Called output handler interruption - telephony buffer cleared")
 
         old_sequence_id = self.curr_sequence_id
         self.sequence_ids = {-1}
@@ -2439,9 +2430,6 @@ class TaskManager(BaseManager):
                 except:
                     break
             self.buffered_output_queue = asyncio.Queue()
-            logger.info("Recreated buffered_output_queue for clean state")
-
-        logger.info(f"V2V interruption complete: cleared {cleared_v2v_count} v2v packets, {cleared_buffer_count} buffer packets, sequence_id {old_sequence_id} -> {self.curr_sequence_id}")
 
     async def _v2v_audio_input_loop(self):
         logger.debug("Starting v2v audio input loop")
@@ -2456,7 +2444,6 @@ class TaskManager(BaseManager):
                 meta_info = ws_data_packet.get('meta_info', {})
 
                 if meta_info.get('eos'):
-                    logger.info("End of audio stream in v2v input loop")
                     self.conversation_ended = True
                     break
 
@@ -2493,7 +2480,6 @@ class TaskManager(BaseManager):
 
                     try:
                         await self.buffered_output_queue.put(audio_chunk_data)
-                        logger.debug(f"Forwarded v2v audio packet #{audio_packet_count}")
                     except Exception as e:
                         logger.warning(f"Failed to queue audio packet (likely during interruption): {e}")
                         continue
@@ -2505,7 +2491,7 @@ class TaskManager(BaseManager):
                 traceback.print_exc()
                 break
 
-        logger.debug(f"V2V audio output loop ended. Total packets forwarded: {audio_packet_count}")
+        logger.debug("V2V audio output loop ended")
 
     async def _v2v_receive_loop(self):
         logger.debug("Starting v2v receive loop")
@@ -2572,7 +2558,6 @@ class TaskManager(BaseManager):
         logger.debug("V2V receive loop ended")
 
     async def run_voice_to_voice(self):
-        logger.info("Starting voice-to-voice conversation")
 
         try:
             connected = await self.voice_to_voice_provider.connect()
@@ -2584,7 +2569,6 @@ class TaskManager(BaseManager):
             tools = self._convert_api_tools_to_v2v_format()
             if tools:
                 session_config['tools'] = tools
-                logger.info(f"Configured {len(tools)} tools for v2v")
 
             await self.voice_to_voice_provider.configure_session(session_config)
 
@@ -2637,7 +2621,7 @@ class TaskManager(BaseManager):
                 "recording_url": ""
             }
 
-            logger.info(f"V2V conversation completed. Duration: {task_output['conversation_time']:.2f}s")
+            logger.debug(f"V2V conversation completed. Duration: {task_output['conversation_time']:.2f}s")
             return task_output
 
         except Exception as e:
@@ -2649,7 +2633,6 @@ class TaskManager(BaseManager):
 
     async def run(self):
         if self.voice_to_voice_mode:
-            logger.info("Running in voice-to-voice mode")
             return await self.run_voice_to_voice()
         try:
             if self._is_conversation_task():

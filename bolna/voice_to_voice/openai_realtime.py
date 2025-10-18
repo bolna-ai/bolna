@@ -66,7 +66,7 @@ class OpenAIRealtimeVoiceToVoice(BaseVoiceToVoice):
             event = await self._receive_event()
             if event.get('type') == 'session.created':
                 self.session_id = event.get('session', {}).get('id')
-                logger.info(f"Session created: {self.session_id}")
+                logger.debug(f"Session created: {self.session_id}")
 
             return True
 
@@ -238,7 +238,7 @@ class OpenAIRealtimeVoiceToVoice(BaseVoiceToVoice):
                 }
 
             elif event_type == 'input_audio_buffer.speech_started':
-                logger.info("User started speaking")
+                logger.debug("User started speaking")
                 return {
                     'audio': None,
                     'transcript': None,
@@ -333,7 +333,7 @@ class OpenAIRealtimeVoiceToVoice(BaseVoiceToVoice):
         if self.ws:
             await self.ws.close()
             self.connected = False
-            logger.info("Closed OpenAI Realtime connection")
+            logger.debug("Closed OpenAI Realtime connection")
 
     async def _send_event(self, event: Dict[str, Any]):
         if not self.ws:
