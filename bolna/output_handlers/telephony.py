@@ -58,7 +58,7 @@ class TelephonyOutputHandler(DefaultOutputHandler):
                         await self.websocket.send_text(json.dumps(mark_message))
 
                         # sending of audio chunk
-                        # Plivo requires PCM to be labeled as 'wav' (both are linear PCM at 8kHz)
+                        # REVIEW: ask prateek the reason for the prev logic for an with agent_welcome_message and  meta_info['cached'] ?
                         if audio_format == 'pcm' and self.io_provider == 'plivo':
                             audio_format = 'wav'
                         media_message = await self.form_media_message(audio_chunk, audio_format)
