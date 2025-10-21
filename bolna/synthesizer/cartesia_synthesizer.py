@@ -48,6 +48,9 @@ class CartesiaSynthesizer(BaseSynthesizer):
         self.sequence_id = 0
         self.context_ids_to_ignore = set()
         self.conversation_ended = False
+        
+        self.current_turn_start_time = None
+        self.current_turn_first_chunk_time = None
 
     def get_engine(self):
         return self.model
@@ -106,6 +109,9 @@ class CartesiaSynthesizer(BaseSynthesizer):
 
             if text != "":
                 try:
+                    if self.current_turn_start_time is None:
+                        self.current_turn_start_time = time.time()
+                    
                     input_message = self.form_payload(text)
                     await self.websocket_holder["websocket"].send(json.dumps(input_message))
                 except Exception as e:
@@ -221,11 +227,15 @@ class CartesiaSynthesizer(BaseSynthesizer):
                 if not self.first_chunk_generated:
                     self.meta_info["is_first_chunk"] = True
                     self.first_chunk_generated = True
+                    
+                    if self.current_turn_start_time is not None:
+                        self.current_turn_first_chunk_time = time.time()
+                        first_chunk_latency_ms = round((self.current_turn_first_chunk_time - self.current_turn_start_time) * 1000)
+                        logger.info(f"Synthesizer first chunk latency: {first_chunk_latency_ms}ms")
                 else:
                     self.meta_info["is_first_chunk"] = False
 
                 if self.last_text_sent:
-                    # Reset the last_text_sent and first_chunk converted to reset synth latency
                     self.first_chunk_generated = False
                     self.last_text_sent = True
 
@@ -233,6 +243,25 @@ class CartesiaSynthesizer(BaseSynthesizer):
                     logger.info("received null byte and hence end of stream")
                     self.meta_info["end_of_synthesizer_stream"] = True
                     self.first_chunk_generated = False
+                    
+                    if self.current_turn_start_time is not None:
+                        turn_end_time = time.time()
+                        total_synthesis_duration_ms = round((turn_end_time - self.current_turn_start_time) * 1000)
+                        first_chunk_latency_ms = None
+                        if self.current_turn_first_chunk_time is not None:
+                            first_chunk_latency_ms = round((self.current_turn_first_chunk_time - self.current_turn_start_time) * 1000)
+                        
+                        latency_data = {
+                            "turn_id": self.meta_info.get("turn_id"),
+                            "model": self.model,
+                            "first_chunk_latency_ms": first_chunk_latency_ms,
+                            "total_synthesis_duration_ms": total_synthesis_duration_ms
+                        }
+                        self.turn_latencies.append(latency_data)
+                        logger.info(f"Synthesizer turn latency: {latency_data}")
+                        
+                        self.current_turn_start_time = None
+                        self.current_turn_first_chunk_time = None
 
                 yield create_ws_data_packet(audio, self.meta_info)
 
