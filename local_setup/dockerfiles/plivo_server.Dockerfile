@@ -19,7 +19,6 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 
 # Copy application files
 COPY telephony_server/plivo_api_server.py /app/
-COPY telephony_server/.env /app/.env
 
 EXPOSE 8002
 
