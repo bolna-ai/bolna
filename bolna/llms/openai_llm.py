@@ -2,6 +2,7 @@ import asyncio
 import os
 from dotenv import load_dotenv
 from openai import AsyncOpenAI, OpenAI
+import httpx
 import json, requests, time
 
 from bolna.constants import CHECKING_THE_DOCUMENTS_FILLER, DEFAULT_LANGUAGE_CODE
@@ -35,13 +36,28 @@ class OpenAiLLM(BaseLLM):
         self.temperature = temperature
         self.model_args = {"max_tokens": self.max_tokens, "temperature": self.temperature, "model": self.model}
 
+        self.connection_start_time = None
+        self.connection_established_time = None
+
+        async def log_request(request):
+            request.extensions['request_start_time'] = time.time()
+
+        async def log_response(response):
+            start = response.extensions.get('request_start_time')
+            if start:
+                response.extensions['request_duration'] = time.time() - start
+
+        http_client = httpx.AsyncClient(
+            event_hooks={'request': [log_request], 'response': [log_response]}
+        )
+
         if kwargs.get("provider", "openai") == "custom":
             base_url = kwargs.get("base_url")
             api_key = kwargs.get('llm_key', None)
-            self.async_client = AsyncOpenAI(base_url=base_url, api_key= api_key)
+            self.async_client = AsyncOpenAI(base_url=base_url, api_key=api_key, http_client=http_client)
         else:
             llm_key = kwargs.get('llm_key', os.getenv('OPENAI_API_KEY'))
-            self.async_client = AsyncOpenAI(api_key=llm_key)
+            self.async_client = AsyncOpenAI(api_key=llm_key, http_client=http_client)
             api_key = llm_key
         self.assistant_id = kwargs.get("assistant_id", None)
         if self.assistant_id:
@@ -86,6 +102,7 @@ class OpenAiLLM(BaseLLM):
         start_time = time.time()
         first_token_time = None
         latency_data = None
+        connection_time_ms = None
 
         async for chunk in await self.async_client.chat.completions.create(**model_args):
             now = time.time()
@@ -94,11 +111,22 @@ class OpenAiLLM(BaseLLM):
                 latency = first_token_time - start_time
                 self.started_streaming = True
 
+                try:
+                    http_response = chunk._raw_response if hasattr(chunk, '_raw_response') else None
+                    if http_response and hasattr(http_response, 'extensions'):
+                        request_duration = http_response.extensions.get('request_duration')
+                        if request_duration:
+                            connection_time_ms = round(request_duration * 1000)
+                            logger.info(f"Connection + TTFB time: {connection_time_ms}ms")
+                except Exception as e:
+                    logger.debug(f"Could not extract connection time: {e}")
+
                 latency_data = {
                     "turn_id": meta_info.get("turn_id"),
                     "model": self.model,
                     "first_token_latency_ms": round(latency * 1000),
-                    "total_stream_duration_ms": None  # Will be filled at end
+                    "connection_time_ms": connection_time_ms,
+                    "total_stream_duration_ms": None
                 }
 
             delta = chunk.choices[0].delta
