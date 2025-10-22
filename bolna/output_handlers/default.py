@@ -24,7 +24,6 @@ class DefaultOutputHandler:
 
     # @TODO Figure out the best way to handle this
     async def handle_interruption(self):
-        logger.info("#######   Sending interruption message ####################")
         response = {"data": None, "type": "clear"}
         await self.websocket.send_json(response)
 

@@ -930,8 +930,8 @@ class TaskManager(BaseManager):
         current_ts = time.time()
         logger.info(f"Cleaning up downstream task")
         start_time = time.time()
-        await self.tools["synthesizer"].handle_interruption()
         await self.tools["output"].handle_interruption()
+        await self.tools["synthesizer"].handle_interruption()
 
         if self.generate_precise_transcript:
             await self.sync_history(self.mark_event_meta_data.fetch_cleared_mark_event_data().items(), current_ts)
