@@ -8,9 +8,9 @@ import json
 import aiohttp
 import os
 import traceback
+import time
 from collections import deque
 
-from bolna.memory.cache.inmemory_scalar_cache import InmemoryScalarCache
 from .base_synthesizer import BaseSynthesizer
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.utils import convert_audio_to_wav, create_ws_data_packet, resample
@@ -19,11 +19,12 @@ logger = configure_logger(__name__)
 
 
 class CartesiaSynthesizer(BaseSynthesizer):
-    def __init__(self, voice_id, voice, model="sonic-english", audio_format="mp3", sampling_rate="16000",
+    def __init__(self, voice_id, voice, language="en", model="sonic-english", audio_format="mp3", sampling_rate="16000",
                  stream=False, buffer_size=400, synthesizer_key=None, caching=True, **kwargs):
         super().__init__(kwargs.get("task_manager_instance", None), stream)
         self.api_key = os.environ["CARTESIA_API_KEY"] if synthesizer_key is None else synthesizer_key
         self.version = '2024-06-10'
+        self.language = language
         self.voice_id = voice_id
         self.model = model
         self.stream = True
@@ -35,9 +36,7 @@ class CartesiaSynthesizer(BaseSynthesizer):
         self.last_text_sent = False
         self.text_queue = deque()
         self.meta_info = None
-        self.caching = caching
-        if self.caching:
-            self.cache = InmemoryScalarCache()
+        self.caching = False
         self.synthesized_characters = 0
         self.previous_request_ids = []
         self.websocket_holder = {"websocket": None}
@@ -53,6 +52,9 @@ class CartesiaSynthesizer(BaseSynthesizer):
 
     def get_engine(self):
         return self.model
+
+    def supports_websocket(self):
+        return True
 
     async def handle_interruption(self):
         try:
@@ -73,6 +75,7 @@ class CartesiaSynthesizer(BaseSynthesizer):
             "context_id": self.context_id,
             "model_id": self.model,
             "transcript": text,
+            "language": self.language,
             "voice": {
                 "mode": "id",
                 "id": self.voice_id
@@ -154,6 +157,8 @@ class CartesiaSynthesizer(BaseSynthesizer):
                     logger.info("No audio data in the response")
             except websockets.exceptions.ConnectionClosed:
                 break
+            except Exception as e:
+                logger.error(f"Error occurred in receiver - {e}")
 
     async def __send_payload(self, payload):
         headers = {
@@ -190,7 +195,8 @@ class CartesiaSynthesizer(BaseSynthesizer):
                 "container": "mp3",
                 "encoding": "mp3",
                 "sample_rate": 44100
-            }
+            },
+            "language": self.language
         }
         response = await self.__send_payload(payload)
         return response
@@ -237,7 +243,10 @@ class CartesiaSynthesizer(BaseSynthesizer):
 
     async def establish_connection(self):
         try:
+            start_time = time.perf_counter()
             websocket = await websockets.connect(self.ws_url)
+            if not self.connection_time:
+                self.connection_time = round((time.perf_counter() - start_time) * 1000)
             logger.info(f"Connected to {self.ws_url}")
             return websocket
         except Exception as e:
@@ -248,7 +257,7 @@ class CartesiaSynthesizer(BaseSynthesizer):
         # Periodically check if the connection is still alive
         while True:
             if self.websocket_holder["websocket"] is None or self.websocket_holder["websocket"].state is websockets.protocol.State.CLOSED:
-                logger.info("Re-establishing connection...")
+                logger.info("Re-establishing cartesia connection...")
                 self.websocket_holder["websocket"] = await self.establish_connection()
             await asyncio.sleep(1)
 
@@ -258,7 +267,6 @@ class CartesiaSynthesizer(BaseSynthesizer):
         self.sequence_id = meta_info.get('sequence_id', 0)
 
     async def push(self, message):
-        logger.info(f"Pushed message to internal queue {message}")
         if self.stream:
             meta_info, text, self.current_text = message.get("meta_info"), message.get("data"), message.get("data")
             self.synthesized_characters += len(text) if text is not None else 0

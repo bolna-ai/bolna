@@ -45,6 +45,7 @@ class CartesiaConfig(BaseModel):
     voice_id: str
     voice: str
     model: str
+    language: str
 
 
 class RimeConfig(BaseModel):
