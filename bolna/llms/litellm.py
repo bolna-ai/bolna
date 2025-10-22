@@ -78,8 +78,7 @@ class LiteLLM(BaseLLM):
 
         start_time = time.time()
         latency_data = {
-            "turn_id": meta_info.get("turn_id") if meta_info else None,
-            "model": self.model,
+            "sequence_id": meta_info.get("sequence_id") if meta_info else None,
             "first_token_latency_ms": None,
             "total_stream_duration_ms": None,
         }
@@ -92,8 +91,7 @@ class LiteLLM(BaseLLM):
                 self.started_streaming = True
 
                 latency_data = {
-                    "turn_id": meta_info.get("turn_id"),
-                    "model": self.model,
+                    "sequence_id": meta_info.get("sequence_id"),
                     "first_token_latency_ms": round(latency * 1000),
                     "total_stream_duration_ms": None  # Will be filled at end
                 }
@@ -206,7 +204,7 @@ class LiteLLM(BaseLLM):
         model_args["messages"] = messages
         model_args["stream"] = stream
 
-        if request_json is True:
+        if request_json:
             model_args['response_format'] = {
                 "type": "json_object"
             }

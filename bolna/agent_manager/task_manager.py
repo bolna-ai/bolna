@@ -394,7 +394,6 @@ class TaskManager(BaseManager):
         if not self.turn_based_conversation and task_id == 0:
             self.synthesizer_monitor_task = asyncio.create_task(self.tools['synthesizer'].monitor_connection())
 
-        #asyncio.create_task(self.__async_setup_tools())
         # # setting llm
         # llm = self.__setup_llm(self.llm_config)
         # # Setup tasks
@@ -604,6 +603,7 @@ class TaskManager(BaseManager):
                     self.stream_sid = stream_sid
                     await self.tools["output"].set_stream_sid(stream_sid)
                     self.tools["input"].update_is_audio_being_played(True)
+                    convert_to_request_log(message=text, meta_info=meta_info, component="synthesizer", direction="response", model=self.synthesizer_provider, is_cached=meta_info.get("is_cached", False), engine=self.tools['synthesizer'].get_engine(), run_id=self.run_id)
                     await self.tools["output"].handle(message)
                     try:
                         duration = calculate_audio_duration(len(message["data"]), self.sampling_rate,
@@ -673,20 +673,6 @@ class TaskManager(BaseManager):
             #     self.synthesizer_monitor_task = asyncio.create_task(self.tools['synthesizer'].monitor_connection())
             if self.task_config["tools_config"]["llm_agent"] is not None and llm_config is not None:
                 llm_config["buffer_size"] = self.task_config["tools_config"]["synthesizer"].get('buffer_size')
-
-    async def __async_setup_tools(self):
-        """Setup transcriber and synthesizer in parallel to avoid blocking each other"""
-        try:
-            await asyncio.gather(
-                self.__setup_transcriber(),
-                self.__setup_synthesizer(self.llm_config)
-            )
-            if not self.turn_based_conversation:
-                self.synthesizer_monitor_task = asyncio.create_task(self.tools['synthesizer'].monitor_connection())
-
-            logger.info("Parallel setup of transcriber and synthesizer completed")
-        except Exception as e:
-            logger.error(f"Error during parallel setup of tools: {e}")
 
     def __setup_llm(self, llm_config, task_id=0):
         if self.task_config["tools_config"]["llm_agent"] is not None:
@@ -1743,12 +1729,19 @@ class TaskManager(BaseManager):
         return sequence_id in self.sequence_ids
 
     async def __listen_synthesizer(self):
+        all_text_to_be_synthesized = []
         try:
             while not self.conversation_ended:
                 logger.info("Listening to synthesizer")
                 try:
                     async for message in self.tools["synthesizer"].generate():
                         meta_info = message.get("meta_info", {})
+                        current_text = meta_info.get("text", "")
+                        write_to_log = False
+                        if current_text not in all_text_to_be_synthesized:
+                            all_text_to_be_synthesized.append(current_text)
+                            write_to_log = True
+
                         is_first_message = meta_info.get("is_first_message", False)
                         sequence_id = meta_info.get("sequence_id", None)
 
@@ -1774,16 +1767,18 @@ class TaskManager(BaseManager):
                                 # TODO handle is audio playing over here
                                 await self.tools["output"].handle(message)
 
-                            convert_to_request_log(
-                                message=meta_info.get("text", ""),
-                                meta_info=meta_info,
-                                component="synthesizer",
-                                direction="response",
-                                model=self.synthesizer_provider,
-                                is_cached=meta_info.get("is_cached", False),
-                                engine=self.tools['synthesizer'].get_engine(),
-                                run_id=self.run_id
-                            )
+                            logger.info(f"writing response to log {meta_info.get('text')}")
+                            if write_to_log:
+                                convert_to_request_log(
+                                    message=current_text,
+                                    meta_info=meta_info,
+                                    component="synthesizer",
+                                    direction="response",
+                                    model=self.synthesizer_provider,
+                                    is_cached=meta_info.get("is_cached", False),
+                                    engine=self.tools['synthesizer'].get_engine(),
+                                    run_id=self.run_id
+                                )
                         else:
                             logger.info(f"Skipping message with sequence_id: {sequence_id}")
 

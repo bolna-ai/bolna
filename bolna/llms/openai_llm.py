@@ -95,8 +95,7 @@ class OpenAiLLM(BaseLLM):
                 self.started_streaming = True
 
                 latency_data = {
-                    "turn_id": meta_info.get("turn_id"),
-                    "model": self.model,
+                    "sequence_id": meta_info.get("sequence_id"),
                     "first_token_latency_ms": round(latency * 1000),
                     "total_stream_duration_ms": None  # Will be filled at end
                 }
