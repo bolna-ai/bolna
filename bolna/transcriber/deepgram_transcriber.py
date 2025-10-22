@@ -41,7 +41,6 @@ class DeepgramTranscriber(BaseTranscriber):
         self.transcriber_output_queue = output_queue
         self.transcription_task = None
         self.keywords = keywords
-        self.audio_cursor = 0.0
         self.transcription_cursor = 0.0
         self.interruption_signalled = False
         if not self.stream:
@@ -66,6 +65,11 @@ class DeepgramTranscriber(BaseTranscriber):
         self.current_turn_id = None
         self.websocket_connection = None
         self.connection_authenticated = False
+        self.speech_start_time = None
+        self.speech_end_time = None
+        self.current_turn_interim_details = []
+        self.audio_frame_timestamps = []  # List of (frame_start, frame_end, send_timestamp)
+        self.turn_counter = 0
 
     def get_deepgram_ws_url(self):
         dg_params = {
@@ -200,7 +204,7 @@ class DeepgramTranscriber(BaseTranscriber):
                     try:
                         self.meta_info = ws_data_packet.get('meta_info') if self.meta_info is None else self.meta_info
                         if self.meta_info is not None and not self.current_turn_start_time:
-                            self.current_turn_start_time = time.perf_counter()
+                            self.current_turn_start_time = time.time() * 1000
                             self.current_turn_id = self.meta_info.get('turn_id') or self.meta_info.get('request_id')
                     except Exception:
                         pass
@@ -208,12 +212,12 @@ class DeepgramTranscriber(BaseTranscriber):
                 if end_of_stream:
                     break
                 self.meta_info = ws_data_packet.get('meta_info')
-                start_time = time.perf_counter()
+                start_time = time.time() * 1000
                 transcription = await self._get_http_transcription(ws_data_packet.get('data'))
                 transcription['meta_info']["include_latency"] = True
                 # HTTP path: first and total are same
                 try:
-                    elapsed = time.perf_counter() - start_time
+                    elapsed = time.time() * 1000 - start_time
                     transcription['meta_info']["transcriber_first_result_latency"] = elapsed
                     transcription['meta_info']["transcriber_total_stream_duration"] = elapsed
                     transcription['meta_info']["transcriber_latency"] = elapsed
@@ -242,7 +246,7 @@ class DeepgramTranscriber(BaseTranscriber):
                     self.meta_info['request_id'] = self.current_request_id
                     try:
                         if not self.current_turn_start_time:
-                            self.current_turn_start_time = time.perf_counter()
+                            self.current_turn_start_time = time.time() * 1000
                             self.current_turn_id = self.meta_info.get('turn_id') or self.meta_info.get('request_id')
                     except Exception:
                         pass
@@ -250,10 +254,13 @@ class DeepgramTranscriber(BaseTranscriber):
                 end_of_stream = await self._check_and_process_end_of_stream(ws_data_packet, ws)
                 if end_of_stream:
                     break
+
+                frame_start = self.num_frames * self.audio_frame_duration
+                frame_end = (self.num_frames + 1) * self.audio_frame_duration
+                send_timestamp = time.time() * 1000
+                self.audio_frame_timestamps.append((frame_start, frame_end, send_timestamp))
                 self.num_frames += 1
-                # save the audio cursor here
-                self.audio_cursor = self.num_frames * self.audio_frame_duration
-                
+
                 try:
                     await ws.send(ws_data_packet.get('data'))
                 except ConnectionClosedError as e:
@@ -281,6 +288,12 @@ class DeepgramTranscriber(BaseTranscriber):
 
                 if msg["type"] == "SpeechStarted":
                     logger.info("Received SpeechStarted event from deepgram")
+                    self.turn_counter += 1
+                    self.current_turn_id = self.turn_counter
+                    self.speech_start_time = time.time() * 1000
+                    self.current_turn_interim_details = []
+
+                    logger.info(f"Starting new turn with turn_id: {self.current_turn_id}")
                     yield create_ws_data_packet("speech_started", self.meta_info)
                     pass
 
@@ -288,18 +301,29 @@ class DeepgramTranscriber(BaseTranscriber):
                     transcript = msg["channel"]["alternatives"][0]["transcript"]
 
                     if transcript.strip():
+                        # Calculate latency using end position (start + duration) for cumulative transcripts
+                        self.__set_transcription_cursor(msg)
+                        audio_position_end = self.transcription_cursor
+                        latency_ms = None
+
+                        audio_sent_at = self._find_audio_send_timestamp(audio_position_end)
+                        if audio_sent_at:
+                            result_received_at = time.time() * 1000
+                            latency_ms = round(result_received_at - audio_sent_at)
+
+                        interim_detail = {
+                            'transcript': transcript,
+                            'latency_ms': latency_ms,
+                            'is_final': msg.get('is_final', False),
+                            'received_at': time.time()
+                        }
+
+                        self.current_turn_interim_details.append(interim_detail)
+
                         data = {
                             "type": "interim_transcript_received",
                             "content": transcript
                         }
-                        # First actionable interim → first result latency
-                        try:
-                            if self.current_turn_start_time is not None and 'transcriber_first_result_latency' not in self.meta_info:
-                                first_result_latency = time.perf_counter() - self.current_turn_start_time
-                                self.meta_info['transcriber_first_result_latency'] = first_result_latency
-                                self.meta_info['transcriber_latency'] = first_result_latency  # For CSV compatibility
-                        except Exception:
-                            pass
                         yield create_ws_data_packet(data, self.meta_info)
 
                     if msg["is_final"] and transcript.strip():
@@ -312,30 +336,28 @@ class DeepgramTranscriber(BaseTranscriber):
                     if msg["speech_final"] and self.final_transcript.strip():
                         if not self.is_transcript_sent_for_processing and self.final_transcript.strip():
                             logger.info(f"Received speech final hence yielding the following transcript - {self.final_transcript}")
+
                             data = {
                                 "type": "transcript",
                                 "content": self.final_transcript
                             }
-                            self.is_transcript_sent_for_processing = True
-                            self.final_transcript = ""
-                            # Total stream duration at final
+
+                            # Build turn_latencies with new metrics before resetting
                             try:
-                                if self.current_turn_start_time is not None:
-                                    total_stream_duration = time.perf_counter() - self.current_turn_start_time
-                                    self.meta_info['transcriber_total_stream_duration'] = total_stream_duration
-                                    self.meta_info['transcriber_latency'] = total_stream_duration  # For CSV compatibility
-                                    
-                                    # Append to turn_latencies
-                                    self.turn_latencies.append({
-                                        'turn_id': self.current_turn_id,
-                                        'sequence_id': self.current_turn_id,
-                                        'first_result_latency_ms': round((self.meta_info.get('transcriber_first_result_latency', 0)) * 1000),
-                                        'total_stream_duration_ms': round(total_stream_duration * 1000)
-                                    })
-                                    
-                                    # Reset turn tracking
-                                    self.current_turn_start_time = None
-                                    self.current_turn_id = None
+                                self.turn_latencies.append({
+                                    'turn_id': self.current_turn_id,
+                                    'sequence_id': self.current_turn_id,
+                                    'interim_details': self.current_turn_interim_details
+                                })
+
+                                # Complete turn reset
+                                self.speech_start_time = None
+                                self.speech_end_time = None
+                                self.current_turn_interim_details = []
+                                self.current_turn_start_time = None
+                                self.current_turn_id = None
+                                self.final_transcript = ""
+                                self.is_transcript_sent_for_processing = True
                             except Exception:
                                 pass
                             yield create_ws_data_packet(data, self.meta_info)
@@ -344,29 +366,28 @@ class DeepgramTranscriber(BaseTranscriber):
                     logger.info(f"Value of is_transcript_sent_for_processing in utterance end - {self.is_transcript_sent_for_processing}")
                     if not self.is_transcript_sent_for_processing and self.final_transcript.strip():
                         logger.info(f"Received UtteranceEnd hence yielding the following transcript - {self.final_transcript}")
+
                         data = {
                             "type": "transcript",
                             "content": self.final_transcript
                         }
-                        self.is_transcript_sent_for_processing = True
-                        self.final_transcript = ""
+
+                        # Build turn_latencies with new metrics before resetting
                         try:
-                            if self.current_turn_start_time is not None:
-                                total_stream_duration = time.perf_counter() - self.current_turn_start_time
-                                self.meta_info['transcriber_total_stream_duration'] = total_stream_duration
-                                self.meta_info['transcriber_latency'] = total_stream_duration  # For CSV compatibility
-                                
-                                # Append to turn_latencies
-                                self.turn_latencies.append({
-                                    'turn_id': self.current_turn_id,
-                                    'sequence_id': self.current_turn_id,
-                                    'first_result_latency_ms': round((self.meta_info.get('transcriber_first_result_latency', 0)) * 1000),
-                                    'total_stream_duration_ms': round(total_stream_duration * 1000)
-                                })
-                                
-                                # Reset turn tracking
-                                self.current_turn_start_time = None
-                                self.current_turn_id = None
+                            self.turn_latencies.append({
+                                'turn_id': self.current_turn_id,
+                                'sequence_id': self.current_turn_id,
+                                'interim_details': self.current_turn_interim_details
+                            })
+
+                            # Complete turn reset
+                            self.speech_start_time = None
+                            self.speech_end_time = None
+                            self.current_turn_interim_details = []
+                            self.current_turn_start_time = None
+                            self.current_turn_id = None
+                            self.final_transcript = ""
+                            self.is_transcript_sent_for_processing = True
                         except Exception:
                             pass
                         yield create_ws_data_packet(data, self.meta_info)
@@ -435,33 +456,48 @@ class DeepgramTranscriber(BaseTranscriber):
         return utterance_end
 
     def __set_transcription_cursor(self, data):
-        if 'channel' in data and 'alternatives' in data['channel']:
-            for alternative in data['channel']['alternatives']:
-                if 'words' in alternative:
-                    final_word = alternative['words'][-1]
-                    self.transcription_cursor = final_word['end']
-        logger.info(f"Setting transcription cursor at {self.transcription_cursor}")
+        if 'start' in data and 'duration' in data:
+            self.transcription_cursor = data['start'] + data['duration']
+            logger.info(f"Setting transcription cursor at {self.transcription_cursor} (start={data['start']}, duration={data['duration']})")
+        else:
+            logger.warning(f"Missing start or duration in Deepgram message, cannot update transcription cursor")
         return self.transcription_cursor
 
-    def __calculate_latency(self):
-        if self.transcription_cursor is not None:
-            logger.info(f'audio cursor is at {self.audio_cursor} & transcription cursor is at {self.transcription_cursor}')
-            return self.audio_cursor - self.transcription_cursor
+    def _find_audio_send_timestamp(self, audio_position):
+        """
+        Find when the audio frame containing this position was sent to Deepgram.
+
+        This directly matches the audio position to the frame that contains it,
+        providing accurate latency measurement from when that specific audio was sent.
+
+        Args:
+            audio_position: Position in seconds within the audio stream
+
+        Returns:
+            Timestamp when the frame containing this position was sent, or None if not found
+        """
+        if not self.audio_frame_timestamps:
+            return None
+
+        for frame_start, frame_end, send_timestamp in self.audio_frame_timestamps:
+            if frame_start <= audio_position <= frame_end:
+                return send_timestamp
+
         return None
 
     async def transcribe(self):
         deepgram_ws = None
         try:
-            start_time = time.perf_counter()
+            start_time = time.time() * 1000
             try:
                 deepgram_ws = await self.deepgram_connect()
             except (ValueError, ConnectionError) as e:
                 logger.error(f"Failed to establish Deepgram connection: {e}")
                 await self.toggle_connection()
                 return
-            
+
             if not self.connection_time:
-                self.connection_time = round((time.perf_counter() - start_time) * 1000)
+                self.connection_time = round(time.time() * 1000 - start_time)
 
             if self.stream:
                 self.sender_task = asyncio.create_task(self.sender_stream(deepgram_ws))
