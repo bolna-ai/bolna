@@ -1,6 +1,7 @@
 from datetime import datetime
 import json
 import asyncio
+import time
 import math
 import re
 import copy
@@ -622,3 +623,11 @@ def compute_function_pre_call_message(language, function_name, api_tool_pre_call
 
     filler = api_tool_pre_call_message if api_tool_pre_call_message else default_filler
     return filler
+
+
+def now_ms() -> float:
+    return time.perf_counter() * 1000
+
+
+def timestamp_ms() -> float:
+    return time.time() * 1000

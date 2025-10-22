@@ -1360,7 +1360,11 @@ class TaskManager(BaseManager):
                 return
 
             if latency:
-                self.llm_latencies['turn_latencies'].append(latency)
+                previous_latency_item = self.llm_latencies['turn_latencies'][-1] if self.llm_latencies['turn_latencies'] else None
+                if previous_latency_item and previous_latency_item.get('sequence_id') == latency.get('sequence_id'):
+                    self.llm_latencies['turn_latencies'][-1] = latency
+                else:
+                    self.llm_latencies['turn_latencies'].append(latency)
 
             llm_response += " " + data
 
