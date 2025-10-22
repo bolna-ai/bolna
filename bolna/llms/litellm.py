@@ -6,7 +6,7 @@ from litellm import acompletion
 from dotenv import load_dotenv
 
 from bolna.constants import DEFAULT_LANGUAGE_CODE
-from bolna.helpers.utils import json_to_pydantic_schema, convert_to_request_log, compute_function_pre_call_message
+from bolna.helpers.utils import convert_to_request_log, compute_function_pre_call_message, now_ms
 from .llm import BaseLLM
 from bolna.helpers.logger_config import configure_logger
 
@@ -76,7 +76,7 @@ class LiteLLM(BaseLLM):
             model_args["tool_choice"] = "auto"
             model_args["parallel_tool_calls"] = False
 
-        start_time = time.time()
+        start_time = now_ms()
         latency_data = {
             "sequence_id": meta_info.get("sequence_id") if meta_info else None,
             "first_token_latency_ms": None,
@@ -84,7 +84,7 @@ class LiteLLM(BaseLLM):
         }
 
         async for chunk in await acompletion(**model_args):
-            now = time.time()
+            now = now_ms()
             if not first_token_time:
                 first_token_time = now
                 latency = first_token_time - start_time

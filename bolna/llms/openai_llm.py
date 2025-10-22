@@ -1,11 +1,10 @@
-import asyncio
 import os
 from dotenv import load_dotenv
 from openai import AsyncOpenAI, OpenAI
-import json, requests, time
+import json
 
-from bolna.constants import CHECKING_THE_DOCUMENTS_FILLER, DEFAULT_LANGUAGE_CODE
-from bolna.helpers.utils import convert_to_request_log, compute_function_pre_call_message, now_ms, timestamp_ms
+from bolna.constants import DEFAULT_LANGUAGE_CODE
+from bolna.helpers.utils import convert_to_request_log, compute_function_pre_call_message, now_ms
 from .llm import BaseLLM
 from bolna.helpers.logger_config import configure_logger
 
