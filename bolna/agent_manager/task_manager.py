@@ -20,7 +20,7 @@ from .base_manager import BaseManager
 from bolna.agent_types import *
 from bolna.providers import *
 from bolna.prompts import *
-from bolna.helpers.utils import compute_function_pre_call_message, get_date_time_from_timezone, get_route_info, calculate_audio_duration, create_ws_data_packet, get_file_names_in_directory, get_raw_audio_bytes, is_valid_md5, \
+from bolna.helpers.utils import structure_system_prompt, compute_function_pre_call_message, get_date_time_from_timezone, get_route_info, calculate_audio_duration, create_ws_data_packet, get_file_names_in_directory, get_raw_audio_bytes, is_valid_md5, \
     get_required_input_types, format_messages, get_prompt_responses, resample, save_audio_file_to_s3, update_prompt_with_context, get_md5_hash, clean_json_string, wav_bytes_to_pcm, convert_to_request_log, yield_chunks_from_memory, process_task_cancellation
 from bolna.helpers.logger_config import configure_logger
 from semantic_router import Route
@@ -394,7 +394,6 @@ class TaskManager(BaseManager):
         if not self.turn_based_conversation and task_id == 0:
             self.synthesizer_monitor_task = asyncio.create_task(self.tools['synthesizer'].monitor_connection())
 
-        #asyncio.create_task(self.__async_setup_tools())
         # # setting llm
         # llm = self.__setup_llm(self.llm_config)
         # # Setup tasks
@@ -604,6 +603,7 @@ class TaskManager(BaseManager):
                     self.stream_sid = stream_sid
                     await self.tools["output"].set_stream_sid(stream_sid)
                     self.tools["input"].update_is_audio_being_played(True)
+                    convert_to_request_log(message=text, meta_info=meta_info, component="synthesizer", direction="response", model=self.synthesizer_provider, is_cached=meta_info.get("is_cached", False), engine=self.tools['synthesizer'].get_engine(), run_id=self.run_id)
                     await self.tools["output"].handle(message)
                     try:
                         duration = calculate_audio_duration(len(message["data"]), self.sampling_rate,
@@ -673,20 +673,6 @@ class TaskManager(BaseManager):
             #     self.synthesizer_monitor_task = asyncio.create_task(self.tools['synthesizer'].monitor_connection())
             if self.task_config["tools_config"]["llm_agent"] is not None and llm_config is not None:
                 llm_config["buffer_size"] = self.task_config["tools_config"]["synthesizer"].get('buffer_size')
-
-    async def __async_setup_tools(self):
-        """Setup transcriber and synthesizer in parallel to avoid blocking each other"""
-        try:
-            await asyncio.gather(
-                self.__setup_transcriber(),
-                self.__setup_synthesizer(self.llm_config)
-            )
-            if not self.turn_based_conversation:
-                self.synthesizer_monitor_task = asyncio.create_task(self.tools['synthesizer'].monitor_connection())
-
-            logger.info("Parallel setup of transcriber and synthesizer completed")
-        except Exception as e:
-            logger.error(f"Error during parallel setup of tools: {e}")
 
     def __setup_llm(self, llm_config, task_id=0):
         if self.task_config["tools_config"]["llm_agent"] is not None:
@@ -814,26 +800,22 @@ class TaskManager(BaseManager):
         if "system_prompt" in self.prompts:
             # This isn't a graph based agent
             enriched_prompt = self.prompts["system_prompt"]
-            if self.context_data is not None:
-                # In the case of web call skipping prompt updation with context data as it would be updated when the init event is received
-                if not self.is_web_based_call:
-                    enriched_prompt = update_prompt_with_context(self.prompts["system_prompt"], self.context_data)
+            if self.context_data and self.context_data.get('recipient_data', {}).get('call_sid'):
+                self.call_sid = self.context_data['recipient_data']['call_sid']
 
-                if 'recipient_data' in self.context_data and self.context_data['recipient_data'] and self.context_data['recipient_data'].get('call_sid', None):
-                    self.call_sid = self.context_data['recipient_data']['call_sid']
-                    enriched_prompt = f'{enriched_prompt}\nPhone call_sid is "{self.call_sid}"\n'
+            enriched_prompt = structure_system_prompt(self.prompts["system_prompt"], self.run_id, self.assistant_id, self.call_sid, self.context_data, self.timezone, self.is_web_based_call)
 
-                enriched_prompt = f'{enriched_prompt}\nagent_id is "{self.assistant_id}"\nexecution_id is "{self.run_id}"\n'
-                self.prompts["system_prompt"] = enriched_prompt
-
-            notes = "### Note:\n"
+            notes = ""
             if self._is_conversation_task() and self.use_fillers:
+                notes = "### Note:\n"
                 notes += f"1.{FILLER_PROMPT}\n"
 
-            current_date, current_time = get_date_time_from_timezone(self.timezone)
+            final_prompt = f"\n## Agent Prompt:\n\n{enriched_prompt}\n{notes}\n\n## Transcript:\n"
+            self.prompts["system_prompt"] = final_prompt
+
             self.system_prompt = {
                 'role': "system",
-                'content': f"{enriched_prompt}\n{notes}\n{DATE_PROMPT.format(current_date, current_time, self.timezone)}"
+                'content': final_prompt
             }
         else:
             self.system_prompt = {
@@ -944,8 +926,8 @@ class TaskManager(BaseManager):
         current_ts = time.time()
         logger.info(f"Cleaning up downstream task")
         start_time = time.time()
-        await self.tools["synthesizer"].handle_interruption()
         await self.tools["output"].handle_interruption()
+        await self.tools["synthesizer"].handle_interruption()
 
         if self.generate_precise_transcript:
             await self.sync_history(self.mark_event_meta_data.fetch_cleared_mark_event_data().items(), current_ts)
@@ -1374,7 +1356,11 @@ class TaskManager(BaseManager):
                 return
 
             if latency:
-                self.llm_latencies['turn_latencies'].append(latency)
+                previous_latency_item = self.llm_latencies['turn_latencies'][-1] if self.llm_latencies['turn_latencies'] else None
+                if previous_latency_item and previous_latency_item.get('sequence_id') == latency.get('sequence_id'):
+                    self.llm_latencies['turn_latencies'][-1] = latency
+                else:
+                    self.llm_latencies['turn_latencies'].append(latency)
 
             llm_response += " " + data
 
@@ -1743,12 +1729,19 @@ class TaskManager(BaseManager):
         return sequence_id in self.sequence_ids
 
     async def __listen_synthesizer(self):
+        all_text_to_be_synthesized = []
         try:
             while not self.conversation_ended:
                 logger.info("Listening to synthesizer")
                 try:
                     async for message in self.tools["synthesizer"].generate():
                         meta_info = message.get("meta_info", {})
+                        current_text = meta_info.get("text", "")
+                        write_to_log = False
+                        if current_text not in all_text_to_be_synthesized:
+                            all_text_to_be_synthesized.append(current_text)
+                            write_to_log = True
+
                         is_first_message = meta_info.get("is_first_message", False)
                         sequence_id = meta_info.get("sequence_id", None)
 
@@ -1774,16 +1767,18 @@ class TaskManager(BaseManager):
                                 # TODO handle is audio playing over here
                                 await self.tools["output"].handle(message)
 
-                            convert_to_request_log(
-                                message=meta_info.get("text", ""),
-                                meta_info=meta_info,
-                                component="synthesizer",
-                                direction="response",
-                                model=self.synthesizer_provider,
-                                is_cached=meta_info.get("is_cached", False),
-                                engine=self.tools['synthesizer'].get_engine(),
-                                run_id=self.run_id
-                            )
+                            logger.info(f"writing response to log {meta_info.get('text')}")
+                            if write_to_log:
+                                convert_to_request_log(
+                                    message=current_text,
+                                    meta_info=meta_info,
+                                    component="synthesizer",
+                                    direction="response",
+                                    model=self.synthesizer_provider,
+                                    is_cached=meta_info.get("is_cached", False),
+                                    engine=self.tools['synthesizer'].get_engine(),
+                                    run_id=self.run_id
+                                )
                         else:
                             logger.info(f"Skipping message with sequence_id: {sequence_id}")
 

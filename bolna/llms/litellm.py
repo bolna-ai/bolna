@@ -6,7 +6,7 @@ from litellm import acompletion
 from dotenv import load_dotenv
 
 from bolna.constants import DEFAULT_LANGUAGE_CODE
-from bolna.helpers.utils import json_to_pydantic_schema, convert_to_request_log, compute_function_pre_call_message
+from bolna.helpers.utils import convert_to_request_log, compute_function_pre_call_message, now_ms
 from .llm import BaseLLM
 from bolna.helpers.logger_config import configure_logger
 
@@ -76,25 +76,22 @@ class LiteLLM(BaseLLM):
             model_args["tool_choice"] = "auto"
             model_args["parallel_tool_calls"] = False
 
-        start_time = time.time()
+        start_time = now_ms()
         latency_data = {
-            "turn_id": meta_info.get("turn_id") if meta_info else None,
-            "model": self.model,
+            "sequence_id": meta_info.get("sequence_id") if meta_info else None,
             "first_token_latency_ms": None,
             "total_stream_duration_ms": None,
         }
 
         async for chunk in await acompletion(**model_args):
-            now = time.time()
+            now = now_ms()
             if not first_token_time:
                 first_token_time = now
-                latency = first_token_time - start_time
                 self.started_streaming = True
 
                 latency_data = {
-                    "turn_id": meta_info.get("turn_id"),
-                    "model": self.model,
-                    "first_token_latency_ms": round(latency * 1000),
+                    "sequence_id": meta_info.get("sequence_id"),
+                    "first_token_latency_ms": first_token_time - start_time,
                     "total_stream_duration_ms": None  # Will be filled at end
                 }
 
@@ -143,8 +140,9 @@ class LiteLLM(BaseLLM):
                     yield split[0], False, latency_data, False, None, None
                     buffer = split[1] if len(split) > 1 else ""
 
-        # After streaming ends
-        latency_data["total_stream_duration_ms"] = round((time.time() - start_time) * 1000)
+        # Set final duration
+        if latency_data:
+            latency_data["total_stream_duration_ms"] = now_ms() - start_time
 
         # Handle final function call logic
         if self.trigger_function_call and final_tool_calls_data:
@@ -206,7 +204,7 @@ class LiteLLM(BaseLLM):
         model_args["messages"] = messages
         model_args["stream"] = stream
 
-        if request_json is True:
+        if request_json:
             model_args['response_format'] = {
                 "type": "json_object"
             }
