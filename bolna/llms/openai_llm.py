@@ -90,12 +90,11 @@ class OpenAiLLM(BaseLLM):
             now = now_ms()
             if not first_token_time:
                 first_token_time = now
-                latency = first_token_time - start_time
                 self.started_streaming = True
 
                 latency_data = {
                     "sequence_id": meta_info.get("sequence_id"),
-                    "first_token_latency_ms": latency,
+                    "first_token_latency_ms": first_token_time - start_time,
                     "total_stream_duration_ms": None  # Will be filled at end
                 }
 
