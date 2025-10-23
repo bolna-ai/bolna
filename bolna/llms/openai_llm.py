@@ -1,11 +1,10 @@
-import asyncio
 import os
 from dotenv import load_dotenv
 from openai import AsyncOpenAI, OpenAI
-import json, requests, time
+import json
 
-from bolna.constants import CHECKING_THE_DOCUMENTS_FILLER, DEFAULT_LANGUAGE_CODE
-from bolna.helpers.utils import convert_to_request_log, compute_function_pre_call_message
+from bolna.constants import DEFAULT_LANGUAGE_CODE
+from bolna.helpers.utils import convert_to_request_log, compute_function_pre_call_message, now_ms
 from .llm import BaseLLM
 from bolna.helpers.logger_config import configure_logger
 
@@ -83,21 +82,19 @@ class OpenAiLLM(BaseLLM):
         received_textual_response = False
         called_fun = None
 
-        start_time = time.time()
+        start_time = now_ms()
         first_token_time = None
         latency_data = None
 
         async for chunk in await self.async_client.chat.completions.create(**model_args):
-            now = time.time()
+            now = now_ms()
             if not first_token_time:
                 first_token_time = now
-                latency = first_token_time - start_time
                 self.started_streaming = True
 
                 latency_data = {
-                    "turn_id": meta_info.get("turn_id"),
-                    "model": self.model,
-                    "first_token_latency_ms": round(latency * 1000),
+                    "sequence_id": meta_info.get("sequence_id"),
+                    "first_token_latency_ms": first_token_time - start_time,
                     "total_stream_duration_ms": None  # Will be filled at end
                 }
 
@@ -145,9 +142,8 @@ class OpenAiLLM(BaseLLM):
                     buffer = split[1] if len(split) > 1 else ""
 
         # Set final duration
-        total_duration = time.time() - start_time
         if latency_data:
-            latency_data["total_stream_duration_ms"] = round(total_duration * 1000)
+            latency_data["total_stream_duration_ms"] = now_ms() - start_time
 
         # Post-processing for function call payload
         if self.trigger_function_call and final_tool_calls_data and final_tool_calls_data[0]["function"]["name"] in self.api_params:

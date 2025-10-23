@@ -1,6 +1,7 @@
 from datetime import datetime
 import json
 import asyncio
+import time
 import math
 import re
 import copy
@@ -21,6 +22,7 @@ from dotenv import load_dotenv
 from pydantic import create_model
 from .logger_config import configure_logger
 from bolna.constants import PREPROCESS_DIR, PRE_FUNCTION_CALL_MESSAGE, DEFAULT_LANGUAGE_CODE, TRANSFERING_CALL_FILLER
+from bolna.prompts import DATE_PROMPT
 from pydub import AudioSegment
 
 logger = configure_logger(__name__)
@@ -622,3 +624,35 @@ def compute_function_pre_call_message(language, function_name, api_tool_pre_call
 
     filler = api_tool_pre_call_message if api_tool_pre_call_message else default_filler
     return filler
+
+
+def now_ms() -> float:
+    return time.perf_counter() * 1000
+
+
+def timestamp_ms() -> float:
+    return time.time() * 1000
+
+
+def structure_system_prompt(system_prompt, run_id, assistant_id, call_sid, context_data, timezone, is_web_based_call=False):
+    final_prompt = system_prompt
+    default_variables = {
+        "agent_id": assistant_id,
+        "execution_id": run_id
+    }
+
+    if context_data is not None:
+        if not is_web_based_call:
+            final_prompt = update_prompt_with_context(system_prompt, context_data)
+
+        if call_sid:
+            default_variables["call_sid"] = call_sid
+
+        final_prompt = f"{final_prompt}\n\n## Call information:\n\n### Variables:\n"
+        for k, v in default_variables.items():
+            final_prompt = f'{final_prompt}{k} is "{v}"\n'
+
+    current_date, current_time = get_date_time_from_timezone(timezone)
+    final_prompt = f"{final_prompt}\n{DATE_PROMPT.format(current_date, current_time, timezone)}"
+
+    return final_prompt
