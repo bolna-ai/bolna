@@ -20,7 +20,7 @@ from .base_manager import BaseManager
 from bolna.agent_types import *
 from bolna.providers import *
 from bolna.prompts import *
-from bolna.helpers.utils import compute_function_pre_call_message, get_date_time_from_timezone, get_route_info, calculate_audio_duration, create_ws_data_packet, get_file_names_in_directory, get_raw_audio_bytes, is_valid_md5, \
+from bolna.helpers.utils import structure_system_prompt, compute_function_pre_call_message, get_date_time_from_timezone, get_route_info, calculate_audio_duration, create_ws_data_packet, get_file_names_in_directory, get_raw_audio_bytes, is_valid_md5, \
     get_required_input_types, format_messages, get_prompt_responses, resample, save_audio_file_to_s3, update_prompt_with_context, get_md5_hash, clean_json_string, wav_bytes_to_pcm, convert_to_request_log, yield_chunks_from_memory, process_task_cancellation
 from bolna.helpers.logger_config import configure_logger
 from semantic_router import Route
@@ -800,26 +800,20 @@ class TaskManager(BaseManager):
         if "system_prompt" in self.prompts:
             # This isn't a graph based agent
             enriched_prompt = self.prompts["system_prompt"]
-            if self.context_data is not None:
-                # In the case of web call skipping prompt updation with context data as it would be updated when the init event is received
-                if not self.is_web_based_call:
-                    enriched_prompt = update_prompt_with_context(self.prompts["system_prompt"], self.context_data)
+            if self.context_data and self.context_data.get('recipient_data', {}).get('call_sid'):
+                self.call_sid = self.context_data['recipient_data']['call_sid']
 
-                if 'recipient_data' in self.context_data and self.context_data['recipient_data'] and self.context_data['recipient_data'].get('call_sid', None):
-                    self.call_sid = self.context_data['recipient_data']['call_sid']
-                    enriched_prompt = f'{enriched_prompt}\nPhone call_sid is "{self.call_sid}"\n'
+            enriched_prompt = structure_system_prompt(self.prompts["system_prompt"], self.run_id, self.assistant_id, self.call_sid, self.context_data, self.timezone, self.is_web_based_call)
+            self.prompts["system_prompt"] = enriched_prompt
 
-                enriched_prompt = f'{enriched_prompt}\nagent_id is "{self.assistant_id}"\nexecution_id is "{self.run_id}"\n'
-                self.prompts["system_prompt"] = enriched_prompt
-
-            notes = "### Note:\n"
+            notes = ""
             if self._is_conversation_task() and self.use_fillers:
+                notes = "### Note:\n"
                 notes += f"1.{FILLER_PROMPT}\n"
 
-            current_date, current_time = get_date_time_from_timezone(self.timezone)
             self.system_prompt = {
                 'role': "system",
-                'content': f"{enriched_prompt}\n{notes}\n{DATE_PROMPT.format(current_date, current_time, self.timezone)}"
+                'content': f"{enriched_prompt}\n{notes}\n\n## Transcript:\n\n"
             }
         else:
             self.system_prompt = {
