@@ -143,9 +143,8 @@ class OpenAiLLM(BaseLLM):
                     buffer = split[1] if len(split) > 1 else ""
 
         # Set final duration
-        total_duration = now_ms() - start_time
         if latency_data:
-            latency_data["total_stream_duration_ms"] = total_duration
+            latency_data["total_stream_duration_ms"] = now_ms() - start_time
 
         # Post-processing for function call payload
         if self.trigger_function_call and final_tool_calls_data and final_tool_calls_data[0]["function"]["name"] in self.api_params:

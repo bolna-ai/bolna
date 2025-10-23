@@ -141,8 +141,9 @@ class LiteLLM(BaseLLM):
                     yield split[0], False, latency_data, False, None, None
                     buffer = split[1] if len(split) > 1 else ""
 
-        # After streaming ends
-        latency_data["total_stream_duration_ms"] = round((time.time() - start_time) * 1000)
+        # Set final duration
+        if latency_data:
+            latency_data["total_stream_duration_ms"] = now_ms() - start_time
 
         # Handle final function call logic
         if self.trigger_function_call and final_tool_calls_data:
