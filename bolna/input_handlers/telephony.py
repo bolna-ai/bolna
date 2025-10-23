@@ -136,7 +136,7 @@ class TelephonyInputHandler(DefaultInputHandler):
                     # WebSocket closed normally
                     pass
                 else:
-                    logger.erro(f"WebSocket disconnected unexpectedly: code={e.code}, reason={getattr(e, 'reason', None)}")
+                    logger.error(f"WebSocket disconnected unexpectedly: code={e.code}, reason={getattr(e, 'reason', None)}")
 
             except Exception as e:
                 traceback.print_exc()
