@@ -804,16 +804,18 @@ class TaskManager(BaseManager):
                 self.call_sid = self.context_data['recipient_data']['call_sid']
 
             enriched_prompt = structure_system_prompt(self.prompts["system_prompt"], self.run_id, self.assistant_id, self.call_sid, self.context_data, self.timezone, self.is_web_based_call)
-            self.prompts["system_prompt"] = enriched_prompt
 
             notes = ""
             if self._is_conversation_task() and self.use_fillers:
                 notes = "### Note:\n"
                 notes += f"1.{FILLER_PROMPT}\n"
 
+            final_prompt = f"\n## Agent Prompt:\n\n{enriched_prompt}\n{notes}\n\n## Transcript:\n"
+            self.prompts["system_prompt"] = final_prompt
+
             self.system_prompt = {
                 'role': "system",
-                'content': f"\n## Agent Prompt:\n\n{enriched_prompt}\n{notes}\n\n## Transcript:\n"
+                'content': final_prompt
             }
         else:
             self.system_prompt = {
