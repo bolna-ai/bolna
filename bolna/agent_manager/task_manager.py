@@ -813,7 +813,7 @@ class TaskManager(BaseManager):
 
             self.system_prompt = {
                 'role': "system",
-                'content': f"\n## Agent Ppompt:\n\n{enriched_prompt}\n{notes}\n\n## Transcript:\n"
+                'content': f"\n## Agent Prompt:\n\n{enriched_prompt}\n{notes}\n\n## Transcript:\n"
             }
         else:
             self.system_prompt = {
