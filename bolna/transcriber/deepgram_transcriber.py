@@ -1,6 +1,5 @@
 import asyncio
 import traceback
-#import torch
 import os
 import json
 import aiohttp
@@ -13,10 +12,8 @@ from websockets.exceptions import ConnectionClosedError, InvalidHandshake
 
 from .base_transcriber import BaseTranscriber
 from bolna.helpers.logger_config import configure_logger
-from bolna.helpers.utils import create_ws_data_packet
+from bolna.helpers.utils import create_ws_data_packet, now_ms
 
-
-#torch.set_num_threads(1)
 
 logger = configure_logger(__name__)
 load_dotenv()
@@ -204,7 +201,7 @@ class DeepgramTranscriber(BaseTranscriber):
                     try:
                         self.meta_info = ws_data_packet.get('meta_info') if self.meta_info is None else self.meta_info
                         if self.meta_info is not None and not self.current_turn_start_time:
-                            self.current_turn_start_time = time.time() * 1000
+                            self.current_turn_start_time = now_ms()
                             self.current_turn_id = self.meta_info.get('turn_id') or self.meta_info.get('request_id')
                     except Exception:
                         pass
@@ -212,12 +209,12 @@ class DeepgramTranscriber(BaseTranscriber):
                 if end_of_stream:
                     break
                 self.meta_info = ws_data_packet.get('meta_info')
-                start_time = time.time() * 1000
+                start_time = now_ms()
                 transcription = await self._get_http_transcription(ws_data_packet.get('data'))
                 transcription['meta_info']["include_latency"] = True
                 # HTTP path: first and total are same
                 try:
-                    elapsed = time.time() * 1000 - start_time
+                    elapsed = now_ms() - start_time
                     transcription['meta_info']["transcriber_first_result_latency"] = elapsed
                     transcription['meta_info']["transcriber_total_stream_duration"] = elapsed
                     transcription['meta_info']["transcriber_latency"] = elapsed
@@ -246,7 +243,7 @@ class DeepgramTranscriber(BaseTranscriber):
                     self.meta_info['request_id'] = self.current_request_id
                     try:
                         if not self.current_turn_start_time:
-                            self.current_turn_start_time = time.time() * 1000
+                            self.current_turn_start_time = now_ms()
                             self.current_turn_id = self.meta_info.get('turn_id') or self.meta_info.get('request_id')
                     except Exception:
                         pass
@@ -257,7 +254,7 @@ class DeepgramTranscriber(BaseTranscriber):
 
                 frame_start = self.num_frames * self.audio_frame_duration
                 frame_end = (self.num_frames + 1) * self.audio_frame_duration
-                send_timestamp = time.time() * 1000
+                send_timestamp = now_ms()
                 self.audio_frame_timestamps.append((frame_start, frame_end, send_timestamp))
                 self.num_frames += 1
 
@@ -290,7 +287,7 @@ class DeepgramTranscriber(BaseTranscriber):
                     logger.info("Received SpeechStarted event from deepgram")
                     self.turn_counter += 1
                     self.current_turn_id = self.turn_counter
-                    self.speech_start_time = time.time() * 1000
+                    self.speech_start_time = now_ms()
                     self.current_turn_interim_details = []
 
                     logger.info(f"Starting new turn with turn_id: {self.current_turn_id}")
@@ -308,7 +305,7 @@ class DeepgramTranscriber(BaseTranscriber):
 
                         audio_sent_at = self._find_audio_send_timestamp(audio_position_end)
                         if audio_sent_at:
-                            result_received_at = time.time() * 1000
+                            result_received_at = now_ms()
                             latency_ms = round(result_received_at - audio_sent_at)
 
                         interim_detail = {
@@ -488,7 +485,7 @@ class DeepgramTranscriber(BaseTranscriber):
     async def transcribe(self):
         deepgram_ws = None
         try:
-            start_time = time.time() * 1000
+            start_time = now_ms()
             try:
                 deepgram_ws = await self.deepgram_connect()
             except (ValueError, ConnectionError) as e:
@@ -497,7 +494,7 @@ class DeepgramTranscriber(BaseTranscriber):
                 return
 
             if not self.connection_time:
-                self.connection_time = round(time.time() * 1000 - start_time)
+                self.connection_time = round(now_ms() - start_time)
 
             if self.stream:
                 self.sender_task = asyncio.create_task(self.sender_stream(deepgram_ws))
