@@ -648,7 +648,7 @@ def structure_system_prompt(system_prompt, run_id, assistant_id, call_sid, conte
         if call_sid:
             default_variables["call_sid"] = call_sid
 
-        final_prompt = f"{final_prompt}\n\n## Call information:\n\n## Variables:\n"
+        final_prompt = f"{final_prompt}\n\n## Call information:\n\n### Variables:\n"
         for k, v in default_variables.items():
             final_prompt = f'{final_prompt}{k} is "{v}"\n'
 
