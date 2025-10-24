@@ -1690,6 +1690,9 @@ class TaskManager(BaseManager):
 
                     await self.__process_http_transcription(message)
 
+        except websockets.exceptions.ConnectionClosedOK:
+            # Normal WebSocket closure (code 1000)
+            pass
         except Exception as e:
             traceback.print_exc()
             logger.error(f"Error in transcriber {e}")
