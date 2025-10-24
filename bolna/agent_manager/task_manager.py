@@ -10,6 +10,7 @@ import uuid
 import copy
 import base64
 import pytz
+import websockets
 
 import aiohttp
 
