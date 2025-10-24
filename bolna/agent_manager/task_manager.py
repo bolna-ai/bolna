@@ -2300,8 +2300,10 @@ class TaskManager(BaseManager):
                 }
 
                 try:
-                    output["latency_dict"]["welcome_message_sent_ts"] = welcome_message_sent_ts - self.conversation_start_init_ts
-                    output["latency_dict"]["stream_sid_ts"] = self.stream_sid_ts - self.conversation_start_init_ts
+                    if welcome_message_sent_ts:
+                        output["latency_dict"]["welcome_message_sent_ts"] = welcome_message_sent_ts - self.conversation_start_init_ts
+                    if self.stream_sid_ts:
+                        output["latency_dict"]["stream_sid_ts"] = self.stream_sid_ts - self.conversation_start_init_ts
                 except Exception as e:
                     logger.error(f"error in logging audio latency ts {str(e)}")
 
