@@ -2,6 +2,8 @@ import asyncio
 import base64
 import time
 import uuid
+from starlette.websockets import WebSocketDisconnect
+
 from dotenv import load_dotenv
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.utils import create_ws_data_packet
@@ -149,6 +151,15 @@ class DefaultInputHandler:
                 else:
                     request = await self.websocket.receive_json()                    
                 await self.process_message(request)
+
+        except WebSocketDisconnect as e:
+            ws_data_packet = create_ws_data_packet(
+                data=None,
+                meta_info={'io': 'default', 'eos': True}
+            )
+            await self.queues['transcriber'].put(ws_data_packet)
+            self.running = False
+
         except Exception as e:
             # Send EOS message to transcriber to shut the connection
             ws_data_packet = create_ws_data_packet(
