@@ -256,6 +256,7 @@ class DeepgramTranscriber(BaseTranscriber):
                 frame_end = (self.num_frames + 1) * self.audio_frame_duration
                 send_timestamp = timestamp_ms()
                 self.audio_frame_timestamps.append((frame_start, frame_end, send_timestamp))
+                logger.info(f"[LATENCY_DEBUG] Sent frame #{self.num_frames}: position {frame_start:.3f}s - {frame_end:.3f}s at timestamp {send_timestamp:.2f}ms")
                 self.num_frames += 1
 
                 try:
@@ -303,10 +304,22 @@ class DeepgramTranscriber(BaseTranscriber):
                         audio_position_end = self.transcription_cursor
                         latency_ms = None
 
+                        interim_number = len(self.current_turn_interim_details) + 1
+                        is_first_interim = interim_number == 1
+
+                        logger.info(f"[LATENCY_DEBUG] ═══ Turn {self.current_turn_id} Interim #{interim_number} {'(FIRST)' if is_first_interim else ''} ═══")
+                        logger.info(f"[LATENCY_DEBUG] Transcript: '{transcript}'")
+
                         audio_sent_at = self._find_audio_send_timestamp(audio_position_end)
                         if audio_sent_at:
                             result_received_at = timestamp_ms()
                             latency_ms = round(result_received_at - audio_sent_at, 5)
+
+                            logger.info(f"[LATENCY_DEBUG] Audio sent at: {audio_sent_at:.2f}ms, Result received at: {result_received_at:.2f}ms")
+                            logger.info(f"[LATENCY_DEBUG] Calculated latency: {latency_ms:.2f}ms")
+
+                        else:
+                            logger.warning(f"[LATENCY_DEBUG] Could not calculate latency - no matching audio frame found")
 
                         interim_detail = {
                             'transcript': transcript,
@@ -455,9 +468,9 @@ class DeepgramTranscriber(BaseTranscriber):
     def __set_transcription_cursor(self, data):
         if 'start' in data and 'duration' in data:
             self.transcription_cursor = data['start'] + data['duration']
-            logger.info(f"Setting transcription cursor at {self.transcription_cursor} (start={data['start']}, duration={data['duration']})")
+            logger.info(f"[LATENCY_DEBUG] Transcription cursor: start={data['start']:.3f}s, duration={data['duration']:.3f}s, end={self.transcription_cursor:.3f}s")
         else:
-            logger.warning(f"Missing start or duration in Deepgram message, cannot update transcription cursor")
+            logger.warning(f"[LATENCY_DEBUG] Missing start or duration in Deepgram message, cannot update transcription cursor")
         return self.transcription_cursor
 
     def _find_audio_send_timestamp(self, audio_position):
@@ -473,13 +486,22 @@ class DeepgramTranscriber(BaseTranscriber):
         Returns:
             Timestamp when the frame containing this position was sent, or None if not found
         """
+        logger.info(f"[LATENCY_DEBUG] Searching for audio position {audio_position:.3f}s in {len(self.audio_frame_timestamps)} frames")
+
         if not self.audio_frame_timestamps:
+            logger.warning(f"[LATENCY_DEBUG] No audio frames tracked yet")
             return None
 
         for frame_start, frame_end, send_timestamp in self.audio_frame_timestamps:
             if frame_start <= audio_position <= frame_end:
+                logger.info(f"[LATENCY_DEBUG] Matched frame: {frame_start:.3f}s - {frame_end:.3f}s, sent at {send_timestamp:.2f}ms")
                 return send_timestamp
 
+        logger.warning(f"[LATENCY_DEBUG] No frame found for position {audio_position:.3f}s (total frames: {len(self.audio_frame_timestamps)})")
+        if self.audio_frame_timestamps:
+            first = self.audio_frame_timestamps[0]
+            last = self.audio_frame_timestamps[-1]
+            logger.warning(f"[LATENCY_DEBUG] Frame range: {first[0]:.3f}s - {last[1]:.3f}s")
         return None
 
     async def transcribe(self):
