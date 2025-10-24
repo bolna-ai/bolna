@@ -9,6 +9,7 @@ from bolna.models import *
 from bolna.agent_types.base_agent import BaseAgent
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.rag_service_client import RAGServiceClient, RAGServiceClientSingleton
+from bolna.helpers.utils import now_ms
 
 from typing import List, Tuple, Generator, AsyncGenerator
 
@@ -254,11 +255,17 @@ Use this information naturally when it helps answer the user's questions. Don't 
         
         return next_node_id
 
-    async def generate(self, message: List[dict], **kwargs) -> AsyncGenerator[Tuple[str, bool, float, bool], None]:
-        start_time = time.time()
+    async def generate(self, message: List[dict], **kwargs) -> AsyncGenerator[Tuple[str, bool, Optional[Dict], bool, None, None], None]:
+        meta_info = kwargs.get('meta_info')
+        start_time = now_ms()
         first_token_time = None
         buffer = ""
         buffer_size = 20
+        latency_data = {
+            "sequence_id": meta_info.get("sequence_id") if meta_info else None,
+            "first_token_latency_ms": None,
+            "total_stream_duration_ms": None
+        }
 
         try:
             # Decide next move
@@ -274,19 +281,25 @@ Use this information naturally when it helps answer the user's questions. Don't 
             words = response_text.split()
             for i, word in enumerate(words):
                 if first_token_time is None:
-                    first_token_time = time.time()
-                    latency = first_token_time - start_time
+                    first_token_time = now_ms()
+                    latency_data["first_token_latency_ms"] = first_token_time - start_time
 
                 buffer += word + " "
 
                 if len(buffer.split()) >= buffer_size or i == len(words) - 1:
                     is_final = (i == len(words) - 1)
-                    yield buffer.strip(), is_final, latency, False, None, None
+                    if is_final and latency_data:
+                        latency_data["total_stream_duration_ms"] = now_ms() - start_time
+                    yield buffer.strip(), is_final, latency_data, False, None, None
                     buffer = ""
 
             if buffer:
-                yield buffer.strip(), True, latency, False, None, None
+                if latency_data:
+                    latency_data["total_stream_duration_ms"] = now_ms() - start_time
+                yield buffer.strip(), True, latency_data, False, None, None
 
         except Exception as e:
             logger.error(f"Error in generate function: {e}")
-            yield f"An error occurred: {str(e)}", True, time.time() - start_time, False, None, None
+            latency_data["first_token_latency_ms"] = latency_data.get("first_token_latency_ms") or 0
+            latency_data["total_stream_duration_ms"] = now_ms() - start_time
+            yield f"An error occurred: {str(e)}", True, latency_data, False, None, None
