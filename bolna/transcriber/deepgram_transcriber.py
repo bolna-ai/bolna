@@ -306,7 +306,7 @@ class DeepgramTranscriber(BaseTranscriber):
                         audio_sent_at = self._find_audio_send_timestamp(audio_position_end)
                         if audio_sent_at:
                             result_received_at = now_ms()
-                            latency_ms = round(result_received_at - audio_sent_at)
+                            latency_ms = round(result_received_at - audio_sent_at, 5)
 
                         interim_detail = {
                             'transcript': transcript,
