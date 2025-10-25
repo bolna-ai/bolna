@@ -69,3 +69,10 @@ DEFAULT_USER_ONLINE_MESSAGE = "Hey, are you still there?"
 DEFAULT_USER_ONLINE_MESSAGE_TRIGGER_DURATION = 6
 DEFAULT_LANGUAGE_CODE = 'en'
 DEFAULT_TIMEZONE = 'America/Los_Angeles'
+
+# Audio constants
+TELEPHONY_SAMPLE_RATE = 8000  # 8kHz for telephony providers (Twilio, Plivo, Exotel)
+WEB_SAMPLE_RATE = 24000  # 24kHz for web-based calls
+OPENAI_REALTIME_SAMPLE_RATE = 24000  # 24kHz for OpenAI Realtime API
+PCM16_SAMPLE_WIDTH = 2  # 2 bytes per sample for PCM16
+DEFAULT_ENDPOINTING_MS = 500  # Default endpointing duration when no transcriber
