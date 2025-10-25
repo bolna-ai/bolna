@@ -132,8 +132,7 @@ class TelephonyInputHandler(DefaultInputHandler):
                     break
 
             except WebSocketDisconnect as e:
-                if e.code == 1000:
-                    # WebSocket closed normally
+                if e.code in (1000, 1001, 1006):
                     pass
                 else:
                     logger.error(f"WebSocket disconnected unexpectedly: code={e.code}, reason={getattr(e, 'reason', None)}")
