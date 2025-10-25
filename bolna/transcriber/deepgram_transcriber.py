@@ -8,7 +8,7 @@ from urllib.parse import urlencode
 from dotenv import load_dotenv
 import websockets
 from websockets.asyncio.client import ClientConnection
-from websockets.exceptions import ConnectionClosedError, InvalidHandshake, ConnectionClosedOK
+from websockets.exceptions import ConnectionClosedError, InvalidHandshake, ConnectionClosed
 
 from .base_transcriber import BaseTranscriber
 from bolna.helpers.logger_config import configure_logger
@@ -129,11 +129,17 @@ class DeepgramTranscriber(BaseTranscriber):
                 data = {'type': 'KeepAlive'}
                 try:
                     await ws.send(json.dumps(data))
-                except ConnectionClosedOK:
-                    logger.info("Connection closed normally (1000 OK) during heartbeat.")
-                    break
-                except ConnectionClosedError as e:
-                    logger.info(f"Connection closed while sending heartbeat: {e}")
+                except ConnectionClosed as e:
+                    rcvd_code = getattr(e.rcvd, "code", None)
+                    sent_code = getattr(e.sent, "code", None)
+
+                    if rcvd_code == 1000 or sent_code == 1000:
+                        logger.info("WebSocket closed normally (1000 OK) during heartbeat.")
+                    else:
+                        logger.warning(
+                            f"WebSocket closed: received={rcvd_code}, sent={sent_code}, "
+                            f"reason={getattr(e.rcvd, 'reason', '') or getattr(e.sent, 'reason', '')}"
+                        )
                     break
                 except Exception as e:
                     logger.error(f"Error sending heartbeat: {e}")
