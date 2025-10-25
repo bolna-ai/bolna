@@ -8,6 +8,8 @@ import traceback
 from dotenv import load_dotenv
 from .default import DefaultOutputHandler
 from bolna.helpers.logger_config import configure_logger
+from bolna.helpers.utils import wav_bytes_to_pcm
+
 logger = configure_logger(__name__)
 load_dotenv()
 
@@ -59,8 +61,16 @@ class TelephonyOutputHandler(DefaultOutputHandler):
                         await self.websocket.send_text(json.dumps(mark_message))
 
                         # sending of audio chunk
-                        if audio_format == 'pcm' and meta_info.get('message_category', '') == 'agent_welcome_message' and self.io_provider == 'plivo' and meta_info['cached'] is True:
+                        #REVIEW: ask prateek the reason for the prev logic for an with agent_welcome_message and  meta_info['cached'] ?
+                        
+                        # Plivo expects raw PCM data, not WAV with headers
+                        if audio_format == 'wav' and self.io_provider == 'plivo':
+                            logger.info(f"Converting WAV with headers to raw PCM for Plivo")
+                            audio_chunk = wav_bytes_to_pcm(audio_chunk)
+                            audio_format = 'wav'  # Keep format as 'wav' for Plivo contentType
+                        elif audio_format == 'pcm' and self.io_provider == 'plivo':
                             audio_format = 'wav'
+                        
                         media_message = await self.form_media_message(audio_chunk, audio_format)
                         await self.websocket.send_text(json.dumps(media_message))
                         if meta_info.get('message_category', '') == 'agent_welcome_message' and not self.welcome_message_sent_ts:
