@@ -964,12 +964,6 @@ class TaskManager(BaseManager):
         if self.task_config["task_type"] == "webhook":
             return
 
-        # Skip load_prompt for OpenAI Realtime Full V2V mode (handles prompts internally)
-        if (self.llm_config.get('provider') == 'openai_realtime' and
-            'transcriber' not in self.pipelines[0] and
-            'synthesizer' not in self.pipelines[0]):
-            return
-
         agent_type = self.task_config["tools_config"]["llm_agent"].get("agent_type", "simple_llm_agent")
         self.is_local = local
         if task_id == 0:
@@ -1044,6 +1038,15 @@ class TaskManager(BaseManager):
             self.history.append({'role': 'assistant', 'content': self.kwargs['agent_welcome_message']})
 
         self.interim_history = copy.deepcopy(self.history)
+
+        # For OpenAI Realtime, update instructions with enriched system_prompt
+        if self.llm_config and self.llm_config.get('provider') == 'openai_realtime':
+            if self.system_prompt and self.system_prompt.get('content'):
+                enriched_instructions = self.system_prompt['content']
+                # Update the LLM's instructions before session configuration
+                if "llm_agent" in self.tools:
+                    self.tools["llm_agent"].instructions = enriched_instructions
+                    logger.info(f"Updated OpenAI Realtime instructions with enriched system_prompt ({len(enriched_instructions)} chars)")
 
     def __prefill_prompts(self, task, prompt, task_type):
         if self.context_data and 'recipient_data' in self.context_data and self.context_data[
