@@ -1462,7 +1462,12 @@ class TaskManager(BaseManager):
             if self.agent_type not in ["graph_agent", "knowledgebase_agent"]:
                 if self.use_llm_to_determine_hangup and not self.turn_based_conversation:
                     completion_res = await self.tools["llm_agent"].check_for_completion(messages, self.check_for_completion_prompt)
-                    should_hangup = completion_res['hangup'].lower() == "yes"
+                    should_hangup = (
+                        str(completion_res.get("hangup", "")).lower() == "yes"
+                        if isinstance(completion_res, dict)
+                        else False
+                    )
+
                     prompt = [
                             {'role': 'system', 'content': self.check_for_completion_prompt},
                             {'role': 'user', 'content': format_messages(self.history, use_system_prompt= True)}]
