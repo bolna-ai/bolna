@@ -2504,6 +2504,7 @@ class TaskManager(BaseManager):
                 # Handle user started speaking (interruption)
                 if event_data.get('interruption') or event_data.get('speech_started'):
                     logger.info("[INTERRUPTION] User started speaking")
+                    self.time_since_last_spoken_human_word = time.time()
                     await self._handle_openai_realtime_interruption()
                     continue
 
@@ -2554,6 +2555,7 @@ class TaskManager(BaseManager):
                 # Handle response completion
                 if event_data.get('response_done'):
                     logger.info("OpenAI Realtime response completed")
+                    self.last_transmitted_timestamp = time.time()
 
             except Exception as e:
                 logger.error(f"Error in OpenAI Realtime receive loop: {e}")
@@ -2895,6 +2897,9 @@ class TaskManager(BaseManager):
         logger.info("Starting output processing loop")
         tasks.append(asyncio.create_task(self.__process_output_loop()))
 
+        if not self.turn_based_conversation:
+            tasks.append(asyncio.create_task(self.__check_for_completion()))
+
         # Wait for all tasks
         await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -2952,6 +2957,9 @@ class TaskManager(BaseManager):
         # Output processing (sends audio to telephony)
         logger.info("Starting output processing loop")
         tasks.append(asyncio.create_task(self.__process_output_loop()))
+
+        if not self.turn_based_conversation:
+            tasks.append(asyncio.create_task(self.__check_for_completion()))
 
         # Wait for all tasks
         await asyncio.gather(*tasks, return_exceptions=True)
