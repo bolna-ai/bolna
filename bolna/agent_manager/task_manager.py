@@ -10,11 +10,12 @@ import uuid
 import copy
 import base64
 import pytz
+from typing import Dict, Any
 import websockets
 
 import aiohttp
 
-from bolna.constants import ACCIDENTAL_INTERRUPTION_PHRASES, DEFAULT_USER_ONLINE_MESSAGE, DEFAULT_USER_ONLINE_MESSAGE_TRIGGER_DURATION, FILLER_DICT, DEFAULT_LANGUAGE_CODE, DEFAULT_TIMEZONE
+from bolna.constants import ACCIDENTAL_INTERRUPTION_PHRASES, DEFAULT_USER_ONLINE_MESSAGE, DEFAULT_USER_ONLINE_MESSAGE_TRIGGER_DURATION, FILLER_DICT, DEFAULT_LANGUAGE_CODE, DEFAULT_TIMEZONE, TELEPHONY_SAMPLE_RATE, WEB_SAMPLE_RATE, DEFAULT_ENDPOINTING_MS
 from bolna.helpers.function_calling_helpers import trigger_api, computed_api_response
 from bolna.memory.cache.vector_cache import VectorCache
 from .base_manager import BaseManager
@@ -23,6 +24,7 @@ from bolna.providers import *
 from bolna.prompts import *
 from bolna.helpers.utils import structure_system_prompt, compute_function_pre_call_message, get_date_time_from_timezone, get_route_info, calculate_audio_duration, create_ws_data_packet, get_file_names_in_directory, get_raw_audio_bytes, is_valid_md5, \
     get_required_input_types, format_messages, get_prompt_responses, resample, save_audio_file_to_s3, update_prompt_with_context, get_md5_hash, clean_json_string, wav_bytes_to_pcm, convert_to_request_log, yield_chunks_from_memory, process_task_cancellation
+from bolna.helpers.audio_utils import convert_mulaw_to_pcm16_24khz, resample_audio, convert_pcm16_to_target_format
 from bolna.helpers.logger_config import configure_logger
 from semantic_router import Route
 from semantic_router.layer import RouteLayer
@@ -144,6 +146,10 @@ class TaskManager(BaseManager):
             else:
                 self.should_record = self.task_config["tools_config"]["output"]["provider"] == 'default' and self.enforce_streaming #In this case, this is a websocket connection and we should record
 
+        self.last_interruption_time = 0
+        self.interruption_debounce_ms = 300
+
+        if self.task_config["tools_config"]["input"] is not None:
             self.__setup_input_handlers(turn_based_conversation, input_queue, self.should_record)
         self.__setup_output_handlers(turn_based_conversation, output_queue)
 
@@ -194,7 +200,7 @@ class TaskManager(BaseManager):
         #Tasks
         self.extracted_data = None
         self.summarized_data = None
-        self.stream = (self.task_config["tools_config"]['synthesizer'] is not None and self.task_config["tools_config"]["synthesizer"]["stream"]) and (self.enforce_streaming or not self.turn_based_conversation)
+        self.stream = (self._has_synthesizer() and self.task_config["tools_config"]["synthesizer"]["stream"]) and (self.enforce_streaming or not self.turn_based_conversation)
 
         self.is_local = False
         self.llm_config = None
@@ -205,8 +211,8 @@ class TaskManager(BaseManager):
         if self.__is_multiagent():
             for agent, config in self.task_config["tools_config"]["llm_agent"]['llm_config']['agent_map'].items():
                 self.llm_config_map[agent] = config.copy()
-                self.llm_config_map[agent]['buffer_size'] = self.task_config["tools_config"]["synthesizer"][
-                    'buffer_size']
+                if self._has_synthesizer():
+                    self.llm_config_map[agent]['buffer_size'] = self.task_config["tools_config"]["synthesizer"]['buffer_size']
         else:
             if self.task_config["tools_config"]["llm_agent"] is not None:
                 if self.__is_knowledgebase_agent():
@@ -254,8 +260,11 @@ class TaskManager(BaseManager):
         self.conversation_config = None
 
         if task_id == 0:
-            provider_config = self.task_config["tools_config"]["synthesizer"].get("provider_config")
-            self.synthesizer_voice = provider_config["voice"]
+            if self._has_synthesizer():
+                provider_config = self.task_config["tools_config"]["synthesizer"].get("provider_config")
+                self.synthesizer_voice = provider_config["voice"]
+            else:
+                self.synthesizer_voice = None
 
             self.handle_accumulated_message_task = None
             # self.initial_silence_task = None
@@ -281,8 +290,10 @@ class TaskManager(BaseManager):
                 self.check_user_online_message = update_prompt_with_context(self.check_user_online_message, self.context_data)
 
             self.kwargs["process_interim_results"] = "true" if self.conversation_config.get("optimize_latency", False) is True else "false"
-            # Routes
-            self.routes = task['tools_config']['llm_agent'].get("routes", None)
+            if task['tools_config']['llm_agent'] is not None:
+                self.routes = task['tools_config']['llm_agent'].get("routes", None)
+            else:
+                self.routes = None
             self.route_layer = None
 
             if self.routes:
@@ -311,7 +322,10 @@ class TaskManager(BaseManager):
             # for long pauses and rushing
             if self.conversation_config is not None:
                 # TODO need to get this for azure - for azure the subtraction would not happen
-                self.minimum_wait_duration = self.task_config["tools_config"]["transcriber"]["endpointing"]
+                if 'transcriber' in self.pipelines[0] and self._has_transcriber():
+                    self.minimum_wait_duration = self.task_config["tools_config"]["transcriber"]["endpointing"]
+                else:
+                    self.minimum_wait_duration = DEFAULT_ENDPOINTING_MS
                 self.last_spoken_timestamp = time.time() * 1000
                 self.incremental_delay = self.conversation_config.get("incremental_delay", 100)
                 self.required_delay_before_speaking = max(self.minimum_wait_duration - self.incremental_delay, 0)  #Everytime we get a message we increase it by 100 miliseconds
@@ -389,11 +403,13 @@ class TaskManager(BaseManager):
                 else:
                     self.filler_preset_directory = f"{os.getenv('FILLERS_PRESETS_DIR')}/{self.synthesizer_voice.lower()}"
 
-        # setting transcriber and synthesizer in parallel
-        self.__setup_transcriber()
-        self.__setup_synthesizer(self.llm_config)
-        if not self.turn_based_conversation and task_id == 0:
-            self.synthesizer_monitor_task = asyncio.create_task(self.tools['synthesizer'].monitor_connection())
+
+        if 'transcriber' in self.pipelines[0]:
+            self.__setup_transcriber()
+        if 'synthesizer' in self.pipelines[0]:
+            self.__setup_synthesizer(self.llm_config)
+            if not self.turn_based_conversation and task_id == 0:
+                self.synthesizer_monitor_task = asyncio.create_task(self.tools['synthesizer'].monitor_connection())
 
         # # setting llm
         # llm = self.__setup_llm(self.llm_config)
@@ -403,6 +419,11 @@ class TaskManager(BaseManager):
         # setting llm
         if self.llm_config is not None:
             llm = self.__setup_llm(self.llm_config, task_id)
+
+            # For OpenAI Realtime, store raw LLM in tools for direct access
+            if self.llm_config.get('provider') == 'openai_realtime':
+                self.tools["llm"] = llm
+
             #Setup tasks
             agent_params = {
                 'llm': llm,
@@ -436,11 +457,15 @@ class TaskManager(BaseManager):
     def __is_multiagent(self):
         if self.task_config["task_type"] == "webhook":
             return False
+        if self.task_config['tools_config']["llm_agent"] is None:
+            return False
         agent_type = self.task_config['tools_config']["llm_agent"].get("agent_type", None)
         return agent_type == "multiagent"
 
     def __is_knowledgebase_agent(self):
         if self.task_config["task_type"] == "webhook":
+            return False
+        if self.task_config['tools_config']["llm_agent"] is None:
             return False
         agent_type = self.task_config['tools_config']["llm_agent"].get("agent_type", None)
         return agent_type == "knowledgebase_agent"
@@ -448,14 +473,53 @@ class TaskManager(BaseManager):
     def __is_graph_agent(self):
         if self.task_config["task_type"] == "webhook":
             return False
+        if self.task_config['tools_config']["llm_agent"] is None:
+            return False
         agent_type = self.task_config['tools_config']["llm_agent"].get("agent_type", None)
         return agent_type == "graph_agent"
-    
+
     # def __is_knowledge_agent(self):
     #     if self.task_config["task_type"] == "webhook":
     #         return False
     #     agent_type = self.task_config['tools_config']["llm_agent"].get("agent_type", None)
     #     return agent_type == "knowledge_agent"
+
+    def _has_synthesizer(self) -> bool:
+        """Check if synthesizer is configured in toolchain."""
+        return self.task_config.get("tools_config", {}).get("synthesizer") is not None
+
+    def _has_transcriber(self) -> bool:
+        """Check if transcriber is configured in toolchain."""
+        return self.task_config.get("tools_config", {}).get("transcriber") is not None
+
+    def _is_openai_realtime_mode(self) -> tuple:
+        """
+        Check if this is OpenAI Realtime mode and which mode.
+
+        Returns:
+            tuple: (is_realtime: bool, mode: str|None)
+                mode can be: "full_v2v", "custom_tts", "pure_llm", "custom_stt", or None
+        """
+        if not self.llm_config:
+            return False, None
+
+        is_openai_realtime = self.llm_config.get('provider') == 'openai_realtime'
+        if not is_openai_realtime:
+            return False, None
+
+        has_transcriber = self._has_transcriber()
+        has_synthesizer = self._has_synthesizer()
+
+        if not has_transcriber and not has_synthesizer:
+            return True, "full_v2v"
+        elif not has_transcriber and has_synthesizer:
+            return True, "custom_tts"
+        elif has_transcriber and has_synthesizer:
+            return True, "pure_llm"
+        elif has_transcriber and not has_synthesizer:
+            return True, "custom_stt"
+
+        return False, None
 
     def __setup_routes(self, routes):
         embedding_model = routes.get("embedding_model", os.getenv("ROUTE_EMBEDDING_MODEL"))
@@ -507,13 +571,27 @@ class TaskManager(BaseManager):
 
                 if self.task_config["tools_config"]["output"]["provider"] in SUPPORTED_OUTPUT_TELEPHONY_HANDLERS.keys():
                     output_kwargs['mark_event_meta_data'] = self.mark_event_meta_data
-                    logger.info(f"Making sure that the sampling rate for output handler is 8000")
-                    self.task_config['tools_config']['synthesizer']['provider_config']['sampling_rate'] = 8000
-                    self.task_config['tools_config']['synthesizer']['audio_format'] = 'pcm'
+                    logger.info(f"Making sure that the sampling rate for output handler is {TELEPHONY_SAMPLE_RATE}")
+
+                    # Configure synthesizer sampling rate for telephony if synthesizer is in toolchain
+                    if 'synthesizer' in self.pipelines[0] and self._has_synthesizer():
+                        self.task_config['tools_config']['synthesizer']['provider_config']['sampling_rate'] = TELEPHONY_SAMPLE_RATE
+                        self.task_config['tools_config']['synthesizer']['audio_format'] = 'pcm'
+                        self.sampling_rate = TELEPHONY_SAMPLE_RATE
+                    else:
+                        # No synthesizer (e.g., OpenAI Realtime full v2v handles audio output)
+                        self.sampling_rate = TELEPHONY_SAMPLE_RATE
+                        logger.debug(f"Using {TELEPHONY_SAMPLE_RATE}Hz sampling rate for telephony output")
                 else:
-                    self.task_config['tools_config']['synthesizer']['provider_config']['sampling_rate'] = 24000
+                    # Web-based call
+                    if 'synthesizer' in self.pipelines[0] and self._has_synthesizer():
+                        self.task_config['tools_config']['synthesizer']['provider_config']['sampling_rate'] = WEB_SAMPLE_RATE
+                        self.sampling_rate = WEB_SAMPLE_RATE
+                    else:
+                        # No synthesizer (e.g., OpenAI Realtime handles audio output)
+                        self.sampling_rate = WEB_SAMPLE_RATE
+                        logger.debug(f"Using {WEB_SAMPLE_RATE}Hz sampling rate for web output")
                     output_kwargs['queue'] = output_queue
-                self.sampling_rate = self.task_config['tools_config']['synthesizer']['provider_config']['sampling_rate']
 
             if self.task_config["tools_config"]["output"]["provider"] == "default":
                 output_kwargs["is_web_based_call"] = self.is_web_based_call
@@ -566,46 +644,143 @@ class TaskManager(BaseManager):
             raise "Other input handlers not supported yet"
 
     async def __forced_first_message(self, timeout=10.0):
-        logger.info(f"Executing the first message task")
+        """
+        Play welcome message.
+        Waits for stream_sid to become available before sending.
+
+        For OpenAI Realtime modes:
+        - Mode 1 (Full V2V): Plays pre-generated audio directly (dashboard pre-generates with OpenAI TTS)
+        - Mode 2 (Custom TTS): Uses _synthesize() like traditional pipeline
+        - Traditional: Plays preloaded audio directly
+        """
+        logger.info(f"Executing first message task")
+
         try:
+            text = self.kwargs.get('agent_welcome_message', None)
+            if not text:
+                logger.info("No welcome message text configured, skipping")
+                return
+
+            # Check if preloaded audio exists
+            if not self.preloaded_welcome_audio:
+                logger.info("No preloaded welcome audio")
+                # For Mode 2, we can fallback to _synthesize()
+                is_openai_realtime = self.llm_config.get('provider') == 'openai_realtime'
+                if is_openai_realtime and not self.tools["llm"].handles_audio_output:
+                    logger.info("Mode 2 detected without preloaded audio, using _synthesize() fallback")
+                    # Wait for stream_sid first
+                    start_time = asyncio.get_running_loop().time()
+                    while True:
+                        elapsed_time = asyncio.get_running_loop().time() - start_time
+                        if elapsed_time > timeout:
+                            await self.__process_end_of_conversation()
+                            logger.warning(f"Timeout reached while waiting for stream_sid")
+                            return
+
+                        stream_sid = self.tools["input"].get_stream_sid()
+                        if stream_sid is not None:
+                            logger.info(f"Got stream_sid ({stream_sid}) for welcome message")
+                            self.stream_sid = stream_sid
+                            await self.tools["output"].set_stream_sid(stream_sid)
+                            break
+
+                        await asyncio.sleep(0.01)
+
+                    meta_info = {
+                        'io': self.tools["output"].get_provider(),
+                        'message_category': 'agent_welcome_message',
+                        'stream_sid': stream_sid,
+                        "request_id": str(uuid.uuid4()),
+                        "cached": True,
+                        "sequence_id": -1,
+                        'format': self.task_config["tools_config"]["output"]["format"],
+                        'text': text,
+                        'end_of_llm_stream': True
+                    }
+                    await self._synthesize(create_ws_data_packet(text, meta_info=meta_info))
+                else:
+                    logger.info("No preloaded audio and not Mode 2, skipping welcome message")
+                return
+
+            # Have preloaded audio - use it for all modes (Mode 1, Mode 2 if cached, Traditional)
+            logger.info("Playing preloaded welcome message audio")
+
             start_time = asyncio.get_running_loop().time()
+
+            # Prepare message metadata
+            meta_info = {
+                'io': self.tools["output"].get_provider(),
+                'message_category': 'agent_welcome_message',
+                "request_id": str(uuid.uuid4()),
+                "cached": True,
+                "sequence_id": -1,
+                'format': self.task_config["tools_config"]["output"]["format"],
+                'text': text,
+                'end_of_llm_stream': True
+            }
+            ws_data_packet = create_ws_data_packet(text, meta_info=meta_info)
+
+            meta_info = ws_data_packet["meta_info"]
+            text = ws_data_packet["data"]
+            meta_info["type"] = "audio"
+            meta_info["synthesizer_start_time"] = time.time()
+
+            audio_bytes = self.preloaded_welcome_audio
+            if meta_info['text'] == '':
+                audio_bytes = None
+
+            # Convert audio format for telephony provider
+            # Mode 1 (OpenAI Realtime Full V2V) uses 24kHz OpenAI TTS - needs conversion
+            # Traditional/Mode 2 use custom synthesizer at provider's sample rate - already correct
+            if audio_bytes is not None:
+                is_openai_realtime = self.llm_config.get('provider') == 'openai_realtime'
+                is_mode_1 = is_openai_realtime and self.tools["llm"].handles_audio_output
+
+                if is_mode_1:
+                    # Mode 1: Convert from 24kHz OpenAI TTS to provider format
+                    output_provider = self.task_config["tools_config"]["output"]["provider"]
+                    from bolna.helpers.audio_utils import convert_pcm16_to_target_format
+                    audio_bytes, output_format = convert_pcm16_to_target_format(
+                        audio_bytes,
+                        24000,  # OpenAI TTS generates at 24kHz
+                        output_provider
+                    )
+                    meta_info["format"] = output_format
+                else:
+                    # Traditional/Mode 2: Already at correct sample rate
+                    meta_info["format"] = "pcm"
+            else:
+                meta_info["format"] = "pcm"
+
+            meta_info['is_first_chunk'] = True
+            meta_info["end_of_synthesizer_stream"] = True
+            meta_info['chunk_id'] = 1
+            meta_info["is_first_chunk_of_entire_response"] = True
+            meta_info["is_final_chunk_of_entire_response"] = True
+
+            # Wait for stream_sid
             while True:
                 elapsed_time = asyncio.get_running_loop().time() - start_time
                 if elapsed_time > timeout:
                     await self.__process_end_of_conversation()
-                    logger.warning("Timeout reached while waiting for stream_sid")
+                    logger.warning(f"Timeout reached while waiting for stream_sid")
                     break
-
-                text = self.kwargs.get('agent_welcome_message', None)
-                meta_info = {'io': self.tools["output"].get_provider(), 'message_category': 'agent_welcome_message', "request_id": str(uuid.uuid4()), "cached": True, "sequence_id": -1, 'format': self.task_config["tools_config"]["output"]["format"], 'text': text, 'end_of_llm_stream': True}
-                ws_data_packet = create_ws_data_packet(text, meta_info=meta_info)
-
-                meta_info = ws_data_packet["meta_info"]
-                text = ws_data_packet["data"]
-                meta_info["type"] = "audio"
-                meta_info["synthesizer_start_time"] = time.time()
-
-                audio_chunk = self.preloaded_welcome_audio if self.preloaded_welcome_audio else None
-                if meta_info['text'] == '':
-                    audio_chunk = None
-
-                meta_info["format"] = "pcm"
-                meta_info['is_first_chunk'] = True
-                meta_info["end_of_synthesizer_stream"] = True
-                meta_info['chunk_id'] = 1
-                meta_info["is_first_chunk_of_entire_response"] = True
-                meta_info["is_final_chunk_of_entire_response"] = True
-                message = create_ws_data_packet(audio_chunk, meta_info)
 
                 stream_sid = self.tools["input"].get_stream_sid()
                 if stream_sid is not None and self.output_handler_set:
                     self.stream_sid_ts = time.time() * 1000
-                    logger.info(f"Got stream sid and hence sending the first message {stream_sid}")
+                    logger.info(f"Got stream_sid ({stream_sid}), sending preloaded welcome audio")
                     self.stream_sid = stream_sid
                     await self.tools["output"].set_stream_sid(stream_sid)
+
+                    message = create_ws_data_packet(audio_bytes, meta_info)
                     self.tools["input"].update_is_audio_being_played(True)
-                    convert_to_request_log(message=text, meta_info=meta_info, component="synthesizer", direction="response", model=self.synthesizer_provider, is_cached=meta_info.get("is_cached", False), engine=self.tools['synthesizer'].get_engine(), run_id=self.run_id)
+
+                    if "synthesizer" in self.tools:
+                        convert_to_request_log(message=text, meta_info=meta_info, component="synthesizer", direction="response", model=self.synthesizer_provider, is_cached=meta_info.get("is_cached", False), engine=self.tools['synthesizer'].get_engine(), run_id=self.run_id)
+
                     await self.tools["output"].handle(message)
+
                     try:
                         duration = calculate_audio_duration(len(message["data"]), self.sampling_rate,
                                                             format=message['meta_info']['format'])
@@ -614,18 +789,21 @@ class TaskManager(BaseManager):
                     except Exception as e:
                         duration = 0.256
                         logger.error("Exception in __forced_first_message for duration calculation: {}".format(str(e)))
+
                     break
                 else:
-                    logger.info(f"Stream id is still None ({stream_sid}) or output handler not set ({self.output_handler_set}), waiting...")
+                    logger.debug(f"Stream_sid still None ({stream_sid}) or output not set ({self.output_handler_set}), waiting...")
                     await asyncio.sleep(0.01)
+
         except Exception as e:
-            logger.error(f"Exception in __forced_first_message {str(e)}")
+            logger.error(f"Exception in __forced_first_message: {e}")
+            traceback.print_exc()
 
         return
 
     def __setup_transcriber(self):
         try:
-            if self.task_config["tools_config"]["transcriber"] is not None:
+            if self._has_transcriber():
                 self.language = self.task_config["tools_config"]["transcriber"].get('language', DEFAULT_LANGUAGE_CODE)
                 if self.turn_based_conversation:
                     provider = "playground"
@@ -654,8 +832,9 @@ class TaskManager(BaseManager):
 
     def __setup_synthesizer(self, llm_config=None):
         if self._is_conversation_task():
-            self.kwargs["use_turbo"] = self.task_config["tools_config"]["transcriber"]["language"] == DEFAULT_LANGUAGE_CODE
-        if self.task_config["tools_config"]["synthesizer"] is not None:
+            if 'transcriber' in self.pipelines[0] and self._has_transcriber():
+                self.kwargs["use_turbo"] = self.task_config["tools_config"]["transcriber"]["language"] == DEFAULT_LANGUAGE_CODE
+        if self._has_synthesizer():
             if "caching" in self.task_config['tools_config']['synthesizer']:
                 caching = self.task_config["tools_config"]["synthesizer"].pop("caching")
             else:
@@ -687,6 +866,23 @@ class TaskManager(BaseManager):
 
                     if self._is_summarization_task() or self._is_extraction_task():
                         llm_config['model'] = 'gpt-4o-mini'
+
+                # Pass toolchain context for OpenAI Realtime to determine operational mode
+                if llm_config["provider"] == 'openai_realtime':
+                    self.kwargs['toolchain_pipeline'] = self.pipelines[0]
+                    self.kwargs['audio_input_queue'] = self.audio_queue
+                    # Extract OpenAI Realtime specific config if present
+                    if 'instructions' in llm_config:
+                        self.kwargs['instructions'] = llm_config.pop('instructions')
+                    if 'voice' in llm_config:
+                        self.kwargs['voice'] = llm_config.pop('voice')
+                    if 'turn_detection' in llm_config:
+                        self.kwargs['turn_detection'] = llm_config.pop('turn_detection')
+                    if 'modalities' in llm_config:
+                        self.kwargs['modalities'] = llm_config.pop('modalities')
+                    if 'input_audio_transcription' in llm_config:
+                        self.kwargs['input_audio_transcription'] = llm_config.pop('input_audio_transcription')
+
                 llm = llm_class(language=self.language, **llm_config, **self.kwargs)
                 return llm
             else:
@@ -766,6 +962,12 @@ class TaskManager(BaseManager):
 
     async def load_prompt(self, assistant_name, task_id, local, **kwargs):
         if self.task_config["task_type"] == "webhook":
+            return
+
+        # Skip load_prompt for OpenAI Realtime Full V2V mode (handles prompts internally)
+        if (self.llm_config.get('provider') == 'openai_realtime' and
+            'transcriber' not in self.pipelines[0] and
+            'synthesizer' not in self.pipelines[0]):
             return
 
         agent_type = self.task_config["tools_config"]["llm_agent"].get("agent_type", "simple_llm_agent")
@@ -928,13 +1130,15 @@ class TaskManager(BaseManager):
         logger.info(f"Cleaning up downstream task")
         start_time = time.time()
         await self.tools["output"].handle_interruption()
-        await self.tools["synthesizer"].handle_interruption()
+        if "synthesizer" in self.tools:
+            await self.tools["synthesizer"].handle_interruption()
 
         if self.generate_precise_transcript:
             await self.sync_history(self.mark_event_meta_data.fetch_cleared_mark_event_data().items(), current_ts)
 
         self.sequence_ids = {-1}
-        await self.tools["synthesizer"].flush_synthesizer_stream()
+        if "synthesizer" in self.tools:
+            await self.tools["synthesizer"].flush_synthesizer_stream()
 
         #Stop the output loop first so that we do not transmit anything else
         if self.output_task is not None:
@@ -998,6 +1202,36 @@ class TaskManager(BaseManager):
 
     def _is_conversation_task(self):
         return self.task_config["task_type"] == "conversation"
+
+    def _is_openai_realtime_mode(self):
+        """
+        Detect if this is OpenAI Realtime and which mode.
+
+        Returns:
+            tuple: (is_realtime: bool, mode: str) where mode is one of:
+                - "full_v2v": No transcriber, no synthesizer (Mode 1)
+                - "custom_tts": No transcriber, has synthesizer (Mode 2)
+                - "pure_llm": Has transcriber, has synthesizer (Mode 3)
+                - None: Not OpenAI Realtime or unsupported mode
+        """
+        if self.llm_config.get('provider') != 'openai_realtime':
+            return False, None
+
+        has_transcriber = 'transcriber' in self.pipelines[0]
+        has_synthesizer = 'synthesizer' in self.pipelines[0]
+
+        if not has_transcriber and not has_synthesizer:
+            return True, "full_v2v"
+        elif not has_transcriber and has_synthesizer:
+            return True, "custom_tts"
+        elif has_transcriber and has_synthesizer:
+            return True, "pure_llm"
+        elif has_transcriber and not has_synthesizer:
+            # TODO: Implement Mode 4 (custom_stt) orchestration - Custom STT + OpenAI Realtime TTS
+            logger.warning("OpenAI Realtime Mode 4 (custom_stt) not implemented, using traditional pipeline")
+            return False, None
+
+        return False, None
 
     def _get_next_step(self, sequence, origin):
         try:
@@ -1328,19 +1562,19 @@ class TaskManager(BaseManager):
         else:
             self.llm_response_generated = True
             convert_to_request_log(message=llm_response, meta_info= meta_info, component="llm", direction="response", model=self.llm_config["model"], run_id= self.run_id)
-            if should_trigger_function_call:
-                logger.info(f"There was a function call and need to make that work")
-                self.history.append({"role": "assistant", "content": llm_response})
-                #Assuming that callee was silent
-                # self.history = copy.deepcopy(self.interim_history)
-            else:
-                messages.append({"role": "assistant", "content": llm_response})
-                self.history.append({"role": "assistant", "content": llm_response})
-                self.interim_history = copy.deepcopy(messages)
-                # if self.callee_silent:
-                #     logger.info("##### When we got utterance end, maybe LLM was still generating response. So, copying into history")
-                #     self.history = copy.deepcopy(self.interim_history)
-                #self.__update_transcripts()
+        if should_trigger_function_call:
+            logger.info(f"There was a function call and need to make that work")
+            self.history.append({"role": "assistant", "content": llm_response})
+            #Assuming that callee was silent
+            # self.history = copy.deepcopy(self.interim_history)
+        else:
+            messages.append({"role": "assistant", "content": llm_response})
+            self.history.append({"role": "assistant", "content": llm_response})
+            self.interim_history = copy.deepcopy(messages)
+            # if self.callee_silent:
+            #     logger.info("##### When we got utterance end, maybe LLM was still generating response. So, copying into history")
+            #     self.history = copy.deepcopy(self.interim_history)
+            #self.__update_transcripts()
 
     async def __do_llm_generation(self, messages, meta_info, next_step, should_bypass_synth=False, should_trigger_function_call=False):
         llm_response, function_tool, function_tool_message = '', '', ''
@@ -1749,6 +1983,9 @@ class TaskManager(BaseManager):
                         is_first_message = meta_info.get("is_first_message", False)
                         sequence_id = meta_info.get("sequence_id", None)
 
+                        if self.stream_sid:
+                            meta_info['stream_sid'] = self.stream_sid
+
                         # Check if the message is valid to process
                         if is_first_message or (not self.conversation_ended and sequence_id in self.sequence_ids):
                             logger.info(f"Processing message with sequence_id: {sequence_id}")
@@ -1937,7 +2174,7 @@ class TaskManager(BaseManager):
     # but it shouldn't be the case.
     async def __process_output_loop(self):
         try:
-            while True:
+            while not self.conversation_ended:
                 if (not self.let_remaining_audio_pass_through) and self.tools["input"].welcome_message_played():
                     time_since_first_interim_result = (time.time() * 1000) - self.time_since_first_interim_result if self.time_since_first_interim_result != -1 else -1
                     logger.info(f"##### It's been {time_since_first_interim_result} ms since first  interim result and required time to wait for it is {self.required_delay_before_speaking}. Hence sleeping for 100ms. self.time_since_first_interim_result {self.time_since_first_interim_result}")
@@ -1967,6 +2204,7 @@ class TaskManager(BaseManager):
                 if 'sequence_id' in message['meta_info'] and message["meta_info"]["sequence_id"] in self.sequence_ids:
                     self.tools["input"].update_is_audio_being_played(True)
                     await self.tools["output"].handle(message)
+                    
                     try:
                         duration = calculate_audio_duration(len(message["data"]), self.sampling_rate, format = message['meta_info']['format'])
                         self.conversation_recording['output'].append({'data': message['data'], "start_time": time.time(), "duration": duration})
@@ -1974,7 +2212,7 @@ class TaskManager(BaseManager):
                         duration = 0.256
                         logger.info("Exception in __process_output_loop: {}".format(str(e)))
                 else:
-                    logger.info(f'{message["meta_info"]["sequence_id"]} is not in {self.sequence_ids} and hence not speaking')
+                    logger.debug(f'Audio dropped: sequence_id {message["meta_info"]["sequence_id"]} not in valid set {self.sequence_ids}')
                     continue
 
                 if (message['meta_info'].get("end_of_llm_stream", False) or message['meta_info'].get("end_of_synthesizer_stream", False)) and \
@@ -2194,57 +2432,608 @@ class TaskManager(BaseManager):
         except Exception as e:
             logger.error(f"Error occurred in handling init event - {e}")
 
+    # ==================== OpenAI Realtime Orchestration Methods ====================
+
+    async def _openai_realtime_audio_input_loop(self):
+        """
+        Read audio from telephony input → send to OpenAI Realtime.
+        Adapted from old _v2v_audio_input_loop.
+        """
+        logger.info("Starting OpenAI Realtime audio input loop")
+
+        while not self.conversation_ended:
+            try:
+                ws_data_packet = await asyncio.wait_for(
+                    self.audio_queue.get(),
+                    timeout=1.0
+                )
+
+                audio_data = ws_data_packet.get('data')
+                meta_info = ws_data_packet.get('meta_info', {})
+
+                # Check for end of stream
+                if meta_info.get('eos'):
+                    logger.info("EOS received in OpenAI Realtime audio input loop")
+                    self.conversation_ended = True
+                    break
+
+                if audio_data:
+                    # Convert audio format based on telephony provider
+                    audio_format = meta_info.get('format', 'pcm')
+                    io_provider = meta_info.get('io', 'default')
+
+                    # Twilio sends mulaw at 8kHz, need PCM16 at 24kHz
+                    if io_provider == 'twilio' or audio_format == 'mulaw':
+                        audio_data = convert_mulaw_to_pcm16_24khz(audio_data)
+                    # Plivo/Exotel send PCM at 8kHz, need 24kHz
+                    elif io_provider in ['plivo', 'exotel']:
+                        audio_data = resample_audio(audio_data, 8000, 24000, 'pcm', 'pcm')
+
+                    # Send to OpenAI Realtime
+                    await self.tools["llm"].send_audio(audio_data, meta_info)
+
+            except asyncio.TimeoutError:
+                continue
+            except Exception as e:
+                logger.error(f"Error in OpenAI Realtime audio input loop: {e}")
+                traceback.print_exc()
+                break
+
+        logger.info("OpenAI Realtime audio input loop ended")
+
+    async def _openai_realtime_receive_loop(self):
+        """
+        Continuously receive events from OpenAI Realtime.
+        Handles: audio deltas, transcripts, function calls, interruptions.
+        Adapted from old _v2v_receive_loop.
+        """
+        logger.info("Starting OpenAI Realtime receive loop")
+
+        while not self.conversation_ended:
+            try:
+                # Call LLM's receive_audio() which returns parsed events
+                event_data = await self.tools["llm"].receive_audio()
+
+                if not event_data:
+                    await asyncio.sleep(0.01)
+                    continue
+
+                # Handle user started speaking (interruption)
+                if event_data.get('interruption') or event_data.get('speech_started'):
+                    logger.info("[INTERRUPTION] User started speaking")
+                    await self._handle_openai_realtime_interruption()
+                    continue
+
+                # Handle audio output
+                if event_data.get('audio'):
+                    audio_bytes = event_data['audio']
+                    meta_info = event_data.get('meta_info', {})
+
+                    # Convert PCM16 24kHz to telephony provider format
+                    output_provider = self.task_config["tools_config"]["output"]["provider"]
+
+                    converted_bytes, output_format = convert_pcm16_to_target_format(
+                        audio_bytes,
+                        24000,
+                        output_provider
+                    )
+
+                    # Get current stream_sid from input handler
+                    current_stream_sid = None
+                    if hasattr(self.tools.get("input"), 'get_stream_sid'):
+                        current_stream_sid = self.tools["input"].get_stream_sid()
+
+                    # Create output packet
+                    ws_data_packet = {
+                        'data': converted_bytes,
+                        'meta_info': {
+                            'format': output_format,
+                            'io': output_provider,
+                            'sequence_id': self.curr_sequence_id,
+                            'stream_sid': current_stream_sid,
+                            'is_first_chunk': False,
+                            'end_of_llm_stream': event_data.get('is_final', False),
+                            'end_of_synthesizer_stream': event_data.get('is_final', False),
+                            'message_category': 'assistant_response',
+                            'type': 'audio'
+                        }
+                    }
+
+                    self.sequence_ids.add(self.curr_sequence_id)
+
+                    # Put in buffered output queue for output handler
+                    await self.buffered_output_queue.put(ws_data_packet)
+
+                # Handle function calls
+                if event_data.get('function_call'):
+                    await self._handle_openai_realtime_function_call(event_data['function_call'])
+
+                # Handle response completion
+                if event_data.get('response_done'):
+                    logger.info("OpenAI Realtime response completed")
+
+            except Exception as e:
+                logger.error(f"Error in OpenAI Realtime receive loop: {e}")
+                traceback.print_exc()
+                break
+
+        logger.info("OpenAI Realtime receive loop ended")
+
+    async def _openai_realtime_text_receive_loop(self):
+        """
+        Receive text transcripts from OpenAI Realtime and stream to synthesizer (Mode 2).
+        Continuously listens for transcript events and sends text to custom synthesizer.
+        """
+        logger.info("Starting OpenAI Realtime text receive loop")
+
+        text_buffer = ""
+        sent_text_length = 0  # Track how much text we've already sent to avoid duplication
+        current_meta_info = None
+
+        while not self.conversation_ended:
+            try:
+                # Listen for events from OpenAI Realtime
+                event = await self.tools["llm"]._receive_event()
+                if not event:
+                    await asyncio.sleep(0.01)
+                    continue
+
+                event_type = event.get('type')
+
+                # Handle speech start (user interruption)
+                if event_type == 'input_audio_buffer.speech_started':
+                    logger.info("[INTERRUPTION] User started speaking")
+                    await self._handle_openai_realtime_interruption()
+                    # Reset state for new turn
+                    text_buffer = ""
+                    sent_text_length = 0  # Reset tracking on interruption
+                    self.turn_id += 1
+                    self.curr_sequence_id += 1
+                    self.sequence_ids.add(self.curr_sequence_id)
+                    continue
+
+                # Handle response creation (start of new LLM response)
+                if event_type == 'response.created':
+                    logger.info("OpenAI Realtime response created")
+                    # Add current sequence_id to valid set
+                    self.sequence_ids.add(self.curr_sequence_id)
+                    # Prepare meta_info for this response
+                    current_meta_info = {
+                        "request_id": str(uuid.uuid4()),
+                        "sequence_id": self.curr_sequence_id,
+                        "turn_id": self.turn_id,
+                        "llm_start_time": time.time(),
+                        "origin": "openai_realtime",
+                        "io": self.task_config["tools_config"]["output"]["provider"],
+                        "end_of_llm_stream": False,
+                        "llm": self.llm_config.get('provider'),
+                        "model": self.llm_config.get('model')
+                    }
+                    text_buffer = ""
+                    sent_text_length = 0  # Reset tracking for new response
+                    continue
+
+                # Handle text transcript deltas (streaming text from OpenAI)
+                if event_type == 'response.audio_transcript.delta':
+                    transcript_delta = event.get('delta', '')
+                    if transcript_delta and current_meta_info:
+                        text_buffer += transcript_delta
+                        logger.debug(f"Received transcript delta: {transcript_delta}")
+
+                        # Send to synthesizer when buffer reaches threshold
+                        buffer_size = self.tools["llm"].buffer_size if hasattr(self.tools["llm"], 'buffer_size') else 40
+                        if len(text_buffer) >= buffer_size:
+                            # Split at last space to avoid cutting words
+                            split = text_buffer.rsplit(" ", 1)
+                            to_send = split[0]
+                            text_buffer = split[1] if len(split) > 1 else ""
+
+                            if to_send:
+                                logger.info(f"Sending text chunk to synthesizer: {to_send[:50]}...")
+                                # Create data packet and send to synthesizer
+                                # Use LIVE sequence_id (not stale one from current_meta_info) to match Mode 1 behavior
+                                meta_info_copy = current_meta_info.copy()
+                                meta_info_copy["sequence_id"] = self.curr_sequence_id
+                                ws_data_packet = create_ws_data_packet(to_send, meta_info=meta_info_copy)
+                                await self._synthesize(ws_data_packet)
+                                # Track how much we've sent (including the space we removed in rsplit)
+                                sent_text_length += len(to_send) + 1
+                    continue
+
+                # Handle final transcript (end of LLM response)
+                if event_type == 'response.audio_transcript.done':
+                    transcript = event.get('transcript', '')
+                    logger.info(f"Final transcript received: {transcript}")
+
+                    if current_meta_info:
+                        # Send only the UNSENT portion of the transcript to avoid duplication
+                        unsent_text = transcript[sent_text_length:] if sent_text_length < len(transcript) else ""
+
+                        if unsent_text.strip():
+                            # Use LIVE sequence_id (not stale one from current_meta_info) to match Mode 1 behavior
+                            meta_info_copy = current_meta_info.copy()
+                            meta_info_copy["sequence_id"] = self.curr_sequence_id
+                            meta_info_copy["end_of_llm_stream"] = True
+                            logger.info(f"Sending final unsent chunk: {unsent_text}")
+                            ws_data_packet = create_ws_data_packet(unsent_text, meta_info=meta_info_copy)
+                            await self._synthesize(ws_data_packet)
+                        else:
+                            logger.info(f"No unsent text to send (sent_length={sent_text_length}, transcript_length={len(transcript)})")
+                        
+                        # Reset for next response
+                        text_buffer = ""
+                        sent_text_length = 0
+
+                        # Update conversation history
+                        if transcript:
+                            self.history.append({'role': 'assistant', 'content': transcript})
+                            logger.debug(f"Updated history with assistant response")
+                    continue
+
+                # Handle function calls
+                if event_type == 'response.function_call_arguments.done':
+                    function_call = {
+                        'name': event.get('name'),
+                        'arguments': event.get('arguments'),
+                        'call_id': event.get('call_id')
+                    }
+                    logger.info(f"Function call received: {function_call['name']}")
+                    await self._handle_openai_realtime_function_call(function_call)
+                    continue
+
+                # Handle response completion
+                if event_type == 'response.done':
+                    logger.info("OpenAI Realtime response completed")
+                    # Response is done, ready for next user speech
+                    continue
+
+                # Handle errors
+                if event_type == 'error':
+                    error_info = event.get('error', {})
+                    logger.error(f"OpenAI Realtime error: {error_info}")
+                    continue
+
+                # Handle conversation item truncated (from interruption)
+                if event_type == 'conversation.item.truncated':
+                    logger.info("Conversation item truncated due to interruption")
+                    text_buffer = ""
+                    continue
+
+            except asyncio.CancelledError:
+                logger.info("Text receive loop cancelled")
+                break
+            except Exception as e:
+                logger.error(f"Error in OpenAI Realtime text receive loop: {e}")
+                traceback.print_exc()
+                await asyncio.sleep(0.1)
+
+        logger.info("OpenAI Realtime text receive loop ended")
+
+    async def _handle_openai_realtime_interruption(self):
+        """
+        Handle user interruption for OpenAI Realtime.
+        Adapted from old _handle_v2v_interruption.
+        """
+        # Debouncing - prevent rapid multiple interruptions
+        current_time = time.time() * 1000
+        if current_time - self.last_interruption_time < self.interruption_debounce_ms:
+            logger.debug(f"Ignoring rapid interruption (debounced within {self.interruption_debounce_ms}ms)")
+            return
+
+        self.last_interruption_time = current_time
+
+        # Tell OpenAI Realtime to cancel response and truncate
+        await self.tools["llm"].handle_interruption(audio_end_ms=0)
+
+        # Tell output handler to clear buffers
+        if hasattr(self.tools.get("output"), 'handle_interruption'):
+            await self.tools["output"].handle_interruption()
+
+        # Update sequence tracking
+        # IMPORTANT: Keep old_sequence_id in the set to allow in-flight synthesizer messages to complete
+        # This prevents race condition where messages sent to synthesizer just before interruption
+        # get rejected because sequence_ids was cleared too aggressively
+        old_sequence_id = self.curr_sequence_id
+        self.curr_sequence_id += 1
+        self.sequence_ids = {-1, old_sequence_id, self.curr_sequence_id}
+
+        # Clear buffered output queue
+        cleared_count = 0
+        while not self.buffered_output_queue.empty():
+            try:
+                self.buffered_output_queue.get_nowait()
+                cleared_count += 1
+            except:
+                break
+
+        logger.info(f"Interruption handled: cleared {cleared_count} buffered packets, new sequence_id={self.curr_sequence_id}")
+
+    async def _handle_openai_realtime_function_call(self, function_call: Dict[str, Any]):
+        """
+        Execute function call and send result back to OpenAI Realtime.
+        Adapted from old _handle_v2v_function_call.
+        """
+        function_name = function_call['name']
+        arguments_str = function_call['arguments']
+        call_id = function_call['call_id']
+
+        logger.info(f"Executing OpenAI Realtime function: {function_name}")
+
+        try:
+            # Parse arguments
+            if isinstance(arguments_str, str):
+                arguments = json.loads(arguments_str)
+            else:
+                arguments = arguments_str
+
+            # Get tools config
+            api_tools = self.task_config["tools_config"].get('api_tools', {})
+            tools_params = api_tools.get('tools_params', {})
+
+            if function_name in tools_params:
+                # Execute the function using existing trigger_api
+                result = await trigger_api(
+                    function_name,
+                    arguments,
+                    tools_params[function_name],
+                    context_data=self.context_data
+                )
+
+                # Send result back to OpenAI Realtime
+                await self.tools["llm"].send_function_result(call_id, result)
+                logger.info(f"Function result sent for {function_name}")
+            else:
+                logger.warning(f"Function {function_name} not found in tools_params")
+                await self.tools["llm"].send_function_result(
+                    call_id,
+                    {"error": f"Function {function_name} not configured"}
+                )
+
+        except Exception as e:
+            logger.error(f"Error executing OpenAI Realtime function {function_name}: {e}")
+            traceback.print_exc()
+            await self.tools["llm"].send_function_result(
+                call_id,
+                {"error": str(e)}
+            )
+
+    def _convert_api_tools_to_openai_realtime_format(self, tools_list: list) -> list:
+        """
+        Convert Bolna api_tools to OpenAI Realtime function calling format.
+        Adapted from old _convert_api_tools_to_v2v_format.
+        """
+        converted_tools = []
+
+        for tool in tools_list:
+            if isinstance(tool, dict):
+                if tool.get('type') == 'function' and 'function' in tool:
+                    func = tool['function']
+                    converted_tools.append({
+                        'type': 'function',
+                        'name': func.get('name'),
+                        'description': func.get('description'),
+                        'parameters': func.get('parameters')
+                    })
+                elif tool.get('type') == 'function':
+                    converted_tools.append(tool)
+                else:
+                    converted_tools.append({
+                        'type': 'function',
+                        'name': tool.get('name'),
+                        'description': tool.get('description'),
+                        'parameters': tool.get('parameters')
+                    })
+            else:
+                # Handle Pydantic models
+                tool_dict = tool.dict() if hasattr(tool, 'dict') else tool.model_dump()
+                if tool_dict.get('type') == 'function' and 'function' in tool_dict:
+                    func = tool_dict['function']
+                    converted_tools.append({
+                        'type': 'function',
+                        'name': func.get('name'),
+                        'description': func.get('description'),
+                        'parameters': func.get('parameters')
+                    })
+                elif tool_dict.get('type') == 'function':
+                    converted_tools.append(tool_dict)
+                else:
+                    converted_tools.append({
+                        'type': 'function',
+                        'name': tool_dict.get('name'),
+                        'description': tool_dict.get('description'),
+                        'parameters': tool_dict.get('parameters')
+                    })
+
+        return converted_tools
+
+    async def _run_openai_realtime_full_v2v(self):
+        """
+        Run OpenAI Realtime Full V2V mode.
+        OpenAI handles both audio input and output.
+        """
+        logger.info("Starting OpenAI Realtime Full V2V mode")
+
+        # Connect to OpenAI Realtime
+        connected = await self.tools["llm"].connect()
+        if not connected:
+            raise Exception("Failed to connect to OpenAI Realtime")
+
+        # Configure session (voice, instructions, tools, etc.)
+        session_config = {}
+
+        # Add tools if configured
+        api_tools = self.task_config["tools_config"].get('api_tools', {})
+        if api_tools and api_tools.get('tools'):
+            # Convert tools to OpenAI Realtime format
+            tools_list = self._convert_api_tools_to_openai_realtime_format(api_tools['tools'])
+            session_config['tools'] = tools_list
+            logger.info(f"Configured {len(tools_list)} tools for OpenAI Realtime")
+
+        await self.tools["llm"].configure_session(session_config)
+
+        # Get stream/call SIDs from input handler
+        if hasattr(self.tools.get("input"), 'get_stream_sid'):
+            self.stream_sid = self.tools["input"].get_stream_sid()
+        if hasattr(self.tools.get("input"), 'get_call_sid'):
+            self.call_sid = self.tools["input"].get_call_sid()
+
+        # Start all concurrent tasks
+        tasks = []
+
+        # Input handler and welcome message are already handled by message_task_new() started at initialization
+        # (same as old v2v implementation - don't duplicate input handler here)
+
+        # Core OpenAI Realtime loops
+        logger.info("Starting OpenAI Realtime audio processing loops")
+        tasks.append(asyncio.create_task(self._openai_realtime_audio_input_loop()))
+        tasks.append(asyncio.create_task(self._openai_realtime_receive_loop()))
+
+        # Output processing (sends audio to telephony)
+        logger.info("Starting output processing loop")
+        tasks.append(asyncio.create_task(self.__process_output_loop()))
+
+        # Wait for all tasks
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+        logger.info("OpenAI Realtime Full V2V conversation completed")
+
+    async def _run_openai_realtime_custom_tts(self):
+        """
+        Run OpenAI Realtime with Custom TTS mode (Mode 2).
+        OpenAI handles audio input (STT) → text output.
+        Custom synthesizer handles text → audio output.
+        """
+        logger.info("Starting OpenAI Realtime Custom TTS mode")
+
+        # Connect to OpenAI Realtime
+        connected = await self.tools["llm"].connect()
+        if not connected:
+            raise Exception("Failed to connect to OpenAI Realtime")
+
+        # Configure session (voice, instructions, tools, etc.)
+        session_config = {}
+
+        # Add tools if configured
+        api_tools = self.task_config["tools_config"].get('api_tools', {})
+        if api_tools and api_tools.get('tools'):
+            # Convert tools to OpenAI Realtime format
+            tools_list = self._convert_api_tools_to_openai_realtime_format(api_tools['tools'])
+            session_config['tools'] = tools_list
+            logger.info(f"Configured {len(tools_list)} tools for OpenAI Realtime")
+
+        await self.tools["llm"].configure_session(session_config)
+
+        # Get stream/call SIDs from input handler
+        if hasattr(self.tools.get("input"), 'get_stream_sid'):
+            self.stream_sid = self.tools["input"].get_stream_sid()
+        if hasattr(self.tools.get("input"), 'get_call_sid'):
+            self.call_sid = self.tools["input"].get_call_sid()
+
+        # Start all concurrent tasks
+        tasks = []
+
+        # Input handler and welcome message are already handled by message_task_new() started at initialization
+        # (same as Full V2V - don't duplicate input handler here)
+
+        # Core OpenAI Realtime loops
+        logger.info("Starting OpenAI Realtime audio input loop")
+        tasks.append(asyncio.create_task(self._openai_realtime_audio_input_loop()))
+
+        logger.info("Starting OpenAI Realtime text receive loop")
+        tasks.append(asyncio.create_task(self._openai_realtime_text_receive_loop()))
+
+        # Synthesizer loop
+        logger.info("Starting synthesizer loop")
+        tasks.append(asyncio.create_task(self.__listen_synthesizer()))
+
+        # Output processing (sends audio to telephony)
+        logger.info("Starting output processing loop")
+        tasks.append(asyncio.create_task(self.__process_output_loop()))
+
+        # Wait for all tasks
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+        logger.info("OpenAI Realtime Custom TTS conversation completed")
+
+    async def _run_traditional_pipeline(self):
+        """
+        Run traditional transcriber→LLM→synthesizer pipeline.
+        This is the standard conversational agent flow.
+        """
+        # Create transcriber and synthesizer tasks
+        tasks = []
+
+        # In the case of web call we would play the first message once we receive the init event
+        if self.turn_based_conversation:
+            self.first_message_task = asyncio.create_task(self.__first_message())
+
+        if not self.turn_based_conversation:
+            self.first_message_passing_time = None
+            self.handle_accumulated_message_task = asyncio.create_task(self.__handle_accumulated_message())
+
+        if "transcriber" in self.tools:
+            tasks.append(asyncio.create_task(self._listen_transcriber()))
+            self.transcriber_task = asyncio.create_task(self.tools["transcriber"].run())
+
+        if self.turn_based_conversation and self._is_conversation_task():
+            logger.info(
+                "Since it's connected through dashboard, I'll run listen_llm_task too in case user wants to simply text")
+            self.llm_queue_task = asyncio.create_task(self._listen_llm_input_queue())
+
+        if "synthesizer" in self.tools and self._is_conversation_task() and not self.turn_based_conversation:
+            try:
+                self.synthesizer_task = asyncio.create_task(self.__listen_synthesizer())
+            except asyncio.CancelledError as e:
+                logger.error(f'Synth task got cancelled {e}')
+                traceback.print_exc()
+
+        self.output_task = asyncio.create_task(self.__process_output_loop())
+        if not self.turn_based_conversation or self.enforce_streaming:
+            self.hangup_task = asyncio.create_task(self.__check_for_completion())
+
+            if self.should_backchannel:
+                self.backchanneling_task = asyncio.create_task(self.__check_for_backchanneling())
+            if self.ambient_noise:
+                self.ambient_noise_task = asyncio.create_task(self.__start_transmitting_ambient_noise())
+
+        try:
+            await asyncio.gather(*tasks)
+        except asyncio.CancelledError as e:
+            logger.error(f'task got cancelled {e}')
+            traceback.print_exc()
+        except Exception as e:
+            traceback.print_exc()
+            logger.error(f"Error: {e}")
+
+        if self.generate_precise_transcript:
+            current_ts = time.time()
+            await self.sync_history(self.mark_event_meta_data.mark_event_meta_data.items(), current_ts)
+
+    # ==================== End OpenAI Realtime Methods ====================
+
     async def run(self):
         try:
             if self._is_conversation_task():
                 logger.info("started running")
-                # Create transcriber and synthesizer tasks
-                tasks = []
-                #tasks = [asyncio.create_task(self.tools['input'].handle())]
 
-                # In the case of web call we would play the first message once we receive the init event
-                if self.turn_based_conversation:
-                    self.first_message_task = asyncio.create_task(self.__first_message())
+                # Check if this is OpenAI Realtime mode
+                is_realtime, realtime_mode = self._is_openai_realtime_mode()
 
-                if not self.turn_based_conversation:
-                    self.first_message_passing_time = None
-                    self.handle_accumulated_message_task = asyncio.create_task(self.__handle_accumulated_message())
-                if "transcriber" in self.tools:
-                    tasks.append(asyncio.create_task(self._listen_transcriber()))
-                    self.transcriber_task = asyncio.create_task(self.tools["transcriber"].run())
+                if is_realtime and realtime_mode == "full_v2v":
+                    # Mode 1: Full V2V - OpenAI Realtime handles everything
+                    logger.info("Running in OpenAI Realtime Full V2V mode")
+                    await self._run_openai_realtime_full_v2v()
 
-                if self.turn_based_conversation and self._is_conversation_task():
-                    logger.info(
-                        "Since it's connected through dashboard, I'll run listen_llm_tas too in case user wants to simply text")
-                    self.llm_queue_task = asyncio.create_task(self._listen_llm_input_queue())
+                elif is_realtime and realtime_mode == "custom_tts":
+                    # Mode 2: OpenAI STT + Custom TTS
+                    logger.info("Running in OpenAI Realtime with Custom TTS mode")
+                    await self._run_openai_realtime_custom_tts()
 
-                if "synthesizer" in self.tools and self._is_conversation_task() and not self.turn_based_conversation:
-                    try:
-                        self.synthesizer_task = asyncio.create_task(self.__listen_synthesizer())
-                    except asyncio.CancelledError as e:
-                        logger.error(f'Synth task got cancelled {e}')
-                        traceback.print_exc()
+                else:
+                    # Traditional pipeline (includes Mode 3 - pure LLM)
+                    logger.info("Running in traditional pipeline mode")
+                    await self._run_traditional_pipeline()
 
-                self.output_task = asyncio.create_task(self.__process_output_loop())
-                if not self.turn_based_conversation or self.enforce_streaming:
-                    self.hangup_task = asyncio.create_task(self.__check_for_completion())
-
-                    if self.should_backchannel:
-                        self.backchanneling_task = asyncio.create_task(self.__check_for_backchanneling())
-                    if self.ambient_noise:
-                        self.ambient_noise_task = asyncio.create_task(self.__start_transmitting_ambient_noise())
-                try:
-                    await asyncio.gather(*tasks)
-                except asyncio.CancelledError as e:
-                    logger.error(f'task got cancelled {e}')
-                    traceback.print_exc()
-                except Exception as e:
-                    traceback.print_exc()
-                    logger.error(f"Error: {e}")
-
-                if self.generate_precise_transcript:
-                    current_ts = time.time()
-                    await self.sync_history(self.mark_event_meta_data.mark_event_meta_data.items(), current_ts)
                 logger.info("Conversation completed")
                 self.conversation_ended = True
             else:
@@ -2278,11 +3067,33 @@ class TaskManager(BaseManager):
                 tasks_to_cancel.append(process_task_cancellation(self.synthesizer_monitor_task, 'synthesizer_monitor_task'))
 
             if self._is_conversation_task():
-                self.transcriber_latencies['connection_latency_ms'] = self.tools["transcriber"].connection_time
-                self.synthesizer_latencies['connection_latency_ms'] = self.tools["synthesizer"].connection_time
-                
-                self.transcriber_latencies['turn_latencies'] = self.tools["transcriber"].turn_latencies
-                self.synthesizer_latencies['turn_latencies'] = self.tools["synthesizer"].turn_latencies
+                # Collect latency metrics (transcriber/synthesizer may not exist in Full V2V mode)
+                if "transcriber" in self.tools:
+                    self.transcriber_latencies['connection_latency_ms'] = self.tools["transcriber"].connection_time
+                    self.transcriber_latencies['turn_latencies'] = self.tools["transcriber"].turn_latencies
+                else:
+                    self.transcriber_latencies['connection_latency_ms'] = 0
+                    self.transcriber_latencies['turn_latencies'] = {}
+
+                if "synthesizer" in self.tools:
+                    self.synthesizer_latencies['connection_latency_ms'] = self.tools["synthesizer"].connection_time
+                    self.synthesizer_latencies['turn_latencies'] = self.tools["synthesizer"].turn_latencies
+                    synthesizer_characters = self.tools['synthesizer'].get_synthesized_characters()
+                else:
+                    self.synthesizer_latencies['connection_latency_ms'] = 0
+                    self.synthesizer_latencies['turn_latencies'] = {}
+                    synthesizer_characters = 0
+
+                # Check if this is OpenAI Realtime mode and collect v2v metrics
+                is_realtime, realtime_mode = self._is_openai_realtime_mode()
+                v2v_metrics = None
+                transcript = None
+
+                if is_realtime and realtime_mode in ["full_v2v", "custom_tts"]:
+                    # Collect OpenAI Realtime metrics (Mode 1, 2, 3)
+                    v2v_metrics = await self.tools["llm"].get_metrics()
+                    transcript = await self.tools["llm"].get_conversation_transcript()
+                    logger.info(f"Collected OpenAI Realtime metrics: {v2v_metrics}")
 
                 welcome_message_sent_ts = self.tools["output"].get_welcome_message_sent_ts()
 
@@ -2293,7 +3104,8 @@ class TaskManager(BaseManager):
                     "call_sid": self.call_sid,
                     "stream_sid": self.stream_sid,
                     "transcriber_duration": self.transcriber_duration,
-                    "synthesizer_characters": self.tools['synthesizer'].get_synthesized_characters(), "ended_by_assistant": self.ended_by_assistant,
+                    "synthesizer_characters": synthesizer_characters,
+                    "ended_by_assistant": self.ended_by_assistant,
                     "latency_dict": {
                         "llm_latencies": self.llm_latencies,
                         "transcriber_latencies": self.transcriber_latencies,
@@ -2302,6 +3114,12 @@ class TaskManager(BaseManager):
                         "stream_sid_ts": None
                     }
                 }
+
+                # Add v2v metrics if available
+                if v2v_metrics is not None:
+                    output["v2v_metrics"] = v2v_metrics
+                if transcript is not None:
+                    output["transcript"] = transcript
 
                 try:
                     if welcome_message_sent_ts:
