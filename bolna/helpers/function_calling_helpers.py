@@ -18,7 +18,6 @@ async def trigger_api(url, method, param, api_token, headers_data, meta_info, ru
             exec(code, globals(), kwargs)
             request_body = param % kwargs
             api_params = json.loads(request_body)
-        else:
 
         headers = {'Content-Type': 'application/json'}
         content_type = "json"
