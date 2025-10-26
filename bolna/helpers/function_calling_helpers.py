@@ -18,10 +18,7 @@ async def trigger_api(url, method, param, api_token, headers_data, meta_info, ru
             exec(code, globals(), kwargs)
             request_body = param % kwargs
             api_params = json.loads(request_body)
-
-            logger.info(f"Params {param % kwargs} \n {type(request_body)} \n {param} \n {kwargs} \n\n {request_body}")
         else:
-            logger.info(f"Params {param} \n {type(request_body)} \n {param} \n {kwargs} \n\n {request_body}")
 
         headers = {'Content-Type': 'application/json'}
         content_type = "json"
@@ -36,7 +33,6 @@ async def trigger_api(url, method, param, api_token, headers_data, meta_info, ru
             content_type = 'form'
         convert_to_request_log(request_body, meta_info , None, "function_call", direction="request", is_cached=False, run_id=run_id)
 
-        logger.info(f"Sleeping for 700 ms to make sure that we do not send the same message multiple times")
         await asyncio.sleep(0.7)
 
         async with aiohttp.ClientSession() as session:
@@ -44,23 +40,18 @@ async def trigger_api(url, method, param, api_token, headers_data, meta_info, ru
                 logger.info(f"Sending request {request_body}, {url}, {headers}")
                 async with session.get(url, params=api_params, headers=headers) as response:
                     response_text = await response.text()
-                    logger.info(f"Response from the server: {response_text}")
             elif method.lower() == "post":
                 if content_type == "json":
-                    logger.info(f"Sending request {api_params}, {url}, {headers}")
                     async with session.post(url, json=api_params, headers=headers) as response:
                         response_text = await response.text()
-                        logger.info(f"Response from the server: {response_text}")
                 elif content_type == "form":
                     normalized_api_params = normalize_for_form(api_params)
-                    logger.info(f"Sending request {api_params}, {url}, {headers}, {normalized_api_params}")
                     async with session.post(url, data=normalized_api_params, headers=headers) as response:
                         response_text = await response.text()
-                        logger.info(f"Response from the server: {response_text}")
 
             return response_text
     except Exception as e:
-        message = f"ERROR CALLING API: There was an error calling the API: {e}"
+        message = f"ERROR CALLING API: Please check your API definition: {e}"
         logger.error(message)
         return message
 
