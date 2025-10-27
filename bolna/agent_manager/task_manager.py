@@ -710,7 +710,6 @@ class TaskManager(BaseManager):
                 if is_mode_1:
                     # Mode 1: Convert from 24kHz OpenAI TTS to provider format
                     output_provider = self.task_config["tools_config"]["output"]["provider"]
-                    from bolna.helpers.audio_utils import convert_pcm16_to_target_format
                     audio_bytes, output_format = convert_pcm16_to_target_format(
                         audio_bytes,
                         24000,  # OpenAI TTS generates at 24kHz
