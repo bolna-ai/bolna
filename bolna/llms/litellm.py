@@ -2,7 +2,7 @@ import os
 import json
 import time
 import logging
-from litellm import acompletion
+from litellm import acompletion, ContentPolicyViolationError
 from dotenv import load_dotenv
 
 from bolna.constants import DEFAULT_LANGUAGE_CODE
@@ -83,119 +83,128 @@ class LiteLLM(BaseLLM):
             "total_stream_duration_ms": None,
         }
 
-        async for chunk in await acompletion(**model_args):
-            now = now_ms()
-            if not first_token_time:
-                first_token_time = now
-                self.started_streaming = True
+        try:
+            async for chunk in await acompletion(**model_args):
+                now = now_ms()
+                if not first_token_time:
+                    first_token_time = now
+                    self.started_streaming = True
 
-                latency_data = {
-                    "sequence_id": meta_info.get("sequence_id"),
-                    "first_token_latency_ms": first_token_time - start_time,
-                    "total_stream_duration_ms": None  # Will be filled at end
+                    latency_data = {
+                        "sequence_id": meta_info.get("sequence_id"),
+                        "first_token_latency_ms": first_token_time - start_time,
+                        "total_stream_duration_ms": None  # Will be filled at end
+                    }
+
+                choice = chunk["choices"][0]
+                delta = choice.get("delta", {})
+
+                # Handle tool_calls
+                if hasattr(delta, "tool_calls") and delta.tool_calls:
+                    if buffer:
+                        yield buffer, True, latency_data, False, None, None
+                        buffer = ""
+
+                    for tool_call in delta.tool_calls:
+                        idx = tool_call.index
+                        called_fun = tool_call.function.name
+
+                        if idx not in final_tool_calls_data:
+                            logger.info(f"Tool function triggered: {called_fun}")
+                            final_tool_calls_data[idx] = {
+                                "index": tool_call.index,
+                                "id": tool_call.id,
+                                "function": {
+                                    "name": called_fun,
+                                    "arguments": tool_call.function.arguments or ""
+                                },
+                                "type": "function"
+                            }
+                        else:
+                            final_tool_calls_data[idx]["function"]["arguments"] += tool_call.function.arguments or ""
+
+                    # Pre-function call message (if any)
+                    if not self.gave_out_prefunction_call_message and not received_textual_response:
+                        api_tool_pre_call_message = self.api_params.get(called_fun, {}).get("pre_call_message", None)
+                        pre_msg = compute_function_pre_call_message(self.language, called_fun, api_tool_pre_call_message)
+                        yield pre_msg, True, latency_data, False, called_fun, api_tool_pre_call_message
+                        self.gave_out_prefunction_call_message = True
+
+                # Normal streamed tokens
+                elif hasattr(delta, "content") and delta.content:
+                    received_textual_response = True
+                    answer += delta.content
+                    buffer += delta.content
+
+                    if synthesize and len(buffer) >= self.buffer_size:
+                        split = buffer.rsplit(" ", 1)
+                        yield split[0], False, latency_data, False, None, None
+                        buffer = split[1] if len(split) > 1 else ""
+
+            # Set final duration
+            if latency_data:
+                latency_data["total_stream_duration_ms"] = now_ms() - start_time
+
+            # Handle final function call logic
+            if self.trigger_function_call and final_tool_calls_data:
+                # Safely get the first tool call
+                first_tool_call = final_tool_calls_data[0]["function"]
+                func_name = first_tool_call["name"]
+                args_str = first_tool_call["arguments"]
+
+                tool_spec = next((t for t in model_args["tools"] if t["function"]["name"] == func_name), None)
+                func_conf = self.api_params.get(func_name)
+
+                if not func_conf:
+                    logger.warning(f"No API config found for tool: {func_name}")
+                    return
+
+                try:
+                    parsed_args = json.loads(args_str)
+                except json.JSONDecodeError:
+                    parsed_args = args_str
+
+                logger.info(f"Tool payload: {parsed_args} | Config: {func_conf}")
+                api_call_payload = {
+                    "url": func_conf.get("url"),
+                    "method": (func_conf.get("method") or "").lower(),
+                    "param": func_conf.get("param"),
+                    "api_token": func_conf.get("api_token"),
+                    "headers": func_conf.get('headers', None),
+                    "model_args": model_args,
+                    "meta_info": meta_info,
+                    "called_fun": func_name,
+                    "model_response": list(final_tool_calls_data.values()),
+                    "tool_call_id": final_tool_calls_data[0].get("id")
                 }
 
-            choice = chunk["choices"][0]
-            delta = choice.get("delta", {})
-
-            # Handle tool_calls
-            if hasattr(delta, "tool_calls") and delta.tool_calls:
-                if buffer:
-                    yield buffer, True, latency_data, False, None, None
-                    buffer = ""
-
-                for tool_call in delta.tool_calls:
-                    idx = tool_call.index
-                    called_fun = tool_call.function.name
-
-                    if idx not in final_tool_calls_data:
-                        logger.info(f"Tool function triggered: {called_fun}")
-                        final_tool_calls_data[idx] = {
-                            "index": tool_call.index,
-                            "id": tool_call.id,
-                            "function": {
-                                "name": called_fun,
-                                "arguments": tool_call.function.arguments or ""
-                            },
-                            "type": "function"
-                        }
+                # Merge function arguments into payload if all required keys exist
+                if tool_spec:
+                    required_keys = tool_spec["function"].get("parameters", {}).get("required", [])
+                    if all(k in parsed_args for k in required_keys):
+                        convert_to_request_log(parsed_args, meta_info, self.model, "llm", direction="response",
+                                               is_cached=False, run_id=self.run_id)
+                        api_call_payload.update(parsed_args)
                     else:
-                        final_tool_calls_data[idx]["function"]["arguments"] += tool_call.function.arguments or ""
+                        api_call_payload["resp"] = None
 
-                # Pre-function call message (if any)
-                if not self.gave_out_prefunction_call_message and not received_textual_response:
-                    api_tool_pre_call_message = self.api_params.get(called_fun, {}).get("pre_call_message", None)
-                    pre_msg = compute_function_pre_call_message(self.language, called_fun, api_tool_pre_call_message)
-                    yield pre_msg, True, latency_data, False, called_fun, api_tool_pre_call_message
-                    self.gave_out_prefunction_call_message = True
+                yield api_call_payload, False, latency_data, True, None, None
 
-            # Normal streamed tokens
-            elif hasattr(delta, "content") and delta.content:
-                received_textual_response = True
-                answer += delta.content
-                buffer += delta.content
+            # Final buffer flush
+            if synthesize and buffer.strip():
+                yield buffer, True, latency_data, False, None, None
+            elif not synthesize:
+                yield answer, True, latency_data, False, None, None
 
-                if synthesize and len(buffer) >= self.buffer_size:
-                    split = buffer.rsplit(" ", 1)
-                    yield split[0], False, latency_data, False, None, None
-                    buffer = split[1] if len(split) > 1 else ""
+            self.started_streaming = False
 
-        # Set final duration
-        if latency_data:
-            latency_data["total_stream_duration_ms"] = now_ms() - start_time
-
-        # Handle final function call logic
-        if self.trigger_function_call and final_tool_calls_data:
-            # Safely get the first tool call
-            first_tool_call = final_tool_calls_data[0]["function"]
-            func_name = first_tool_call["name"]
-            args_str = first_tool_call["arguments"]
-
-            tool_spec = next((t for t in model_args["tools"] if t["function"]["name"] == func_name), None)
-            func_conf = self.api_params.get(func_name)
-
-            if not func_conf:
-                logger.warning(f"No API config found for tool: {func_name}")
-                return
-
-            try:
-                parsed_args = json.loads(args_str)
-            except json.JSONDecodeError:
-                parsed_args = args_str
-
-            logger.info(f"Tool payload: {parsed_args} | Config: {func_conf}")
-            api_call_payload = {
-                "url": func_conf.get("url"),
-                "method": (func_conf.get("method") or "").lower(),
-                "param": func_conf.get("param"),
-                "api_token": func_conf.get("api_token"),
-                "headers": func_conf.get('headers', None),
-                "model_args": model_args,
-                "meta_info": meta_info,
-                "called_fun": func_name,
-                "model_response": list(final_tool_calls_data.values()),
-                "tool_call_id": final_tool_calls_data[0].get("id")
-            }
-
-            # Merge function arguments into payload if all required keys exist
-            if tool_spec:
-                required_keys = tool_spec["function"].get("parameters", {}).get("required", [])
-                if all(k in parsed_args for k in required_keys):
-                    convert_to_request_log(parsed_args, meta_info, self.model, "llm", direction="response",
-                                           is_cached=False, run_id=self.run_id)
-                    api_call_payload.update(parsed_args)
-                else:
-                    api_call_payload["resp"] = None
-
-            yield api_call_payload, False, latency_data, True, None, None
-
-        # Final buffer flush
-        if synthesize and buffer.strip():
-            yield buffer, True, latency_data, False, None, None
-        elif not synthesize:
-            yield answer, True, latency_data, False, None, None
-
-        self.started_streaming = False
+        except ContentPolicyViolationError as e:
+            error_message = str(e)
+            logger.error(f'LiteLLM ContentPolicyViolationError during streaming: {error_message}')
+            logger.error(f'Model: {self.model}, Meta info: {meta_info}')
+            # Yield empty response to prevent downstream crashes
+            yield "", True, latency_data, False, None, None
+            self.started_streaming = False
 
     async def generate(self, messages, stream=False, request_json=False, meta_info = None):
         text = ""
@@ -212,6 +221,10 @@ class LiteLLM(BaseLLM):
         try:
             completion = await acompletion(**model_args)
             text = completion.choices[0].message.content
+        except ContentPolicyViolationError as e:
+            error_message = str(e)
+            logger.error(f'LiteLLM ContentPolicyViolationError: {error_message}')
+            logger.error(f'Model: {self.model}, Meta info: {meta_info}')
         except Exception as e:
             logger.error(f'Error generating response {e}')
         return text
