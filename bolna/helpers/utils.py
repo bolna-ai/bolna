@@ -653,7 +653,8 @@ def structure_system_prompt(system_prompt, run_id, assistant_id, call_sid, conte
 
         final_prompt = f"{final_prompt}\n\n## Call information:\n\n### Variables:\n"
         for k, v in default_variables.items():
-            final_prompt = f'{final_prompt}{k} is "{v}"\n'
+            if v:
+                final_prompt = f'{final_prompt}{k} is "{v}"\n'
 
     current_date, current_time = get_date_time_from_timezone(timezone)
     final_prompt = f"{final_prompt}\n{DATE_PROMPT.format(current_date, current_time, timezone)}"
