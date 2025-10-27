@@ -642,8 +642,8 @@ def structure_system_prompt(system_prompt, run_id, assistant_id, call_sid, conte
     }
 
     if context_data is not None:
-        default_variables["agent_number"] = context_data.get("agent_number")
-        default_variables["user_number"] = context_data.get("user_number")
+        default_variables["agent_number"] = context_data.get("recipient_data", {}).get("agent_number")
+        default_variables["user_number"] = context_data.get("recipient_data", {}).get("user_number")
 
         if not is_web_based_call:
             final_prompt = update_prompt_with_context(system_prompt, context_data)
