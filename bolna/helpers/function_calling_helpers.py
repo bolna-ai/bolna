@@ -50,7 +50,7 @@ async def trigger_api(url, method, param, api_token, headers_data, meta_info, ru
 
             return response_text
     except Exception as e:
-        message = f"ERROR CALLING API: Please check your API definition: {e}"
+        message = f"ERROR CALLING API: Please check your API: {e}"
         logger.error(message)
         return message
 
