@@ -33,70 +33,6 @@ RECORDING_BUCKET_URL = os.getenv('RECORDING_BUCKET_URL')
 
 FORMAT_PATTERN = re.compile(r"%\(([^)]+)\)([sdifouxXeEgGcr])")
 
-
-def detect_agent_mode(tools_config, pipelines=None):
-    """
-    Detect agent operational mode for OpenAI Realtime API.
-
-    Analyzes the agent configuration to determine if it's using OpenAI Realtime
-    and which of the 4 operational modes is in use.
-
-    Args:
-        tools_config (dict): The tools_config section from agent configuration
-        pipelines (list, optional): The toolchain pipelines list. If not provided,
-                                     will infer from tools_config presence.
-
-    Returns:
-        tuple: (is_realtime: bool, mode: str|None)
-            - is_realtime: True if using OpenAI Realtime API
-            - mode: One of:
-                - "full_v2v": Mode 1 - No transcriber, no synthesizer
-                - "custom_tts": Mode 2 - No transcriber, has synthesizer
-                - "pure_llm": Mode 3 - Has transcriber, has synthesizer
-                - "custom_stt": Mode 4 - Has transcriber, no synthesizer
-                - None: Traditional (non-OpenAI Realtime) agent
-
-    Example:
-        >>> tools_config = {"llm_agent": {"llm_config": {"provider": "openai_realtime"}}}
-        >>> is_realtime, mode = detect_agent_mode(tools_config, pipelines=[["llm"]])
-        >>> print(f"Mode: {mode}")
-        Mode: full_v2v
-    """
-    # Check if OpenAI Realtime is the LLM provider
-    llm_agent = tools_config.get('llm_agent', {})
-    llm_config = llm_agent.get('llm_config', llm_agent)  # Handle both nested and flat structure
-    is_openai_realtime = llm_config.get('provider') == 'openai_realtime'
-
-    if not is_openai_realtime:
-        return False, None
-
-    # Determine which components are present
-    if pipelines:
-        # Use pipeline structure if provided
-        has_transcriber = 'transcriber' in pipelines[0]
-        has_synthesizer = 'synthesizer' in pipelines[0]
-    else:
-        # Infer from tools_config
-        has_transcriber = tools_config.get('transcriber') is not None
-        has_synthesizer = tools_config.get('synthesizer') is not None
-
-    # Determine operational mode
-    if not has_transcriber and not has_synthesizer:
-        # Mode 1: OpenAI handles both audio input (STT) and output (TTS)
-        return True, "full_v2v"
-    elif not has_transcriber and has_synthesizer:
-        # Mode 2: OpenAI handles audio input (STT), custom TTS for output
-        return True, "custom_tts"
-    elif has_transcriber and has_synthesizer:
-        # Mode 3: Custom STT and TTS, OpenAI as pure LLM (text-to-text)
-        return True, "pure_llm"
-    elif has_transcriber and not has_synthesizer:
-        # Mode 4: Custom STT, OpenAI handles output (TTS)
-        return True, "custom_stt"
-
-    return False, None
-
-
 class DictWithMissing(dict):
     def __missing__(self, key):
         return ''
@@ -316,8 +252,6 @@ def get_required_input_types(task):
                     has_transcriber = 'transcriber' in chain
                     if not has_transcriber:
                         input_types["audio"] = i
-        elif chain[0] == "voice_to_voice":
-            input_types["audio"] = i
     return input_types
 
 

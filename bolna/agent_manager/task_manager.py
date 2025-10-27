@@ -492,35 +492,6 @@ class TaskManager(BaseManager):
         """Check if transcriber is configured in toolchain."""
         return self.task_config.get("tools_config", {}).get("transcriber") is not None
 
-    def _is_openai_realtime_mode(self) -> tuple:
-        """
-        Check if this is OpenAI Realtime mode and which mode.
-
-        Returns:
-            tuple: (is_realtime: bool, mode: str|None)
-                mode can be: "full_v2v", "custom_tts", "pure_llm", "custom_stt", or None
-        """
-        if not self.llm_config:
-            return False, None
-
-        is_openai_realtime = self.llm_config.get('provider') == 'openai_realtime'
-        if not is_openai_realtime:
-            return False, None
-
-        has_transcriber = self._has_transcriber()
-        has_synthesizer = self._has_synthesizer()
-
-        if not has_transcriber and not has_synthesizer:
-            return True, "full_v2v"
-        elif not has_transcriber and has_synthesizer:
-            return True, "custom_tts"
-        elif has_transcriber and has_synthesizer:
-            return True, "pure_llm"
-        elif has_transcriber and not has_synthesizer:
-            return True, "custom_stt"
-
-        return False, None
-
     def __setup_routes(self, routes):
         embedding_model = routes.get("embedding_model", os.getenv("ROUTE_EMBEDDING_MODEL"))
         route_encoder = FastEmbedEncoder(name=embedding_model)

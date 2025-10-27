@@ -7,8 +7,7 @@ import os
 from typing import Optional, Dict, Any
 from .llm import BaseLLM
 from bolna.helpers.logger_config import configure_logger
-from bolna.constants import DEFAULT_LANGUAGE_CODE, OPENAI_REALTIME_SAMPLE_RATE, PCM16_SAMPLE_WIDTH
-from bolna.helpers.utils import convert_to_request_log
+from bolna.constants import OPENAI_REALTIME_SAMPLE_RATE, PCM16_SAMPLE_WIDTH
 
 logger = configure_logger(__name__)
 
@@ -53,7 +52,7 @@ class OpenAIRealtimeLLM(BaseLLM):
     """
 
     def __init__(self, max_tokens=4096, buffer_size=40, model="gpt-4o-realtime-preview-2024-12-17",
-                 temperature=0.8, language=DEFAULT_LANGUAGE_CODE, **kwargs):
+                 temperature=0.8, **kwargs):
         super().__init__(max_tokens, buffer_size)
 
         # Detect mode from toolchain context
@@ -76,10 +75,6 @@ class OpenAIRealtimeLLM(BaseLLM):
         self.ws = None
         self.connected = False
         self.session_id = None
-
-        # Audio queues (for modes that handle audio)
-        self.audio_input_queue = kwargs.get('audio_input_queue', None)  # For mode 1 & 2
-        self.audio_output_queue = asyncio.Queue()  # For mode 1 & 4
 
         # OpenAI Realtime configuration
         self.model = model
@@ -104,7 +99,6 @@ class OpenAIRealtimeLLM(BaseLLM):
 
         # Function calling
         self.custom_tools = kwargs.get("api_tools", None)
-        self.language = language
         if self.custom_tools is not None:
             self.trigger_function_call = True
             self.api_params = self.custom_tools['tools_params']
@@ -133,10 +127,6 @@ class OpenAIRealtimeLLM(BaseLLM):
         self.output_audio_tokens = 0
         self.cached_text_tokens = 0
         self.cached_audio_tokens = 0
-
-        # Task manager reference
-        self.task_manager_instance = kwargs.get('task_manager_instance', None)
-        self.run_id = kwargs.get('run_id', None)
 
         # Background tasks
         self.background_tasks = []
