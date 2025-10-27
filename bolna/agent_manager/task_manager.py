@@ -2746,12 +2746,19 @@ class TaskManager(BaseManager):
             tools_params = api_tools.get('tools_params', {})
 
             if function_name in tools_params:
+                # Extract tool configuration
+                tool_config = tools_params[function_name]
+
                 # Execute the function using existing trigger_api
                 result = await trigger_api(
-                    function_name,
-                    arguments,
-                    tools_params[function_name],
-                    context_data=self.context_data
+                    url=tool_config.get('url'),
+                    method=tool_config.get('method', 'POST'),
+                    param=tool_config.get('param'),
+                    api_token=tool_config.get('api_token'),
+                    headers_data=tool_config.get('headers'),
+                    meta_info={'function_call': function_name, 'call_id': call_id},
+                    run_id=self.run_id,
+                    **arguments
                 )
 
                 # Send result back to OpenAI Realtime
