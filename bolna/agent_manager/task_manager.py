@@ -1611,7 +1611,6 @@ class TaskManager(BaseManager):
 
                     # Whenever interim results would be received from Deepgram, this condition would get triggered
                     elif isinstance(message.get("data"), dict) and message["data"].get("type", "") == "interim_transcript_received":
-                        self.time_since_last_spoken_human_word = time.time()
                         if temp_transcriber_message == message["data"].get("content"):
                             logger.info("Received the same transcript as the previous one we have hence continuing")
                             continue
@@ -1629,6 +1628,7 @@ class TaskManager(BaseManager):
                         if self.tools["input"].is_audio_being_played_to_user() and self.tools["input"].welcome_message_played() and self.number_of_words_for_interruption != 0:
                             if interim_transcript_len > self.number_of_words_for_interruption or \
                                     message["data"].get("content").strip() in self.accidental_interruption_phrases:
+                                self.time_since_last_spoken_human_word = time.time()
                                 logger.info(f"Condition for interruption hit")
                                 self.turn_id += 1
                                 self.tools["input"].update_is_audio_being_played(False)
@@ -1636,6 +1636,10 @@ class TaskManager(BaseManager):
                             else:
                                 logger.info(f"Ignoring transcript: {message['data'].get('content').strip()}")
                                 continue
+                        else:
+                            if interim_transcript_len > self.number_of_words_for_interruption and \
+                                    message["data"].get("content").strip() not in self.accidental_interruption_phrases:
+                                self.time_since_last_spoken_human_word = time.time()
 
                         # Doing changes for incremental delay
                         self.required_delay_before_speaking = self.incremental_delay
@@ -1659,6 +1663,7 @@ class TaskManager(BaseManager):
                             continue
 
                         self.callee_speaking = False
+                        self.time_since_last_spoken_human_word = time.time()
                         # self.callee_silent = True
                         temp_transcriber_message = ""
 

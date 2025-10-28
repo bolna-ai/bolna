@@ -380,6 +380,7 @@ class ConversationConfig(BaseModel):
     trigger_user_online_message_after: Optional[int] = 10
     check_user_online_message: Optional[str] = "Hey, are you still there"
     check_if_user_online: Optional[bool] = True
+    min_transcript_char_length: Optional[int] = 0
     generate_precise_transcript: Optional[bool] = False
     dtmf_enabled: Optional[bool] = False
 
