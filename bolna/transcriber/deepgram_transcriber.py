@@ -400,6 +400,10 @@ class DeepgramTranscriber(BaseTranscriber):
 
                 elif msg["type"] == "Metadata":
                     logger.info(f"Received Metadata from deepgram - {msg}")
+                    # Ignore deprecated metadata events as per Deepgram's recommendation
+                    if msg.get("transaction_key") == "deprecated":
+                        logger.info("Ignoring deprecated metadata event")
+                        continue
                     self.meta_info["transcriber_duration"] = msg["duration"]
                     yield create_ws_data_packet("transcriber_connection_closed", self.meta_info)
                     return
