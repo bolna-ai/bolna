@@ -3,6 +3,7 @@ from .default import DefaultInputHandler
 import asyncio
 import base64
 import json
+from starlette.websockets import WebSocketDisconnect
 from dotenv import load_dotenv
 from bolna.helpers.utils import create_ws_data_packet
 from bolna.helpers.logger_config import configure_logger
@@ -130,6 +131,12 @@ class TelephonyInputHandler(DefaultInputHandler):
                     self.queues['transcriber'].put_nowait(ws_data_packet)
                     break
 
+            except WebSocketDisconnect as e:
+                if e.code in (1000, 1001, 1006):
+                    pass
+                else:
+                    logger.error(f"WebSocket disconnected unexpectedly: code={e.code}, reason={getattr(e, 'reason', None)}")
+
             except Exception as e:
                 traceback.print_exc()
                 ws_data_packet = create_ws_data_packet(
@@ -139,7 +146,7 @@ class TelephonyInputHandler(DefaultInputHandler):
                         'eos': True
                     })
                 self.queues['transcriber'].put_nowait(ws_data_packet)
-                logger.info('Exception in twilio_receiver reading events: {}'.format(e))
+                logger.info(f"Exception in {self.io_provider} receiver reading events: {str(e)}")
                 break
 
     async def handle(self):

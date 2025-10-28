@@ -269,7 +269,7 @@ class BodhiTranscriber(BaseTranscriber):
             return ws
         except Exception as e:
             traceback.print_exc()
-            logger.erro(f"something went wrong in connecting {e}")
+            logger.error(f"something went wrong in connecting {e}")
 
     async def run(self):
         try:
