@@ -287,7 +287,6 @@ class DeepgramTranscriber(BaseTranscriber):
         async for msg in ws:
             try:
                 msg = json.loads(msg)
-                logger.info(f"Received deepgram event: {msg}")
 
                 # If connection_start_time is None, it is the durations of frame submitted till now minus current time
                 if self.connection_start_time is None:
