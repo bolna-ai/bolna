@@ -9,6 +9,7 @@ from bolna.helpers.utils import create_ws_data_packet
 from bolna.memory.cache.inmemory_scalar_cache import InmemoryScalarCache
 from .base_synthesizer import BaseSynthesizer
 import azure.cognitiveservices.speech as speechsdk
+from azure.cognitiveservices.speech import CancellationErrorCode
 
 logger = configure_logger(__name__)
 load_dotenv()
@@ -94,8 +95,33 @@ class AzureSynthesizer(BaseSynthesizer):
 
         if result.reason == speechsdk.ResultReason.SynthesizingAudioCompleted:
             return result.audio_data
+        elif result.reason == speechsdk.ResultReason.Canceled:
+            cancellation = result.cancellation_details
+            logger.error(f"Azure TTS canceled: {cancellation.reason}")
+            if cancellation.reason == speechsdk.CancellationReason.Error:
+                error_code = cancellation.error_code
+                error_details = cancellation.error_details
+                logger.error(f"Azure TTS error details: {error_details}")
+
+                # Check specific error codes using SDK enums
+                if error_code == CancellationErrorCode.AuthenticationFailure:
+                    logger.error(f"Azure TTS authentication failed: Invalid subscription key - Region: {self.region}")
+                    raise Exception(f"Azure TTS authentication failed: Invalid subscription key. Details: {error_details}")
+                elif error_code == CancellationErrorCode.Forbidden:
+                    logger.error(f"Azure TTS forbidden: Insufficient permissions or invalid region - Region: {self.region}")
+                    raise Exception(f"Azure TTS forbidden: Insufficient permissions. Details: {error_details}")
+                elif error_code == CancellationErrorCode.BadRequest:
+                    logger.error(f"Azure TTS bad request: Invalid configuration - Region: {self.region}")
+                    raise Exception(f"Azure TTS bad request: Invalid configuration. Details: {error_details}")
+                elif error_code == CancellationErrorCode.ConnectionFailure:
+                    logger.error(f"Azure TTS connection failure: Network issue - Region: {self.region}")
+                    raise Exception(f"Azure TTS connection failure. Details: {error_details}")
+                else:
+                    logger.error(f"Azure TTS error (code: {error_code}): {error_details}")
+                    raise Exception(f"Azure TTS error: {error_details}")
+            return None
         else:
-            logger.error(f"Speech synthesis failed: {result.reason}")
+            logger.error(f"Azure TTS synthesis failed with reason: {result.reason}")
             return None
 
     async def generate(self):
@@ -133,11 +159,18 @@ class AzureSynthesizer(BaseSynthesizer):
                     continue
 
                 # Create synthesizer for each request to avoid blocking
-                synthesizer = speechsdk.SpeechSynthesizer(speech_config=self.speech_config, audio_config=None)
+                try:
+                    synthesizer = speechsdk.SpeechSynthesizer(speech_config=self.speech_config, audio_config=None)
+                except Exception as e:
+                    logger.error(f"Failed to create Azure TTS synthesizer: {e}")
+                    # SpeechSynthesizer creation typically fails due to config issues
+                    logger.error(f"Check subscription key and region configuration - Region: {self.region}")
+                    continue
 
                 # Set up streaming events
                 chunk_queue = asyncio.Queue()
                 done_event = asyncio.Event()
+                synthesis_error = None
                 start_time = time.perf_counter()
 
                 def speech_synthesizer_synthesizing_handler(evt):
@@ -147,15 +180,35 @@ class AzureSynthesizer(BaseSynthesizer):
 
                         # Use run_coroutine_threadsafe to safely put data from another thread
                         asyncio.run_coroutine_threadsafe(
-                            chunk_queue.put(evt.result.audio_data), 
+                            chunk_queue.put(evt.result.audio_data),
                             self.loop
                         )
                     except Exception as e:
                         logger.error(f"Error in synthesizing handler: {e}")
 
                 def speech_synthesizer_completed_handler(evt):
+                    nonlocal synthesis_error
                     async def set_done_event():
                         done_event.set()
+
+                    # Check if synthesis was canceled due to error
+                    if evt.result.reason == speechsdk.ResultReason.Canceled:
+                        cancellation = evt.result.cancellation_details
+                        if cancellation.reason == speechsdk.CancellationReason.Error:
+                            error_code = cancellation.error_code
+                            error_details = cancellation.error_details
+                            synthesis_error = error_details
+                            logger.error(f"Azure TTS synthesis canceled with error: {error_details}")
+
+                            # Check specific error codes using SDK enums
+                            if error_code == CancellationErrorCode.AuthenticationFailure:
+                                logger.error(f"Azure TTS authentication failed: Invalid subscription key - Region: {self.region}")
+                            elif error_code == CancellationErrorCode.Forbidden:
+                                logger.error(f"Azure TTS forbidden: Insufficient permissions - Region: {self.region}")
+                            elif error_code == CancellationErrorCode.BadRequest:
+                                logger.error(f"Azure TTS bad request: Invalid configuration - Region: {self.region}")
+                            elif error_code == CancellationErrorCode.ConnectionFailure:
+                                logger.error(f"Azure TTS connection failure: Network issue - Region: {self.region}")
 
                     asyncio.run_coroutine_threadsafe(set_done_event(), self.loop)
 
@@ -170,10 +223,15 @@ class AzureSynthesizer(BaseSynthesizer):
 
                 ssml = self._build_ssml(text)
                 start_time = time.perf_counter()
-                if ssml:
-                    synthesizer.speak_ssml_async(ssml)
-                else:
-                    synthesizer.speak_text_async(text)
+                try:
+                    if ssml:
+                        synthesizer.speak_ssml_async(ssml)
+                    else:
+                        synthesizer.speak_text_async(text)
+                except Exception as e:
+                    logger.error(f"Failed to start Azure TTS synthesis: {e}")
+                    # Synthesis start failures will be caught by the completed_handler
+                    continue
                 logger.info(f"Azure TTS request sent for {len(text)} chars")
                 full_audio = bytearray()
                 

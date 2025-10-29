@@ -3,6 +3,7 @@ import json
 import time
 import logging
 from litellm import acompletion
+from litellm.exceptions import AuthenticationError, RateLimitError, APIError, APIConnectionError
 from dotenv import load_dotenv
 
 from bolna.constants import DEFAULT_LANGUAGE_CODE
@@ -83,7 +84,25 @@ class LiteLLM(BaseLLM):
             "total_stream_duration_ms": None,
         }
 
-        async for chunk in await acompletion(**model_args):
+        try:
+            completion_stream = await acompletion(**model_args)
+        except AuthenticationError as e:
+            logger.error(f"LiteLLM authentication failed: Invalid or expired API key - {e}")
+            raise
+        except RateLimitError as e:
+            logger.error(f"LiteLLM rate limit exceeded: {e}")
+            raise
+        except APIConnectionError as e:
+            logger.error(f"LiteLLM connection error: {e}")
+            raise
+        except APIError as e:
+            logger.error(f"LiteLLM API error: {e}")
+            raise
+        except Exception as e:
+            logger.error(f"LiteLLM unexpected error: {e}")
+            raise
+
+        async for chunk in completion_stream:
             now = now_ms()
             if not first_token_time:
                 first_token_time = now
@@ -212,6 +231,19 @@ class LiteLLM(BaseLLM):
         try:
             completion = await acompletion(**model_args)
             text = completion.choices[0].message.content
+        except AuthenticationError as e:
+            logger.error(f"LiteLLM authentication failed: Invalid or expired API key - {e}")
+            raise
+        except RateLimitError as e:
+            logger.error(f"LiteLLM rate limit exceeded: {e}")
+            raise
+        except APIConnectionError as e:
+            logger.error(f"LiteLLM connection error: {e}")
+            raise
+        except APIError as e:
+            logger.error(f"LiteLLM API error: {e}")
+            raise
         except Exception as e:
-            logger.error(f'Error generating response {e}')
+            logger.error(f'LiteLLM unexpected error generating response: {e}')
+            raise
         return text
