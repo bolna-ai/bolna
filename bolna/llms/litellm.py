@@ -2,7 +2,7 @@ import os
 import json
 import time
 import logging
-from litellm import acompletion
+from litellm import acompletion, ContentPolicyViolationError
 from dotenv import load_dotenv
 
 from bolna.constants import DEFAULT_LANGUAGE_CODE
@@ -212,6 +212,22 @@ class LiteLLM(BaseLLM):
         try:
             completion = await acompletion(**model_args)
             text = completion.choices[0].message.content
+        except ContentPolicyViolationError as e:
+            error_message = str(e)
+            logger.error(f'Content policy violation: {error_message}')
+
+            # Log to CSV trace
+            if meta_info and self.run_id:
+                convert_to_request_log(
+                    f"Content Policy Violation: {error_message}",
+                    meta_info,
+                    self.model,
+                    component="llm",
+                    direction="error",
+                    is_cached=False,
+                    run_id=self.run_id
+                )
         except Exception as e:
-            logger.error(f'Error generating response {e}')
+            error_message = str(e)
+            logger.error(f'Error generating response {error_message}')
         return text
