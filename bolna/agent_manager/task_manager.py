@@ -22,7 +22,7 @@ from bolna.agent_types import *
 from bolna.providers import *
 from bolna.prompts import *
 from bolna.helpers.utils import structure_system_prompt, compute_function_pre_call_message, get_date_time_from_timezone, get_route_info, calculate_audio_duration, create_ws_data_packet, get_file_names_in_directory, get_raw_audio_bytes, is_valid_md5, \
-    get_required_input_types, format_messages, get_prompt_responses, resample, save_audio_file_to_s3, update_prompt_with_context, get_md5_hash, clean_json_string, wav_bytes_to_pcm, convert_to_request_log, yield_chunks_from_memory, process_task_cancellation
+    get_required_input_types, format_messages, get_prompt_responses, resample, save_audio_file_to_s3, update_prompt_with_context, get_md5_hash, clean_json_string, wav_bytes_to_pcm, convert_to_request_log, yield_chunks_from_memory, process_task_cancellation, log_error
 from bolna.helpers.logger_config import configure_logger
 from semantic_router import Route
 from semantic_router.layer import RouteLayer
@@ -620,6 +620,8 @@ class TaskManager(BaseManager):
                     await asyncio.sleep(0.01)
         except Exception as e:
             logger.error(f"Exception in __forced_first_message {str(e)}")
+            synthesizer_model = self.task_config["tools_config"]["synthesizer"].get("provider", self.task_config["tools_config"]["synthesizer"].get("model", "unknown"))
+            log_error("synthesizer", synthesizer_model, e, {}, self.run_id)
 
         return
 
@@ -651,6 +653,8 @@ class TaskManager(BaseManager):
                     self.tools["transcriber"] = transcriber_class(provider, **self.task_config["tools_config"]["transcriber"], **self.kwargs)
         except Exception as e:
             logger.error(f"Something went wrong with starting transcriber {e}")
+            transcriber_provider = self.task_config["tools_config"]["transcriber"].get("provider", self.task_config["tools_config"]["transcriber"].get("model", "unknown"))
+            log_error("transcriber", transcriber_provider, e, {}, self.run_id)
 
     def __setup_synthesizer(self, llm_config=None):
         if self._is_conversation_task():
@@ -1262,6 +1266,7 @@ class TaskManager(BaseManager):
                         payload['call_transfer_number'] = call_transfer_number
                 except Exception as e:
                     logger.error(f"Error in __execute_function_call {e}")
+                    log_error("function_call", called_fun, e, meta_info, self.run_id)
 
             if param is not None:
                 logger.info(f"Gotten response {resp}")
@@ -1531,6 +1536,9 @@ class TaskManager(BaseManager):
         except Exception as e:
             traceback.print_exc()
             logger.error(f"Something went wrong in llm: {e}")
+            llm_model = self.tools.get("llm").get_model() if self.tools.get("llm") and hasattr(self.tools.get("llm"), "get_model") else "unknown"
+            meta_info_dict = meta_info if isinstance(meta_info, dict) else {}
+            log_error("llm", llm_model, e, meta_info_dict, self.run_id)
 
 
     #################################################################
@@ -1702,6 +1710,8 @@ class TaskManager(BaseManager):
         except Exception as e:
             traceback.print_exc()
             logger.error(f"Error in transcriber {e}")
+            transcriber_model = self.task_config["tools_config"]["transcriber"].get("provider", self.task_config["tools_config"]["transcriber"].get("model", "unknown"))
+            log_error("transcriber", transcriber_model, e, {}, self.run_id)
 
     async def __process_http_transcription(self, message):
         meta_info = self.__get_updated_meta_info(message["meta_info"])
@@ -1803,6 +1813,8 @@ class TaskManager(BaseManager):
                     break
                 except Exception as e:
                     logger.error(f"Error in synthesizer: {e}", exc_info=True)
+                    synthesizer_model = self.task_config["tools_config"]["synthesizer"].get("provider", self.task_config["tools_config"]["synthesizer"].get("model", "unknown"))
+                    log_error("synthesizer", synthesizer_model, e, {}, self.run_id)
                     break
 
             logger.info("Exiting __listen_synthesizer gracefully.")
@@ -1812,6 +1824,8 @@ class TaskManager(BaseManager):
             #await self.handle_cancellation("Synthesizer task was cancelled outside loop.")
         except Exception as e:
             logger.error(f"Unexpected error in __listen_synthesizer: {e}", exc_info=True)
+            synthesizer_model = self.task_config["tools_config"]["synthesizer"].get("provider", self.task_config["tools_config"]["synthesizer"].get("model", "unknown"))
+            log_error("synthesizer", synthesizer_model, e, {}, self.run_id)
         finally:
             await self.tools["synthesizer"].cleanup()
 

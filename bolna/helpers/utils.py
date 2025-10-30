@@ -446,18 +446,21 @@ async def write_request_logs(message, run_id):
         message_data = ''
 
     row = [message['time'], message["component"], message["direction"], message["leg_id"], message['sequence_id'], message['model']]
-    if message["component"] in ("llm", "llm_hangup"):
-        component_details = [message_data, message.get('input_tokens', 0), message.get('output_tokens', 0), None, message.get('latency', None), message['cached'], None]
+
+    if message["direction"] == "error":
+        component_details = [message_data, None, None, None, None, None, None, None, message.get('error_message', '')]
+    elif message["component"] in ("llm", "llm_hangup"):
+        component_details = [message_data, message.get('input_tokens', 0), message.get('output_tokens', 0), None, message.get('latency', None), message['cached'], None, None, None]
     elif message["component"] == "transcriber":
-        component_details = [message_data, None, None, None, message.get('latency', None), False, message.get('is_final', False)]
+        component_details = [message_data, None, None, None, message.get('latency', None), False, message.get('is_final', False), None, None]
     elif message["component"] == "synthesizer":
-        component_details = [message_data, None, None, len(message_data), message.get('latency', None), message['cached'], None, message['engine']]
+        component_details = [message_data, None, None, len(message_data), message.get('latency', None), message['cached'], None, message['engine'], None]
     elif message["component"] == "function_call":
-        component_details = [message_data, None, None, None, message.get('latency', None), None, None, None]
+        component_details = [message_data, None, None, None, message.get('latency', None), None, None, None, None]
 
     row = row + component_details
 
-    header = "Time,Component,Direction,Leg ID,Sequence ID,Model,Data,Input Tokens,Output Tokens,Characters,Latency,Cached,Final Transcript,Engine\n"
+    header = "Time,Component,Direction,Leg ID,Sequence ID,Model,Data,Input Tokens,Output Tokens,Characters,Latency,Cached,Final Transcript,Engine,Error Message\n"
     log_string = ','.join(['"' + str(item).replace('"', '""') + '"' if item is not None else '' for item in row]) + '\n'
     log_dir = f"./logs"
     os.makedirs(log_dir, exist_ok=True)
@@ -566,6 +569,31 @@ def convert_to_request_log(message, meta_info, model, component="transcriber", d
     else:
         log['is_final'] = False #This is logged only for users to know final transcript from the transcriber
     log['engine'] = engine
+    asyncio.create_task(write_request_logs(log, run_id))
+
+
+def log_error(component, model, error, meta_info, run_id):
+    """
+    Log an error to the CSV file
+
+    Args:
+        component: Component type (llm, transcriber, synthesizer, function_call)
+        model: Model name/provider
+        error: Exception object or error message
+        meta_info: Metadata dict containing request_id, sequence_id, etc.
+        run_id: Run ID for the conversation
+    """
+    error_message = str(error)
+    log = dict()
+    log['direction'] = 'error'
+    log['data'] = ''
+    log['leg_id'] = meta_info.get('request_id', '-') if isinstance(meta_info, dict) else '-'
+    log['time'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    log['component'] = component
+    log['sequence_id'] = meta_info.get('sequence_id', None) if isinstance(meta_info, dict) else None
+    log['model'] = model
+    log['cached'] = False
+    log['error_message'] = error_message
     asyncio.create_task(write_request_logs(log, run_id))
 
 
