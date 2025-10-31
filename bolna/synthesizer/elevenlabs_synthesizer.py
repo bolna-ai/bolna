@@ -154,13 +154,17 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
                     try:
                         response_chars = data.get('alignment', {}).get('chars', [])
                         response_text = ''.join(response_chars)
-                        last_four_words_text = ' '.join(response_text.split(" ")[-4:]).strip()
+
+                        last_four_words_text = ' '.join(response_text.split(" ")[-4:]).replace('"', "").strip()
                         last_four_words_text = last_four_words_text.replace('"', "").strip()
-                        logger.info(f'Last four char - {last_four_words_text} | current text - {self.current_text.strip()}')
-                        if self.current_text.replace('"', "").strip().endswith(last_four_words_text):
+
+                        current_normalize_text = self.normalize_text(self.current_text.strip()).replace('"', "").strip()
+                        logger.info(f'Last four char - {last_four_words_text} | current text - {current_normalize_text}')
+
+                        if current_normalize_text.endswith(last_four_words_text):
                             logger.info('send end_of_synthesizer_stream')
                             yield b'\x00', ""
-                        elif self.current_text.replace('"', "").replace(' ', '').strip().endswith(last_four_words_text.replace(' ', '')):
+                        elif current_normalize_text.replace('"', "").replace(' ', '').strip().endswith(last_four_words_text.replace(' ', '')):
                             logger.info('send end_of_synthesizer_stream on fallback')
                             yield b'\x00', ""
                     except Exception as e:
