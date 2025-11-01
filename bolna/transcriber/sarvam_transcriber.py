@@ -11,6 +11,7 @@ from dotenv import load_dotenv
 import aiohttp
 import websockets
 from websockets.asyncio.client import ClientConnection
+from websockets.exceptions import InvalidHandshake
 
 import numpy as np
 from scipy.signal import resample_poly
@@ -432,11 +433,30 @@ class SarvamTranscriber(BaseTranscriber):
                 self.websocket_connection = ws
                 self.connection_authenticated = True
                 return ws
+            except asyncio.TimeoutError:
+                logger.error("Timeout while connecting to Sarvam websocket")
+                raise ConnectionError("Timeout while connecting to Sarvam websocket")
+            except InvalidHandshake as e:
+                error_msg = str(e)
+                if '401' in error_msg or '403' in error_msg:
+                    logger.error(f"Sarvam authentication failed: Invalid or expired API key - {e}")
+                    raise ConnectionError(f"Sarvam authentication failed: Invalid or expired API key - {e}")
+                elif '404' in error_msg:
+                    logger.error(f"Sarvam endpoint not found - check model/configuration: {e}")
+                    raise ConnectionError(f"Sarvam endpoint not found: {e}")
+                else:
+                    logger.error(f"Invalid handshake during Sarvam websocket connection: {e}")
+                    last_err = e
+                    attempt += 1
+                    if attempt < retries:
+                        await asyncio.sleep(2 ** attempt)
             except Exception as e:
+                logger.error(f"Error connecting to Sarvam websocket (attempt {attempt + 1}/{retries}): {e}")
                 last_err = e
                 attempt += 1
-                await asyncio.sleep(2 ** attempt)
-        raise ConnectionError(last_err)
+                if attempt < retries:
+                    await asyncio.sleep(2 ** attempt)
+        raise ConnectionError(f"Failed to connect to Sarvam after {retries} attempts: {last_err}")
 
     async def push_to_transcriber_queue(self, data_packet):
         if self.transcriber_output_queue is not None:
