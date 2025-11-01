@@ -2,6 +2,7 @@ import io
 import torchaudio
 from bolna.helpers.logger_config import configure_logger
 import asyncio
+import re
 
 logger = configure_logger(__name__)
 
@@ -60,6 +61,9 @@ class BaseSynthesizer:
 
         if buffer:
             yield buffer.strip() + " "
+
+    def normalize_text(self, s):
+        return re.sub(r'\s+', ' ', s.strip())
 
     def resample(self, audio_bytes):
         audio_buffer = io.BytesIO(audio_bytes)
