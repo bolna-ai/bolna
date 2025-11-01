@@ -3,6 +3,7 @@ import json
 import time
 import logging
 from litellm import acompletion, ContentPolicyViolationError
+from litellm.exceptions import AuthenticationError, RateLimitError, APIError, APIConnectionError
 from dotenv import load_dotenv
 
 from bolna.constants import DEFAULT_LANGUAGE_CODE
@@ -83,7 +84,42 @@ class LiteLLM(BaseLLM):
             "total_stream_duration_ms": None,
         }
 
-        async for chunk in await acompletion(**model_args):
+        try:
+            completion_stream = await acompletion(**model_args)
+        except ContentPolicyViolationError as e:
+            error_message = str(e)
+            logger.error(f'Content policy violation in stream: {error_message}')
+
+            # Log to CSV trace
+            if meta_info and self.run_id:
+                convert_to_request_log(
+                    f"Content Policy Violation: {error_message}",
+                    meta_info,
+                    self.model,
+                    component="llm",
+                    direction="error",
+                    is_cached=False,
+                    run_id=self.run_id
+                )
+            # Don't re-raise - allow graceful degradation for content policy violations
+            return
+        except AuthenticationError as e:
+            logger.error(f"LiteLLM authentication failed: Invalid or expired API key - {e}")
+            raise
+        except RateLimitError as e:
+            logger.error(f"LiteLLM rate limit exceeded: {e}")
+            raise
+        except APIConnectionError as e:
+            logger.error(f"LiteLLM connection error: {e}")
+            raise
+        except APIError as e:
+            logger.error(f"LiteLLM API error: {e}")
+            raise
+        except Exception as e:
+            logger.error(f"LiteLLM unexpected error: {e}")
+            raise
+
+        async for chunk in completion_stream:
             now = now_ms()
             if not first_token_time:
                 first_token_time = now
@@ -227,7 +263,21 @@ class LiteLLM(BaseLLM):
                     is_cached=False,
                     run_id=self.run_id
                 )
+            # Don't re-raise - allow graceful degradation for content policy violations
+        except AuthenticationError as e:
+            logger.error(f"LiteLLM authentication failed: Invalid or expired API key - {e}")
+            raise
+        except RateLimitError as e:
+            logger.error(f"LiteLLM rate limit exceeded: {e}")
+            raise
+        except APIConnectionError as e:
+            logger.error(f"LiteLLM connection error: {e}")
+            raise
+        except APIError as e:
+            logger.error(f"LiteLLM API error: {e}")
+            raise
         except Exception as e:
             error_message = str(e)
-            logger.error(f'Error generating response {error_message}')
+            logger.error(f'LiteLLM unexpected error generating response: {error_message}')
+            raise
         return text

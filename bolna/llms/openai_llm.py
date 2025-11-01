@@ -1,6 +1,6 @@
 import os
 from dotenv import load_dotenv
-from openai import AsyncOpenAI, OpenAI
+from openai import AsyncOpenAI, OpenAI, AuthenticationError, PermissionDeniedError, NotFoundError, RateLimitError, APIError, APIConnectionError
 import json
 
 from bolna.constants import DEFAULT_LANGUAGE_CODE
@@ -86,7 +86,31 @@ class OpenAiLLM(BaseLLM):
         first_token_time = None
         latency_data = None
 
-        async for chunk in await self.async_client.chat.completions.create(**model_args):
+        try:
+            completion_stream = await self.async_client.chat.completions.create(**model_args)
+        except AuthenticationError as e:
+            logger.error(f"OpenAI authentication failed: Invalid or expired API key - {e}")
+            raise
+        except PermissionDeniedError as e:
+            logger.error(f"OpenAI permission denied (403): {e}")
+            raise
+        except NotFoundError as e:
+            logger.error(f"OpenAI resource not found (404): Check model name or endpoint - {e}")
+            raise
+        except RateLimitError as e:
+            logger.error(f"OpenAI rate limit exceeded: {e}")
+            raise
+        except APIConnectionError as e:
+            logger.error(f"OpenAI connection error: {e}")
+            raise
+        except APIError as e:
+            logger.error(f"OpenAI API error: {e}")
+            raise
+        except Exception as e:
+            logger.error(f"OpenAI unexpected error: {e}")
+            raise
+
+        async for chunk in completion_stream:
             now = now_ms()
             if not first_token_time:
                 first_token_time = now
@@ -187,10 +211,32 @@ class OpenAiLLM(BaseLLM):
     async def generate(self, messages, request_json=False):
         response_format = self.get_response_format(request_json)
 
-        completion = await self.async_client.chat.completions.create(model=self.model, temperature=0.0, messages=messages,
-                                                                     stream=False, response_format=response_format)
-        res = completion.choices[0].message.content
-        return res
+        try:
+            completion = await self.async_client.chat.completions.create(model=self.model, temperature=0.0, messages=messages,
+                                                                         stream=False, response_format=response_format)
+            res = completion.choices[0].message.content
+            return res
+        except AuthenticationError as e:
+            logger.error(f"OpenAI authentication failed: Invalid or expired API key - {e}")
+            raise
+        except PermissionDeniedError as e:
+            logger.error(f"OpenAI permission denied (403): {e}")
+            raise
+        except NotFoundError as e:
+            logger.error(f"OpenAI resource not found (404): Check model name or endpoint - {e}")
+            raise
+        except RateLimitError as e:
+            logger.error(f"OpenAI rate limit exceeded: {e}")
+            raise
+        except APIConnectionError as e:
+            logger.error(f"OpenAI connection error: {e}")
+            raise
+        except APIError as e:
+            logger.error(f"OpenAI API error: {e}")
+            raise
+        except Exception as e:
+            logger.error(f"OpenAI unexpected error: {e}")
+            raise
 
     def get_response_format(self, is_json_format: bool):
         if is_json_format and self.model in ('gpt-4-1106-preview', 'gpt-3.5-turbo-1106', 'gpt-4o-mini'):
