@@ -2,6 +2,7 @@ import aiohttp  # type: ignore
 import asyncio
 import json
 import logging
+import uuid
 from typing import List, Dict, Any, Optional
 from dataclasses import dataclass, field
 
@@ -101,8 +102,8 @@ class RAGServiceClient:
             }
     
     async def query_for_conversation(
-        self, 
-        query: str, 
+        self,
+        query: str,
         collections: List[str],
         max_results: int = 15,
         similarity_threshold: float = 0.0
@@ -116,31 +117,37 @@ class RAGServiceClient:
             collections: List of collection IDs to search
             max_results: Maximum number of results to return
             similarity_threshold: Minimum similarity score threshold
-            
+
         Returns:
             RAGResponse with contextualized results
         """
         await self._ensure_session()
-        
+        query_id = str(uuid.uuid4())
+        query_preview = query[:100] + "..." if len(query) > 100 else query
+        self.logger.info(f"RAG query started | query_id: {query_id} | collections: {collections} | query: '{query_preview}' | max_results: {max_results}")
+
         payload = {
             "query": query,
             "collections": collections,
             "max_results": max_results,
             "similarity_threshold": similarity_threshold
         }
-        
+
         try:
             session = self.session
             assert session is not None
             async with session.post(
                 f"{self.base_url}/conversation/query",
                 json=payload,
-                headers={"Content-Type": "application/json"}
+                headers={
+                    "Content-Type": "application/json",
+                    "X-Query-ID": query_id
+                }
             ) as response:
                 
                 if response.status != 200:
                     error_text = await response.text()
-                    self.logger.error(f"RAG query failed: {response.status} - {error_text}")
+                    self.logger.error(f"RAG query failed | query_id: {query_id} | status: {response.status} | error: {error_text}")
                     return RAGResponse(contexts=[], total_results=0, processing_time=0.0)
                 
                 data = await response.json()
@@ -159,18 +166,19 @@ class RAGServiceClient:
                 total_results = data.get("total_retrieved", len(contexts))
                 # Convert ms to seconds for consistency in logs
                 processing_time = float(data.get("query_time_ms", 0.0)) / 1000.0
+                self.logger.info(f"RAG query completed | query_id: {query_id} | results: {total_results} | time: {processing_time:.3f}s")
 
                 return RAGResponse(
                     contexts=contexts,
                     total_results=total_results,
                     processing_time=processing_time
                 )
-                
+            
         except asyncio.TimeoutError:
-            self.logger.error(f"RAG query timeout for collections: {collections}")
+            self.logger.error(f"RAG query timeout | query_id: {query_id} | collections: {collections}")
             return RAGResponse(contexts=[], total_results=0, processing_time=0.0)
         except Exception as e:
-            self.logger.error(f"RAG query error: {e}")
+            self.logger.error(f"RAG query error | query_id: {query_id} | error: {e}")
             return RAGResponse(contexts=[], total_results=0, processing_time=0.0)
     
     async def format_context_for_prompt(self, contexts: List[RAGContext]) -> str:
