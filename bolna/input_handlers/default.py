@@ -87,7 +87,7 @@ class DefaultInputHandler:
         message_type = mark_event_meta_data_obj.get("type")
         
         is_content_audio = message_type not in ['ambient_noise', 'backchanneling']
-        
+
         if message_type == "pre_mark_message":
             self.update_is_audio_being_played(True)
             return
