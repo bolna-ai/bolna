@@ -440,10 +440,15 @@ class SarvamTranscriber(BaseTranscriber):
                 error_msg = str(e)
                 if '401' in error_msg or '403' in error_msg:
                     logger.error(f"Sarvam authentication failed: Invalid or expired API key - {e}")
-                    raise ConnectionError(f"Sarvam authentication failed: Invalid or expired API key - {e}")
+                    # Preserve the InvalidHandshake type as an attribute
+                    error = ConnectionError(f"Sarvam authentication failed: Invalid or expired API key - {e}")
+                    error.error_type = "InvalidHandshake"
+                    raise error
                 elif '404' in error_msg:
                     logger.error(f"Sarvam endpoint not found - check model/configuration: {e}")
-                    raise ConnectionError(f"Sarvam endpoint not found: {e}")
+                    error = ConnectionError(f"Sarvam endpoint not found: {e}")
+                    error.error_type = "InvalidHandshake"
+                    raise error
                 else:
                     logger.error(f"Invalid handshake during Sarvam websocket connection: {e}")
                     last_err = e
@@ -495,11 +500,18 @@ class SarvamTranscriber(BaseTranscriber):
             pass
 
     async def transcribe(self):
+        connection_error = None
+        connection_error_type = None
+
         try:
             start_time = time.perf_counter()
             try:
                 sarvam_ws = await self.sarvam_connect()
-            except (ValueError, ConnectionError):
+            except (ValueError, ConnectionError) as e:
+                logger.error(f"Failed to establish Sarvam connection: {e}")
+                connection_error = str(e)
+                # Check if error has preserved error_type attribute (for InvalidHandshake)
+                connection_error_type = getattr(e, 'error_type', type(e).__name__)
                 await self.toggle_connection()
                 return
 
@@ -529,12 +541,25 @@ class SarvamTranscriber(BaseTranscriber):
             if self.audio_submission_time:
                 self.total_stream_duration_ms = round((time.time() - self.audio_submission_time) * 1000)
                 self.meta_info["total_stream_duration_ms"] = self.total_stream_duration_ms
-
+        finally:
+            # Send appropriate message based on whether there was an error
+            # This must be in finally block to execute even on early return
             try:
-                await self.push_to_transcriber_queue(create_ws_data_packet("transcriber_connection_closed", self.meta_info))
+                if connection_error:
+                    logger.error(f"Sending connection_failed message: {connection_error_type} - {connection_error}")
+                    await self.push_to_transcriber_queue(
+                        create_ws_data_packet("connection_failed", {
+                            "error": connection_error,
+                            "error_type": connection_error_type,
+                            "component": "transcriber"
+                        })
+                    )
+                elif hasattr(self, 'meta_info'):
+                    await self.push_to_transcriber_queue(create_ws_data_packet("transcriber_connection_closed", self.meta_info))
             except Exception:
                 traceback.print_exc()
-        finally:
+
+            # Cleanup tasks
             if self.sender_task:
                 self.sender_task.cancel()
             if self.heartbeat_task:
