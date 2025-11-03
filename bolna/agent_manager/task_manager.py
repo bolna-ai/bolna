@@ -178,6 +178,14 @@ class TaskManager(BaseManager):
         self.llm_response_generated = False
         self.turn_id = 0
 
+        # language detection (first N turns)
+        self.default_language = task.get('default_language', 'en')
+        self.language_detection_turns = task.get('language_detection_turns', 3)
+        self.language_word_counts = {}  # Accumulate word counts: {'hi': 15, 'en': 3}
+        self.current_turn_count = 0
+        self.conversation_language = None  # Determined after N turns
+        self.language_determined = False
+
         # Call conversations
         self.call_sid = None
         self.stream_sid = None
@@ -1348,6 +1356,21 @@ class TaskManager(BaseManager):
         if should_bypass_synth:
             synthesize = False
 
+        # Inject language instruction at top of system prompt (once determined)
+        if self.language_determined and self.conversation_language:
+            language_names = {
+                'en': 'English', 'hi': 'Hindi'
+            }
+            lang_name = language_names.get(self.conversation_language, self.conversation_language)
+            instruction = f"LANGUAGE INSTRUCTION: User speaks in {lang_name}. Always respond in {lang_name}.\n\n"
+
+            # Prepend to system message
+            for i, msg in enumerate(messages):
+                if msg.get('role') == 'system':
+                    messages[i]['content'] = instruction + msg['content']
+                    logger.info(f"Injected language instruction: {lang_name}")
+                    break
+
         async for llm_message in self.tools['llm_agent'].generate(messages, synthesize=synthesize, meta_info=meta_info):
             data, end_of_llm_stream, latency, trigger_function_call, function_tool, function_tool_message = llm_message
 
@@ -1564,6 +1587,28 @@ class TaskManager(BaseManager):
         if self.current_start_ts == self.previous_start_ts and not self.tools['input'].is_audio_being_played_to_user():
             logger.info(f"handle_transcriber_output -> skip as previous user message {self.history[-1]}")
             return
+
+        # accumulate word counts for first N turns
+        if not self.language_determined and 'segment_word_lang_counts' in meta_info:
+            self.current_turn_count += 1
+
+            # Accumulate word counts
+            segment_counts = meta_info.get('segment_word_lang_counts', {})
+            for lang, count in segment_counts.items():
+                self.language_word_counts[lang] = self.language_word_counts.get(lang, 0) + count
+
+            logger.info(f"Turn {self.current_turn_count}/{self.language_detection_turns}: Word counts = {self.language_word_counts}")
+
+            # After N turns, determine conversation language
+            if self.current_turn_count >= self.language_detection_turns:
+                if self.language_word_counts:
+                    self.conversation_language = max(self.language_word_counts, key=self.language_word_counts.get)
+                else:
+                    self.conversation_language = self.default_language
+
+                self.language_determined = True
+                logger.info(f"Conversation language determined: {self.conversation_language} (total counts: {self.language_word_counts})")
+
         self.history.append({"role": "user", "content": transcriber_message})
 
         convert_to_request_log(message=transcriber_message, meta_info=meta_info, model=self.task_config["tools_config"]["transcriber"]["provider"], run_id= self.run_id)
