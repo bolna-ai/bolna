@@ -333,7 +333,43 @@ class DeepgramTranscriber(BaseTranscriber):
                         yield create_ws_data_packet(data, self.meta_info)
 
                     if msg["is_final"] and transcript.strip():
+                        logger.info(f"===== DEEPGRAM RESPONSE (is_final=True) =====")
+                        logger.info(f"{json.dumps(msg, indent=2)}")
+                        logger.info(f"==============================================")
                         logger.info(f"Received interim result with is_final set as True - {transcript}")
+
+                        # Extract language data from is_final response
+                        alternative = msg["channel"]["alternatives"][0]
+                        detected_languages = alternative.get("languages", [])
+
+                        # Extract per-word language breakdown
+                        word_lang_counts = {}
+                        total_words = 0
+
+                        if "words" in alternative and alternative["words"]:
+                            for word_obj in alternative["words"]:
+                                word_lang = word_obj.get("language", "en")
+                                word_lang_counts[word_lang] = word_lang_counts.get(word_lang, 0) + 1
+                                total_words += 1
+
+                        # Determine primary language for this segment
+                        if word_lang_counts:
+                            primary_language = max(word_lang_counts, key=word_lang_counts.get)
+                            primary_lang_percentage = (word_lang_counts[primary_language] / total_words) if total_words > 0 else 0.0
+                        else:
+                            primary_language = detected_languages[0] if detected_languages else "en"
+                            primary_lang_percentage = 1.0
+
+                        # Store language info in meta_info for this segment
+                        self.meta_info['segment_language'] = primary_language
+                        self.meta_info['segment_language_percentage'] = round(primary_lang_percentage, 2)
+                        self.meta_info['segment_all_languages'] = detected_languages
+                        self.meta_info['segment_word_lang_counts'] = word_lang_counts
+
+                        logger.info(f"Language detected: {primary_language} ({int(primary_lang_percentage*100)}% confidence)")
+                        if len(word_lang_counts) > 1:
+                            logger.info(f"Code-switching detected: {word_lang_counts}")
+
                         self.final_transcript += f' {transcript}'
 
                         if self.is_transcript_sent_for_processing:

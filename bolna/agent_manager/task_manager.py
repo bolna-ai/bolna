@@ -178,6 +178,13 @@ class TaskManager(BaseManager):
         self.llm_response_generated = False
         self.turn_id = 0
 
+        # Language tracking for conversation
+        self.conversation_language_history = []
+        self.dominant_conversation_language = "en"
+        self.language_history_window = 5  # Track last 5 turns
+        self.language_switch_threshold = 0.7  # 70% of words must be in new language
+        self.consecutive_turns_for_switch = 2  # Need 2 consecutive turns to confirm switch
+
         # Call conversations
         self.call_sid = None
         self.stream_sid = None
@@ -1348,6 +1355,17 @@ class TaskManager(BaseManager):
         if should_bypass_synth:
             synthesize = False
 
+        # Inject language instruction if needed
+        language_instruction = self._get_language_instruction_for_llm()
+        if language_instruction:
+            # Find the system message and prepend language instruction
+            for i, msg in enumerate(messages):
+                if msg.get('role') == 'system':
+                    # Prepend to existing system message
+                    messages[i]['content'] = f"{language_instruction}\n\n{msg['content']}"
+                    logger.info(f"Injected language instruction: {self.dominant_conversation_language}")
+                    break
+
         async for llm_message in self.tools['llm_agent'].generate(messages, synthesize=synthesize, meta_info=meta_info):
             data, end_of_llm_stream, latency, trigger_function_call, function_tool, function_tool_message = llm_message
 
@@ -1552,6 +1570,81 @@ class TaskManager(BaseManager):
             skip_append_to_data = False
         return sequence
 
+    def _update_language_tracking(self, meta_info):
+        """
+        Update language tracking based on current turn's detected language.
+        Determines if we should switch the dominant conversation language.
+
+        Args:
+            meta_info: Dictionary containing segment_language and segment_language_percentage
+
+        Returns:
+            bool: True if language switched, False otherwise
+        """
+        segment_language = meta_info.get('segment_language', 'en')
+        segment_percentage = meta_info.get('segment_language_percentage', 1.0)
+
+        # Add to history
+        self.conversation_language_history.append({
+            'language': segment_language,
+            'percentage': segment_percentage,
+            'turn_id': self.turn_id
+        })
+
+        # Keep only last N turns
+        if len(self.conversation_language_history) > self.language_history_window:
+            self.conversation_language_history.pop(0)
+
+        # Check if we should switch dominant language
+        # Need consecutive turns with high percentage in the new language
+        if segment_percentage >= self.language_switch_threshold:
+            # Check last N consecutive turns
+            recent_turns = self.conversation_language_history[-self.consecutive_turns_for_switch:]
+
+            if len(recent_turns) >= self.consecutive_turns_for_switch:
+                # Check if all recent turns are in the same language with high confidence
+                all_same_language = all(
+                    turn['language'] == segment_language and
+                    turn['percentage'] >= self.language_switch_threshold
+                    for turn in recent_turns
+                )
+
+                if all_same_language and segment_language != self.dominant_conversation_language:
+                    logger.info(f"Language switch detected: {self.dominant_conversation_language} → {segment_language}")
+                    logger.info(f"   Reason: {self.consecutive_turns_for_switch} consecutive turns with {int(self.language_switch_threshold*100)}%+ confidence")
+                    self.dominant_conversation_language = segment_language
+                    return True
+
+        # If this is the first turn, set initial language
+        if len(self.conversation_language_history) == 1:
+            self.dominant_conversation_language = segment_language
+            logger.info(f"Initial conversation language set to: {segment_language}")
+            return True
+
+        return False
+
+    def _get_language_instruction_for_llm(self):
+        """
+        Generate language instruction to prepend to LLM prompt.
+
+        Returns:
+            str: Language instruction for the LLM
+        """
+        language_names = {
+            'en': 'English',
+            'hi': 'Hindi',
+            'bn': 'Bengali',
+            'te': 'Telugu',
+            'ta': 'Tamil',
+            'mr': 'Marathi'
+        }
+
+        language_name = language_names.get(self.dominant_conversation_language, self.dominant_conversation_language)
+
+        if self.dominant_conversation_language != 'en':
+            return f"IMPORTANT: The user prefers to communicate in {language_name}. Always respond in {language_name}, even if they occasionally use English words (code-switching). Maintain consistency in your response language."
+        return ""
+
     async def _handle_transcriber_output(self, next_task, transcriber_message, meta_info):
         current_ts = self.tools["input"].get_current_mark_started_time()
         self.previous_start_ts = self.current_start_ts
@@ -1564,6 +1657,14 @@ class TaskManager(BaseManager):
         if self.current_start_ts == self.previous_start_ts and not self.tools['input'].is_audio_being_played_to_user():
             logger.info(f"handle_transcriber_output -> skip as previous user message {self.history[-1]}")
             return
+
+        # Update language tracking if we have language data
+        if 'segment_language' in meta_info:
+            language_switched = self._update_language_tracking(meta_info)
+            logger.info(f"Current dominant language: {self.dominant_conversation_language}")
+            if language_switched:
+                logger.info(f"Language instruction will be updated for LLM")
+
         self.history.append({"role": "user", "content": transcriber_message})
 
         convert_to_request_log(message=transcriber_message, meta_info=meta_info, model=self.task_config["tools_config"]["transcriber"]["provider"], run_id= self.run_id)
