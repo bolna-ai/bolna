@@ -2,6 +2,7 @@ import aiohttp
 import asyncio
 import os
 import websockets
+from websockets.exceptions import InvalidHandshake
 import copy
 import time
 import uuid
@@ -174,7 +175,10 @@ class SarvamSynthesizer(BaseSynthesizer):
             additional_headers = {
                 'api-subscription-key': self.api_key,
             }
-            websocket = await websockets.connect(self.ws_url, additional_headers=additional_headers)
+            websocket = await asyncio.wait_for(
+                websockets.connect(self.ws_url, additional_headers=additional_headers),
+                timeout=10.0
+            )
             bos_message = {
                 "type": "config",
                 "data": {
@@ -196,16 +200,40 @@ class SarvamSynthesizer(BaseSynthesizer):
 
             logger.info(f"Connected to {self.ws_url}")
             return websocket
+        except asyncio.TimeoutError:
+            logger.error("Timeout while connecting to Sarvam TTS websocket")
+            return None
+        except InvalidHandshake as e:
+            error_msg = str(e)
+            if '401' in error_msg or '403' in error_msg:
+                logger.error(f"Sarvam TTS authentication failed: Invalid or expired API key - {e}")
+            elif '404' in error_msg:
+                logger.error(f"Sarvam TTS endpoint not found: {e}")
+            else:
+                logger.error(f"Sarvam TTS handshake failed: {e}")
+            return None
         except Exception as e:
-            logger.info(f"Failed to connect: {e}")
+            logger.error(f"Failed to connect to Sarvam TTS: {e}")
             return None
 
     async def monitor_connection(self):
         # Periodically check if the connection is still alive
-        while True:
+        consecutive_failures = 0
+        max_failures = 3
+
+        while consecutive_failures < max_failures:
             if self.websocket_holder["websocket"] is None or self.websocket_holder["websocket"].state is websockets.protocol.State.CLOSED:
                 logger.info("Re-establishing sarvam connection...")
-                self.websocket_holder["websocket"] = await self.establish_connection()
+                result = await self.establish_connection()
+                if result is None:
+                    consecutive_failures += 1
+                    logger.warning(f"Sarvam TTS connection failed (attempt {consecutive_failures}/{max_failures})")
+                    if consecutive_failures >= max_failures:
+                        logger.error("Max connection failures reached for Sarvam TTS - stopping reconnection attempts")
+                        break
+                else:
+                    self.websocket_holder["websocket"] = result
+                    consecutive_failures = 0  # Reset on success
             await asyncio.sleep(1)
 
     def get_synthesized_characters(self):
