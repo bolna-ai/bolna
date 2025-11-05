@@ -66,7 +66,7 @@ class OpenAiLLM(BaseLLM):
             "messages": messages,
             "stream": True,
             "stop": ["User:"],
-            "user": f"{self.run_id}#{meta_info['turn_id']}"
+            "user": f"{self.run_id}#turn:{meta_info.get('turn_id', 0)}.int:{meta_info.get('interruption_count', 0)}"
         }
 
         if self.trigger_function_call:
@@ -118,6 +118,8 @@ class OpenAiLLM(BaseLLM):
 
                 latency_data = {
                     "sequence_id": meta_info.get("sequence_id"),
+                    "turn_id": meta_info.get("turn_id"),
+                    "interruption_count": meta_info.get("interruption_count", 0),
                     "first_token_latency_ms": first_token_time - start_time,
                     "total_stream_duration_ms": None  # Will be filled at end
                 }
