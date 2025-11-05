@@ -255,7 +255,8 @@ class GoogleTranscriber(BaseTranscriber):
                 total_s = (time.perf_counter() - self.current_turn_start_time) if self.current_turn_start_time else 0
                 self.turn_latencies.append({
                     'turn_id': self.current_turn_id,
-                    'sequence_id': self.current_turn_id,
+                    'interruption_count': self.meta_info.get('interruption_count'),
+                    'sequence_id': self.meta_info.get('sequence_id'),
                     'first_result_latency_ms': first_ms,
                     'total_stream_duration_ms': int(round(total_s * 1000))
                 })

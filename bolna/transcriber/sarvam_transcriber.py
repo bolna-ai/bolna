@@ -381,9 +381,10 @@ class SarvamTranscriber(BaseTranscriber):
 
                                 turn_info = {
                                     "turn_id": self.current_turn_id,
-                                    "sequence_id": self.current_turn_id,
+                                    "interruption_count": self.meta_info.get('interruption_count'),
+                                    "sequence_id": self.meta_info.get('sequence_id'),
                                     "first_result_latency_ms": self.turn_first_result_latency,
-                                    "total_stream_duration_ms": total_stream_duration_ms,  
+                                    "total_stream_duration_ms": total_stream_duration_ms,
                                 }
                                 self.turn_latencies.append(turn_info)
                                 self.meta_info["turn_latencies"] = self.turn_latencies

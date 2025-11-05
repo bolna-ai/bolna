@@ -352,7 +352,8 @@ class DeepgramTranscriber(BaseTranscriber):
                             try:
                                 self.turn_latencies.append({
                                     'turn_id': self.current_turn_id,
-                                    'sequence_id': self.current_turn_id,
+                                    'interruption_count': self.meta_info.get('interruption_count'),
+                                    'sequence_id': self.meta_info.get('sequence_id'),
                                     'interim_details': self.current_turn_interim_details
                                 })
 
@@ -382,7 +383,8 @@ class DeepgramTranscriber(BaseTranscriber):
                         try:
                             self.turn_latencies.append({
                                 'turn_id': self.current_turn_id,
-                                'sequence_id': self.current_turn_id,
+                                'interruption_count': self.meta_info.get('interruption_count'),
+                                'sequence_id': self.meta_info.get('sequence_id'),
                                 'interim_details': self.current_turn_interim_details
                             })
 
