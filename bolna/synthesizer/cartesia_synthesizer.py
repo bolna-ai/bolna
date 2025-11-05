@@ -3,6 +3,7 @@ import copy
 import uuid
 import time
 import websockets
+from websockets.exceptions import InvalidHandshake
 import base64
 import json
 import aiohttp
@@ -267,21 +268,48 @@ class CartesiaSynthesizer(BaseSynthesizer):
     async def establish_connection(self):
         try:
             start_time = time.perf_counter()
-            websocket = await websockets.connect(self.ws_url)
+            websocket = await asyncio.wait_for(
+                websockets.connect(self.ws_url),
+                timeout=10.0
+            )
             if not self.connection_time:
                 self.connection_time = round((time.perf_counter() - start_time) * 1000)
             logger.info(f"Connected to {self.ws_url}")
             return websocket
+        except asyncio.TimeoutError:
+            logger.error("Timeout while connecting to Cartesia websocket")
+            return None
+        except InvalidHandshake as e:
+            error_msg = str(e)
+            if '401' in error_msg or '403' in error_msg:
+                logger.error(f"Cartesia authentication failed: Invalid or expired API key - {e}")
+            elif '404' in error_msg:
+                logger.error(f"Cartesia endpoint not found: {e}")
+            else:
+                logger.error(f"Cartesia handshake failed: {e}")
+            return None
         except Exception as e:
-            logger.info(f"Failed to connect: {e}")
+            logger.error(f"Failed to connect to Cartesia: {e}")
             return None
 
     async def monitor_connection(self):
         # Periodically check if the connection is still alive
-        while True:
+        consecutive_failures = 0
+        max_failures = 3
+
+        while consecutive_failures < max_failures:
             if self.websocket_holder["websocket"] is None or self.websocket_holder["websocket"].state is websockets.protocol.State.CLOSED:
                 logger.info("Re-establishing cartesia connection...")
-                self.websocket_holder["websocket"] = await self.establish_connection()
+                result = await self.establish_connection()
+                if result is None:
+                    consecutive_failures += 1
+                    logger.warning(f"Cartesia connection failed (attempt {consecutive_failures}/{max_failures})")
+                    if consecutive_failures >= max_failures:
+                        logger.error("Max connection failures reached for Cartesia - stopping reconnection attempts")
+                        break
+                else:
+                    self.websocket_holder["websocket"] = result
+                    consecutive_failures = 0  # Reset on success
             await asyncio.sleep(1)
 
     def update_context(self, meta_info):

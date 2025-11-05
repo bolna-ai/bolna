@@ -454,6 +454,8 @@ async def write_request_logs(message, run_id):
         component_details = [message_data, None, None, len(message_data), message.get('latency', None), message['cached'], None, message['engine']]
     elif message["component"] == "function_call":
         component_details = [message_data, None, None, None, message.get('latency', None), None, None, None]
+    elif message["component"] == "error":
+        component_details = [message_data, None, None, None, message.get('latency', None), False, None, None]
 
     row = row + component_details
 
