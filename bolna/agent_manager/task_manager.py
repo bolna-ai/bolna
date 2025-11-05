@@ -176,7 +176,11 @@ class TaskManager(BaseManager):
         self.callee_speaking = False
         self.callee_speaking_start_time = -1
         self.llm_response_generated = False
-        self.turn_id = 0
+        self.interruption_count = 0  # Only increments when user interrupts agent
+        self.turn_id = 0  # Increments on EVERY speaker change
+        self.user_turn_count = 0  # Count of user turns
+        self.agent_turn_count = 0  # Count of agent turns
+        self.last_speaker = None  # Track who spoke last ('user' or 'agent')
 
         # Call conversations
         self.call_sid = None
@@ -979,6 +983,10 @@ class TaskManager(BaseManager):
         self.curr_sequence_id += 1
         meta_info_copy["sequence_id"] = self.curr_sequence_id
         meta_info_copy['turn_id'] = self.turn_id
+        meta_info_copy['interruption_count'] = self.interruption_count
+        meta_info_copy['user_turn_count'] = self.user_turn_count
+        meta_info_copy['agent_turn_count'] = self.agent_turn_count
+
         self.sequence_ids.add(meta_info_copy["sequence_id"])
         return meta_info_copy
 
@@ -1605,6 +1613,11 @@ class TaskManager(BaseManager):
 
                     # Handling of transcriber events
                     if message["data"] == "speech_started":
+                        if self.last_speaker != 'user':
+                            self.turn_id += 1
+                            self.user_turn_count += 1
+                        self.last_speaker = 'user'
+
                         if self.tools["input"].welcome_message_played():
                             logger.info(f"User has started speaking")
                             # self.callee_silent = False
@@ -1630,7 +1643,7 @@ class TaskManager(BaseManager):
                             if interim_transcript_len > self.number_of_words_for_interruption or \
                                     message["data"].get("content").strip() in self.accidental_interruption_phrases:
                                 logger.info(f"Condition for interruption hit")
-                                self.turn_id += 1
+                                self.interruption_count += 1
                                 self.tools["input"].update_is_audio_being_played(False)
                                 await self.__cleanup_downstream_tasks()
                             else:
@@ -1882,6 +1895,11 @@ class TaskManager(BaseManager):
         text = message["data"]
         meta_info["type"] = "audio"
         meta_info["synthesizer_start_time"] = time.time()
+        if self.last_speaker != 'agent':
+            self.turn_id += 1
+            self.agent_turn_count += 1
+        self.last_speaker = 'agent'
+
         try:
             if not self.conversation_ended and ('is_first_message' in meta_info and meta_info['is_first_message'] or message["meta_info"]["sequence_id"] in self.sequence_ids):
                 if meta_info["is_md5_hash"]:
