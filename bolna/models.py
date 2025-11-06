@@ -26,7 +26,7 @@ class ElevenLabsConfig(BaseModel):
     voice_id: str
     model: str
     temperature: Optional[float] = 0.5
-    similarity_boost: Optional[float] = 0.5
+    similarity_boost: Optional[float] = 0.75
     speed: Optional[float] = 1.0
 
 
