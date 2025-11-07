@@ -333,6 +333,9 @@ class DeepgramTranscriber(BaseTranscriber):
                         yield create_ws_data_packet(data, self.meta_info)
 
                     if msg["is_final"] and transcript.strip():
+                        logger.info(f"===== DEEPGRAM RESPONSE (is_final=True) =====")
+                        logger.info(f"{json.dumps(msg, indent=2)}")
+                        logger.info(f"==============================================")
                         logger.info(f"Received interim result with is_final set as True - {transcript}")
 
                         # Extract language data ONLY if Deepgram is in multilingual mode
