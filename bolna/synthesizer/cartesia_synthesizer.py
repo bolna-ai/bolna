@@ -3,6 +3,7 @@ import copy
 import uuid
 import time
 import websockets
+from websockets.exceptions import InvalidHandshake
 import base64
 import json
 import aiohttp
@@ -49,6 +50,8 @@ class CartesiaSynthesizer(BaseSynthesizer):
         self.sequence_id = 0
         self.context_ids_to_ignore = set()
         self.conversation_ended = False
+        self.current_turn_start_time = None
+        self.current_turn_id = None
 
     def get_engine(self):
         return self.model
@@ -117,13 +120,12 @@ class CartesiaSynthesizer(BaseSynthesizer):
             if end_of_llm_stream:
                 self.last_text_sent = True
 
-            # Send the end-of-stream signal with an empty string as text
-            try:
-                input_message = self.form_payload("")
-                await self.websocket_holder["websocket"].send(json.dumps(input_message))
-                logger.info("Sent end-of-stream signal.")
-            except Exception as e:
-                logger.error(f"Error sending end-of-stream signal: {e}")
+                # Send the end-of-stream signal with an empty string as text
+                try:
+                    input_message = self.form_payload("")
+                    await self.websocket_holder["websocket"].send(json.dumps(input_message))
+                except Exception as e:
+                    logger.error(f"Error sending end-of-stream signal: {e}")
         except asyncio.CancelledError:
             logger.info("Sender task was cancelled.")
         except Exception as e:
@@ -209,6 +211,13 @@ class CartesiaSynthesizer(BaseSynthesizer):
             async for message in self.receiver():
                 if len(self.text_queue) > 0:
                     self.meta_info = self.text_queue.popleft()
+                    # Compute first-result latency on first audio chunk
+                    try:
+                        if self.current_turn_start_time is not None:
+                            first_result_latency = time.perf_counter() - self.current_turn_start_time
+                            self.meta_info['synthesizer_latency'] = first_result_latency
+                    except Exception:
+                        pass
                 audio = ""
 
                 if self.use_mulaw:
@@ -234,6 +243,20 @@ class CartesiaSynthesizer(BaseSynthesizer):
                     logger.info("received null byte and hence end of stream")
                     self.meta_info["end_of_synthesizer_stream"] = True
                     self.first_chunk_generated = False
+                    # Compute total stream duration for this synthesizer turn
+                    try:
+                        if self.current_turn_start_time is not None:
+                            total_stream_duration = time.perf_counter() - self.current_turn_start_time
+                            self.turn_latencies.append({
+                                'turn_id': self.current_turn_id,
+                                'sequence_id': self.current_turn_id,
+                                'first_result_latency_ms': round((self.meta_info.get('synthesizer_latency', 0)) * 1000),
+                                'total_stream_duration_ms': round(total_stream_duration * 1000)
+                            })
+                            self.current_turn_start_time = None
+                            self.current_turn_id = None
+                    except Exception:
+                        pass
 
                 yield create_ws_data_packet(audio, self.meta_info)
 
@@ -244,21 +267,48 @@ class CartesiaSynthesizer(BaseSynthesizer):
     async def establish_connection(self):
         try:
             start_time = time.perf_counter()
-            websocket = await websockets.connect(self.ws_url)
+            websocket = await asyncio.wait_for(
+                websockets.connect(self.ws_url),
+                timeout=10.0
+            )
             if not self.connection_time:
                 self.connection_time = round((time.perf_counter() - start_time) * 1000)
             logger.info(f"Connected to {self.ws_url}")
             return websocket
+        except asyncio.TimeoutError:
+            logger.error("Timeout while connecting to Cartesia websocket")
+            return None
+        except InvalidHandshake as e:
+            error_msg = str(e)
+            if '401' in error_msg or '403' in error_msg:
+                logger.error(f"Cartesia authentication failed: Invalid or expired API key - {e}")
+            elif '404' in error_msg:
+                logger.error(f"Cartesia endpoint not found: {e}")
+            else:
+                logger.error(f"Cartesia handshake failed: {e}")
+            return None
         except Exception as e:
-            logger.info(f"Failed to connect: {e}")
+            logger.error(f"Failed to connect to Cartesia: {e}")
             return None
 
     async def monitor_connection(self):
         # Periodically check if the connection is still alive
-        while True:
+        consecutive_failures = 0
+        max_failures = 3
+
+        while consecutive_failures < max_failures:
             if self.websocket_holder["websocket"] is None or self.websocket_holder["websocket"].state is websockets.protocol.State.CLOSED:
                 logger.info("Re-establishing cartesia connection...")
-                self.websocket_holder["websocket"] = await self.establish_connection()
+                result = await self.establish_connection()
+                if result is None:
+                    consecutive_failures += 1
+                    logger.warning(f"Cartesia connection failed (attempt {consecutive_failures}/{max_failures})")
+                    if consecutive_failures >= max_failures:
+                        logger.error("Max connection failures reached for Cartesia - stopping reconnection attempts")
+                        break
+                else:
+                    self.websocket_holder["websocket"] = result
+                    consecutive_failures = 0  # Reset on success
             await asyncio.sleep(1)
 
     def update_context(self, meta_info):
@@ -278,6 +328,13 @@ class CartesiaSynthesizer(BaseSynthesizer):
             else:
                 if self.turn_id != meta_info.get('turn_id', 0) or self.sequence_id != meta_info.get('sequence_id', 0):
                     self.update_context(meta_info)
+
+            # Stamp synthesizer turn start time
+            try:
+                self.current_turn_start_time = time.perf_counter()
+                self.current_turn_id = meta_info.get('turn_id') or meta_info.get('sequence_id')
+            except Exception:
+                pass
 
             self.sender_task = asyncio.create_task(self.sender(text, meta_info.get('sequence_id'), end_of_llm_stream))
             self.text_queue.append(meta_info)

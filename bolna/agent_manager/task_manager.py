@@ -2316,6 +2316,26 @@ class TaskManager(BaseManager):
 
         except Exception as e:
             # Cancel all tasks on error
+            error_message = str(e)
+            logger.error(f"Exception in task manager run: {error_message}")
+            traceback.print_exc()
+
+            # Log call-breaking exception to CSV trace
+            if self.run_id:
+                meta_info = {
+                    'request_id': self.task_id,
+                    'sequence_id': None
+                }
+                convert_to_request_log(
+                    f"Call Breaking Error: {error_message}",
+                    meta_info,
+                    model="-",
+                    component="error",
+                    direction="error",
+                    is_cached=False,
+                    run_id=self.run_id
+                )
+
             await self.handle_cancellation(f"Exception occurred {e}")
             raise Exception(e)
 
