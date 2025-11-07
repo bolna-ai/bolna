@@ -79,7 +79,6 @@ class DefaultOutputHandler:
                         "type": "mark",
                         "name": mark_id
                     }
-                    logger.info(f"Sending pre-mark event - {mark_message}")
                     await self.websocket.send_text(json.dumps(mark_message))
 
                 logger.info(f"Sending to the frontend {len(data)}")

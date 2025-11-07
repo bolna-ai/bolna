@@ -55,7 +55,6 @@ class TelephonyOutputHandler(DefaultOutputHandler):
                         mark_id = str(uuid.uuid4())
                         self.mark_event_meta_data.update_data(mark_id, pre_mark_event_meta_data)
                         mark_message = await self.form_mark_message(mark_id)
-                        logger.info(f"Sending pre-mark event - {mark_message}")
                         await self.websocket.send_text(json.dumps(mark_message))
 
                         # sending of audio chunk
