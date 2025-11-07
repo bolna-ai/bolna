@@ -118,7 +118,6 @@ class CartesiaSynthesizer(BaseSynthesizer):
 
             # If end_of_llm_stream is True, mark the last chunk and send an empty message
             if end_of_llm_stream:
-                logger.info("Final End of stream was sent.")
                 self.last_text_sent = True
 
                 # Send the end-of-stream signal with an empty string as text
