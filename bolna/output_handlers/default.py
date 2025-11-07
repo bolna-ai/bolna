@@ -102,13 +102,12 @@ class DefaultOutputHandler:
                     }
                     mark_id = meta_info.get("mark_id") if (
                                 meta_info.get("mark_id") and meta_info.get("mark_id") != "") else str(uuid.uuid4())
-                    logger.info(f"Mark meta data being saved for mark id - {mark_id} is - {mark_event_meta_data}")
+
                     self.mark_event_meta_data.update_data(mark_id, mark_event_meta_data)
                     mark_message = {
                         "type": "mark",
                         "name": mark_id
                     }
-                    logger.info(f"Sending post-mark event - {mark_message}")
                     await self.websocket.send_text(json.dumps(mark_message))
             else:
                 logger.error("Other modalities are not implemented yet")
