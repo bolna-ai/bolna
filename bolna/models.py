@@ -394,6 +394,12 @@ class Task(BaseModel):
     task_type: Optional[str] = "conversation"  # extraction, summarization, notification
     task_config: ConversationConfig = dict()
 
+    # Language detection & injection (optional)
+    default_language: Optional[str] = None
+    language_detection_turns: Optional[int] = None
+    language_injection_mode: Optional[str] = None
+    language_instruction_template: Optional[str] = None
+
 
 class AgentModel(BaseModel):
     agent_name: str
