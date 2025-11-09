@@ -48,6 +48,11 @@ class AzureSynthesizer(BaseSynthesizer):
         }
         self.connection_requested_at = None
 
+        # Turn tracking variables (matching ElevenLabs pattern)
+        self.current_turn_start_time = None
+        self.current_turn_id = None
+        self.current_text = ""
+
         # Implement connection pooling with a synthesizer factory
         self.synthesizer_pool = []
         self.max_pool_size = 5  # Tune based on your traffic
@@ -215,12 +220,6 @@ class AzureSynthesizer(BaseSynthesizer):
                 synthesizer.synthesizing.connect(speech_synthesizer_synthesizing_handler)
                 synthesizer.synthesis_completed.connect(speech_synthesizer_completed_handler)
 
-                # Stamp synthesizer turn start time
-                try:
-                    meta_info['synthesizer_start_time'] = time.perf_counter()
-                except Exception:
-                    pass
-
                 ssml = self._build_ssml(text)
                 start_time = time.perf_counter()
                 try:
@@ -245,18 +244,18 @@ class AzureSynthesizer(BaseSynthesizer):
                         if self.caching:
                             full_audio.extend(chunk)
                         
-                        # Log first chunk latency
+                        # Compute first-result latency on first audio chunk (matching ElevenLabs pattern)
                         if not self.first_chunk_generated:
                             first_chunk_time = round((time.perf_counter() - start_time) * 1000)
                             self.latency_stats["request_count"] += 1
                             self.latency_stats["total_first_byte_latency"] += first_chunk_time
                             self.latency_stats["min_latency"] = min(self.latency_stats["min_latency"], first_chunk_time)
                             self.latency_stats["max_latency"] = max(self.latency_stats["max_latency"], first_chunk_time)
-                            # Expose first-result latency via meta_info
+
                             try:
-                                if 'synthesizer_first_result_latency' not in meta_info:
-                                    meta_info['synthesizer_first_result_latency'] = (time.perf_counter() - meta_info.get('synthesizer_start_time', start_time))
-                                    meta_info['synthesizer_latency'] = meta_info['synthesizer_first_result_latency']
+                                if self.current_turn_start_time is not None:
+                                    first_result_latency = time.perf_counter() - self.current_turn_start_time
+                                    meta_info['synthesizer_latency'] = first_result_latency
                             except Exception:
                                 pass
 
@@ -272,6 +271,21 @@ class AzureSynthesizer(BaseSynthesizer):
                             if "end_of_llm_stream" in meta_info and meta_info["end_of_llm_stream"]:
                                 meta_info["end_of_synthesizer_stream"] = True
                                 self.first_chunk_generated = False
+
+                                # Populate turn_latencies list (matching ElevenLabs pattern)
+                                try:
+                                    if self.current_turn_start_time is not None:
+                                        total_stream_duration = time.perf_counter() - self.current_turn_start_time
+                                        self.turn_latencies.append({
+                                            'turn_id': self.current_turn_id,
+                                            'sequence_id': self.current_turn_id,
+                                            'first_result_latency_ms': round((meta_info.get('synthesizer_latency', 0)) * 1000),
+                                            'total_stream_duration_ms': round(total_stream_duration * 1000)
+                                        })
+                                        self.current_turn_start_time = None
+                                        self.current_turn_id = None
+                                except Exception as e:
+                                    logger.error(f"Error appending to turn_latencies: {e}")
                         
                         meta_info['text'] = text
                         meta_info['format'] = 'wav'
@@ -287,13 +301,8 @@ class AzureSynthesizer(BaseSynthesizer):
                 if self.caching and full_audio:
                     logger.info(f"Caching audio for text: {text}")
                     self.cache.set(text, bytes(full_audio))
-                
+
                 self.synthesized_characters += len(text)
-                # Compute total stream duration
-                try:
-                    meta_info['synthesizer_total_stream_duration'] = (time.perf_counter() - meta_info.get('synthesizer_start_time', start_time))
-                except Exception:
-                    pass
         except asyncio.CancelledError:
             logger.info("Azure synthesizer task was cancelled - shutting down cleanly")
             raise
@@ -306,4 +315,14 @@ class AzureSynthesizer(BaseSynthesizer):
 
     async def push(self, message):
         logger.info(f"Pushed message to internal queue {message}")
+
+        # Track turn start time and ID (matching ElevenLabs pattern)
+        try:
+            meta_info = message.get("meta_info", {})
+            self.current_turn_start_time = time.perf_counter()
+            self.current_turn_id = meta_info.get('turn_id') or meta_info.get('sequence_id')
+            self.current_text = message.get("data", "")
+        except Exception:
+            pass
+
         self.internal_queue.put_nowait(message)
