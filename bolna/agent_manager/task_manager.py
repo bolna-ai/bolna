@@ -179,17 +179,16 @@ class TaskManager(BaseManager):
         self.turn_id = 0
 
         # language detection (first N turns)
-        self.default_language = task.get('default_language', 'en')
-        self.language_detection_turns = task.get('language_detection_turns', 3)
+        self.default_language = self.task_config['task_config'].get('default_language')
+        self.language_detection_turns = self.task_config['task_config'].get('language_detection_turns')
         self.language_word_counts = {}  # Accumulate word counts: {'hi': 15, 'en': 3}
         self.current_turn_count = 0
-        self.conversation_language = None  # Determined after N turns
-        self.language_determined = False
+        self.conversation_language = None  # Detected after N turns
+        self.language_detected = False
 
         # A/B Testing: Language injection configuration
-        self.language_injection_mode = task.get('language_injection_mode', 'system_only')  # 'system_only' or 'per_turn'
-        self.language_instruction_template = task.get('language_instruction_template',
-            'LANGUAGE INSTRUCTION: User speaks in {language}. Always respond in {language}.')
+        self.language_injection_mode = self.task_config['task_config'].get('language_injection_mode')
+        self.language_instruction_template = self.task_config['task_config'].get('language_instruction_template')
 
         # Call conversations
         self.call_sid = None
@@ -1361,8 +1360,10 @@ class TaskManager(BaseManager):
         if should_bypass_synth:
             synthesize = False
 
-        # Inject language instruction based on configured mode (once determined)
-        if self.language_determined and self.conversation_language:
+        # Inject language instruction based on configured mode (once detected)
+        if (self.language_detected and self.conversation_language and
+            self.language_injection_mode is not None and
+            self.language_detection_turns and self.language_detection_turns > 0):
             language_names = {
                 'en': 'English', 'hi': 'Hindi'
             }
@@ -1587,6 +1588,42 @@ class TaskManager(BaseManager):
             skip_append_to_data = False
         return sequence
 
+    def _detect_conversation_language(self, meta_info):
+        """
+        Accumulate word counts from transcription segments and detect conversation language.
+        This method tracks language usage over the first N turns to determine the primary
+        conversation language, which can be used for prompt injection or other language-specific features.
+
+        Args:
+            meta_info (dict): Metadata from transcriber containing 'segment_word_lang_counts'
+        """
+        # Skip if language already detected or no language data in meta_info
+        if self.language_detected or 'segment_word_lang_counts' not in meta_info:
+            return
+
+        # Skip if language detection is not configured
+        if not self.language_detection_turns or self.language_detection_turns <= 0:
+            return
+
+        self.current_turn_count += 1
+
+        # Accumulate word counts
+        segment_counts = meta_info.get('segment_word_lang_counts', {})
+        for lang, count in segment_counts.items():
+            self.language_word_counts[lang] = self.language_word_counts.get(lang, 0) + count
+
+        logger.info(f"Turn {self.current_turn_count}/{self.language_detection_turns}: Word counts = {self.language_word_counts}")
+
+        # After N turns, detect conversation language
+        if self.current_turn_count >= self.language_detection_turns:
+            if self.language_word_counts:
+                self.conversation_language = max(self.language_word_counts, key=self.language_word_counts.get)
+            else:
+                self.conversation_language = self.default_language
+
+            self.language_detected = True
+            logger.info(f"Conversation language detected: {self.conversation_language} (total counts: {self.language_word_counts})")
+
     async def _handle_transcriber_output(self, next_task, transcriber_message, meta_info):
         current_ts = self.tools["input"].get_current_mark_started_time()
         self.previous_start_ts = self.current_start_ts
@@ -1600,26 +1637,8 @@ class TaskManager(BaseManager):
             logger.info(f"handle_transcriber_output -> skip as previous user message {self.history[-1]}")
             return
 
-        # accumulate word counts for first N turns
-        if not self.language_determined and 'segment_word_lang_counts' in meta_info:
-            self.current_turn_count += 1
-
-            # Accumulate word counts
-            segment_counts = meta_info.get('segment_word_lang_counts', {})
-            for lang, count in segment_counts.items():
-                self.language_word_counts[lang] = self.language_word_counts.get(lang, 0) + count
-
-            logger.info(f"Turn {self.current_turn_count}/{self.language_detection_turns}: Word counts = {self.language_word_counts}")
-
-            # After N turns, determine conversation language
-            if self.current_turn_count >= self.language_detection_turns:
-                if self.language_word_counts:
-                    self.conversation_language = max(self.language_word_counts, key=self.language_word_counts.get)
-                else:
-                    self.conversation_language = self.default_language
-
-                self.language_determined = True
-                logger.info(f"Conversation language determined: {self.conversation_language} (total counts: {self.language_word_counts})")
+        # Detect conversation language from first N turns
+        self._detect_conversation_language(meta_info)
 
         self.history.append({"role": "user", "content": transcriber_message})
 
