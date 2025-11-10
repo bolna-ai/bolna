@@ -83,9 +83,7 @@ class DefaultInputHandler:
             logger.info(f"No object retrieved from global dict of mark_event_meta_data for received mark event - {packet}")
             return
 
-        logger.info(f"Mark event meta data object retrieved = {mark_event_meta_data_obj}")
         message_type = mark_event_meta_data_obj.get("type")
-        
         is_content_audio = message_type not in ['ambient_noise', 'backchanneling']
 
         if message_type == "pre_mark_message":
