@@ -1577,6 +1577,18 @@ class TaskManager(BaseManager):
         convert_to_request_log(message=transcriber_message, meta_info=meta_info, model=self.task_config["tools_config"]["transcriber"]["provider"], run_id= self.run_id)
         if next_task == "llm":
             logger.info(f"Running llm Tasks")
+
+            # Increment to agent's turn before LLM (agent is responding)
+            if self.last_speaker != 'agent':
+                self.turn_id += 1
+                self.agent_turn_count += 1
+            self.last_speaker = 'agent'
+
+            # Update meta_info with agent's turn_id (even numbers: 2, 4, 6...)
+            meta_info['turn_id'] = self.turn_id
+            meta_info['agent_turn_count'] = self.agent_turn_count
+            meta_info['interruption_count'] = self.interruption_count
+
             meta_info["origin"] = "transcriber"
             transcriber_package = create_ws_data_packet(transcriber_message, meta_info)
             self.llm_task = asyncio.create_task(
@@ -1693,6 +1705,21 @@ class TaskManager(BaseManager):
 
                         transcriber_message = message["data"].get("content")
                         meta_info = self.__get_updated_meta_info(meta_info)
+
+                        # Process transcriber turn metrics if present
+                        if 'transcriber_turn_metrics' in meta_info:
+                            turn_metrics = meta_info['transcriber_turn_metrics']
+                            self.transcriber_latencies['turn_latencies'].append({
+                                'turn_id': meta_info['turn_id'],
+                                'interruption_count': meta_info['interruption_count'],
+                                'sequence_id': meta_info['sequence_id'],
+                                'first_result_latency_ms': turn_metrics.get('first_result_latency_ms'),
+                                'total_stream_duration_ms': turn_metrics.get('total_stream_duration_ms'),
+                                'interim_details': turn_metrics.get('interim_details', [])
+                            })
+                            # Clean up meta_info before passing downstream
+                            del meta_info['transcriber_turn_metrics']
+
                         await self._handle_transcriber_output(next_task, transcriber_message, meta_info)
 
                     elif message["data"] == "transcriber_connection_closed":
@@ -1895,10 +1922,15 @@ class TaskManager(BaseManager):
         text = message["data"]
         meta_info["type"] = "audio"
         meta_info["synthesizer_start_time"] = time.time()
-        if self.last_speaker != 'agent':
-            self.turn_id += 1
-            self.agent_turn_count += 1
-        self.last_speaker = 'agent'
+
+        # Inherit turn_id from meta_info (set by _handle_transcriber_output)
+        # For edge cases where meta_info doesn't have turn_id (system messages), use current state
+        if 'turn_id' not in meta_info or meta_info['turn_id'] is None:
+            meta_info['turn_id'] = self.turn_id
+        if 'agent_turn_count' not in meta_info or meta_info['agent_turn_count'] is None:
+            meta_info['agent_turn_count'] = self.agent_turn_count
+        if 'interruption_count' not in meta_info or meta_info['interruption_count'] is None:
+            meta_info['interruption_count'] = self.interruption_count
 
         try:
             if not self.conversation_ended and ('is_first_message' in meta_info and meta_info['is_first_message'] or message["meta_info"]["sequence_id"] in self.sequence_ids):
@@ -2323,8 +2355,6 @@ class TaskManager(BaseManager):
             if self._is_conversation_task():
                 self.transcriber_latencies['connection_latency_ms'] = self.tools["transcriber"].connection_time
                 self.synthesizer_latencies['connection_latency_ms'] = self.tools["synthesizer"].connection_time
-                
-                self.transcriber_latencies['turn_latencies'] = self.tools["transcriber"].turn_latencies
                 self.synthesizer_latencies['turn_latencies'] = self.tools["synthesizer"].turn_latencies
 
                 welcome_message_sent_ts = self.tools["output"].get_welcome_message_sent_ts()

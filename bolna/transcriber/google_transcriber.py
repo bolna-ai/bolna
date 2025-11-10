@@ -246,30 +246,23 @@ class GoogleTranscriber(BaseTranscriber):
 
     def _append_turn_latency(self):
         """
-        Add a turn latency entry compatible with the Deepgram 'turn_latencies' entries.
+        Include timing data in meta_info for TaskManager to process.
         Called when a final transcript arrives (end-of-turn semantics).
         """
         try:
-            if self.current_turn_id and self.current_turn_start_time:
+            if self.current_turn_start_time:
                 first_ms = int(round((self.meta_info.get('transcriber_first_result_latency', 0)) * 1000))
                 total_s = (time.perf_counter() - self.current_turn_start_time) if self.current_turn_start_time else 0
-                self.turn_latencies.append({
-                    'turn_id': self.current_turn_id,
-                    'interruption_count': self.meta_info.get('interruption_count'),
-                    'sequence_id': self.meta_info.get('sequence_id'),
+                # Include timing data in meta_info for TaskManager to process
+                self.meta_info['transcriber_turn_metrics'] = {
                     'first_result_latency_ms': first_ms,
                     'total_stream_duration_ms': int(round(total_s * 1000))
-                })
-                # also expose on meta_info for immediate consumption
-                try:
-                    self.meta_info['turn_latencies'] = self.turn_latencies
-                except Exception:
-                    pass
+                }
                 # reset turn tracking
                 self.current_turn_start_time = None
                 self.current_turn_id = None
         except Exception:
-            logger.exception("Error appending turn latency")
+            logger.exception("Error adding turn metrics")
 
     def _run_grpc_stream(self):
         """

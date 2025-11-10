@@ -375,16 +375,11 @@ class AssemblyAITranscriber(BaseTranscriber):
                                     total_stream_duration = time.perf_counter() - self.current_turn_start_time
                                     self.meta_info['transcriber_total_stream_duration'] = total_stream_duration
                                     self.meta_info['transcriber_latency'] = total_stream_duration
-                                    turn_info = {
-                                        'turn_id': self.current_turn_id,
-                                        'interruption_count': self.meta_info.get('interruption_count'),
-                                        'sequence_id': self.meta_info.get('sequence_id'),
-                                        'first_result_latency_ms': round(((self.meta_info or {}).get('transcriber_first_result_latency', 0)) * 1000),
-                                        'total_stream_duration_ms': round(total_stream_duration * 1000),
+                                    # Pass interim details via meta_info for TaskManager to build latencies
+                                    self.meta_info['transcriber_turn_metrics'] = {
                                         'interim_details': self.current_turn_interim_details
                                     }
-                                    self.turn_latencies.append(turn_info)
-
+                                    # Reset turn tracking
                                     self.current_turn_start_time = None
                                     self.current_turn_id = None
                                     self.current_turn_interim_details = []

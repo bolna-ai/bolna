@@ -375,21 +375,17 @@ class SarvamTranscriber(BaseTranscriber):
                             if self.current_turn_start_time:
                                 total_stream_duration = time.perf_counter() - self.current_turn_start_time
                                 total_stream_duration_ms = round(total_stream_duration * 1000)
-                                
-                                self.meta_info['transcriber_total_stream_duration'] = total_stream_duration
-                                self.meta_info['transcriber_latency'] = total_stream_duration  
 
-                                turn_info = {
-                                    "turn_id": self.current_turn_id,
-                                    "interruption_count": self.meta_info.get('interruption_count'),
-                                    "sequence_id": self.meta_info.get('sequence_id'),
+                                self.meta_info['transcriber_total_stream_duration'] = total_stream_duration
+                                self.meta_info['transcriber_latency'] = total_stream_duration
+
+                                # Include timing data in meta_info for TaskManager to process
+                                self.meta_info['transcriber_turn_metrics'] = {
                                     "first_result_latency_ms": self.turn_first_result_latency,
                                     "total_stream_duration_ms": total_stream_duration_ms,
                                 }
-                                self.turn_latencies.append(turn_info)
-                                self.meta_info["turn_latencies"] = self.turn_latencies
-                                
-                                # Reset turn tracking 
+
+                                # Reset turn tracking
                                 self.current_turn_start_time = None
                                 self.current_turn_id = None
 
