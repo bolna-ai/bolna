@@ -432,13 +432,24 @@ class AssemblyAITranscriber(BaseTranscriber):
     async def transcribe(self):
         """Main transcription method"""
         assemblyai_ws = None
+        connection_error = None
+        connection_error_type = None
+
         try:
             start_time = time.perf_counter()
-            
+
             try:
                 assemblyai_ws = await self.assemblyai_connect()
+            except InvalidHandshake as e:
+                logger.error(f"Failed to establish AssemblyAI connection - Invalid handshake: {e}")
+                connection_error = str(e)
+                connection_error_type = "InvalidHandshake"
+                await self.toggle_connection()
+                return
             except (ValueError, ConnectionError) as e:
                 logger.error(f"Failed to establish AssemblyAI connection: {e}")
+                connection_error = str(e)
+                connection_error_type = type(e).__name__
                 await self.toggle_connection()
                 return
             
@@ -469,9 +480,13 @@ class AssemblyAITranscriber(BaseTranscriber):
 
         except (ValueError, ConnectionError) as e:
             logger.error(f"Connection error in transcribe: {e}")
+            connection_error = str(e)
+            connection_error_type = type(e).__name__
             await self.toggle_connection()
         except Exception as e:
             logger.error(f"Unexpected error in transcribe: {e}")
+            connection_error = str(e)
+            connection_error_type = type(e).__name__
             await self.toggle_connection()
         finally:
             if assemblyai_ws is not None:
@@ -483,12 +498,23 @@ class AssemblyAITranscriber(BaseTranscriber):
                 finally:
                     self.websocket_connection = None
                     self.connection_authenticated = False
-            
+
             if hasattr(self, 'sender_task') and self.sender_task is not None:
                 self.sender_task.cancel()
             if hasattr(self, 'heartbeat_task') and self.heartbeat_task is not None:
                 self.heartbeat_task.cancel()
-            
-            await self.push_to_transcriber_queue(
-                create_ws_data_packet("transcriber_connection_closed", getattr(self, 'meta_info', {}))
-            )
+
+            # Send appropriate message based on whether there was an error
+            if connection_error:
+                logger.error(f"Sending connection_failed message: {connection_error_type} - {connection_error}")
+                await self.push_to_transcriber_queue(
+                    create_ws_data_packet("connection_failed", {
+                        "error": connection_error,
+                        "error_type": connection_error_type,
+                        "component": "transcriber"
+                    })
+                )
+            else:
+                await self.push_to_transcriber_queue(
+                    create_ws_data_packet("transcriber_connection_closed", getattr(self, 'meta_info', {}))
+                )

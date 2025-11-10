@@ -437,7 +437,10 @@ class DeepgramTranscriber(BaseTranscriber):
             raise ConnectionError("Timeout while connecting to Deepgram websocket")
         except InvalidHandshake as e:
             logger.error(f"Invalid handshake during Deepgram websocket connection: {e}")
-            raise ConnectionError(f"Invalid handshake during Deepgram websocket connection: {e}")
+            # Preserve the InvalidHandshake type as an attribute
+            error = ConnectionError(f"Invalid handshake during Deepgram websocket connection: {e}")
+            error.error_type = "InvalidHandshake"
+            raise error
         except ConnectionClosedError as e:
             logger.error(f"Deepgram websocket connection closed unexpectedly: {e}")
             raise ConnectionError(f"Deepgram websocket connection closed unexpectedly: {e}")
@@ -493,12 +496,18 @@ class DeepgramTranscriber(BaseTranscriber):
 
     async def transcribe(self):
         deepgram_ws = None
+        connection_error = None
+        connection_error_type = None
+
         try:
             start_time = timestamp_ms()
             try:
                 deepgram_ws = await self.deepgram_connect()
             except (ValueError, ConnectionError) as e:
                 logger.error(f"Failed to establish Deepgram connection: {e}")
+                connection_error = str(e)
+                # Check if error has preserved error_type attribute (for InvalidHandshake)
+                connection_error_type = getattr(e, 'error_type', type(e).__name__)
                 await self.toggle_connection()
                 return
 
@@ -528,9 +537,13 @@ class DeepgramTranscriber(BaseTranscriber):
 
         except (ValueError, ConnectionError) as e:
             logger.error(f"Connection error in transcribe: {e}")
+            connection_error = str(e)
+            connection_error_type = getattr(e, 'error_type', type(e).__name__)
             await self.toggle_connection()
         except Exception as e:
             logger.error(f"Unexpected error in transcribe: {e}")
+            connection_error = str(e)
+            connection_error_type = getattr(e, 'error_type', type(e).__name__)
             await self.toggle_connection()
         finally:
             if deepgram_ws is not None:
@@ -547,7 +560,18 @@ class DeepgramTranscriber(BaseTranscriber):
                 self.sender_task.cancel()
             if hasattr(self, 'heartbeat_task') and self.heartbeat_task is not None:
                 self.heartbeat_task.cancel()
-            
-            await self.push_to_transcriber_queue(
-                create_ws_data_packet("transcriber_connection_closed", getattr(self, 'meta_info', {}))
-            )
+
+            # Send appropriate message based on whether there was an error
+            if connection_error:
+                logger.error(f"Sending connection_failed message: {connection_error_type} - {connection_error}")
+                await self.push_to_transcriber_queue(
+                    create_ws_data_packet("connection_failed", {
+                        "error": connection_error,
+                        "error_type": connection_error_type,
+                        "component": "transcriber"
+                    })
+                )
+            else:
+                await self.push_to_transcriber_queue(
+                    create_ws_data_packet("transcriber_connection_closed", getattr(self, 'meta_info', {}))
+                )

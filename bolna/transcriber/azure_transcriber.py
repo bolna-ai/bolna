@@ -35,6 +35,8 @@ class AzureTranscriber(BaseTranscriber):
         self.duration = 0
         self.start_time = None
         self.end_time = None
+        self.connection_error = None
+        self.connection_error_type = None
 
         if self.audio_provider in ("twilio", "exotel", "plivo"):
             self.encoding = "mulaw" if self.audio_provider in ("twilio",) else "linear16"
@@ -53,6 +55,16 @@ class AzureTranscriber(BaseTranscriber):
             self.send_audio_to_transcriber_task = asyncio.create_task(self.send_audio_to_transcriber())
         except Exception as e:
             logger.error(f"Error received in run method - {e}")
+            # Check if error has preserved error_type attribute
+            connection_error_type = getattr(e, 'error_type', type(e).__name__)
+            # Send connection failure message
+            await self.transcriber_output_queue.put(
+                create_ws_data_packet("connection_failed", {
+                    "error": str(e),
+                    "error_type": connection_error_type,
+                    "component": "transcriber"
+                })
+            )
 
     def _check_and_process_end_of_stream(self, ws_data_packet):
         if 'eos' in ws_data_packet['meta_info'] and ws_data_packet['meta_info']['eos'] is True:
@@ -125,8 +137,28 @@ class AzureTranscriber(BaseTranscriber):
             if not self.connection_time:
                 self.connection_time = round((time.perf_counter() - start_time) * 1000)
 
+        except ValueError as e:
+            # ValueError typically indicates credential/authentication issues
+            logger.error(f"Authentication error in initialize_connection - {e}")
+            self.connection_error = str(e)
+            self.connection_error_type = "AuthenticationError"
+            error = ConnectionError(f"Failed to initialize Azure transcriber: {e}")
+            error.error_type = "AuthenticationError"
+            raise error
         except Exception as e:
             logger.error(f"Error in initialize_connection - {e}")
+            self.connection_error = str(e)
+            # Check if it's an authentication-related error
+            error_str = str(e).lower()
+            if "403" in error_str or "401" in error_str or "authentication" in error_str or "unauthorized" in error_str:
+                self.connection_error_type = "AuthenticationError"
+                error = ConnectionError(f"Failed to initialize Azure transcriber: {e}")
+                error.error_type = "AuthenticationError"
+            else:
+                self.connection_error_type = type(e).__name__
+                error = ConnectionError(f"Failed to initialize Azure transcriber: {e}")
+                error.error_type = type(e).__name__
+            raise error
 
     # Synchronous wrapper functions that schedule the async handlers
     def _sync_recognizing_handler(self, evt):
@@ -177,6 +209,33 @@ class AzureTranscriber(BaseTranscriber):
 
     async def canceled_handler(self, evt):
         logger.info(f"Canceled event received: {evt} | run_id - {self.run_id}")
+
+        # Check if this is an error (not just normal cancellation)
+        cancellation_details = evt.result.cancellation_details
+        if cancellation_details.reason == speechsdk.CancellationReason.Error:
+            error_details = cancellation_details.error_details
+            error_code = getattr(cancellation_details, 'error_code', 'Unknown')
+
+            logger.error(f"Azure transcriber error - Code: {error_code}, Details: {error_details}")
+
+            # Detect authentication failures (403/401)
+            is_auth_error = "403" in str(error_details) or "401" in str(error_details) or "AuthenticationFailure" in str(error_details)
+
+            self.connection_error = error_details
+            self.connection_error_type = "AuthenticationError" if is_auth_error else "ConnectionError"
+
+            # Send connection_failed message
+            await self.transcriber_output_queue.put(
+                create_ws_data_packet("connection_failed", {
+                    "error": str(error_details),
+                    "error_type": self.connection_error_type,
+                    "error_code": str(error_code),
+                    "component": "transcriber"
+                })
+            )
+
+            # Raise to propagate to task_manager
+            raise ConnectionError(f"Azure transcriber connection failed: {error_details}")
 
     async def session_started_handler(self, evt):
         logger.info(f"Session start event received: {evt} | run_id - {self.run_id}")

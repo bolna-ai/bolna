@@ -571,6 +571,39 @@ def convert_to_request_log(message, meta_info, model, component="transcriber", d
     asyncio.create_task(write_request_logs(log, run_id))
 
 
+async def convert_to_request_log_async(message, meta_info, model, component="transcriber", direction='response', is_cached=False, engine=None, run_id=None):
+    """Async version of convert_to_request_log that awaits the write operation.
+
+    Use this version when you need to ensure the log is written before continuing,
+    such as in error handlers where the process may terminate immediately after.
+    """
+    log = dict()
+    log['direction'] = direction
+    log['data'] = message
+    log['leg_id'] = meta_info['request_id'] if "request_id" in meta_info else "-"
+    log['time'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    log['component'] = component
+    log['sequence_id'] = meta_info.get('sequence_id', None)
+    log['model'] = model
+    log['cached'] = is_cached
+    if component == "llm":
+        log['latency'] = meta_info.get('llm_latency', None) if direction == "response" else None
+    if component == "synthesizer":
+        log['latency'] = meta_info.get('synthesizer_latency', None) if direction == "response" else None
+    if component == "transcriber":
+        log['latency'] = meta_info.get('transcriber_latency', None) if direction == "response" else None
+        if 'is_final' in meta_info and meta_info['is_final']:
+            log['is_final'] = True
+    if component == "function_call":
+        log['latency'] = None
+    if component == "llm-hangup":
+        log['latency'] = meta_info.get('llm_latency', None) if direction == "response" else None
+    else:
+        log['is_final'] = False #This is logged only for users to know final transcript from the transcriber
+    log['engine'] = engine
+    await write_request_logs(log, run_id)
+
+
 def get_route_info(message, route_layer):
     route = route_layer(message)
     logger.info(f"route gotten {route}")

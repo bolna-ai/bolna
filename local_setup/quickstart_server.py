@@ -199,7 +199,35 @@ async def websocket_endpoint(agent_id: str, websocket: WebSocket, user_agent: st
         async for index, task_output in assistant_manager.run(local=True):
             logger.info(task_output)
     except WebSocketDisconnect:
-        active_websockets.remove(websocket)
+        logger.info("WebSocket disconnected by client")
+        if websocket in active_websockets:
+            active_websockets.remove(websocket)
+    except ConnectionError as e:
+        # Connection failure in transcriber/synthesizer
+        logger.error(f"Connection failure: {e}")
+        try:
+            await websocket.send_json({
+                "type": "error",
+                "message": f"Call terminated due to connection failure: {str(e)}"
+            })
+            await websocket.close(code=1011, reason=str(e)[:100])  # Reason limited to 123 bytes
+        except Exception as close_error:
+            logger.error(f"Error while closing websocket: {close_error}")
+        finally:
+            if websocket in active_websockets:
+                active_websockets.remove(websocket)
     except Exception as e:
+        # Other unexpected errors
         traceback.print_exc()
-        logger.error(f"error in executing {e}")
+        logger.error(f"Error in executing: {e}")
+        try:
+            await websocket.send_json({
+                "type": "error",
+                "message": f"Call terminated: {str(e)}"
+            })
+            await websocket.close(code=1011, reason="Internal error")
+        except Exception as close_error:
+            logger.error(f"Error while closing websocket: {close_error}")
+        finally:
+            if websocket in active_websockets:
+                active_websockets.remove(websocket)

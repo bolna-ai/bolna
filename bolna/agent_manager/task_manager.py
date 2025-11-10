@@ -22,7 +22,7 @@ from bolna.agent_types import *
 from bolna.providers import *
 from bolna.prompts import *
 from bolna.helpers.utils import structure_system_prompt, compute_function_pre_call_message, get_date_time_from_timezone, get_route_info, calculate_audio_duration, create_ws_data_packet, get_file_names_in_directory, get_raw_audio_bytes, is_valid_md5, \
-    get_required_input_types, format_messages, get_prompt_responses, resample, save_audio_file_to_s3, update_prompt_with_context, get_md5_hash, clean_json_string, wav_bytes_to_pcm, convert_to_request_log, yield_chunks_from_memory, process_task_cancellation
+    get_required_input_types, format_messages, get_prompt_responses, resample, save_audio_file_to_s3, update_prompt_with_context, get_md5_hash, clean_json_string, wav_bytes_to_pcm, convert_to_request_log, convert_to_request_log_async, yield_chunks_from_memory, process_task_cancellation
 from bolna.helpers.logger_config import configure_logger
 from semantic_router import Route
 from semantic_router.layer import RouteLayer
@@ -1589,6 +1589,21 @@ class TaskManager(BaseManager):
                 message = await self.transcriber_output_queue.get()
                 logger.info(f"Message from the transcriber class {message}")
 
+                # Check for connection failures and raise immediately
+                if message["data"] == "connection_failed":
+                    error_type = message.get("meta_info", {}).get("error_type", "Unknown")
+                    error_msg = message.get("meta_info", {}).get("error", "Connection failed")
+                    component = message.get("meta_info", {}).get("component", "transcriber")
+
+                    logger.error(f"{component} connection failed: {error_type} - {error_msg}")
+
+                    # Immediate termination for authentication/handshake failures
+                    if error_type == "InvalidHandshake":
+                        raise ConnectionError(f"{component} authentication failed: {error_msg}")
+
+                    # Raise for all other connection errors
+                    raise ConnectionError(f"{component} connection failed ({error_type}): {error_msg}")
+
                 if self.hangup_triggered:
                     if message["data"] == "transcriber_connection_closed":
                         logger.info(f"Transcriber connection has been closed")
@@ -1699,6 +1714,11 @@ class TaskManager(BaseManager):
         except websockets.exceptions.ConnectionClosedOK:
             # Normal WebSocket closure (code 1000)
             pass
+        except ConnectionError as e:
+            # Re-raise ConnectionError to propagate to run() for immediate call termination
+            traceback.print_exc()
+            logger.error(f"Connection error in transcriber: {e}")
+            raise
         except Exception as e:
             traceback.print_exc()
             logger.error(f"Error in transcriber {e}")
@@ -2246,6 +2266,7 @@ class TaskManager(BaseManager):
                 except Exception as e:
                     traceback.print_exc()
                     logger.error(f"Error: {e}")
+                    raise  # Re-raise to trigger outer exception handler for CSV logging
 
                 if self.generate_precise_transcript:
                     current_ts = time.time()
@@ -2277,19 +2298,25 @@ class TaskManager(BaseManager):
 
             # Log call-breaking exception to CSV trace
             if self.run_id:
-                meta_info = {
-                    'request_id': self.task_id,
-                    'sequence_id': None
-                }
-                convert_to_request_log(
-                    f"Call Breaking Error: {error_message}",
-                    meta_info,
-                    model="-",
-                    component="error",
-                    direction="error",
-                    is_cached=False,
-                    run_id=self.run_id
-                )
+                try:
+                    logger.info(f"Attempting to log error to CSV for run_id: {self.run_id}")
+                    meta_info = {
+                        'request_id': self.task_id,
+                        'sequence_id': None
+                    }
+                    await convert_to_request_log_async(
+                        f"Call Breaking Error: {error_message}",
+                        meta_info,
+                        model="-",
+                        component="error",
+                        direction="error",
+                        is_cached=False,
+                        run_id=self.run_id
+                    )
+                    logger.info(f"Successfully logged error to CSV for run_id: {self.run_id}")
+                except Exception as csv_error:
+                    logger.error(f"Failed to log error to CSV: {csv_error}")
+                    traceback.print_exc()
 
             await self.handle_cancellation(f"Exception occurred {e}")
             raise Exception(e)
