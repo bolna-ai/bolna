@@ -333,11 +333,7 @@ class DeepgramTranscriber(BaseTranscriber):
                         yield create_ws_data_packet(data, self.meta_info)
 
                     if msg["is_final"] and transcript.strip():
-                        logger.info(f"===== DEEPGRAM RESPONSE (is_final=True) =====")
-                        logger.info(f"{json.dumps(msg, indent=2)}")
-                        logger.info(f"==============================================")
                         logger.info(f"Received interim result with is_final set as True - {transcript}")
-
                         # Extract language data ONLY if Deepgram is in multilingual mode
                         try:
                             alternative = msg["channel"]["alternatives"][0]
@@ -410,8 +406,8 @@ class DeepgramTranscriber(BaseTranscriber):
                                 self.current_turn_id = None
                                 self.final_transcript = ""
                                 self.is_transcript_sent_for_processing = True
-                            except Exception:
-                                pass
+                            except Exception as e:
+                                logger.error(f"Failed to extract transcript from Deepgram response in speech_final: {e}")
                             yield create_ws_data_packet(data, self.meta_info)
 
                 elif msg["type"] == "UtteranceEnd":
@@ -440,8 +436,8 @@ class DeepgramTranscriber(BaseTranscriber):
                             self.current_turn_id = None
                             self.final_transcript = ""
                             self.is_transcript_sent_for_processing = True
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            logger.error(f"Failed to extract transcript from Deepgram response: {e}")
                         yield create_ws_data_packet(data, self.meta_info)
 
                 elif msg["type"] == "Metadata" and msg.get('transaction_key') != 'deprecated':

@@ -1367,22 +1367,25 @@ class TaskManager(BaseManager):
             language_names = {
                 'en': 'English', 'hi': 'Hindi'
             }
-            lang_name = language_names.get(self.conversation_language, self.conversation_language)
-            instruction = self.language_instruction_template.format(language=lang_name) + "\n\n"
+            try:
+                lang_name = language_names.get(self.conversation_language, self.conversation_language)
+                instruction = self.language_instruction_template.format(language=lang_name) + "\n\n"
 
-            if self.language_injection_mode == 'system_only':
-                # Inject once at top of system prompt
-                for i, msg in enumerate(messages):
-                    if msg.get('role') == 'system':
-                        messages[i]['content'] = instruction + msg['content']
-                        logger.info(f"[system_only] Injected language instruction: {lang_name}")
-                        break
-            elif self.language_injection_mode == 'per_turn':
-                # Inject before every user message
-                for i, msg in enumerate(messages):
-                    if msg.get('role') == 'user':
-                        messages[i]['content'] = instruction + msg['content']
-                logger.info(f"[per_turn] Injected language instruction to {sum(1 for m in messages if m.get('role') == 'user')} user messages: {lang_name}")
+                if self.language_injection_mode == 'system_only':
+                    # Inject once at top of system prompt
+                    for i, msg in enumerate(messages):
+                        if msg.get('role') == 'system':
+                            messages[i]['content'] = instruction + msg['content']
+                            logger.info(f"[system_only] Injected language instruction: {lang_name}")
+                            break
+                elif self.language_injection_mode == 'per_turn':
+                    # Inject before every user message
+                    for i, msg in enumerate(messages):
+                        if msg.get('role') == 'user':
+                            messages[i]['content'] = instruction + msg['content']
+                    logger.info(f"[per_turn] Injected language instruction to {sum(1 for m in messages if m.get('role') == 'user')} user messages: {lang_name}")
+            except Exception as e:
+                logger.error(f"Exception while injecting language instruction: {e}")
 
         async for llm_message in self.tools['llm_agent'].generate(messages, synthesize=synthesize, meta_info=meta_info):
             data, end_of_llm_stream, latency, trigger_function_call, function_tool, function_tool_message = llm_message
