@@ -1714,7 +1714,7 @@ class TaskManager(BaseManager):
                                 continue
 
                         # Doing changes for incremental delay
-                        self.required_delay_before_speaking = self.incremental_delay
+                        self.required_delay_before_speaking = self.incremental_delay if len(self.history) > 2 else 0
                         logger.info(f"Increased the incremental delay time to {self.required_delay_before_speaking}")
                         if self.time_since_first_interim_result == -1:
                             self.time_since_first_interim_result = time.time() * 1000
@@ -1752,7 +1752,7 @@ class TaskManager(BaseManager):
                         # Resetting variables for incremental delay
                         self.time_since_first_interim_result = -1
                         self.required_delay_before_speaking = max(
-                            self.minimum_wait_duration - self.incremental_delay, 0)
+                            self.minimum_wait_duration - self.incremental_delay, 0) if len(self.history) > 2 else 0
 
                         transcriber_message = message["data"].get("content")
                         meta_info = self.__get_updated_meta_info(meta_info)
