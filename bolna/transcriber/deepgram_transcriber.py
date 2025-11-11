@@ -67,6 +67,7 @@ class DeepgramTranscriber(BaseTranscriber):
         self.current_turn_interim_details = []
         self.audio_frame_timestamps = []  # List of (frame_start, frame_end, send_timestamp)
         self.turn_counter = 0
+        self.speech_started_sent = False
 
     def get_deepgram_ws_url(self):
         dg_params = {
@@ -298,15 +299,18 @@ class DeepgramTranscriber(BaseTranscriber):
                     self.current_turn_id = self.turn_counter
                     self.speech_start_time = timestamp_ms()
                     self.current_turn_interim_details = []
-
-                    logger.info(f"Starting new turn with turn_id: {self.current_turn_id}")
-                    yield create_ws_data_packet("speech_started", self.meta_info)
+                    self.speech_started_sent = False
                     pass
 
                 elif msg["type"] == "Results":
                     transcript = msg["channel"]["alternatives"][0]["transcript"]
 
                     if transcript.strip():
+                        if not self.speech_started_sent:
+                            logger.info(f"Sending speech_started with first non-empty transcript: {transcript}")
+                            yield create_ws_data_packet("speech_started", self.meta_info)
+                            self.speech_started_sent = True
+
                         # Calculate latency using end position (start + duration) for cumulative transcripts
                         self.__set_transcription_cursor(msg)
                         audio_position_end = self.transcription_cursor
