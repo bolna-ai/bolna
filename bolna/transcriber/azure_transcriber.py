@@ -246,16 +246,12 @@ class AzureTranscriber(BaseTranscriber):
             self.current_turn_interim_details.append(interim_detail)
 
             try:
-                if not self.current_turn_id:
-                    self.current_turn_id = self.meta_info.get('turn_id') or self.meta_info.get('request_id')
-
-                turn_info = {
-                    'turn_id': self.current_turn_id,
-                    'sequence_id': self.current_turn_id,
+                # Pass interim details via meta_info for TaskManager to build latencies
+                self.meta_info['transcriber_turn_metrics'] = {
                     'interim_details': self.current_turn_interim_details
                 }
-                self.turn_latencies.append(turn_info)
 
+                # Reset turn tracking
                 self.current_turn_interim_details = []
                 self.current_turn_start_time = None
                 self.current_turn_id = None
