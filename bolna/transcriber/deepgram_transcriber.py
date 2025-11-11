@@ -408,6 +408,7 @@ class DeepgramTranscriber(BaseTranscriber):
                                 self.is_transcript_sent_for_processing = True
                             except Exception as e:
                                 logger.error(f"Failed to extract transcript from Deepgram response in speech_final: {e}")
+                                pass
                             yield create_ws_data_packet(data, self.meta_info)
 
                 elif msg["type"] == "UtteranceEnd":
@@ -438,6 +439,7 @@ class DeepgramTranscriber(BaseTranscriber):
                             self.is_transcript_sent_for_processing = True
                         except Exception as e:
                             logger.error(f"Failed to extract transcript from Deepgram response: {e}")
+                            pass
                         yield create_ws_data_packet(data, self.meta_info)
 
                 elif msg["type"] == "Metadata" and msg.get('transaction_key') != 'deprecated':
