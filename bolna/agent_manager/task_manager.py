@@ -2126,13 +2126,17 @@ class TaskManager(BaseManager):
                 continue
 
             time_since_last_spoken_ai_word = (time.time() - self.last_transmitted_timestamp)
+            time_since_user_last_spoke = (time.time() - self.time_since_last_spoken_human_word) if self.time_since_last_spoken_human_word > 0 else float('inf')
+
             if self.hang_conversation_after > 0 and time_since_last_spoken_ai_word > self.hang_conversation_after and self.time_since_last_spoken_human_word < self.last_transmitted_timestamp:
                 logger.info(f"{time_since_last_spoken_ai_word} seconds since last spoken time stamp and hence cutting the phone call and last transmitted timestampt ws {self.last_transmitted_timestamp} and time since last spoken human word {self.time_since_last_spoken_human_word}")
                 await self.process_call_hangup()
                 break
 
-            elif time_since_last_spoken_ai_word > self.trigger_user_online_message_after and not self.asked_if_user_is_still_there and self.time_since_last_spoken_human_word < self.last_transmitted_timestamp:
-                logger.info(f"Asking if the user is still there")
+            elif (time_since_last_spoken_ai_word > self.trigger_user_online_message_after and
+                  not self.asked_if_user_is_still_there and
+                  time_since_user_last_spoke > self.trigger_user_online_message_after):
+                logger.info(f"Asking if the user is still there (agent silent for {time_since_last_spoken_ai_word:.2f}s, user silent for {time_since_user_last_spoke:.2f}s)")
                 self.asked_if_user_is_still_there = True
 
                 if self.check_if_user_online:
