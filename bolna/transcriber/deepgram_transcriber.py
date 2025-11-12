@@ -67,6 +67,10 @@ class DeepgramTranscriber(BaseTranscriber):
         self.current_turn_interim_details = []
         self.audio_frame_timestamps = []  # List of (frame_start, frame_end, send_timestamp)
         self.turn_counter = 0
+        # Timeout tracking for stuck utterances
+        self.last_interim_time = None
+        self.interim_timeout = kwargs.get("interim_timeout", 5.0)  # Default 5 seconds
+        self.utterance_timeout_task = None
 
     def get_deepgram_ws_url(self):
         dg_params = {
@@ -153,13 +157,94 @@ class DeepgramTranscriber(BaseTranscriber):
             logger.error('Error in send_heartbeat: ' + str(e))
             raise
 
+    def _reset_turn_state(self):
+        """Reset turn state variables after finalizing a transcript"""
+        self.speech_start_time = None
+        self.speech_end_time = None
+        self.last_interim_time = None
+        self.current_turn_interim_details = []
+        self.current_turn_start_time = None
+        self.current_turn_id = None
+        self.final_transcript = ""
+        self.is_transcript_sent_for_processing = True
+
+    async def _force_finalize_utterance(self):
+        """Force-finalize a stuck utterance and send to queue"""
+
+        # Determine what transcript to use
+        transcript_to_send = self.final_transcript.strip()
+
+        # Fallback: use last interim if no is_final results received
+        if not transcript_to_send and self.current_turn_interim_details:
+            transcript_to_send = self.current_turn_interim_details[-1]['transcript']
+            logger.info(f"Using last interim as fallback: {transcript_to_send}")
+
+        if not transcript_to_send:
+            logger.warning("No transcript available to force-finalize")
+            self._reset_turn_state()
+            return
+
+        # Build turn latencies (same as UtteranceEnd logic)
+        try:
+            self.turn_latencies.append({
+                'turn_id': self.current_turn_id,
+                'sequence_id': self.current_turn_id,
+                'interim_details': self.current_turn_interim_details,
+                'force_finalized': True
+            })
+        except Exception as e:
+            logger.error(f"Error building turn latencies: {e}")
+
+        # Create transcript message (same format as UtteranceEnd)
+        data = {
+            "type": "transcript",
+            "content": transcript_to_send,
+            "force_finalized": True  # For debugging
+        }
+
+        logger.info(f"Force-finalized transcript after timeout: {transcript_to_send}")
+
+        # Send to queue (unblocks _listen_transcriber)
+        await self.push_to_transcriber_queue(create_ws_data_packet(data, self.meta_info))
+
+        # Reset state (same as normal UtteranceEnd)
+        self._reset_turn_state()
+
+    async def monitor_utterance_timeout(self):
+        """Monitor for stuck utterances that never receive UtteranceEnd"""
+        try:
+            while True:
+                await asyncio.sleep(1.0)
+
+                # Check if we have pending interim results without finalization
+                if (self.last_interim_time and
+                    not self.is_transcript_sent_for_processing and
+                    (self.final_transcript.strip() or self.current_turn_interim_details)):
+
+                    elapsed = time.time() - self.last_interim_time
+
+                    if elapsed > self.interim_timeout:
+                        logger.warning(
+                            f"Interim timeout: No finalization for {elapsed:.1f}s. "
+                            f"Force-finalizing turn {self.current_turn_id}"
+                        )
+                        await self._force_finalize_utterance()
+        except asyncio.CancelledError:
+            logger.info("Utterance timeout monitoring task cancelled")
+            raise
+        except Exception as e:
+            logger.error(f"Error in monitor_utterance_timeout: {e}")
+            raise
+
     async def toggle_connection(self):
         self.connection_on = False
         if self.heartbeat_task is not None:
             self.heartbeat_task.cancel()
         if self.sender_task is not None:
             self.sender_task.cancel()
-        
+        if self.utterance_timeout_task is not None:
+            self.utterance_timeout_task.cancel()
+
         if self.websocket_connection is not None:
             try:
                 await self.websocket_connection.close()
@@ -325,6 +410,8 @@ class DeepgramTranscriber(BaseTranscriber):
                         }
 
                         self.current_turn_interim_details.append(interim_detail)
+                        # Track time of last interim for timeout monitoring
+                        self.last_interim_time = time.time()
 
                         data = {
                             "type": "interim_transcript_received",
@@ -552,7 +639,7 @@ class DeepgramTranscriber(BaseTranscriber):
             if self.stream:
                 self.sender_task = asyncio.create_task(self.sender_stream(deepgram_ws))
                 self.heartbeat_task = asyncio.create_task(self.send_heartbeat(deepgram_ws))
-                
+                self.utterance_timeout_task = asyncio.create_task(self.monitor_utterance_timeout())
                 try:
                     async for message in self.receiver(deepgram_ws):
                         if self.connection_on:
@@ -591,7 +678,9 @@ class DeepgramTranscriber(BaseTranscriber):
                 self.sender_task.cancel()
             if hasattr(self, 'heartbeat_task') and self.heartbeat_task is not None:
                 self.heartbeat_task.cancel()
-            
+            if hasattr(self, 'utterance_timeout_task') and self.utterance_timeout_task is not None:
+                self.utterance_timeout_task.cancel()
+
             await self.push_to_transcriber_queue(
                 create_ws_data_packet("transcriber_connection_closed", getattr(self, 'meta_info', {}))
             )
