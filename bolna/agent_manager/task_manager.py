@@ -2045,6 +2045,14 @@ class TaskManager(BaseManager):
 
                 message = await self.buffered_output_queue.get()
 
+                # Reset incremental delay timers when new audio sequence starts
+                # This prevents infinite sleep bug when user interrupts and agent responds
+                meta_info = message.get('meta_info', {})
+                if meta_info.get("is_first_chunk_of_entire_response", False):
+                    logger.info("##### Resetting timers for new audio sequence")
+                    self.time_since_first_interim_result = -1
+                    self.required_delay_before_speaking = 0
+
                 if "end_of_conversation" in message['meta_info']:
                     await self.__process_end_of_conversation()
 
