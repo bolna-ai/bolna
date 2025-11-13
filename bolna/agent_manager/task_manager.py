@@ -1582,7 +1582,6 @@ class TaskManager(BaseManager):
         meta_info['turn_id'] = self.turn_id
         meta_info['user_turn_count'] = self.user_turn_count
         meta_info['interruption_count'] = self.interruption_count
-        meta_info['sequence_id'] = self.sequence_id
 
         # Process transcriber turn metrics if present
         if 'transcriber_turn_metrics' in meta_info:
