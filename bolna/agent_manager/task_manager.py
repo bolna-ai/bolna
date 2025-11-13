@@ -1625,11 +1625,8 @@ class TaskManager(BaseManager):
 
                     # Handling of transcriber events
                     if message["data"] == "speech_started":
-                        if self.last_speaker != 'user':
-                            self.turn_id += 1
-                            self.user_turn_count += 1
-                        self.last_speaker = 'user'
-
+                        # Note: turn_id increment moved to transcript arrival (universal trigger)
+                        # Keep this block for logging and future speech_started specific logic
                         if self.tools["input"].welcome_message_played():
                             logger.info(f"User has started speaking")
                             # self.callee_silent = False
@@ -1677,6 +1674,13 @@ class TaskManager(BaseManager):
                     # Whenever speech_final or UtteranceEnd is received from Deepgram, this condition would get triggered
                     elif isinstance(message.get("data"), dict) and message["data"].get("type", "") == "transcript":
                         logger.info(f"Received transcript, sending for further processing")
+
+                        # Increment user's turn when final transcript arrives (universal trigger for all transcribers)
+                        if self.last_speaker != 'user':
+                            self.turn_id += 1
+                            self.user_turn_count += 1
+                        self.last_speaker = 'user'
+
                         if self.tools["input"].welcome_message_played() and self.tools["input"].is_audio_being_played_to_user() and \
                                 len(message["data"].get("content").strip().split(" ")) <= self.number_of_words_for_interruption and \
                                 message["data"].get("content").strip() not in self.accidental_interruption_phrases:
