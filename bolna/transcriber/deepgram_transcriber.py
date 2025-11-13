@@ -477,13 +477,11 @@ class DeepgramTranscriber(BaseTranscriber):
                                 "content": self.final_transcript
                             }
 
-                            # Build turn_latencies with new metrics before resetting
+                            # Include timing data in meta_info for TaskManager to process
                             try:
-                                self.turn_latencies.append({
-                                    'turn_id': self.current_turn_id,
-                                    'sequence_id': self.current_turn_id,
+                                self.meta_info['transcriber_turn_metrics'] = {
                                     'interim_details': self.current_turn_interim_details
-                                })
+                                }
 
                                 # Complete turn reset
                                 self.speech_start_time = None
@@ -508,13 +506,11 @@ class DeepgramTranscriber(BaseTranscriber):
                             "content": self.final_transcript
                         }
 
-                        # Build turn_latencies with new metrics before resetting
+                        # Include timing data in meta_info for TaskManager to process
                         try:
-                            self.turn_latencies.append({
-                                'turn_id': self.current_turn_id,
-                                'sequence_id': self.current_turn_id,
+                            self.meta_info['transcriber_turn_metrics'] = {
                                 'interim_details': self.current_turn_interim_details
-                            })
+                            }
 
                             # Complete turn reset
                             self.speech_start_time = None

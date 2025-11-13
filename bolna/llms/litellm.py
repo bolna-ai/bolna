@@ -80,6 +80,8 @@ class LiteLLM(BaseLLM):
         start_time = now_ms()
         latency_data = {
             "sequence_id": meta_info.get("sequence_id") if meta_info else None,
+            "turn_id": meta_info.get("turn_id") if meta_info else None,
+            "interruption_count": meta_info.get("interruption_count", 0) if meta_info else 0,
             "first_token_latency_ms": None,
             "total_stream_duration_ms": None,
         }
@@ -127,6 +129,8 @@ class LiteLLM(BaseLLM):
 
                 latency_data = {
                     "sequence_id": meta_info.get("sequence_id"),
+                    "turn_id": meta_info.get("turn_id"),
+                    "interruption_count": meta_info.get("interruption_count", 0),
                     "first_token_latency_ms": first_token_time - start_time,
                     "total_stream_duration_ms": None  # Will be filled at end
                 }

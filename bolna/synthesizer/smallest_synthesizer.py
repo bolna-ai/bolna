@@ -126,14 +126,14 @@ class SmallestSynthesizer(BaseSynthesizer):
                             if self.current_turn_start_time is not None:
                                 total_stream_duration = time.perf_counter() - self.current_turn_start_time
                                 self.turn_latencies.append({
-                                    'turn_id': self.current_turn_id,
-                                    'sequence_id': self.current_turn_id,
+                                    'turn_id': self.meta_info.get('turn_id'),
+                                    'interruption_count': self.meta_info.get('interruption_count'),
+                                    'sequence_id': self.meta_info.get('sequence_id'),
                                     'first_result_latency_ms': round((self.meta_info.get('synthesizer_latency', 0)) * 1000),
                                     'total_stream_duration_ms': round(total_stream_duration * 1000)
                                 })
                                 # Reset turn tracking
                                 self.current_turn_start_time = None
-                                self.current_turn_id = None
                         except Exception:
                             pass
 

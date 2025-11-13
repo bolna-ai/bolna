@@ -20,7 +20,6 @@ class BaseTranscriber:
         self.previous_request_id = None
         self.current_request_id = None
         self.connection_time = None
-        self.turn_latencies = []
 
     def update_meta_info(self):
         self.meta_info['request_id'] = self.current_request_id if self.current_request_id else None

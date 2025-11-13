@@ -176,7 +176,11 @@ class TaskManager(BaseManager):
         self.callee_speaking = False
         self.callee_speaking_start_time = -1
         self.llm_response_generated = False
-        self.turn_id = 0
+        self.interruption_count = 0  # Only increments when user interrupts agent
+        self.turn_id = 0  # Increments on EVERY speaker change
+        self.user_turn_count = 0  # Count of user turns
+        self.agent_turn_count = 0  # Count of agent turns
+        self.last_speaker = None  # Track who spoke last ('user' or 'agent')
 
         # language detection (first N turns)
         self.default_language = self.task_config['task_config'].get('default_language')
@@ -991,6 +995,10 @@ class TaskManager(BaseManager):
         self.curr_sequence_id += 1
         meta_info_copy["sequence_id"] = self.curr_sequence_id
         meta_info_copy['turn_id'] = self.turn_id
+        meta_info_copy['interruption_count'] = self.interruption_count
+        meta_info_copy['user_turn_count'] = self.user_turn_count
+        meta_info_copy['agent_turn_count'] = self.agent_turn_count
+
         self.sequence_ids.add(meta_info_copy["sequence_id"])
         return meta_info_copy
 
@@ -1648,6 +1656,18 @@ class TaskManager(BaseManager):
         convert_to_request_log(message=transcriber_message, meta_info=meta_info, model=self.task_config["tools_config"]["transcriber"]["provider"], run_id= self.run_id)
         if next_task == "llm":
             logger.info(f"Running llm Tasks")
+
+            # Increment to agent's turn before LLM (agent is responding)
+            if self.last_speaker != 'agent':
+                self.turn_id += 1
+                self.agent_turn_count += 1
+            self.last_speaker = 'agent'
+
+            # Update meta_info with agent's turn_id (even numbers: 2, 4, 6...)
+            meta_info['turn_id'] = self.turn_id
+            meta_info['agent_turn_count'] = self.agent_turn_count
+            meta_info['interruption_count'] = self.interruption_count
+
             meta_info["origin"] = "transcriber"
             transcriber_package = create_ws_data_packet(transcriber_message, meta_info)
             self.llm_task = asyncio.create_task(
@@ -1684,6 +1704,8 @@ class TaskManager(BaseManager):
 
                     # Handling of transcriber events
                     if message["data"] == "speech_started":
+                        # Note: turn_id increment moved to transcript arrival (universal trigger)
+                        # Keep this block for logging and future speech_started specific logic
                         if self.tools["input"].welcome_message_played():
                             logger.info(f"User has started speaking")
                             # self.callee_silent = False
@@ -1709,7 +1731,7 @@ class TaskManager(BaseManager):
                             if interim_transcript_len > self.number_of_words_for_interruption or \
                                     message["data"].get("content").strip() in self.accidental_interruption_phrases:
                                 logger.info(f"Condition for interruption hit")
-                                self.turn_id += 1
+                                self.interruption_count += 1
                                 self.tools["input"].update_is_audio_being_played(False)
                                 await self.__cleanup_downstream_tasks()
                             else:
@@ -1731,6 +1753,13 @@ class TaskManager(BaseManager):
                     # Whenever speech_final or UtteranceEnd is received from Deepgram, this condition would get triggered
                     elif isinstance(message.get("data"), dict) and message["data"].get("type", "") == "transcript":
                         logger.info(f"Received transcript, sending for further processing")
+
+                        # Increment user's turn when final transcript arrives (universal trigger for all transcribers)
+                        if self.last_speaker != 'user':
+                            self.turn_id += 1
+                            self.user_turn_count += 1
+                        self.last_speaker = 'user'
+
                         if self.tools["input"].welcome_message_played() and self.tools["input"].is_audio_being_played_to_user() and \
                                 len(message["data"].get("content").strip().split(" ")) <= self.number_of_words_for_interruption and \
                                 message["data"].get("content").strip() not in self.accidental_interruption_phrases:
@@ -1759,6 +1788,21 @@ class TaskManager(BaseManager):
 
                         transcriber_message = message["data"].get("content")
                         meta_info = self.__get_updated_meta_info(meta_info)
+
+                        # Process transcriber turn metrics if present
+                        if 'transcriber_turn_metrics' in meta_info:
+                            turn_metrics = meta_info['transcriber_turn_metrics']
+                            self.transcriber_latencies['turn_latencies'].append({
+                                'turn_id': meta_info['turn_id'],
+                                'interruption_count': meta_info['interruption_count'],
+                                'sequence_id': meta_info['sequence_id'],
+                                'first_result_latency_ms': turn_metrics.get('first_result_latency_ms'),
+                                'total_stream_duration_ms': turn_metrics.get('total_stream_duration_ms'),
+                                'interim_details': turn_metrics.get('interim_details', [])
+                            })
+                            # Clean up meta_info before passing downstream
+                            del meta_info['transcriber_turn_metrics']
+
                         await self._handle_transcriber_output(next_task, transcriber_message, meta_info)
 
                     elif message["data"] == "transcriber_connection_closed":
@@ -1961,6 +2005,16 @@ class TaskManager(BaseManager):
         text = message["data"]
         meta_info["type"] = "audio"
         meta_info["synthesizer_start_time"] = time.time()
+
+        # Inherit turn_id from meta_info (set by _handle_transcriber_output)
+        # For edge cases where meta_info doesn't have turn_id (system messages), use current state
+        if 'turn_id' not in meta_info or meta_info['turn_id'] is None:
+            meta_info['turn_id'] = self.turn_id
+        if 'agent_turn_count' not in meta_info or meta_info['agent_turn_count'] is None:
+            meta_info['agent_turn_count'] = self.agent_turn_count
+        if 'interruption_count' not in meta_info or meta_info['interruption_count'] is None:
+            meta_info['interruption_count'] = self.interruption_count
+
         try:
             if not self.conversation_ended and ('is_first_message' in meta_info and meta_info['is_first_message'] or message["meta_info"]["sequence_id"] in self.sequence_ids):
                 if meta_info["is_md5_hash"]:
@@ -2384,8 +2438,6 @@ class TaskManager(BaseManager):
             if self._is_conversation_task():
                 self.transcriber_latencies['connection_latency_ms'] = self.tools["transcriber"].connection_time
                 self.synthesizer_latencies['connection_latency_ms'] = self.tools["synthesizer"].connection_time
-                
-                self.transcriber_latencies['turn_latencies'] = self.tools["transcriber"].turn_latencies
                 self.synthesizer_latencies['turn_latencies'] = self.tools["synthesizer"].turn_latencies
 
                 welcome_message_sent_ts = self.tools["output"].get_welcome_message_sent_ts()
