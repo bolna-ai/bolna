@@ -982,7 +982,6 @@ class TaskManager(BaseManager):
         meta_info_copy = meta_info.copy()
         self.curr_sequence_id += 1
         meta_info_copy["sequence_id"] = self.curr_sequence_id
-        meta_info_copy['turn_id'] = self.turn_id
         meta_info_copy['interruption_count'] = self.interruption_count
         meta_info_copy['user_turn_count'] = self.user_turn_count
         meta_info_copy['agent_turn_count'] = self.agent_turn_count
@@ -1572,6 +1571,33 @@ class TaskManager(BaseManager):
         if self.current_start_ts == self.previous_start_ts and not self.tools['input'].is_audio_being_played_to_user():
             logger.info(f"handle_transcriber_output -> skip as previous user message {self.history[-1]}")
             return
+
+        # Increment user's turn when final transcript arrives
+        if self.last_speaker != 'user':
+            self.turn_id += 1
+            self.user_turn_count += 1
+        self.last_speaker = 'user'
+
+        # Update meta_info with user's turn_id (odd numbers: 1, 3, 5...)
+        meta_info['turn_id'] = self.turn_id
+        meta_info['user_turn_count'] = self.user_turn_count
+        meta_info['interruption_count'] = self.interruption_count
+        meta_info['sequence_id'] = self.sequence_id
+
+        # Process transcriber turn metrics if present
+        if 'transcriber_turn_metrics' in meta_info:
+            turn_metrics = meta_info['transcriber_turn_metrics']
+            self.transcriber_latencies['turn_latencies'].append({
+                'turn_id': meta_info['turn_id'],
+                'interruption_count': meta_info['interruption_count'],
+                'sequence_id': meta_info['sequence_id'],
+                'first_result_latency_ms': turn_metrics.get('first_result_latency_ms'),
+                'total_stream_duration_ms': turn_metrics.get('total_stream_duration_ms'),
+                'interim_details': turn_metrics.get('interim_details', [])
+            })
+            # Clean up meta_info before passing downstream
+            del meta_info['transcriber_turn_metrics']
+
         self.history.append({"role": "user", "content": transcriber_message})
 
         convert_to_request_log(message=transcriber_message, meta_info=meta_info, model=self.task_config["tools_config"]["transcriber"]["provider"], run_id= self.run_id)
@@ -1675,12 +1701,6 @@ class TaskManager(BaseManager):
                     elif isinstance(message.get("data"), dict) and message["data"].get("type", "") == "transcript":
                         logger.info(f"Received transcript, sending for further processing")
 
-                        # Increment user's turn when final transcript arrives (universal trigger for all transcribers)
-                        if self.last_speaker != 'user':
-                            self.turn_id += 1
-                            self.user_turn_count += 1
-                        self.last_speaker = 'user'
-
                         if self.tools["input"].welcome_message_played() and self.tools["input"].is_audio_being_played_to_user() and \
                                 len(message["data"].get("content").strip().split(" ")) <= self.number_of_words_for_interruption and \
                                 message["data"].get("content").strip() not in self.accidental_interruption_phrases:
@@ -1709,20 +1729,6 @@ class TaskManager(BaseManager):
 
                         transcriber_message = message["data"].get("content")
                         meta_info = self.__get_updated_meta_info(meta_info)
-
-                        # Process transcriber turn metrics if present
-                        if 'transcriber_turn_metrics' in meta_info:
-                            turn_metrics = meta_info['transcriber_turn_metrics']
-                            self.transcriber_latencies['turn_latencies'].append({
-                                'turn_id': meta_info['turn_id'],
-                                'interruption_count': meta_info['interruption_count'],
-                                'sequence_id': meta_info['sequence_id'],
-                                'first_result_latency_ms': turn_metrics.get('first_result_latency_ms'),
-                                'total_stream_duration_ms': turn_metrics.get('total_stream_duration_ms'),
-                                'interim_details': turn_metrics.get('interim_details', [])
-                            })
-                            # Clean up meta_info before passing downstream
-                            del meta_info['transcriber_turn_metrics']
 
                         await self._handle_transcriber_output(next_task, transcriber_message, meta_info)
 
