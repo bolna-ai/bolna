@@ -33,6 +33,8 @@ class OpenAiLLM(BaseLLM):
         self.max_tokens = max_tokens
         self.temperature = temperature
         self.model_args = {"max_tokens": self.max_tokens, "temperature": self.temperature, "model": self.model}
+        if kwargs.get("service_tier") == "priority":
+            self.model_args["service_tier"] = "priority"
 
         if kwargs.get("provider", "openai") == "custom":
             base_url = kwargs.get("base_url")
