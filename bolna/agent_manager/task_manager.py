@@ -959,6 +959,8 @@ class TaskManager(BaseManager):
             self.llm_task.cancel()
             self.llm_task = None
 
+        #NOTE: We do NOT cancel execute_function_call_task to allow function calls to complete during user interruptions, ensuring the LLM receives the function response data
+
         if self.first_message_task is not None:
             logger.info("Cancelling first message task")
             self.first_message_task.cancel()
@@ -1301,6 +1303,7 @@ class TaskManager(BaseManager):
                     response_text = await response.text()
                     logger.info(f"Response from the server after call transfer: {response_text}")
                     convert_to_request_log(str(response_text), meta_info, None, "function_call", direction="response", is_cached=False, run_id=self.run_id)
+                    self.execute_function_call_task = None
                     return
 
         response = await trigger_api(url=url, method=method.lower(), param=param, api_token=api_token, headers_data=headers, meta_info=meta_info, run_id=self.run_id, **resp)
@@ -1392,7 +1395,7 @@ class TaskManager(BaseManager):
 
             if trigger_function_call:
                 logger.info(f"Triggering function call for {data}")
-                self.llm_task = asyncio.create_task(self.__execute_function_call(next_step = next_step, **data))
+                self.execute_function_call_task = asyncio.create_task(self.__execute_function_call(next_step = next_step, **data))
                 return
 
             if latency:
