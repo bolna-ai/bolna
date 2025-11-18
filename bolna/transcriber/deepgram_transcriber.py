@@ -118,8 +118,10 @@ class DeepgramTranscriber(BaseTranscriber):
         if self.keywords and len(self.keywords.split(",")) > 0:
             if self.model.startswith('nova-3'):
                 dg_params['keyterm'] = "&keyterm=".join(self.keywords.split(","))
-                if self.language != 'en':
+                # Only disable keyterms for multilingual mode (not monolingual languages)
+                if self.language in ['multi', 'detect']:
                     dg_params.pop('keyterm', None)
+                    logger.info(f"Keyterms disabled for multilingual transcription (language={self.language})")
             else:
                 dg_params['keywords'] = "&keywords=".join(self.keywords.split(","))
 
