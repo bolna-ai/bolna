@@ -390,6 +390,7 @@ class DeepgramTranscriber(BaseTranscriber):
 
                 elif msg["type"] == "Results":
                     transcript = msg["channel"]["alternatives"][0]["transcript"]
+                    deepgram_request_id = msg.get("metadata", {}).get("request_id")
 
                     if transcript.strip():
                         # Calculate latency using end position (start + duration) for cumulative transcripts
@@ -406,8 +407,11 @@ class DeepgramTranscriber(BaseTranscriber):
                             'transcript': transcript,
                             'latency_ms': latency_ms,
                             'is_final': msg.get('is_final', False),
-                            'received_at': time.time()
+                            'received_at': time.time(),
+                            'request_id': deepgram_request_id
                         }
+
+                        logger.info(f"Interim result - request_id: {deepgram_request_id}, is_final: {msg.get('is_final', False)}, transcript: {transcript}")
 
                         self.current_turn_interim_details.append(interim_detail)
                         # Track time of last interim for timeout monitoring
