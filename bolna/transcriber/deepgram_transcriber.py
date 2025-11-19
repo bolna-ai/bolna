@@ -34,7 +34,8 @@ class DeepgramTranscriber(BaseTranscriber):
         self.sampling_rate = 16000
         self.encoding = encoding
         self.api_key = kwargs.get("transcriber_key", os.getenv('DEEPGRAM_AUTH_TOKEN'))
-        self.deepgram_host = os.getenv('DEEPGRAM_HOST', 'api.deepgram.com')
+        self.deepgram_host = kwargs.get("deepgram_host", os.getenv('DEEPGRAM_HOST', 'api.deepgram.com'))
+
         self.transcriber_output_queue = output_queue
         self.transcription_task = None
         self.keywords = keywords
@@ -118,8 +119,10 @@ class DeepgramTranscriber(BaseTranscriber):
         if self.keywords and len(self.keywords.split(",")) > 0:
             if self.model.startswith('nova-3'):
                 dg_params['keyterm'] = "&keyterm=".join(self.keywords.split(","))
-                if self.language != 'en':
+                # Only disable keyterms for multilingual mode (not monolingual languages)
+                if self.language in ['multi', 'detect']:
                     dg_params.pop('keyterm', None)
+                    logger.info(f"Keyterms disabled for multilingual transcription (language={self.language})")
             else:
                 dg_params['keywords'] = "&keywords=".join(self.keywords.split(","))
 
@@ -390,6 +393,7 @@ class DeepgramTranscriber(BaseTranscriber):
 
                 elif msg["type"] == "Results":
                     transcript = msg["channel"]["alternatives"][0]["transcript"]
+                    deepgram_request_id = msg.get("metadata", {}).get("request_id")
 
                     if transcript.strip():
                         # Calculate latency using end position (start + duration) for cumulative transcripts
@@ -406,8 +410,11 @@ class DeepgramTranscriber(BaseTranscriber):
                             'transcript': transcript,
                             'latency_ms': latency_ms,
                             'is_final': msg.get('is_final', False),
-                            'received_at': time.time()
+                            'received_at': time.time(),
+                            'request_id': deepgram_request_id
                         }
+
+                        logger.info(f"Interim result - request_id: {deepgram_request_id}, is_final: {msg.get('is_final', False)}, transcript: {transcript}")
 
                         self.current_turn_interim_details.append(interim_detail)
                         # Track time of last interim for timeout monitoring
