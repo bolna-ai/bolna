@@ -35,6 +35,7 @@ class DeepgramTranscriber(BaseTranscriber):
         self.encoding = encoding
         self.api_key = kwargs.get("transcriber_key", os.getenv('DEEPGRAM_AUTH_TOKEN'))
         self.deepgram_host = os.getenv('DEEPGRAM_HOST', 'api.deepgram.com')
+        print(self.deepgram_host)
         self.transcriber_output_queue = output_queue
         self.transcription_task = None
         self.keywords = keywords
