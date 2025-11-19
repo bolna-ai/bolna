@@ -30,6 +30,7 @@ from semantic_router.encoders import FastEmbedEncoder
 
 from ..helpers.mark_event_meta_data import MarkEventMetaData
 from ..helpers.observable_variable import ObservableVariable
+from ..helpers.language_detector import LanguageDetector
 
 logger = configure_logger(__name__)
 
@@ -178,13 +179,20 @@ class TaskManager(BaseManager):
         self.llm_response_generated = False
         self.turn_id = 0
 
-        # language detection (first N turns)
         self.default_language = self.task_config['task_config'].get('default_language')
         self.language_detection_turns = self.task_config['task_config'].get('language_detection_turns')
-        self.language_word_counts = {}  # Accumulate word counts: {'hi': 15, 'en': 3}
+        self.language_turn_counts = {}
         self.current_turn_count = 0
-        self.conversation_language = None  # Detected after N turns
+        self.conversation_language = None
         self.language_detected = False
+
+        self.language_detector = kwargs.get('preloaded_language_detector', None)
+
+        if self.language_detector is None and self.language_detection_turns and self.language_detection_turns > 0:
+            try:
+                self.language_detector = LanguageDetector()
+            except Exception as e:
+                logger.warning(f"Failed to initialize detector: {e}")
 
         # A/B Testing: Language injection configuration
         self.language_injection_mode = self.task_config['task_config'].get('language_injection_mode')
@@ -1591,41 +1599,40 @@ class TaskManager(BaseManager):
             skip_append_to_data = False
         return sequence
 
-    def _detect_conversation_language(self, meta_info):
-        """
-        Accumulate word counts from transcription segments and detect conversation language.
-        This method tracks language usage over the first N turns to determine the primary
-        conversation language, which can be used for prompt injection or other language-specific features.
-
-        Args:
-            meta_info (dict): Metadata from transcriber containing 'segment_word_lang_counts'
-        """
-        # Skip if language already detected or no language data in meta_info
-        if self.language_detected or 'segment_word_lang_counts' not in meta_info:
+    async def _detect_conversation_language(self, transcript):
+        """Detect conversation language over first N turns."""
+        if self.language_detected:
             return
 
-        # Skip if language detection is not configured
-        if not self.language_detection_turns or self.language_detection_turns <= 0:
+        if not self.language_detection_turns or self.language_detection_turns <= 0 or not self.language_detector:
+            return
+
+        if not transcript or not transcript.strip():
             return
 
         self.current_turn_count += 1
 
-        # Accumulate word counts
-        segment_counts = meta_info.get('segment_word_lang_counts', {})
-        for lang, count in segment_counts.items():
-            self.language_word_counts[lang] = self.language_word_counts.get(lang, 0) + count
+        try:
+            detected_lang = await asyncio.to_thread(
+                self.language_detector.detect_language,
+                transcript
+            )
+        except Exception as e:
+            logger.warning(f"Detection failed: {e}")
+            detected_lang = None
 
-        logger.info(f"Turn {self.current_turn_count}/{self.language_detection_turns}: Word counts = {self.language_word_counts}")
+        if detected_lang:
+            self.language_turn_counts[detected_lang] = self.language_turn_counts.get(detected_lang, 0) + 1
+            logger.info(f"Turn {self.current_turn_count}/{self.language_detection_turns}: {detected_lang} | Counts: {self.language_turn_counts}")
 
-        # After N turns, detect conversation language
         if self.current_turn_count >= self.language_detection_turns:
-            if self.language_word_counts:
-                self.conversation_language = max(self.language_word_counts, key=self.language_word_counts.get)
+            if self.language_turn_counts:
+                self.conversation_language = max(self.language_turn_counts, key=self.language_turn_counts.get)
             else:
                 self.conversation_language = self.default_language
 
             self.language_detected = True
-            logger.info(f"Conversation language detected: {self.conversation_language} (total counts: {self.language_word_counts})")
+            logger.info(f"Conversation language: {self.conversation_language} ({self.language_turn_counts.get(self.conversation_language, 0)}/{self.current_turn_count} turns)")
 
     async def _handle_transcriber_output(self, next_task, transcriber_message, meta_info):
         current_ts = self.tools["input"].get_current_mark_started_time()
@@ -1640,8 +1647,7 @@ class TaskManager(BaseManager):
             logger.info(f"handle_transcriber_output -> skip as previous user message {self.history[-1]}")
             return
 
-        # Detect conversation language from first N turns
-        self._detect_conversation_language(meta_info)
+        await self._detect_conversation_language(transcriber_message)
 
         self.history.append({"role": "user", "content": transcriber_message})
 
