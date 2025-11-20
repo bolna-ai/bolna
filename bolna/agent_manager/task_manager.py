@@ -145,7 +145,6 @@ class TaskManager(BaseManager):
                 self.should_record = self.task_config["tools_config"]["output"]["provider"] == 'default' and self.enforce_streaming #In this case, this is a websocket connection and we should record
 
             self.__setup_input_handlers(turn_based_conversation, input_queue, self.should_record)
-            logger.info(f"[DTMF_DEBUG] Input handler created for task_id={task_id}")
         self.__setup_output_handlers(turn_based_conversation, output_queue)
 
         self.first_message_task_new = asyncio.create_task(self.message_task_new())
@@ -284,11 +283,8 @@ class TaskManager(BaseManager):
             # Enable DTMF flow
             dtmf_enabled = self.conversation_config.get('dtmf_enabled', False)
             if dtmf_enabled:
-                logger.info(f"[DTMF_DEBUG] Setting is_dtmf_active=True for task_id={task_id}")
                 self.tools['input'].is_dtmf_active = True
-                logger.info(f"[DTMF_DEBUG] is_dtmf_active set to {self.tools['input'].is_dtmf_active}")
                 self.dtmf_task = asyncio.create_task(self.inject_digits_to_conversation())
-                logger.info(f"[DTMF_DEBUG] dtmf_task created successfully")
 
             self.trigger_user_online_message_after = self.conversation_config.get("trigger_user_online_message_after", DEFAULT_USER_ONLINE_MESSAGE_TRIGGER_DURATION)
             self.check_if_user_online = self.conversation_config.get("check_if_user_online", True)
@@ -578,7 +574,6 @@ class TaskManager(BaseManager):
 
                 input_kwargs["observable_variables"] = self.observable_variables
             self.tools["input"] = input_handler_class(**input_kwargs)
-            logger.info(f"[DTMF_DEBUG] Input handler instantiated: {input_handler_class.__name__}, is_dtmf_active={self.tools['input'].is_dtmf_active}")
         else:
             raise "Other input handlers not supported yet"
 

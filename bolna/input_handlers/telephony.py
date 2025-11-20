@@ -60,7 +60,6 @@ class TelephonyInputHandler(DefaultInputHandler):
     async def _handle_dtmf_digit(self, digit: str) -> bool:
         """Handle digit. Returns True if complete (termination '#')."""
         if not self.is_dtmf_active:
-            logger.warning(f"[DTMF_DEBUG] DTMF digit '{digit}' ignored because is_dtmf_active=False")
             return False
 
         termination_key = '#'
@@ -117,17 +116,13 @@ class TelephonyInputHandler(DefaultInputHandler):
 
                 elif packet['event'] == 'dtmf':
                     digit = packet.get('dtmf', {}).get('digit', '')
-                    logger.info(f"[DTMF_DEBUG] Received DTMF event: digit='{digit}', is_dtmf_active={self.is_dtmf_active}")
                     if not digit:
                         continue
 
                     is_complete = await self._handle_dtmf_digit(digit)
                     if is_complete and self.dtmf_digits:
                         if self.is_dtmf_active:
-                            logger.info(f"[DTMF_DEBUG] Putting digits in queue: {self.dtmf_digits}")
                             self.queues['dtmf'].put_nowait(self.dtmf_digits)
-                        else:
-                            logger.warning(f"[DTMF_DEBUG] DTMF complete but is_dtmf_active=False, digits NOT queued: {self.dtmf_digits}")
                         self.dtmf_digits = ""
 
                 elif packet['event'] == 'stop':
