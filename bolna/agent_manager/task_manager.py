@@ -181,7 +181,7 @@ class TaskManager(BaseManager):
 
         self.default_language = self.task_config['task_config'].get('default_language')
         self.language_detection_turns = self.task_config['task_config'].get('language_detection_turns')
-        self.language_turn_counts = {}
+        self._accumulated_transcripts = []
         self.current_turn_count = 0
         self.conversation_language = None
         self.language_detected = False
@@ -1600,7 +1600,7 @@ class TaskManager(BaseManager):
         return sequence
 
     async def _detect_conversation_language(self, transcript):
-        """Detect conversation language over first N turns."""
+        """Detect conversation language by accumulating N turns and analyzing combined text."""
         if self.language_detected:
             return
 
@@ -1610,29 +1610,24 @@ class TaskManager(BaseManager):
         if not transcript or not transcript.strip():
             return
 
+        self._accumulated_transcripts.append(transcript.strip())
         self.current_turn_count += 1
 
-        try:
-            detected_lang = await asyncio.to_thread(
-                self.language_detector.detect_language,
-                transcript
-            )
-        except Exception as e:
-            logger.warning(f"Detection failed: {e}")
-            detected_lang = None
-
-        if detected_lang:
-            self.language_turn_counts[detected_lang] = self.language_turn_counts.get(detected_lang, 0) + 1
-            logger.info(f"Turn {self.current_turn_count}/{self.language_detection_turns}: {detected_lang} | Counts: {self.language_turn_counts}")
-
         if self.current_turn_count >= self.language_detection_turns:
-            if self.language_turn_counts:
-                self.conversation_language = max(self.language_turn_counts, key=self.language_turn_counts.get)
-            else:
+            combined_text = " ".join(self._accumulated_transcripts)
+
+            try:
+                detected_lang = await asyncio.to_thread(
+                    self.language_detector.detect_language,
+                    combined_text
+                )
+                self.conversation_language = detected_lang or self.default_language
+            except Exception as e:
+                logger.warning(f"Detection failed: {e}")
                 self.conversation_language = self.default_language
 
             self.language_detected = True
-            logger.info(f"Conversation language: {self.conversation_language} ({self.language_turn_counts.get(self.conversation_language, 0)}/{self.current_turn_count} turns)")
+            logger.info(f"Conversation language: {self.conversation_language} (detected from {self.current_turn_count} turns, {len(combined_text)} chars)")
 
     async def _handle_transcriber_output(self, next_task, transcriber_message, meta_info):
         current_ts = self.tools["input"].get_current_mark_started_time()
