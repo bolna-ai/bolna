@@ -14,7 +14,7 @@ class LanguageDetector:
     def __init__(
         self,
         model_id: str = "protectai/xlm-roberta-base-language-detection-onnx",
-        min_text_length: int = 10,
+        min_text_length: int = 6,
         confidence_threshold: float = 0.5
     ):
         self.model_id = model_id
