@@ -33,7 +33,6 @@ RECORDING_BUCKET_URL = os.getenv('RECORDING_BUCKET_URL')
 
 FORMAT_PATTERN = re.compile(r"%\(([^)]+)\)([sdifouxXeEgGcr])")
 
-
 class DictWithMissing(dict):
     def __missing__(self, key):
         return ''
@@ -243,6 +242,16 @@ def get_required_input_types(task):
             input_types["audio"] = i
         elif chain[0] == "synthesizer" or chain[0] == "llm":
             input_types["text"] = i
+            # Check if this is OpenAI Realtime LLM handling audio input (Full V2V or Custom TTS mode)
+            # In these modes, even though the first element is "llm", we need to accept audio input
+            if chain[0] == "llm":
+                llm_agent_config = task['tools_config'].get('llm_agent', {})
+                llm_config = llm_agent_config.get('llm_config', llm_agent_config)
+                if llm_config.get('provider') == 'openai_realtime':
+                    # Check if there's no separate transcriber (meaning OpenAI Realtime handles audio input)
+                    has_transcriber = 'transcriber' in chain
+                    if not has_transcriber:
+                        input_types["audio"] = i
     return input_types
 
 
