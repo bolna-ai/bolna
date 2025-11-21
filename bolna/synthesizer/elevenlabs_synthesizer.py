@@ -91,7 +91,7 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
             # Ensure the WebSocket connection is established
             while self.websocket_holder["websocket"] is None or self.websocket_holder["websocket"].state is websockets.protocol.State.CLOSED:
                 logger.info("Waiting for elevenlabs ws connection to be established...")
-                await asyncio.sleep(1)
+                await asyncio.sleep(0.1)  # Faster retry for lower latency
 
             if text != "":
                 for text_chunk in self.text_chunker(text):
@@ -357,7 +357,7 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
             if self.websocket_holder["websocket"] is None or self.websocket_holder["websocket"].state is websockets.protocol.State.CLOSED:
                 logger.info("Re-establishing elevenlabs connection...")
                 self.websocket_holder["websocket"] = await self.establish_connection()
-            await asyncio.sleep(1)
+            await asyncio.sleep(5)  # Reduced polling frequency for better performance under load
 
     async def get_sender_task(self):
         return self.sender_task
