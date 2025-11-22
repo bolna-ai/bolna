@@ -28,21 +28,26 @@ def get_or_create_aiohttp_session():
     """Get or create a global aiohttp session with optimized connection pooling"""
     global _global_aiohttp_session
     if _global_aiohttp_session is None or _global_aiohttp_session.closed:
-        # Create optimized session with connection pooling
         connector = aiohttp.TCPConnector(
-            limit=100,  # Total connection pool size
-            limit_per_host=30,  # Per-host connection limit
-            ttl_dns_cache=300,  # DNS cache TTL
-            keepalive_timeout=30,  # Keep connections alive
-            force_close=False  # Reuse connections
+            limit=500,
+            limit_per_host=150,
+            ttl_dns_cache=600,
+            keepalive_timeout=300,
+            enable_cleanup_closed=True,
+            force_close=False,  # Reuse connections
+            ssl=None  # Use default SSL context
         )
         _global_aiohttp_session = aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=180),
+            timeout=aiohttp.ClientTimeout(
+                total=300,  # Total timeout 5 minutes
+                connect=10,  # Connection timeout 10 seconds
+                sock_read=60  # Socket read timeout 60 seconds
+            ),
             connector=connector
         )
         # Configure LiteLLM to use our optimized session
         litellm.base_llm_aiohttp_handler = BaseLLMAIOHTTPHandler(client_session=_global_aiohttp_session)
-        logger.info("Created optimized aiohttp session for LiteLLM with connection pooling")
+        logger.info("Created optimized aiohttp session for LiteLLM: pool_size=500, per_host=150, keepalive=300s")
     return _global_aiohttp_session
 
 async def cleanup_aiohttp_session():
