@@ -2,8 +2,11 @@ import os
 import json
 import time
 import logging
+import aiohttp
+import litellm
 from litellm import acompletion, ContentPolicyViolationError
 from litellm.exceptions import AuthenticationError, RateLimitError, APIError, APIConnectionError
+from litellm.llms.custom_httpx.aiohttp_handler import BaseLLMAIOHTTPHandler
 from dotenv import load_dotenv
 
 from bolna.constants import DEFAULT_LANGUAGE_CODE
@@ -18,12 +21,47 @@ logging.getLogger("LiteLLM").setLevel(logging.WARNING)
 logging.getLogger("LiteLLM Router").setLevel(logging.WARNING)
 logging.getLogger("LiteLLM Proxy").setLevel(logging.WARNING)
 
+# Global optimized aiohttp session for connection pooling
+_global_aiohttp_session = None
+
+def get_or_create_aiohttp_session():
+    """Get or create a global aiohttp session with optimized connection pooling"""
+    global _global_aiohttp_session
+    if _global_aiohttp_session is None or _global_aiohttp_session.closed:
+        # Create optimized session with connection pooling
+        connector = aiohttp.TCPConnector(
+            limit=100,  # Total connection pool size
+            limit_per_host=30,  # Per-host connection limit
+            ttl_dns_cache=300,  # DNS cache TTL
+            keepalive_timeout=30,  # Keep connections alive
+            force_close=False  # Reuse connections
+        )
+        _global_aiohttp_session = aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=180),
+            connector=connector
+        )
+        # Configure LiteLLM to use our optimized session
+        litellm.base_llm_aiohttp_handler = BaseLLMAIOHTTPHandler(client_session=_global_aiohttp_session)
+        logger.info("Created optimized aiohttp session for LiteLLM with connection pooling")
+    return _global_aiohttp_session
+
+async def cleanup_aiohttp_session():
+    """Cleanup the global aiohttp session"""
+    global _global_aiohttp_session
+    if _global_aiohttp_session and not _global_aiohttp_session.closed:
+        await _global_aiohttp_session.close()
+        logger.info("Closed global aiohttp session for LiteLLM")
+        _global_aiohttp_session = None
+
 
 class LiteLLM(BaseLLM):
     def __init__(self, model, max_tokens=30, buffer_size=40, temperature=0.0, language=DEFAULT_LANGUAGE_CODE, **kwargs):
         super().__init__(max_tokens, buffer_size)
         self.model = model
         self.started_streaming = False
+
+        # Ensure the global session is initialized
+        get_or_create_aiohttp_session()
 
         self.language = language
         self.model_args = {"max_tokens": max_tokens, "temperature": temperature, "model": self.model}
