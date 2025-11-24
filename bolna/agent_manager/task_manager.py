@@ -11,6 +11,7 @@ import copy
 import base64
 import pytz
 import websockets
+import audioop
 
 import aiohttp
 
@@ -2220,17 +2221,41 @@ class TaskManager(BaseManager):
 
     async def __start_transmitting_ambient_noise(self):
         try:
-            audio = await get_raw_audio_bytes(f'{os.getenv("AMBIENT_NOISE_PRESETS_DIR")}/{self.soundtrack}', local=True, is_location=True)
-            audio = resample(audio, self.sampling_rate, format = "wav")
-            if self.task_config["tools_config"]["output"]["provider"] in SUPPORTED_OUTPUT_TELEPHONY_HANDLERS.keys():
-                audio = wav_bytes_to_pcm(audio)
-            logger.info(f"Length of audio {len(audio)} {self.sampling_rate}")
+            output_config = self.task_config.get("tools_config", {}).get("output", {})
+            telephony_provider = output_config.get("provider", "default")
+            is_telephony = telephony_provider in SUPPORTED_OUTPUT_TELEPHONY_HANDLERS.keys()
+
+            base_filename = self.soundtrack.replace('.wav', '')
+            presets_dir = os.getenv("AMBIENT_NOISE_PRESETS_DIR")
+
+            if is_telephony and self.sampling_rate == 8000:
+                if telephony_provider == 'exotel':
+                    # Exotel uses PCM format
+                    audio_file = f'{presets_dir}/{base_filename}_8000.pcm'
+                    audio_format = 'pcm'
+                    logger.info(f"Loading PCM file for Exotel: {audio_file}")
+                else:
+                    # Twilio/Plivo use mulaw format
+                    audio_file = f'{presets_dir}/{base_filename}_8000.mulaw'
+                    audio_format = 'mulaw'
+                    logger.info(f"Loading mulaw file for {telephony_provider}: {audio_file}")
+
+                audio = await get_raw_audio_bytes(audio_file, local=True, is_location=True)
+            else:
+                # WebSocket uses original WAV, resample if needed
+                audio_file = f'{presets_dir}/{self.soundtrack}'
+                audio_format = 'wav'
+                logger.info(f"Loading WAV file for WebSocket: {audio_file}")
+
+                audio = await get_raw_audio_bytes(audio_file, local=True, is_location=True)
+                audio = resample(audio, self.sampling_rate, format="wav")
+
+            logger.info(f"Loaded ambient noise: {len(audio)} bytes @ {self.sampling_rate} Hz, format: {audio_format}")
             # TODO whenever this feature is redone ensure to have a look at the metadata of other messages which have the sequence_id of -1. Fields such as end_of_synthesizer_stream and end_of_llm_stream would need to be added here
             if self.should_record:
                 meta_info={'io': 'default', 'message_category': 'ambient_noise', "request_id": str(uuid.uuid4()), "sequence_id": -1, "type":'audio', 'format': 'wav'}
             else:
-
-                meta_info={'io': self.tools["output"].get_provider(), 'message_category': 'ambient_noise', 'stream_sid': self.stream_sid , "request_id": str(uuid.uuid4()), "cached": True, "type":'audio', "sequence_id": -1, 'format': 'pcm'}
+                meta_info={'io': self.tools["output"].get_provider(), 'message_category': 'ambient_noise', 'stream_sid': self.stream_sid , "request_id": str(uuid.uuid4()), "cached": True, "type":'audio', "sequence_id": -1, 'format': audio_format}
             while True:
                 logger.info(f"Before yielding ambient noise")
                 for chunk in yield_chunks_from_memory(audio, self.output_chunk_size*2):

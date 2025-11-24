@@ -374,7 +374,7 @@ class ConversationConfig(BaseModel):
     backchanneling_message_gap: Optional[int] = 5
     backchanneling_start_delay: Optional[int] = 5
     ambient_noise: Optional[bool] = False
-    ambient_noise_track: Optional[str] = "convention_hall"
+    ambient_noise_track: Optional[str] = "office-ambience"
     call_terminate: Optional[int] = 90
     use_fillers: Optional[bool] = False
     trigger_user_online_message_after: Optional[int] = 10
