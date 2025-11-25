@@ -1903,10 +1903,22 @@ class TaskManager(BaseManager):
             # This will help with interruption in IVR
             audio_chunk = None
             if self.turn_based_conversation or self.task_config['tools_config']['output']['provider'] == "default":
-                audio_chunk = await get_raw_audio_bytes(text, self.assistant_name,
-                                                                self.task_config["tools_config"]["output"][
-                                                                    "format"], local=self.is_local,
-                                                                assistant_id=self.assistant_id)
+                # For welcome message, use preloaded audio (already loaded from cache in __init__)
+                if 'message_category' in meta_info and meta_info['message_category'] == "agent_welcome_message":
+                    audio_chunk = self.preloaded_welcome_audio
+                else:
+                    # For other preprocessed audio (IVR, etc.), fetch from S3
+                    audio_chunk = await get_raw_audio_bytes(text, self.assistant_name,
+                                                                    self.task_config["tools_config"]["output"][
+                                                                        "format"], local=self.is_local,
+                                                                    assistant_id=self.assistant_id)
+
+                # Fallback to real-time synthesis if audio not found
+                if audio_chunk is None and 'message_category' in meta_info and meta_info['message_category'] == "agent_welcome_message":
+                    logger.info(f"Cached audio not found. Falling back to synthesizer")
+                    meta_info['cached'] = False
+                    await self._synthesize(create_ws_data_packet(meta_info['text'], meta_info=meta_info))
+                    return
                 logger.info("Sending preprocessed audio")
                 meta_info["format"] = self.task_config["tools_config"]["output"]["format"]
                 meta_info["end_of_synthesizer_stream"] = True
@@ -1929,7 +1941,7 @@ class TaskManager(BaseManager):
                     if not self.buffered_output_queue.empty():
                         logger.info(f"Output queue was not empty and hence emptying it")
                         self.buffered_output_queue = asyncio.Queue()
-                    meta_info["format"] = "pcm"
+                    meta_info["format"] = "wav" if self.is_web_based_call else "pcm"
                     if 'message_category' in meta_info and meta_info['message_category'] == "agent_welcome_message":
                         if audio_chunk is None:
                             logger.info(f"File doesn't exist in S3. Hence we're synthesizing it from synthesizer")
@@ -2173,11 +2185,12 @@ class TaskManager(BaseManager):
             if self.is_web_based_call:
                 logger.info("Sending agent welcome message for web based call")
                 text = self.kwargs.get('agent_welcome_message', None)
-                meta_info = {'io': 'default', 'message_category': 'agent_welcome_message',
-                             'stream_sid': self.stream_sid, "request_id": str(uuid.uuid4()), "cached": False,
-                             "sequence_id": -1, 'format': self.task_config["tools_config"]["output"]["format"],
-                             'text': text, 'end_of_llm_stream': True}
                 self.stream_sid_ts = time.time() * 1000
+                meta_info = {'io': 'default', 'message_category': 'agent_welcome_message',
+                             'stream_sid': self.stream_sid, "request_id": str(uuid.uuid4()),
+                             "cached": True, "sequence_id": -1,
+                             'format': self.task_config["tools_config"]["output"]["format"],
+                             'text': text, 'end_of_llm_stream': True}
                 await self._synthesize(create_ws_data_packet(text, meta_info=meta_info))
                 return
 
