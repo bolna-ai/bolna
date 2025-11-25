@@ -689,16 +689,17 @@ class TaskManager(BaseManager):
 
     def __setup_llm(self, llm_config, task_id=0):
         if self.task_config["tools_config"]["llm_agent"] is not None:
+            if task_id and task_id > 0:
+                self.kwargs.pop('llm_key', None)
+                self.kwargs.pop('base_url', None)
+                self.kwargs.pop('api_version', None)
+
+                if self._is_summarization_task() or self._is_extraction_task():
+                    llm_config['model'] = 'gpt-4o-mini'
+                    llm_config['provider'] = 'openai'
+
             if llm_config["provider"] in SUPPORTED_LLM_PROVIDERS.keys():
                 llm_class = SUPPORTED_LLM_PROVIDERS.get(llm_config["provider"])
-
-                if task_id and task_id > 0:
-                    self.kwargs.pop('llm_key', None)
-                    self.kwargs.pop('base_url', None)
-                    self.kwargs.pop('api_version', None)
-
-                    if self._is_summarization_task() or self._is_extraction_task():
-                        llm_config['model'] = 'gpt-4o-mini'
                 llm = llm_class(language=self.language, **llm_config, **self.kwargs)
                 return llm
             else:

@@ -2,7 +2,7 @@ from .synthesizer import PollySynthesizer, ElevenlabsSynthesizer, OPENAISynthesi
 from .transcriber import DeepgramTranscriber, AzureTranscriber , SarvamTranscriber, AssemblyAITranscriber, GoogleTranscriber
 from .input_handlers import DefaultInputHandler, TwilioInputHandler, ExotelInputHandler, PlivoInputHandler
 from .output_handlers import DefaultOutputHandler, TwilioOutputHandler, ExotelOutputHandler, PlivoOutputHandler
-from .llms import OpenAiLLM, LiteLLM
+from .llms import OpenAiLLM, LiteLLM, AzureLLM
 
 SUPPORTED_SYNTHESIZER_MODELS = {
     'polly': PollySynthesizer,
@@ -36,7 +36,7 @@ SUPPORTED_LLM_PROVIDERS = {
     'deepinfra': LiteLLM,
     'together': LiteLLM,
     'fireworks': LiteLLM,
-    'azure-openai': LiteLLM,
+    'azure-openai': AzureLLM,
     'perplexity': LiteLLM,
     'vllm': LiteLLM,
     'anyscale': LiteLLM,
@@ -46,7 +46,7 @@ SUPPORTED_LLM_PROVIDERS = {
     'anthropic': LiteLLM,
     'deepseek': LiteLLM,
     'openrouter': LiteLLM,
-    'azure': LiteLLM #Backwards compatibility
+    'azure': AzureLLM
 }
 SUPPORTED_INPUT_HANDLERS = {
     'default': DefaultInputHandler,
