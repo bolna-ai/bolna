@@ -1499,7 +1499,7 @@ class TaskManager(BaseManager):
             await self.__do_llm_generation(messages, meta_info, next_step, should_bypass_synth)
             # TODO : Write a better check for completion prompt
 
-            if self.agent_type not in ["graph_agent", "knowledgebase_agent"]:
+            if self.agent_type not in ["graph_agent"]:
                 if self.use_llm_to_determine_hangup and not self.turn_based_conversation:
                     completion_res = await self.tools["llm_agent"].check_for_completion(messages, self.check_for_completion_prompt)
                     should_hangup = (
