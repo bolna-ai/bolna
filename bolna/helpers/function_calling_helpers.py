@@ -49,6 +49,9 @@ async def trigger_api(url, method, param, api_token, headers_data, meta_info, ru
                         response_text = await response.text()
 
             return response_text
+    except asyncio.CancelledError:
+        logger.info("API call was cancelled")
+        raise
     except Exception as e:
         message = f"ERROR CALLING API: Please check your API: {e}"
         logger.error(message)

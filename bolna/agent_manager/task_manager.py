@@ -163,6 +163,8 @@ class TaskManager(BaseManager):
         self.synthesizer_task = None
         self.synthesizer_monitor_task = None
         self.dtmf_task = None
+        self.filler_task = None
+        self.llm_queue_task = None
 
         # state of conversation
         self.current_request_id = None
@@ -1239,101 +1241,109 @@ class TaskManager(BaseManager):
         await self._handle_llm_output(next_step, filler, should_bypass_synth, new_meta_info, is_filler=True)
 
     async def __execute_function_call(self, url, method, param, api_token, headers, model_args, meta_info, next_step, called_fun, **resp):
-        self.check_if_user_online = False
+        try:
+            self.check_if_user_online = False
 
-        if called_fun.startswith("transfer_call"):
-            await asyncio.sleep(2)
-
-            try:
-                from_number = self.context_data['recipient_data']['from_number']
-            except Exception as e:
-                from_number = None
-
-            call_sid = None
-            call_transfer_number = None
-            payload = {
-                'call_sid': call_sid,
-                'provider': self.tools['input'].io_provider,
-                'stream_sid': self.stream_sid,
-                'from_number': from_number,
-                'execution_id': self.run_id,
-                **(self.transfer_call_params or {})
-            }
-
-            if self.tools['input'].io_provider != 'default':
-                call_sid = self.tools["input"].get_call_sid()
-                payload['call_sid'] = call_sid
-
-            if url is None:
-                url = os.getenv("CALL_TRANSFER_WEBHOOK_URL")
+            if called_fun.startswith("transfer_call"):
+                await asyncio.sleep(2)
 
                 try:
-                    json_function_call_params = copy.deepcopy(param)
-                    if isinstance(param, str):
-                        json_function_call_params = json.loads(param)
-                    call_transfer_number = json_function_call_params['call_transfer_number']
-                    if call_transfer_number:
-                        payload['call_transfer_number'] = call_transfer_number
+                    from_number = self.context_data['recipient_data']['from_number']
                 except Exception as e:
-                    logger.error(f"Error in __execute_function_call {e}")
+                    from_number = None
 
-            if param is not None:
-                logger.info(f"Gotten response {resp}")
-                payload = {**payload, **resp}
+                call_sid = None
+                call_transfer_number = None
+                payload = {
+                    'call_sid': call_sid,
+                    'provider': self.tools['input'].io_provider,
+                    'stream_sid': self.stream_sid,
+                    'from_number': from_number,
+                    'execution_id': self.run_id,
+                    **(self.transfer_call_params or {})
+                }
 
-            if self.tools['input'].io_provider == 'default':
-                mock_response = f"This is a mocked response demonstrating a successful transfer of call to {call_transfer_number}"
-                convert_to_request_log(str(payload), meta_info, None, "function_call", direction="request", run_id=self.run_id)
-                convert_to_request_log(mock_response, meta_info, None, "function_call", direction="response", run_id=self.run_id)
+                if self.tools['input'].io_provider != 'default':
+                    call_sid = self.tools["input"].get_call_sid()
+                    payload['call_sid'] = call_sid
 
-                bos_packet = create_ws_data_packet("<beginning_of_stream>", meta_info)
-                await self.tools["output"].handle(bos_packet)
-                await self.tools["output"].handle(create_ws_data_packet(mock_response, meta_info))
-                eos_packet = create_ws_data_packet("<end_of_stream>", meta_info)
-                await self.tools["output"].handle(eos_packet)
-                return
+                if url is None:
+                    url = os.getenv("CALL_TRANSFER_WEBHOOK_URL")
 
-            async with aiohttp.ClientSession() as session:
-                logger.info(f"Sending the payload to stop the conversation {payload} url {url}")
-                while self.tools["input"].is_audio_being_played_to_user():
-                    await asyncio.sleep(1)
-                convert_to_request_log(str(payload), meta_info, None, "function_call", direction="request", is_cached=False,
-                                       run_id=self.run_id)
-                async with session.post(url, json = payload) as response:
-                    response_text = await response.text()
-                    logger.info(f"Response from the server after call transfer: {response_text}")
-                    convert_to_request_log(str(response_text), meta_info, None, "function_call", direction="response", is_cached=False, run_id=self.run_id)
-                    self.execute_function_call_task = None
+                    try:
+                        json_function_call_params = copy.deepcopy(param)
+                        if isinstance(param, str):
+                            json_function_call_params = json.loads(param)
+                        call_transfer_number = json_function_call_params['call_transfer_number']
+                        if call_transfer_number:
+                            payload['call_transfer_number'] = call_transfer_number
+                    except Exception as e:
+                        logger.error(f"Error in __execute_function_call {e}")
+
+                if param is not None:
+                    logger.info(f"Gotten response {resp}")
+                    payload = {**payload, **resp}
+
+                if self.tools['input'].io_provider == 'default':
+                    mock_response = f"This is a mocked response demonstrating a successful transfer of call to {call_transfer_number}"
+                    convert_to_request_log(str(payload), meta_info, None, "function_call", direction="request", run_id=self.run_id)
+                    convert_to_request_log(mock_response, meta_info, None, "function_call", direction="response", run_id=self.run_id)
+
+                    bos_packet = create_ws_data_packet("<beginning_of_stream>", meta_info)
+                    await self.tools["output"].handle(bos_packet)
+                    await self.tools["output"].handle(create_ws_data_packet(mock_response, meta_info))
+                    eos_packet = create_ws_data_packet("<end_of_stream>", meta_info)
+                    await self.tools["output"].handle(eos_packet)
                     return
 
-        response = await trigger_api(url=url, method=method.lower(), param=param, api_token=api_token, headers_data=headers, meta_info=meta_info, run_id=self.run_id, **resp)
-        function_response = str(response)
-        get_res_keys, get_res_values = await computed_api_response(function_response)
-        if called_fun.startswith('check_availability_of_slots') and (not get_res_values or (len(get_res_values) == 1 and len(get_res_values[0]) == 0)):
-            set_response_prompt = []
-        elif called_fun.startswith('book_appointment') and 'id' not in get_res_keys:
-            if get_res_values and get_res_values[0] == 'no_available_users_found_error':
-                function_response = "Sorry, the host isn't available at this time. Are you available at any other time?"
-            set_response_prompt = []
-        else:
-            set_response_prompt = function_response
+                async with aiohttp.ClientSession() as session:
+                    logger.info(f"Sending the payload to stop the conversation {payload} url {url}")
+                    while self.tools["input"].is_audio_being_played_to_user():
+                        await asyncio.sleep(1)
+                    convert_to_request_log(str(payload), meta_info, None, "function_call", direction="request", is_cached=False,
+                                           run_id=self.run_id)
+                    async with session.post(url, json = payload) as response:
+                        response_text = await response.text()
+                        logger.info(f"Response from the server after call transfer: {response_text}")
+                        convert_to_request_log(str(response_text), meta_info, None, "function_call", direction="response", is_cached=False, run_id=self.run_id)
+                        return
 
-        self.history.append({"role": "assistant", "content": None, "tool_calls": resp["model_response"]})
-        self.history.append({"role": "tool", "tool_call_id": resp.get("tool_call_id", ""), "content": function_response})
-        model_args["messages"].append({"role": "assistant", "content": None, "tool_calls": resp["model_response"]})
-        model_args["messages"].append({"role": "tool", "tool_call_id": resp.get("tool_call_id", ""), "content": function_response})
+            response = await trigger_api(url=url, method=method.lower(), param=param, api_token=api_token, headers_data=headers, meta_info=meta_info, run_id=self.run_id, **resp)
+            function_response = str(response)
+            get_res_keys, get_res_values = await computed_api_response(function_response)
+            if called_fun.startswith('check_availability_of_slots') and (not get_res_values or (len(get_res_values) == 1 and len(get_res_values[0]) == 0)):
+                set_response_prompt = []
+            elif called_fun.startswith('book_appointment') and 'id' not in get_res_keys:
+                if get_res_values and get_res_values[0] == 'no_available_users_found_error':
+                    function_response = "Sorry, the host isn't available at this time. Are you available at any other time?"
+                set_response_prompt = []
+            else:
+                set_response_prompt = function_response
 
-        logger.info(f"Logging function call parameters ")
-        convert_to_request_log(function_response, meta_info , None, "function_call", direction = "response", is_cached= False, run_id = self.run_id)
+            self.history.append({"role": "assistant", "content": None, "tool_calls": resp["model_response"]})
+            self.history.append({"role": "tool", "tool_call_id": resp.get("tool_call_id", ""), "content": function_response})
+            model_args["messages"].append({"role": "assistant", "content": None, "tool_calls": resp["model_response"]})
+            model_args["messages"].append({"role": "tool", "tool_call_id": resp.get("tool_call_id", ""), "content": function_response})
 
-        convert_to_request_log(format_messages(model_args['messages'], True), meta_info, self.llm_config['model'], "llm", direction = "request", is_cached= False, run_id = self.run_id)
-        self.check_if_user_online = self.conversation_config.get("check_if_user_online", True)
+            logger.info(f"Logging function call parameters ")
+            convert_to_request_log(function_response, meta_info , None, "function_call", direction = "response", is_cached= False, run_id = self.run_id)
 
-        if not called_fun.startswith("transfer_call"):
-            should_bypass_synth = meta_info.get('bypass_synth', False)
-            await self.__do_llm_generation(model_args["messages"], meta_info, next_step, should_bypass_synth=should_bypass_synth, should_trigger_function_call=True)
+            convert_to_request_log(format_messages(model_args['messages'], True), meta_info, self.llm_config['model'], "llm", direction = "request", is_cached= False, run_id = self.run_id)
+            self.check_if_user_online = self.conversation_config.get("check_if_user_online", True)
 
-        self.execute_function_call_task = None
+            if not called_fun.startswith("transfer_call"):
+                should_bypass_synth = meta_info.get('bypass_synth', False)
+                await self.__do_llm_generation(model_args["messages"], meta_info, next_step, should_bypass_synth=should_bypass_synth, should_trigger_function_call=True)
+
+        except asyncio.CancelledError:
+            logger.info("Function call task was cancelled")
+            raise
+        except Exception as e:
+            logger.error(f"Error in function call execution: {e}")
+            raise
+        finally:
+            self.execute_function_call_task = None
+            self.check_if_user_online = self.conversation_config.get("check_if_user_online", True)
 
     def __store_into_history(self, meta_info, messages, llm_response, should_trigger_function_call = False):
         # TODO revisit this
@@ -2431,6 +2441,7 @@ class TaskManager(BaseManager):
                 tasks_to_cancel.append(process_task_cancellation(self.dtmf_task, 'dtmf_task'))
                 tasks_to_cancel.append(
                     process_task_cancellation(self.handle_accumulated_message_task, "handle_accumulated_message_task"))
+                tasks_to_cancel.append(process_task_cancellation(self.execute_function_call_task, 'execute_function_call_task'))
 
                 output['recording_url'] = ""
                 if self.should_record:
