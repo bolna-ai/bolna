@@ -79,35 +79,41 @@ class KnowledgeBaseAgent(BaseAgent):
     def _initialize_rag_config(self) -> Dict:
         """Initialize RAG configuration using the current format."""
         rag_config = self.config.get('rag_config', {})
-        
+
         if not rag_config:
             logger.warning("No RAG config provided")
             return {}
-        
-        # Current format: rag_config should have vector_store.provider_config.vector_id
+
+        # Support both single vector_id and multiple vector_ids
         collections = []
-        
+
         if 'vector_store' in rag_config:
             vector_store = rag_config['vector_store']
             provider_config = vector_store.get('provider_config', {})
-            vector_id = provider_config.get('vector_id')
-            
-            if vector_id:
+
+            # Try multiple vector_ids first (new format)
+            vector_ids = provider_config.get('vector_ids')
+            if vector_ids and isinstance(vector_ids, list):
+                collections.extend(vector_ids)
+                logger.info(f"Found {len(vector_ids)} collections in vector_ids")
+            # Fallback to single vector_id (backward compatibility)
+            elif vector_id := provider_config.get('vector_id'):
                 collections.append(vector_id)
+                logger.info(f"Found single collection in vector_id")
             else:
-                logger.error("vector_id not found in rag_config.vector_store.provider_config")
+                logger.error("Neither vector_ids nor vector_id found in rag_config.vector_store.provider_config")
         else:
             logger.error("vector_store not found in rag_config")
-        
+
         processed_config = {
             'collections': collections,
             'similarity_top_k': rag_config.get('similarity_top_k', 10),
-            'temperature': rag_config.get('temperature', 0.7), 
+            'temperature': rag_config.get('temperature', 0.7),
             'model': rag_config.get('model', 'gpt-4o'),
             'max_tokens': rag_config.get('max_tokens', 150)
         }
-        
-        logger.info(f"Initialized RAG config with collections: {collections}")
+
+        logger.info(f"Initialized RAG config with {len(collections)} collection(s): {collections}")
         return processed_config
 
     async def generate_response(self, history: List[dict]) -> dict:
