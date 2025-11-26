@@ -1,14 +1,17 @@
 import os
 import time
 import asyncio
+import json
 from typing import List, Tuple, AsyncGenerator, Optional, Dict
 
 from bolna.models import *
 from bolna.agent_types.base_agent import BaseAgent
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.rag_service_client import RAGServiceClient, RAGServiceClientSingleton
-from bolna.helpers.utils import now_ms
+from bolna.helpers.utils import now_ms, format_messages
 from bolna.providers import SUPPORTED_LLM_PROVIDERS
+from bolna.llms import OpenAiLLM
+from bolna.prompts import CHECK_FOR_COMPLETION_PROMPT
 
 logger = configure_logger(__name__)
 
@@ -27,14 +30,17 @@ class KnowledgeBaseAgent(BaseAgent):
         self.agent_information = self.config.get('agent_information', 'Knowledge-based AI assistant')
         self.context_data = self.config.get('context_data', {})
         self.llm_model = self.config.get('model', 'gpt-4o')
-        
+
         # Initialize provider LLM (same provider system simple agents use)
         self.llm = self._initialize_llm()
-        
+
+        # Initialize conversation completion LLM for hangup detection
+        self.conversation_completion_llm = OpenAiLLM(model=os.getenv('CHECK_FOR_COMPLETION_LLM', self.llm_model))
+
         # Initialize RAG configurations - simplified from GraphAgent's approach
         self.rag_config = self._initialize_rag_config()
         self.rag_server_url = os.getenv('RAG_SERVER_URL', 'http://localhost:8000')
-        
+
         logger.info(f"KnowledgeAgent initialized with RAG collections: {self.rag_config.get('collections', [])}")
 
     def _initialize_llm(self):
@@ -115,6 +121,25 @@ class KnowledgeBaseAgent(BaseAgent):
 
         logger.info(f"Initialized RAG config with {len(collections)} collection(s): {collections}")
         return processed_config
+
+    async def check_for_completion(self, messages, check_for_completion_prompt):
+        """
+        Check if the conversation should end based on the conversation history.
+        Uses a separate LLM to evaluate if the call should be hung up.
+        """
+        try:
+            prompt = [
+                {'role': 'system', 'content': check_for_completion_prompt},
+                {'role': 'user', 'content': format_messages(messages)}
+            ]
+
+            response = await self.conversation_completion_llm.generate(prompt, request_json=True)
+            hangup = json.loads(response)
+
+            return hangup
+        except Exception as e:
+            logger.error(f'check_for_completion exception: {str(e)}')
+            return {'hangup': 'No'}
 
     async def generate_response(self, history: List[dict]) -> dict:
         """Generate response with natural conversation flow and optional RAG augmentation."""
