@@ -116,12 +116,14 @@ class TelephonyInputHandler(DefaultInputHandler):
 
                 elif packet['event'] == 'dtmf':
                     digit = packet.get('dtmf', {}).get('digit', '')
+                    logger.info(f"DTMF key pressed: '{digit}' | Accumulated: '{self.dtmf_digits}'")
                     if not digit:
                         continue
 
                     is_complete = await self._handle_dtmf_digit(digit)
                     if is_complete and self.dtmf_digits:
                         if self.is_dtmf_active:
+                            logger.info(f"DTMF complete - Sending: '{self.dtmf_digits}'")
                             self.queues['dtmf'].put_nowait(self.dtmf_digits)
                         self.dtmf_digits = ""
 
