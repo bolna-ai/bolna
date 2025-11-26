@@ -20,7 +20,7 @@ logger = configure_logger(__name__)
 
 class ElevenlabsSynthesizer(BaseSynthesizer):
     def __init__(self, voice, voice_id, model="eleven_turbo_v2_5", audio_format="mp3", sampling_rate="16000",
-                 stream=False, buffer_size=400, temperature=0.5, similarity_boost=0.75, speed=1.0, synthesizer_key=None,
+                 stream=False, buffer_size=400, temperature=0.5, similarity_boost=0.75, speed=1.0, style=0, synthesizer_key=None,
                  caching=True, **kwargs):
         super().__init__(kwargs.get("task_manager_instance", None), stream)
         self.api_key = os.environ["ELEVENLABS_API_KEY"] if synthesizer_key is None else synthesizer_key
@@ -29,6 +29,7 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
         self.stream = True  # Issue with elevenlabs streaming that we need to always send the text quickly
         self.sampling_rate = sampling_rate
         self.speed = speed
+        self.style = style
         self.audio_format = "mp3"
         self.use_mulaw = kwargs.get("use_mulaw", True)
         self.elevenlabs_host = os.getenv("ELEVENLABS_API_HOST", "api.elevenlabs.io")
@@ -209,7 +210,8 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
                 "stability": self.temperature,
                 "similarity_boost": self.similarity_boost,
                 "optimize_streaming_latency": 3,
-                "speed": self.speed
+                "speed": self.speed,
+                "style": self.style
             }
         }
         response = await self.__send_payload(payload, format=format)
@@ -337,7 +339,8 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
                 "voice_settings": {
                     "stability": self.temperature,
                     "similarity_boost": self.similarity_boost,
-                    "speed": self.speed
+                    "speed": self.speed,
+                    "style": self.style
                 },
                 "xi_api_key": self.api_key
             }
