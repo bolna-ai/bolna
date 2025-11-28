@@ -1,4 +1,5 @@
 import os
+import httpx
 from dotenv import load_dotenv
 from openai import AsyncOpenAI, OpenAI, AuthenticationError, PermissionDeniedError, NotFoundError, RateLimitError, APIError, APIConnectionError
 import json
@@ -36,13 +37,24 @@ class OpenAiLLM(BaseLLM):
         if kwargs.get("service_tier") == "priority":
             self.model_args["service_tier"] = "priority"
 
+        limits = httpx.Limits(
+            max_connections=50,
+            max_keepalive_connections=50,
+            keepalive_expiry=30
+        )
+        http_client = httpx.AsyncClient(
+            limits=limits,
+            timeout=httpx.Timeout(600.0, connect=10.0),
+            http2=True
+        )
+
         if kwargs.get("provider", "openai") == "custom":
             base_url = kwargs.get("base_url")
             api_key = kwargs.get('llm_key', None)
-            self.async_client = AsyncOpenAI(base_url=base_url, api_key= api_key)
+            self.async_client = AsyncOpenAI(base_url=base_url, api_key=api_key, http_client=http_client)
         else:
             llm_key = kwargs.get('llm_key', os.getenv('OPENAI_API_KEY'))
-            self.async_client = AsyncOpenAI(api_key=llm_key)
+            self.async_client = AsyncOpenAI(api_key=llm_key, http_client=http_client)
             api_key = llm_key
         self.assistant_id = kwargs.get("assistant_id", None)
         if self.assistant_id:
