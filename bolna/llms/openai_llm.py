@@ -103,6 +103,7 @@ class OpenAiLLM(BaseLLM):
         start_time = now_ms()
         first_token_time = None
         latency_data = None
+        service_tier = None
 
         try:
             completion_stream = await self.async_client.chat.completions.create(**model_args)
@@ -130,6 +131,11 @@ class OpenAiLLM(BaseLLM):
 
         async for chunk in completion_stream:
             now = now_ms()
+            if hasattr(chunk, 'service_tier') and chunk.service_tier:
+                service_tier = chunk.service_tier
+                if latency_data:
+                    latency_data["service_tier"] = service_tier
+
             if not first_token_time:
                 first_token_time = now
                 self.started_streaming = True
@@ -137,7 +143,8 @@ class OpenAiLLM(BaseLLM):
                 latency_data = {
                     "sequence_id": meta_info.get("sequence_id"),
                     "first_token_latency_ms": first_token_time - start_time,
-                    "total_stream_duration_ms": None  # Will be filled at end
+                    "total_stream_duration_ms": None,  # Will be filled at end
+                    "service_tier": service_tier
                 }
 
             delta = chunk.choices[0].delta
