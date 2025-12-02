@@ -54,7 +54,11 @@ class OpenAiLLM(BaseLLM):
             self.async_client = AsyncOpenAI(base_url=base_url, api_key=api_key, http_client=http_client)
         else:
             llm_key = kwargs.get('llm_key', os.getenv('OPENAI_API_KEY'))
-            self.async_client = AsyncOpenAI(api_key=llm_key, http_client=http_client)
+            base_url = kwargs.get('base_url')
+            if base_url:
+                self.async_client = AsyncOpenAI(base_url=base_url, api_key=llm_key, http_client=http_client)
+            else:
+                self.async_client = AsyncOpenAI(api_key=llm_key, http_client=http_client)
             api_key = llm_key
         self.assistant_id = kwargs.get("assistant_id", None)
         if self.assistant_id:
