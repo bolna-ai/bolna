@@ -1,5 +1,6 @@
 import os
 import httpx
+from urllib.parse import urlparse
 from dotenv import load_dotenv
 from openai import AsyncOpenAI, OpenAI, AuthenticationError, PermissionDeniedError, NotFoundError, RateLimitError, APIError, APIConnectionError
 import json
@@ -60,6 +61,7 @@ class OpenAiLLM(BaseLLM):
             else:
                 self.async_client = AsyncOpenAI(api_key=llm_key, http_client=http_client)
             api_key = llm_key
+        self.llm_host = urlparse(base_url).netloc if base_url else None
         self.assistant_id = kwargs.get("assistant_id", None)
         if self.assistant_id:
             logger.info(f"Initializing OpenAI assistant with assistant id {self.assistant_id}")
@@ -144,7 +146,8 @@ class OpenAiLLM(BaseLLM):
                     "sequence_id": meta_info.get("sequence_id"),
                     "first_token_latency_ms": first_token_time - start_time,
                     "total_stream_duration_ms": None,  # Will be filled at end
-                    "service_tier": service_tier
+                    "service_tier": service_tier,
+                    "llm_host": self.llm_host
                 }
 
             delta = chunk.choices[0].delta
