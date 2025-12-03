@@ -741,6 +741,8 @@ class TaskManager(BaseManager):
                 injected_cfg['base_url'] = self.kwargs['base_url']
             if 'api_version' in self.kwargs:
                 injected_cfg['api_version'] = self.kwargs['api_version']
+            if 'api_tools' in self.kwargs:
+                injected_cfg['api_tools'] = self.kwargs['api_tools']
 
             llm_agent = KnowledgeBaseAgent(injected_cfg)
             logger.info("Knowledge agent created with rag-proxy-server support")
