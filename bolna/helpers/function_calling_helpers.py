@@ -14,9 +14,18 @@ async def trigger_api(url, method, param, api_token, headers_data, meta_info, ru
         if param:
             if isinstance(param, dict):
                 param = json.dumps(param)
-            code = compile(param % kwargs, "<string>", "exec")
-            exec(code, globals(), kwargs)
-            request_body = param % kwargs
+
+            # JSON-serialize complex values (lists, dicts) for proper string substitution
+            # Python's % formatting uses repr() which produces single quotes,
+            # but JSON requires double quotes for valid JSON output
+            json_kwargs = {
+                k: json.dumps(v) if isinstance(v, (list, dict)) else v
+                for k, v in kwargs.items()
+            }
+
+            code = compile(param % json_kwargs, "<string>", "exec")
+            exec(code, globals(), json_kwargs)
+            request_body = param % json_kwargs
             api_params = json.loads(request_body)
 
         headers = {'Content-Type': 'application/json'}
