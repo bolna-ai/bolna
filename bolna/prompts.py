@@ -13,7 +13,14 @@ Given the following transcript from a communication between a user and an agent 
 SUMMARY_JSON_STRUCTURE = {"summary": "Summary of the conversation goes here"}
 
 SUMMARIZATION_PROMPT = """
-Given this transcript from the communication between user and an agent your task is to summarize the conversation.
+Given this transcript from the communication between user and an agent, your task is to summarize the conversation.
+
+CRITICAL RULES:
+1. ONLY summarize what is ACTUALLY present in the transcript. Do NOT invent, assume, or fabricate any dialogue.
+2. If the transcript contains only the agent's greeting with no meaningful user response, respond with: "Call ended after initial greeting. No user response was captured."
+3. If the transcript is empty or contains no meaningful exchange, respond with: "No conversation to summarize."
+4. Never generate hypothetical or imagined conversations.
+5. Base your summary STRICTLY on the exact words spoken in the transcript.
 """
 
 CHECK_FOR_COMPLETION_PROMPT = """
