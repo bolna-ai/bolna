@@ -34,7 +34,7 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
         self.use_mulaw = kwargs.get("use_mulaw", True)
         self.elevenlabs_host = os.getenv("ELEVENLABS_API_HOST", "api.elevenlabs.io")
         self.ws_url = f"wss://{self.elevenlabs_host}/v1/text-to-speech/{self.voice}/multi-stream-input?model_id={self.model}&output_format={'ulaw_8000' if self.use_mulaw else 'mp3_44100_128'}&inactivity_timeout=170&sync_alignment=true"
-        self.api_url = f"https://{self.elevenlabs_host}/v1/text-to-speech/{self.voice}?optimize_streaming_latency=2&output_format="
+        self.api_url = f"https://{self.elevenlabs_host}/v1/text-to-speech/{self.voice}?output_format="
         self.first_chunk_generated = False
         self.last_text_sent = False
         self.text_queue = deque()
@@ -102,19 +102,35 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
                         await self.flush_synthesizer_stream()
                         return
                     try:
-                        await self.websocket_holder["websocket"].send(json.dumps({"text": text_chunk}))
+                        await self.websocket_holder["websocket"].send(json.dumps({
+                            "text": text_chunk,
+                            "context_id": self.context_id
+                        }))
                     except Exception as e:
                         logger.info(f"Error sending chunk: {e}")
                         return
 
-            # If end_of_llm_stream is True, mark the last chunk and send an empty message
+            # If end_of_llm_stream is True, mark the last chunk
             if end_of_llm_stream:
                 self.last_text_sent = True
-                self.context_id = str(uuid.uuid4())
 
-            # Send the end-of-stream signal with an empty string as text
+            # Send the end-of-stream signal with flush
             try:
-                await self.websocket_holder["websocket"].send(json.dumps({"text": "", "flush": True}))
+                await self.websocket_holder["websocket"].send(json.dumps({
+                    "text": "",
+                    "flush": True,
+                    "context_id": self.context_id
+                }))
+
+                # Send close_context to trigger immediate isFinal (avoids 20s wait)
+                if end_of_llm_stream:
+                    await self.websocket_holder["websocket"].send(json.dumps({
+                        "context_id": self.context_id,
+                        "close_context": True
+                    }))
+                    # Reset context_id for next turn AFTER close_context
+                    self.context_id = str(uuid.uuid4())
+
             except Exception as e:
                 logger.info(f"Error sending end-of-stream signal: {e}")
 
@@ -334,8 +350,14 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
         try:
             start_time = time.perf_counter()
             websocket = await websockets.connect(self.ws_url)
+
+            # Initialize context_id if not set
+            if not self.context_id:
+                self.context_id = str(uuid.uuid4())
+
             bos_message = {
                 "text": " ",
+                "context_id": self.context_id,
                 "voice_settings": {
                     "stability": self.temperature,
                     "similarity_boost": self.similarity_boost,
