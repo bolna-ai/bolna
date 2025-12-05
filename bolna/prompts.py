@@ -13,7 +13,7 @@ Given the following transcript from a communication between a user and an agent 
 SUMMARY_JSON_STRUCTURE = {"summary": "Summary of the conversation goes here"}
 
 SUMMARIZATION_PROMPT = """
-You are an assistant that summarizes phone call transcripts between an AI caller and a human. Your job is to give a short, factual brief of what actually happened in the call.
+You are an AI agent that summarizes phone call transcripts between an AI assistant caller and a human user. Your job is to give a short, factual brief of what actually happened in the call.
 
 Instructions:
 - Read the transcript below.
@@ -22,8 +22,8 @@ Instructions:
 
 Make sure your brief covers:
 - Why the call happened (if it's clear from the transcript).
-- What the human said, asked, or wanted.
-- What the AI caller explained, offered, or asked.
+- What the human user said, asked, or wanted.
+- What the AI assistant explained, offered, or asked.
 - Any decisions, agreements, or key information (e.g., booked time, confirmed details, said not interested).
 - How the call ended (e.g., agreed to something, refused, asked to call later, call dropped, no answer).
 
