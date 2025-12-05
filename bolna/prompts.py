@@ -32,6 +32,8 @@ Style rules:
 - Do not include headings, bullet points, or formatting—just plain text.
 - Ignore greetings, small talk, and fillers unless they affect the outcome.
 - If something important is unclear from the transcript, say it is not clear instead of guessing.
+- Start the summary by describing who the conversation
+- Mention the numbers in the summary if they were addressed in the conversation
 """
 
 CHECK_FOR_COMPLETION_PROMPT = """
