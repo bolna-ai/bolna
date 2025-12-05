@@ -13,12 +13,25 @@ Given the following transcript from a communication between a user and an agent 
 SUMMARY_JSON_STRUCTURE = {"summary": "Summary of the conversation goes here"}
 
 SUMMARIZATION_PROMPT = """
-Given this transcript from the communication between user and an agent, your task is to summarize the conversation.
+You are an assistant that summarizes phone call transcripts between an AI caller and a human. Your job is to give a short, factual brief of what actually happened in the call.
 
-CRITICAL RULES:
-1. ONLY summarize what is ACTUALLY present in the transcript. Do NOT invent, assume, or fabricate any dialogue.
-2. If the transcript contains only the agent's greeting with no meaningful user response, respond with: "Call ended after initial greeting. No user response was captured."
-3. If the transcript is empty or contains no meaningful exchange, respond with: "No conversation to summarize."
+Instructions:
+- Read the transcript below.
+- Write one short paragraph (3–6 sentences) that describes the call in chronological order.
+- Focus only on what concretely happened, not your opinions.
+
+Make sure your brief covers:
+- Why the call happened (if it's clear from the transcript).
+- What the human said, asked, or wanted.
+- What the AI caller explained, offered, or asked.
+- Any decisions, agreements, or key information (e.g., booked time, confirmed details, said not interested).
+- How the call ended (e.g., agreed to something, refused, asked to call later, call dropped, no answer).
+
+Style rules:
+- Be short and to the point (maximum ~100–120 words).
+- Do not include headings, bullet points, or formatting—just plain text.
+- Ignore greetings, small talk, and fillers unless they affect the outcome.
+- If something important is unclear from the transcript, say it is not clear instead of guessing.
 """
 
 CHECK_FOR_COMPLETION_PROMPT = """
