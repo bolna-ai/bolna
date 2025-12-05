@@ -695,7 +695,7 @@ class TaskManager(BaseManager):
                 self.kwargs.pop('api_version', None)
 
                 if self._is_summarization_task() or self._is_extraction_task():
-                    llm_config['model'] = 'gpt-4o-mini'
+                    llm_config['model'] = 'gpt-4.1-mini'
                     llm_config['provider'] = 'openai'
 
             if llm_config["provider"] in SUPPORTED_LLM_PROVIDERS.keys():

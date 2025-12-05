@@ -12,8 +12,29 @@ Given the following transcript from a communication between a user and an agent 
 
 SUMMARY_JSON_STRUCTURE = {"summary": "Summary of the conversation goes here"}
 
+
 SUMMARIZATION_PROMPT = """
-Given this transcript from the communication between user and an agent your task is to summarize the conversation.
+You are a call summarization assistant.
+
+Your input is a transcript of a conversation between a User and an Assistant.
+Your job is to produce a single-paragraph summary that is:
+- Neutral in tone (no emotions, no sentiment analysis).
+- Crisp and concise, but covers all the relevant highlights and proceedings of the conversation.
+- Based only and strictly on what is actually present in the transcript.
+
+Instructions:
+1. Focus on what the User wanted or talked about (the agenda of the conversation), and only mention the Assistant's actions when needed for context.
+2. Capture the overall happenings of the call and the main focus points, including (when present):
+   - Queries, requests, questions, or complaints raised by the user.
+   - Problems discussed or issues reported.
+   - Any specific details such as order information, IDs, reference numbers, amounts, prices, dates, timelines, quantities, or other concrete figures.
+   - Any decisions made, resolutions reached, or agreements during the call.
+   - Any explicit next steps (e.g., follow-up actions by the user or the agent).
+3. Use direct paraphrasing only:
+   - Do NOT invent, assume, or fabricate any dialogue, details, intent, or outcome.
+   - Do NOT infer user mood, attitude, or intent unless it is clearly and explicitly stated in the transcript.
+   - If the outcome or next steps are not clearly stated, do NOT guess or imply them.
+4. The beginning of the summary should highlight the participants of the conversation.
 """
 
 CHECK_FOR_COMPLETION_PROMPT = """
