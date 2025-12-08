@@ -28,6 +28,7 @@ class ElevenLabsConfig(BaseModel):
     temperature: Optional[float] = 0.5
     similarity_boost: Optional[float] = 0.75
     speed: Optional[float] = 1.0
+    style: Optional[float] = 0.0
 
 
 class OpenAIConfig(BaseModel):
