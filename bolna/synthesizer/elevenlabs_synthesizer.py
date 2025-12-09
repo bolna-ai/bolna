@@ -33,7 +33,7 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
         self.audio_format = "mp3"
         self.use_mulaw = kwargs.get("use_mulaw", True)
         self.elevenlabs_host = os.getenv("ELEVENLABS_API_HOST", "api.elevenlabs.io")
-        self.ws_url = f"wss://{self.elevenlabs_host}/v1/text-to-speech/{self.voice}/multi-stream-input?model_id={self.model}&output_format={'ulaw_8000' if self.use_mulaw else 'mp3_44100_128'}&inactivity_timeout=170&sync_alignment=true"
+        self.ws_url = f"wss://{self.elevenlabs_host}/v1/text-to-speech/{self.voice}/multi-stream-input?model_id={self.model}&output_format={'ulaw_8000' if self.use_mulaw else 'mp3_44100_128'}&inactivity_timeout=170&sync_alignment=true&optimize_streaming_latency=4"
         self.api_url = f"https://{self.elevenlabs_host}/v1/text-to-speech/{self.voice}?optimize_streaming_latency=2&output_format="
         self.first_chunk_generated = False
         self.last_text_sent = False
@@ -53,6 +53,9 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
         self.current_turn_id = None
         self.current_text = ""
         self.context_id = None
+        self.ws_send_time = None  # Tracks when first text is actually sent to WebSocket
+        self.ttfb_logged = False  # Tracks if TTFB has been logged for current turn
+        self.ws_trace_id = None  # ElevenLabs x-trace-id for request correlation
 
     # Ensuring we only do wav output for now
     def get_format(self, format, sampling_rate):
@@ -102,6 +105,11 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
                         await self.flush_synthesizer_stream()
                         return
                     try:
+                        # Capture WebSocket send time on first send
+                        if self.ws_send_time is None:
+                            self.ws_send_time = time.perf_counter()
+                            delay_from_push = (self.ws_send_time - self.current_turn_start_time) * 1000 if self.current_turn_start_time else 0
+                            logger.info(f"[SYNTH-TIMING] sender() first_ws_send at {self.ws_send_time:.4f} (delay from push: {delay_from_push:.2f}ms)")
                         await self.websocket_holder["websocket"].send(json.dumps({"text": text_chunk}))
                     except Exception as e:
                         logger.info(f"Error sending chunk: {e}")
@@ -229,11 +237,19 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
 
                     if len(self.text_queue) > 0:
                         self.meta_info = self.text_queue.popleft()
-                        # Compute first-result latency on first audio chunk
+                        # Compute first-result latency on first audio chunk only (use ws_send_time for accurate TTFB)
                         try:
-                            if self.current_turn_start_time is not None:
-                                first_result_latency = time.perf_counter() - self.current_turn_start_time
-                                self.meta_info['synthesizer_latency'] = first_result_latency
+                            if not self.ttfb_logged:
+                                if self.ws_send_time is not None:
+                                    first_result_latency = time.perf_counter() - self.ws_send_time
+                                    self.meta_info['synthesizer_latency'] = first_result_latency
+                                    logger.info(f"[SYNTH-TIMING] first_audio_chunk received! TTFB={first_result_latency*1000:.2f}ms (from ws_send)")
+                                    self.ttfb_logged = True
+                                elif self.current_turn_start_time is not None:
+                                    first_result_latency = time.perf_counter() - self.current_turn_start_time
+                                    self.meta_info['synthesizer_latency'] = first_result_latency
+                                    logger.info(f"[SYNTH-TIMING] first_audio_chunk received! TTFB={first_result_latency*1000:.2f}ms (from push)")
+                                    self.ttfb_logged = True
                         except Exception:
                             pass
                     audio = ""
@@ -267,6 +283,7 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
                         try:
                             if self.current_turn_start_time is not None:
                                 total_stream_duration = time.perf_counter() - self.current_turn_start_time
+                                logger.info(f"[SYNTH-TIMING] end_of_stream total_duration={total_stream_duration*1000:.2f}ms")
                                 self.turn_latencies.append({
                                     'turn_id': self.current_turn_id,
                                     'sequence_id': self.current_turn_id,
@@ -275,6 +292,8 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
                                 })
                                 self.current_turn_start_time = None
                                 self.current_turn_id = None
+                                self.ws_send_time = None  # Reset for next turn
+                                self.ttfb_logged = False  # Reset for next turn
                         except Exception:
                             pass
 
@@ -334,6 +353,10 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
         try:
             start_time = time.perf_counter()
             websocket = await websockets.connect(self.ws_url)
+            # Extract x-trace-id from WebSocket handshake response
+            if hasattr(websocket, 'response') and hasattr(websocket.response, 'headers'):
+                self.ws_trace_id = websocket.response.headers.get('x-trace-id')
+                logger.info(f"Elevenlabs WebSocket connected trace_id={self.ws_trace_id}")
             bos_message = {
                 "text": " ",
                 "voice_settings": {
@@ -341,6 +364,9 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
                     "similarity_boost": self.similarity_boost,
                     "speed": self.speed,
                     "style": self.style
+                },
+                "generation_config": {
+                    "chunk_length_schedule": [50, 80, 120, 150],  # Fast first byte, then progressively larger for quality
                 },
                 "xi_api_key": self.api_key
             }
@@ -372,9 +398,13 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
             end_of_llm_stream = "end_of_llm_stream" in meta_info and meta_info["end_of_llm_stream"]
             self.meta_info = copy.deepcopy(meta_info)
             meta_info["text"] = text
-            # Stamp synthesizer turn start time
+            # Stamp synthesizer turn start time - only on FIRST push (don't overwrite)
             try:
-                self.current_turn_start_time = time.perf_counter()
+                if self.current_turn_start_time is None:
+                    self.current_turn_start_time = time.perf_counter()
+                    self.ws_send_time = None  # Reset ws_send_time for new turn
+                    self.ttfb_logged = False  # Reset TTFB logged flag for new turn
+                    logger.info(f"[SYNTH-TIMING] push() turn_start_time={self.current_turn_start_time:.4f} text_len={len(text) if text else 0}")
                 self.current_turn_id = meta_info.get('turn_id') or meta_info.get('sequence_id')
             except Exception:
                 pass
