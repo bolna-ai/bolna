@@ -54,7 +54,6 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
         self.current_text = ""
         self.context_id = None
         self.ws_send_time = None  # Tracks when first text is actually sent to WebSocket
-        self.ttfb_logged = False  # Tracks if TTFB has been logged for current turn
         self.ws_trace_id = None  # ElevenLabs x-trace-id for request correlation
         self.current_turn_ttfb = None  # Store TTFB separately (meta_info gets overwritten)
 
@@ -238,11 +237,9 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
                         self.meta_info = self.text_queue.popleft()
                         # Compute TTFB on first audio chunk only
                         try:
-                            if not self.ttfb_logged and self.ws_send_time is not None:
-                                first_result_latency = time.perf_counter() - self.ws_send_time
-                                self.current_turn_ttfb = first_result_latency
-                                self.meta_info['synthesizer_latency'] = first_result_latency
-                                self.ttfb_logged = True
+                            if self.current_turn_ttfb is None and self.ws_send_time is not None:
+                                self.current_turn_ttfb = time.perf_counter() - self.ws_send_time
+                                self.meta_info['synthesizer_latency'] = self.current_turn_ttfb
                         except Exception:
                             pass
                     audio = ""
@@ -285,7 +282,6 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
                                 self.current_turn_start_time = None
                                 self.current_turn_id = None
                                 self.ws_send_time = None  # Reset for next turn
-                                self.ttfb_logged = False  # Reset for next turn
                                 self.current_turn_ttfb = None  # Reset for next turn
                         except Exception:
                             pass
@@ -391,12 +387,11 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
             end_of_llm_stream = "end_of_llm_stream" in meta_info and meta_info["end_of_llm_stream"]
             self.meta_info = copy.deepcopy(meta_info)
             meta_info["text"] = text
-            # Stamp synthesizer turn start time - only on FIRST push (don't overwrite)
             try:
                 if self.current_turn_start_time is None:
                     self.current_turn_start_time = time.perf_counter()
-                    self.ws_send_time = None  # Reset ws_send_time for new turn
-                    self.ttfb_logged = False  # Reset TTFB logged flag for new turn
+                    self.ws_send_time = None  # Reset for new turn
+                    self.current_turn_ttfb = None  # Reset for new turn
                 self.current_turn_id = meta_info.get('turn_id') or meta_info.get('sequence_id')
             except Exception:
                 pass
