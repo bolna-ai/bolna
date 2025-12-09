@@ -109,8 +109,6 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
                         # Capture WebSocket send time on first send
                         if self.ws_send_time is None:
                             self.ws_send_time = time.perf_counter()
-                            delay_from_push = (self.ws_send_time - self.current_turn_start_time) * 1000 if self.current_turn_start_time else 0
-                            logger.info(f"[SYNTH-TIMING] sender() first_ws_send at {self.ws_send_time:.4f} (delay from push: {delay_from_push:.2f}ms)")
                         await self.websocket_holder["websocket"].send(json.dumps({"text": text_chunk}))
                     except Exception as e:
                         logger.info(f"Error sending chunk: {e}")
@@ -238,21 +236,13 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
 
                     if len(self.text_queue) > 0:
                         self.meta_info = self.text_queue.popleft()
-                        # Compute first-result latency on first audio chunk only (use ws_send_time for accurate TTFB)
+                        # Compute TTFB on first audio chunk only
                         try:
-                            if not self.ttfb_logged:
-                                if self.ws_send_time is not None:
-                                    first_result_latency = time.perf_counter() - self.ws_send_time
-                                    self.current_turn_ttfb = first_result_latency
-                                    self.meta_info['synthesizer_latency'] = first_result_latency
-                                    logger.info(f"[SYNTH-TIMING] first_audio_chunk received! TTFB={first_result_latency*1000:.2f}ms (from ws_send)")
-                                    self.ttfb_logged = True
-                                elif self.current_turn_start_time is not None:
-                                    first_result_latency = time.perf_counter() - self.current_turn_start_time
-                                    self.current_turn_ttfb = first_result_latency
-                                    self.meta_info['synthesizer_latency'] = first_result_latency
-                                    logger.info(f"[SYNTH-TIMING] first_audio_chunk received! TTFB={first_result_latency*1000:.2f}ms (from push)")
-                                    self.ttfb_logged = True
+                            if not self.ttfb_logged and self.ws_send_time is not None:
+                                first_result_latency = time.perf_counter() - self.ws_send_time
+                                self.current_turn_ttfb = first_result_latency
+                                self.meta_info['synthesizer_latency'] = first_result_latency
+                                self.ttfb_logged = True
                         except Exception:
                             pass
                     audio = ""
@@ -286,7 +276,6 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
                         try:
                             if self.current_turn_start_time is not None:
                                 total_stream_duration = time.perf_counter() - self.current_turn_start_time
-                                logger.info(f"[SYNTH-TIMING] end_of_stream total_duration={total_stream_duration*1000:.2f}ms")
                                 self.turn_latencies.append({
                                     'turn_id': self.current_turn_id,
                                     'sequence_id': self.current_turn_id,
@@ -408,7 +397,6 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
                     self.current_turn_start_time = time.perf_counter()
                     self.ws_send_time = None  # Reset ws_send_time for new turn
                     self.ttfb_logged = False  # Reset TTFB logged flag for new turn
-                    logger.info(f"[SYNTH-TIMING] push() turn_start_time={self.current_turn_start_time:.4f} text_len={len(text) if text else 0}")
                 self.current_turn_id = meta_info.get('turn_id') or meta_info.get('sequence_id')
             except Exception:
                 pass
