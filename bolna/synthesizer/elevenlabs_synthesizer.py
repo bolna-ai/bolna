@@ -56,6 +56,7 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
         self.ws_send_time = None  # Tracks when first text is actually sent to WebSocket
         self.ttfb_logged = False  # Tracks if TTFB has been logged for current turn
         self.ws_trace_id = None  # ElevenLabs x-trace-id for request correlation
+        self.current_turn_ttfb = None  # Store TTFB separately (meta_info gets overwritten)
 
     # Ensuring we only do wav output for now
     def get_format(self, format, sampling_rate):
@@ -242,11 +243,13 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
                             if not self.ttfb_logged:
                                 if self.ws_send_time is not None:
                                     first_result_latency = time.perf_counter() - self.ws_send_time
+                                    self.current_turn_ttfb = first_result_latency
                                     self.meta_info['synthesizer_latency'] = first_result_latency
                                     logger.info(f"[SYNTH-TIMING] first_audio_chunk received! TTFB={first_result_latency*1000:.2f}ms (from ws_send)")
                                     self.ttfb_logged = True
                                 elif self.current_turn_start_time is not None:
                                     first_result_latency = time.perf_counter() - self.current_turn_start_time
+                                    self.current_turn_ttfb = first_result_latency
                                     self.meta_info['synthesizer_latency'] = first_result_latency
                                     logger.info(f"[SYNTH-TIMING] first_audio_chunk received! TTFB={first_result_latency*1000:.2f}ms (from push)")
                                     self.ttfb_logged = True
@@ -287,13 +290,14 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
                                 self.turn_latencies.append({
                                     'turn_id': self.current_turn_id,
                                     'sequence_id': self.current_turn_id,
-                                    'first_result_latency_ms': round((self.meta_info.get('synthesizer_latency', 0)) * 1000),
+                                    'first_result_latency_ms': round((self.current_turn_ttfb or 0) * 1000),
                                     'total_stream_duration_ms': round(total_stream_duration * 1000)
                                 })
                                 self.current_turn_start_time = None
                                 self.current_turn_id = None
                                 self.ws_send_time = None  # Reset for next turn
                                 self.ttfb_logged = False  # Reset for next turn
+                                self.current_turn_ttfb = None  # Reset for next turn
                         except Exception:
                             pass
 
