@@ -33,7 +33,7 @@ class ElevenLabsTranscriber(BaseTranscriber):
         self.sampling_rate = 16000
         self.encoding = encoding
         self.api_key = kwargs.get("transcriber_key", os.getenv('ELEVENLABS_API_KEY'))
-        self.elevenlabs_host = os.getenv('ELEVENLABS_HOST', 'api.elevenlabs.io')
+        self.elevenlabs_host = os.getenv('ELEVENLABS_API_HOST', 'api.elevenlabs.io')
         self.transcriber_output_queue = output_queue
         self.transcription_task = None
         self.transcription_cursor = 0.0
