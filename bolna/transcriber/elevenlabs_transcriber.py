@@ -21,10 +21,13 @@ load_dotenv()
 
 class ElevenLabsTranscriber(BaseTranscriber):
     def __init__(self, telephony_provider, input_queue=None, model='scribe_v2_realtime', stream=True,
-                 language="en", sampling_rate="16000", encoding="linear16", output_queue=None,
-                 commit_strategy="vad", vad_silence_threshold_secs=1.0, include_timestamps=False,
+                 language="en", endpointing="400", sampling_rate="16000", encoding="linear16", output_queue=None,
+                 commit_strategy="vad", include_timestamps=False,
                  include_language_detection=False, **kwargs):
         super().__init__(input_queue)
+        self.endpointing = endpointing
+        # Convert endpointing (ms) to vad_silence_threshold_secs (seconds)
+        self.vad_silence_threshold_secs = int(endpointing) / 1000.0
         self.language = language
         self.stream = stream
         self.provider = telephony_provider
@@ -47,7 +50,7 @@ class ElevenLabsTranscriber(BaseTranscriber):
 
         # ElevenLabs specific settings
         self.commit_strategy = commit_strategy
-        self.vad_silence_threshold_secs = vad_silence_threshold_secs
+        # Note: self.vad_silence_threshold_secs is set above from endpointing
         self.include_timestamps = include_timestamps
         self.include_language_detection = include_language_detection
 
@@ -73,30 +76,39 @@ class ElevenLabsTranscriber(BaseTranscriber):
 
     def get_elevenlabs_ws_url(self):
         """Build the ElevenLabs WebSocket URL with query parameters"""
-        params = {
-            'model': self.model,
-        }
-
         self.audio_frame_duration = 0.5  # Default for 8k samples at 16kHz
+        audio_format = 'pcm_16000'  # Default
 
         if self.provider in ('twilio', 'exotel', 'plivo'):
             # Twilio uses mulaw at 8kHz, exotel/plivo use linear16 at 8kHz
             self.encoding = 'mulaw' if self.provider == "twilio" else "linear16"
             self.sampling_rate = 8000
             self.audio_frame_duration = 0.2  # 200ms chunks for telephony
+            audio_format = 'ulaw_8000' if self.provider == "twilio" else 'pcm_8000'
 
         elif self.provider == "web_based_call":
             self.encoding = "linear16"
             self.sampling_rate = 16000
             self.audio_frame_duration = 0.256
+            audio_format = 'pcm_16000'
 
         elif not self.connected_via_dashboard:
             self.encoding = "linear16"
             self.sampling_rate = 16000
+            audio_format = 'pcm_16000'
 
         if self.provider == "playground":
             self.sampling_rate = 8000
             self.audio_frame_duration = 0.0  # No streaming from playground
+            audio_format = 'pcm_8000'
+
+        params = {
+            'model': self.model,
+            'language_code': self.language,
+            'audio_format': audio_format,
+            'commit_strategy': self.commit_strategy,
+            'vad_silence_threshold_secs': self.vad_silence_threshold_secs,
+        }
 
         websocket_url = f'wss://{self.elevenlabs_host}/v1/speech-to-text/realtime?{urlencode(params)}'
         return websocket_url
