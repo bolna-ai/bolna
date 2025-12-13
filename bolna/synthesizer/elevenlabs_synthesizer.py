@@ -93,9 +93,13 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
                 return
 
             # Ensure the WebSocket connection is established
+            ws_wait_start = time.perf_counter()
             while self.websocket_holder["websocket"] is None or self.websocket_holder["websocket"].state is websockets.protocol.State.CLOSED:
                 logger.info("Waiting for elevenlabs ws connection to be established...")
                 await asyncio.sleep(1)
+            ws_wait_time = (time.perf_counter() - ws_wait_start) * 1000
+            if ws_wait_time > 10:
+                logger.info(f"EL sender ws_wait={ws_wait_time:.0f}ms trace_id={self.ws_trace_id}")
 
             if text != "":
                 for text_chunk in self.text_chunker(text):
@@ -108,6 +112,7 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
                         # Capture WebSocket send time on first send
                         if self.ws_send_time is None:
                             self.ws_send_time = time.perf_counter()
+                            logger.info(f"WS send trace_id={self.ws_trace_id} first_text_sent")
                         await self.websocket_holder["websocket"].send(json.dumps({"text": text_chunk}))
                     except Exception as e:
                         logger.info(f"Error sending chunk: {e}")
@@ -130,6 +135,8 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
             logger.error(f"Unexpected error in sender: {e}")
 
     async def receiver(self):
+        audio_chunk_count = 0
+        last_recv_time = None
         while True:
             try:
                 if self.conversation_ended:
@@ -141,8 +148,21 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
                     await asyncio.sleep(5)
                     continue
 
+                recv_start = time.perf_counter()
                 response = await self.websocket_holder["websocket"].recv()
+                recv_duration = (time.perf_counter() - recv_start) * 1000
                 data = json.loads(response)
+                # Log receive timing for debugging network latency
+                if "audio" in data and data["audio"] and self.ws_send_time is not None:
+                    audio_chunk_count += 1
+                    time_since_send = (time.perf_counter() - self.ws_send_time) * 1000
+                    # Log first chunk and any slow chunks
+                    if audio_chunk_count == 1:
+                        logger.info(f"WS recv FIRST trace_id={self.ws_trace_id} recv_wait={recv_duration:.0f}ms time_since_send={time_since_send:.0f}ms")
+                    elif recv_duration > 200:
+                        gap = (recv_start - last_recv_time) * 1000 if last_recv_time else 0
+                        logger.info(f"WS recv SLOW chunk={audio_chunk_count} trace_id={self.ws_trace_id} recv_wait={recv_duration:.0f}ms gap={gap:.0f}ms")
+                    last_recv_time = time.perf_counter()
                 logger.info("response for isFinal: {}".format(data.get('isFinal', False)))
                 # logger.info(f"Response from elevenlabs - {data}")
 
@@ -155,6 +175,9 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
                     yield chunk, text_spoken
 
                 if "isFinal" in data and data["isFinal"]:
+                    logger.info(f"WS recv isFinal trace_id={self.ws_trace_id}")
+                    audio_chunk_count = 0
+                    last_recv_time = None
                     yield b'\x00', ""
 
                 elif self.last_text_sent:
@@ -228,9 +251,15 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
 
     # Currently we are only supporting wav output but soon we will incorporate conver
     async def generate(self):
+        last_yield_time = None
         try:
             if self.stream:
                 async for message, text_synthesized in self.receiver():
+                    gen_loop_start = time.perf_counter()
+                    if last_yield_time:
+                        loop_gap = (gen_loop_start - last_yield_time) * 1000
+                        if loop_gap > 100:
+                            logger.info(f"EL generate loop_gap={loop_gap:.0f}ms trace_id={self.ws_trace_id}")
                     logger.info(f"Received message from server")
 
                     if len(self.text_queue) > 0:
@@ -251,8 +280,12 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
                         self.meta_info['format'] = "wav"
                         audio = message
                         if message != b'\x00':
+                            proc_start = time.perf_counter()
                             audio = resample(convert_audio_to_wav(message, source_format="mp3"), int(self.sampling_rate),
                                              format="wav")
+                            proc_time = (time.perf_counter() - proc_start) * 1000
+                            if proc_time > 50:
+                                logger.info(f"EL audio_proc took={proc_time:.0f}ms trace_id={self.ws_trace_id}")
 
                     if not self.first_chunk_generated:
                         self.meta_info["is_first_chunk"] = True
@@ -289,6 +322,7 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
                     self.meta_info["text_synthesized"] = text_synthesized
 
                     self.meta_info["mark_id"] = str(uuid.uuid4())
+                    last_yield_time = time.perf_counter()
                     yield create_ws_data_packet(audio, self.meta_info)
             else:
                 while True:
@@ -392,6 +426,7 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
                     self.current_turn_start_time = time.perf_counter()
                     self.ws_send_time = None  # Reset for new turn
                     self.current_turn_ttfb = None  # Reset for new turn
+                    logger.info(f"EL push new_turn trace_id={self.ws_trace_id} text_len={len(text) if text else 0}")
                 self.current_turn_id = meta_info.get('turn_id') or meta_info.get('sequence_id')
             except Exception:
                 pass
