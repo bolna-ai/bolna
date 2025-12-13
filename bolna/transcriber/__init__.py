@@ -4,3 +4,4 @@ from .azure_transcriber import AzureTranscriber
 from .sarvam_transcriber import SarvamTranscriber
 from .assemblyai_transcriber import AssemblyAITranscriber
 from .google_transcriber import GoogleTranscriber
+from .pixa_transcriber import PixaTranscriber
