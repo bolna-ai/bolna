@@ -22,7 +22,7 @@ load_dotenv()
 class ElevenLabsTranscriber(BaseTranscriber):
     def __init__(self, telephony_provider, input_queue=None, model='scribe_v2_realtime', stream=True,
                  language="en", endpointing="400", sampling_rate="16000", encoding="linear16", output_queue=None,
-                 commit_strategy="vad", include_timestamps=False,
+                 commit_strategy="vad", include_timestamps=True,
                  include_language_detection=False, **kwargs):
         super().__init__(input_queue)
         self.endpointing = endpointing
@@ -54,6 +54,11 @@ class ElevenLabsTranscriber(BaseTranscriber):
         self.include_timestamps = include_timestamps
         self.include_language_detection = include_language_detection
 
+        # VAD tuning parameters for low latency
+        self.vad_threshold = kwargs.get("vad_threshold", 0.4)  # VAD sensitivity (0-1)
+        self.min_speech_duration_ms = kwargs.get("min_speech_duration_ms", 100)  # Min speech to process
+        self.min_silence_duration_ms = kwargs.get("min_silence_duration_ms", 100)  # Min pause for segments
+
         # Message states
         self.curr_message = ''
         self.finalized_transcript = ""
@@ -68,6 +73,9 @@ class ElevenLabsTranscriber(BaseTranscriber):
         self.current_turn_interim_details = []
         self.audio_frame_timestamps = []
         self.turn_counter = 0
+
+        # Latency tracking
+        self.last_audio_send_time = None
 
         # Timeout tracking for stuck utterances
         self.last_interim_time = None
@@ -108,6 +116,13 @@ class ElevenLabsTranscriber(BaseTranscriber):
             'audio_format': audio_format,
             'commit_strategy': self.commit_strategy,
             'vad_silence_threshold_secs': self.vad_silence_threshold_secs,
+            # VAD tuning for low latency
+            'vad_threshold': self.vad_threshold,
+            'min_speech_duration_ms': self.min_speech_duration_ms,
+            'min_silence_duration_ms': self.min_silence_duration_ms,
+            # Timestamps and language detection
+            'include_timestamps': 'true' if self.include_timestamps else 'false',
+            'include_language_detection': 'true' if self.include_language_detection else 'false',
         }
 
         websocket_url = f'wss://{self.elevenlabs_host}/v1/speech-to-text/realtime?{urlencode(params)}'
@@ -123,6 +138,25 @@ class ElevenLabsTranscriber(BaseTranscriber):
         self.current_turn_id = None
         self.final_transcript = ""
         self.is_transcript_sent_for_processing = True
+
+    def _find_audio_send_timestamp(self, audio_position):
+        """
+        Find when the audio frame containing this position was sent to ElevenLabs.
+
+        Args:
+            audio_position: Position in seconds within the audio stream
+
+        Returns:
+            Timestamp when the frame containing this position was sent, or None if not found
+        """
+        if not self.audio_frame_timestamps:
+            return None
+
+        for frame_start, frame_end, send_timestamp in self.audio_frame_timestamps:
+            if frame_start <= audio_position <= frame_end:
+                return send_timestamp
+
+        return None
 
     async def _force_finalize_utterance(self):
         """Force-finalize a stuck utterance and send to queue"""
@@ -257,6 +291,8 @@ class ElevenLabsTranscriber(BaseTranscriber):
                     }
 
                     await ws.send(json.dumps(message))
+                    # Track send time for latency calculation
+                    self.last_audio_send_time = timestamp_ms()
                 except ConnectionClosedError as e:
                     logger.error(f"Connection closed while sending data: {e}")
                     break
@@ -300,13 +336,20 @@ class ElevenLabsTranscriber(BaseTranscriber):
                             logger.info(f"Starting new turn with turn_id: {self.current_turn_id}")
                             yield create_ws_data_packet("speech_started", self.meta_info)
 
+                        # Calculate latency from last audio send to transcript receipt
+                        latency_ms = None
+                        if self.last_audio_send_time:
+                            result_received_at = timestamp_ms()
+                            latency_ms = round(result_received_at - self.last_audio_send_time, 5)
+
                         interim_detail = {
                             'transcript': transcript,
                             'is_final': False,
                             'received_at': time.time(),
+                            'latency_ms': latency_ms,
                         }
 
-                        logger.info(f"Partial transcript: {transcript}")
+                        logger.info(f"Partial transcript: {transcript} (latency: {latency_ms}ms)")
                         self.current_turn_interim_details.append(interim_detail)
                         self.last_interim_time = time.time()
 
@@ -355,6 +398,7 @@ class ElevenLabsTranscriber(BaseTranscriber):
                 elif msg_type == "committed_transcript_with_timestamps":
                     transcript = msg.get("text", "")
                     words = msg.get("words", [])
+                    detected_language = msg.get("language_code")
                     logger.info(f"Committed transcript with timestamps: {transcript} ({len(words)} words)")
 
                     if transcript.strip() and not self.is_transcript_sent_for_processing:
@@ -364,11 +408,44 @@ class ElevenLabsTranscriber(BaseTranscriber):
                         }
 
                         try:
+                            # Extract language detection info (similar to Deepgram)
+                            if self.include_language_detection and detected_language:
+                                self.meta_info['segment_language'] = detected_language
+                                logger.info(f"Language detected: {detected_language}")
+
+                                # Extract per-word language breakdown if available
+                                word_lang_counts = {}
+                                total_words = 0
+                                for word_obj in words:
+                                    if isinstance(word_obj, dict) and 'language' in word_obj:
+                                        word_lang = word_obj['language']
+                                        word_lang_counts[word_lang] = word_lang_counts.get(word_lang, 0) + 1
+                                        total_words += 1
+
+                                if word_lang_counts:
+                                    primary_language = max(word_lang_counts, key=word_lang_counts.get)
+                                    primary_lang_percentage = (word_lang_counts[primary_language] / total_words) if total_words > 0 else 0.0
+                                    self.meta_info['segment_language_percentage'] = round(primary_lang_percentage, 2)
+                                    self.meta_info['segment_word_lang_counts'] = word_lang_counts
+                                    if len(word_lang_counts) > 1:
+                                        logger.info(f"Code-switching detected: {word_lang_counts}")
+
+                            # Calculate per-word latency using timestamps
+                            if words and self.audio_frame_timestamps:
+                                for word_obj in words:
+                                    if isinstance(word_obj, dict) and 'end' in word_obj:
+                                        audio_position = word_obj['end']
+                                        audio_sent_at = self._find_audio_send_timestamp(audio_position)
+                                        if audio_sent_at:
+                                            word_latency = round(timestamp_ms() - audio_sent_at, 5)
+                                            word_obj['latency_ms'] = word_latency
+
                             self.turn_latencies.append({
                                 'turn_id': self.current_turn_id,
                                 'sequence_id': self.current_turn_id,
                                 'interim_details': self.current_turn_interim_details,
-                                'words': words
+                                'words': words,
+                                'detected_language': detected_language
                             })
 
                             self._reset_turn_state()
