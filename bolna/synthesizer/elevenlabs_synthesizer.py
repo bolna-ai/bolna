@@ -141,7 +141,7 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
 
                 if (self.websocket_holder["websocket"] is None or
                         self.websocket_holder["websocket"].state is websockets.protocol.State.CLOSED):
-                    logger.info("WebSocket is not connected, waiting for connection...")
+                    # logger.info("WebSocket is not connected, waiting for connection...")
                     await self.connection_ready.wait()
                     continue
 
