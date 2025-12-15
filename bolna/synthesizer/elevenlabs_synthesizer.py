@@ -57,6 +57,7 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
         self.ws_send_time = None  # Tracks when first text is actually sent to WebSocket
         self.ws_trace_id = None  # ElevenLabs x-trace-id for request correlation
         self.current_turn_ttfb = None  # Store TTFB separately (meta_info gets overwritten)
+        self.last_disconnect_log_time = 0  # Rate limit disconnect logging
 
     # Ensuring we only do wav output for now
     def get_format(self, format, sampling_rate):
@@ -140,8 +141,12 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
                     return
 
                 if (self.websocket_holder["websocket"] is None or
-                        self.websocket_holder["websocket"].state is websockets.protocol.State.CLOSED):
-                    logger.info("WebSocket is not connected, waiting for connection...")
+                        self.websocket_holder["websocket"].state != websockets.protocol.State.OPEN):
+                    # Rate limit this log message to once per 5 seconds
+                    current_time = time.time()
+                    if current_time - self.last_disconnect_log_time >= 5:
+                        logger.info("WebSocket is not connected, waiting for connection...")
+                        self.last_disconnect_log_time = current_time
                     await self.connection_ready.wait()
                     continue
 
@@ -201,7 +206,8 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
                 else:
                     logger.info("No audio data in the response")
 
-            except websockets.exceptions.ConnectionClosed:
+            except websockets.exceptions.ConnectionClosed as e:
+                logger.error(f"WebSocket ConnectionClosed: code={e.code}, reason={e.reason}")
                 break
             except Exception as e:
                 logger.error(f"Error occurred in receiver - {e}")
@@ -404,10 +410,13 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
     async def monitor_connection(self):
         # Periodically check if the connection is still alive
         while True:
-            if self.websocket_holder["websocket"] is None or self.websocket_holder["websocket"].state is websockets.protocol.State.CLOSED:
+            if self.websocket_holder["websocket"] is None or self.websocket_holder["websocket"].state != websockets.protocol.State.OPEN:
                 self.connection_ready.clear()
-                logger.info("Re-establishing elevenlabs connection...")
+                current_state = self.websocket_holder['websocket'].state if self.websocket_holder['websocket'] else 'None'
+                logger.info(f"Re-establishing elevenlabs connection... (current state: {current_state})")
                 self.websocket_holder["websocket"] = await self.establish_connection()
+                # Reset disconnect log timer on successful reconnection
+                self.last_disconnect_log_time = 0
             await asyncio.sleep(1)
 
     async def get_sender_task(self):
