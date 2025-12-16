@@ -5,3 +5,4 @@ from .sarvam_transcriber import SarvamTranscriber
 from .assemblyai_transcriber import AssemblyAITranscriber
 from .google_transcriber import GoogleTranscriber
 from .pixa_transcriber import PixaTranscriber
+from .gladia_transcriber import GladiaTranscriber
