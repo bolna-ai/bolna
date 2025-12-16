@@ -58,6 +58,8 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
         self.ws_trace_id = None  # ElevenLabs x-trace-id for request correlation
         self.current_turn_ttfb = None  # Store TTFB separately (meta_info gets overwritten)
         self.last_disconnect_log_time = 0  # Rate limit disconnect logging
+        self.disconnect_start_time = None  # Track when disconnection started
+        self.max_disconnect_timeout = 30  # Give up after 30 seconds of being disconnected
 
     # Ensuring we only do wav output for now
     def get_format(self, format, sampling_rate):
@@ -142,13 +144,27 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
 
                 if (self.websocket_holder["websocket"] is None or
                         self.websocket_holder["websocket"].state != websockets.protocol.State.OPEN):
-                    # Rate limit this log message to once per 5 seconds
                     current_time = time.time()
+
+                    # Track when disconnection started
+                    if self.disconnect_start_time is None:
+                        self.disconnect_start_time = current_time
+
+                    # Check if we've been disconnected too long - give up gracefully
+                    disconnect_duration = current_time - self.disconnect_start_time
+                    if disconnect_duration > self.max_disconnect_timeout:
+                        logger.error(f"WebSocket disconnected for {disconnect_duration:.1f}s, giving up. Ending receiver gracefully.")
+                        return
+
+                    # Rate limit this log message to once per 5 seconds
                     if current_time - self.last_disconnect_log_time >= 5:
-                        logger.info("WebSocket is not connected, waiting for connection...")
+                        logger.info(f"WebSocket is not connected, waiting for connection... (disconnected for {disconnect_duration:.1f}s)")
                         self.last_disconnect_log_time = current_time
                     await self.connection_ready.wait()
                     continue
+
+                # Connected - reset disconnect tracking
+                self.disconnect_start_time = None
 
                 recv_start = time.perf_counter()
                 response = await self.websocket_holder["websocket"].recv()
@@ -415,8 +431,9 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
                 current_state = self.websocket_holder['websocket'].state if self.websocket_holder['websocket'] else 'None'
                 logger.info(f"Re-establishing elevenlabs connection... (current state: {current_state})")
                 self.websocket_holder["websocket"] = await self.establish_connection()
-                # Reset disconnect log timer on successful reconnection
+                # Reset disconnect timers on successful reconnection
                 self.last_disconnect_log_time = 0
+                self.disconnect_start_time = None
             await asyncio.sleep(1)
 
     async def get_sender_task(self):
