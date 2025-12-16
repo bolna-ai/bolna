@@ -111,7 +111,7 @@ class ElevenLabsTranscriber(BaseTranscriber):
             audio_format = 'pcm_8000'
 
         params = {
-            'model': self.model,
+            'model_id': self.model,
             'language_code': self.language,
             'audio_format': audio_format,
             'commit_strategy': self.commit_strategy,
