@@ -85,10 +85,6 @@ class PixaTranscriber(BaseTranscriber):
         self.first_result_latency_ms = None
         self.turn_counter = 0
         self.turn_first_result_latency = None
-        self.current_turn_interim_details = []
-
-        # Audio frame timestamp tracking for per-result latency calculation
-        self.audio_frame_timestamps = []  # List of (frame_start, frame_end, send_timestamp)
 
         # Since Pixa has no VAD, use is_final-based turn detection
         self.is_transcript_sent_for_processing = False
@@ -121,25 +117,6 @@ class PixaTranscriber(BaseTranscriber):
             self.sampling_rate = int(self.sampling_rate)
             self.input_sampling_rate = self.sampling_rate
             self.audio_frame_duration = 0.2
-
-    def _find_audio_send_timestamp(self, audio_position):
-        """
-        Find when the audio frame containing this position was sent to Pixa.
-
-        Args:
-            audio_position: Position in seconds within the audio stream (from Pixa's 'start' field)
-
-        Returns:
-            Timestamp (ms) when the frame containing this position was sent, or None if not found
-        """
-        if not self.audio_frame_timestamps:
-            return None
-
-        for frame_start, frame_end, send_timestamp in self.audio_frame_timestamps:
-            if frame_start <= audio_position <= frame_end:
-                return send_timestamp
-
-        return None
 
     def _get_ws_url(self):
         """Construct WebSocket URL with query parameters."""
@@ -215,7 +192,6 @@ class PixaTranscriber(BaseTranscriber):
                     self.audio_submission_time = time.time()
                     self.current_request_id = self.generate_request_id()
                     self.meta_info["request_id"] = self.current_request_id
-                    self.meta_info["transcriber_start_time"] = time.time()
 
                     # Start turn tracking
                     if not self.current_turn_start_time:
@@ -234,12 +210,6 @@ class PixaTranscriber(BaseTranscriber):
                     except Exception as e:
                         logger.warning(f"Error sending close commands: {e}")
                     break
-
-                # Track audio frame timestamps for latency calculation
-                frame_start = self.num_frames * self.audio_frame_duration
-                frame_end = (self.num_frames + 1) * self.audio_frame_duration
-                send_timestamp = timestamp_ms()
-                self.audio_frame_timestamps.append((frame_start, frame_end, send_timestamp))
 
                 self.num_frames += 1
 
@@ -294,7 +264,6 @@ class PixaTranscriber(BaseTranscriber):
 
                             transcript = ""
                             is_final = data.get("is_final", False)
-                            start_offset = data.get("start", 0)  # Start time offset in seconds
 
                             if channels and len(channels) > 0:
                                 alternatives = channels[0].get("alternatives", [])
@@ -307,13 +276,6 @@ class PixaTranscriber(BaseTranscriber):
 
                             if transcript and transcript.strip():
                                 now_timestamp = time.time()
-
-                                # Calculate per-result latency using start offset
-                                latency_ms = None
-                                audio_sent_at = self._find_audio_send_timestamp(start_offset)
-                                if audio_sent_at:
-                                    result_received_at = timestamp_ms()
-                                    latency_ms = round(result_received_at - audio_sent_at, 5)
 
                                 # Track first result latency
                                 if self.first_result_latency_ms is None and self.audio_submission_time:
@@ -328,20 +290,10 @@ class PixaTranscriber(BaseTranscriber):
                                     turn_latency_ms = timestamp_ms() - self.current_turn_start_time
                                     self.turn_first_result_latency = round(turn_latency_ms)
 
-                                # Build interim_detail for latency tracking
-                                interim_detail = {
-                                    'transcript': transcript.strip(),
-                                    'latency_ms': latency_ms,
-                                    'is_final': is_final,
-                                    'received_at': time.time(),
-                                    'start_offset': start_offset,
-                                }
-                                self.current_turn_interim_details.append(interim_detail)
-
                                 # Update last interim time for timeout monitoring
                                 self.last_interim_time = time.time()
 
-                                logger.info(f"Pixa result - is_final: {is_final}, transcript: {transcript}, latency_ms: {latency_ms}")
+                                logger.info(f"Pixa result - is_final: {is_final}, transcript: {transcript}")
 
                                 # Always yield interim transcript
                                 yield create_ws_data_packet(
@@ -354,10 +306,6 @@ class PixaTranscriber(BaseTranscriber):
                                     self.final_transcript = transcript.strip()
                                     self.meta_info["last_vocal_frame_timestamp"] = now_timestamp
 
-                                    # Add total stream duration
-                                    if "transcriber_start_time" in self.meta_info:
-                                        self.meta_info["transcriber_total_stream_duration"] = now_timestamp - self.meta_info["transcriber_start_time"]
-
                                     # Build turn latency info
                                     if self.current_turn_start_time:
                                         total_duration_ms = round(timestamp_ms() - self.current_turn_start_time)
@@ -366,7 +314,6 @@ class PixaTranscriber(BaseTranscriber):
                                             "sequence_id": self.current_turn_id,
                                             "first_result_latency_ms": self.turn_first_result_latency,
                                             "total_stream_duration_ms": total_duration_ms,
-                                            "interim_details": self.current_turn_interim_details,
                                         }
                                         self.turn_latencies.append(turn_info)
                                         self.meta_info["turn_latencies"] = self.turn_latencies
@@ -406,7 +353,6 @@ class PixaTranscriber(BaseTranscriber):
         self.final_transcript = ""
         self.is_transcript_sent_for_processing = True
         self.last_interim_time = None
-        self.current_turn_interim_details = []
 
     async def monitor_utterance_timeout(self):
         """
@@ -454,7 +400,6 @@ class PixaTranscriber(BaseTranscriber):
                 "sequence_id": self.current_turn_id,
                 "first_result_latency_ms": self.turn_first_result_latency,
                 "total_stream_duration_ms": total_duration_ms,
-                "interim_details": self.current_turn_interim_details,
                 "force_finalized": True,
             }
             self.turn_latencies.append(turn_info)
