@@ -23,7 +23,7 @@ class ElevenLabsTranscriber(BaseTranscriber):
     def __init__(self, telephony_provider, input_queue=None, model='scribe_v2_realtime', stream=True,
                  language="en", endpointing="400", sampling_rate="16000", encoding="linear16", output_queue=None,
                  commit_strategy="vad", include_timestamps=True,
-                 include_language_detection=False, **kwargs):
+                 include_language_detection=True, **kwargs):
         super().__init__(input_queue)
         self.endpointing = endpointing
         # Convert endpointing (ms) to vad_silence_threshold_secs (seconds)
@@ -56,11 +56,12 @@ class ElevenLabsTranscriber(BaseTranscriber):
         self.include_timestamps = include_timestamps
         self.include_language_detection = include_language_detection
 
-        # VAD tuning parameters for low latency
+        # VAD tuning parameters - balanced for accuracy and latency
         # ElevenLabs valid ranges: vad_threshold (0.1-0.9), min_speech_duration_ms (50-2000), min_silence_duration_ms (50-2000)
-        self.vad_threshold = max(0.1, min(0.9, kwargs.get("vad_threshold", 0.4)))
-        self.min_speech_duration_ms = max(50, min(2000, kwargs.get("min_speech_duration_ms", 100)))
-        self.min_silence_duration_ms = max(50, min(2000, kwargs.get("min_silence_duration_ms", 100)))
+        # Defaults tuned for conversational AI with good Hindi/multilingual support
+        self.vad_threshold = max(0.1, min(0.9, kwargs.get("vad_threshold", 0.5)))
+        self.min_speech_duration_ms = max(50, min(2000, kwargs.get("min_speech_duration_ms", 150)))
+        self.min_silence_duration_ms = max(50, min(2000, kwargs.get("min_silence_duration_ms", 300)))
 
         # Message states
         self.curr_message = ''
@@ -129,6 +130,10 @@ class ElevenLabsTranscriber(BaseTranscriber):
         }
 
         websocket_url = f'wss://{self.elevenlabs_host}/v1/speech-to-text/realtime?{urlencode(params)}'
+        logger.info(f"ElevenLabs WebSocket params - language: {self.language}, audio_format: {audio_format}, "
+                    f"vad_threshold: {self.vad_threshold}, min_speech_ms: {self.min_speech_duration_ms}, "
+                    f"min_silence_ms: {self.min_silence_duration_ms}, vad_silence_secs: {self.vad_silence_threshold_secs}, "
+                    f"lang_detection: {self.include_language_detection}")
         return websocket_url
 
     def _reset_turn_state(self):
