@@ -27,7 +27,9 @@ class ElevenLabsTranscriber(BaseTranscriber):
         super().__init__(input_queue)
         self.endpointing = endpointing
         # Convert endpointing (ms) to vad_silence_threshold_secs (seconds)
-        self.vad_silence_threshold_secs = int(endpointing) / 1000.0
+        # ElevenLabs requires vad_silence_threshold_secs to be between 0.3 and 3.0
+        raw_vad_threshold = int(endpointing) / 1000.0
+        self.vad_silence_threshold_secs = max(0.3, min(3.0, raw_vad_threshold))
         self.language = language
         self.stream = stream
         self.provider = telephony_provider
@@ -55,9 +57,10 @@ class ElevenLabsTranscriber(BaseTranscriber):
         self.include_language_detection = include_language_detection
 
         # VAD tuning parameters for low latency
-        self.vad_threshold = kwargs.get("vad_threshold", 0.4)  # VAD sensitivity (0-1)
-        self.min_speech_duration_ms = kwargs.get("min_speech_duration_ms", 100)  # Min speech to process
-        self.min_silence_duration_ms = kwargs.get("min_silence_duration_ms", 100)  # Min pause for segments
+        # ElevenLabs valid ranges: vad_threshold (0.1-0.9), min_speech_duration_ms (50-2000), min_silence_duration_ms (50-2000)
+        self.vad_threshold = max(0.1, min(0.9, kwargs.get("vad_threshold", 0.4)))
+        self.min_speech_duration_ms = max(50, min(2000, kwargs.get("min_speech_duration_ms", 100)))
+        self.min_silence_duration_ms = max(50, min(2000, kwargs.get("min_silence_duration_ms", 100)))
 
         # Message states
         self.curr_message = ''
