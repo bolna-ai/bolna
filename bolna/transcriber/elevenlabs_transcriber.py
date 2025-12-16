@@ -145,7 +145,10 @@ class ElevenLabsTranscriber(BaseTranscriber):
         self.current_turn_start_time = None
         self.current_turn_id = None
         self.final_transcript = ""
-        self.is_transcript_sent_for_processing = True
+        # Set to False to allow next utterance to be processed
+        # The flag prevents duplicate processing of same utterance (committed vs committed_with_timestamps)
+        # but should not block subsequent utterances
+        self.is_transcript_sent_for_processing = False
 
     def _find_audio_send_timestamp(self, audio_position):
         """
@@ -377,6 +380,11 @@ class ElevenLabsTranscriber(BaseTranscriber):
                     transcript = msg.get("text", "")
                     logger.info(f"Committed transcript: {transcript}")
 
+                    # Skip when include_timestamps is enabled - we'll process committed_transcript_with_timestamps instead
+                    # ElevenLabs sends both messages for the same utterance despite docs saying they're mutually exclusive
+                    if self.include_timestamps:
+                        continue
+
                     if transcript.strip() and not self.is_transcript_sent_for_processing:
                         data = {
                             "type": "transcript",
@@ -390,14 +398,14 @@ class ElevenLabsTranscriber(BaseTranscriber):
                                 'interim_details': self.current_turn_interim_details
                             })
 
-                            # Complete turn reset
+                            # Complete turn reset - set flag to False to allow next utterance
                             self.speech_start_time = None
                             self.speech_end_time = None
                             self.current_turn_interim_details = []
                             self.current_turn_start_time = None
                             self.current_turn_id = None
                             self.final_transcript = ""
-                            self.is_transcript_sent_for_processing = True
+                            self.is_transcript_sent_for_processing = False
                         except Exception as e:
                             logger.error(f"Error in committed_transcript handling: {e}")
 
