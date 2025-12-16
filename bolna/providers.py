@@ -1,5 +1,5 @@
 from .synthesizer import PollySynthesizer, ElevenlabsSynthesizer, OPENAISynthesizer, DeepgramSynthesizer, AzureSynthesizer, CartesiaSynthesizer, SmallestSynthesizer, SarvamSynthesizer, RimeSynthesizer
-from .transcriber import DeepgramTranscriber, AzureTranscriber, SarvamTranscriber, AssemblyAITranscriber, GoogleTranscriber, PixaTranscriber, GladiaTranscriber, ElevenLabsTranscriber
+from .transcriber import DeepgramTranscriber, AzureTranscriber, SarvamTranscriber, AssemblyAITranscriber, GoogleTranscriber, PixaTranscriber, GladiaTranscriber, ElevenLabsTranscriber, SmallestTranscriber
 from .input_handlers import DefaultInputHandler, TwilioInputHandler, ExotelInputHandler, PlivoInputHandler
 from .output_handlers import DefaultOutputHandler, TwilioOutputHandler, ExotelOutputHandler, PlivoOutputHandler
 from .llms import OpenAiLLM, LiteLLM, AzureLLM
@@ -24,7 +24,8 @@ SUPPORTED_TRANSCRIBER_PROVIDERS = {
     'google': GoogleTranscriber,
     'pixa': PixaTranscriber,
     'gladia': GladiaTranscriber,
-    'elevenlabs': ElevenLabsTranscriber
+    'elevenlabs': ElevenLabsTranscriber,
+    'smallest': SmallestTranscriber
 }
 
 #Backwards compatibility
