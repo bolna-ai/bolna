@@ -45,6 +45,8 @@ class GladiaTranscriber(BaseTranscriber):
         maximum_duration_without_endpointing: int = 5,
         speech_threshold: float = 0.6,
         code_switching: bool = False,
+        keywords: str = None,  # Custom vocabulary keywords (comma-separated)
+        model: str = None,     # Optional model for future Gladia models
         **kwargs
     ):
         super().__init__(input_queue)
@@ -60,6 +62,8 @@ class GladiaTranscriber(BaseTranscriber):
         self.maximum_duration_without_endpointing = maximum_duration_without_endpointing
         self.speech_threshold = speech_threshold
         self.code_switching = code_switching
+        self.keywords = keywords
+        self.model = model
 
         # API configuration
         self.api_key = kwargs.get("transcriber_key", os.getenv('GLADIA_API_KEY'))
@@ -168,28 +172,61 @@ class GladiaTranscriber(BaseTranscriber):
             "Content-Type": "application/json"
         }
 
+        # When code_switching is enabled, specify allowed languages to restrict detection
+        # This prevents misdetection of other languages (e.g., Chinese instead of Hindi)
+        if self.code_switching and self.language:
+            # For Hindi with code_switching, allow Hindi + English (Hinglish)
+            if self.language in ("hi", "hi-IN"):
+                languages_list = ["hi", "en"]
+            else:
+                # For other languages with code_switching, include English as secondary
+                languages_list = [self.language, "en"]
+        else:
+            languages_list = [self.language] if self.language else []
+
         payload = {
             "encoding": self.encoding,
             "sample_rate": self.sample_rate,
             "bit_depth": self.bit_depth,
             "channels": 1,
             "language_config": {
-                "languages": [self.language] if self.language else [],
+                "languages": languages_list,
                 "code_switching": self.code_switching
             },
             "endpointing": self.endpointing,
             "maximum_duration_without_endpointing": self.maximum_duration_without_endpointing,
             "pre_processing": {
+                "audio_enhancer": self.provider in ("twilio", "exotel", "plivo"),
                 "speech_threshold": self.speech_threshold
             },
             "messages_config": {
-                "receive_partial_transcripts": True
+                "receive_partial_transcripts": True,
+                "receive_speech_events": True,
+                "receive_lifecycle_events": False
             }
         }
 
-        logger.info(f"Creating Gladia session with config: encoding={self.encoding}, "
-                   f"sample_rate={self.sample_rate}, language={self.language}, "
-                   f"endpointing={self.endpointing}s")
+        # Add model if specified (for future Gladia models)
+        if self.model:
+            payload["model"] = self.model
+
+        # Add custom vocabulary if keywords provided
+        if self.keywords:
+            vocabulary_list = [kw.strip() for kw in self.keywords.split(",") if kw.strip()]
+            if vocabulary_list:
+                payload["realtime_processing"] = {
+                    "custom_vocabulary": True,
+                    "custom_vocabulary_config": {
+                        "vocabulary": vocabulary_list,
+                        "default_intensity": 0.7
+                    }
+                }
+
+        logger.info(f"Creating Gladia session: encoding={self.encoding}, "
+                   f"sample_rate={self.sample_rate}, languages={languages_list}, "
+                   f"endpointing={self.endpointing}s, code_switching={self.code_switching}, "
+                   f"audio_enhancer={payload['pre_processing'].get('audio_enhancer', False)}, "
+                   f"keywords={bool(self.keywords)}")
 
         async with aiohttp.ClientSession() as session:
             async with session.post(
