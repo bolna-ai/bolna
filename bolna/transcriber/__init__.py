@@ -4,3 +4,7 @@ from .azure_transcriber import AzureTranscriber
 from .sarvam_transcriber import SarvamTranscriber
 from .assemblyai_transcriber import AssemblyAITranscriber
 from .google_transcriber import GoogleTranscriber
+from .pixa_transcriber import PixaTranscriber
+from .gladia_transcriber import GladiaTranscriber
+from .elevenlabs_transcriber import ElevenLabsTranscriber
+from .smallest_transcriber import SmallestTranscriber
