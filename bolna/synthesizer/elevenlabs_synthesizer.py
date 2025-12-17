@@ -49,7 +49,6 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
         self.websocket_holder = {"websocket": None}
         self.sender_task = None
         self.conversation_ended = False
-        self.connection_ready = asyncio.Event()  # Signals when WebSocket is connected
         self.current_turn_start_time = None
         self.current_turn_id = None
         self.current_text = ""
@@ -57,9 +56,6 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
         self.ws_send_time = None  # Tracks when first text is actually sent to WebSocket
         self.ws_trace_id = None  # ElevenLabs x-trace-id for request correlation
         self.current_turn_ttfb = None  # Store TTFB separately (meta_info gets overwritten)
-        self.last_disconnect_log_time = 0  # Rate limit disconnect logging
-        self.disconnect_start_time = None  # Track when disconnection started
-        self.max_disconnect_timeout = 30  # Give up after 30 seconds of being disconnected
 
     # Ensuring we only do wav output for now
     def get_format(self, format, sampling_rate):
@@ -97,9 +93,13 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
                 return
 
             # Ensure the WebSocket connection is established
-            if self.websocket_holder["websocket"] is None or self.websocket_holder["websocket"].state is websockets.protocol.State.CLOSED:
+            ws_wait_start = time.perf_counter()
+            while self.websocket_holder["websocket"] is None or self.websocket_holder["websocket"].state is websockets.protocol.State.CLOSED:
                 logger.info("Waiting for elevenlabs ws connection to be established...")
-                await self.connection_ready.wait()
+                await asyncio.sleep(1)
+            ws_wait_time = (time.perf_counter() - ws_wait_start) * 1000
+            if ws_wait_time > 10:
+                logger.info(f"EL sender ws_wait={ws_wait_time:.0f}ms trace_id={self.ws_trace_id}")
 
             if text != "":
                 for text_chunk in self.text_chunker(text):
@@ -143,28 +143,10 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
                     return
 
                 if (self.websocket_holder["websocket"] is None or
-                        self.websocket_holder["websocket"].state != websockets.protocol.State.OPEN):
-                    current_time = time.time()
-
-                    # Track when disconnection started
-                    if self.disconnect_start_time is None:
-                        self.disconnect_start_time = current_time
-
-                    # Check if we've been disconnected too long - give up gracefully
-                    disconnect_duration = current_time - self.disconnect_start_time
-                    if disconnect_duration > self.max_disconnect_timeout:
-                        logger.error(f"WebSocket disconnected for {disconnect_duration:.1f}s, giving up. Ending receiver gracefully.")
-                        return
-
-                    # Rate limit this log message to once per 5 seconds
-                    if current_time - self.last_disconnect_log_time >= 5:
-                        logger.info(f"WebSocket is not connected, waiting for connection... (disconnected for {disconnect_duration:.1f}s)")
-                        self.last_disconnect_log_time = current_time
-                    await self.connection_ready.wait()
+                        self.websocket_holder["websocket"].state is websockets.protocol.State.CLOSED):
+                    logger.info("WebSocket is not connected, skipping receive.")
+                    await asyncio.sleep(0.10)
                     continue
-
-                # Connected - reset disconnect tracking
-                self.disconnect_start_time = None
 
                 recv_start = time.perf_counter()
                 response = await self.websocket_holder["websocket"].recv()
@@ -222,8 +204,7 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
                 else:
                     logger.info("No audio data in the response")
 
-            except websockets.exceptions.ConnectionClosed as e:
-                logger.error(f"WebSocket ConnectionClosed: code={e.code}, reason={e.reason}")
+            except websockets.exceptions.ConnectionClosed:
                 break
             except Exception as e:
                 logger.error(f"Error occurred in receiver - {e}")
@@ -417,7 +398,6 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
                 self.connection_time = round((time.perf_counter() - start_time) * 1000)
 
             logger.info(f"Connected to {self.ws_url}")
-            self.connection_ready.set()
             return websocket
         except Exception as e:
             logger.info(f"Failed to connect: {e}")
@@ -426,14 +406,9 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
     async def monitor_connection(self):
         # Periodically check if the connection is still alive
         while True:
-            if self.websocket_holder["websocket"] is None or self.websocket_holder["websocket"].state != websockets.protocol.State.OPEN:
-                self.connection_ready.clear()
-                current_state = self.websocket_holder['websocket'].state if self.websocket_holder['websocket'] else 'None'
-                logger.info(f"Re-establishing elevenlabs connection... (current state: {current_state})")
+            if self.websocket_holder["websocket"] is None or self.websocket_holder["websocket"].state is websockets.protocol.State.CLOSED:
+                logger.info("Re-establishing elevenlabs connection...")
                 self.websocket_holder["websocket"] = await self.establish_connection()
-                # Reset disconnect timers on successful reconnection
-                self.last_disconnect_log_time = 0
-                self.disconnect_start_time = None
             await asyncio.sleep(1)
 
     async def get_sender_task(self):
@@ -464,7 +439,6 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
 
     async def cleanup(self):
         self.conversation_ended = True
-        self.connection_ready.set()  # Unblock any tasks waiting for connection
         logger.info("cleaning elevenlabs synthesizer tasks")
         if self.sender_task:
             try:
