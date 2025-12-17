@@ -1087,7 +1087,7 @@ class TaskManager(BaseManager):
                 if first_item.get('type') == 'agent_hangup' and first_item.get('text_synthesized') == '' and second_item.get('type') == 'pre_mark_message':
                     break
 
-            if first_item.get('is_final_chunk') is True:
+            if first_item.get('text_synthesized') and first_item.get('is_final_chunk') is True:
                 break
 
             await asyncio.sleep(0.5)
