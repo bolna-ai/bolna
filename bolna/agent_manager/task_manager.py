@@ -178,6 +178,10 @@ class TaskManager(BaseManager):
         self.llm_response_generated = False
         self.turn_id = 0
 
+        # Speech not captured fallback state
+        self.awaiting_speech_after_interruption = False
+        self.interruption_timestamp = None
+
         # language detection (first N turns)
         self.default_language = self.task_config['task_config'].get('default_language')
         self.language_detection_turns = self.task_config['task_config'].get('language_detection_turns')
@@ -291,6 +295,14 @@ class TaskManager(BaseManager):
             self.check_user_online_message = self.conversation_config.get("check_user_online_message", DEFAULT_USER_ONLINE_MESSAGE)
             if self.check_user_online_message and self.context_data:
                 self.check_user_online_message = update_prompt_with_context(self.check_user_online_message, self.context_data)
+
+            # Speech not captured fallback config
+            self.speech_not_captured_timeout = self.conversation_config.get("speech_not_captured_timeout", 3.0)
+            self.speech_not_captured_message = self.conversation_config.get("speech_not_captured_message",
+                "I'm sorry, I didn't catch that. Could you please repeat?")
+            self.enable_speech_not_captured_fallback = self.conversation_config.get("enable_speech_not_captured_fallback", True)
+            if self.speech_not_captured_message and self.context_data:
+                self.speech_not_captured_message = update_prompt_with_context(self.speech_not_captured_message, self.context_data)
 
             self.kwargs["process_interim_results"] = "true" if self.conversation_config.get("optimize_latency", False) is True else "false"
             # Routes
@@ -984,6 +996,11 @@ class TaskManager(BaseManager):
         self.started_transmitting_audio = False #Since we're interrupting we need to stop transmitting as well
         self.last_transmitted_timestamp = time.time()
         logger.info(f"Cleaning up downstream tasks sequenxce ids {self.sequence_ids}. Time taken to send a clear message {time.time() - start_time}")
+
+        # Start tracking for speech not captured fallback
+        if self.enable_speech_not_captured_fallback:
+            self.awaiting_speech_after_interruption = True
+            self.interruption_timestamp = time.time()
 
     def __get_updated_meta_info(self, meta_info = None):
         #This is used in case there's silence from callee's side
@@ -1694,6 +1711,10 @@ class TaskManager(BaseManager):
                     # Whenever interim results would be received from Deepgram, this condition would get triggered
                     elif isinstance(message.get("data"), dict) and message["data"].get("type", "") == "interim_transcript_received":
                         self.time_since_last_spoken_human_word = time.time()
+                        # Reset speech not captured tracking since we received actual speech
+                        self.awaiting_speech_after_interruption = False
+                        self.interruption_timestamp = None
+
                         if temp_transcriber_message == message["data"].get("content"):
                             logger.info("Received the same transcript as the previous one we have hence continuing")
                             continue
@@ -1743,6 +1764,9 @@ class TaskManager(BaseManager):
                         self.callee_speaking = False
                         # self.callee_silent = True
                         temp_transcriber_message = ""
+                        # Reset speech not captured tracking since we received final transcript
+                        self.awaiting_speech_after_interruption = False
+                        self.interruption_timestamp = None
 
                         if self.output_task is None:
                             logger.info(f"Output task was none and hence starting it")
@@ -2154,6 +2178,40 @@ class TaskManager(BaseManager):
                 await self.tools["output"].handle_interruption()
             else:
                 logger.info(f"Only {time_since_last_spoken_ai_word} seconds since last spoken time stamp and hence not cutting the phone call")
+
+            # Check for speech not captured after interruption
+            if (self.enable_speech_not_captured_fallback and
+                self.awaiting_speech_after_interruption and
+                self.interruption_timestamp and
+                (time.time() - self.interruption_timestamp) > self.speech_not_captured_timeout):
+                logger.info(f"No speech received {self.speech_not_captured_timeout}s after interruption, sending fallback message")
+                await self._send_speech_not_captured_message()
+                self.awaiting_speech_after_interruption = False
+                self.interruption_timestamp = None
+
+    async def _send_speech_not_captured_message(self):
+        """Send fallback message when speech not captured after interruption"""
+        if self.should_record:
+            meta_info = {
+                'io': 'default',
+                'request_id': str(uuid.uuid4()),
+                'cached': False,
+                'sequence_id': -1,
+                'format': 'wav',
+                'message_category': 'speech_not_captured_message',
+                'end_of_llm_stream': True
+            }
+        else:
+            meta_info = {
+                'io': self.tools["output"].get_provider(),
+                'request_id': str(uuid.uuid4()),
+                'cached': False,
+                'sequence_id': -1,
+                'format': 'pcm',
+                'message_category': 'speech_not_captured_message',
+                'end_of_llm_stream': True
+            }
+        await self._synthesize(create_ws_data_packet(self.speech_not_captured_message, meta_info=meta_info))
 
     async def __check_for_backchanneling(self):
         while True:
