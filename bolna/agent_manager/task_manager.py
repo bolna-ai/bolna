@@ -227,6 +227,7 @@ class TaskManager(BaseManager):
                         "model": self.llm_agent_config['llm_config']['model'],
                         "max_tokens": self.llm_agent_config['llm_config']['max_tokens'],
                         "provider": self.llm_agent_config['llm_config']['provider'],
+                        "buffer_size": self.task_config["tools_config"]["synthesizer"].get('buffer_size'),
                     }
                 elif self.__is_graph_agent():
                     self.llm_agent_config = self.task_config["tools_config"]["llm_agent"]
@@ -743,6 +744,8 @@ class TaskManager(BaseManager):
                 injected_cfg['api_version'] = self.kwargs['api_version']
             if 'api_tools' in self.kwargs:
                 injected_cfg['api_tools'] = self.kwargs['api_tools']
+            injected_cfg['buffer_size'] = self.task_config["tools_config"]["synthesizer"].get('buffer_size')
+            injected_cfg['language'] = self.language
 
             llm_agent = KnowledgeBaseAgent(injected_cfg)
             logger.info("Knowledge agent created with rag-proxy-server support")
