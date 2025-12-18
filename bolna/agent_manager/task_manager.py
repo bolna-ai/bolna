@@ -227,6 +227,7 @@ class TaskManager(BaseManager):
                         "model": self.llm_agent_config['llm_config']['model'],
                         "max_tokens": self.llm_agent_config['llm_config']['max_tokens'],
                         "provider": self.llm_agent_config['llm_config']['provider'],
+                        "buffer_size": self.task_config["tools_config"]["synthesizer"].get('buffer_size'),
                     }
                 elif self.__is_graph_agent():
                     self.llm_agent_config = self.task_config["tools_config"]["llm_agent"]
@@ -744,6 +745,8 @@ class TaskManager(BaseManager):
                 injected_cfg['api_version'] = self.kwargs['api_version']
             if 'api_tools' in self.kwargs:
                 injected_cfg['api_tools'] = self.kwargs['api_tools']
+            injected_cfg['buffer_size'] = self.task_config["tools_config"]["synthesizer"].get('buffer_size')
+            injected_cfg['language'] = self.language
 
             llm_agent = KnowledgeBaseAgent(injected_cfg)
             logger.info("Knowledge agent created with rag-proxy-server support")
@@ -2134,8 +2137,8 @@ class TaskManager(BaseManager):
             time_since_last_spoken_ai_word = (time.time() - self.last_transmitted_timestamp)
             time_since_user_last_spoke = (time.time() - self.time_since_last_spoken_human_word) if self.time_since_last_spoken_human_word > 0 else float('inf')
 
-            if self.hang_conversation_after > 0 and time_since_last_spoken_ai_word > self.hang_conversation_after and self.time_since_last_spoken_human_word < self.last_transmitted_timestamp:
-                logger.info(f"{time_since_last_spoken_ai_word} seconds since last spoken time stamp and hence cutting the phone call and last transmitted timestampt ws {self.last_transmitted_timestamp} and time since last spoken human word {self.time_since_last_spoken_human_word}")
+            if self.hang_conversation_after > 0 and time_since_last_spoken_ai_word > self.hang_conversation_after and time_since_user_last_spoke > self.hang_conversation_after:
+                logger.info(f"{time_since_last_spoken_ai_word} seconds since AI last spoke and {time_since_user_last_spoke} seconds since user last spoke, both exceed {self.hang_conversation_after}s timeout - hanging up")
                 await self.process_call_hangup()
                 self.hangup_detail = "inactivity_timeout"
                 break
