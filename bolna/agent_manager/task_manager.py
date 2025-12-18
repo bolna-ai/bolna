@@ -268,6 +268,7 @@ class TaskManager(BaseManager):
         if task_id == 0:
             provider_config = self.task_config["tools_config"]["synthesizer"].get("provider_config")
             self.synthesizer_voice = provider_config["voice"]
+            self.hangup_detail = None
 
             self.handle_accumulated_message_task = None
             # self.initial_silence_task = None
@@ -1519,6 +1520,7 @@ class TaskManager(BaseManager):
 
                     if should_hangup:
                         await self.process_call_hangup()
+                        self.hangup_detail = "llm_prompted_hangup"
                         return
 
             self.llm_processed_request_ids.add(self.current_request_id)
@@ -2115,6 +2117,7 @@ class TaskManager(BaseManager):
                     self.task_config["task_config"]["call_terminate"]):
                 logger.info("Hanging up for web call as max time of call has been reached")
                 await self.__process_end_of_conversation(web_call_timeout=True)
+                self.hangup_detail = "web_call_max_duration_reached"
                 break
 
             if self.last_transmitted_timestamp == 0:
@@ -2134,6 +2137,7 @@ class TaskManager(BaseManager):
             if self.hang_conversation_after > 0 and time_since_last_spoken_ai_word > self.hang_conversation_after and self.time_since_last_spoken_human_word < self.last_transmitted_timestamp:
                 logger.info(f"{time_since_last_spoken_ai_word} seconds since last spoken time stamp and hence cutting the phone call and last transmitted timestampt ws {self.last_transmitted_timestamp} and time since last spoken human word {self.time_since_last_spoken_human_word}")
                 await self.process_call_hangup()
+                self.hangup_detail = "inactivity_timeout"
                 break
 
             elif (time_since_last_spoken_ai_word > self.trigger_user_online_message_after and
@@ -2411,7 +2415,8 @@ class TaskManager(BaseManager):
                         "synthesizer_latencies": self.synthesizer_latencies,
                         "welcome_message_sent_ts": None,
                         "stream_sid_ts": None
-                    }
+                    },
+                    "hangup_detail": self.hangup_detail
                 }
 
                 try:
