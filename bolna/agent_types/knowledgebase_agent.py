@@ -81,24 +81,33 @@ class KnowledgeBaseAgent(BaseAgent):
             return {}
 
         collections = []
+        used_sources = rag_config.get('used_sources', None)
 
         if 'vector_store' in rag_config:
             provider_config = rag_config['vector_store'].get('provider_config', {})
 
-            # Support both formats: vector_ids (list) and vector_id (single)
-            vector_ids = provider_config.get('vector_ids')
-            if vector_ids and isinstance(vector_ids, list):
-                collections.extend(vector_ids)
-            elif vector_id := provider_config.get('vector_id'):
-                collections.append(vector_id)
+            if used_sources:
+                for source in used_sources:
+                    vector_id = source.get('vector_id')
+                    if vector_id:
+                        collections.append(vector_id)
+
             else:
-                logger.error("No vector_id or vector_ids found in rag_config")
+                # Support both formats: vector_ids (list) and vector_id (single)
+                vector_ids = provider_config.get('vector_ids')
+                if vector_ids and isinstance(vector_ids, list):
+                    collections.extend(vector_ids)
+                elif vector_id := provider_config.get('vector_id'):
+                    collections.append(vector_id)
+                else:
+                    logger.error("No vector_id or vector_ids found in rag_config")
         else:
             logger.error("No vector_store in rag_config")
 
         return {
             'collections': collections,
             'similarity_top_k': rag_config.get('similarity_top_k', 10),
+            'used_sources': used_sources
         }
 
     async def check_for_completion(self, messages, check_for_completion_prompt):
@@ -114,13 +123,13 @@ class KnowledgeBaseAgent(BaseAgent):
             logger.error(f'check_for_completion error: {e}')
             return {'hangup': 'No'}
 
-    async def _add_rag_context(self, messages: List[dict]) -> List[dict]:
+    async def _add_rag_context(self, messages: List[dict]) -> Tuple[List[dict], bool]:
         """
         Add relevant knowledge base context to the messages.
         Returns the original messages if RAG is not configured or fails.
         """
         if not self.rag_config.get('collections'):
-            return messages
+            return messages, False
 
         try:
             client = await RAGServiceClientSingleton.get_client(self.rag_server_url)
@@ -135,7 +144,7 @@ class KnowledgeBaseAgent(BaseAgent):
             )
 
             if not rag_response.contexts:
-                return messages
+                return messages, False
 
             logger.info(f"RAG: Found {rag_response.total_results} contexts, top score: {rag_response.contexts[0].score:.3f}")
 
@@ -165,14 +174,14 @@ Use this information naturally when it helps answer the user's questions. Don't 
             if len(final_messages) > max_messages:
                 final_messages = [final_messages[0]] + final_messages[-(max_messages-1):]
 
-            return final_messages
+            return final_messages, True
 
         except asyncio.TimeoutError:
             logger.error("RAG service timeout")
-            return messages
+            return messages, False
         except Exception as e:
             logger.error(f"RAG error: {e}")
-            return messages
+            return messages, False
 
     async def generate(self, message: List[dict], **kwargs) -> AsyncGenerator[Tuple[str, bool, Optional[Dict], bool, None, None], None]:
         """
@@ -183,7 +192,12 @@ Use this information naturally when it helps answer the user's questions. Don't 
         start_time = now_ms()
 
         try:
-            messages_with_context = await self._add_rag_context(message)
+            messages_with_context, is_success = await self._add_rag_context(message)
+
+            if is_success:
+                if 'llm_metadata' not in meta_info:
+                    meta_info['llm_metadata'] = {}
+                meta_info['llm_metadata']['sources'] = self.rag_config.get('used_sources', [])
 
             async for chunk in self.llm.generate_stream(messages_with_context, synthesize=synthesize, meta_info=meta_info):
                 yield chunk
