@@ -70,8 +70,9 @@ class CartesiaSynthesizer(BaseSynthesizer):
 
                 logger.info('handle_interruption: {}'.format(interrupt_message))
                 await self.websocket_holder["websocket"].send(json.dumps(interrupt_message))
+                self.context_id = None
         except Exception as e:
-            pass
+            logger.error(f"Error in handle_interruption: {e}")
 
     def form_payload(self, text):
         payload = {
