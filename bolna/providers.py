@@ -18,6 +18,7 @@ SUPPORTED_SYNTHESIZER_MODELS = {
 
 SUPPORTED_TRANSCRIBER_PROVIDERS = {
     'deepgram': DeepgramTranscriber,
+    'deepgram-test': DeepgramTranscriber,
     'azure': AzureTranscriber,
     'sarvam': SarvamTranscriber,
     'assembly': AssemblyAITranscriber,
