@@ -1,0 +1,55 @@
+# This workflow builds and publishes the Docker images to Docker Hub.
+#
+# To use this workflow, you need to create two secrets in your repository:
+#
+#   DOCKERHUB_USERNAME: Your Docker Hub username.
+#   DOCKERHUB_TOKEN: Your Docker Hub access token.
+#
+# The workflow will be triggered automatically when you push a new tag to the repository.
+
+name: Publish Docker Images
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v2
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push bolna-app
+        uses: docker/build-push-action@v4
+        with:
+          context: bolna/local_setup
+          dockerfile: bolna/local_setup/dockerfiles/bolna_server.Dockerfile
+          push: true
+          tags: ${{ secrets.DOCKERHUB_USERNAME }}/bolna-app:${{ github.ref_name }}
+
+      - name: Build and push twilio-app
+        uses: docker/build-push-action@v4
+        with:
+          context: bolna/local_setup
+          dockerfile: bolna/local_setup/dockerfiles/twilio_server.Dockerfile
+          push: true
+          tags: ${{ secrets.DOCKERHUB_USERNAME }}/twilio-app:${{ github.ref_name }}
+
+      - name: Build and push plivo-app
+        uses: docker/build-push-action@v4
+        with:
+          context: bolna/local_setup
+          dockerfile: bolna/local_setup/dockerfiles/plivo_server.Dockerfile
+          push: true
+          tags: ${{ secrets.DOCKERHUB_USERNAME }}/plivo-app:${{ github.ref_name }}
