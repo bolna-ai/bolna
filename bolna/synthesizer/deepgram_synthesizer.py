@@ -35,10 +35,8 @@ class DeepgramSynthesizer(BaseSynthesizer):
         # For telephony (8000 sample rate), use mulaw encoding
         # For WebSocket streaming, Deepgram supports: linear16, mulaw, alaw
         self.use_mulaw = kwargs.get("use_mulaw", True)
-        if self.use_mulaw:
+        if self.use_mulaw or audio_format in ["pcm", "wav"]:
             self.format = "mulaw"
-        elif audio_format in ["pcm", "wav", "linear16"]:
-            self.format = "linear16"
         else:
             self.format = audio_format
 
