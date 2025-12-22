@@ -57,3 +57,7 @@ class BaseTranscriber:
             await ws.send(json.dumps(data))
         except Exception as e:
             logger.error(f"Error while closing transcriber stream {e}")
+
+    async def cleanup(self):
+        """Clean up transcriber resources. Override in subclasses."""
+        pass

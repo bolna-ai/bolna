@@ -255,6 +255,45 @@ class DeepgramTranscriber(BaseTranscriber):
                 self.websocket_connection = None
                 self.connection_authenticated = False
 
+    async def cleanup(self):
+        """Clean up all resources including HTTP session and websocket."""
+        logger.info("Cleaning up Deepgram transcriber resources")
+
+        # Close HTTP session (for non-streaming mode)
+        if hasattr(self, 'session') and self.session and not self.session.closed:
+            try:
+                await self.session.close()
+                logger.info("Deepgram HTTP session closed")
+            except Exception as e:
+                logger.error(f"Error closing Deepgram HTTP session: {e}")
+
+        # Cancel tasks properly
+        for task_name, task in [
+            ("heartbeat_task", getattr(self, 'heartbeat_task', None)),
+            ("sender_task", getattr(self, 'sender_task', None)),
+            ("utterance_timeout_task", getattr(self, 'utterance_timeout_task', None)),
+            ("transcription_task", getattr(self, 'transcription_task', None))
+        ]:
+            if task is not None and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    logger.info(f"Deepgram {task_name} cancelled")
+                except Exception as e:
+                    logger.error(f"Error cancelling Deepgram {task_name}: {e}")
+
+        # Close websocket
+        if self.websocket_connection is not None:
+            try:
+                await self.websocket_connection.close()
+                logger.info("Deepgram websocket connection closed")
+            except Exception as e:
+                logger.error(f"Error closing Deepgram websocket: {e}")
+            finally:
+                self.websocket_connection = None
+                self.connection_authenticated = False
+
     async def _get_http_transcription(self, audio_data):
         if self.session is None or self.session.closed:
             self.session = aiohttp.ClientSession()
