@@ -419,6 +419,45 @@ class GladiaTranscriber(BaseTranscriber):
                 self.websocket_connection = None
                 self.connection_authenticated = False
 
+    async def cleanup(self):
+        """Clean up all resources including HTTP session and websocket."""
+        logger.info("Cleaning up Gladia transcriber resources")
+
+        # Close HTTP session
+        if self.http_session and not self.http_session.closed:
+            try:
+                await self.http_session.close()
+                logger.info("Gladia HTTP session closed")
+            except Exception as e:
+                logger.error(f"Error closing Gladia HTTP session: {e}")
+
+        # Cancel tasks properly
+        for task_name, task in [
+            ("heartbeat_task", getattr(self, 'heartbeat_task', None)),
+            ("sender_task", getattr(self, 'sender_task', None)),
+            ("utterance_timeout_task", getattr(self, 'utterance_timeout_task', None)),
+            ("transcription_task", getattr(self, 'transcription_task', None))
+        ]:
+            if task is not None and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    logger.info(f"Gladia {task_name} cancelled")
+                except Exception as e:
+                    logger.error(f"Error cancelling Gladia {task_name}: {e}")
+
+        # Close websocket
+        if self.websocket_connection is not None:
+            try:
+                await self.websocket_connection.close()
+                logger.info("Gladia websocket connection closed")
+            except Exception as e:
+                logger.error(f"Error closing Gladia websocket: {e}")
+            finally:
+                self.websocket_connection = None
+                self.connection_authenticated = False
+
     async def _close_gladia(self, ws: ClientConnection):
         """Send stop_recording and close WebSocket."""
         try:

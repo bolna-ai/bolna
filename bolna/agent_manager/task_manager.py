@@ -2395,6 +2395,12 @@ class TaskManager(BaseManager):
                 tasks_to_cancel.append(process_task_cancellation(self.synthesizer_task, 'synthesizer_task'))
                 tasks_to_cancel.append(process_task_cancellation(self.synthesizer_monitor_task, 'synthesizer_monitor_task'))
 
+            # Transcriber cleanup
+            if "transcriber" in self.tools:
+                tasks_to_cancel.append(self.tools["transcriber"].cleanup())
+                if hasattr(self, 'transcriber_task') and self.transcriber_task is not None:
+                    tasks_to_cancel.append(process_task_cancellation(self.transcriber_task, 'transcriber_task'))
+
             if self._is_conversation_task():
                 self.transcriber_latencies['connection_latency_ms'] = self.tools["transcriber"].connection_time
                 self.synthesizer_latencies['connection_latency_ms'] = self.tools["synthesizer"].connection_time
