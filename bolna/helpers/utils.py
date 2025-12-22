@@ -448,10 +448,10 @@ async def write_request_logs(message, run_id):
     row = [message['time'], message["component"], message["direction"], message["leg_id"], message['sequence_id'], message['model']]
     metadata = {}
     if message["component"] in ("llm", "llm_hangup"):
-        component_details = [message_data, message.get('input_tokens', 0), message.get('output_tokens', 0), None, message.get('latency', None), message['cached'], None]
+        component_details = [message_data, message.get('input_tokens', 0), message.get('output_tokens', 0), None, message.get('latency', None), message['cached'], None, None]
         metadata = message.get('llm_metadata', {})
     elif message["component"] == "transcriber":
-        component_details = [message_data, None, None, None, message.get('latency', None), False, message.get('is_final', False)]
+        component_details = [message_data, None, None, None, message.get('latency', None), False, message.get('is_final', False), None]
         metadata = message.get('transcriber_metadata', {})
     elif message["component"] == "synthesizer":
         component_details = [message_data, None, None, len(message_data), message.get('latency', None), message['cached'], None, message['engine']]
