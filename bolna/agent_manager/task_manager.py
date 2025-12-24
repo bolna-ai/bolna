@@ -1122,7 +1122,8 @@ class TaskManager(BaseManager):
         await self.wait_for_current_message()
 
         # Check completion of agent_hangup_message sent from output
-        while True and self.hangup_triggered:
+        # Only wait for hangup chunk if there's actually a hangup message to send
+        while self.hangup_triggered and self.call_hangup_message and self.call_hangup_message.strip():
             try:
                 if self.tools["output"].hangup_sent():
                     logger.info("final hangup chunk is now sent. Breaking now")
@@ -1530,6 +1531,8 @@ class TaskManager(BaseManager):
             llm_response = ""
 
     async def process_call_hangup(self):
+        # Set immediately to prevent user interruptions from cancelling hangup
+        self.hangup_triggered = True
         if not self.call_hangup_message:
             await self.__process_end_of_conversation()
         else:
@@ -1538,7 +1541,6 @@ class TaskManager(BaseManager):
             meta_info = {'io': self.tools["output"].get_provider(), "request_id": str(uuid.uuid4()),
                              "cached": False, "sequence_id": -1, 'format': 'pcm', 'message_category': 'agent_hangup',
                          'end_of_llm_stream': True}
-            self.hangup_triggered = True
             await self._synthesize(create_ws_data_packet(self.call_hangup_message, meta_info=meta_info))
         return
 
