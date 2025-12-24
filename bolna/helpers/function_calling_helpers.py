@@ -112,6 +112,7 @@ async def trigger_api(url, method, param, api_token, headers_data, meta_info, ru
                 async with session.get(url, params=api_params, headers=headers) as response:
                     response_text = await response.text()
             elif method.lower() == "post":
+                logger.info(f"Sending request {api_params}, {url}, {headers}")
                 if content_type == "json":
                     async with session.post(url, json=api_params, headers=headers) as response:
                         response_text = await response.text()

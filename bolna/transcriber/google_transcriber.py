@@ -425,33 +425,51 @@ class GoogleTranscriber(BaseTranscriber):
         
         logger.info("GoogleTranscriber connection toggled off")
 
-    def cleanup(self):
+    def _sync_cleanup(self):
         """
-        Enhanced graceful shutdown matching Deepgram pattern.
+        Synchronous cleanup of Google resources.
         """
         try:
             self._running = False
             self.connection_authenticated = False
-            
+
             # Signal thread to stop
             self._audio_q.put(None)
-            
+
             # Wait for thread with timeout
             if self._grpc_thread and self._grpc_thread.is_alive():
                 self._grpc_thread.join(timeout=2.0)
                 if self._grpc_thread.is_alive():
                     logger.warning("gRPC thread did not terminate gracefully")
-            
+
             self._grpc_thread = None
-            
+
             # Reset connection state
             self.connection_start_time = None
             self.connection_time = None
-            
-            logger.info("GoogleTranscriber cleanup completed")
-            
+
+            logger.info("GoogleTranscriber sync cleanup completed")
+
         except Exception:
             logger.exception("cleanup error in GoogleTranscriber")
+
+    async def cleanup(self):
+        """Clean up all resources including gRPC thread and tasks."""
+        logger.info("Cleaning up Google transcriber resources")
+
+        # Cancel transcription task properly
+        if hasattr(self, 'transcription_task') and self.transcription_task is not None and not self.transcription_task.done():
+            self.transcription_task.cancel()
+            try:
+                await self.transcription_task
+            except asyncio.CancelledError:
+                logger.info("Google transcription_task cancelled")
+            except Exception as e:
+                logger.error(f"Error cancelling Google transcription_task: {e}")
+
+        # Run sync cleanup in executor to not block event loop
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, self._sync_cleanup)
 
     def get_meta_info(self):
         return self.meta_info

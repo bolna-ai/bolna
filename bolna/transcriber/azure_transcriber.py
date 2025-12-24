@@ -71,7 +71,7 @@ class AzureTranscriber(BaseTranscriber):
     def _check_and_process_end_of_stream(self, ws_data_packet):
         if 'eos' in ws_data_packet['meta_info'] and ws_data_packet['meta_info']['eos'] is True:
             logger.info("End of stream detected")
-            self.cleanup()
+            self._sync_cleanup()
             return True
         return False
 
@@ -301,9 +301,10 @@ class AzureTranscriber(BaseTranscriber):
                 pass
             self.send_audio_to_transcriber_task = None
 
-        self.cleanup()
+        self._sync_cleanup()
 
-    def cleanup(self):
+    def _sync_cleanup(self):
+        """Synchronous cleanup of Azure resources."""
         try:
             logger.info(f"Cleaning up azure connections")
             if self.push_stream:
@@ -325,6 +326,28 @@ class AzureTranscriber(BaseTranscriber):
             logger.info(f"Time duration as per azure - {self.duration} | Time duration as per self calculation - {self.end_time - self.start_time}" )
         except Exception as e:
             logger.error(f"Error occurred while cleaning up - {e}")
+
+    async def cleanup(self):
+        """Clean up all resources including Azure recognizer and tasks."""
+        logger.info("Cleaning up Azure transcriber resources")
+
+        # Cancel tasks properly
+        for task_name, task in [
+            ("send_audio_to_transcriber_task", getattr(self, 'send_audio_to_transcriber_task', None)),
+            ("transcription_task", getattr(self, 'transcription_task', None))
+        ]:
+            if task is not None and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    logger.info(f"Azure {task_name} cancelled")
+                except Exception as e:
+                    logger.error(f"Error cancelling Azure {task_name}: {e}")
+
+        # Run sync cleanup in executor to not block event loop
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, self._sync_cleanup)
 
     def get_meta_info(self):
         return self.meta_info
