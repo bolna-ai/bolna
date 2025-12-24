@@ -383,6 +383,11 @@ class ConversationConfig(BaseModel):
     check_if_user_online: Optional[bool] = True
     generate_precise_transcript: Optional[bool] = False
     dtmf_enabled: Optional[bool] = False
+    # Voicemail detection configuration
+    voicemail_detection: Optional[bool] = False  # Enable/disable voicemail detection
+    voicemail_detection_turns: Optional[int] = 3  # Number of initial turns to check for voicemail
+    voicemail_detection_prompt: Optional[str] = None  # Custom prompt for voicemail detection
+    voicemail_detected_message: Optional[str] = "Voicemail detected. Ending call."  # Message to say when voicemail is detected
 
     @field_validator('hangup_after_silence', mode='before')
     def set_hangup_after_silence(cls, v):

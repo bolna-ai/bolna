@@ -10,6 +10,7 @@ from bolna.helpers.rag_service_client import RAGServiceClientSingleton
 from bolna.helpers.utils import now_ms, format_messages
 from bolna.providers import SUPPORTED_LLM_PROVIDERS
 from bolna.llms import OpenAiLLM
+from bolna.prompts import VOICEMAIL_DETECTION_PROMPT
 
 logger = configure_logger(__name__)
 
@@ -122,6 +123,37 @@ class KnowledgeBaseAgent(BaseAgent):
         except Exception as e:
             logger.error(f'check_for_completion error: {e}')
             return {'hangup': 'No'}
+        
+    async def check_for_voicemail(self, user_message, voicemail_detection_prompt=None):
+        """
+        Check if the user message indicates a voicemail system.
+        
+        Args:
+            user_message: The transcribed message from the user
+            voicemail_detection_prompt: Custom prompt for voicemail detection (optional)
+        
+        Returns:
+            dict with 'is_voicemail': 'Yes' or 'No'
+        """
+        try:
+            detection_prompt = voicemail_detection_prompt or VOICEMAIL_DETECTION_PROMPT
+            prompt = [
+                {'role': 'system', 'content': detection_prompt + """
+                    Respond only in this JSON format:
+                    {
+                      "is_voicemail": "Yes" or "No"
+                    }
+                """},
+                {'role': 'user', 'content': f"User message: {user_message}"}
+            ]
+
+            response = await self.conversation_completion_llm.generate(prompt, request_json=True)
+            result = json.loads(response)
+            logger.info(f"Voicemail detection result: {result}")
+            return result
+        except Exception as e:
+            logger.error('check_for_voicemail exception: {}'.format(str(e)))
+            return {'is_voicemail': 'No'}
 
     async def _add_rag_context(self, messages: List[dict]) -> Tuple[List[dict], dict]:
         """
