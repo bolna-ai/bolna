@@ -58,6 +58,9 @@ class CartesiaSynthesizer(BaseSynthesizer):
 
     def supports_websocket(self):
         return True
+    
+    def get_sleep_time(self):
+        return 0.01
 
     async def handle_interruption(self):
         try:

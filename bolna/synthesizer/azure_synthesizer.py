@@ -60,6 +60,9 @@ class AzureSynthesizer(BaseSynthesizer):
 
     def supports_websocket(self):
         return False
+    
+    def get_sleep_time(self):
+        return 0.01
 
     async def synthesize(self, text):
         # For one-off synthesis without streaming
