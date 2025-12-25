@@ -2,6 +2,7 @@ import aiohttp  # type: ignore
 import asyncio
 import json
 import logging
+import time
 import uuid
 from typing import List, Dict, Any, Optional
 from dataclasses import dataclass, field
@@ -12,11 +13,13 @@ class RAGContext:
     score: float
     metadata: Dict[str, Any] = field(default_factory=dict)
 
-@dataclass  
+@dataclass
 class RAGResponse:
     contexts: List[RAGContext]
     total_results: int
     processing_time: float
+    total_query_time_ms: float = 0.0
+    server_processing_time_ms: float = 0.0
 
 class RAGServiceClient:
     """
@@ -111,7 +114,7 @@ class RAGServiceClient:
         """
         Query multiple collections for conversation context.
         This is the main method used by bolna agents.
-        
+
         Args:
             query: The user's query/message
             collections: List of collection IDs to search
@@ -125,6 +128,9 @@ class RAGServiceClient:
         query_id = str(uuid.uuid4())
         query_preview = query[:100] + "..." if len(query) > 100 else query
         self.logger.info(f"RAG query started | query_id: {query_id} | collections: {collections} | query: '{query_preview}' | max_results: {max_results}")
+
+        # Track client-side timing (includes network latency)
+        start_time = time.time()
 
         payload = {
             "query": query,
@@ -151,6 +157,7 @@ class RAGServiceClient:
                     return RAGResponse(contexts=[], total_results=0, processing_time=0.0)
                 
                 data = await response.json()
+                total_query_time_ms = (time.time() - start_time) * 1000
 
                 # rag-proxy-server returns { documents, total_retrieved, query_time_ms, ... }
                 documents = data.get("documents", [])
@@ -164,14 +171,16 @@ class RAGServiceClient:
                 ]
 
                 total_results = data.get("total_retrieved", len(contexts))
-                # Convert ms to seconds for consistency in logs
-                processing_time = float(data.get("query_time_ms", 0.0)) / 1000.0
-                self.logger.info(f"RAG query completed | query_id: {query_id} | results: {total_results} | time: {processing_time:.3f}s")
+                server_processing_time_ms = float(data.get("query_time_ms", 0.0))
+                processing_time = server_processing_time_ms / 1000.0
+                self.logger.info(f"RAG query completed | query_id: {query_id} | results: {total_results} | server_time: {processing_time:.3f}s | total_time: {total_query_time_ms:.1f}ms")
 
                 return RAGResponse(
                     contexts=contexts,
                     total_results=total_results,
-                    processing_time=processing_time
+                    processing_time=processing_time,
+                    total_query_time_ms=total_query_time_ms,
+                    server_processing_time_ms=server_processing_time_ms
                 )
             
         except asyncio.TimeoutError:

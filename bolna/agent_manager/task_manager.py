@@ -46,6 +46,7 @@ class TaskManager(BaseManager):
         self.llm_latencies = {'connection_latency_ms': None, 'turn_latencies': []}
         self.transcriber_latencies = {'connection_latency_ms': None, 'turn_latencies': []}
         self.synthesizer_latencies = {'connection_latency_ms': None, 'turn_latencies': []}
+        self.rag_latencies = {'turn_latencies': []}
         self.stream_sid_ts = None
 
         self.task_config = task
@@ -1481,6 +1482,13 @@ class TaskManager(BaseManager):
         if self.stream and llm_response != filler_message:
             self.__store_into_history(meta_info, messages, llm_response, should_trigger_function_call= should_trigger_function_call)
 
+        # Collect RAG latency if present (from KnowledgeBaseAgent)
+        if meta_info.get('rag_latency'):
+            rag_latency = meta_info['rag_latency']
+            existing_seq_ids = [t.get('sequence_id') for t in self.rag_latencies['turn_latencies']]
+            if rag_latency.get('sequence_id') not in existing_seq_ids:
+                self.rag_latencies['turn_latencies'].append(rag_latency)
+
     async def _process_conversation_task(self, message, sequence, meta_info):
         should_bypass_synth = 'bypass_synth' in meta_info and meta_info['bypass_synth'] is True
         next_step = self._get_next_step(sequence, "llm")
@@ -2504,6 +2512,7 @@ class TaskManager(BaseManager):
                         "llm_latencies": self.llm_latencies,
                         "transcriber_latencies": self.transcriber_latencies,
                         "synthesizer_latencies": self.synthesizer_latencies,
+                        "rag_latencies": self.rag_latencies,
                         "welcome_message_sent_ts": None,
                         "stream_sid_ts": None
                     },
