@@ -98,6 +98,8 @@ class TaskManager(BaseManager):
         self.sampling_rate = 24000
         self.conversation_ended = False
         self.hangup_triggered = False
+        self.pending_llm_hangup = False
+        self.hangup_processing = False
 
         # Prompts
         self.prompts, self.system_prompt = {}, {}
@@ -274,6 +276,7 @@ class TaskManager(BaseManager):
             self.handle_accumulated_message_task = None
             # self.initial_silence_task = None
             self.hangup_task = None
+            self.llm_hangup_check_task = None
             self.transcriber_task = None
             self.output_chunk_size = 16384 if self.sampling_rate == 24000 else 4096 #0.5 second chunk size for calls
             # For nitro
@@ -971,6 +974,11 @@ class TaskManager(BaseManager):
             self.first_message_task.cancel()
             self.first_message_task = None
 
+        if self.llm_hangup_check_task is not None:
+            logger.info("Cancelling LLM hangup check task")
+            self.llm_hangup_check_task.cancel()
+            self.llm_hangup_check_task = None
+
         # self.synthesizer_task.cancel()
         # self.synthesizer_task = asyncio.create_task(self.__listen_synthesizer())
         #for task in self.synthesizer_tasks:
@@ -1066,6 +1074,15 @@ class TaskManager(BaseManager):
         logger.info(f'Updating last_transmitted_timestamp')
         self.last_transmitted_timestamp = time.time()
 
+        if self.pending_llm_hangup:
+            self.pending_llm_hangup = False
+            logger.info("Pending LLM hangup detected - triggering hangup after audio completed")
+            asyncio.create_task(self._execute_pending_hangup())
+
+    async def _execute_pending_hangup(self):
+        await self.process_call_hangup()
+        self.hangup_detail = "llm_prompted_hangup"
+
     async def agent_hangup_observer(self, is_agent_hangup):
         logger.info(f"agent_hangup_observer triggered with is_agent_hangup = {is_agent_hangup}")
         if is_agent_hangup:
@@ -1118,6 +1135,10 @@ class TaskManager(BaseManager):
 
     async def __process_end_of_conversation(self, web_call_timeout=False):
         logger.info("Got end of conversation. I'm stopping now")
+
+        if self.llm_hangup_check_task and not self.llm_hangup_check_task.done():
+            self.llm_hangup_check_task.cancel()
+            self.llm_hangup_check_task = None
 
         await self.wait_for_current_message()
 
@@ -1368,6 +1389,24 @@ class TaskManager(BaseManager):
         if should_bypass_synth:
             synthesize = False
 
+        if self.llm_hangup_check_task and self.llm_hangup_check_task.done():
+            try:
+                completion_res = self.llm_hangup_check_task.result()
+                should_hangup = (
+                    str(completion_res.get("hangup", "")).lower() == "yes"
+                    if isinstance(completion_res, dict)
+                    else False
+                )
+                if should_hangup and self.call_hangup_message:
+                    logger.info("Hangup detected before LLM generation - skipping LLM response")
+                    self._log_hangup_check(meta_info, completion_res)
+                    await self.process_call_hangup()
+                    self.hangup_detail = "llm_prompted_hangup"
+                    self.llm_hangup_check_task = None
+                    return
+            except Exception as e:
+                logger.error(f"Error checking early hangup result: {e}")
+
         # Inject language instruction based on configured mode (once detected)
         if (self.language_detected and self.conversation_language and
             self.language_injection_mode is not None and
@@ -1500,40 +1539,56 @@ class TaskManager(BaseManager):
                 self.history.append({"role": "user", "content": message['data']})
             messages = copy.deepcopy(self.history)
             # messages.append({'role': 'user', 'content': message['data']})
+
+            if (self.use_llm_to_determine_hangup and
+                not self.turn_based_conversation and
+                self.agent_type not in ["graph_agent"]):
+                self.llm_hangup_check_task = asyncio.create_task(
+                    self.tools["llm_agent"].check_for_completion(messages, self.check_for_completion_prompt)
+                )
+
             ### TODO CHECK IF THIS IS EVEN REQUIRED
             convert_to_request_log(message=format_messages(messages, use_system_prompt=True), meta_info=meta_info, component="llm", direction="request", model=self.llm_config["model"], run_id= self.run_id)
 
             await self.__do_llm_generation(messages, meta_info, next_step, should_bypass_synth)
-            # TODO : Write a better check for completion prompt
 
-            if self.agent_type not in ["graph_agent"]:
-                if self.use_llm_to_determine_hangup and not self.turn_based_conversation:
-                    completion_res = await self.tools["llm_agent"].check_for_completion(messages, self.check_for_completion_prompt)
-                    should_hangup = (
-                        str(completion_res.get("hangup", "")).lower() == "yes"
-                        if isinstance(completion_res, dict)
-                        else False
-                    )
+            if self.llm_hangup_check_task:
+                try:
+                    completion_res = await self.llm_hangup_check_task
+                except Exception as e:
+                    logger.error(f"Hangup check task error: {e}")
+                    completion_res = {"hangup": "No"}
+                finally:
+                    self.llm_hangup_check_task = None
 
-                    prompt = [
-                            {'role': 'system', 'content': self.check_for_completion_prompt},
-                            {'role': 'user', 'content': format_messages(self.history, use_system_prompt= True)}]
-                    logger.info(f"##### Answer from the LLM {completion_res}")
-                    convert_to_request_log(message=format_messages(prompt, use_system_prompt= True), meta_info= meta_info, component="llm_hangup", direction="request", model=self.check_for_completion_llm, run_id= self.run_id)
-                    convert_to_request_log(message=completion_res, meta_info= meta_info, component="llm_hangup", direction="response", model=self.check_for_completion_llm, run_id= self.run_id)
+                should_hangup = (
+                    str(completion_res.get("hangup", "")).lower() == "yes"
+                    if isinstance(completion_res, dict)
+                    else False
+                )
 
-                    if should_hangup:
+                self._log_hangup_check(meta_info, completion_res)
+
+                if should_hangup:
+                    if self.call_hangup_message and not self.tools["input"].is_audio_being_played_to_user():
+                        logger.info("Hangup detected before audio started - skipping LLM audio, playing hangup message")
                         await self.process_call_hangup()
                         self.hangup_detail = "llm_prompted_hangup"
+                        return
+                    else:
+                        self.pending_llm_hangup = True
                         return
 
             self.llm_processed_request_ids.add(self.current_request_id)
             llm_response = ""
 
     async def process_call_hangup(self):
-        # Set immediately to prevent user interruptions from cancelling hangup
+        if self.hangup_processing:
+            return
+        self.hangup_processing = True
         self.hangup_triggered = True
         if not self.call_hangup_message:
+            await self.wait_for_current_message()
             await self.__process_end_of_conversation()
         else:
             await self.wait_for_current_message()
@@ -1543,6 +1598,30 @@ class TaskManager(BaseManager):
                          'end_of_llm_stream': True}
             await self._synthesize(create_ws_data_packet(self.call_hangup_message, meta_info=meta_info))
         return
+
+    def _log_hangup_check(self, meta_info, completion_res):
+        """Log hangup check request/response for analytics."""
+        prompt = [
+            {'role': 'system', 'content': self.check_for_completion_prompt},
+            {'role': 'user', 'content': format_messages(self.history, use_system_prompt=True)}
+        ]
+        convert_to_request_log(
+            message=format_messages(prompt, use_system_prompt=True),
+            meta_info=meta_info,
+            component="llm_hangup",
+            direction="request",
+            model=self.check_for_completion_llm,
+            run_id=self.run_id
+        )
+        convert_to_request_log(
+            message=completion_res,
+            meta_info=meta_info,
+            component="llm_hangup",
+            direction="response",
+            model=self.check_for_completion_llm,
+            run_id=self.run_id
+        )
+        logger.info(f"Hangup check result: {completion_res}")
 
     async def _listen_llm_input_queue(self):
         logger.info(
@@ -2134,6 +2213,9 @@ class TaskManager(BaseManager):
             if self.tools["input"].is_audio_being_played_to_user():
                 continue
 
+            if self.llm_task is not None and not self.llm_task.done():
+                continue
+
             time_since_last_spoken_ai_word = (time.time() - self.last_transmitted_timestamp)
             time_since_user_last_spoke = (time.time() - self.time_since_last_spoken_human_word) if self.time_since_last_spoken_human_word > 0 else float('inf')
 
@@ -2438,6 +2520,7 @@ class TaskManager(BaseManager):
 
                 tasks_to_cancel.append(process_task_cancellation(self.output_task,'output_task'))
                 tasks_to_cancel.append(process_task_cancellation(self.hangup_task,'hangup_task'))
+                tasks_to_cancel.append(process_task_cancellation(self.llm_hangup_check_task, 'llm_hangup_check_task'))
                 tasks_to_cancel.append(process_task_cancellation(self.backchanneling_task, 'backchanneling_task'))
                 tasks_to_cancel.append(process_task_cancellation(self.ambient_noise_task, 'ambient_noise_task'))
                 # tasks_to_cancel.append(process_task_cancellation(self.initial_silence_task, 'initial_silence_task'))
