@@ -98,6 +98,8 @@ class TaskManager(BaseManager):
         self.sampling_rate = 24000
         self.conversation_ended = False
         self.hangup_triggered = False
+        self.pending_llm_hangup = False
+        self.hangup_processing = False
 
         # Prompts
         self.prompts, self.system_prompt = {}, {}
@@ -1072,6 +1074,15 @@ class TaskManager(BaseManager):
         logger.info(f'Updating last_transmitted_timestamp')
         self.last_transmitted_timestamp = time.time()
 
+        if self.pending_llm_hangup:
+            self.pending_llm_hangup = False
+            logger.info("Pending LLM hangup detected - triggering hangup after audio completed")
+            asyncio.create_task(self._execute_pending_hangup())
+
+    async def _execute_pending_hangup(self):
+        await self.process_call_hangup()
+        self.hangup_detail = "llm_prompted_hangup"
+
     async def agent_hangup_observer(self, is_agent_hangup):
         logger.info(f"agent_hangup_observer triggered with is_agent_hangup = {is_agent_hangup}")
         if is_agent_hangup:
@@ -1559,15 +1570,22 @@ class TaskManager(BaseManager):
                 self._log_hangup_check(meta_info, completion_res)
 
                 if should_hangup:
-                    await self.process_call_hangup()
-                    self.hangup_detail = "llm_prompted_hangup"
-                    return
+                    if self.call_hangup_message and not self.tools["input"].is_audio_being_played_to_user():
+                        logger.info("Hangup detected before audio started - skipping LLM audio, playing hangup message")
+                        await self.process_call_hangup()
+                        self.hangup_detail = "llm_prompted_hangup"
+                        return
+                    else:
+                        self.pending_llm_hangup = True
+                        return
 
             self.llm_processed_request_ids.add(self.current_request_id)
             llm_response = ""
 
     async def process_call_hangup(self):
-        # Set immediately to prevent user interruptions from cancelling hangup
+        if self.hangup_processing:
+            return
+        self.hangup_processing = True
         self.hangup_triggered = True
         if not self.call_hangup_message:
             await self.wait_for_current_message()
@@ -2193,6 +2211,9 @@ class TaskManager(BaseManager):
                 break
 
             if self.tools["input"].is_audio_being_played_to_user():
+                continue
+
+            if self.llm_task is not None and not self.llm_task.done():
                 continue
 
             time_since_last_spoken_ai_word = (time.time() - self.last_transmitted_timestamp)
