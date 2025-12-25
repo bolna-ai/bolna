@@ -1570,6 +1570,7 @@ class TaskManager(BaseManager):
         # Set immediately to prevent user interruptions from cancelling hangup
         self.hangup_triggered = True
         if not self.call_hangup_message:
+            await self.wait_for_current_message()
             await self.__process_end_of_conversation()
         else:
             await self.wait_for_current_message()
