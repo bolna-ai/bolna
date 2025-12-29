@@ -1044,7 +1044,6 @@ class TaskManager(BaseManager):
             self.stream_sid = message['meta_info']["stream_sid"]
 
     async def _process_followup_task(self, message=None):
-        logger.info(f" TASK CONFIG  {self.task_config['task_type']}")
         if self.task_config["task_type"] == "webhook":
             logger.info(f"Input patrameters {self.input_parameters}")
             extraction_details = self.input_parameters.get('extraction_details', {})
