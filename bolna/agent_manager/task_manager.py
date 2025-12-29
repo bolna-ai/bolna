@@ -1421,6 +1421,10 @@ class TaskManager(BaseManager):
                 #self.__update_transcripts()
 
     async def __do_llm_generation(self, messages, meta_info, next_step, should_bypass_synth=False, should_trigger_function_call=False):
+        # Reset response tracking for new turn
+        if self.generate_precise_transcript:
+            self.tools["input"].reset_response_heard_by_user()
+
         llm_response, function_tool, function_tool_message = '', '', ''
         synthesize = True
         if should_bypass_synth:

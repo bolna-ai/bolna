@@ -138,8 +138,6 @@ class DefaultInputHandler:
                 logger.info(f"Agent hangup has been triggered")
                 self.observable_variables["agent_hangup_observable"].value = True
 
-            self.response_heard_by_user = ""
-
     def __process_mark_event(self, packet):
         self.process_mark_message(packet)
 
