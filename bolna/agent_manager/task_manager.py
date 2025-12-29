@@ -1044,7 +1044,6 @@ class TaskManager(BaseManager):
             self.stream_sid = message['meta_info']["stream_sid"]
 
     async def _process_followup_task(self, message=None):
-        logger.info(f" TASK CONFIG  {self.task_config['task_type']}")
         if self.task_config["task_type"] == "webhook":
             logger.info(f"Input patrameters {self.input_parameters}")
             extraction_details = self.input_parameters.get('extraction_details', {})
@@ -1060,12 +1059,9 @@ class TaskManager(BaseManager):
 
             json_data = await self.tools["llm_agent"].generate(self.history)
             if self.task_config["task_type"] == "summarization":
-                logger.info(f'Summary {json_data["summary"]}')
                 self.summarized_data = json_data["summary"]
-                logger.info(f"self.summarize {self.summarized_data}")
             else:
                 json_data = clean_json_string(json_data)
-                logger.info(f"After replacing {json_data}")
                 if type(json_data) is not dict:
                     json_data = json.loads(json_data)
                 self.extracted_data = json_data
