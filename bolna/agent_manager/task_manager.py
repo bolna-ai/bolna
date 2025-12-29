@@ -916,62 +916,59 @@ class TaskManager(BaseManager):
         return heard_text
 
     async def sync_history(self, mark_events_data, interruption_processed_at):
-        """Sync history to reflect only what was actually spoken. Uses confirmed text or falls back to pending marks."""
+        """Sync history to reflect only what was actually spoken. Uses playedStream confirmation + latency-based exact determination."""
         try:
-            response_heard = self.tools["input"].response_heard_by_user
-            logger.info(f"sync_history: response_heard len={len(response_heard) if response_heard else 0}")
+            response_heard = self.tools["input"].response_heard_by_user or ""
+            logger.info(f"sync_history: response_heard len={len(response_heard)}")
+
+            # Get pending marks (sent to Plivo but playedStream not received yet)
+            pending_marks = [{'mark_id': k, 'mark_data': v} for k, v in mark_events_data]
+            pending_chunks = []
+            for mark in pending_marks:
+                mark_data = mark.get('mark_data', {})
+                mark_type = mark_data.get('type', '')
+                text = mark_data.get('text_synthesized', '')
+                if mark_type in ['pre_mark_message', 'ambient_noise', 'backchanneling'] or not text:
+                    continue
+                pending_chunks.append({
+                    'text': text,
+                    'duration': mark_data.get('duration', 0),
+                    'sent_ts': mark_data.get('sent_ts', 0)
+                })
+
+            # Sort by sent_ts to process in order (invalid timestamps go to end)
+            pending_chunks.sort(key=lambda x: x.get('sent_ts', float('inf')))
+
+            # Determine which pending chunks were played using EXACT latency calculation
+            if pending_chunks:
+                # one_way_latency = time for audio to reach Plivo and start playing
+                one_way_latency = self.tools["input"].get_calculated_plivo_latency() / 2
+
+                for chunk in pending_chunks:
+                    sent_ts = chunk.get('sent_ts', 0)
+                    duration = chunk.get('duration', 0)
+                    text = chunk.get('text', '')
+
+                    if sent_ts <= 0 or not text:
+                        continue  # Invalid timestamp or empty text
+
+                    # EXACT: Audio finishes playing at sent_ts + one_way_latency + duration
+                    audio_finish_time = sent_ts + one_way_latency + duration
+
+                    if audio_finish_time <= interruption_processed_at:
+                        # This chunk was FULLY played (playedStream just delayed)
+                        response_heard += text
+                        logger.info(f"sync_history: chunk played (finish={audio_finish_time:.3f} <= interrupt={interruption_processed_at:.3f})")
+                    else:
+                        # This chunk was NOT fully played - stop here
+                        logger.info(f"sync_history: chunk not played (finish={audio_finish_time:.3f} > interrupt={interruption_processed_at:.3f})")
+                        break
 
             if not response_heard:
-                pending_marks = [{'mark_id': k, 'mark_data': v} for k, v in mark_events_data]
-                pending_chunks = []
-                for mark in pending_marks:
-                    mark_data = mark.get('mark_data', {})
-                    mark_type = mark_data.get('type', '')
-                    text = mark_data.get('text_synthesized', '')
-                    if mark_type in ['pre_mark_message', 'ambient_noise', 'backchanneling'] or not text:
-                        continue
-                    pending_chunks.append({
-                        'text': text,
-                        'duration': mark_data.get('duration', 0),
-                        'sent_ts': mark_data.get('sent_ts', 0)
-                    })
+                logger.info("sync_history: no response_heard, keeping full transcript")
+                return
 
-                if pending_chunks:
-                    first_sent_ts = pending_chunks[0].get('sent_ts', 0)
-                    plivo_latency = self.tools["input"].get_calculated_plivo_latency()
-                    if first_sent_ts > 0:
-                        time_since_first_send = interruption_processed_at - first_sent_ts
-                        actual_play_time = max(0, time_since_first_send - plivo_latency)
-                    else:
-                        elapsed_time = interruption_processed_at - self.tools["input"].get_current_mark_started_time()
-                        actual_play_time = max(0, elapsed_time - plivo_latency)
-
-                    played_text = []
-                    cumulative_duration = 0
-                    for chunk in pending_chunks:
-                        if cumulative_duration >= actual_play_time:
-                            break
-                        chunk_duration = chunk['duration']
-                        if cumulative_duration + chunk_duration <= actual_play_time:
-                            played_text.append(chunk['text'])
-                        else:
-                            remaining_time = actual_play_time - cumulative_duration
-                            proportion = remaining_time / chunk_duration if chunk_duration > 0 else 0
-                            char_count = int(len(chunk['text']) * proportion)
-                            partial_text = chunk['text'][:char_count]
-                            if partial_text and char_count < len(chunk['text']):
-                                last_space = partial_text.rfind(' ')
-                                if last_space > 0:
-                                    partial_text = partial_text[:last_space]
-                            if partial_text:
-                                played_text.append(partial_text)
-                        cumulative_duration += chunk_duration
-
-                    if played_text:
-                        response_heard = ''.join(played_text)
-                else:
-                    # No pending content marks - response likely completed normally
-                    return
+            logger.info(f"sync_history: final response_heard len={len(response_heard)}")
 
             # Update last assistant message in history
             for i in range(len(self.history) - 1, -1, -1):
