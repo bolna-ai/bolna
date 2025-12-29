@@ -56,6 +56,10 @@ class DefaultInputHandler:
         self.response_heard_by_user = ""
         return response.strip()
 
+    def reset_response_heard_by_user(self):
+        """Reset the response heard tracking for next turn."""
+        self.response_heard_by_user = ""
+
     async def stop_handler(self):
         self.running = False
         try:
@@ -91,7 +95,12 @@ class DefaultInputHandler:
             return
 
         self.audio_chunks_received += 1
-        self.response_heard_by_user += mark_event_meta_data_obj.get("text_synthesized")
+
+        # Only add to response_heard_by_user if it's actual content (not ambient noise/backchanneling)
+        # Also handle None text_synthesized to prevent TypeError
+        if is_content_audio:
+            text_synthesized = mark_event_meta_data_obj.get("text_synthesized") or ""
+            self.response_heard_by_user += text_synthesized
 
         if mark_event_meta_data_obj.get("is_final_chunk"):
             if message_type != "is_user_online_message":
@@ -106,6 +115,12 @@ class DefaultInputHandler:
             elif message_type == "agent_hangup":
                 logger.info(f"Agent hangup has been triggered")
                 self.observable_variables["agent_hangup_observable"].value = True
+
+            # Reset response_heard_by_user after each response completes normally
+            # This ensures we only track the CURRENT response, not accumulated responses
+            # sync_history will use this before reset if there was an interruption
+            logger.info(f"Final chunk received for {message_type}, resetting response_heard_by_user")
+            self.response_heard_by_user = ""
 
     def __process_mark_event(self, packet):
         self.process_mark_message(packet)

@@ -891,57 +891,154 @@ class TaskManager(BaseManager):
         #     text_chunk = text_chunk[index+2:]
         return text_chunk
 
-    def get_partial_combined_text(self, mark_events, diff_ts):
-        chunks = [x['mark_data']['text_synthesized']
-                  for x in mark_events
-                  if 'text_synthesized' in x['mark_data']]
-        combined_text = "".join(chunks)
+    def update_transcript_for_interruption(self, original_stream, heard_text):
+        """
+        Trim original response to match what was actually heard by the user.
+        Uses progressive matching to handle trailing spaces from synthesizer.
+        """
+        # Handle None or empty original_stream
+        if original_stream is None:
+            return heard_text.strip() if heard_text else None
 
-        total_duration = sum(
-            x['mark_data'].get('duration', 0.0)
-            for x in mark_events
-            if 'text_synthesized' in x['mark_data']
-        )
-
-        if total_duration == 0:
+        if not heard_text or not heard_text.strip():
+            # User heard nothing - return empty (not original)
+            logger.info("sync_history: heard_text is empty, user heard nothing")
             return ""
 
-        proportion = min(diff_ts / total_duration, 1.0)
-        char_count = int(len(combined_text) * proportion)
+        heard_text = heard_text.strip()
 
-        if char_count >= len(combined_text):
-            return combined_text
-
-        if combined_text[char_count].isalnum():
-            while char_count < len(combined_text) and combined_text[char_count].isalnum():
-                char_count += 1
-
-        return combined_text[:char_count].strip()
-
-    def update_transcript_for_interruption(self, original_stream, current_stream):
-        logger.info(f"updating transcript: {original_stream} -- with -- {current_stream}")
-        index = original_stream.find(current_stream)
+        # Try exact match first
+        index = original_stream.find(heard_text)
         if index != -1:
-            trimmed = original_stream[:index + len(current_stream)]
-        else:
-            trimmed = current_stream
-        return trimmed
+            trimmed = original_stream[:index + len(heard_text)]
+            logger.info(f"sync_history: exact match found, trimmed to '{trimmed[:50] if trimmed else ''}...'")
+            return trimmed
+
+        # Try matching progressively shorter prefixes (handles synthesizer trailing spaces)
+        # Only if the original starts with the beginning of heard_text (same content, just truncated)
+        if len(heard_text) > 3 and original_stream[:3] == heard_text[:3]:
+            for i in range(len(heard_text), 0, -1):
+                partial = heard_text[:i].strip()
+                if partial and original_stream.startswith(partial):
+                    logger.info(f"sync_history: progressive match found at {i} chars, trimmed to '{partial[:50] if partial else ''}...'")
+                    return partial
+
+        # Fallback: return what was heard (better than wrong content)
+        logger.info(f"sync_history: no match found, using heard_text directly: '{heard_text[:50] if heard_text else ''}...'")
+        return heard_text
 
     async def sync_history(self, mark_events_data, interruption_processed_at):
-        cleared_mark_events_data = [{'mark_id': k, 'mark_data': v} for k, v in mark_events_data]
-        logger.info(f"all cleared_mark_events_data: {cleared_mark_events_data}")
-        if cleared_mark_events_data:
-            if cleared_mark_events_data[0]['mark_data'].get('type', '') == 'pre_mark_message' and len(cleared_mark_events_data) > 1:
-                start_ts = self.tools["input"].get_current_mark_started_time()
-                diff_ts = interruption_processed_at - start_ts
-                logger.info(f"interrupted data times: {start_ts}, {interruption_processed_at}")
-                spoken_so_far = self.get_partial_combined_text(cleared_mark_events_data, diff_ts)
+        """
+        Sync conversation history to reflect only what was actually spoken to the user.
+        Uses response_heard_by_user (confirmed played text from telephony provider marks).
+        Falls back to pending marks if no confirmed text (handles fast interruptions).
+        """
+        try:
+            # Get the confirmed played text from input handler
+            response_heard = self.tools["input"].response_heard_by_user
 
-                if self.history[-1]['role'] == 'assistant':
-                    self.history[-1]['content'] = self.update_transcript_for_interruption(self.history[-1]['content'], spoken_so_far)
+            logger.info(f"sync_history called: response_heard='{response_heard[:100] if response_heard else ''}...' len={len(response_heard) if response_heard else 0}")
 
-                if self.interim_history[-1]['role'] == 'assistant':
-                    self.interim_history[-1]['content'] = self.update_transcript_for_interruption(self.interim_history[-1]['content'], spoken_so_far)
+            # If no confirmed text, try to extract from pending marks
+            # This handles the case where user interrupts before mark confirmations arrive
+            if not response_heard:
+                # Extract text from pending marks (marks sent but not yet confirmed by telephony provider)
+                pending_marks = [{'mark_id': k, 'mark_data': v} for k, v in mark_events_data]
+                logger.info(f"sync_history: no confirmed text, checking {len(pending_marks)} pending marks")
+
+                # Collect marks with text and duration for time-based estimation
+                pending_chunks = []
+                for mark in pending_marks:
+                    mark_data = mark.get('mark_data', {})
+                    mark_type = mark_data.get('type', '')
+                    text = mark_data.get('text_synthesized', '')
+                    duration = mark_data.get('duration', 0)
+                    logger.info(f"sync_history: pending mark type='{mark_type}' text='{text[:50] if text else ''}...' duration={duration}")
+
+                    # Skip pre_mark_message and non-content types
+                    if mark_type == 'pre_mark_message':
+                        continue
+                    if mark_type in ['ambient_noise', 'backchanneling']:
+                        continue
+                    if text:
+                        pending_chunks.append({'text': text, 'duration': duration})
+
+                if pending_chunks:
+                    # Calculate elapsed time since audio started playing
+                    start_ts = self.tools["input"].get_current_mark_started_time()
+                    elapsed_time = interruption_processed_at - start_ts
+                    # Subtract buffer delay (Plivo buffers ~300ms before playing)
+                    plivo_buffer_delay = 0.3
+                    actual_play_time = max(0, elapsed_time - plivo_buffer_delay)
+
+                    logger.info(f"sync_history: elapsed_time={elapsed_time:.2f}s, actual_play_time={actual_play_time:.2f}s")
+
+                    # Only include text for chunks that could have been played
+                    played_text = []
+                    cumulative_duration = 0
+                    for chunk in pending_chunks:
+                        if cumulative_duration < actual_play_time:
+                            # This chunk was likely being played
+                            chunk_duration = chunk['duration']
+                            if cumulative_duration + chunk_duration <= actual_play_time:
+                                # Full chunk was played
+                                played_text.append(chunk['text'])
+                            else:
+                                # Partial chunk - estimate proportion
+                                remaining_time = actual_play_time - cumulative_duration
+                                proportion = remaining_time / chunk_duration if chunk_duration > 0 else 0
+                                char_count = int(len(chunk['text']) * proportion)
+                                partial_text = chunk['text'][:char_count]
+                                # Trim to word boundary
+                                if partial_text and char_count < len(chunk['text']):
+                                    last_space = partial_text.rfind(' ')
+                                    if last_space > 0:
+                                        partial_text = partial_text[:last_space]
+                                if partial_text:
+                                    played_text.append(partial_text)
+                                logger.info(f"sync_history: partial chunk, proportion={proportion:.2f}, chars={char_count}")
+                            cumulative_duration += chunk_duration
+                        else:
+                            break
+
+                    if played_text:
+                        response_heard = ''.join(played_text)
+                        logger.info(f"sync_history: using time-trimmed pending marks: '{response_heard[:100] if response_heard else ''}...' len={len(response_heard)}")
+                    else:
+                        # No time to play anything - user heard nothing
+                        logger.info("sync_history: actual_play_time too short, user heard nothing")
+                else:
+                    # No confirmed text and no pending marks - user heard nothing
+                    # response_heard stays empty, transcript will be set to empty
+                    logger.info("sync_history: no response_heard and no pending marks with text, user heard nothing")
+
+            # Find and update the last assistant message in history
+            for i in range(len(self.history) - 1, -1, -1):
+                if self.history[i]['role'] == 'assistant':
+                    original = self.history[i]['content']
+                    # Skip if content is None (e.g., tool_calls only message)
+                    if original is None:
+                        logger.info(f"sync_history: history[{i}] has None content, skipping")
+                        continue
+                    self.history[i]['content'] = self.update_transcript_for_interruption(original, response_heard)
+                    updated = self.history[i]['content']
+                    logger.info(f"sync_history: updated history[{i}] from '{original[:30] if original else ''}...' to '{updated[:30] if updated else ''}...'")
+                    break
+
+            # Same for interim_history
+            for i in range(len(self.interim_history) - 1, -1, -1):
+                if self.interim_history[i]['role'] == 'assistant':
+                    original = self.interim_history[i]['content']
+                    # Skip if content is None
+                    if original is None:
+                        continue
+                    self.interim_history[i]['content'] = self.update_transcript_for_interruption(original, response_heard)
+                    break
+
+        except Exception as e:
+            logger.error(f"sync_history failed: {e}")
+            import traceback
+            traceback.print_exc()
 
     async def __cleanup_downstream_tasks(self):
         current_ts = time.time()
@@ -952,6 +1049,8 @@ class TaskManager(BaseManager):
 
         if self.generate_precise_transcript:
             await self.sync_history(self.mark_event_meta_data.fetch_cleared_mark_event_data().items(), current_ts)
+            # Reset for next turn
+            self.tools["input"].reset_response_heard_by_user()
 
         self.sequence_ids = {-1}
         await self.tools["synthesizer"].flush_synthesizer_stream()
@@ -2346,8 +2445,15 @@ class TaskManager(BaseManager):
                     logger.error(f"Error: {e}")
 
                 if self.generate_precise_transcript:
-                    current_ts = time.time()
-                    await self.sync_history(self.mark_event_meta_data.mark_event_meta_data.items(), current_ts)
+                    # At conversation end, only sync if there's pending data to sync
+                    # If both response_heard and marks are empty, conversation ended normally - no sync needed
+                    has_pending_marks = len(self.mark_event_meta_data.mark_event_meta_data) > 0
+                    has_response_heard = bool(self.tools["input"].response_heard_by_user)
+                    if has_pending_marks or has_response_heard:
+                        current_ts = time.time()
+                        await self.sync_history(self.mark_event_meta_data.mark_event_meta_data.items(), current_ts)
+                    # Reset for next conversation
+                    self.tools["input"].reset_response_heard_by_user()
                 logger.info("Conversation completed")
                 self.conversation_ended = True
             else:
