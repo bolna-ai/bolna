@@ -35,6 +35,49 @@ class DefaultInputHandler:
         self.io_provider = 'default'
         self.is_dtmf_active = False
         self.dtmf_digits = ""
+        # Track Plivo latency from confirmed playedStream events
+        self.plivo_latency_samples = []
+        self.calculated_plivo_latency = 0.25  # Default fallback
+        self.max_latency_samples = 10  # Keep last N samples for rolling average
+
+    def get_calculated_plivo_latency(self):
+        """Get the calculated Plivo latency based on actual playedStream timing."""
+        return self.calculated_plivo_latency
+
+    def _calculate_and_update_latency(self, mark_event_meta_data_obj):
+        """
+        Calculate actual latency from playedStream event timing.
+        Formula: latency = received_ts - sent_ts - duration
+        This gives us the time between sending audio and start of playback.
+        """
+        sent_ts = mark_event_meta_data_obj.get('sent_ts', 0)
+        duration = mark_event_meta_data_obj.get('duration', 0)
+
+        if sent_ts <= 0:
+            # No sent_ts available, can't calculate latency
+            return
+
+        received_ts = time.time()
+        # latency = time from send to playback start
+        # received_ts is when playback FINISHED, so subtract duration
+        latency = received_ts - sent_ts - duration
+
+        # Sanity check: latency should be positive and reasonable (0-2 seconds)
+        if latency < 0:
+            logger.info(f"Latency calculation negative ({latency:.3f}s), skipping - possible clock issue")
+            return
+        if latency > 2.0:
+            logger.info(f"Latency calculation too high ({latency:.3f}s), skipping - possible outlier")
+            return
+
+        # Add to samples and keep rolling average
+        self.plivo_latency_samples.append(latency)
+        if len(self.plivo_latency_samples) > self.max_latency_samples:
+            self.plivo_latency_samples.pop(0)
+
+        # Calculate rolling average
+        self.calculated_plivo_latency = sum(self.plivo_latency_samples) / len(self.plivo_latency_samples)
+        logger.info(f"Plivo latency sample: {latency:.3f}s, rolling avg: {self.calculated_plivo_latency:.3f}s (from {len(self.plivo_latency_samples)} samples)")
 
     def get_audio_chunks_received(self):
         audio_chunks_received = self.audio_chunks_received
@@ -95,6 +138,10 @@ class DefaultInputHandler:
             return
 
         self.audio_chunks_received += 1
+
+        # Calculate and update Plivo latency from this confirmed playback event
+        # This uses sent_ts and duration to calculate actual send-to-playback latency
+        self._calculate_and_update_latency(mark_event_meta_data_obj)
 
         # Only add to response_heard_by_user if it's actual content (not ambient noise/backchanneling)
         # Also handle None text_synthesized to prevent TypeError

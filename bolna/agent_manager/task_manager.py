@@ -946,14 +946,15 @@ class TaskManager(BaseManager):
                 pending_marks = [{'mark_id': k, 'mark_data': v} for k, v in mark_events_data]
                 logger.info(f"sync_history: no confirmed text, checking {len(pending_marks)} pending marks")
 
-                # Collect marks with text and duration for time-based estimation
+                # Collect marks with text, duration, and sent_ts for time-based estimation
                 pending_chunks = []
                 for mark in pending_marks:
                     mark_data = mark.get('mark_data', {})
                     mark_type = mark_data.get('type', '')
                     text = mark_data.get('text_synthesized', '')
                     duration = mark_data.get('duration', 0)
-                    logger.info(f"sync_history: pending mark type='{mark_type}' text='{text[:50] if text else ''}...' duration={duration}")
+                    sent_ts = mark_data.get('sent_ts', 0)
+                    logger.info(f"sync_history: pending mark type='{mark_type}' text='{text[:50] if text else ''}...' duration={duration:.3f}s sent_ts={sent_ts}")
 
                     # Skip pre_mark_message and non-content types
                     if mark_type == 'pre_mark_message':
@@ -961,17 +962,25 @@ class TaskManager(BaseManager):
                     if mark_type in ['ambient_noise', 'backchanneling']:
                         continue
                     if text:
-                        pending_chunks.append({'text': text, 'duration': duration})
+                        pending_chunks.append({'text': text, 'duration': duration, 'sent_ts': sent_ts})
 
                 if pending_chunks:
-                    # Calculate elapsed time since audio started playing
-                    start_ts = self.tools["input"].get_current_mark_started_time()
-                    elapsed_time = interruption_processed_at - start_ts
-                    # Subtract buffer delay (Plivo buffers ~300ms before playing)
-                    plivo_buffer_delay = 0.3
-                    actual_play_time = max(0, elapsed_time - plivo_buffer_delay)
-
-                    logger.info(f"sync_history: elapsed_time={elapsed_time:.2f}s, actual_play_time={actual_play_time:.2f}s")
+                    # Use sent_ts from first chunk as baseline (when audio was actually sent to Plivo)
+                    first_sent_ts = pending_chunks[0].get('sent_ts', 0)
+                    if first_sent_ts > 0:
+                        # Calculate time from when first audio was sent to when user interrupted
+                        time_since_first_send = interruption_processed_at - first_sent_ts
+                        # Use calculated latency from confirmed playedStream events (or fallback to 0.25s)
+                        plivo_latency = self.tools["input"].get_calculated_plivo_latency()
+                        actual_play_time = max(0, time_since_first_send - plivo_latency)
+                        logger.info(f"sync_history: first_sent_ts={first_sent_ts}, time_since_first_send={time_since_first_send:.2f}s, plivo_latency={plivo_latency:.3f}s, actual_play_time={actual_play_time:.2f}s")
+                    else:
+                        # Fallback if sent_ts not available (old data without sent_ts)
+                        start_ts = self.tools["input"].get_current_mark_started_time()
+                        elapsed_time = interruption_processed_at - start_ts
+                        plivo_latency = self.tools["input"].get_calculated_plivo_latency()
+                        actual_play_time = max(0, elapsed_time - plivo_latency)
+                        logger.info(f"sync_history: no sent_ts, using fallback. elapsed_time={elapsed_time:.2f}s, plivo_latency={plivo_latency:.3f}s, actual_play_time={actual_play_time:.2f}s")
 
                     # Only include text for chunks that could have been played
                     played_text = []
@@ -1008,9 +1017,11 @@ class TaskManager(BaseManager):
                         # No time to play anything - user heard nothing
                         logger.info("sync_history: actual_play_time too short, user heard nothing")
                 else:
-                    # No confirmed text and no pending marks - user heard nothing
-                    # response_heard stays empty, transcript will be set to empty
-                    logger.info("sync_history: no response_heard and no pending marks with text, user heard nothing")
+                    # No confirmed text and no pending content marks
+                    # This likely means the response completed normally (all marks confirmed, response_heard reset)
+                    # Don't modify history - it already has the correct full response
+                    logger.info("sync_history: no response_heard and no pending content marks, response likely completed normally - skipping")
+                    return
 
             # Find and update the last assistant message in history
             for i in range(len(self.history) - 1, -1, -1):
