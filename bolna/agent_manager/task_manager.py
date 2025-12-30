@@ -181,7 +181,7 @@ class TaskManager(BaseManager):
         self.turn_id = 0
 
         # Language detection via LLM (first N turns)
-        self.language_detection_turns = self.task_config['task_config'].get('language_detection_turns', 0)
+        self.language_detection_turns = self.task_config['task_config'].get('language_detection_turns') or 0
         self.default_language = self.task_config['task_config'].get('default_language', 'en')
         self._language_detection_transcripts = []
         self._dominant_language = None
