@@ -13,20 +13,8 @@ logger = configure_logger(__name__)
 class LanguageDetector:
     """Detects dominant language from user transcripts using LLM."""
 
-    LANGUAGE_NAMES = {
-        'en': 'English', 'hi': 'Hindi', 'bn': 'Bengali',
-        'ta': 'Tamil', 'te': 'Telugu', 'mr': 'Marathi',
-        'gu': 'Gujarati', 'kn': 'Kannada', 'ml': 'Malayalam',
-        'pa': 'Punjabi', 'fr': 'French', 'es': 'Spanish',
-        'pt': 'Portuguese', 'de': 'German', 'it': 'Italian',
-        'nl': 'Dutch', 'id': 'Indonesian', 'ms': 'Malay',
-        'th': 'Thai', 'vi': 'Vietnamese', 'od': 'Odia'
-    }
-
     def __init__(self, config: dict, run_id: str = None):
         self.turns_threshold = config.get('language_detection_turns') or 0
-        self.injection_mode = config.get('language_injection_mode')
-        self.instruction_template = config.get('language_instruction_template')
         self.run_id = run_id
 
         self._transcripts = []
@@ -48,14 +36,6 @@ class LanguageDetector:
         if self._complete and self._result:
             return self._result.get('dominant_language')
         return None
-
-    @property
-    def is_ready_for_injection(self) -> bool:
-        return (self._complete and
-                self.dominant_language and
-                self.injection_mode and
-                self.instruction_template and
-                self.turns_threshold > 0)
 
     async def collect_transcript(self, transcript: str):
         """Collect transcript and trigger detection after N turns."""
@@ -88,33 +68,6 @@ class LanguageDetector:
         finally:
             self._in_progress = False
             self._task = None
-
-    def inject_language_instruction(self, messages: list) -> list:
-        """Inject language instruction into messages. Returns modified messages."""
-        if not self.is_ready_for_injection:
-            return messages
-
-        try:
-            lang_code = self.dominant_language
-            lang_name = self.LANGUAGE_NAMES.get(lang_code, lang_code)
-            instruction = self.instruction_template.format(language=lang_name) + "\n\n"
-
-            if self.injection_mode == 'system_only':
-                for i, msg in enumerate(messages):
-                    if msg.get('role') == 'system':
-                        messages[i]['content'] = instruction + msg['content']
-                        logger.info(f"[system_only] Injected: {lang_name} ({lang_code})")
-                        break
-            elif self.injection_mode == 'per_turn':
-                for i, msg in enumerate(messages):
-                    if msg.get('role') == 'user':
-                        messages[i]['content'] = instruction + msg['content']
-                count = sum(1 for m in messages if m.get('role') == 'user')
-                logger.info(f"[per_turn] Injected to {count} user messages: {lang_name} ({lang_code})")
-        except Exception as e:
-            logger.error(f"Language injection error: {e}")
-
-        return messages
 
     def _log_detection(self, result: dict):
         """Log for analytics."""
