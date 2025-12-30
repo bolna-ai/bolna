@@ -182,7 +182,7 @@ class TaskManager(BaseManager):
 
         # Language detection via LLM (first N turns)
         self.language_detection_turns = self.task_config['task_config'].get('language_detection_turns') or 0
-        self.default_language = self.task_config['task_config'].get('default_language', 'en')
+        self.default_language = self.task_config['task_config'].get('default_language') or 'en'
         self._language_detection_transcripts = []
         self._dominant_language = None
         self._language_detection_task = None
@@ -1474,7 +1474,7 @@ class TaskManager(BaseManager):
 
         # Inject language instruction based on configured mode (once detected via LLM)
         if (self._language_detection_complete and self.dominant_language and
-            self.language_injection_mode is not None and
+            self.language_injection_mode and self.language_instruction_template and
             self.language_detection_turns and self.language_detection_turns > 0):
             language_names = {
                 'en': 'English', 'hi': 'Hindi', 'bn': 'Bengali',
