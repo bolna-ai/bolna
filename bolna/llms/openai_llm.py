@@ -267,7 +267,7 @@ class OpenAiLLM(BaseLLM):
             raise
 
     def get_response_format(self, is_json_format: bool):
-        if is_json_format and self.model in ('gpt-4-1106-preview', 'gpt-3.5-turbo-1106', 'gpt-4o-mini'):
+        if is_json_format and self.model in ('gpt-4-1106-preview', 'gpt-3.5-turbo-1106', 'gpt-4o-mini', 'gpt-4.1-mini'):
             return {"type": "json_object"}
         else:
             return {"type": "text"}
