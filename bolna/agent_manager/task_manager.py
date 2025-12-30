@@ -14,7 +14,7 @@ import websockets
 
 import aiohttp
 
-from bolna.constants import ACCIDENTAL_INTERRUPTION_PHRASES, DEFAULT_USER_ONLINE_MESSAGE, DEFAULT_USER_ONLINE_MESSAGE_TRIGGER_DURATION, FILLER_DICT, DEFAULT_LANGUAGE_CODE, DEFAULT_TIMEZONE
+from bolna.constants import ACCIDENTAL_INTERRUPTION_PHRASES, DEFAULT_USER_ONLINE_MESSAGE, DEFAULT_USER_ONLINE_MESSAGE_TRIGGER_DURATION, FILLER_DICT, DEFAULT_LANGUAGE_CODE, DEFAULT_TIMEZONE, LANGUAGE_NAMES
 from bolna.helpers.function_calling_helpers import trigger_api, computed_api_response
 from bolna.memory.cache.vector_cache import VectorCache
 from .base_manager import BaseManager
@@ -186,6 +186,8 @@ class TaskManager(BaseManager):
             self.task_config['task_config'],
             run_id=self.run_id
         )
+        self.language_injection_mode = self.task_config['task_config'].get('language_injection_mode')
+        self.language_instruction_template = self.task_config['task_config'].get('language_instruction_template')
 
         # Call conversations
         self.call_sid = None
@@ -467,6 +469,32 @@ class TaskManager(BaseManager):
     #         return False
     #     agent_type = self.task_config['tools_config']["llm_agent"].get("agent_type", None)
     #     return agent_type == "knowledge_agent"
+
+    def _inject_language_instruction(self, messages: list) -> list:
+        """Inject language instruction into messages based on detected language."""
+        lang = self.language_detector.dominant_language
+        if not lang or not self.language_injection_mode or not self.language_instruction_template:
+            return messages
+
+        try:
+            lang_name = LANGUAGE_NAMES.get(lang, lang)
+            instruction = self.language_instruction_template.format(language=lang_name) + "\n\n"
+
+            if self.language_injection_mode == 'system_only':
+                for i, msg in enumerate(messages):
+                    if msg.get('role') == 'system':
+                        messages[i]['content'] = instruction + msg['content']
+                        logger.info(f"[system_only] Injected: {lang_name} ({lang})")
+                        break
+            elif self.language_injection_mode == 'per_turn':
+                for i, msg in enumerate(messages):
+                    if msg.get('role') == 'user':
+                        messages[i]['content'] = instruction + msg['content']
+                logger.info(f"[per_turn] Injected to {sum(1 for m in messages if m.get('role') == 'user')} user messages: {lang_name} ({lang})")
+        except Exception as e:
+            logger.error(f"Language injection error: {e}")
+
+        return messages
 
     def __setup_routes(self, routes):
         embedding_model = routes.get("embedding_model", os.getenv("ROUTE_EMBEDDING_MODEL"))
@@ -1427,7 +1455,7 @@ class TaskManager(BaseManager):
             synthesize = False
 
         # Inject language instruction if detection complete
-        messages = self.language_detector.inject_language_instruction(messages)
+        messages = self._inject_language_instruction(messages)
 
         async for llm_message in self.tools['llm_agent'].generate(messages, synthesize=synthesize, meta_info=meta_info):
             if isinstance(llm_message, dict) and 'messages' in llm_message: # custom list of messages before the llm call
