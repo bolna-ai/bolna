@@ -180,15 +180,20 @@ class TaskManager(BaseManager):
         self.llm_response_generated = False
         self.turn_id = 0
 
-        # language detection (first N turns)
-        self.default_language = self.task_config['task_config'].get('default_language')
-        self.language_detection_turns = self.task_config['task_config'].get('language_detection_turns')
-        self.language_word_counts = {}  # Accumulate word counts: {'hi': 15, 'en': 3}
-        self.current_turn_count = 0
-        self.conversation_language = None  # Detected after N turns
-        self.language_detected = False
+        # Language detection via LLM (first N turns)
+        self.language_detection_turns = self.task_config['task_config'].get('language_detection_turns', 0)
+        self.default_language = self.task_config['task_config'].get('default_language', 'en')
+        self._language_detection_transcripts = []
+        self._dominant_language = None
+        self._language_detection_task = None
+        self._language_detection_complete = False
+        self._language_detection_in_progress = False
+        self._language_detection_llm = None
+        if self.language_detection_turns > 0:
+            from bolna.llms import OpenAiLLM
+            self._language_detection_llm = OpenAiLLM(model=os.getenv('LANGUAGE_DETECTION_LLM', 'gpt-4.1-mini'))
 
-        # A/B Testing: Language injection configuration
+        # Language injection configuration
         self.language_injection_mode = self.task_config['task_config'].get('language_injection_mode')
         self.language_instruction_template = self.task_config['task_config'].get('language_instruction_template')
 
@@ -1467,15 +1472,22 @@ class TaskManager(BaseManager):
         if should_bypass_synth:
             synthesize = False
 
-        # Inject language instruction based on configured mode (once detected)
-        if (self.language_detected and self.conversation_language and
+        # Inject language instruction based on configured mode (once detected via LLM)
+        if (self._language_detection_complete and self.dominant_language and
             self.language_injection_mode is not None and
             self.language_detection_turns and self.language_detection_turns > 0):
             language_names = {
-                'en': 'English', 'hi': 'Hindi'
+                'en': 'English', 'hi': 'Hindi', 'bn': 'Bengali',
+                'ta': 'Tamil', 'te': 'Telugu', 'mr': 'Marathi',
+                'gu': 'Gujarati', 'kn': 'Kannada', 'ml': 'Malayalam',
+                'pa': 'Punjabi', 'fr': 'French', 'es': 'Spanish',
+                'pt': 'Portuguese', 'de': 'German', 'it': 'Italian',
+                'nl': 'Dutch', 'id': 'Indonesian', 'ms': 'Malay',
+                'th': 'Thai', 'vi': 'Vietnamese', 'od': 'Odia'
             }
             try:
-                lang_name = language_names.get(self.conversation_language, self.conversation_language)
+                lang_code = self.dominant_language
+                lang_name = language_names.get(lang_code, lang_code)
                 instruction = self.language_instruction_template.format(language=lang_name) + "\n\n"
 
                 if self.language_injection_mode == 'system_only':
@@ -1483,14 +1495,14 @@ class TaskManager(BaseManager):
                     for i, msg in enumerate(messages):
                         if msg.get('role') == 'system':
                             messages[i]['content'] = instruction + msg['content']
-                            logger.info(f"[system_only] Injected language instruction: {lang_name}")
+                            logger.info(f"[system_only] Injected language instruction: {lang_name} (code: {lang_code})")
                             break
                 elif self.language_injection_mode == 'per_turn':
                     # Inject before every user message
                     for i, msg in enumerate(messages):
                         if msg.get('role') == 'user':
                             messages[i]['content'] = instruction + msg['content']
-                    logger.info(f"[per_turn] Injected language instruction to {sum(1 for m in messages if m.get('role') == 'user')} user messages: {lang_name}")
+                    logger.info(f"[per_turn] Injected language instruction to {sum(1 for m in messages if m.get('role') == 'user')} user messages: {lang_name} (code: {lang_code})")
             except Exception as e:
                 logger.error(f"Exception while injecting language instruction: {e}")
 
@@ -1719,41 +1731,59 @@ class TaskManager(BaseManager):
             skip_append_to_data = False
         return sequence
 
-    def _detect_conversation_language(self, meta_info):
-        """
-        Accumulate word counts from transcription segments and detect conversation language.
-        This method tracks language usage over the first N turns to determine the primary
-        conversation language, which can be used for prompt injection or other language-specific features.
+    @property
+    def dominant_language(self):
+        """Returns detected language code or None if not yet detected."""
+        if self._language_detection_complete and self._dominant_language:
+            return self._dominant_language.get('dominant_language')
+        return None
 
-        Args:
-            meta_info (dict): Metadata from transcriber containing 'segment_word_lang_counts'
-        """
-        # Skip if language already detected or no language data in meta_info
-        if self.language_detected or 'segment_word_lang_counts' not in meta_info:
+    async def _collect_transcript_for_language_detection(self, transcript):
+        """Collect transcripts and trigger detection after N turns."""
+        if self._language_detection_complete or not self.language_detection_turns:
+            return
+        if self._language_detection_in_progress:
             return
 
-        # Skip if language detection is not configured
-        if not self.language_detection_turns or self.language_detection_turns <= 0:
-            return
+        self._language_detection_transcripts.append(transcript)
+        logger.info(f"Language detection: collected {len(self._language_detection_transcripts)}/{self.language_detection_turns} transcripts")
 
-        self.current_turn_count += 1
+        if len(self._language_detection_transcripts) >= self.language_detection_turns:
+            self._language_detection_in_progress = True
+            self._language_detection_task = asyncio.create_task(self._run_language_detection_task())
 
-        # Accumulate word counts
-        segment_counts = meta_info.get('segment_word_lang_counts', {})
-        for lang, count in segment_counts.items():
-            self.language_word_counts[lang] = self.language_word_counts.get(lang, 0) + count
+    async def _run_language_detection_task(self):
+        """Detect dominant language via LLM."""
+        try:
+            formatted = "\n".join([f"- {t}" for t in self._language_detection_transcripts])
+            prompt = LANGUAGE_DETECTION_PROMPT.format(transcripts=formatted)
+            response = await self._language_detection_llm.generate([{'role': 'system', 'content': prompt}], request_json=True)
+            self._dominant_language = json.loads(response)
+            self._language_detection_complete = True
+            logger.info(f"Language detection complete: {self._dominant_language}")
+            self._log_language_detection(self._dominant_language)
+        except Exception as e:
+            logger.error(f"Language detection error: {e}")
+            self._dominant_language = {'dominant_language': self.default_language, 'confidence': 0.0, 'reasoning': 'fallback'}
+            self._language_detection_complete = True
+        finally:
+            self._language_detection_in_progress = False
+            self._language_detection_task = None
 
-        logger.info(f"Turn {self.current_turn_count}/{self.language_detection_turns}: Word counts = {self.language_word_counts}")
-
-        # After N turns, detect conversation language
-        if self.current_turn_count >= self.language_detection_turns:
-            if self.language_word_counts:
-                self.conversation_language = max(self.language_word_counts, key=self.language_word_counts.get)
-            else:
-                self.conversation_language = self.default_language
-
-            self.language_detected = True
-            logger.info(f"Conversation language detected: {self.conversation_language} (total counts: {self.language_word_counts})")
+    def _log_language_detection(self, result):
+        """Log detection for analytics."""
+        meta_info = {'request_id': str(uuid.uuid4())}
+        model = self._language_detection_llm.model if self._language_detection_llm else 'unknown'
+        convert_to_request_log(
+            message={'transcripts': self._language_detection_transcripts},
+            meta_info=meta_info, component="llm_language_detection",
+            direction="request", model=model, run_id=self.run_id
+        )
+        convert_to_request_log(
+            message=result, meta_info=meta_info,
+            component="llm_language_detection", direction="response",
+            model=model, run_id=self.run_id
+        )
 
     def _should_check_voicemail(self, transcriber_message, is_final=True):
         """
@@ -1924,8 +1954,8 @@ class TaskManager(BaseManager):
             logger.info("Voicemail already detected - skipping normal transcriber output processing")
             return
 
-        # Detect conversation language from first N turns
-        self._detect_conversation_language(meta_info)
+        # Collect transcript for LLM-based language detection (first N turns)
+        await self._collect_transcript_for_language_detection(transcriber_message)
 
         self.history.append({"role": "user", "content": transcriber_message})
 
