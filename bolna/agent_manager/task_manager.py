@@ -183,7 +183,6 @@ class TaskManager(BaseManager):
 
         # Language detection via LLM (first N turns)
         self.language_detection_turns = self.task_config['task_config'].get('language_detection_turns') or 0
-        self.default_language = self.task_config['task_config'].get('default_language') or 'en'
         self._language_detection_transcripts = []
         self._dominant_language = None
         self._language_detection_task = None
@@ -1764,7 +1763,7 @@ class TaskManager(BaseManager):
             self._log_language_detection(self._dominant_language)
         except Exception as e:
             logger.error(f"Language detection error: {e}")
-            self._dominant_language = {'dominant_language': self.default_language, 'confidence': 0.0, 'reasoning': 'fallback'}
+            self._dominant_language = None
             self._language_detection_complete = True
         finally:
             self._language_detection_in_progress = False
