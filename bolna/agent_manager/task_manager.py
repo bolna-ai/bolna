@@ -21,6 +21,7 @@ from .base_manager import BaseManager
 from bolna.agent_types import *
 from bolna.providers import *
 from bolna.prompts import *
+from bolna.llms import OpenAiLLM
 from bolna.helpers.utils import structure_system_prompt, compute_function_pre_call_message, get_date_time_from_timezone, get_route_info, calculate_audio_duration, create_ws_data_packet, get_file_names_in_directory, get_raw_audio_bytes, is_valid_md5, \
     get_required_input_types, format_messages, get_prompt_responses, resample, save_audio_file_to_s3, update_prompt_with_context, get_md5_hash, clean_json_string, wav_bytes_to_pcm, convert_to_request_log, yield_chunks_from_memory, process_task_cancellation
 from bolna.helpers.logger_config import configure_logger
@@ -190,7 +191,6 @@ class TaskManager(BaseManager):
         self._language_detection_in_progress = False
         self._language_detection_llm = None
         if self.language_detection_turns > 0:
-            from bolna.llms import OpenAiLLM
             self._language_detection_llm = OpenAiLLM(model=os.getenv('LANGUAGE_DETECTION_LLM', 'gpt-4.1-mini'))
 
         # Language injection configuration
