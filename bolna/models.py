@@ -384,9 +384,11 @@ class ConversationConfig(BaseModel):
     generate_precise_transcript: Optional[bool] = False
     dtmf_enabled: Optional[bool] = False
     # Voicemail detection configuration
-    voicemail_detection: Optional[bool] = False  # Enable/disable voicemail detection
-    voicemail_detection_turns: Optional[int] = 3  # Number of initial turns to check for voicemail
-    voicemail_detection_prompt: Optional[str] = None  # Custom prompt for voicemail detection
+    voicemail: Optional[bool] = False
+    voicemail_detection_prompt: Optional[str] = None
+    voicemail_detection_duration: Optional[float] = 30.0  # Time window in seconds
+    voicemail_check_interval: Optional[float] = 7.0  # Min time between interim checks
+    voicemail_min_transcript_length: Optional[int] = 7  # Min words for interim check
     voicemail_detected_message: Optional[str] = "Voicemail detected. Ending call."  # Message to say when voicemail is detected
 
     @field_validator('hangup_after_silence', mode='before')

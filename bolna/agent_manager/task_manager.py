@@ -190,14 +190,6 @@ class TaskManager(BaseManager):
         self.language_injection_mode = self.task_config['task_config'].get('language_injection_mode')
         self.language_instruction_template = self.task_config['task_config'].get('language_instruction_template')
 
-        # Voicemail detection (first N turns)
-        self.voicemail_detection_enabled = self.task_config['task_config'].get('voicemail_detection', False)
-        self.voicemail_detection_turns = self.task_config['task_config'].get('voicemail_detection_turns', 3)
-        self.voicemail_detection_prompt = self.task_config['task_config'].get('voicemail_detection_prompt')
-        self.voicemail_detected_message = self.task_config['task_config'].get('voicemail_detected_message', 'Voicemail detected. Ending call.')
-        self.voicemail_turn_count = 0
-        self.voicemail_detected = False
-
         # Call conversations
         self.call_sid = None
         self.stream_sid = None
@@ -362,6 +354,30 @@ class TaskManager(BaseManager):
                 if self.call_hangup_message and self.context_data and not self.is_web_based_call:
                     self.call_hangup_message = update_prompt_with_context(self.call_hangup_message, self.context_data)
                 self.check_for_completion_llm = os.getenv("CHECK_FOR_COMPLETION_LLM")
+
+                # Voicemail detection (time-based)
+                self.voicemail_detection_enabled = self.conversation_config.get('voicemail', False)
+                # self.voicemail_detection_enabled = True
+                self.voicemail_llm = os.getenv('CHECK_FOR_COMPLETION_LLM')
+
+                if 'output' not in self.tools or (self.tools['output'] and not self.tools['output'].requires_custom_voicemail_detection()):
+                    self.voicemail_detection_enabled = False
+
+                self.voicemail_detection_duration = self.conversation_config.get('voicemail_detection_duration', 30.0)  # Time window in seconds
+                self.voicemail_check_interval = self.conversation_config.get('voicemail_check_interval', 5.0)  # Min time between interim checks
+                self.voicemail_min_transcript_length = self.conversation_config.get('voicemail_min_transcript_length', 5)  # Min words for interim check
+                self.voicemail_detection_prompt = self.conversation_config.get('voicemail_detection_prompt', VOICEMAIL_DETECTION_PROMPT)
+                self.voicemail_detection_prompt += """
+                    Respond only in this JSON format:
+                        {{
+                          "is_voicemail": "Yes" or "No"
+                        }}
+                """
+                self.voicemail_detected_message = self.conversation_config.get('voicemail_detected_message', 'Voicemail detected. Ending call.')
+                self.voicemail_detected = False
+                self.voicemail_detection_start_time = None  # Will be set when detection window starts
+                self.voicemail_last_check_time = None  # Last time we checked for voicemail
+            
                 self.time_since_last_spoken_human_word = 0
 
                 #Handling accidental interruption
@@ -1648,14 +1664,18 @@ class TaskManager(BaseManager):
             self.language_detected = True
             logger.info(f"Conversation language detected: {self.conversation_language} (total counts: {self.language_word_counts})")
 
-    async def _check_for_voicemail(self, transcriber_message, meta_info):
+    async def _check_for_voicemail(self, transcriber_message, meta_info, is_final=True):
         """
-        Check if the user message indicates a voicemail system during the first N turns.
-        If voicemail is detected, end the call.
+        Check if the user message indicates a voicemail system within a time-based window.
+        Interim transcripts are checked if:
+        1) Enough time has passed since the last check (voicemail_check_interval)
+        2) Transcript length exceeds the minimum threshold (voicemail_min_transcript_length)
+        Final transcripts are always checked regardless of these conditions.
 
         Args:
             transcriber_message (str): The transcribed message from the user
             meta_info (dict): Metadata from transcriber
+            is_final (bool): Whether this is a final transcript (always checked) or interim
 
         Returns:
             bool: True if voicemail was detected and call should be ended, False otherwise
@@ -1668,23 +1688,53 @@ class TaskManager(BaseManager):
         if self.voicemail_detected:
             return True
 
-        # Skip if we've already checked enough turns
-        if self.voicemail_turn_count >= self.voicemail_detection_turns:
+        current_time = time.time()
+
+        # Initialize detection start time on first check
+        if self.voicemail_detection_start_time is None:
+            self.voicemail_detection_start_time = current_time
+            logger.info(f"Voicemail detection window started at {self.voicemail_detection_start_time}")
+
+        # Skip if we've exceeded the detection time window
+        time_elapsed = current_time - self.voicemail_detection_start_time
+        if time_elapsed > self.voicemail_detection_duration:
+            logger.info(f"Voicemail detection window expired ({time_elapsed:.2f}s > {self.voicemail_detection_duration}s)")
             return False
 
-        self.voicemail_turn_count += 1
-        logger.info(f"Voicemail detection turn {self.voicemail_turn_count}/{self.voicemail_detection_turns}: checking message")
+        # For interim transcripts, check additional conditions
+        if not is_final:
+            # Check if enough time has passed since the last check
+            time_since_last_check = (current_time - self.voicemail_last_check_time) if self.voicemail_last_check_time else float('inf')
+            if time_since_last_check < self.voicemail_check_interval:
+                logger.info(f"Skipping interim voicemail check - only {time_since_last_check:.2f}s since last check (need {self.voicemail_check_interval}s)")
+                return False
+
+            # Check if transcript length meets the minimum threshold
+            word_count = len(transcriber_message.strip().split())
+            if word_count < self.voicemail_min_transcript_length:
+                logger.info(f"Skipping interim voicemail check - transcript too short ({word_count} words < {self.voicemail_min_transcript_length})")
+                return False
+
+        # Update last check time
+        self.voicemail_last_check_time = current_time
+        logger.info(f"Voicemail check at {time_elapsed:.2f}s into detection window (is_final={is_final}): {transcriber_message}")
 
         try:
             # Use the LLM agent to check for voicemail
             if "llm_agent" in self.tools and hasattr(self.tools["llm_agent"], 'check_for_voicemail'):
                 # Log the voicemail detection request/response
+
+                prompt = [
+                    {"role": "system", "content": self.voicemail_detection_prompt},
+                    {"role": "user", "content": f"User message: {transcriber_message}"}
+                ]
+
                 convert_to_request_log(
-                    message=f"Voicemail check for: {transcriber_message}",
+                    message=format_messages(prompt, use_system_prompt=True),
                     meta_info=meta_info,
-                    component="llm", #TODO
+                    component="llm_voicemail",
                     direction="request",
-                    model=os.getenv('CHECK_FOR_COMPLETION_LLM', self.llm_config.get('model', 'unknown') if self.llm_config else 'unknown'),
+                    model=self.voicemail_llm,
                     run_id=self.run_id
                 )
 
@@ -1702,9 +1752,9 @@ class TaskManager(BaseManager):
                 convert_to_request_log(
                     message=voicemail_result,
                     meta_info=meta_info,
-                    component="llm", #TODO
+                    component="llm_voicemail",
                     direction="response",
-                    model=os.getenv('CHECK_FOR_COMPLETION_LLM', self.llm_config.get('model', 'unknown') if self.llm_config else 'unknown'),
+                    model=self.voicemail_llm,
                     run_id=self.run_id
                 )
 
@@ -1745,8 +1795,8 @@ class TaskManager(BaseManager):
             logger.info(f"handle_transcriber_output -> skip as previous user message {self.history[-1]}")
             return
 
-        # Check for voicemail during first N turns (before processing normally)
-        if await self._check_for_voicemail(transcriber_message, meta_info):
+        # Check for voicemail within the detection time window (final transcript - always checked)
+        if await self._check_for_voicemail(transcriber_message, meta_info, is_final=True):
             logger.info("Voicemail detected - skipping normal transcriber output processing")
             return
 
@@ -1832,6 +1882,13 @@ class TaskManager(BaseManager):
                         if self.time_since_first_interim_result == -1:
                             self.time_since_first_interim_result = time.time() * 1000
                             logger.info(f"Setting time for first interim result as {self.time_since_first_interim_result}")
+
+                        # Check for voicemail on interim transcripts (conditionally based on time and length)
+                        if self.voicemail_detection_enabled and not self.voicemail_detected:
+                            interim_content = message["data"].get("content", "")
+                            if await self._check_for_voicemail(interim_content, meta_info, is_final=False):
+                                logger.info("Voicemail detected on interim transcript - skipping further processing")
+                                continue
 
                         # self.callee_silent = False
                         # TODO check where this needs to be added post understanding it's usage

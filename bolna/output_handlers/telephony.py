@@ -30,6 +30,9 @@ class TelephonyOutputHandler(DefaultOutputHandler):
     async def form_mark_message(self, mark_id):
         pass
 
+    def requires_custom_voicemail_detection(self):
+        return False
+
     async def set_stream_sid(self, stream_id):
         self.stream_sid = stream_id
 

@@ -47,12 +47,7 @@ class StreamingContextualAgent(BaseAgent):
         try:
             detection_prompt = voicemail_detection_prompt or VOICEMAIL_DETECTION_PROMPT
             prompt = [
-                {'role': 'system', 'content': detection_prompt + """
-                    Respond only in this JSON format:
-                    {
-                      "is_voicemail": "Yes" or "No"
-                    }
-                """},
+                {'role': 'system', 'content': detection_prompt},
                 {'role': 'user', 'content': f"User message: {user_message}"}
             ]
 

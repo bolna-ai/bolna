@@ -447,7 +447,10 @@ async def write_request_logs(message, run_id):
 
     row = [message['time'], message["component"], message["direction"], message["leg_id"], message['sequence_id'], message['model']]
     metadata = {}
-    if message["component"] in ("llm", "llm_hangup"):
+    if message["component"] in ("llm", "llm_hangup", "llm_voicemail"):
+        # Convert dict to string if necessary
+        if isinstance(message_data, dict):
+            message_data = json.dumps(message_data)
         component_details = [message_data, message.get('input_tokens', 0), message.get('output_tokens', 0), None, message.get('latency', None), message['cached'], None, None]
         metadata = message.get('llm_metadata', {})
     elif message["component"] == "transcriber":

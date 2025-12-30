@@ -45,3 +45,6 @@ class PlivoOutputHandler(TelephonyOutputHandler):
         }
 
         return mark_message
+
+    def requires_custom_voicemail_detection(self):
+        return True
