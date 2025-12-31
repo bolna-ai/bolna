@@ -246,6 +246,36 @@ class ElevenLabsTranscriber(BaseTranscriber):
                 self.websocket_connection = None
                 self.connection_authenticated = False
 
+    async def cleanup(self):
+        """Clean up all resources including websocket."""
+        logger.info("Cleaning up ElevenLabs transcriber resources")
+
+        # Cancel tasks properly
+        for task_name, task in [
+            ("sender_task", getattr(self, 'sender_task', None)),
+            ("utterance_timeout_task", getattr(self, 'utterance_timeout_task', None)),
+            ("transcription_task", getattr(self, 'transcription_task', None))
+        ]:
+            if task is not None and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    logger.info(f"ElevenLabs {task_name} cancelled")
+                except Exception as e:
+                    logger.error(f"Error cancelling ElevenLabs {task_name}: {e}")
+
+        # Close websocket
+        if self.websocket_connection is not None:
+            try:
+                await self.websocket_connection.close()
+                logger.info("ElevenLabs websocket connection closed")
+            except Exception as e:
+                logger.error(f"Error closing ElevenLabs websocket: {e}")
+            finally:
+                self.websocket_connection = None
+                self.connection_authenticated = False
+
     async def _check_and_process_end_of_stream(self, ws_data_packet, ws):
         if 'eos' in ws_data_packet['meta_info'] and ws_data_packet['meta_info']['eos'] is True:
             # ElevenLabs doesn't have a close_stream message, just close the websocket

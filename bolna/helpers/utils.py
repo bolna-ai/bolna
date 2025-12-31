@@ -31,8 +31,6 @@ BUCKET_NAME = os.getenv('BUCKET_NAME')
 RECORDING_BUCKET_NAME = os.getenv('RECORDING_BUCKET_NAME')
 RECORDING_BUCKET_URL = os.getenv('RECORDING_BUCKET_URL')
 
-FORMAT_PATTERN = re.compile(r"%\(([^)]+)\)([sdifouxXeEgGcr])")
-
 
 class DictWithMissing(dict):
     def __missing__(self, key):
@@ -446,20 +444,29 @@ async def write_request_logs(message, run_id):
         message_data = ''
 
     row = [message['time'], message["component"], message["direction"], message["leg_id"], message['sequence_id'], message['model']]
+    metadata = {}
     if message["component"] in ("llm", "llm_hangup"):
-        component_details = [message_data, message.get('input_tokens', 0), message.get('output_tokens', 0), None, message.get('latency', None), message['cached'], None]
+        component_details = [message_data, message.get('input_tokens', 0), message.get('output_tokens', 0), None, message.get('latency', None), message['cached'], None, None]
+        metadata = message.get('llm_metadata', {})
     elif message["component"] == "transcriber":
-        component_details = [message_data, None, None, None, message.get('latency', None), False, message.get('is_final', False)]
+        component_details = [message_data, None, None, None, message.get('latency', None), False, message.get('is_final', False), None]
+        metadata = message.get('transcriber_metadata', {})
     elif message["component"] == "synthesizer":
         component_details = [message_data, None, None, len(message_data), message.get('latency', None), message['cached'], None, message['engine']]
+        metadata = message.get('synthesizer_metadata', {})
     elif message["component"] == "function_call":
         component_details = [message_data, None, None, None, message.get('latency', None), None, None, None]
+        metadata = message.get('function_call_metadata', {})
     elif message["component"] == "error":
         component_details = [message_data, None, None, None, message.get('latency', None), False, None, None]
+        metadata = message.get('error_metadata', {})
 
-    row = row + component_details
+    metadata_str = None
+    if metadata:
+        metadata_str = json.dumps(metadata)
+    row = row + component_details + [metadata_str]
 
-    header = "Time,Component,Direction,Leg ID,Sequence ID,Model,Data,Input Tokens,Output Tokens,Characters,Latency,Cached,Final Transcript,Engine\n"
+    header = "Time,Component,Direction,Leg ID,Sequence ID,Model,Data,Input Tokens,Output Tokens,Characters,Latency,Cached,Final Transcript,Engine,Metadata\n"
     log_string = ','.join(['"' + str(item).replace('"', '""') + '"' if item is not None else '' for item in row]) + '\n'
     log_dir = f"./logs"
     os.makedirs(log_dir, exist_ok=True)
@@ -555,6 +562,7 @@ def convert_to_request_log(message, meta_info, model, component="transcriber", d
     log['cached'] = is_cached
     if component == "llm":
         log['latency'] = meta_info.get('llm_latency', None) if direction == "response" else None
+        log['llm_metadata'] = meta_info.get('llm_metadata', None)
     if component == "synthesizer":
         log['latency'] = meta_info.get('synthesizer_latency', None) if direction == "response" else None
     if component == "transcriber":
@@ -598,25 +606,6 @@ def get_date_time_from_timezone(timezone):
     ts = datetime.now(timezone).strftime("%I:%M:%S %p")
 
     return dt, ts
-
-
-def safe_format_with_context(template_dict, context):
-    result = {}
-    for key, value in template_dict.items():
-        if isinstance(value, str):
-            def replacer(match):
-                var_name, fmt_type = match.group(1), match.group(2)
-                if var_name in context:
-                    try:
-                        return ("%%(%s)%s" % (var_name, fmt_type)) % context
-                    except (ValueError, TypeError):
-                        return match.group(0)  # leave untouched on format failure
-                else:
-                    return match.group(0)  # leave as-is if missing
-            result[key] = FORMAT_PATTERN.sub(replacer, value)
-        else:
-            result[key] = value  # pass non-strings as-is
-    return result
 
 
 def compute_function_pre_call_message(language, function_name, api_tool_pre_call_message):
