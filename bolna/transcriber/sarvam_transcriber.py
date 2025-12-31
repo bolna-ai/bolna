@@ -426,12 +426,14 @@ class SarvamTranscriber(BaseTranscriber):
         last_err = None
         while attempt < retries:
             try:
+                logger.info(f"Attempting to connect to Sarvam websocket: {ws_url}")
                 ws = await asyncio.wait_for(
                     websockets.connect(ws_url, additional_headers=additional_headers),
                     timeout=timeout,
                 )
                 self.websocket_connection = ws
                 self.connection_authenticated = True
+                logger.info("Successfully connected to Sarvam websocket")
                 return ws
             except asyncio.TimeoutError:
                 logger.error("Timeout while connecting to Sarvam websocket")
