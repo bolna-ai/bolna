@@ -1754,9 +1754,12 @@ class TaskManager(BaseManager):
         logger.info(f"Triggering background voicemail check at {time_elapsed:.2f}s into detection window (is_final={is_final}): {transcriber_message}")
 
         # Create background task for voicemail detection
-        self.voicemail_check_task = asyncio.create_task(
-            self._voicemail_check_background_task(transcriber_message, meta_info, is_final)
-        )
+        try:
+            self.voicemail_check_task = asyncio.create_task(
+                self._voicemail_check_background_task(transcriber_message, meta_info, is_final)
+            )
+        except Exception as e:
+            logger.error(f"Error starting voicemail check background task: {e}")
 
     async def _voicemail_check_background_task(self, transcriber_message, meta_info, is_final):
         """
