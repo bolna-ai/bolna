@@ -175,8 +175,16 @@ class KnowledgeBaseAgent(BaseAgent):
                 similarity_threshold=0.0
             )
 
+            # Capture latency data from RAG response
+            rag_latency_data = {
+                'total_query_time_ms': rag_response.total_query_time_ms,
+                'server_processing_time_ms': rag_response.server_processing_time_ms,
+                'collections_count': len(self.rag_config['collections']),
+                'results_count': rag_response.total_results
+            }
+
             if not rag_response.contexts:
-                return messages, {'status': 'error', 'message': 'No knowledgebase contexts found'}
+                return messages, {'status': 'error', 'message': 'No knowledgebase contexts found', 'latency': rag_latency_data}
             
             used_vector_ids = set()
             for context in rag_response.contexts:
@@ -219,7 +227,7 @@ Use this information naturally when it helps answer the user's questions. Don't 
             if len(final_messages) > max_messages:
                 final_messages = [final_messages[0]] + final_messages[-(max_messages-1):]
 
-            return final_messages, {'status': 'success', 'retrieved_sources': retrieved_sources}
+            return final_messages, {'status': 'success', 'retrieved_sources': retrieved_sources, 'latency': rag_latency_data}
 
         except asyncio.TimeoutError:
             logger.error("RAG service timeout")
@@ -243,6 +251,13 @@ Use this information naturally when it helps answer the user's questions. Don't 
             messages_with_context, metadata = await self._add_rag_context(message)
 
             meta_info['llm_metadata']['rag_info']['context_retrieval'] = metadata
+
+            # Set rag_latency for task_manager to collect
+            if metadata.get('latency'):
+                meta_info['rag_latency'] = {
+                    'sequence_id': meta_info.get('sequence_id'),
+                    **metadata['latency']
+                }
 
             async for chunk in self.llm.generate_stream(messages_with_context, synthesize=synthesize, meta_info=meta_info):
                 yield chunk

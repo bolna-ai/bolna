@@ -46,6 +46,7 @@ class TaskManager(BaseManager):
         self.llm_latencies = {'connection_latency_ms': None, 'turn_latencies': []}
         self.transcriber_latencies = {'connection_latency_ms': None, 'turn_latencies': []}
         self.synthesizer_latencies = {'connection_latency_ms': None, 'turn_latencies': []}
+        self.rag_latencies = {'turn_latencies': []}
         self.stream_sid_ts = None
 
         self.task_config = task
@@ -1066,7 +1067,6 @@ class TaskManager(BaseManager):
             self.stream_sid = message['meta_info']["stream_sid"]
 
     async def _process_followup_task(self, message=None):
-        logger.info(f" TASK CONFIG  {self.task_config['task_type']}")
         if self.task_config["task_type"] == "webhook":
             logger.info(f"Input patrameters {self.input_parameters}")
             extraction_details = self.input_parameters.get('extraction_details', {})
@@ -1082,12 +1082,9 @@ class TaskManager(BaseManager):
 
             json_data = await self.tools["llm_agent"].generate(self.history)
             if self.task_config["task_type"] == "summarization":
-                logger.info(f'Summary {json_data["summary"]}')
                 self.summarized_data = json_data["summary"]
-                logger.info(f"self.summarize {self.summarized_data}")
             else:
                 json_data = clean_json_string(json_data)
-                logger.info(f"After replacing {json_data}")
                 if type(json_data) is not dict:
                     json_data = json.loads(json_data)
                 self.extracted_data = json_data
@@ -1479,6 +1476,13 @@ class TaskManager(BaseManager):
         filler_message = compute_function_pre_call_message(self.language, function_tool, function_tool_message)
         if self.stream and llm_response != filler_message:
             self.__store_into_history(meta_info, messages, llm_response, should_trigger_function_call= should_trigger_function_call)
+
+        # Collect RAG latency if present (from KnowledgeBaseAgent)
+        if meta_info.get('rag_latency'):
+            rag_latency = meta_info['rag_latency']
+            existing_seq_ids = [t.get('sequence_id') for t in self.rag_latencies['turn_latencies']]
+            if rag_latency.get('sequence_id') not in existing_seq_ids:
+                self.rag_latencies['turn_latencies'].append(rag_latency)
 
     async def _process_conversation_task(self, message, sequence, meta_info):
         should_bypass_synth = 'bypass_synth' in meta_info and meta_info['bypass_synth'] is True
@@ -2355,6 +2359,7 @@ class TaskManager(BaseManager):
                     else:
                         meta_info={'io': self.tools["output"].get_provider(), "request_id": str(uuid.uuid4()), "cached": False, "sequence_id": -1, 'format': 'pcm', "message_category": "is_user_online_message", 'end_of_llm_stream': True}
                         await self._synthesize(create_ws_data_packet(self.check_user_online_message, meta_info= meta_info))
+                    self.history.append({'role': 'assistant', 'content': self.check_user_online_message})
 
                 # Just in case we need to clear messages sent before
                 await self.tools["output"].handle_interruption()
@@ -2621,6 +2626,7 @@ class TaskManager(BaseManager):
                         "llm_latencies": self.llm_latencies,
                         "transcriber_latencies": self.transcriber_latencies,
                         "synthesizer_latencies": self.synthesizer_latencies,
+                        "rag_latencies": self.rag_latencies,
                         "welcome_message_sent_ts": None,
                         "stream_sid_ts": None
                     },
