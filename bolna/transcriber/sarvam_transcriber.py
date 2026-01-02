@@ -37,8 +37,8 @@ class SarvamTranscriber(BaseTranscriber):
         encoding="linear16",
         sampling_rate="16000",
         output_queue=None,
-        high_vad_sensitivity=False,
-        vad_signals=False,
+        high_vad_sensitivity=True,
+        vad_signals=True,
         disable_sdk=False,
         **kwargs,
     ):
@@ -206,7 +206,8 @@ class SarvamTranscriber(BaseTranscriber):
             wav_buffer.seek(0)
             return wav_buffer.getvalue()
         except Exception as e:
-            logger.error(f"WAV conversion error: {e}")
+            logger.error(f"WAV conversion error for language {self.language}: {e}")
+            logger.warning("Skipping audio frame - this may cause missing transcripts")
             return None
 
     def normalize_to_16k(self, raw_audio: bytes, in_sr: int) -> bytes:
@@ -331,6 +332,7 @@ class SarvamTranscriber(BaseTranscriber):
                         metrics = payload.get("metrics", {})
 
                         if transcript and transcript.strip():
+                            logger.debug(f"Sarvam transcript received: {transcript.strip()[:50]}...")
                             now_timestamp = time.time()
                             
                             if self.first_result_latency_ms is None and self.audio_submission_time:
@@ -361,6 +363,7 @@ class SarvamTranscriber(BaseTranscriber):
                     elif isinstance(data, dict) and data.get("type") == "events":
                         vad = data.get("data", {})
                         if vad.get("signal_type") == "START_SPEECH":
+                            logger.debug("Sarvam VAD: speech started")
                             self.current_turn_start_time = time.perf_counter()
                             self.turn_counter += 1
                             self.current_turn_id = f"turn_{self.turn_counter}"
@@ -368,6 +371,7 @@ class SarvamTranscriber(BaseTranscriber):
                             yield create_ws_data_packet("speech_started", self.meta_info)
 
                         elif vad.get("signal_type") == "END_SPEECH":
+                            logger.debug("Sarvam VAD: speech ended")
                             now = time.time()
                             self.last_vocal_frame_timestamp = now
                             self.meta_info["last_vocal_frame_timestamp"] = self.last_vocal_frame_timestamp
