@@ -22,7 +22,7 @@ from bolna.agent_types import *
 from bolna.providers import *
 from bolna.prompts import *
 from bolna.helpers.language_detector import LanguageDetector
-from bolna.helpers.utils import structure_system_prompt, compute_function_pre_call_message, get_date_time_from_timezone, get_route_info, calculate_audio_duration, create_ws_data_packet, get_file_names_in_directory, get_raw_audio_bytes, is_valid_md5, \
+from bolna.helpers.utils import structure_system_prompt, compute_function_pre_call_message, select_message_by_language, get_date_time_from_timezone, get_route_info, calculate_audio_duration, create_ws_data_packet, get_file_names_in_directory, get_raw_audio_bytes, is_valid_md5, \
     get_required_input_types, format_messages, get_prompt_responses, resample, save_audio_file_to_s3, update_prompt_with_context, get_md5_hash, clean_json_string, wav_bytes_to_pcm, convert_to_request_log, yield_chunks_from_memory, process_task_cancellation
 from bolna.helpers.logger_config import configure_logger
 from semantic_router import Route
@@ -288,9 +288,15 @@ class TaskManager(BaseManager):
 
             self.trigger_user_online_message_after = self.conversation_config.get("trigger_user_online_message_after", DEFAULT_USER_ONLINE_MESSAGE_TRIGGER_DURATION)
             self.check_if_user_online = self.conversation_config.get("check_if_user_online", True)
-            self.check_user_online_message = self.conversation_config.get("check_user_online_message", DEFAULT_USER_ONLINE_MESSAGE)
-            if self.check_user_online_message and self.context_data:
-                self.check_user_online_message = update_prompt_with_context(self.check_user_online_message, self.context_data)
+            self.check_user_online_message_config = self.conversation_config.get("check_user_online_message", DEFAULT_USER_ONLINE_MESSAGE)
+            if self.check_user_online_message_config and self.context_data:
+                if isinstance(self.check_user_online_message_config, dict):
+                    self.check_user_online_message_config = {
+                        lang: update_prompt_with_context(msg, self.context_data)
+                        for lang, msg in self.check_user_online_message_config.items()
+                    }
+                else:
+                    self.check_user_online_message_config = update_prompt_with_context(self.check_user_online_message_config, self.context_data)
 
             self.kwargs["process_interim_results"] = "true" if self.conversation_config.get("optimize_latency", False) is True else "false"
             # Routes
@@ -347,10 +353,15 @@ class TaskManager(BaseManager):
                             }}
                     """
 
-                self.call_hangup_message = self.conversation_config.get("call_hangup_message", None)
-                # In the case of web call skipping hangup message updation with context data as it would be updated when the init event is received
-                if self.call_hangup_message and self.context_data and not self.is_web_based_call:
-                    self.call_hangup_message = update_prompt_with_context(self.call_hangup_message, self.context_data)
+                self.call_hangup_message_config = self.conversation_config.get("call_hangup_message", None)
+                if self.call_hangup_message_config and self.context_data and not self.is_web_based_call:
+                    if isinstance(self.call_hangup_message_config, dict):
+                        self.call_hangup_message_config = {
+                            lang: update_prompt_with_context(msg, self.context_data)
+                            for lang, msg in self.call_hangup_message_config.items()
+                        }
+                    else:
+                        self.call_hangup_message_config = update_prompt_with_context(self.call_hangup_message_config, self.context_data)
                 self.check_for_completion_llm = os.getenv("CHECK_FOR_COMPLETION_LLM")
                 self.time_since_last_spoken_human_word = 0
 
@@ -1143,7 +1154,17 @@ class TaskManager(BaseManager):
 
         # Check completion of agent_hangup_message sent from output
         # Only wait for hangup chunk if there's actually a hangup message to send
-        while self.hangup_triggered and self.call_hangup_message and self.call_hangup_message.strip():
+        while self.hangup_triggered and self.call_hangup_message_config:
+            # Check if config has content (string with content or non-empty dict)
+            has_content = False
+            if isinstance(self.call_hangup_message_config, str):
+                has_content = bool(self.call_hangup_message_config.strip())
+            elif isinstance(self.call_hangup_message_config, dict):
+                has_content = bool(self.call_hangup_message_config)
+
+            if not has_content:
+                break
+
             try:
                 if self.tools["output"].hangup_sent():
                     logger.info("final hangup chunk is now sent. Breaking now")
@@ -1155,8 +1176,10 @@ class TaskManager(BaseManager):
                 logger.error(f"Error while checking queue: {e}", exc_info=True)
                 break
 
-        if self.call_hangup_message and self.call_hangup_message.strip() and not web_call_timeout:
-            self.history.append({"role": "assistant", "content": self.call_hangup_message})
+        if self.call_hangup_message_config and not web_call_timeout:
+            detected_lang = self.language_detector.dominant_language
+            hangup_message = select_message_by_language(self.call_hangup_message_config, detected_lang)
+            self.history.append({"role": "assistant", "content": hangup_message})
 
         self.conversation_ended = True
         self.ended_by_assistant = True
@@ -1417,7 +1440,8 @@ class TaskManager(BaseManager):
 
                 # A hack as during the 'await' part control passes to llm streaming function parameters
                 # So we have to make sure we've commited the filler message
-                filler_message = compute_function_pre_call_message(self.language, function_tool, function_tool_message)
+                detected_lang = self.language_detector.dominant_language or self.language
+                filler_message = compute_function_pre_call_message(detected_lang, function_tool, function_tool_message)
                 #filler_message = PRE_FUNCTION_CALL_MESSAGE.get(self.language, PRE_FUNCTION_CALL_MESSAGE[DEFAULT_LANGUAGE_CODE])
                 if text_chunk == filler_message:
                     logger.info("Got a pre function call message")
@@ -1434,7 +1458,8 @@ class TaskManager(BaseManager):
                 await self._handle_llm_output(next_step, llm_response, should_bypass_synth, meta_info, is_function_call=should_trigger_function_call)
                 convert_to_request_log(message=llm_response, meta_info=meta_info, component="llm", direction="response", model=self.llm_config["model"], run_id= self.run_id)
 
-        filler_message = compute_function_pre_call_message(self.language, function_tool, function_tool_message)
+        detected_lang = self.language_detector.dominant_language or self.language
+        filler_message = compute_function_pre_call_message(detected_lang, function_tool, function_tool_message)
         if self.stream and llm_response != filler_message:
             self.__store_into_history(meta_info, messages, llm_response, should_trigger_function_call= should_trigger_function_call)
 
@@ -1536,15 +1561,18 @@ class TaskManager(BaseManager):
     async def process_call_hangup(self):
         # Set immediately to prevent user interruptions from cancelling hangup
         self.hangup_triggered = True
-        if not self.call_hangup_message:
+        if not self.call_hangup_message_config:
             await self.__process_end_of_conversation()
         else:
+            detected_lang = self.language_detector.dominant_language
+            hangup_message = select_message_by_language(self.call_hangup_message_config, detected_lang)
+
             await self.wait_for_current_message()
             await self.__cleanup_downstream_tasks()
             meta_info = {'io': self.tools["output"].get_provider(), "request_id": str(uuid.uuid4()),
                              "cached": False, "sequence_id": -1, 'format': 'pcm', 'message_category': 'agent_hangup',
                          'end_of_llm_stream': True}
-            await self._synthesize(create_ws_data_packet(self.call_hangup_message, meta_info=meta_info))
+            await self._synthesize(create_ws_data_packet(hangup_message, meta_info=meta_info))
         return
 
     async def _listen_llm_input_queue(self):
@@ -2036,8 +2064,9 @@ class TaskManager(BaseManager):
                     logger.info(f'{message["meta_info"]["sequence_id"]} is not in {self.sequence_ids} and hence not speaking')
                     continue
 
+                # Reset asked_if_user_is_still_there flag after any message except is_user_online_message
                 if (message['meta_info'].get("end_of_llm_stream", False) or message['meta_info'].get("end_of_synthesizer_stream", False)) and \
-                        message['meta_info'].get('text', '') != self.check_user_online_message:
+                        message['meta_info'].get('message_category', '') != 'is_user_online_message':
                     self.asked_if_user_is_still_there = False
 
                 # # The below code is redundant in the case of telephony
@@ -2117,13 +2146,16 @@ class TaskManager(BaseManager):
                 self.asked_if_user_is_still_there = True
 
                 if self.check_if_user_online:
+                    detected_lang = self.language_detector.dominant_language
+                    user_online_message = select_message_by_language(self.check_user_online_message_config, detected_lang)
+
                     if self.should_record:
                         meta_info={'io': 'default', "request_id": str(uuid.uuid4()), "cached": False, "sequence_id": -1, 'format': 'wav', "message_category": "is_user_online_message", 'end_of_llm_stream': True}
-                        await self._synthesize(create_ws_data_packet(self.check_user_online_message, meta_info= meta_info))
+                        await self._synthesize(create_ws_data_packet(user_online_message, meta_info= meta_info))
                     else:
                         meta_info={'io': self.tools["output"].get_provider(), "request_id": str(uuid.uuid4()), "cached": False, "sequence_id": -1, 'format': 'pcm', "message_category": "is_user_online_message", 'end_of_llm_stream': True}
-                        await self._synthesize(create_ws_data_packet(self.check_user_online_message, meta_info= meta_info))
-                    self.history.append({'role': 'assistant', 'content': self.check_user_online_message})
+                        await self._synthesize(create_ws_data_packet(user_online_message, meta_info= meta_info))
+                    self.history.append({'role': 'assistant', 'content': user_online_message})
 
                 # Just in case we need to clear messages sent before
                 await self.tools["output"].handle_interruption()
@@ -2245,8 +2277,14 @@ class TaskManager(BaseManager):
                 self.system_prompt['content'] = system_prompt
                 self.history[0]['content'] = system_prompt
 
-            if self.call_hangup_message and self.context_data:
-                self.call_hangup_message = update_prompt_with_context(self.call_hangup_message, self.context_data)
+            if self.call_hangup_message_config and self.context_data:
+                if isinstance(self.call_hangup_message_config, dict):
+                    self.call_hangup_message_config = {
+                        lang: update_prompt_with_context(msg, self.context_data)
+                        for lang, msg in self.call_hangup_message_config.items()
+                    }
+                else:
+                    self.call_hangup_message_config = update_prompt_with_context(self.call_hangup_message_config, self.context_data)
 
             agent_welcome_message = self.kwargs.get("agent_welcome_message", "")
             agent_welcome_message = update_prompt_with_context(agent_welcome_message, self.context_data)
