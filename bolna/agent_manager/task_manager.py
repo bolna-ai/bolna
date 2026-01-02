@@ -358,7 +358,7 @@ class TaskManager(BaseManager):
 
                 # Voicemail detection (time-based)
                 self.voicemail_detection_enabled = self.conversation_config.get('voicemail', False)
-                self.voicemail_llm = os.getenv('VOICEMAIL_DETECTION_LLM', "gpt-4o-mini")
+                self.voicemail_llm = os.getenv('VOICEMAIL_DETECTION_LLM', "gpt-4.1-mini")
 
                 if 'output' not in self.tools or (self.tools['output'] and not self.tools['output'].requires_custom_voicemail_detection()):
                     self.voicemail_detection_enabled = False
