@@ -366,7 +366,7 @@ class TaskManager(BaseManager):
                 self.voicemail_detection_duration = self.conversation_config.get('voicemail_detection_duration', 30.0)  # Time window in seconds
                 self.voicemail_check_interval = self.conversation_config.get('voicemail_check_interval', 5.0)  # Min time between interim checks
                 self.voicemail_min_transcript_length = self.conversation_config.get('voicemail_min_transcript_length', 5)  # Min words for interim check
-                self.voicemail_detection_prompt = self.conversation_config.get('voicemail_detection_prompt', VOICEMAIL_DETECTION_PROMPT)
+                self.voicemail_detection_prompt = VOICEMAIL_DETECTION_PROMPT
                 self.voicemail_detection_prompt += """
                     Respond only in this JSON format:
                         {{

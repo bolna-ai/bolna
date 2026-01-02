@@ -385,7 +385,6 @@ class ConversationConfig(BaseModel):
     dtmf_enabled: Optional[bool] = False
     # Voicemail detection configuration
     voicemail: Optional[bool] = False
-    voicemail_detection_prompt: Optional[str] = None
     voicemail_detection_duration: Optional[float] = 30.0  # Time window in seconds
     voicemail_check_interval: Optional[float] = 7.0  # Min time between interim checks
     voicemail_min_transcript_length: Optional[int] = 7  # Min words for interim check
