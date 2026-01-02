@@ -377,6 +377,7 @@ class TaskManager(BaseManager):
                 self.voicemail_detected = False
                 self.voicemail_detection_start_time = None  # Will be set when detection window starts
                 self.voicemail_last_check_time = None  # Last time we checked for voicemail
+                self.voicemail_check_task = None  # Background task for voicemail detection
             
                 self.time_since_last_spoken_human_word = 0
 
@@ -995,6 +996,12 @@ class TaskManager(BaseManager):
             self.first_message_task.cancel()
             self.first_message_task = None
 
+        # Cancel voicemail check task if running
+        if self.voicemail_check_task is not None and not self.voicemail_check_task.done():
+            logger.info("Cancelling voicemail check task")
+            self.voicemail_check_task.cancel()
+            self.voicemail_check_task = None
+
         # self.synthesizer_task.cancel()
         # self.synthesizer_task = asyncio.create_task(self.__listen_synthesizer())
         #for task in self.synthesizer_tasks:
@@ -1164,6 +1171,13 @@ class TaskManager(BaseManager):
 
         self.conversation_ended = True
         self.ended_by_assistant = True
+
+        # Cancel voicemail check task if still running
+        if self.voicemail_check_task is not None and not self.voicemail_check_task.done():
+            logger.info("Cancelling voicemail check task during conversation end")
+            self.voicemail_check_task.cancel()
+            self.voicemail_check_task = None
+
         await self.tools["input"].stop_handler()
         logger.info("Stopped input handler")
         if "transcriber" in self.tools and not self.turn_based_conversation:
@@ -1664,21 +1678,17 @@ class TaskManager(BaseManager):
             self.language_detected = True
             logger.info(f"Conversation language detected: {self.conversation_language} (total counts: {self.language_word_counts})")
 
-    async def _check_for_voicemail(self, transcriber_message, meta_info, is_final=True):
+    def _should_check_voicemail(self, transcriber_message, is_final=True):
         """
-        Check if the user message indicates a voicemail system within a time-based window.
-        Interim transcripts are checked if:
-        1) Enough time has passed since the last check (voicemail_check_interval)
-        2) Transcript length exceeds the minimum threshold (voicemail_min_transcript_length)
-        Final transcripts are always checked regardless of these conditions.
+        Determine if voicemail check should be triggered based on timing and conditions.
+        This is a non-blocking check that returns quickly.
 
         Args:
             transcriber_message (str): The transcribed message from the user
-            meta_info (dict): Metadata from transcriber
-            is_final (bool): Whether this is a final transcript (always checked) or interim
+            is_final (bool): Whether this is a final transcript or interim
 
         Returns:
-            bool: True if voicemail was detected and call should be ended, False otherwise
+            bool: True if voicemail check should be triggered, False otherwise
         """
         # Skip if voicemail detection is disabled
         if not self.voicemail_detection_enabled:
@@ -1686,7 +1696,12 @@ class TaskManager(BaseManager):
 
         # Skip if voicemail already detected (call is ending)
         if self.voicemail_detected:
-            return True
+            return False
+
+        # Skip if a voicemail check is already in progress
+        if self.voicemail_check_task is not None and not self.voicemail_check_task.done():
+            logger.info("Voicemail check already in progress, skipping")
+            return False
 
         current_time = time.time()
 
@@ -1715,15 +1730,44 @@ class TaskManager(BaseManager):
                 logger.info(f"Skipping interim voicemail check - transcript too short ({word_count} words < {self.voicemail_min_transcript_length})")
                 return False
 
-        # Update last check time
-        self.voicemail_last_check_time = current_time
-        logger.info(f"Voicemail check at {time_elapsed:.2f}s into detection window (is_final={is_final}): {transcriber_message}")
+        return True
 
+    def _trigger_voicemail_check(self, transcriber_message, meta_info, is_final=True):
+        """
+        Trigger a background voicemail check if conditions are met.
+        This is non-blocking and returns immediately.
+
+        Args:
+            transcriber_message (str): The transcribed message from the user
+            meta_info (dict): Metadata from transcriber
+            is_final (bool): Whether this is a final transcript or interim
+        """
+        if not self._should_check_voicemail(transcriber_message, is_final):
+            return
+
+        # Update last check time before starting the background task
+        self.voicemail_last_check_time = time.time()
+        time_elapsed = self.voicemail_last_check_time - self.voicemail_detection_start_time
+        logger.info(f"Triggering background voicemail check at {time_elapsed:.2f}s into detection window (is_final={is_final}): {transcriber_message}")
+
+        # Create background task for voicemail detection
+        self.voicemail_check_task = asyncio.create_task(
+            self._voicemail_check_background_task(transcriber_message, meta_info, is_final)
+        )
+
+    async def _voicemail_check_background_task(self, transcriber_message, meta_info, is_final):
+        """
+        Background task that performs the actual voicemail detection LLM call.
+        If voicemail is detected, it will trigger the hangup process.
+
+        Args:
+            transcriber_message (str): The transcribed message from the user
+            meta_info (dict): Metadata from transcriber
+            is_final (bool): Whether this is a final transcript or interim
+        """
         try:
             # Use the LLM agent to check for voicemail
             if "llm_agent" in self.tools and hasattr(self.tools["llm_agent"], 'check_for_voicemail'):
-                # Log the voicemail detection request/response
-
                 prompt = [
                     {"role": "system", "content": self.voicemail_detection_prompt},
                     {"role": "user", "content": f"User message: {transcriber_message}"}
@@ -1759,19 +1803,16 @@ class TaskManager(BaseManager):
                 )
 
                 if is_voicemail:
-                    logger.info(f"Voicemail detected! Message: {transcriber_message}")
+                    logger.info(f"Voicemail detected in background task! Message: {transcriber_message}")
                     self.voicemail_detected = True
                     self.hangup_detail = "voicemail_detected"
                     
-                    # Send the voicemail detected message and end the call
+                    # Trigger voicemail handling and call hangup
                     await self._handle_voicemail_detected()
-                    return True
             else:
                 logger.warning("Voicemail detection enabled but llm_agent doesn't support check_for_voicemail")
         except Exception as e:
-            logger.error(f"Error during voicemail detection: {e}")
-
-        return False
+            logger.error(f"Error during background voicemail detection: {e}")
 
     async def _handle_voicemail_detected(self):
         """
@@ -1795,9 +1836,12 @@ class TaskManager(BaseManager):
             logger.info(f"handle_transcriber_output -> skip as previous user message {self.history[-1]}")
             return
 
-        # Check for voicemail within the detection time window (final transcript - always checked)
-        if await self._check_for_voicemail(transcriber_message, meta_info, is_final=True):
-            logger.info("Voicemail detected - skipping normal transcriber output processing")
+        # Trigger background voicemail check (non-blocking) for final transcripts
+        self._trigger_voicemail_check(transcriber_message, meta_info, is_final=True)
+
+        # Skip processing if voicemail was already detected
+        if self.voicemail_detected:
+            logger.info("Voicemail already detected - skipping normal transcriber output processing")
             return
 
         # Detect conversation language from first N turns
@@ -1883,12 +1927,10 @@ class TaskManager(BaseManager):
                             self.time_since_first_interim_result = time.time() * 1000
                             logger.info(f"Setting time for first interim result as {self.time_since_first_interim_result}")
 
-                        # Check for voicemail on interim transcripts (conditionally based on time and length)
+                        # Trigger background voicemail check on interim transcripts (non-blocking)
                         if self.voicemail_detection_enabled and not self.voicemail_detected:
                             interim_content = message["data"].get("content", "")
-                            if await self._check_for_voicemail(interim_content, meta_info, is_final=False):
-                                logger.info("Voicemail detected on interim transcript - skipping further processing")
-                                continue
+                            self._trigger_voicemail_check(interim_content, meta_info, is_final=False)
 
                         # self.callee_silent = False
                         # TODO check where this needs to be added post understanding it's usage
@@ -2600,6 +2642,7 @@ class TaskManager(BaseManager):
                 # tasks_to_cancel.append(process_task_cancellation(self.initial_silence_task, 'initial_silence_task'))
                 tasks_to_cancel.append(process_task_cancellation(self.first_message_task, 'first_message_task'))
                 tasks_to_cancel.append(process_task_cancellation(self.dtmf_task, 'dtmf_task'))
+                tasks_to_cancel.append(process_task_cancellation(self.voicemail_check_task, 'voicemail_check_task'))
                 tasks_to_cancel.append(
                     process_task_cancellation(self.handle_accumulated_message_task, "handle_accumulated_message_task"))
 
