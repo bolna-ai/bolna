@@ -60,7 +60,7 @@ class KnowledgeBaseAgent(BaseAgent):
             }
 
             # Pass through credentials
-            for key in ['llm_key', 'base_url', 'api_version', 'language', 'api_tools']:
+            for key in ['llm_key', 'base_url', 'api_version', 'language', 'api_tools', 'buffer_size']:
                 if key in self.config:
                     llm_kwargs[key] = self.config[key]
 
@@ -81,24 +81,33 @@ class KnowledgeBaseAgent(BaseAgent):
             return {}
 
         collections = []
+        used_sources = rag_config.get('used_sources', None)
 
         if 'vector_store' in rag_config:
             provider_config = rag_config['vector_store'].get('provider_config', {})
 
-            # Support both formats: vector_ids (list) and vector_id (single)
-            vector_ids = provider_config.get('vector_ids')
-            if vector_ids and isinstance(vector_ids, list):
-                collections.extend(vector_ids)
-            elif vector_id := provider_config.get('vector_id'):
-                collections.append(vector_id)
+            if used_sources:
+                for source in used_sources:
+                    vector_id = source.get('vector_id')
+                    if vector_id:
+                        collections.append(vector_id)
+
             else:
-                logger.error("No vector_id or vector_ids found in rag_config")
+                # Support both formats: vector_ids (list) and vector_id (single)
+                vector_ids = provider_config.get('vector_ids')
+                if vector_ids and isinstance(vector_ids, list):
+                    collections.extend(vector_ids)
+                elif vector_id := provider_config.get('vector_id'):
+                    collections.append(vector_id)
+                else:
+                    logger.error("No vector_id or vector_ids found in rag_config")
         else:
             logger.error("No vector_store in rag_config")
 
         return {
             'collections': collections,
             'similarity_top_k': rag_config.get('similarity_top_k', 10),
+            'used_sources': used_sources
         }
 
     async def check_for_completion(self, messages, check_for_completion_prompt):
@@ -114,13 +123,13 @@ class KnowledgeBaseAgent(BaseAgent):
             logger.error(f'check_for_completion error: {e}')
             return {'hangup': 'No'}
 
-    async def _add_rag_context(self, messages: List[dict]) -> List[dict]:
+    async def _add_rag_context(self, messages: List[dict]) -> Tuple[List[dict], dict]:
         """
         Add relevant knowledge base context to the messages.
         Returns the original messages if RAG is not configured or fails.
         """
         if not self.rag_config.get('collections'):
-            return messages
+            return messages, {'status': 'error', 'message': 'No knowledgebases configured'}
 
         try:
             client = await RAGServiceClientSingleton.get_client(self.rag_server_url)
@@ -134,8 +143,29 @@ class KnowledgeBaseAgent(BaseAgent):
                 similarity_threshold=0.0
             )
 
+            # Capture latency data from RAG response
+            rag_latency_data = {
+                'total_query_time_ms': rag_response.total_query_time_ms,
+                'server_processing_time_ms': rag_response.server_processing_time_ms,
+                'collections_count': len(self.rag_config['collections']),
+                'results_count': rag_response.total_results
+            }
+
             if not rag_response.contexts:
-                return messages
+                return messages, {'status': 'error', 'message': 'No knowledgebase contexts found', 'latency': rag_latency_data}
+            
+            used_vector_ids = set()
+            for context in rag_response.contexts:
+                metadata = context.metadata
+                vector_id = metadata.get('collection_id', None)
+                if vector_id:
+                    used_vector_ids.add(vector_id)
+
+            retrieved_sources = []
+            for source in self.rag_config.get('used_sources', []):
+                vector_id = source.get('vector_id')
+                if vector_id in used_vector_ids:
+                    retrieved_sources.append(source)
 
             logger.info(f"RAG: Found {rag_response.total_results} contexts, top score: {rag_response.contexts[0].score:.3f}")
 
@@ -165,14 +195,14 @@ Use this information naturally when it helps answer the user's questions. Don't 
             if len(final_messages) > max_messages:
                 final_messages = [final_messages[0]] + final_messages[-(max_messages-1):]
 
-            return final_messages
+            return final_messages, {'status': 'success', 'retrieved_sources': retrieved_sources, 'latency': rag_latency_data}
 
         except asyncio.TimeoutError:
             logger.error("RAG service timeout")
-            return messages
+            return messages, {'status': 'error', 'message': 'Internal Service Error'}
         except Exception as e:
             logger.error(f"RAG error: {e}")
-            return messages
+            return messages, {'status': 'error', 'message': 'Internal Service Error'}
 
     async def generate(self, message: List[dict], **kwargs) -> AsyncGenerator[Tuple[str, bool, Optional[Dict], bool, None, None], None]:
         """
@@ -182,8 +212,20 @@ Use this information naturally when it helps answer the user's questions. Don't 
         synthesize = kwargs.get('synthesize', True)
         start_time = now_ms()
 
+        meta_info['llm_metadata'] = meta_info.get('llm_metadata', {})
+        meta_info['llm_metadata']['rag_info'] = {}
+        meta_info['llm_metadata']['rag_info']['all_sources'] = self.rag_config.get('used_sources', [])
         try:
-            messages_with_context = await self._add_rag_context(message)
+            messages_with_context, metadata = await self._add_rag_context(message)
+
+            meta_info['llm_metadata']['rag_info']['context_retrieval'] = metadata
+
+            # Set rag_latency for task_manager to collect
+            if metadata.get('latency'):
+                meta_info['rag_latency'] = {
+                    'sequence_id': meta_info.get('sequence_id'),
+                    **metadata['latency']
+                }
 
             async for chunk in self.llm.generate_stream(messages_with_context, synthesize=synthesize, meta_info=meta_info):
                 yield chunk

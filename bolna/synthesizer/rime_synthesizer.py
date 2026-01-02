@@ -104,6 +104,9 @@ class RimeSynthesizer(BaseSynthesizer):
 
     def supports_websocket(self):
         return False
+    
+    def get_sleep_time(self):
+        return 0.01
 
     async def open_connection(self):
         pass
@@ -172,7 +175,7 @@ class RimeSynthesizer(BaseSynthesizer):
                 if (self.websocket_holder["websocket"] is None or
                         self.websocket_holder["websocket"].state is websockets.protocol.State.CLOSED):
                     logger.info("WebSocket is not connected, skipping receive.")
-                    await asyncio.sleep(5)
+                    await asyncio.sleep(0.1)
                     continue
 
                 response = await self.websocket_holder["websocket"].recv()

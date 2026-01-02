@@ -46,6 +46,7 @@ class TaskManager(BaseManager):
         self.llm_latencies = {'connection_latency_ms': None, 'turn_latencies': []}
         self.transcriber_latencies = {'connection_latency_ms': None, 'turn_latencies': []}
         self.synthesizer_latencies = {'connection_latency_ms': None, 'turn_latencies': []}
+        self.rag_latencies = {'turn_latencies': []}
         self.stream_sid_ts = None
 
         self.task_config = task
@@ -227,6 +228,7 @@ class TaskManager(BaseManager):
                         "model": self.llm_agent_config['llm_config']['model'],
                         "max_tokens": self.llm_agent_config['llm_config']['max_tokens'],
                         "provider": self.llm_agent_config['llm_config']['provider'],
+                        "buffer_size": self.task_config["tools_config"]["synthesizer"].get('buffer_size'),
                     }
                 elif self.__is_graph_agent():
                     self.llm_agent_config = self.task_config["tools_config"]["llm_agent"]
@@ -268,6 +270,7 @@ class TaskManager(BaseManager):
         if task_id == 0:
             provider_config = self.task_config["tools_config"]["synthesizer"].get("provider_config")
             self.synthesizer_voice = provider_config["voice"]
+            self.hangup_detail = None
 
             self.handle_accumulated_message_task = None
             # self.initial_silence_task = None
@@ -743,6 +746,8 @@ class TaskManager(BaseManager):
                 injected_cfg['api_version'] = self.kwargs['api_version']
             if 'api_tools' in self.kwargs:
                 injected_cfg['api_tools'] = self.kwargs['api_tools']
+            injected_cfg['buffer_size'] = self.task_config["tools_config"]["synthesizer"].get('buffer_size')
+            injected_cfg['language'] = self.language
 
             llm_agent = KnowledgeBaseAgent(injected_cfg)
             logger.info("Knowledge agent created with rag-proxy-server support")
@@ -1031,7 +1036,6 @@ class TaskManager(BaseManager):
             self.stream_sid = message['meta_info']["stream_sid"]
 
     async def _process_followup_task(self, message=None):
-        logger.info(f" TASK CONFIG  {self.task_config['task_type']}")
         if self.task_config["task_type"] == "webhook":
             logger.info(f"Input patrameters {self.input_parameters}")
             extraction_details = self.input_parameters.get('extraction_details', {})
@@ -1047,12 +1051,9 @@ class TaskManager(BaseManager):
 
             json_data = await self.tools["llm_agent"].generate(self.history)
             if self.task_config["task_type"] == "summarization":
-                logger.info(f'Summary {json_data["summary"]}')
                 self.summarized_data = json_data["summary"]
-                logger.info(f"self.summarize {self.summarized_data}")
             else:
                 json_data = clean_json_string(json_data)
-                logger.info(f"After replacing {json_data}")
                 if type(json_data) is not dict:
                     json_data = json.loads(json_data)
                 self.extracted_data = json_data
@@ -1118,7 +1119,8 @@ class TaskManager(BaseManager):
         await self.wait_for_current_message()
 
         # Check completion of agent_hangup_message sent from output
-        while True and self.hangup_triggered:
+        # Only wait for hangup chunk if there's actually a hangup message to send
+        while self.hangup_triggered and self.call_hangup_message and self.call_hangup_message.strip():
             try:
                 if self.tools["output"].hangup_sent():
                     logger.info("final hangup chunk is now sent. Breaking now")
@@ -1436,6 +1438,13 @@ class TaskManager(BaseManager):
             await self._handle_llm_output(next_step, llm_response, should_bypass_synth, meta_info, is_function_call=should_trigger_function_call)
             convert_to_request_log(message=llm_response, meta_info=meta_info, component="llm", direction="response", model=self.llm_config["model"], run_id=self.run_id)
 
+        # Collect RAG latency if present (from KnowledgeBaseAgent)
+        if meta_info.get('rag_latency'):
+            rag_latency = meta_info['rag_latency']
+            existing_seq_ids = [t.get('sequence_id') for t in self.rag_latencies['turn_latencies']]
+            if rag_latency.get('sequence_id') not in existing_seq_ids:
+                self.rag_latencies['turn_latencies'].append(rag_latency)
+
     async def _process_conversation_task(self, message, sequence, meta_info):
         should_bypass_synth = 'bypass_synth' in meta_info and meta_info['bypass_synth'] is True
         next_step = self._get_next_step(sequence, "llm")
@@ -1518,12 +1527,15 @@ class TaskManager(BaseManager):
 
                     if should_hangup:
                         await self.process_call_hangup()
+                        self.hangup_detail = "llm_prompted_hangup"
                         return
 
             self.llm_processed_request_ids.add(self.current_request_id)
             llm_response = ""
 
     async def process_call_hangup(self):
+        # Set immediately to prevent user interruptions from cancelling hangup
+        self.hangup_triggered = True
         if not self.call_hangup_message:
             await self.__process_end_of_conversation()
         else:
@@ -1532,7 +1544,6 @@ class TaskManager(BaseManager):
             meta_info = {'io': self.tools["output"].get_provider(), "request_id": str(uuid.uuid4()),
                              "cached": False, "sequence_id": -1, 'format': 'pcm', 'message_category': 'agent_hangup',
                          'end_of_llm_stream': True}
-            self.hangup_triggered = True
             await self._synthesize(create_ws_data_packet(self.call_hangup_message, meta_info=meta_info))
         return
 
@@ -1873,9 +1884,7 @@ class TaskManager(BaseManager):
                             logger.info(f"Skipping message with sequence_id: {sequence_id}")
 
                         # Give control to other tasks
-                        sleep_time = 0.2
-                        if self.synthesizer_provider in ('cartesia', 'rime', 'sarvam', 'azuretts'):
-                            sleep_time = 0.01
+                        sleep_time = self.tools["synthesizer"].get_sleep_time()
                         await asyncio.sleep(sleep_time)
 
                 except asyncio.CancelledError:
@@ -2114,6 +2123,7 @@ class TaskManager(BaseManager):
                     self.task_config["task_config"]["call_terminate"]):
                 logger.info("Hanging up for web call as max time of call has been reached")
                 await self.__process_end_of_conversation(web_call_timeout=True)
+                self.hangup_detail = "web_call_max_duration_reached"
                 break
 
             if self.last_transmitted_timestamp == 0:
@@ -2130,9 +2140,10 @@ class TaskManager(BaseManager):
             time_since_last_spoken_ai_word = (time.time() - self.last_transmitted_timestamp)
             time_since_user_last_spoke = (time.time() - self.time_since_last_spoken_human_word) if self.time_since_last_spoken_human_word > 0 else float('inf')
 
-            if self.hang_conversation_after > 0 and time_since_last_spoken_ai_word > self.hang_conversation_after and self.time_since_last_spoken_human_word < self.last_transmitted_timestamp:
-                logger.info(f"{time_since_last_spoken_ai_word} seconds since last spoken time stamp and hence cutting the phone call and last transmitted timestampt ws {self.last_transmitted_timestamp} and time since last spoken human word {self.time_since_last_spoken_human_word}")
+            if self.hang_conversation_after > 0 and time_since_last_spoken_ai_word > self.hang_conversation_after and time_since_user_last_spoke > self.hang_conversation_after:
+                logger.info(f"{time_since_last_spoken_ai_word} seconds since AI last spoke and {time_since_user_last_spoke} seconds since user last spoke, both exceed {self.hang_conversation_after}s timeout - hanging up")
                 await self.process_call_hangup()
+                self.hangup_detail = "inactivity_timeout"
                 break
 
             elif (time_since_last_spoken_ai_word > self.trigger_user_online_message_after and
@@ -2148,6 +2159,7 @@ class TaskManager(BaseManager):
                     else:
                         meta_info={'io': self.tools["output"].get_provider(), "request_id": str(uuid.uuid4()), "cached": False, "sequence_id": -1, 'format': 'pcm', "message_category": "is_user_online_message", 'end_of_llm_stream': True}
                         await self._synthesize(create_ws_data_packet(self.check_user_online_message, meta_info= meta_info))
+                    self.history.append({'role': 'assistant', 'content': self.check_user_online_message})
 
                 # Just in case we need to clear messages sent before
                 await self.tools["output"].handle_interruption()
@@ -2387,6 +2399,12 @@ class TaskManager(BaseManager):
                 tasks_to_cancel.append(process_task_cancellation(self.synthesizer_task, 'synthesizer_task'))
                 tasks_to_cancel.append(process_task_cancellation(self.synthesizer_monitor_task, 'synthesizer_monitor_task'))
 
+            # Transcriber cleanup
+            if "transcriber" in self.tools:
+                tasks_to_cancel.append(self.tools["transcriber"].cleanup())
+                if hasattr(self, 'transcriber_task') and self.transcriber_task is not None:
+                    tasks_to_cancel.append(process_task_cancellation(self.transcriber_task, 'transcriber_task'))
+
             if self._is_conversation_task():
                 self.transcriber_latencies['connection_latency_ms'] = self.tools["transcriber"].connection_time
                 self.synthesizer_latencies['connection_latency_ms'] = self.tools["synthesizer"].connection_time
@@ -2408,9 +2426,11 @@ class TaskManager(BaseManager):
                         "llm_latencies": self.llm_latencies,
                         "transcriber_latencies": self.transcriber_latencies,
                         "synthesizer_latencies": self.synthesizer_latencies,
+                        "rag_latencies": self.rag_latencies,
                         "welcome_message_sent_ts": None,
                         "stream_sid_ts": None
-                    }
+                    },
+                    "hangup_detail": self.hangup_detail
                 }
 
                 try:
