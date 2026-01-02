@@ -373,7 +373,6 @@ class TaskManager(BaseManager):
                           "is_voicemail": "Yes" or "No"
                         }}
                 """
-                self.voicemail_detected_message = self.conversation_config.get('voicemail_detected_message', '')
                 self.voicemail_detected = False
                 self.voicemail_detection_start_time = None  # Will be set when detection window starts
                 self.voicemail_last_check_time = None  # Last time we checked for voicemail
@@ -1576,7 +1575,7 @@ class TaskManager(BaseManager):
     async def process_call_hangup(self):
         # Set immediately to prevent user interruptions from cancelling hangup
         self.hangup_triggered = True
-        message = self.call_hangup_message if not self.voicemail_detected else self.voicemail_detected_message
+        message = self.call_hangup_message if not self.voicemail_detected else ""
         if not message or message.strip() == "":
             await self.__process_end_of_conversation()
         else:
@@ -1824,7 +1823,7 @@ class TaskManager(BaseManager):
         """
         Handle the case when voicemail is detected - say the message and end the call.
         """
-        logger.info(f"Handling voicemail detection - ending call with message: {self.voicemail_detected_message}")
+        logger.info(f"Handling voicemail detection - ending call")
         
         await self.process_call_hangup()
 
