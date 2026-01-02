@@ -358,15 +358,14 @@ class TaskManager(BaseManager):
 
                 # Voicemail detection (time-based)
                 self.voicemail_detection_enabled = self.conversation_config.get('voicemail', False)
-                # self.voicemail_detection_enabled = True
-                self.voicemail_llm = os.getenv('CHECK_FOR_COMPLETION_LLM')
+                self.voicemail_llm = os.getenv('VOICEMAIL_DETECTION_LLM', "gpt-4o-mini")
 
                 if 'output' not in self.tools or (self.tools['output'] and not self.tools['output'].requires_custom_voicemail_detection()):
                     self.voicemail_detection_enabled = False
 
                 self.voicemail_detection_duration = self.conversation_config.get('voicemail_detection_duration', 30.0)  # Time window in seconds
-                self.voicemail_check_interval = self.conversation_config.get('voicemail_check_interval', 5.0)  # Min time between interim checks
-                self.voicemail_min_transcript_length = self.conversation_config.get('voicemail_min_transcript_length', 5)  # Min words for interim check
+                self.voicemail_check_interval = self.conversation_config.get('voicemail_check_interval', 7.0)  # Min time between interim checks
+                self.voicemail_min_transcript_length = self.conversation_config.get('voicemail_min_transcript_length', 7)  # Min words for interim check
                 self.voicemail_detection_prompt = VOICEMAIL_DETECTION_PROMPT
                 self.voicemail_detection_prompt += """
                     Respond only in this JSON format:
@@ -374,7 +373,7 @@ class TaskManager(BaseManager):
                           "is_voicemail": "Yes" or "No"
                         }}
                 """
-                self.voicemail_detected_message = self.conversation_config.get('voicemail_detected_message', 'Voicemail detected. Ending call.')
+                self.voicemail_detected_message = self.conversation_config.get('voicemail_detected_message', '')
                 self.voicemail_detected = False
                 self.voicemail_detection_start_time = None  # Will be set when detection window starts
                 self.voicemail_last_check_time = None  # Last time we checked for voicemail

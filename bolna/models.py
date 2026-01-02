@@ -388,7 +388,7 @@ class ConversationConfig(BaseModel):
     voicemail_detection_duration: Optional[float] = 30.0  # Time window in seconds
     voicemail_check_interval: Optional[float] = 7.0  # Min time between interim checks
     voicemail_min_transcript_length: Optional[int] = 7  # Min words for interim check
-    voicemail_detected_message: Optional[str] = "Voicemail detected. Ending call."  # Message to say when voicemail is detected
+    voicemail_detected_message: Optional[str] = ""  # Message to say when voicemail is detected
 
     @field_validator('hangup_after_silence', mode='before')
     def set_hangup_after_silence(cls, v):
