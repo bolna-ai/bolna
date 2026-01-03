@@ -41,6 +41,9 @@ class DefaultOutputHandler:
 
     def get_welcome_message_sent_ts(self):
         return self.welcome_message_sent_ts
+    
+    def requires_custom_voicemail_detection(self):
+        return True
 
     # def welcome_message_sent(self):
     #     return self.is_welcome_message_sent
