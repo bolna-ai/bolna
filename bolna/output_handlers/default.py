@@ -22,10 +22,10 @@ class DefaultOutputHandler:
         self.mark_event_meta_data = mark_event_meta_data
         self.welcome_message_sent_ts = None
 
-    # @TODO Figure out the best way to handle this
     async def handle_interruption(self):
         response = {"data": None, "type": "clear"}
         await self.websocket.send_json(response)
+        self.mark_event_meta_data.clear_data()
 
     def process_in_chunks(self, yield_chunks=False):
         return self.is_chunking_supported and yield_chunks
