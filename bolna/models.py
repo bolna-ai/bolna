@@ -383,6 +383,11 @@ class ConversationConfig(BaseModel):
     check_if_user_online: Optional[bool] = True
     generate_precise_transcript: Optional[bool] = False
     dtmf_enabled: Optional[bool] = False
+    # Voicemail detection configuration
+    voicemail: Optional[bool] = False
+    voicemail_detection_duration: Optional[float] = 30.0  # Time window in seconds
+    voicemail_check_interval: Optional[float] = 7.0  # Min time between interim checks
+    voicemail_min_transcript_length: Optional[int] = 7  # Min words for interim check
 
     @field_validator('hangup_after_silence', mode='before')
     def set_hangup_after_silence(cls, v):
