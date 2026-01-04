@@ -172,3 +172,5 @@ agent_data/
 testing/
 
 test_3.wav
+test_camb.py
+uv.lock
