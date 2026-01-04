@@ -35,6 +35,31 @@ class DefaultInputHandler:
         self.io_provider = 'default'
         self.is_dtmf_active = False
         self.dtmf_digits = ""
+        self.plivo_latency_samples = []
+        self.calculated_plivo_latency = 0.25
+        self.max_latency_samples = 10
+
+    def get_calculated_plivo_latency(self):
+        return self.calculated_plivo_latency
+
+    def _calculate_and_update_latency(self, mark_event_meta_data_obj):
+        """Calculate latency from playedStream timing: latency = received_ts - sent_ts - duration"""
+        sent_ts = mark_event_meta_data_obj.get('sent_ts', 0)
+        duration = mark_event_meta_data_obj.get('duration', 0)
+
+        if sent_ts <= 0:
+            return
+
+        latency = time.time() - sent_ts - duration
+
+        if latency < 0 or latency > 2.0:
+            return
+
+        self.plivo_latency_samples.append(latency)
+        if len(self.plivo_latency_samples) > self.max_latency_samples:
+            self.plivo_latency_samples.pop(0)
+
+        self.calculated_plivo_latency = sum(self.plivo_latency_samples) / len(self.plivo_latency_samples)
 
     def get_audio_chunks_received(self):
         audio_chunks_received = self.audio_chunks_received
@@ -55,6 +80,9 @@ class DefaultInputHandler:
         response = self.response_heard_by_user
         self.response_heard_by_user = ""
         return response.strip()
+
+    def reset_response_heard_by_user(self):
+        self.response_heard_by_user = ""
 
     async def stop_handler(self):
         self.running = False
@@ -91,7 +119,10 @@ class DefaultInputHandler:
             return
 
         self.audio_chunks_received += 1
-        self.response_heard_by_user += mark_event_meta_data_obj.get("text_synthesized")
+        self._calculate_and_update_latency(mark_event_meta_data_obj)
+
+        if is_content_audio:
+            self.response_heard_by_user += mark_event_meta_data_obj.get("text_synthesized") or ""
 
         if mark_event_meta_data_obj.get("is_final_chunk"):
             if message_type != "is_user_online_message":

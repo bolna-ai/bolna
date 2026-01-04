@@ -73,7 +73,8 @@ class TelephonyOutputHandler(DefaultOutputHandler):
                         "is_first_chunk": meta_info.get("is_first_chunk", False),
                         "is_final_chunk": meta_info.get("end_of_llm_stream", False) and meta_info.get("end_of_synthesizer_stream", False),
                         "sequence_id": meta_info["sequence_id"],
-                        "duration": len(audio_chunk) / 8000 if meta_info.get('format', 'mulaw') == 'mulaw' else len(audio_chunk) / 16000
+                        "duration": len(audio_chunk) / 8000 if meta_info.get('format', 'mulaw') == 'mulaw' else len(audio_chunk) / 16000,
+                        "sent_ts": time.time()  # Track when audio was actually sent to telephony provider
                     }
                     mark_id = meta_info.get("mark_id") if (meta_info.get("mark_id") and meta_info.get("mark_id") != "") else str(uuid.uuid4())
 
