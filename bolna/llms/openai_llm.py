@@ -34,7 +34,12 @@ class OpenAiLLM(BaseLLM):
         logger.info(f"Initializing OpenAI LLM with model: {self.model} and maxc tokens {max_tokens}")
         self.max_tokens = max_tokens
         self.temperature = temperature
-        self.model_args = {"max_tokens": self.max_tokens, "temperature": self.temperature, "model": self.model}
+
+        max_tokens_key = "max_tokens"
+        if model.startswith("gpt-5"):
+            max_tokens_key = "max_completion_tokens"
+        self.model_args = {max_tokens_key: self.max_tokens, "temperature": self.temperature, "model": self.model}
+
         if kwargs.get("service_tier") == "priority":
             self.model_args["service_tier"] = "priority"
 
@@ -85,9 +90,11 @@ class OpenAiLLM(BaseLLM):
             "response_format": response_format,
             "messages": messages,
             "stream": True,
-            "stop": ["User:"],
             "user": f"{self.run_id}#{meta_info['turn_id']}"
         }
+
+        if not self.model.startswith("gpt-5"):
+            model_args["stop"] = ["User:"]
 
         if self.trigger_function_call:
             model_args["tools"] = json.loads(self.tools) if isinstance(self.tools, str) else self.tools
