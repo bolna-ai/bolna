@@ -18,6 +18,7 @@ from bolna.constants import ACCIDENTAL_INTERRUPTION_PHRASES, DEFAULT_USER_ONLINE
 from bolna.helpers.function_calling_helpers import trigger_api, computed_api_response
 from bolna.memory.cache.vector_cache import VectorCache
 from .base_manager import BaseManager
+from .interruption_manager import InterruptionManager
 from bolna.agent_types import *
 from bolna.providers import *
 from bolna.prompts import *
@@ -259,6 +260,9 @@ class TaskManager(BaseManager):
         self.curr_sequence_id = 0
         self.sequence_ids = {-1} #-1 is used for data that needs to be passed and is developed by task manager like backchannleing etc.
 
+        # Initialize InterruptionManager with defaults (will be reconfigured for task_id == 0)
+        self.interruption_manager = InterruptionManager()
+
         #setup request logs
         self.request_logs = []
         self.hangup_task = None
@@ -396,6 +400,13 @@ class TaskManager(BaseManager):
                 self.accidental_interruption_phrases = set(ACCIDENTAL_INTERRUPTION_PHRASES)
                 #self.interruption_backoff_period = 1000 #conversation_config.get("interruption_backoff_period", 300) #this is the amount of time output loop will sleep before sending next audio
                 self.allow_extra_sleep = False #It'll help us to back off as soon as we hear interruption for a while
+
+                # Initialize InterruptionManager to centralize interruption logic
+                self.interruption_manager = InterruptionManager(
+                    number_of_words_for_interruption=self.number_of_words_for_interruption,
+                    accidental_interruption_phrases=ACCIDENTAL_INTERRUPTION_PHRASES,
+                    incremental_delay=self.incremental_delay,
+                )
 
                 #Backchanneling
                 self.should_backchannel = self.conversation_config.get("backchanneling", False)
@@ -1078,6 +1089,9 @@ class TaskManager(BaseManager):
             await self.sync_history(self.mark_event_meta_data.fetch_cleared_mark_event_data().items(), current_ts)
             self.tools["input"].reset_response_heard_by_user()
 
+        # Invalidate pending responses via InterruptionManager
+        self.interruption_manager.invalidate_pending_responses()
+        # Also update local state for backward compatibility
         self.sequence_ids = {-1}
         await self.tools["synthesizer"].flush_synthesizer_stream()
 
@@ -1127,10 +1141,16 @@ class TaskManager(BaseManager):
             meta_info = self.tools["transcriber"].get_meta_info()
             logger.info(f"Metainfo {meta_info}")
         meta_info_copy = meta_info.copy()
-        self.curr_sequence_id += 1
-        meta_info_copy["sequence_id"] = self.curr_sequence_id
-        meta_info_copy['turn_id'] = self.turn_id
-        self.sequence_ids.add(meta_info_copy["sequence_id"])
+
+        # Get sequence_id and turn_id via InterruptionManager
+        new_sequence_id = self.interruption_manager.get_next_sequence_id()
+        meta_info_copy["sequence_id"] = new_sequence_id
+        meta_info_copy['turn_id'] = self.interruption_manager.get_turn_id()
+
+        # Also update local state for backward compatibility
+        self.curr_sequence_id = new_sequence_id
+        self.sequence_ids.add(new_sequence_id)
+
         return meta_info_copy
 
     def _extract_sequence_and_meta(self, message):
@@ -1968,23 +1988,38 @@ class TaskManager(BaseManager):
                         if not self.tools["input"].welcome_message_played():
                             continue
 
+                        # Track user speaking state via InterruptionManager
+                        self.interruption_manager.on_user_speech_started()
+                        # Also update local state for backward compatibility
                         if not self.callee_speaking:
                             self.callee_speaking_start_time = time.time()
                             self.callee_speaking = True
 
                         interim_transcript_len += len(message["data"].get("content").strip().split(" "))
-                        if self.tools["input"].is_audio_being_played_to_user() and self.tools["input"].welcome_message_played() and self.number_of_words_for_interruption != 0:
-                            if interim_transcript_len > self.number_of_words_for_interruption or \
-                                    message["data"].get("content").strip() in self.accidental_interruption_phrases:
-                                logger.info(f"Condition for interruption hit")
-                                self.turn_id += 1
-                                self.tools["input"].update_is_audio_being_played(False)
-                                await self.__cleanup_downstream_tasks()
-                            else:
-                                logger.info(f"Ignoring transcript: {message['data'].get('content').strip()}")
-                                continue
+                        transcript_content = message["data"].get("content", "")
+
+                        # Check if interruption should be triggered via InterruptionManager
+                        if self.interruption_manager.should_trigger_interruption(
+                            word_count=interim_transcript_len,
+                            transcript=transcript_content,
+                            is_audio_playing=self.tools["input"].is_audio_being_played_to_user(),
+                            welcome_played=self.tools["input"].welcome_message_played()
+                        ):
+                            logger.info(f"Condition for interruption hit")
+                            self.interruption_manager.on_interruption_triggered()
+                            # Also update local state for backward compatibility
+                            self.turn_id += 1
+                            self.tools["input"].update_is_audio_being_played(False)
+                            await self.__cleanup_downstream_tasks()
+                        elif self.tools["input"].is_audio_being_played_to_user() and self.tools["input"].welcome_message_played() and self.number_of_words_for_interruption != 0:
+                            # Not enough words for interruption - ignore
+                            logger.info(f"Ignoring transcript: {transcript_content.strip()}")
+                            continue
 
                         # Doing changes for incremental delay
+                        self.interruption_manager.update_required_delay(len(self.history))
+                        self.interruption_manager.on_interim_transcript_received()
+                        # Also update local state for backward compatibility
                         self.required_delay_before_speaking = self.incremental_delay if len(self.history) > 2 else 0
                         logger.info(f"Increased the incremental delay time to {self.required_delay_before_speaking}")
                         if self.time_since_first_interim_result == -1:
@@ -2004,12 +2039,22 @@ class TaskManager(BaseManager):
                     # Whenever speech_final or UtteranceEnd is received from Deepgram, this condition would get triggered
                     elif isinstance(message.get("data"), dict) and message["data"].get("type", "") == "transcript":
                         logger.info(f"Received transcript, sending for further processing")
-                        if self.tools["input"].welcome_message_played() and self.tools["input"].is_audio_being_played_to_user() and \
-                                len(message["data"].get("content").strip().split(" ")) <= self.number_of_words_for_interruption and \
-                                message["data"].get("content").strip() not in self.accidental_interruption_phrases:
-                            logger.info(f"Continuing the loop and ignoring the transcript received ({message['data'].get('content')}) in speech final as it is false interruption")
+                        transcript_content = message["data"].get("content", "")
+                        word_count = len(transcript_content.strip().split(" "))
+
+                        # Check if this is a false interruption via InterruptionManager
+                        if self.interruption_manager.is_false_interruption(
+                            word_count=word_count,
+                            transcript=transcript_content,
+                            is_audio_playing=self.tools["input"].is_audio_being_played_to_user(),
+                            welcome_played=self.tools["input"].welcome_message_played()
+                        ):
+                            logger.info(f"Continuing the loop and ignoring the transcript received ({transcript_content}) in speech final as it is false interruption")
                             continue
 
+                        # User finished speaking - update InterruptionManager state
+                        self.interruption_manager.on_user_speech_ended()
+                        # Also update local state for backward compatibility
                         self.callee_speaking = False
                         # self.callee_silent = True
                         temp_transcriber_message = ""
@@ -2025,7 +2070,9 @@ class TaskManager(BaseManager):
                         # TODO check where this needs to be added post understanding it's usage
                         self.let_remaining_audio_pass_through = True
 
-                        # Resetting variables for incremental delay
+                        # Resetting variables for incremental delay (via InterruptionManager)
+                        self.interruption_manager.reset_delay_for_speech_final(len(self.history), self.minimum_wait_duration)
+                        # Also update local state for backward compatibility
                         self.time_since_first_interim_result = -1
                         self.required_delay_before_speaking = max(
                             self.minimum_wait_duration - self.incremental_delay, 0) if len(self.history) > 2 else 0
@@ -2087,7 +2134,8 @@ class TaskManager(BaseManager):
         self.buffered_output_queue.put_nowait(create_ws_data_packet(chunk, copied_meta_info))
 
     def is_sequence_id_in_current_ids(self, sequence_id):
-        return sequence_id in self.sequence_ids
+        """Check if sequence_id is valid. Delegates to InterruptionManager."""
+        return self.interruption_manager.is_valid_sequence(sequence_id)
 
     async def __listen_synthesizer(self):
         all_text_to_be_synthesized = []
@@ -2319,7 +2367,8 @@ class TaskManager(BaseManager):
                 if "end_of_conversation" in message['meta_info']:
                     await self.__process_end_of_conversation()
 
-                if 'sequence_id' in message['meta_info'] and message["meta_info"]["sequence_id"] in self.sequence_ids:
+                sequence_id = message['meta_info'].get('sequence_id')
+                if sequence_id is not None and self.interruption_manager.should_send_audio(sequence_id):
                     self.tools["input"].update_is_audio_being_played(True)
                     await self.tools["output"].handle(message)
                     try:
@@ -2329,7 +2378,7 @@ class TaskManager(BaseManager):
                         duration = 0.256
                         logger.info("Exception in __process_output_loop: {}".format(str(e)))
                 else:
-                    logger.info(f'{message["meta_info"]["sequence_id"]} is not in {self.sequence_ids} and hence not speaking')
+                    logger.info(f'{sequence_id} is not in {self.interruption_manager.sequence_ids} and hence not speaking')
                     continue
 
                 # Reset asked_if_user_is_still_there flag after any message except is_user_online_message
