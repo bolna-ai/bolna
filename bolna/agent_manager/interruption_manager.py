@@ -74,8 +74,11 @@ class InterruptionManager:
         """
         Decides if audio chunk should be sent to user.
 
-        Part 1 (Extraction): Only checks sequence_id (matches current behavior).
-        Part 2 (Bug Fix): Will add callee_speaking check.
+        Returns False if:
+        - sequence_id is not valid (response was interrupted/invalidated)
+        - user is currently speaking (callee_speaking is True)
+
+        This prevents the agent from talking over the user.
 
         Args:
             sequence_id: The sequence ID of the audio chunk.
@@ -83,8 +86,18 @@ class InterruptionManager:
         Returns:
             True if the audio should be sent, False otherwise.
         """
-        # Part 1: Match current behavior - only check sequence_id
-        return sequence_id in self.sequence_ids
+        # Check if sequence_id is valid AND user is not speaking
+        is_valid = sequence_id in self.sequence_ids
+        user_not_speaking = not self.callee_speaking
+
+        if not is_valid:
+            return False
+
+        if not user_not_speaking:
+            logger.info(f"Blocking audio - user is speaking (callee_speaking={self.callee_speaking})")
+            return False
+
+        return True
 
     def should_trigger_interruption(
         self,

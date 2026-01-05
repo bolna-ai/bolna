@@ -2378,7 +2378,11 @@ class TaskManager(BaseManager):
                         duration = 0.256
                         logger.info("Exception in __process_output_loop: {}".format(str(e)))
                 else:
-                    logger.info(f'{sequence_id} is not in {self.interruption_manager.sequence_ids} and hence not speaking')
+                    # Audio blocked - either invalid sequence_id or user is speaking
+                    if self.interruption_manager.is_user_speaking():
+                        logger.info(f'Audio blocked: user is speaking (sequence_id={sequence_id})')
+                    else:
+                        logger.info(f'Audio blocked: sequence_id {sequence_id} not in valid set {self.interruption_manager.sequence_ids}')
                     continue
 
                 # Reset asked_if_user_is_still_there flag after any message except is_user_online_message
