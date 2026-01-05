@@ -12,18 +12,10 @@ logger = configure_logger(__name__)
 
 
 class StreamingContextualAgent(BaseAgent):
-    def __init__(self, llm, **kwargs):
+    def __init__(self, llm):
         super().__init__()
         self.llm = llm
-        hangup_kwargs = {}
-        if kwargs.get('base_url'):
-            hangup_kwargs['base_url'] = kwargs['base_url']
-        if kwargs.get('llm_key'):
-            hangup_kwargs['llm_key'] = kwargs['llm_key']
-        self.conversation_completion_llm = OpenAiLLM(
-            model=os.getenv('CHECK_FOR_COMPLETION_LLM', llm.model),
-            **hangup_kwargs
-        )
+        self.conversation_completion_llm = OpenAiLLM(model=os.getenv('CHECK_FOR_COMPLETION_LLM', llm.model))
         self.history = [{'content': ""}]
 
     async def check_for_completion(self, messages, check_for_completion_prompt):

@@ -36,15 +36,7 @@ class KnowledgeBaseAgent(BaseAgent):
         self.llm = self._initialize_llm()
 
         # Separate LLM for checking if call should end
-        hangup_kwargs = {}
-        if self.config.get('base_url'):
-            hangup_kwargs['base_url'] = self.config['base_url']
-        if self.config.get('llm_key'):
-            hangup_kwargs['llm_key'] = self.config['llm_key']
-        self.conversation_completion_llm = OpenAiLLM(
-            model=os.getenv('CHECK_FOR_COMPLETION_LLM', self.llm_model),
-            **hangup_kwargs
-        )
+        self.conversation_completion_llm = OpenAiLLM(model=os.getenv('CHECK_FOR_COMPLETION_LLM', self.llm_model))
 
         # RAG configuration
         self.rag_config = self._initialize_rag_config()
