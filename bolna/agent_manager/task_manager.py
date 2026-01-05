@@ -734,7 +734,7 @@ class TaskManager(BaseManager):
     def __get_agent_object(self, llm, agent_type, assistant_config=None):
         self.agent_type = agent_type
         if agent_type == "simple_llm_agent":
-            llm_agent = StreamingContextualAgent(llm, **self.kwargs)
+            llm_agent = StreamingContextualAgent(llm)
         elif agent_type == "graph_agent":
             logger.info("Setting up graph agent with rag-proxy-server support")
             llm_config = self.task_config["tools_config"]["llm_agent"].get("llm_config", {})
