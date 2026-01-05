@@ -99,6 +99,7 @@ class TaskManager(BaseManager):
         self.sampling_rate = 24000
         self.conversation_ended = False
         self.hangup_triggered = False
+        self.hangup_message_queued = False
 
         # Prompts
         self.prompts, self.system_prompt = {}, {}
@@ -1209,8 +1210,8 @@ class TaskManager(BaseManager):
         await self.wait_for_current_message()
 
         # Check completion of agent_hangup_message sent from output
-        # Only wait for hangup chunk if there's actually a hangup message to send
-        while self.hangup_triggered and self.call_hangup_message and self.call_hangup_message.strip():
+        # Only wait for hangup chunk if a hangup message was actually queued
+        while self.hangup_triggered and self.hangup_message_queued:
             try:
                 if self.tools["output"].hangup_sent():
                     logger.info("final hangup chunk is now sent. Breaking now")
@@ -1222,7 +1223,7 @@ class TaskManager(BaseManager):
                 logger.error(f"Error while checking queue: {e}", exc_info=True)
                 break
 
-        if self.call_hangup_message and self.call_hangup_message.strip() and not web_call_timeout:
+        if self.hangup_message_queued and not web_call_timeout:
             self.history.append({"role": "assistant", "content": self.call_hangup_message})
 
         self.conversation_ended = True
@@ -1642,8 +1643,10 @@ class TaskManager(BaseManager):
         self.hangup_triggered = True
         message = self.call_hangup_message if not self.voicemail_detected else ""
         if not message or message.strip() == "":
+            self.hangup_message_queued = False  # No hangup message to wait for
             await self.__process_end_of_conversation()
         else:
+            self.hangup_message_queued = True  # Hangup message will be synthesized
             await self.wait_for_current_message()
             await self.__cleanup_downstream_tasks()
             meta_info = {'io': self.tools["output"].get_provider(), "request_id": str(uuid.uuid4()),
