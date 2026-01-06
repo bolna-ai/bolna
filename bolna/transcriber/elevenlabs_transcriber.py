@@ -454,28 +454,6 @@ class ElevenLabsTranscriber(BaseTranscriber):
                         }
 
                         try:
-                            # Extract language detection info (similar to Deepgram)
-                            if self.include_language_detection and detected_language:
-                                self.meta_info['segment_language'] = detected_language
-                                logger.info(f"Language detected: {detected_language}")
-
-                                # Extract per-word language breakdown if available
-                                word_lang_counts = {}
-                                total_words = 0
-                                for word_obj in words:
-                                    if isinstance(word_obj, dict) and 'language' in word_obj:
-                                        word_lang = word_obj['language']
-                                        word_lang_counts[word_lang] = word_lang_counts.get(word_lang, 0) + 1
-                                        total_words += 1
-
-                                if word_lang_counts:
-                                    primary_language = max(word_lang_counts, key=word_lang_counts.get)
-                                    primary_lang_percentage = (word_lang_counts[primary_language] / total_words) if total_words > 0 else 0.0
-                                    self.meta_info['segment_language_percentage'] = round(primary_lang_percentage, 2)
-                                    self.meta_info['segment_word_lang_counts'] = word_lang_counts
-                                    if len(word_lang_counts) > 1:
-                                        logger.info(f"Code-switching detected: {word_lang_counts}")
-
                             # Calculate per-word latency using timestamps
                             if words and self.audio_frame_timestamps:
                                 for word_obj in words:
