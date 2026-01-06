@@ -1495,6 +1495,10 @@ class TaskManager(BaseManager):
                 logger.error(f"Exception while injecting language instruction: {e}")
 
         async for llm_message in self.tools['llm_agent'].generate(messages, synthesize=synthesize, meta_info=meta_info):
+            if isinstance(llm_message, dict) and 'messages' in llm_message: # custom list of messages before the llm call
+                convert_to_request_log(format_messages(llm_message['messages'], True), meta_info, self.llm_config['model'], "llm", direction="request", is_cached=False, run_id=self.run_id)
+                continue
+
             data, end_of_llm_stream, latency, trigger_function_call, function_tool, function_tool_message = llm_message
 
             if trigger_function_call:
@@ -1607,7 +1611,10 @@ class TaskManager(BaseManager):
             messages = copy.deepcopy(self.history)
             # messages.append({'role': 'user', 'content': message['data']})
             ### TODO CHECK IF THIS IS EVEN REQUIRED
-            convert_to_request_log(message=format_messages(messages, use_system_prompt=True), meta_info=meta_info, component="llm", direction="request", model=self.llm_config["model"], run_id= self.run_id)
+
+            # Request logs converted inside do_llm_generation for knowledgebase agent
+            if not self.__is_knowledgebase_agent():
+                convert_to_request_log(message=format_messages(messages, use_system_prompt=True), meta_info=meta_info, component="llm", direction="request", model=self.llm_config["model"], run_id= self.run_id)
 
             await self.__do_llm_generation(messages, meta_info, next_step, should_bypass_synth)
             # TODO : Write a better check for completion prompt
