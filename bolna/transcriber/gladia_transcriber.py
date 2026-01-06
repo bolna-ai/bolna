@@ -604,6 +604,10 @@ class GladiaTranscriber(BaseTranscriber):
                         self.current_turn_interim_details.append(interim_detail)
                         self.last_interim_time = now_timestamp
 
+                        # Store detected language in meta_info
+                        if detected_language:
+                            self.meta_info['segment_language'] = detected_language
+
                         if is_final:
                             # Final transcript
                             logger.info(f"Received final transcript: {text}")

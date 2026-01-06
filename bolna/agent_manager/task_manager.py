@@ -14,15 +14,14 @@ import websockets
 
 import aiohttp
 
-from bolna.constants import ACCIDENTAL_INTERRUPTION_PHRASES, DEFAULT_USER_ONLINE_MESSAGE, DEFAULT_USER_ONLINE_MESSAGE_TRIGGER_DURATION, FILLER_DICT, DEFAULT_LANGUAGE_CODE, DEFAULT_TIMEZONE, LANGUAGE_NAMES
+from bolna.constants import ACCIDENTAL_INTERRUPTION_PHRASES, DEFAULT_USER_ONLINE_MESSAGE, DEFAULT_USER_ONLINE_MESSAGE_TRIGGER_DURATION, FILLER_DICT, DEFAULT_LANGUAGE_CODE, DEFAULT_TIMEZONE
 from bolna.helpers.function_calling_helpers import trigger_api, computed_api_response
 from bolna.memory.cache.vector_cache import VectorCache
 from .base_manager import BaseManager
 from bolna.agent_types import *
 from bolna.providers import *
 from bolna.prompts import *
-from bolna.helpers.language_detector import LanguageDetector
-from bolna.helpers.utils import structure_system_prompt, compute_function_pre_call_message, select_message_by_language, get_date_time_from_timezone, get_route_info, calculate_audio_duration, create_ws_data_packet, get_file_names_in_directory, get_raw_audio_bytes, is_valid_md5, \
+from bolna.helpers.utils import structure_system_prompt, compute_function_pre_call_message, get_date_time_from_timezone, get_route_info, calculate_audio_duration, create_ws_data_packet, get_file_names_in_directory, get_raw_audio_bytes, is_valid_md5, \
     get_required_input_types, format_messages, get_prompt_responses, resample, save_audio_file_to_s3, update_prompt_with_context, get_md5_hash, clean_json_string, wav_bytes_to_pcm, convert_to_request_log, yield_chunks_from_memory, process_task_cancellation
 from bolna.helpers.logger_config import configure_logger
 from semantic_router import Route
@@ -181,11 +180,15 @@ class TaskManager(BaseManager):
         self.llm_response_generated = False
         self.turn_id = 0
 
-        # Language detection
-        self.language_detector = LanguageDetector(
-            self.task_config['task_config'],
-            run_id=self.run_id
-        )
+        # language detection (first N turns)
+        self.default_language = self.task_config['task_config'].get('default_language')
+        self.language_detection_turns = self.task_config['task_config'].get('language_detection_turns')
+        self.language_word_counts = {}  # Accumulate word counts: {'hi': 15, 'en': 3}
+        self.current_turn_count = 0
+        self.conversation_language = None  # Detected after N turns
+        self.language_detected = False
+
+        # A/B Testing: Language injection configuration
         self.language_injection_mode = self.task_config['task_config'].get('language_injection_mode')
         self.language_instruction_template = self.task_config['task_config'].get('language_instruction_template')
 
@@ -289,15 +292,9 @@ class TaskManager(BaseManager):
 
             self.trigger_user_online_message_after = self.conversation_config.get("trigger_user_online_message_after", DEFAULT_USER_ONLINE_MESSAGE_TRIGGER_DURATION)
             self.check_if_user_online = self.conversation_config.get("check_if_user_online", True)
-            self.check_user_online_message_config = self.conversation_config.get("check_user_online_message", DEFAULT_USER_ONLINE_MESSAGE)
-            if self.check_user_online_message_config and self.context_data:
-                if isinstance(self.check_user_online_message_config, dict):
-                    self.check_user_online_message_config = {
-                        lang: update_prompt_with_context(msg, self.context_data)
-                        for lang, msg in self.check_user_online_message_config.items()
-                    }
-                else:
-                    self.check_user_online_message_config = update_prompt_with_context(self.check_user_online_message_config, self.context_data)
+            self.check_user_online_message = self.conversation_config.get("check_user_online_message", DEFAULT_USER_ONLINE_MESSAGE)
+            if self.check_user_online_message and self.context_data:
+                self.check_user_online_message = update_prompt_with_context(self.check_user_online_message, self.context_data)
 
             self.kwargs["process_interim_results"] = "true" if self.conversation_config.get("optimize_latency", False) is True else "false"
             # Routes
@@ -354,16 +351,34 @@ class TaskManager(BaseManager):
                             }}
                     """
 
-                self.call_hangup_message_config = self.conversation_config.get("call_hangup_message", None)
-                if self.call_hangup_message_config and self.context_data and not self.is_web_based_call:
-                    if isinstance(self.call_hangup_message_config, dict):
-                        self.call_hangup_message_config = {
-                            lang: update_prompt_with_context(msg, self.context_data)
-                            for lang, msg in self.call_hangup_message_config.items()
-                        }
-                    else:
-                        self.call_hangup_message_config = update_prompt_with_context(self.call_hangup_message_config, self.context_data)
+                self.call_hangup_message = self.conversation_config.get("call_hangup_message", None)
+                # In the case of web call skipping hangup message updation with context data as it would be updated when the init event is received
+                if self.call_hangup_message and self.context_data and not self.is_web_based_call:
+                    self.call_hangup_message = update_prompt_with_context(self.call_hangup_message, self.context_data)
                 self.check_for_completion_llm = os.getenv("CHECK_FOR_COMPLETION_LLM")
+
+                # Voicemail detection (time-based)
+                self.voicemail_detection_enabled = self.conversation_config.get('voicemail', False)
+                self.voicemail_llm = os.getenv('VOICEMAIL_DETECTION_LLM', "gpt-4.1-mini")
+
+                if 'output' not in self.tools or (self.tools['output'] and not self.tools['output'].requires_custom_voicemail_detection()):
+                    self.voicemail_detection_enabled = False
+
+                self.voicemail_detection_duration = self.conversation_config.get('voicemail_detection_duration', 30.0)  # Time window in seconds
+                self.voicemail_check_interval = self.conversation_config.get('voicemail_check_interval', 7.0)  # Min time between interim checks
+                self.voicemail_min_transcript_length = self.conversation_config.get('voicemail_min_transcript_length', 7)  # Min words for interim check
+                self.voicemail_detection_prompt = VOICEMAIL_DETECTION_PROMPT
+                self.voicemail_detection_prompt += """
+                    Respond only in this JSON format:
+                        {{
+                          "is_voicemail": "Yes" or "No"
+                        }}
+                """
+                self.voicemail_detected = False
+                self.voicemail_detection_start_time = None  # Will be set when detection window starts
+                self.voicemail_last_check_time = None  # Last time we checked for voicemail
+                self.voicemail_check_task = None  # Background task for voicemail detection
+            
                 self.time_since_last_spoken_human_word = 0
 
                 #Handling accidental interruption
@@ -480,32 +495,6 @@ class TaskManager(BaseManager):
     #         return False
     #     agent_type = self.task_config['tools_config']["llm_agent"].get("agent_type", None)
     #     return agent_type == "knowledge_agent"
-
-    def _inject_language_instruction(self, messages: list) -> list:
-        """Inject language instruction into messages based on detected language."""
-        lang = self.language_detector.dominant_language
-        if not lang or not self.language_injection_mode or not self.language_instruction_template:
-            return messages
-
-        try:
-            lang_name = LANGUAGE_NAMES.get(lang, lang)
-            instruction = self.language_instruction_template.format(language=lang_name) + "\n\n"
-
-            if self.language_injection_mode == 'system_only':
-                for i, msg in enumerate(messages):
-                    if msg.get('role') == 'system':
-                        messages[i]['content'] = instruction + msg['content']
-                        logger.info(f"[system_only] Injected: {lang_name} ({lang})")
-                        break
-            elif self.language_injection_mode == 'per_turn':
-                for i, msg in enumerate(messages):
-                    if msg.get('role') == 'user':
-                        messages[i]['content'] = instruction + msg['content']
-                logger.info(f"[per_turn] Injected to {sum(1 for m in messages if m.get('role') == 'user')} user messages: {lang_name} ({lang})")
-        except Exception as e:
-            logger.error(f"Language injection error: {e}")
-
-        return messages
 
     def __setup_routes(self, routes):
         embedding_model = routes.get("embedding_model", os.getenv("ROUTE_EMBEDDING_MODEL"))
@@ -1068,6 +1057,12 @@ class TaskManager(BaseManager):
             self.first_message_task.cancel()
             self.first_message_task = None
 
+        # Cancel voicemail check task if running
+        if self.voicemail_check_task is not None and not self.voicemail_check_task.done():
+            logger.info("Cancelling voicemail check task")
+            self.voicemail_check_task.cancel()
+            self.voicemail_check_task = None
+
         # self.synthesizer_task.cancel()
         # self.synthesizer_task = asyncio.create_task(self.__listen_synthesizer())
         #for task in self.synthesizer_tasks:
@@ -1233,6 +1228,13 @@ class TaskManager(BaseManager):
 
         self.conversation_ended = True
         self.ended_by_assistant = True
+
+        # Cancel voicemail check task if still running
+        if self.voicemail_check_task is not None and not self.voicemail_check_task.done():
+            logger.info("Cancelling voicemail check task during conversation end")
+            self.voicemail_check_task.cancel()
+            self.voicemail_check_task = None
+
         await self.tools["input"].stop_handler()
         logger.info("Stopped input handler")
         if "transcriber" in self.tools and not self.turn_based_conversation:
@@ -1465,13 +1467,32 @@ class TaskManager(BaseManager):
         if should_bypass_synth:
             synthesize = False
 
-        # Inject language instruction if detection complete
-        messages = self._inject_language_instruction(messages)
+        # Inject language instruction based on configured mode (once detected)
+        if (self.language_detected and self.conversation_language and
+            self.language_injection_mode is not None and
+            self.language_detection_turns and self.language_detection_turns > 0):
+            language_names = {
+                'en': 'English', 'hi': 'Hindi'
+            }
+            try:
+                lang_name = language_names.get(self.conversation_language, self.conversation_language)
+                instruction = self.language_instruction_template.format(language=lang_name) + "\n\n"
 
-        # Pass detected language to LLM for pre_call_message selection
-        detected_lang = self.language_detector.dominant_language
-        if detected_lang:
-            meta_info['detected_language'] = detected_lang
+                if self.language_injection_mode == 'system_only':
+                    # Inject once at top of system prompt
+                    for i, msg in enumerate(messages):
+                        if msg.get('role') == 'system':
+                            messages[i]['content'] = instruction + msg['content']
+                            logger.info(f"[system_only] Injected language instruction: {lang_name}")
+                            break
+                elif self.language_injection_mode == 'per_turn':
+                    # Inject before every user message
+                    for i, msg in enumerate(messages):
+                        if msg.get('role') == 'user':
+                            messages[i]['content'] = instruction + msg['content']
+                    logger.info(f"[per_turn] Injected language instruction to {sum(1 for m in messages if m.get('role') == 'user')} user messages: {lang_name}")
+            except Exception as e:
+                logger.error(f"Exception while injecting language instruction: {e}")
 
         async for llm_message in self.tools['llm_agent'].generate(messages, synthesize=synthesize, meta_info=meta_info):
             if isinstance(llm_message, dict) and 'messages' in llm_message: # custom list of messages before the llm call
@@ -1503,8 +1524,7 @@ class TaskManager(BaseManager):
 
                 # A hack as during the 'await' part control passes to llm streaming function parameters
                 # So we have to make sure we've commited the filler message
-                detected_lang = self.language_detector.dominant_language or self.language
-                filler_message = compute_function_pre_call_message(detected_lang, function_tool, function_tool_message)
+                filler_message = compute_function_pre_call_message(self.language, function_tool, function_tool_message)
                 #filler_message = PRE_FUNCTION_CALL_MESSAGE.get(self.language, PRE_FUNCTION_CALL_MESSAGE[DEFAULT_LANGUAGE_CODE])
                 if text_chunk == filler_message:
                     logger.info("Got a pre function call message")
@@ -1521,8 +1541,7 @@ class TaskManager(BaseManager):
                 await self._handle_llm_output(next_step, llm_response, should_bypass_synth, meta_info, is_function_call=should_trigger_function_call)
                 convert_to_request_log(message=llm_response, meta_info=meta_info, component="llm", direction="response", model=self.llm_config["model"], run_id= self.run_id)
 
-        detected_lang = self.language_detector.dominant_language or self.language
-        filler_message = compute_function_pre_call_message(detected_lang, function_tool, function_tool_message)
+        filler_message = compute_function_pre_call_message(self.language, function_tool, function_tool_message)
         if self.stream and llm_response != filler_message:
             self.__store_into_history(meta_info, messages, llm_response, should_trigger_function_call= should_trigger_function_call)
 
@@ -1602,6 +1621,12 @@ class TaskManager(BaseManager):
 
             if self.agent_type not in ["graph_agent"]:
                 if self.use_llm_to_determine_hangup and not self.turn_based_conversation:
+
+                    prompt = [
+                            {'role': 'system', 'content': self.check_for_completion_prompt},
+                            {'role': 'user', 'content': format_messages(self.history, use_system_prompt= True)}]
+                    convert_to_request_log(message=format_messages(prompt, use_system_prompt= True), meta_info= meta_info, component="llm_hangup", direction="request", model=self.check_for_completion_llm, run_id= self.run_id)
+                    
                     completion_res = await self.tools["llm_agent"].check_for_completion(messages, self.check_for_completion_prompt)
                     should_hangup = (
                         str(completion_res.get("hangup", "")).lower() == "yes"
@@ -1609,11 +1634,7 @@ class TaskManager(BaseManager):
                         else False
                     )
 
-                    prompt = [
-                            {'role': 'system', 'content': self.check_for_completion_prompt},
-                            {'role': 'user', 'content': format_messages(self.history, use_system_prompt= True)}]
                     logger.info(f"##### Answer from the LLM {completion_res}")
-                    convert_to_request_log(message=format_messages(prompt, use_system_prompt= True), meta_info= meta_info, component="llm_hangup", direction="request", model=self.check_for_completion_llm, run_id= self.run_id)
                     convert_to_request_log(message=completion_res, meta_info= meta_info, component="llm_hangup", direction="response", model=self.check_for_completion_llm, run_id= self.run_id)
 
                     if should_hangup:
@@ -1698,6 +1719,190 @@ class TaskManager(BaseManager):
             skip_append_to_data = False
         return sequence
 
+    def _detect_conversation_language(self, meta_info):
+        """
+        Accumulate word counts from transcription segments and detect conversation language.
+        This method tracks language usage over the first N turns to determine the primary
+        conversation language, which can be used for prompt injection or other language-specific features.
+
+        Args:
+            meta_info (dict): Metadata from transcriber containing 'segment_word_lang_counts'
+        """
+        # Skip if language already detected or no language data in meta_info
+        if self.language_detected or 'segment_word_lang_counts' not in meta_info:
+            return
+
+        # Skip if language detection is not configured
+        if not self.language_detection_turns or self.language_detection_turns <= 0:
+            return
+
+        self.current_turn_count += 1
+
+        # Accumulate word counts
+        segment_counts = meta_info.get('segment_word_lang_counts', {})
+        for lang, count in segment_counts.items():
+            self.language_word_counts[lang] = self.language_word_counts.get(lang, 0) + count
+
+        logger.info(f"Turn {self.current_turn_count}/{self.language_detection_turns}: Word counts = {self.language_word_counts}")
+
+        # After N turns, detect conversation language
+        if self.current_turn_count >= self.language_detection_turns:
+            if self.language_word_counts:
+                self.conversation_language = max(self.language_word_counts, key=self.language_word_counts.get)
+            else:
+                self.conversation_language = self.default_language
+
+            self.language_detected = True
+            logger.info(f"Conversation language detected: {self.conversation_language} (total counts: {self.language_word_counts})")
+
+    def _should_check_voicemail(self, transcriber_message, is_final=True):
+        """
+        Determine if voicemail check should be triggered based on timing and conditions.
+        This is a non-blocking check that returns quickly.
+
+        Args:
+            transcriber_message (str): The transcribed message from the user
+            is_final (bool): Whether this is a final transcript or interim
+
+        Returns:
+            bool: True if voicemail check should be triggered, False otherwise
+        """
+        # Skip if voicemail detection is disabled
+        if not self.voicemail_detection_enabled:
+            return False
+
+        # Skip if voicemail already detected (call is ending)
+        if self.voicemail_detected:
+            return False
+
+        # Skip if a voicemail check is already in progress
+        if self.voicemail_check_task is not None and not self.voicemail_check_task.done():
+            logger.info("Voicemail check already in progress, skipping")
+            return False
+
+        current_time = time.time()
+
+        # Initialize detection start time on first check
+        if self.voicemail_detection_start_time is None:
+            self.voicemail_detection_start_time = current_time
+            logger.info(f"Voicemail detection window started at {self.voicemail_detection_start_time}")
+
+        # Skip if we've exceeded the detection time window
+        time_elapsed = current_time - self.voicemail_detection_start_time
+        if time_elapsed > self.voicemail_detection_duration:
+            logger.info(f"Voicemail detection window expired ({time_elapsed:.2f}s > {self.voicemail_detection_duration}s)")
+            return False
+
+        # For interim transcripts, check additional conditions
+        if not is_final:
+            # Check if enough time has passed since the last check
+            time_since_last_check = (current_time - self.voicemail_last_check_time) if self.voicemail_last_check_time else float('inf')
+            if time_since_last_check < self.voicemail_check_interval:
+                logger.info(f"Skipping interim voicemail check - only {time_since_last_check:.2f}s since last check (need {self.voicemail_check_interval}s)")
+                return False
+
+            # Check if transcript length meets the minimum threshold
+            word_count = len(transcriber_message.strip().split())
+            if word_count < self.voicemail_min_transcript_length:
+                logger.info(f"Skipping interim voicemail check - transcript too short ({word_count} words < {self.voicemail_min_transcript_length})")
+                return False
+
+        return True
+
+    def _trigger_voicemail_check(self, transcriber_message, meta_info, is_final=True):
+        """
+        Trigger a background voicemail check if conditions are met.
+        This is non-blocking and returns immediately.
+
+        Args:
+            transcriber_message (str): The transcribed message from the user
+            meta_info (dict): Metadata from transcriber
+            is_final (bool): Whether this is a final transcript or interim
+        """
+        if not self._should_check_voicemail(transcriber_message, is_final):
+            return
+
+        # Update last check time before starting the background task
+        self.voicemail_last_check_time = time.time()
+        time_elapsed = self.voicemail_last_check_time - self.voicemail_detection_start_time
+        logger.info(f"Triggering background voicemail check at {time_elapsed:.2f}s into detection window (is_final={is_final}): {transcriber_message}")
+
+        # Create background task for voicemail detection
+        try:
+            self.voicemail_check_task = asyncio.create_task(
+                self._voicemail_check_background_task(transcriber_message, meta_info, is_final)
+            )
+        except Exception as e:
+            logger.error(f"Error starting voicemail check background task: {e}")
+
+    async def _voicemail_check_background_task(self, transcriber_message, meta_info, is_final):
+        """
+        Background task that performs the actual voicemail detection LLM call.
+        If voicemail is detected, it will trigger the hangup process.
+
+        Args:
+            transcriber_message (str): The transcribed message from the user
+            meta_info (dict): Metadata from transcriber
+            is_final (bool): Whether this is a final transcript or interim
+        """
+        try:
+            # Use the LLM agent to check for voicemail
+            if "llm_agent" in self.tools and hasattr(self.tools["llm_agent"], 'check_for_voicemail'):
+                prompt = [
+                    {"role": "system", "content": self.voicemail_detection_prompt},
+                    {"role": "user", "content": f"User message: {transcriber_message}"}
+                ]
+
+                convert_to_request_log(
+                    message=format_messages(prompt, use_system_prompt=True),
+                    meta_info=meta_info,
+                    component="llm_voicemail",
+                    direction="request",
+                    model=self.voicemail_llm,
+                    run_id=self.run_id
+                )
+
+                voicemail_result = await self.tools["llm_agent"].check_for_voicemail(
+                    transcriber_message, 
+                    self.voicemail_detection_prompt
+                )
+
+                is_voicemail = (
+                    str(voicemail_result.get("is_voicemail", "")).lower() == "yes"
+                    if isinstance(voicemail_result, dict)
+                    else False
+                )
+
+                convert_to_request_log(
+                    message=voicemail_result,
+                    meta_info=meta_info,
+                    component="llm_voicemail",
+                    direction="response",
+                    model=self.voicemail_llm,
+                    run_id=self.run_id
+                )
+
+                if is_voicemail:
+                    logger.info(f"Voicemail detected in background task! Message: {transcriber_message}")
+                    self.voicemail_detected = True
+                    self.hangup_detail = "voicemail_detected"
+                    
+                    # Trigger voicemail handling and call hangup
+                    await self._handle_voicemail_detected()
+            else:
+                logger.warning("Voicemail detection enabled but llm_agent doesn't support check_for_voicemail")
+        except Exception as e:
+            logger.error(f"Error during background voicemail detection: {e}")
+
+    async def _handle_voicemail_detected(self):
+        """
+        Handle the case when voicemail is detected - say the message and end the call.
+        """
+        logger.info(f"Handling voicemail detection - ending call")
+        
+        await self.process_call_hangup()
+
+
     async def _handle_transcriber_output(self, next_task, transcriber_message, meta_info):
         current_ts = self.tools["input"].get_current_mark_started_time()
         self.previous_start_ts = self.current_start_ts
@@ -1711,8 +1916,16 @@ class TaskManager(BaseManager):
             logger.info(f"handle_transcriber_output -> skip as previous user message {self.history[-1]}")
             return
 
-        # Collect transcript for language detection
-        await self.language_detector.collect_transcript(transcriber_message)
+        # Trigger background voicemail check (non-blocking) for final transcripts
+        self._trigger_voicemail_check(transcriber_message, meta_info, is_final=True)
+
+        # Skip processing if voicemail was already detected
+        if self.voicemail_detected:
+            logger.info("Voicemail already detected - skipping normal transcriber output processing")
+            return
+
+        # Detect conversation language from first N turns
+        self._detect_conversation_language(meta_info)
 
         self.history.append({"role": "user", "content": transcriber_message})
 
@@ -1793,6 +2006,11 @@ class TaskManager(BaseManager):
                         if self.time_since_first_interim_result == -1:
                             self.time_since_first_interim_result = time.time() * 1000
                             logger.info(f"Setting time for first interim result as {self.time_since_first_interim_result}")
+
+                        # Trigger background voicemail check on interim transcripts (non-blocking)
+                        if self.voicemail_detection_enabled and not self.voicemail_detected:
+                            interim_content = message["data"].get("content", "")
+                            self._trigger_voicemail_check(interim_content, meta_info, is_final=False)
 
                         # self.callee_silent = False
                         # TODO check where this needs to be added post understanding it's usage
@@ -2130,9 +2348,8 @@ class TaskManager(BaseManager):
                     logger.info(f'{message["meta_info"]["sequence_id"]} is not in {self.sequence_ids} and hence not speaking')
                     continue
 
-                # Reset asked_if_user_is_still_there flag after any message except is_user_online_message
                 if (message['meta_info'].get("end_of_llm_stream", False) or message['meta_info'].get("end_of_synthesizer_stream", False)) and \
-                        message['meta_info'].get('message_category', '') != 'is_user_online_message':
+                        message['meta_info'].get('text', '') != self.check_user_online_message:
                     self.asked_if_user_is_still_there = False
 
                 # # The below code is redundant in the case of telephony
@@ -2212,16 +2429,13 @@ class TaskManager(BaseManager):
                 self.asked_if_user_is_still_there = True
 
                 if self.check_if_user_online:
-                    detected_lang = self.language_detector.dominant_language
-                    user_online_message = select_message_by_language(self.check_user_online_message_config, detected_lang)
-
                     if self.should_record:
                         meta_info={'io': 'default', "request_id": str(uuid.uuid4()), "cached": False, "sequence_id": -1, 'format': 'wav', "message_category": "is_user_online_message", 'end_of_llm_stream': True}
-                        await self._synthesize(create_ws_data_packet(user_online_message, meta_info= meta_info))
+                        await self._synthesize(create_ws_data_packet(self.check_user_online_message, meta_info= meta_info))
                     else:
                         meta_info={'io': self.tools["output"].get_provider(), "request_id": str(uuid.uuid4()), "cached": False, "sequence_id": -1, 'format': 'pcm', "message_category": "is_user_online_message", 'end_of_llm_stream': True}
-                        await self._synthesize(create_ws_data_packet(user_online_message, meta_info= meta_info))
-                    self.history.append({'role': 'assistant', 'content': user_online_message})
+                        await self._synthesize(create_ws_data_packet(self.check_user_online_message, meta_info= meta_info))
+                    self.history.append({'role': 'assistant', 'content': self.check_user_online_message})
 
                 # Just in case we need to clear messages sent before
                 await self.tools["output"].handle_interruption()
@@ -2343,14 +2557,8 @@ class TaskManager(BaseManager):
                 self.system_prompt['content'] = system_prompt
                 self.history[0]['content'] = system_prompt
 
-            if self.call_hangup_message_config and self.context_data:
-                if isinstance(self.call_hangup_message_config, dict):
-                    self.call_hangup_message_config = {
-                        lang: update_prompt_with_context(msg, self.context_data)
-                        for lang, msg in self.call_hangup_message_config.items()
-                    }
-                else:
-                    self.call_hangup_message_config = update_prompt_with_context(self.call_hangup_message_config, self.context_data)
+            if self.call_hangup_message and self.context_data:
+                self.call_hangup_message = update_prompt_with_context(self.call_hangup_message, self.context_data)
 
             agent_welcome_message = self.kwargs.get("agent_welcome_message", "")
             agent_welcome_message = update_prompt_with_context(agent_welcome_message, self.context_data)
@@ -2519,6 +2727,7 @@ class TaskManager(BaseManager):
                 # tasks_to_cancel.append(process_task_cancellation(self.initial_silence_task, 'initial_silence_task'))
                 tasks_to_cancel.append(process_task_cancellation(self.first_message_task, 'first_message_task'))
                 tasks_to_cancel.append(process_task_cancellation(self.dtmf_task, 'dtmf_task'))
+                tasks_to_cancel.append(process_task_cancellation(self.voicemail_check_task, 'voicemail_check_task'))
                 tasks_to_cancel.append(
                     process_task_cancellation(self.handle_accumulated_message_task, "handle_accumulated_message_task"))
 
