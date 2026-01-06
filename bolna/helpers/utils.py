@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import Union, Optional
 import json
 import asyncio
 import time
@@ -611,13 +612,31 @@ def get_date_time_from_timezone(timezone):
     return dt, ts
 
 
-def compute_function_pre_call_message(language, function_name, api_tool_pre_call_message):
-    default_filler = PRE_FUNCTION_CALL_MESSAGE.get(language, PRE_FUNCTION_CALL_MESSAGE.get(DEFAULT_LANGUAGE_CODE))
-    if function_name and function_name.startswith("transfer_call"):
-        default_filler = TRANSFERING_CALL_FILLER.get(language, TRANSFERING_CALL_FILLER.get(DEFAULT_LANGUAGE_CODE))
+def select_message_by_language(message_config: Union[str, dict], detected_language: Optional[str] = None) -> str:
+    """Select message by detected language, fallback to 'en'."""
+    if isinstance(message_config, str):
+        return message_config
 
-    filler = api_tool_pre_call_message if api_tool_pre_call_message else default_filler
-    return filler
+    if isinstance(message_config, dict):
+        return message_config.get(detected_language) or message_config.get('en') or next(iter(message_config.values()))
+
+    return ""
+
+
+def has_non_english_variants(message_config: Union[str, dict]) -> bool:
+    """Check if dict has non-'en' languages."""
+    return isinstance(message_config, dict) and len(message_config) > 0 and (len(message_config) > 1 or 'en' not in message_config)
+
+
+def compute_function_pre_call_message(language, function_name, api_tool_pre_call_message):
+    """Select pre-function call message with language support."""
+    if function_name and function_name.startswith("transfer_call"):
+        default_message = TRANSFERING_CALL_FILLER
+    else:
+        default_message = PRE_FUNCTION_CALL_MESSAGE
+
+    message_config = api_tool_pre_call_message if api_tool_pre_call_message else default_message
+    return select_message_by_language(message_config, language)
 
 
 def now_ms() -> float:
