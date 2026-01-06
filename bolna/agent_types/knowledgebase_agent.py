@@ -236,7 +236,7 @@ Use this information naturally when it helps answer the user's questions. Don't 
             logger.error(f"RAG error: {e}")
             return messages, {'status': 'error', 'message': 'Internal Service Error'}
 
-    async def generate(self, message: List[dict], **kwargs) -> AsyncGenerator[Tuple[str, bool, Optional[Dict], bool, None, None], None]:
+    async def generate(self, message: List[dict], **kwargs) -> AsyncGenerator[Union[Tuple[str, bool, Optional[Dict], bool, None, None], Dict], None]:
         """
         Generate a streaming response with RAG context
         """
@@ -258,6 +258,8 @@ Use this information naturally when it helps answer the user's questions. Don't 
                     'sequence_id': meta_info.get('sequence_id'),
                     **metadata['latency']
                 }
+
+            yield {'messages': messages_with_context}
 
             async for chunk in self.llm.generate_stream(messages_with_context, synthesize=synthesize, meta_info=meta_info):
                 yield chunk
