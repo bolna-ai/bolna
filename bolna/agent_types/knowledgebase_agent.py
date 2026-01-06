@@ -199,6 +199,27 @@ class KnowledgeBaseAgent(BaseAgent):
                 if vector_id in used_vector_ids:
                     retrieved_sources.append(source)
 
+            # Build a mapping from vector_id to source info
+            vector_id_to_source = {}
+            for source in self.rag_config.get('used_sources', []):
+                vid = source.get('vector_id')
+                if vid:
+                    vector_id_to_source[vid] = source
+
+            # Build contexts list with text and source info
+            retrieved_contexts = []
+            for context in rag_response.contexts:
+                vector_id = context.metadata.get('collection_id', None)
+                source_info = vector_id_to_source.get(vector_id, {})
+                context_entry = {
+                    'text': context.text,
+                    'score': context.score,
+                    'vector_id': source_info.get('vector_id'),
+                    'rag_id': source_info.get('rag_id'),
+                    'source': source_info.get('source'),
+                }
+                retrieved_contexts.append(context_entry)
+
             logger.info(f"RAG: Found {rag_response.total_results} contexts, top score: {rag_response.contexts[0].score:.3f}")
 
             rag_context = await client.format_context_for_prompt(rag_response.contexts)
@@ -227,7 +248,7 @@ Use this information naturally when it helps answer the user's questions. Don't 
             if len(final_messages) > max_messages:
                 final_messages = [final_messages[0]] + final_messages[-(max_messages-1):]
 
-            return final_messages, {'status': 'success', 'retrieved_sources': retrieved_sources, 'latency': rag_latency_data}
+            return final_messages, {'status': 'success', 'retrieved_sources': retrieved_sources, 'contexts': retrieved_contexts, 'latency': rag_latency_data}
 
         except asyncio.TimeoutError:
             logger.error("RAG service timeout")
