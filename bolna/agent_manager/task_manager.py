@@ -1468,6 +1468,11 @@ class TaskManager(BaseManager):
         # Inject language instruction if detection complete
         messages = self._inject_language_instruction(messages)
 
+        # Pass detected language to LLM for pre_call_message selection
+        detected_lang = self.language_detector.dominant_language
+        if detected_lang:
+            meta_info['detected_language'] = detected_lang
+
         async for llm_message in self.tools['llm_agent'].generate(messages, synthesize=synthesize, meta_info=meta_info):
             if isinstance(llm_message, dict) and 'messages' in llm_message: # custom list of messages before the llm call
                 convert_to_request_log(format_messages(llm_message['messages'], True), meta_info, self.llm_config['model'], "llm", direction="request", is_cached=False, run_id=self.run_id)
