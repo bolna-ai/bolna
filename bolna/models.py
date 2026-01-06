@@ -342,7 +342,6 @@ class APIParams(BaseModel):
     api_token: Optional[str] = None
     param: Optional[Union[str, dict]] = None
     headers: Optional[Union[str, dict]] = None
-    pre_call_message: Optional[Union[str, Dict[str, str]]] = None
 
 
 class ToolModel(BaseModel):
