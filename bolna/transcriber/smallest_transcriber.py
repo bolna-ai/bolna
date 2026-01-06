@@ -557,6 +557,10 @@ class SmallestTranscriber(BaseTranscriber):
                     self.current_turn_interim_details.append(interim_detail)
                     self.last_interim_time = now_timestamp
 
+                    # Store detected language in meta_info (only use explicitly set language)
+                    if detected_language and detected_language == self.language:
+                        self.meta_info['segment_language'] = detected_language
+
                     logger.info(f"Received transcript - is_final: {is_final}, language: {detected_language}, text: {transcript}")
 
                     if is_final:

@@ -62,26 +62,6 @@ Analyze the user's message and determine if it sounds like a voicemail greeting 
 If the message appears to be from a voicemail system, respond with "Yes". If it appears to be a real person speaking, respond with "No".
 """
 
-LANGUAGE_DETECTION_PROMPT = """
-You are a language detection assistant. Analyze the following user transcripts from a conversation and determine the dominant language the user intends to communicate in.
-
-Consider:
-1. The primary language used across all transcripts
-2. Code-switching patterns (e.g., user mixing Hindi and English) - focus on which language carries the main content
-3. The language used for substantive content vs. filler words or greetings
-4. If the user uses multiple languages, identify which one they predominantly use for expressing their main thoughts
-
-Transcripts:
-{transcripts}
-
-Respond ONLY in this JSON format:
-{{
-  "dominant_language": "<ISO 639-1 code: en, hi, bn, ta, te, mr, gu, kn, ml, pa, fr, es, etc.>",
-  "confidence": <0.0-1.0>,
-  "reasoning": "<brief one-line explanation>"
-}}
-"""
-
 EXTRACTION_PROMPT_GENERATION_PROMPT = """
 You are a parsing assistant. Your job is to convert a structured set of extraction instructions into a JSON object where:
 
