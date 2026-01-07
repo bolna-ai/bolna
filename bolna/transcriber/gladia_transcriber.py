@@ -354,18 +354,24 @@ class GladiaTranscriber(BaseTranscriber):
 
         # Build turn latencies
         try:
-            # Calculate time from first interim to final (force_finalize)
+            # Calculate time from first/last interim to final (force_finalize)
             first_interim_to_final_ms = None
+            last_interim_to_final_ms = None
             if self.current_turn_interim_details:
                 first_interim_received_at = self.current_turn_interim_details[0].get('received_at')
+                last_interim_received_at = self.current_turn_interim_details[-1].get('received_at')
+                now = time.time()
                 if first_interim_received_at:
-                    first_interim_to_final_ms = round((time.time() - first_interim_received_at) * 1000, 2)
+                    first_interim_to_final_ms = round((now - first_interim_received_at) * 1000, 2)
+                if last_interim_received_at:
+                    last_interim_to_final_ms = round((now - last_interim_received_at) * 1000, 2)
 
             self.turn_latencies.append({
                 'turn_id': self.current_turn_id,
                 'sequence_id': self.current_turn_id,
                 'interim_details': self.current_turn_interim_details,
                 'first_interim_to_final_ms': first_interim_to_final_ms,
+                'last_interim_to_final_ms': last_interim_to_final_ms,
                 'force_finalized': True
             })
         except Exception as e:
@@ -625,18 +631,24 @@ class GladiaTranscriber(BaseTranscriber):
 
                             # Build turn latencies
                             try:
-                                # Calculate time from first interim to final
+                                # Calculate time from first/last interim to final
                                 first_interim_to_final_ms = None
+                                last_interim_to_final_ms = None
                                 if self.current_turn_interim_details:
                                     first_interim_received_at = self.current_turn_interim_details[0].get('received_at')
+                                    last_interim_received_at = self.current_turn_interim_details[-1].get('received_at')
+                                    now = time.time()
                                     if first_interim_received_at:
-                                        first_interim_to_final_ms = round((time.time() - first_interim_received_at) * 1000, 2)
+                                        first_interim_to_final_ms = round((now - first_interim_received_at) * 1000, 2)
+                                    if last_interim_received_at:
+                                        last_interim_to_final_ms = round((now - last_interim_received_at) * 1000, 2)
 
                                 self.turn_latencies.append({
                                     'turn_id': self.current_turn_id,
                                     'sequence_id': self.current_turn_id,
                                     'interim_details': self.current_turn_interim_details,
-                                    'first_interim_to_final_ms': first_interim_to_final_ms
+                                    'first_interim_to_final_ms': first_interim_to_final_ms,
+                                    'last_interim_to_final_ms': last_interim_to_final_ms
                                 })
                             except Exception as e:
                                 logger.error(f"Error building turn latencies: {e}")
