@@ -8,3 +8,4 @@ from .pixa_transcriber import PixaTranscriber
 from .gladia_transcriber import GladiaTranscriber
 from .elevenlabs_transcriber import ElevenLabsTranscriber
 from .smallest_transcriber import SmallestTranscriber
+from .shunya_transcriber import ShunyaTranscriber
