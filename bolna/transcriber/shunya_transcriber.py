@@ -766,11 +766,10 @@ class ShunyaTranscriber(BaseTranscriber):
         finally:
             if shunya_ws is not None:
                 try:
-                    # Only close if not already closed
-                    if not shunya_ws.closed:
+                    try:
                         await shunya_ws.close()
                         logger.info("Shunya Labs WebSocket closed in finally block")
-                    else:
+                    except:
                         logger.info("Shunya Labs WebSocket already closed")
                 except Exception as e:
                     logger.error(f"Error closing WebSocket: {e}")
