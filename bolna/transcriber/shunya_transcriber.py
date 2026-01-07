@@ -453,6 +453,13 @@ class ShunyaTranscriber(BaseTranscriber):
             end_msg = self._create_end_message(self.frame_seq)
             try:
                 await ws.send(json.dumps(end_msg))
+                logger.info("Sent end-of-audio signal to Shunya Labs")
+                
+                # Close the websocket to signal the receiver to stop
+                # This will cause the `async for msg in ws:` loop to exit
+                await ws.close()
+                logger.info("Closed Shunya WebSocket after end-of-stream")
+                
             except Exception as e:
                 logger.error(f"Error sending end signal: {e}")
             return True
@@ -557,152 +564,143 @@ class ShunyaTranscriber(BaseTranscriber):
     async def receiver(self, ws: ClientConnection):
         """
         Receive and process messages from Shunya Labs WebSocket.
-
-        Expected response format:
-        {
-            "uid": "client-identifier",
-            "segments": [
-                {
-                    "start": "0.000",
-                    "end": "2.500",
-                    "text": "Hello world",
-                    "completed": true,
-                    "segment_id": "seg_001",
-                    "rev": 1
-                }
-            ],
-            "language": "en",
-            "language_probability": 0.95
-        }
         """
-        async for msg in ws:
-            try:
-                data = json.loads(msg) if isinstance(msg, str) else json.loads(msg.decode())
+        try:
+            async for msg in ws:
+                try:
+                    data = json.loads(msg) if isinstance(msg, str) else json.loads(msg.decode())
 
-                if self.connection_start_time is None:
-                    self.connection_start_time = time.time() - (self.num_frames * self.audio_frame_duration)
+                    if self.connection_start_time is None:
+                        self.connection_start_time = time.time() - (self.num_frames * self.audio_frame_duration)
 
-                # Handle language detection
-                # detected_language = data.get('language')
-                # language_probability = data.get('language_probability')
-                # if detected_language:
-                #     self.meta_info['segment_language'] = detected_language
-                #     if language_probability:
-                #         self.meta_info['segment_language_probability'] = language_probability
-
-                # Handle segments in response
-                segments = data.get('segments', [])
-                
-                for segment in segments:
-                    segment_text = segment.get('text', '').strip()
-                    segment_start = segment.get('start', 0)
-                    segment_end = segment.get('end', 0)
-                    is_completed = segment.get('completed', False)
-                    segment_id = segment.get('segment_id', '')
-                    revision = segment.get('rev', 1)
+                    segments = data.get('segments', [])
                     
-                    if not segment_text:
-                        continue
-
-                    now_timestamp = time.time()
-                    self.last_interim_time = now_timestamp
-
-                    # Calculate latency based on segment timing
-                    latency_ms = None
-                    try:
-                        end_time = float(segment_end) if isinstance(segment_end, str) else segment_end
-                        audio_sent_at = self._find_audio_send_timestamp(end_time)
-                        if audio_sent_at:
-                            result_received_at = timestamp_ms()
-                            latency_ms = round(result_received_at - audio_sent_at, 5)
-                    except (ValueError, TypeError):
-                        pass
-
-                    # Track first result latency
-                    if self.first_result_latency_ms is None and self.audio_submission_time:
-                        first_latency_seconds = now_timestamp - self.audio_submission_time
-                        self.first_result_latency_ms = round(first_latency_seconds * 1000)
-                        self.meta_info["transcriber_first_result_latency"] = first_latency_seconds
-                        self.meta_info["transcriber_latency"] = first_latency_seconds
-                        self.meta_info["first_result_latency_ms"] = self.first_result_latency_ms
-
-                    if is_completed:
-                        # Skip if we've already processed this completed segment
-                        if segment_id and segment_id in self.processed_segment_ids:
-                            logger.debug(f"Skipping already processed segment: {segment_id}")
-                            continue
+                    for segment in segments:
+                        segment_text = segment.get('text', '').strip()
+                        segment_start = segment.get('start', 0)
+                        segment_end = segment.get('end', 0)
+                        is_completed = segment.get('completed', False)
+                        segment_id = segment.get('segment_id', '')
+                        revision = segment.get('rev', 1)
                         
-                        if segment_id:
-                            self.processed_segment_ids.add(segment_id)
+                        if not segment_text:
+                            continue
 
-                        logger.info(f"Completed segment [{segment_start}s - {segment_end}s]: {segment_text}")
+                        now_timestamp = time.time()
+                        self.last_interim_time = now_timestamp
 
-                        # Track interim details for latency tracking
-                        interim_detail = {
-                            'transcript': segment_text,
-                            'is_final': True,
-                            'latency_ms': latency_ms,
-                            'start': segment_start,
-                            'end': segment_end,
-                            'segment_id': segment_id,
-                            'rev': revision,
-                            'received_at': now_timestamp
-                        }
-                        self.current_turn_interim_details.append(interim_detail)
-
-                        # Build turn latencies
+                        # Calculate latency based on segment timing
+                        latency_ms = None
                         try:
-                            self.turn_latencies.append({
-                                'turn_id': self.current_turn_id,
-                                'sequence_id': self.current_turn_id,
-                                'interim_details': self.current_turn_interim_details,
-                                # 'detected_language': detected_language
+                            end_time = float(segment_end) if isinstance(segment_end, str) else segment_end
+                            audio_sent_at = self._find_audio_send_timestamp(end_time)
+                            if audio_sent_at:
+                                result_received_at = timestamp_ms()
+                                latency_ms = round(result_received_at - audio_sent_at, 5)
+                        except (ValueError, TypeError):
+                            pass
+
+                        # Track first result latency
+                        if self.first_result_latency_ms is None and self.audio_submission_time:
+                            first_latency_seconds = now_timestamp - self.audio_submission_time
+                            self.first_result_latency_ms = round(first_latency_seconds * 1000)
+                            self.meta_info["transcriber_first_result_latency"] = first_latency_seconds
+                            self.meta_info["transcriber_latency"] = first_latency_seconds
+                            self.meta_info["first_result_latency_ms"] = self.first_result_latency_ms
+
+                        if is_completed:
+                            # Skip if we've already processed this completed segment
+                            if segment_id and segment_id in self.processed_segment_ids:
+                                logger.debug(f"Skipping already processed segment: {segment_id}")
+                                continue
+                            
+                            if segment_id:
+                                self.processed_segment_ids.add(segment_id)
+
+                            logger.info(f"Completed segment [{segment_start}s - {segment_end}s]: {segment_text}")
+
+                            # Track interim details for latency tracking
+                            interim_detail = {
+                                'transcript': segment_text,
+                                'is_final': True,
+                                'latency_ms': latency_ms,
+                                'start': segment_start,
+                                'end': segment_end,
+                                'segment_id': segment_id,
+                                'rev': revision,
+                                'received_at': now_timestamp
+                            }
+                            self.current_turn_interim_details.append(interim_detail)
+
+                            # Build turn latencies
+                            try:
+                                self.turn_latencies.append({
+                                    'turn_id': self.current_turn_id,
+                                    'sequence_id': self.current_turn_id,
+                                    'interim_details': self.current_turn_interim_details,
+                                    # 'detected_language': detected_language
                             })
-                        except Exception as e:
-                            logger.error(f"Error building turn latencies: {e}")
+                            except Exception as e:
+                                logger.error(f"Error building turn latencies: {e}")
 
-                        # Yield final transcript
-                        transcript_packet = {
-                            "type": "transcript",
-                            "content": segment_text
-                        }
-                        yield create_ws_data_packet(transcript_packet, self.meta_info)
+                            # Yield final transcript
+                            transcript_packet = {
+                                "type": "transcript",
+                                "content": segment_text
+                            }
+                            yield create_ws_data_packet(transcript_packet, self.meta_info)
 
-                        # Reset turn state for next utterance
-                        self._reset_turn_state()
+                            # Reset turn state for next utterance
+                            self._reset_turn_state()
 
-                    else:
-                        # Partial/interim transcript
-                        logger.info(f"Partial segment [{segment_start}s - {segment_end}s]: {segment_text} (rev: {revision})")
+                        else:
+                            # Partial/interim transcript
+                            logger.info(f"Partial segment [{segment_start}s - {segment_end}s]: {segment_text} (rev: {revision})")
 
-                        # Track interim details
-                        interim_detail = {
-                            'transcript': segment_text,
-                            'is_final': False,
-                            'latency_ms': latency_ms,
-                            'start': segment_start,
-                            'end': segment_end,
-                            'segment_id': segment_id,
-                            'rev': revision,
-                            'received_at': now_timestamp
-                        }
-                        self.current_turn_interim_details.append(interim_detail)
+                            # Track interim details
+                            interim_detail = {
+                                'transcript': segment_text,
+                                'is_final': False,
+                                'latency_ms': latency_ms,
+                                'start': segment_start,
+                                'end': segment_end,
+                                'segment_id': segment_id,
+                                'rev': revision,
+                                'received_at': now_timestamp
+                            }
+                            self.current_turn_interim_details.append(interim_detail)
 
-                        # Update final_transcript with latest partial (for potential force-finalize)
-                        self.final_transcript = segment_text
+                            # Update final_transcript with latest partial (for potential force-finalize)
+                            self.final_transcript = segment_text
 
-                        # Yield interim transcript
-                        interim_packet = {
-                            "type": "interim_transcript_received",
-                            "content": segment_text
-                        }
-                        yield create_ws_data_packet(interim_packet, self.meta_info)
+                            # Yield interim transcript
+                            interim_packet = {
+                                "type": "interim_transcript_received",
+                                "content": segment_text
+                            }
+                            yield create_ws_data_packet(interim_packet, self.meta_info)
 
-            except json.JSONDecodeError as e:
-                logger.error(f"Failed to parse Shunya Labs message: {e}")
-            except Exception as e:
-                logger.error(f"Error processing Shunya Labs message: {e}")
-                traceback.print_exc()
+                except json.JSONDecodeError as e:
+                    logger.error(f"Failed to parse Shunya Labs message: {e}")
+                except Exception as e:
+                    logger.error(f"Error processing Shunya Labs message: {e}")
+                    traceback.print_exc()
+            
+            # Loop exited normally (WebSocket closed)
+            logger.info("Shunya receiver loop ended - WebSocket closed")
+            
+        except ConnectionClosedError as e:
+            logger.info(f"Shunya WebSocket connection closed: {e}")
+        except ConnectionClosed as e:
+            # Handle normal closure (code 1000)
+            rcvd_code = getattr(e.rcvd, "code", None)
+            if rcvd_code == 1000:
+                logger.info("Shunya WebSocket closed normally")
+            else:
+                logger.warning(f"Shunya WebSocket closed with code: {rcvd_code}")
+        except Exception as e:
+            logger.error(f"Error in Shunya receiver: {e}")
+            raise
 
     async def push_to_transcriber_queue(self, data_packet):
         """Push data to the output queue."""
@@ -768,8 +766,12 @@ class ShunyaTranscriber(BaseTranscriber):
         finally:
             if shunya_ws is not None:
                 try:
-                    await shunya_ws.close()
-                    logger.info("Shunya Labs WebSocket closed in finally block")
+                    # Only close if not already closed
+                    if not shunya_ws.closed:
+                        await shunya_ws.close()
+                        logger.info("Shunya Labs WebSocket closed in finally block")
+                    else:
+                        logger.info("Shunya Labs WebSocket already closed")
                 except Exception as e:
                     logger.error(f"Error closing WebSocket: {e}")
                 finally:
