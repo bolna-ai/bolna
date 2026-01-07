@@ -144,7 +144,7 @@ class ShunyaTranscriber(BaseTranscriber):
 
     def _create_init_message(self) -> dict:
         """Create the initialization message for Shunya WebSocket."""
-        return {
+        msg = {
             "action": "send",
             "type": "init",
             "config": {
@@ -152,6 +152,12 @@ class ShunyaTranscriber(BaseTranscriber):
                 "api_key": self.api_key
             }
         }
+
+        # for universal model does not need to be specified
+        if self.model in ("zero-indic", "zero-codeswitch"):
+            msg["config"]["model"] = self.model
+
+        return msg
 
     def _create_frame_message(self, audio_b64: str, frame_seq: int) -> dict:
         """Create an audio frame message for Shunya WebSocket."""
@@ -569,9 +575,7 @@ class ShunyaTranscriber(BaseTranscriber):
             "language_probability": 0.95
         }
         """
-        logger.info("Starting to receive messages from Shunya Labs")
         async for msg in ws:
-            logger.info(f"Received message from Shunya Labs: {msg}")
             try:
                 data = json.loads(msg) if isinstance(msg, str) else json.loads(msg.decode())
 
