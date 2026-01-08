@@ -200,9 +200,6 @@ class TaskManager(BaseManager):
         self.ended_by_assistant = False
         self.start_time = time.time()
 
-        self.previous_start_ts = None
-        self.current_start_ts = None
-
         #Tasks
         self.extracted_data = None
         self.summarized_data = None
@@ -1089,9 +1086,7 @@ class TaskManager(BaseManager):
             await self.sync_history(self.mark_event_meta_data.fetch_cleared_mark_event_data().items(), current_ts)
             self.tools["input"].reset_response_heard_by_user()
 
-        # Invalidate pending responses via InterruptionManager
         self.interruption_manager.invalidate_pending_responses()
-        # Also update local state for backward compatibility
         self.sequence_ids = {-1}
         await self.tools["synthesizer"].flush_synthesizer_stream()
 
@@ -1142,12 +1137,9 @@ class TaskManager(BaseManager):
             logger.info(f"Metainfo {meta_info}")
         meta_info_copy = meta_info.copy()
 
-        # Get sequence_id and turn_id via InterruptionManager
         new_sequence_id = self.interruption_manager.get_next_sequence_id()
         meta_info_copy["sequence_id"] = new_sequence_id
         meta_info_copy['turn_id'] = self.interruption_manager.get_turn_id()
-
-        # Also update local state for backward compatibility
         self.curr_sequence_id = new_sequence_id
         self.sequence_ids.add(new_sequence_id)
 
@@ -1908,16 +1900,15 @@ class TaskManager(BaseManager):
         await self.process_call_hangup()
 
     async def _handle_transcriber_output(self, next_task, transcriber_message, meta_info):
-        current_ts = self.tools["input"].get_current_mark_started_time()
-        self.previous_start_ts = self.current_start_ts
-        self.current_start_ts = current_ts
-
         if not self.tools["input"].welcome_message_played() and len(self.history) > 2:
             logger.info(f"Welcome message is playing while spoken: {transcriber_message}")
             return
 
-        if self.current_start_ts == self.previous_start_ts and not self.tools['input'].is_audio_being_played_to_user():
-            logger.info(f"handle_transcriber_output -> skip as previous user message {self.history[-1]}")
+        # Skip only if exact same content as last user message (true duplicate)
+        if (len(self.history) > 0
+            and self.history[-1].get("role") == "user"
+            and self.history[-1].get("content", "").strip() == transcriber_message.strip()):
+            logger.info(f"Skipping duplicate transcript (same content): {transcriber_message}")
             return
 
         # Trigger background voicemail check (non-blocking) for final transcripts
@@ -1988,9 +1979,7 @@ class TaskManager(BaseManager):
                         if not self.tools["input"].welcome_message_played():
                             continue
 
-                        # Track user speaking state via InterruptionManager
                         self.interruption_manager.on_user_speech_started()
-                        # Also update local state for backward compatibility
                         if not self.callee_speaking:
                             self.callee_speaking_start_time = time.time()
                             self.callee_speaking = True
@@ -1998,7 +1987,6 @@ class TaskManager(BaseManager):
                         interim_transcript_len += len(message["data"].get("content").strip().split(" "))
                         transcript_content = message["data"].get("content", "")
 
-                        # Check if interruption should be triggered via InterruptionManager
                         if self.interruption_manager.should_trigger_interruption(
                             word_count=interim_transcript_len,
                             transcript=transcript_content,
@@ -2007,7 +1995,6 @@ class TaskManager(BaseManager):
                         ):
                             logger.info(f"Condition for interruption hit")
                             self.interruption_manager.on_interruption_triggered()
-                            # Also update local state for backward compatibility
                             self.turn_id += 1
                             self.tools["input"].update_is_audio_being_played(False)
                             await self.__cleanup_downstream_tasks()
@@ -2016,10 +2003,8 @@ class TaskManager(BaseManager):
                             logger.info(f"Ignoring transcript: {transcript_content.strip()}")
                             continue
 
-                        # Doing changes for incremental delay
                         self.interruption_manager.update_required_delay(len(self.history))
                         self.interruption_manager.on_interim_transcript_received()
-                        # Also update local state for backward compatibility
                         self.required_delay_before_speaking = self.incremental_delay if len(self.history) > 2 else 0
                         logger.info(f"Increased the incremental delay time to {self.required_delay_before_speaking}")
                         if self.time_since_first_interim_result == -1:
@@ -2042,7 +2027,6 @@ class TaskManager(BaseManager):
                         transcript_content = message["data"].get("content", "")
                         word_count = len(transcript_content.strip().split(" "))
 
-                        # Check if this is a false interruption via InterruptionManager
                         if self.interruption_manager.is_false_interruption(
                             word_count=word_count,
                             transcript=transcript_content,
@@ -2052,9 +2036,7 @@ class TaskManager(BaseManager):
                             logger.info(f"Continuing the loop and ignoring the transcript received ({transcript_content}) in speech final as it is false interruption")
                             continue
 
-                        # User finished speaking - update InterruptionManager state
                         self.interruption_manager.on_user_speech_ended()
-                        # Also update local state for backward compatibility
                         self.callee_speaking = False
                         # self.callee_silent = True
                         temp_transcriber_message = ""
@@ -2070,9 +2052,7 @@ class TaskManager(BaseManager):
                         # TODO check where this needs to be added post understanding it's usage
                         self.let_remaining_audio_pass_through = True
 
-                        # Resetting variables for incremental delay (via InterruptionManager)
                         self.interruption_manager.reset_delay_for_speech_final(len(self.history), self.minimum_wait_duration)
-                        # Also update local state for backward compatibility
                         self.time_since_first_interim_result = -1
                         self.required_delay_before_speaking = max(
                             self.minimum_wait_duration - self.incremental_delay, 0) if len(self.history) > 2 else 0
