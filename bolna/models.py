@@ -4,7 +4,7 @@ from pydantic import BaseModel, Field, field_validator, ValidationError, Json, m
 from pydantic_core import PydanticCustomError
 from .providers import *
 
-AGENT_WELCOME_MESSAGE = "This call is being recorded for quality assurance and training. Please speak now."
+AGENT_WELCOME_MESSAGE = ""  # Disabled default welcome message
 
 
 def validate_attribute(value, allowed_values, value_type='provider'):
@@ -78,6 +78,15 @@ class AzureConfig(BaseModel):
     speed: Optional[float] = 1.0
 
 
+class PixaConfig(BaseModel):
+    voice: str
+    voice_id: str
+    model: str
+    language: str
+    top_p: Optional[float] = 0.95
+    repetition_penalty: Optional[float] = 1.3
+
+
 class Transcriber(BaseModel):
     model: Optional[str] = "nova-2"
     language: Optional[str] = None
@@ -96,7 +105,7 @@ class Transcriber(BaseModel):
 
 class Synthesizer(BaseModel):
     provider: str
-    provider_config: Union[PollyConfig, ElevenLabsConfig, AzureConfig, RimeConfig, SmallestConfig, SarvamConfig, CartesiaConfig, DeepgramConfig, OpenAIConfig] = Field(union_mode='smart')
+    provider_config: Union[PollyConfig, ElevenLabsConfig, AzureConfig, RimeConfig, SmallestConfig, SarvamConfig, CartesiaConfig, DeepgramConfig, OpenAIConfig, PixaConfig] = Field(union_mode='smart')
     stream: bool = False
     buffer_size: Optional[int] = 40  # 40 characters in a buffer
     audio_format: Optional[str] = "pcm"
@@ -115,7 +124,7 @@ class Synthesizer(BaseModel):
 
     @field_validator("provider")
     def validate_model(cls, value):
-        return validate_attribute(value, ["polly", "elevenlabs", "azuretts", "openai", "deepgram", "cartesia", "smallest", "sarvam", "rime"])
+        return validate_attribute(value, ["polly", "elevenlabs", "azuretts", "openai", "deepgram", "cartesia", "smallest", "sarvam", "rime", "pixa"])
 
 
 
