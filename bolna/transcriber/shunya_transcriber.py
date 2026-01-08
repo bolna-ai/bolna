@@ -82,6 +82,7 @@ class ShunyaTranscriber(BaseTranscriber):
         self.frame_seq = 0  # Shunya requires sequential frame numbers
         self.connection_start_time = None
         self.audio_frame_timestamps = []  # List of (frame_start, frame_end, send_timestamp)
+        self.duration = 0.0
 
         # Transcript state management
         self.final_transcript = ""
@@ -413,6 +414,8 @@ class ShunyaTranscriber(BaseTranscriber):
                 self.websocket_connection = None
                 self.connection_authenticated = False
                 self.session_initialized = False
+        
+        self.meta_info["transcriber_duration"] = self.duration
 
     async def cleanup(self):
         """Clean up all resources including websocket."""
@@ -545,6 +548,7 @@ class ShunyaTranscriber(BaseTranscriber):
                         if audio_b64:
                             frame_msg = self._create_frame_message(audio_b64, self.frame_seq)
                             await ws.send(json.dumps(frame_msg))
+                            self.duration += self.audio_frame_duration
                             self.frame_seq += 1
 
                     except ConnectionClosedError as e:
@@ -787,6 +791,8 @@ class ShunyaTranscriber(BaseTranscriber):
                 self.utterance_timeout_task.cancel()
 
             # Send connection closed message
+            if 'duration' not in self.meta_info:
+                self.meta_info["transcriber_duration"] = self.duration
             await self.push_to_transcriber_queue(
                 create_ws_data_packet("transcriber_connection_closed", getattr(self, 'meta_info', {}))
             )
