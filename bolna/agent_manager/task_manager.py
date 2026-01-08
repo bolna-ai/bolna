@@ -1659,8 +1659,8 @@ class TaskManager(BaseManager):
                     convert_to_request_log(message=completion_res, meta_info= meta_info, component="llm_hangup", direction="response", model=self.check_for_completion_llm, run_id= self.run_id)
 
                     if should_hangup:
-                        await self.process_call_hangup()
                         self.hangup_detail = "llm_prompted_hangup"
+                        await self.process_call_hangup()
                         return
 
             self.llm_processed_request_ids.add(self.current_request_id)
@@ -2403,8 +2403,8 @@ class TaskManager(BaseManager):
 
             if self.hang_conversation_after > 0 and time_since_last_spoken_ai_word > self.hang_conversation_after and time_since_user_last_spoke > self.hang_conversation_after:
                 logger.info(f"{time_since_last_spoken_ai_word} seconds since AI last spoke and {time_since_user_last_spoke} seconds since user last spoke, both exceed {self.hang_conversation_after}s timeout - hanging up")
-                await self.process_call_hangup()
                 self.hangup_detail = "inactivity_timeout"
+                await self.process_call_hangup()
                 break
 
             elif (time_since_last_spoken_ai_word > self.trigger_user_online_message_after and
