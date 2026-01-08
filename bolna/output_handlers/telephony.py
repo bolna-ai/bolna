@@ -41,7 +41,7 @@ class TelephonyOutputHandler(DefaultOutputHandler):
                 self.stream_sid = meta_info.get('stream_sid', None)
 
             try:
-                if len(audio_chunk) == 1:
+                if audio_chunk and len(audio_chunk) == 1:
                     audio_chunk += b'\x00'
 
                 if audio_chunk and self.stream_sid and len(audio_chunk) != 1:

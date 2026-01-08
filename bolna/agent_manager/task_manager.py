@@ -617,12 +617,18 @@ class TaskManager(BaseManager):
 
     def __setup_input_handlers(self, turn_based_conversation, input_queue, should_record):
         if self.task_config["tools_config"]["input"]["provider"] in SUPPORTED_INPUT_HANDLERS.keys():
+            # Set is_welcome_message_played to True if:
+            # 1. Output provider is 'default' and not web-based call, OR
+            # 2. Welcome message is empty (nothing to play)
+            welcome_msg_empty = len(self.kwargs.get('agent_welcome_message', '')) == 0
+            is_default_non_web = self.task_config["tools_config"]["output"]["provider"] == 'default' and not self.is_web_based_call
+            
             input_kwargs = {
                 "queues": self.queues,
                 "websocket": self.websocket,
                 "input_types": get_required_input_types(self.task_config),
                 "mark_event_meta_data": self.mark_event_meta_data,
-                "is_welcome_message_played": True if self.task_config["tools_config"]["output"]["provider"] == 'default' and not self.is_web_based_call else False
+                "is_welcome_message_played": True if (is_default_non_web or welcome_msg_empty) else False
             }
 
             if should_record:
@@ -682,8 +688,16 @@ class TaskManager(BaseManager):
                     logger.info(f"Got stream sid and hence sending the first message {stream_sid}")
                     self.stream_sid = stream_sid
                     await self.tools["output"].set_stream_sid(stream_sid)
-                    self.tools["input"].update_is_audio_being_played(True)
                     convert_to_request_log(message=text, meta_info=meta_info, component="synthesizer", direction="response", model=self.synthesizer_provider, is_cached=meta_info.get("is_cached", False), engine=self.tools['synthesizer'].get_engine(), run_id=self.run_id)
+                    
+                    # If welcome message data is None, skip it entirely and don't block user input
+                    if message["data"] is None:
+                        logger.warning("Welcome message data is None, skipping welcome message playback")
+                        # Mark as NOT playing so user input is not blocked
+                        self.tools["input"].update_is_audio_being_played(False)
+                        break
+                    
+                    self.tools["input"].update_is_audio_being_played(True)
                     await self.tools["output"].handle(message)
                     try:
                         duration = calculate_audio_duration(len(message["data"]), self.sampling_rate,
@@ -2323,8 +2337,12 @@ class TaskManager(BaseManager):
                     self.tools["input"].update_is_audio_being_played(True)
                     await self.tools["output"].handle(message)
                     try:
-                        duration = calculate_audio_duration(len(message["data"]), self.sampling_rate, format = message['meta_info']['format'])
-                        self.conversation_recording['output'].append({'data': message['data'], "start_time": time.time(), "duration": duration})
+                        if message["data"] is not None:
+                            duration = calculate_audio_duration(len(message["data"]), self.sampling_rate, format = message['meta_info']['format'])
+                            self.conversation_recording['output'].append({'data': message['data'], "start_time": time.time(), "duration": duration})
+                        else:
+                            duration = 0
+                            logger.warning("Message data is None, skipping audio recording")
                     except Exception as e:
                         duration = 0.256
                         logger.info("Exception in __process_output_loop: {}".format(str(e)))

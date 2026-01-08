@@ -4,7 +4,7 @@ from pydantic import BaseModel, Field, field_validator, ValidationError, Json, m
 from pydantic_core import PydanticCustomError
 from .providers import *
 
-AGENT_WELCOME_MESSAGE = "This call is being recorded for quality assurance and training. Please speak now."
+AGENT_WELCOME_MESSAGE = ""  # Disabled default welcome message
 
 
 def validate_attribute(value, allowed_values, value_type='provider'):
