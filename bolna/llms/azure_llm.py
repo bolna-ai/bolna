@@ -216,7 +216,7 @@ class AzureLLM(BaseLLM):
 
         self.started_streaming = False
 
-    async def generate(self, messages, request_json=False):
+    async def generate(self, messages, request_json=False, ret_metadata=False):
         response_format = self.get_response_format(request_json)
 
         try:
@@ -229,7 +229,10 @@ class AzureLLM(BaseLLM):
             )
 
             res = completion.choices[0].message.content
-            return res
+            if ret_metadata:  
+                return res, {}
+            else:
+                return res
         except BadRequestError as e:
             logger.error(f"Azure OpenAI bad request: {e}")
             raise

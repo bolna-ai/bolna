@@ -14,7 +14,7 @@ import websockets
 
 import aiohttp
 
-from bolna.constants import ACCIDENTAL_INTERRUPTION_PHRASES, DEFAULT_USER_ONLINE_MESSAGE, DEFAULT_USER_ONLINE_MESSAGE_TRIGGER_DURATION, FILLER_DICT, DEFAULT_LANGUAGE_CODE, DEFAULT_TIMEZONE, LANGUAGE_NAMES
+from bolna.constants import ACCIDENTAL_INTERRUPTION_PHRASES, DEFAULT_USER_ONLINE_MESSAGE, DEFAULT_USER_ONLINE_MESSAGE_TRIGGER_DURATION, FILLER_DICT, DEFAULT_LANGUAGE_CODE, DEFAULT_TIMEZONE, LANGUAGE_NAMES, LLM_DEFAULT_CONFIGS
 from bolna.helpers.function_calling_helpers import trigger_api, computed_api_response
 from bolna.memory.cache.vector_cache import VectorCache
 from .base_manager import BaseManager
@@ -44,7 +44,11 @@ class TaskManager(BaseManager):
         self.kwargs["task_manager_instance"] = self
 
         self.conversation_start_init_ts = time.time() * 1000
-        self.llm_latencies = {'connection_latency_ms': None, 'turn_latencies': []}
+        self.llm_latencies = {
+            'connection_latency_ms': None, 
+            'turn_latencies': [],
+            'other_latencies': []  # List of {type, latency_ms, timestamp}
+        }
         self.transcriber_latencies = {'connection_latency_ms': None, 'turn_latencies': []}
         self.synthesizer_latencies = {'connection_latency_ms': None, 'turn_latencies': []}
         self.rag_latencies = {'turn_latencies': []}
@@ -762,8 +766,8 @@ class TaskManager(BaseManager):
                 self.kwargs.pop('api_version', None)
 
                 if self._is_summarization_task() or self._is_extraction_task():
-                    llm_config['model'] = 'gpt-4.1-mini'
-                    llm_config['provider'] = 'openai'
+                    llm_config['model'] = LLM_DEFAULT_CONFIGS["summarization"]["model"]
+                    llm_config['provider'] = LLM_DEFAULT_CONFIGS["summarization"]["provider"]
 
             if llm_config["provider"] in SUPPORTED_LLM_PROVIDERS.keys():
                 llm_class = SUPPORTED_LLM_PROVIDERS.get(llm_config["provider"])
@@ -1180,14 +1184,29 @@ class TaskManager(BaseManager):
                 'content': message
             })
 
+            start_time = time.time()
             json_data = await self.tools["llm_agent"].generate(self.history)
+            latency_ms = (time.time() - start_time) * 1000
+            
             if self.task_config["task_type"] == "summarization":
                 self.summarized_data = json_data["summary"]
+                self.llm_latencies['other_latencies'].append({
+                    'type': 'summarization',
+                    "latency_ms": latency_ms,
+                    "model": LLM_DEFAULT_CONFIGS["summarization"]["model"],
+                    "provider": LLM_DEFAULT_CONFIGS["summarization"]["provider"]
+                })
             else:
                 json_data = clean_json_string(json_data)
                 if type(json_data) is not dict:
                     json_data = json.loads(json_data)
                 self.extracted_data = json_data
+                self.llm_latencies['other_latencies'].append({
+                    "type": 'extraction',
+                    "latency_ms": latency_ms,
+                    "model": LLM_DEFAULT_CONFIGS["extraction"]["model"],
+                    "provider": LLM_DEFAULT_CONFIGS["extraction"]["provider"]
+                })
 
     # This observer works only for messages which have sequence_id != -1
     def final_chunk_played_observer(self, is_final_chunk_played):
@@ -1645,11 +1664,22 @@ class TaskManager(BaseManager):
             if self.agent_type not in ["graph_agent"]:
                 if self.use_llm_to_determine_hangup and not self.turn_based_conversation:
                     completion_res = await self.tools["llm_agent"].check_for_completion(messages, self.check_for_completion_prompt)
+                    
                     should_hangup = (
                         str(completion_res.get("hangup", "")).lower() == "yes"
                         if isinstance(completion_res, dict)
                         else False
                     )
+
+                    # Track hangup check latency (latency returned by agent)
+                    self.llm_latencies['other_latencies'].append({
+                        "type": 'hangup_check',
+                        "latency_ms": completion_res.get("latency_ms"),
+                        "model": self.check_for_completion_llm,
+                        "provider": "openai",  # TODO: Make dynamic based on provider used
+                        "service_tier": completion_res.get("service_tier", None),
+                        "llm_host": completion_res.get("llm_host", None)
+                    })
 
                     prompt = [
                             {'role': 'system', 'content': self.check_for_completion_prompt},
@@ -1857,6 +1887,16 @@ class TaskManager(BaseManager):
                     if isinstance(voicemail_result, dict)
                     else False
                 )
+
+                # Track voicemail check latency (latency returned by agent)
+                self.llm_latencies['other_latencies'].append({
+                    "type": 'voicemail_check',
+                    "latency_ms": voicemail_result.get("latency_ms"),
+                    "model": self.voicemail_llm,
+                    "provider": "openai",  # TODO: Make dynamic based on provider used
+                    "service_tier": voicemail_result.get("service_tier", None),
+                    "llm_host": voicemail_result.get("llm_host", None)
+                })
 
                 convert_to_request_log(
                     message=voicemail_result,
