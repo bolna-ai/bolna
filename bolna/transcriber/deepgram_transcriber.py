@@ -464,48 +464,6 @@ class DeepgramTranscriber(BaseTranscriber):
 
                     if msg["is_final"] and transcript.strip():
                         logger.info(f"Received interim result with is_final set as True - {transcript}")
-                        # Extract language data ONLY if Deepgram is in multilingual mode
-                        try:
-                            alternative = msg["channel"]["alternatives"][0]
-
-                            # Check if language data exists (indicates language=multi mode)
-                            has_language_data = (
-                                "languages" in alternative or
-                                (alternative.get("words") and len(alternative["words"]) > 0 and "language" in alternative["words"][0])
-                            )
-
-                            if has_language_data:
-                                detected_languages = alternative.get("languages", [])
-
-                                # Extract per-word language breakdown
-                                word_lang_counts = {}
-                                total_words = 0
-
-                                if "words" in alternative and alternative["words"]:
-                                    for word_obj in alternative["words"]:
-                                        # Only count if language field exists
-                                        if "language" in word_obj:
-                                            word_lang = word_obj["language"]
-                                            word_lang_counts[word_lang] = word_lang_counts.get(word_lang, 0) + 1
-                                            total_words += 1
-
-                                # Determine primary language for this segment
-                                if word_lang_counts:
-                                    primary_language = max(word_lang_counts, key=word_lang_counts.get)
-                                    primary_lang_percentage = (word_lang_counts[primary_language] / total_words) if total_words > 0 else 0.0
-
-                                    # Store language info in meta_info for this segment
-                                    self.meta_info['segment_language'] = primary_language
-                                    self.meta_info['segment_language_percentage'] = round(primary_lang_percentage, 2)
-                                    self.meta_info['segment_all_languages'] = detected_languages
-                                    self.meta_info['segment_word_lang_counts'] = word_lang_counts
-
-                                    logger.info(f"Language detected: {primary_language} ({int(primary_lang_percentage*100)}% confidence)")
-                                    if len(word_lang_counts) > 1:
-                                        logger.info(f"Code-switching detected: {word_lang_counts}")
-                        except Exception as e:
-                            logger.warning(f"Failed to extract language data from Deepgram response: {e}")
-
                         self.final_transcript += f' {transcript}'
 
                         if self.is_transcript_sent_for_processing:
@@ -572,11 +530,12 @@ class DeepgramTranscriber(BaseTranscriber):
                             pass
                         yield create_ws_data_packet(data, self.meta_info)
 
-                elif msg["type"] == "Metadata" and msg.get('transaction_key') != 'deprecated':
-                    logger.info(f"Received Metadata from deepgram - {msg}")
-                    self.meta_info["transcriber_duration"] = msg["duration"]
-                    yield create_ws_data_packet("transcriber_connection_closed", self.meta_info)
-                    return
+                elif msg["type"] == "Metadata":
+                    # Capture duration from final Metadata message (actual audio processed by Deepgram)
+                    deepgram_duration = msg.get("duration")
+                    if deepgram_duration is not None:
+                        self.meta_info["deepgram_duration"] = deepgram_duration
+                        logger.info(f"Received Deepgram Metadata with duration: {deepgram_duration}s")
 
             except Exception as e:
                 traceback.print_exc()
@@ -688,8 +647,15 @@ class DeepgramTranscriber(BaseTranscriber):
                         if self.connection_on:
                             await self.push_to_transcriber_queue(message)
                         else:
-                            logger.info("closing the deepgram connection")
+                            logger.info("closing the deepgram connection, waiting for Metadata")
                             await self._close(deepgram_ws, data={"type": "CloseStream"})
+                            try:
+                                async with asyncio.timeout(5):
+                                    async for _ in self.receiver(deepgram_ws):
+                                        if "deepgram_duration" in self.meta_info:
+                                            break
+                            except asyncio.TimeoutError:
+                                logger.warning("Timeout waiting for Deepgram Metadata after CloseStream")
                             break
                 except ConnectionClosedError as e:
                     logger.error(f"Deepgram websocket connection closed during streaming: {e}")
@@ -723,6 +689,10 @@ class DeepgramTranscriber(BaseTranscriber):
                 self.heartbeat_task.cancel()
             if hasattr(self, 'utterance_timeout_task') and self.utterance_timeout_task is not None:
                 self.utterance_timeout_task.cancel()
+
+            # Use Deepgram's actual audio duration for billing
+            if "deepgram_duration" in self.meta_info:
+                self.meta_info["transcriber_duration"] = self.meta_info["deepgram_duration"]
 
             await self.push_to_transcriber_queue(
                 create_ws_data_packet("transcriber_connection_closed", getattr(self, 'meta_info', {}))
