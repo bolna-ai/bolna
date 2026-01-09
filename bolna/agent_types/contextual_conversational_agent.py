@@ -32,13 +32,12 @@ class StreamingContextualAgent(BaseAgent):
             latency_ms = (time.time() - start_time) * 1000
             
             hangup = json.loads(response)
-            hangup['latency_ms'] = latency_ms
-            hangup.update(metadata)
+            metadata['latency_ms'] = latency_ms
 
-            return hangup
+            return hangup, metadata
         except Exception as e:
             logger.error('check_for_completion exception: {}'.format(str(e)))
-            return {'hangup': 'No', 'latency_ms': None}
+            return {'hangup': 'No'}, {}
 
     async def check_for_voicemail(self, user_message, voicemail_detection_prompt=None):
         """
@@ -63,13 +62,11 @@ class StreamingContextualAgent(BaseAgent):
             latency_ms = (time.time() - start_time) * 1000
             
             result = json.loads(response)
-            result['latency_ms'] = latency_ms
-            result.update(metadata)
-            logger.info(f"Voicemail detection result: {result}")
-            return result
+            metadata['latency_ms'] = latency_ms
+            return result, metadata
         except Exception as e:
             logger.error('check_for_voicemail exception: {}'.format(str(e)))
-            return {'is_voicemail': 'No', 'latency_ms': None}
+            return {'is_voicemail': 'No'}, {}
 
     async def generate(self, history, synthesize=False, meta_info = None):
         async for token in self.llm.generate_stream(history, synthesize=synthesize, meta_info = meta_info):

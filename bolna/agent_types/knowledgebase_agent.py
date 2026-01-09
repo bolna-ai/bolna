@@ -124,13 +124,12 @@ class KnowledgeBaseAgent(BaseAgent):
             latency_ms = (time.time() - start_time) * 1000
             
             result = json.loads(response)
-            result['latency_ms'] = latency_ms
-            result.update(metadata)
-            return result
+            metadata['latency_ms'] = latency_ms
+            return result, metadata
         except Exception as e:
             logger.error(f'check_for_completion error: {e}')
-            return {'hangup': 'No', 'latency_ms': None}
-        
+            return {'hangup': 'No'}, {}
+
     async def check_for_voicemail(self, user_message, voicemail_detection_prompt=None):
         """
         Check if the user message indicates a voicemail system.
@@ -155,17 +154,15 @@ class KnowledgeBaseAgent(BaseAgent):
             ]
 
             start_time = time.time()
-            response = await self.voicemail_llm.generate(prompt, request_json=True, ret_metadata=True)
+            response, metadata = await self.voicemail_llm.generate(prompt, request_json=True, ret_metadata=True)
             latency_ms = (time.time() - start_time) * 1000
             
-            result, metadata = json.loads(response)
-            result['latency_ms'] = latency_ms
-            result.update(metadata)
-            logger.info(f"Voicemail detection result: {result}")
-            return result
+            result = json.loads(response)
+            metadata['latency_ms'] = latency_ms
+            return result, metadata
         except Exception as e:
             logger.error('check_for_voicemail exception: {}'.format(str(e)))
-            return {'is_voicemail': 'No', 'latency_ms': None}
+            return {'is_voicemail': 'No'}, {}
 
     async def _add_rag_context(self, messages: List[dict]) -> Tuple[List[dict], dict]:
         """

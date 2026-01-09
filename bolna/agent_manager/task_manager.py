@@ -1288,11 +1288,6 @@ class TaskManager(BaseManager):
         self.conversation_ended = True
         self.ended_by_assistant = True
 
-        # Cancel voicemail check task if still running
-        if self.voicemail_check_task is not None and not self.voicemail_check_task.done():
-            logger.info("Cancelling voicemail check task during conversation end")
-            self.voicemail_check_task.cancel()
-            self.voicemail_check_task = None
 
         await self.tools["input"].stop_handler()
         logger.info("Stopped input handler")
@@ -1300,6 +1295,12 @@ class TaskManager(BaseManager):
             logger.info("Stopping transcriber")
             await self.tools["transcriber"].toggle_connection()
             await asyncio.sleep(2)  # Making sure whatever message was passed is over
+            
+        # Cancel voicemail check task if still running
+        if self.voicemail_check_task is not None and not self.voicemail_check_task.done():
+            logger.info("Cancelling voicemail check task during conversation end")
+            self.voicemail_check_task.cancel()
+            self.voicemail_check_task = None
 
     def __update_preprocessed_tree_node(self):
         logger.info(f"It's a preprocessed flow and hence updating current node")
@@ -1663,8 +1664,8 @@ class TaskManager(BaseManager):
 
             if self.agent_type not in ["graph_agent"]:
                 if self.use_llm_to_determine_hangup and not self.turn_based_conversation:
-                    completion_res = await self.tools["llm_agent"].check_for_completion(messages, self.check_for_completion_prompt)
-                    
+                    completion_res, metadata = await self.tools["llm_agent"].check_for_completion(messages, self.check_for_completion_prompt)
+
                     should_hangup = (
                         str(completion_res.get("hangup", "")).lower() == "yes"
                         if isinstance(completion_res, dict)
@@ -1674,11 +1675,11 @@ class TaskManager(BaseManager):
                     # Track hangup check latency (latency returned by agent)
                     self.llm_latencies['other_latencies'].append({
                         "type": 'hangup_check',
-                        "latency_ms": completion_res.get("latency_ms"),
+                        "latency_ms": metadata.get("latency_ms", None),
                         "model": self.check_for_completion_llm,
                         "provider": "openai",  # TODO: Make dynamic based on provider used
-                        "service_tier": completion_res.get("service_tier", None),
-                        "llm_host": completion_res.get("llm_host", None)
+                        "service_tier": metadata.get("service_tier", None),
+                        "llm_host": metadata.get("llm_host", None)
                     })
 
                     prompt = [
@@ -1877,7 +1878,7 @@ class TaskManager(BaseManager):
                     run_id=self.run_id
                 )
 
-                voicemail_result = await self.tools["llm_agent"].check_for_voicemail(
+                voicemail_result, metadata = await self.tools["llm_agent"].check_for_voicemail(
                     transcriber_message,
                     self.voicemail_detection_prompt
                 )
@@ -1891,11 +1892,11 @@ class TaskManager(BaseManager):
                 # Track voicemail check latency (latency returned by agent)
                 self.llm_latencies['other_latencies'].append({
                     "type": 'voicemail_check',
-                    "latency_ms": voicemail_result.get("latency_ms"),
+                    "latency_ms": metadata.get("latency_ms", None),
                     "model": self.voicemail_llm,
                     "provider": "openai",  # TODO: Make dynamic based on provider used
-                    "service_tier": voicemail_result.get("service_tier", None),
-                    "llm_host": voicemail_result.get("llm_host", None)
+                    "service_tier": metadata.get("service_tier", None),
+                    "llm_host": metadata.get("llm_host", None)
                 })
 
                 convert_to_request_log(
@@ -2771,12 +2772,21 @@ class TaskManager(BaseManager):
             else:
                 output = self.input_parameters
                 if self.task_config["task_type"] == "extraction":
-                    output = { "extracted_data" : self.extracted_data, "task_type": "extraction"}
+                    output = { "extracted_data" : self.extracted_data,
+                              "task_type": "extraction",
+                              "latency_dict": {
+                                "llm_latencies": self.llm_latencies
+                            }}
                 elif self.task_config["task_type"] == "summarization":
                     logger.info(f"self.summarized_data {self.summarized_data}")
-                    output = {"summary" : self.summarized_data, "task_type": "summarization"}
+                    output = {"summary" : self.summarized_data,
+                              "task_type": "summarization",
+                              "latency_dict": {
+                                "llm_latencies": self.llm_latencies
+                            }}
                 elif self.task_config["task_type"] == "webhook":
                     output = {"status": self.webhook_response, "task_type": "webhook"}
+                    
 
             await asyncio.gather(*tasks_to_cancel)
             return output
