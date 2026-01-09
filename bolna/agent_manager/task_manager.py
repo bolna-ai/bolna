@@ -1998,6 +1998,20 @@ class TaskManager(BaseManager):
                             self.turn_id += 1
                             self.tools["input"].update_is_audio_being_played(False)
                             await self.__cleanup_downstream_tasks()
+                        # User continuation detection: cancel pending response if user continues within grace period
+                        elif not self.tools["input"].is_audio_being_played_to_user() and self.tools["input"].welcome_message_played():
+                            has_pending_response = len(self.sequence_ids) > 1
+                            time_since_utterance_end = self.interruption_manager.get_time_since_utterance_end()
+                            within_grace_period = (
+                                time_since_utterance_end != -1 and
+                                time_since_utterance_end < self.incremental_delay and
+                                len(self.history) > 2
+                            )
+
+                            if has_pending_response and within_grace_period and interim_transcript_len > self.number_of_words_for_interruption:
+                                logger.info(f"User continuation detected ({interim_transcript_len} words within {time_since_utterance_end:.0f}ms), canceling pending response")
+                                self.interruption_manager.utterance_end_time = -1
+                                await self.__cleanup_downstream_tasks()
                         elif self.tools["input"].is_audio_being_played_to_user() and self.tools["input"].welcome_message_played() and self.number_of_words_for_interruption != 0:
                             # Not enough words for interruption - ignore
                             logger.info(f"Ignoring transcript: {transcript_content.strip()}")
@@ -2335,6 +2349,15 @@ class TaskManager(BaseManager):
 
                 elif self.let_remaining_audio_pass_through:
                     time_since_first_interim_result = (time.time() *1000)- self.time_since_first_interim_result if self.time_since_first_interim_result != -1 else -1
+
+                    # Wait for post-UtteranceEnd grace period before playing audio
+                    if time_since_first_interim_result == -1 and len(self.history) > 2:
+                        time_since_utterance_end = self.interruption_manager.get_time_since_utterance_end()
+                        if time_since_utterance_end != -1 and time_since_utterance_end < self.incremental_delay:
+                            logger.info(f"##### Waiting for continuation grace period: {time_since_utterance_end:.0f}ms / {self.incremental_delay}ms since UtteranceEnd")
+                            await asyncio.sleep(0.1)
+                            continue
+
                     logger.info(f"##### In elif been {time_since_first_interim_result} ms since first  interim result and required time to wait for it is {self.required_delay_before_speaking}. Hence sleeping for 100ms. self.time_since_first_interim_result {self.time_since_first_interim_result}")
                     if time_since_first_interim_result != -1 and time_since_first_interim_result < self.required_delay_before_speaking:
                         await asyncio.sleep(0.1) #sleep for 100ms and continue

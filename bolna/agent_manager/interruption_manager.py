@@ -30,6 +30,7 @@ class InterruptionManager:
         self.time_since_first_interim_result: float = -1
         self.required_delay_before_speaking: float = 0
         self.incremental_delay: int = incremental_delay
+        self.utterance_end_time: float = -1
 
         # Configuration
         self.number_of_words_for_interruption: int = number_of_words_for_interruption
@@ -111,6 +112,7 @@ class InterruptionManager:
         self.callee_speaking = False
         self.let_remaining_audio_pass_through = True
         self.time_since_first_interim_result = -1
+        self.utterance_end_time = time.time() * 1000
         logger.info("User speech ended")
 
     def on_interruption_triggered(self) -> None:
@@ -204,3 +206,9 @@ class InterruptionManager:
         if self.time_since_first_interim_result == -1:
             return -1
         return (time.time() * 1000) - self.time_since_first_interim_result
+
+    def get_time_since_utterance_end(self) -> float:
+        """Returns time since UtteranceEnd in milliseconds, or -1 if none."""
+        if self.utterance_end_time == -1:
+            return -1
+        return (time.time() * 1000) - self.utterance_end_time
