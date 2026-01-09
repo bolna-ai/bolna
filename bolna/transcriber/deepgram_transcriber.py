@@ -529,6 +529,17 @@ class DeepgramTranscriber(BaseTranscriber):
                             logger.error(f"Failed to extract transcript from Deepgram response: {e}")
                             pass
                         yield create_ws_data_packet(data, self.meta_info)
+                    else:
+                        # Transcript already sent but we still need to notify speech ended
+                        # This prevents callee_speaking from staying True indefinitely
+                        logger.info(f"UtteranceEnd received but transcript already processed, yielding speech_ended notification")
+                        self.speech_start_time = None
+                        self.speech_end_time = None
+                        self.current_turn_interim_details = []
+                        self.current_turn_start_time = None
+                        self.current_turn_id = None
+                        self.final_transcript = ""
+                        yield create_ws_data_packet({"type": "speech_ended"}, self.meta_info)
 
                 elif msg["type"] == "Metadata" and msg.get('transaction_key') != 'deprecated':
                     logger.info(f"Received Metadata from deepgram - {msg}")

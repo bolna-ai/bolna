@@ -55,6 +55,33 @@ class InterruptionManager:
 
         return True
 
+    def get_audio_send_status(self, sequence_id: int, history_length: int = 0) -> str:
+        """
+        Centralized decision for whether audio should be sent.
+
+        Returns:
+        - "SEND" - audio should be sent now
+        - "BLOCK" - audio should be discarded (user speaking, invalid sequence)
+        - "WAIT" - audio should be delayed (grace period active)
+        """
+        # Check 1: Invalid sequence - discard
+        if sequence_id not in self.sequence_ids:
+            return "BLOCK"
+
+        # Check 2: User is speaking - discard (interruption)
+        if self.callee_speaking:
+            logger.info(f"Audio status=BLOCK - user is speaking")
+            return "BLOCK"
+
+        # Check 3: Grace period (only after first 2 turns to avoid latency on welcome)
+        if history_length > 2:
+            time_since_utterance_end = self.get_time_since_utterance_end()
+            if time_since_utterance_end != -1 and time_since_utterance_end < self.incremental_delay:
+                logger.info(f"Audio status=WAIT - grace period: {time_since_utterance_end:.0f}ms / {self.incremental_delay}ms")
+                return "WAIT"
+
+        return "SEND"
+
     def should_trigger_interruption(
         self,
         word_count: int,

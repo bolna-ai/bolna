@@ -2075,6 +2075,13 @@ class TaskManager(BaseManager):
                         meta_info = self.__get_updated_meta_info(meta_info)
                         await self._handle_transcriber_output(next_task, transcriber_message, meta_info)
 
+                    # Handle speech_ended notification (UtteranceEnd with no new transcript)
+                    elif isinstance(message.get("data"), dict) and message["data"].get("type", "") == "speech_ended":
+                        logger.info(f"Received speech_ended notification, resetting callee_speaking state")
+                        self.interruption_manager.on_user_speech_ended()
+                        self.callee_speaking = False
+                        temp_transcriber_message = ""
+
                     elif message["data"] == "transcriber_connection_closed":
                         logger.info(f"Transcriber connection has been closed")
                         self.transcriber_duration += message.get("meta_info", {}).get("transcriber_duration", 0) if message["meta_info"] is not None else 0
@@ -2350,14 +2357,7 @@ class TaskManager(BaseManager):
                 elif self.let_remaining_audio_pass_through:
                     time_since_first_interim_result = (time.time() *1000)- self.time_since_first_interim_result if self.time_since_first_interim_result != -1 else -1
 
-                    # Wait for post-UtteranceEnd grace period before playing audio
-                    if time_since_first_interim_result == -1 and len(self.history) > 2:
-                        time_since_utterance_end = self.interruption_manager.get_time_since_utterance_end()
-                        if time_since_utterance_end != -1 and time_since_utterance_end < self.incremental_delay:
-                            logger.info(f"##### Waiting for continuation grace period: {time_since_utterance_end:.0f}ms / {self.incremental_delay}ms since UtteranceEnd")
-                            await asyncio.sleep(0.1)
-                            continue
-
+                    # Grace period is now handled by get_audio_send_status() after dequeue
                     logger.info(f"##### In elif been {time_since_first_interim_result} ms since first  interim result and required time to wait for it is {self.required_delay_before_speaking}. Hence sleeping for 100ms. self.time_since_first_interim_result {self.time_since_first_interim_result}")
                     if time_since_first_interim_result != -1 and time_since_first_interim_result < self.required_delay_before_speaking:
                         await asyncio.sleep(0.1) #sleep for 100ms and continue
@@ -2371,21 +2371,39 @@ class TaskManager(BaseManager):
                     await self.__process_end_of_conversation()
 
                 sequence_id = message['meta_info'].get('sequence_id')
-                if sequence_id is not None and self.interruption_manager.should_send_audio(sequence_id):
-                    self.tools["input"].update_is_audio_being_played(True)
-                    await self.tools["output"].handle(message)
-                    try:
-                        duration = calculate_audio_duration(len(message["data"]), self.sampling_rate, format = message['meta_info']['format'])
-                        self.conversation_recording['output'].append({'data': message['data'], "start_time": time.time(), "duration": duration})
-                    except Exception as e:
-                        duration = 0.256
-                        logger.info("Exception in __process_output_loop: {}".format(str(e)))
-                else:
-                    # Audio blocked - either invalid sequence_id or user is speaking
-                    if self.interruption_manager.is_user_speaking():
-                        logger.info(f'Audio blocked: user is speaking (sequence_id={sequence_id})')
-                    else:
-                        logger.info(f'Audio blocked: sequence_id {sequence_id} not in valid set {self.interruption_manager.sequence_ids}')
+
+                # Centralized tri-state decision loop (handles race condition + grace period)
+                should_continue_outer_loop = False
+                while True:
+                    status = self.interruption_manager.get_audio_send_status(
+                        sequence_id,
+                        len(self.history)
+                    )
+
+                    if status == "SEND":
+                        # Audio approved - send it
+                        self.tools["input"].update_is_audio_being_played(True)
+                        await self.tools["output"].handle(message)
+                        try:
+                            duration = calculate_audio_duration(len(message["data"]), self.sampling_rate, format=message['meta_info']['format'])
+                            self.conversation_recording['output'].append({'data': message['data'], "start_time": time.time(), "duration": duration})
+                        except Exception as e:
+                            duration = 0.256
+                            logger.info("Exception in __process_output_loop: {}".format(str(e)))
+                        break  # Exit inner loop, audio sent
+
+                    elif status == "BLOCK":
+                        # Audio blocked (user speaking or invalid sequence) - discard
+                        logger.info(f'Audio blocked: discarding message (sequence_id={sequence_id})')
+                        should_continue_outer_loop = True
+                        break  # Exit inner loop, skip to next message
+
+                    elif status == "WAIT":
+                        # Grace period active - hold and retry
+                        await asyncio.sleep(0.05)
+                        # Continue inner loop to re-check status
+
+                if should_continue_outer_loop:
                     continue
 
                 # Reset asked_if_user_is_still_there flag after any message except is_user_online_message
