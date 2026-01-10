@@ -186,17 +186,7 @@ class DeepgramTranscriber(BaseTranscriber):
 
         # Build turn latencies (same as UtteranceEnd logic)
         try:
-            # Calculate time from first/last interim to final (force_finalize)
-            first_interim_to_final_ms = None
-            last_interim_to_final_ms = None
-            if self.current_turn_interim_details:
-                first_interim_received_at = self.current_turn_interim_details[0].get('received_at')
-                last_interim_received_at = self.current_turn_interim_details[-1].get('received_at')
-                now = time.time()
-                if first_interim_received_at:
-                    first_interim_to_final_ms = round((now - first_interim_received_at) * 1000, 2)
-                if last_interim_received_at:
-                    last_interim_to_final_ms = round((now - last_interim_received_at) * 1000, 2)
+            first_interim_to_final_ms, last_interim_to_final_ms = self.calculate_interim_to_final_latencies(self.current_turn_interim_details)
 
             self.turn_latencies.append({
                 'turn_id': self.current_turn_id,
@@ -494,17 +484,7 @@ class DeepgramTranscriber(BaseTranscriber):
 
                             # Build turn_latencies with new metrics before resetting
                             try:
-                                # Calculate time from first/last interim to final (speech_final)
-                                first_interim_to_final_ms = None
-                                last_interim_to_final_ms = None
-                                if self.current_turn_interim_details:
-                                    first_interim_received_at = self.current_turn_interim_details[0].get('received_at')
-                                    last_interim_received_at = self.current_turn_interim_details[-1].get('received_at')
-                                    now = time.time()
-                                    if first_interim_received_at:
-                                        first_interim_to_final_ms = round((now - first_interim_received_at) * 1000, 2)
-                                    if last_interim_received_at:
-                                        last_interim_to_final_ms = round((now - last_interim_received_at) * 1000, 2)
+                                first_interim_to_final_ms, last_interim_to_final_ms = self.calculate_interim_to_final_latencies(self.current_turn_interim_details)
 
                                 self.turn_latencies.append({
                                     'turn_id': self.current_turn_id,
@@ -539,17 +519,7 @@ class DeepgramTranscriber(BaseTranscriber):
 
                         # Build turn_latencies with new metrics before resetting
                         try:
-                            # Calculate time from first/last interim to final (UtteranceEnd)
-                            first_interim_to_final_ms = None
-                            last_interim_to_final_ms = None
-                            if self.current_turn_interim_details:
-                                first_interim_received_at = self.current_turn_interim_details[0].get('received_at')
-                                last_interim_received_at = self.current_turn_interim_details[-1].get('received_at')
-                                now = time.time()
-                                if first_interim_received_at:
-                                    first_interim_to_final_ms = round((now - first_interim_received_at) * 1000, 2)
-                                if last_interim_received_at:
-                                    last_interim_to_final_ms = round((now - last_interim_received_at) * 1000, 2)
+                            first_interim_to_final_ms, last_interim_to_final_ms = self.calculate_interim_to_final_latencies(self.current_turn_interim_details)
 
                             self.turn_latencies.append({
                                 'turn_id': self.current_turn_id,
