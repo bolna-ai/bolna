@@ -1575,18 +1575,17 @@ class TaskManager(BaseManager):
                     self.interim_history = copy.deepcopy(messages)
 
                 await self._handle_llm_output(next_step, text_chunk, should_bypass_synth, meta_info)
-            else:
-                if self.turn_based_conversation:
-                    self.history.append({"role": "assistant", "content": llm_response})
-                # messages.append({"role": "assistant", "content": llm_response})
-                # self.history = copy.deepcopy(messages)
-                await self._handle_llm_output(next_step, llm_response, should_bypass_synth, meta_info, is_function_call=should_trigger_function_call)
-                convert_to_request_log(message=llm_response, meta_info=meta_info, component="llm", direction="response", model=self.llm_config["model"], run_id= self.run_id)
 
         detected_lang = self.language_detector.dominant_language or self.language
         filler_message = compute_function_pre_call_message(detected_lang, function_tool, function_tool_message)
         if self.stream and llm_response != filler_message:
             self.__store_into_history(meta_info, messages, llm_response, should_trigger_function_call= should_trigger_function_call)
+        elif not self.stream:
+            llm_response = llm_response.strip()
+            if self.turn_based_conversation:
+                self.history.append({"role": "assistant", "content": llm_response})
+            await self._handle_llm_output(next_step, llm_response, should_bypass_synth, meta_info, is_function_call=should_trigger_function_call)
+            convert_to_request_log(message=llm_response, meta_info=meta_info, component="llm", direction="response", model=self.llm_config["model"], run_id=self.run_id)
 
         # Collect RAG latency if present (from KnowledgeBaseAgent)
         if meta_info.get('rag_latency'):
