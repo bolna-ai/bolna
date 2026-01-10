@@ -14,7 +14,7 @@ import websockets
 
 import aiohttp
 
-from bolna.constants import ACCIDENTAL_INTERRUPTION_PHRASES, DEFAULT_USER_ONLINE_MESSAGE, DEFAULT_USER_ONLINE_MESSAGE_TRIGGER_DURATION, FILLER_DICT, DEFAULT_LANGUAGE_CODE, DEFAULT_TIMEZONE, LANGUAGE_NAMES
+from bolna.constants import ACCIDENTAL_INTERRUPTION_PHRASES, DEFAULT_USER_ONLINE_MESSAGE, DEFAULT_USER_ONLINE_MESSAGE_TRIGGER_DURATION, FILLER_DICT, DEFAULT_LANGUAGE_CODE, DEFAULT_TIMEZONE, LANGUAGE_NAMES, LLM_DEFAULT_CONFIGS
 from bolna.helpers.function_calling_helpers import trigger_api, computed_api_response
 from bolna.memory.cache.vector_cache import VectorCache
 from .base_manager import BaseManager
@@ -44,7 +44,11 @@ class TaskManager(BaseManager):
         self.kwargs["task_manager_instance"] = self
 
         self.conversation_start_init_ts = time.time() * 1000
-        self.llm_latencies = {'connection_latency_ms': None, 'turn_latencies': []}
+        self.llm_latencies = {
+            'connection_latency_ms': None, 
+            'turn_latencies': [],
+            'other_latencies': []  # List of {type, latency_ms, timestamp}
+        }
         self.transcriber_latencies = {'connection_latency_ms': None, 'turn_latencies': []}
         self.synthesizer_latencies = {'connection_latency_ms': None, 'turn_latencies': []}
         self.rag_latencies = {'turn_latencies': []}
@@ -762,8 +766,8 @@ class TaskManager(BaseManager):
                 self.kwargs.pop('api_version', None)
 
                 if self._is_summarization_task() or self._is_extraction_task():
-                    llm_config['model'] = 'gpt-4.1-mini'
-                    llm_config['provider'] = 'openai'
+                    llm_config['model'] = LLM_DEFAULT_CONFIGS["summarization"]["model"]
+                    llm_config['provider'] = LLM_DEFAULT_CONFIGS["summarization"]["provider"]
 
             if llm_config["provider"] in SUPPORTED_LLM_PROVIDERS.keys():
                 llm_class = SUPPORTED_LLM_PROVIDERS.get(llm_config["provider"])
@@ -1180,14 +1184,29 @@ class TaskManager(BaseManager):
                 'content': message
             })
 
+            start_time = time.time()
             json_data = await self.tools["llm_agent"].generate(self.history)
+            latency_ms = (time.time() - start_time) * 1000
+            
             if self.task_config["task_type"] == "summarization":
                 self.summarized_data = json_data["summary"]
+                self.llm_latencies['other_latencies'].append({
+                    'type': 'summarization',
+                    "latency_ms": latency_ms,
+                    "model": LLM_DEFAULT_CONFIGS["summarization"]["model"],
+                    "provider": LLM_DEFAULT_CONFIGS["summarization"]["provider"]
+                })
             else:
                 json_data = clean_json_string(json_data)
                 if type(json_data) is not dict:
                     json_data = json.loads(json_data)
                 self.extracted_data = json_data
+                self.llm_latencies['other_latencies'].append({
+                    "type": 'extraction',
+                    "latency_ms": latency_ms,
+                    "model": LLM_DEFAULT_CONFIGS["extraction"]["model"],
+                    "provider": LLM_DEFAULT_CONFIGS["extraction"]["provider"]
+                })
 
     # This observer works only for messages which have sequence_id != -1
     def final_chunk_played_observer(self, is_final_chunk_played):
@@ -1269,11 +1288,6 @@ class TaskManager(BaseManager):
         self.conversation_ended = True
         self.ended_by_assistant = True
 
-        # Cancel voicemail check task if still running
-        if self.voicemail_check_task is not None and not self.voicemail_check_task.done():
-            logger.info("Cancelling voicemail check task during conversation end")
-            self.voicemail_check_task.cancel()
-            self.voicemail_check_task = None
 
         await self.tools["input"].stop_handler()
         logger.info("Stopped input handler")
@@ -1281,6 +1295,12 @@ class TaskManager(BaseManager):
             logger.info("Stopping transcriber")
             await self.tools["transcriber"].toggle_connection()
             await asyncio.sleep(2)  # Making sure whatever message was passed is over
+            
+        # Cancel voicemail check task if still running
+        if self.voicemail_check_task is not None and not self.voicemail_check_task.done():
+            logger.info("Cancelling voicemail check task during conversation end")
+            self.voicemail_check_task.cancel()
+            self.voicemail_check_task = None
 
     def __update_preprocessed_tree_node(self):
         logger.info(f"It's a preprocessed flow and hence updating current node")
@@ -1555,18 +1575,17 @@ class TaskManager(BaseManager):
                     self.interim_history = copy.deepcopy(messages)
 
                 await self._handle_llm_output(next_step, text_chunk, should_bypass_synth, meta_info)
-            else:
-                if self.turn_based_conversation:
-                    self.history.append({"role": "assistant", "content": llm_response})
-                # messages.append({"role": "assistant", "content": llm_response})
-                # self.history = copy.deepcopy(messages)
-                await self._handle_llm_output(next_step, llm_response, should_bypass_synth, meta_info, is_function_call=should_trigger_function_call)
-                convert_to_request_log(message=llm_response, meta_info=meta_info, component="llm", direction="response", model=self.llm_config["model"], run_id= self.run_id)
 
         detected_lang = self.language_detector.dominant_language or self.language
         filler_message = compute_function_pre_call_message(detected_lang, function_tool, function_tool_message)
         if self.stream and llm_response != filler_message:
             self.__store_into_history(meta_info, messages, llm_response, should_trigger_function_call= should_trigger_function_call)
+        elif not self.stream:
+            llm_response = llm_response.strip()
+            if self.turn_based_conversation:
+                self.history.append({"role": "assistant", "content": llm_response})
+            await self._handle_llm_output(next_step, llm_response, should_bypass_synth, meta_info, is_function_call=should_trigger_function_call)
+            convert_to_request_log(message=llm_response, meta_info=meta_info, component="llm", direction="response", model=self.llm_config["model"], run_id=self.run_id)
 
         # Collect RAG latency if present (from KnowledgeBaseAgent)
         if meta_info.get('rag_latency'):
@@ -1644,12 +1663,23 @@ class TaskManager(BaseManager):
 
             if self.agent_type not in ["graph_agent"]:
                 if self.use_llm_to_determine_hangup and not self.turn_based_conversation:
-                    completion_res = await self.tools["llm_agent"].check_for_completion(messages, self.check_for_completion_prompt)
+                    completion_res, metadata = await self.tools["llm_agent"].check_for_completion(messages, self.check_for_completion_prompt)
+
                     should_hangup = (
                         str(completion_res.get("hangup", "")).lower() == "yes"
                         if isinstance(completion_res, dict)
                         else False
                     )
+
+                    # Track hangup check latency (latency returned by agent)
+                    self.llm_latencies['other_latencies'].append({
+                        "type": 'hangup_check',
+                        "latency_ms": metadata.get("latency_ms", None),
+                        "model": self.check_for_completion_llm,
+                        "provider": "openai",  # TODO: Make dynamic based on provider used
+                        "service_tier": metadata.get("service_tier", None),
+                        "llm_host": metadata.get("llm_host", None)
+                    })
 
                     prompt = [
                             {'role': 'system', 'content': self.check_for_completion_prompt},
@@ -1659,8 +1689,8 @@ class TaskManager(BaseManager):
                     convert_to_request_log(message=completion_res, meta_info= meta_info, component="llm_hangup", direction="response", model=self.check_for_completion_llm, run_id= self.run_id)
 
                     if should_hangup:
-                        await self.process_call_hangup()
                         self.hangup_detail = "llm_prompted_hangup"
+                        await self.process_call_hangup()
                         return
 
             self.llm_processed_request_ids.add(self.current_request_id)
@@ -1847,7 +1877,7 @@ class TaskManager(BaseManager):
                     run_id=self.run_id
                 )
 
-                voicemail_result = await self.tools["llm_agent"].check_for_voicemail(
+                voicemail_result, metadata = await self.tools["llm_agent"].check_for_voicemail(
                     transcriber_message,
                     self.voicemail_detection_prompt
                 )
@@ -1857,6 +1887,16 @@ class TaskManager(BaseManager):
                     if isinstance(voicemail_result, dict)
                     else False
                 )
+
+                # Track voicemail check latency (latency returned by agent)
+                self.llm_latencies['other_latencies'].append({
+                    "type": 'voicemail_check',
+                    "latency_ms": metadata.get("latency_ms", None),
+                    "model": self.voicemail_llm,
+                    "provider": "openai",  # TODO: Make dynamic based on provider used
+                    "service_tier": metadata.get("service_tier", None),
+                    "llm_host": metadata.get("llm_host", None)
+                })
 
                 convert_to_request_log(
                     message=voicemail_result,
@@ -2403,8 +2443,8 @@ class TaskManager(BaseManager):
 
             if self.hang_conversation_after > 0 and time_since_last_spoken_ai_word > self.hang_conversation_after and time_since_user_last_spoke > self.hang_conversation_after:
                 logger.info(f"{time_since_last_spoken_ai_word} seconds since AI last spoke and {time_since_user_last_spoke} seconds since user last spoke, both exceed {self.hang_conversation_after}s timeout - hanging up")
-                await self.process_call_hangup()
                 self.hangup_detail = "inactivity_timeout"
+                await self.process_call_hangup()
                 break
 
             elif (time_since_last_spoken_ai_word > self.trigger_user_online_message_after and
@@ -2681,9 +2721,13 @@ class TaskManager(BaseManager):
             if self._is_conversation_task():
                 self.transcriber_latencies['connection_latency_ms'] = self.tools["transcriber"].connection_time
                 self.synthesizer_latencies['connection_latency_ms'] = self.tools["synthesizer"].connection_time
-                
+
                 self.transcriber_latencies['turn_latencies'] = self.tools["transcriber"].turn_latencies
                 self.synthesizer_latencies['turn_latencies'] = self.tools["synthesizer"].turn_latencies
+
+                # Collect language detection latency if available
+                if hasattr(self, 'language_detector') and self.language_detector.latency_data:
+                    self.llm_latencies['other_latencies'].append(self.language_detector.latency_data)
 
                 welcome_message_sent_ts = self.tools["output"].get_welcome_message_sent_ts()
 
@@ -2731,12 +2775,21 @@ class TaskManager(BaseManager):
             else:
                 output = self.input_parameters
                 if self.task_config["task_type"] == "extraction":
-                    output = { "extracted_data" : self.extracted_data, "task_type": "extraction"}
+                    output = { "extracted_data" : self.extracted_data,
+                              "task_type": "extraction",
+                              "latency_dict": {
+                                "llm_latencies": self.llm_latencies
+                            }}
                 elif self.task_config["task_type"] == "summarization":
                     logger.info(f"self.summarized_data {self.summarized_data}")
-                    output = {"summary" : self.summarized_data, "task_type": "summarization"}
+                    output = {"summary" : self.summarized_data,
+                              "task_type": "summarization",
+                              "latency_dict": {
+                                "llm_latencies": self.llm_latencies
+                            }}
                 elif self.task_config["task_type"] == "webhook":
                     output = {"status": self.webhook_response, "task_type": "webhook"}
+                    
 
             await asyncio.gather(*tasks_to_cancel)
             return output

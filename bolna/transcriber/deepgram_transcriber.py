@@ -572,11 +572,12 @@ class DeepgramTranscriber(BaseTranscriber):
                             pass
                         yield create_ws_data_packet(data, self.meta_info)
 
-                elif msg["type"] == "Metadata" and msg.get('transaction_key') != 'deprecated':
-                    logger.info(f"Received Metadata from deepgram - {msg}")
-                    self.meta_info["transcriber_duration"] = msg["duration"]
-                    yield create_ws_data_packet("transcriber_connection_closed", self.meta_info)
-                    return
+                elif msg["type"] == "Metadata":
+                    # Capture duration from final Metadata message (actual audio processed by Deepgram)
+                    deepgram_duration = msg.get("duration")
+                    if deepgram_duration is not None:
+                        self.meta_info["deepgram_duration"] = deepgram_duration
+                        logger.info(f"Received Deepgram Metadata with duration: {deepgram_duration}s")
 
             except Exception as e:
                 traceback.print_exc()
@@ -688,8 +689,15 @@ class DeepgramTranscriber(BaseTranscriber):
                         if self.connection_on:
                             await self.push_to_transcriber_queue(message)
                         else:
-                            logger.info("closing the deepgram connection")
+                            logger.info("closing the deepgram connection, waiting for Metadata")
                             await self._close(deepgram_ws, data={"type": "CloseStream"})
+                            try:
+                                async with asyncio.timeout(5):
+                                    async for _ in self.receiver(deepgram_ws):
+                                        if "deepgram_duration" in self.meta_info:
+                                            break
+                            except asyncio.TimeoutError:
+                                logger.warning("Timeout waiting for Deepgram Metadata after CloseStream")
                             break
                 except ConnectionClosedError as e:
                     logger.error(f"Deepgram websocket connection closed during streaming: {e}")
@@ -723,6 +731,10 @@ class DeepgramTranscriber(BaseTranscriber):
                 self.heartbeat_task.cancel()
             if hasattr(self, 'utterance_timeout_task') and self.utterance_timeout_task is not None:
                 self.utterance_timeout_task.cancel()
+
+            # Use Deepgram's actual audio duration for billing
+            if "deepgram_duration" in self.meta_info:
+                self.meta_info["transcriber_duration"] = self.meta_info["deepgram_duration"]
 
             await self.push_to_transcriber_queue(
                 create_ws_data_packet("transcriber_connection_closed", getattr(self, 'meta_info', {}))
