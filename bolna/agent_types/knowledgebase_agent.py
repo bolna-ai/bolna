@@ -1,6 +1,7 @@
 import os
 import asyncio
 import json
+import time
 from typing import List, Tuple, AsyncGenerator, Optional, Dict
 
 from bolna.models import *
@@ -36,16 +37,8 @@ class KnowledgeBaseAgent(BaseAgent):
         self.llm = self._initialize_llm()
 
         # Separate LLM for checking if call should end
-        hangup_kwargs = {}
-        if self.config.get('base_url'):
-            hangup_kwargs['base_url'] = self.config['base_url']
-        if self.config.get('llm_key'):
-            hangup_kwargs['llm_key'] = self.config['llm_key']
-        self.conversation_completion_llm = OpenAiLLM(
-            model=os.getenv('CHECK_FOR_COMPLETION_LLM', self.llm_model),
-            **hangup_kwargs
-        )
-
+        self.conversation_completion_llm = OpenAiLLM(model=os.getenv('CHECK_FOR_COMPLETION_LLM', self.llm_model))
+        self.voicemail_llm = OpenAiLLM(model=os.getenv('VOICEMAIL_DETECTION_LLM', "gpt-4.1-mini"))
         # RAG configuration
         self.rag_config = self._initialize_rag_config()
         self.rag_server_url = os.getenv('RAG_SERVER_URL', 'http://localhost:8000')
@@ -126,12 +119,17 @@ class KnowledgeBaseAgent(BaseAgent):
                 {'role': 'system', 'content': check_for_completion_prompt},
                 {'role': 'user', 'content': format_messages(messages)}
             ]
-            response = await self.conversation_completion_llm.generate(prompt, request_json=True)
-            return json.loads(response)
+            start_time = time.time()
+            response, metadata = await self.conversation_completion_llm.generate(prompt, request_json=True, ret_metadata=True)
+            latency_ms = (time.time() - start_time) * 1000
+            
+            result = json.loads(response)
+            metadata['latency_ms'] = latency_ms
+            return result, metadata
         except Exception as e:
             logger.error(f'check_for_completion error: {e}')
-            return {'hangup': 'No'}
-        
+            return {'hangup': 'No'}, {}
+
     async def check_for_voicemail(self, user_message, voicemail_detection_prompt=None):
         """
         Check if the user message indicates a voicemail system.
@@ -141,7 +139,7 @@ class KnowledgeBaseAgent(BaseAgent):
             voicemail_detection_prompt: Custom prompt for voicemail detection (optional)
         
         Returns:
-            dict with 'is_voicemail': 'Yes' or 'No'
+            dict with 'is_voicemail': 'Yes' or 'No', 'latency_ms': float
         """
         try:
             detection_prompt = voicemail_detection_prompt or VOICEMAIL_DETECTION_PROMPT
@@ -155,13 +153,16 @@ class KnowledgeBaseAgent(BaseAgent):
                 {'role': 'user', 'content': f"User message: {user_message}"}
             ]
 
-            response = await self.conversation_completion_llm.generate(prompt, request_json=True)
+            start_time = time.time()
+            response, metadata = await self.voicemail_llm.generate(prompt, request_json=True, ret_metadata=True)
+            latency_ms = (time.time() - start_time) * 1000
+            
             result = json.loads(response)
-            logger.info(f"Voicemail detection result: {result}")
-            return result
+            metadata['latency_ms'] = latency_ms
+            return result, metadata
         except Exception as e:
             logger.error('check_for_voicemail exception: {}'.format(str(e)))
-            return {'is_voicemail': 'No'}
+            return {'is_voicemail': 'No'}, {}
 
     async def _add_rag_context(self, messages: List[dict]) -> Tuple[List[dict], dict]:
         """
@@ -207,6 +208,27 @@ class KnowledgeBaseAgent(BaseAgent):
                 if vector_id in used_vector_ids:
                     retrieved_sources.append(source)
 
+            # Build a mapping from vector_id to source info
+            vector_id_to_source = {}
+            for source in self.rag_config.get('used_sources', []):
+                vid = source.get('vector_id')
+                if vid:
+                    vector_id_to_source[vid] = source
+
+            # Build contexts list with text and source info
+            retrieved_contexts = []
+            for context in rag_response.contexts:
+                vector_id = context.metadata.get('collection_id', None)
+                source_info = vector_id_to_source.get(vector_id, {})
+                context_entry = {
+                    'text': context.text,
+                    'score': context.score,
+                    'vector_id': source_info.get('vector_id'),
+                    'rag_id': source_info.get('rag_id'),
+                    'source': source_info.get('source'),
+                }
+                retrieved_contexts.append(context_entry)
+
             logger.info(f"RAG: Found {rag_response.total_results} contexts, top score: {rag_response.contexts[0].score:.3f}")
 
             rag_context = await client.format_context_for_prompt(rag_response.contexts)
@@ -235,7 +257,7 @@ Use this information naturally when it helps answer the user's questions. Don't 
             if len(final_messages) > max_messages:
                 final_messages = [final_messages[0]] + final_messages[-(max_messages-1):]
 
-            return final_messages, {'status': 'success', 'retrieved_sources': retrieved_sources, 'latency': rag_latency_data}
+            return final_messages, {'status': 'success', 'retrieved_sources': retrieved_sources, 'contexts': retrieved_contexts, 'latency': rag_latency_data}
 
         except asyncio.TimeoutError:
             logger.error("RAG service timeout")
@@ -244,7 +266,7 @@ Use this information naturally when it helps answer the user's questions. Don't 
             logger.error(f"RAG error: {e}")
             return messages, {'status': 'error', 'message': 'Internal Service Error'}
 
-    async def generate(self, message: List[dict], **kwargs) -> AsyncGenerator[Tuple[str, bool, Optional[Dict], bool, None, None], None]:
+    async def generate(self, message: List[dict], **kwargs) -> AsyncGenerator[Union[Tuple[str, bool, Optional[Dict], bool, None, None], Dict], None]:
         """
         Generate a streaming response with RAG context
         """
@@ -266,6 +288,8 @@ Use this information naturally when it helps answer the user's questions. Don't 
                     'sequence_id': meta_info.get('sequence_id'),
                     **metadata['latency']
                 }
+
+            yield {'messages': messages_with_context}
 
             async for chunk in self.llm.generate_stream(messages_with_context, synthesize=synthesize, meta_info=meta_info):
                 yield chunk

@@ -161,7 +161,9 @@ class LiteLLM(BaseLLM):
                 # Pre-function call message (if any)
                 if not self.gave_out_prefunction_call_message and not received_textual_response:
                     api_tool_pre_call_message = self.api_params.get(called_fun, {}).get("pre_call_message", None)
-                    pre_msg = compute_function_pre_call_message(self.language, called_fun, api_tool_pre_call_message)
+                    detected_lang = meta_info.get('detected_language') if meta_info else None
+                    active_language = detected_lang or self.language
+                    pre_msg = compute_function_pre_call_message(active_language, called_fun, api_tool_pre_call_message)
                     yield pre_msg, True, latency_data, False, called_fun, api_tool_pre_call_message
                     self.gave_out_prefunction_call_message = True
 
@@ -233,7 +235,7 @@ class LiteLLM(BaseLLM):
 
         self.started_streaming = False
 
-    async def generate(self, messages, stream=False, request_json=False, meta_info = None):
+    async def generate(self, messages, stream=False, request_json=False, meta_info = None, ret_metadata=False):
         text = ""
         model_args = self.model_args.copy()
         model_args["model"] = self.model
@@ -280,4 +282,7 @@ class LiteLLM(BaseLLM):
             error_message = str(e)
             logger.error(f'LiteLLM unexpected error generating response: {error_message}')
             raise
-        return text
+        if ret_metadata:
+            return text, {}
+        else:
+            return text

@@ -69,3 +69,24 @@ DEFAULT_USER_ONLINE_MESSAGE = "Hey, are you still there?"
 DEFAULT_USER_ONLINE_MESSAGE_TRIGGER_DURATION = 6
 DEFAULT_LANGUAGE_CODE = 'en'
 DEFAULT_TIMEZONE = 'America/Los_Angeles'
+
+LANGUAGE_NAMES = {
+    'en': 'English', 'hi': 'Hindi', 'bn': 'Bengali',
+    'ta': 'Tamil', 'te': 'Telugu', 'mr': 'Marathi',
+    'gu': 'Gujarati', 'kn': 'Kannada', 'ml': 'Malayalam',
+    'pa': 'Punjabi', 'fr': 'French', 'es': 'Spanish',
+    'pt': 'Portuguese', 'de': 'German', 'it': 'Italian',
+    'nl': 'Dutch', 'id': 'Indonesian', 'ms': 'Malay',
+    'th': 'Thai', 'vi': 'Vietnamese', 'od': 'Odia'
+}
+
+LLM_DEFAULT_CONFIGS = {
+    "summarization": {
+        "model": "gpt-4.1-mini",
+        "provider": "openai"
+    },
+    "extraction": {
+        "model": "gpt-4.1-mini",
+        "provider": "openai"
+    }
+}

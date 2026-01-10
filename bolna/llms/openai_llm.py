@@ -34,7 +34,12 @@ class OpenAiLLM(BaseLLM):
         logger.info(f"Initializing OpenAI LLM with model: {self.model} and maxc tokens {max_tokens}")
         self.max_tokens = max_tokens
         self.temperature = temperature
-        self.model_args = {"max_tokens": self.max_tokens, "temperature": self.temperature, "model": self.model}
+
+        max_tokens_key = "max_tokens"
+        if model.startswith("gpt-5"):
+            max_tokens_key = "max_completion_tokens"
+        self.model_args = {max_tokens_key: self.max_tokens, "temperature": self.temperature, "model": self.model}
+
         if kwargs.get("service_tier") == "priority":
             self.model_args["service_tier"] = "priority"
 
@@ -85,9 +90,11 @@ class OpenAiLLM(BaseLLM):
             "response_format": response_format,
             "messages": messages,
             "stream": True,
-            "stop": ["User:"],
             "user": f"{self.run_id}#{meta_info['turn_id']}"
         }
+
+        if not self.model.startswith("gpt-5"):
+            model_args["stop"] = ["User:"]
 
         if self.trigger_function_call:
             model_args["tools"] = json.loads(self.tools) if isinstance(self.tools, str) else self.tools
@@ -179,7 +186,9 @@ class OpenAiLLM(BaseLLM):
 
                 if not self.gave_out_prefunction_call_message and not received_textual_response:
                     api_tool_pre_call_message = self.api_params[called_fun].get('pre_call_message', None)
-                    pre_msg = compute_function_pre_call_message(self.language, called_fun, api_tool_pre_call_message)
+                    detected_lang = meta_info.get('detected_language') if meta_info else None
+                    active_language = detected_lang or self.language
+                    pre_msg = compute_function_pre_call_message(active_language, called_fun, api_tool_pre_call_message)
                     yield pre_msg, True, latency_data, False, called_fun, api_tool_pre_call_message
                     self.gave_out_prefunction_call_message = True
 
@@ -236,14 +245,21 @@ class OpenAiLLM(BaseLLM):
 
         self.started_streaming = False
     
-    async def generate(self, messages, request_json=False):
+    async def generate(self, messages, request_json=False, ret_metadata=False):
         response_format = self.get_response_format(request_json)
 
         try:
             completion = await self.async_client.chat.completions.create(model=self.model, temperature=0.0, messages=messages,
                                                                          stream=False, response_format=response_format)
             res = completion.choices[0].message.content
-            return res
+            if ret_metadata:
+                metadata = {
+                    "llm_host": self.llm_host,
+                    "service_tier": completion.service_tier if hasattr(completion, 'service_tier') else None
+                }
+                return res, metadata
+            else:
+                return res
         except AuthenticationError as e:
             logger.error(f"OpenAI authentication failed: Invalid or expired API key - {e}")
             raise

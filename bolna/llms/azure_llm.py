@@ -157,7 +157,9 @@ class AzureLLM(BaseLLM):
 
                 if not self.gave_out_prefunction_call_message and not received_textual_response:
                     api_tool_pre_call_message = self.api_params[called_fun].get('pre_call_message', None)
-                    pre_msg = compute_function_pre_call_message(self.language, called_fun, api_tool_pre_call_message)
+                    detected_lang = meta_info.get('detected_language') if meta_info else None
+                    active_language = detected_lang or self.language
+                    pre_msg = compute_function_pre_call_message(active_language, called_fun, api_tool_pre_call_message)
                     yield pre_msg, True, latency_data, False, called_fun, api_tool_pre_call_message
                     self.gave_out_prefunction_call_message = True
 
@@ -214,7 +216,7 @@ class AzureLLM(BaseLLM):
 
         self.started_streaming = False
 
-    async def generate(self, messages, request_json=False):
+    async def generate(self, messages, request_json=False, ret_metadata=False):
         response_format = self.get_response_format(request_json)
 
         try:
@@ -227,7 +229,10 @@ class AzureLLM(BaseLLM):
             )
 
             res = completion.choices[0].message.content
-            return res
+            if ret_metadata:  
+                return res, {}
+            else:
+                return res
         except BadRequestError as e:
             logger.error(f"Azure OpenAI bad request: {e}")
             raise
