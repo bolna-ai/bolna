@@ -2722,9 +2722,13 @@ class TaskManager(BaseManager):
             if self._is_conversation_task():
                 self.transcriber_latencies['connection_latency_ms'] = self.tools["transcriber"].connection_time
                 self.synthesizer_latencies['connection_latency_ms'] = self.tools["synthesizer"].connection_time
-                
+
                 self.transcriber_latencies['turn_latencies'] = self.tools["transcriber"].turn_latencies
                 self.synthesizer_latencies['turn_latencies'] = self.tools["synthesizer"].turn_latencies
+
+                # Collect language detection latency if available
+                if hasattr(self, 'language_detector') and self.language_detector.latency_data:
+                    self.llm_latencies['other_latencies'].append(self.language_detector.latency_data)
 
                 welcome_message_sent_ts = self.tools["output"].get_welcome_message_sent_ts()
 
