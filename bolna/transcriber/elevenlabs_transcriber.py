@@ -184,10 +184,14 @@ class ElevenLabsTranscriber(BaseTranscriber):
             return
 
         try:
+            first_interim_to_final_ms, last_interim_to_final_ms = self.calculate_interim_to_final_latencies(self.current_turn_interim_details)
+
             self.turn_latencies.append({
                 'turn_id': self.current_turn_id,
                 'sequence_id': self.current_turn_id,
                 'interim_details': self.current_turn_interim_details,
+                'first_interim_to_final_ms': first_interim_to_final_ms,
+                'last_interim_to_final_ms': last_interim_to_final_ms,
                 'force_finalized': True
             })
         except Exception as e:
@@ -422,10 +426,14 @@ class ElevenLabsTranscriber(BaseTranscriber):
                         }
 
                         try:
+                            first_interim_to_final_ms, last_interim_to_final_ms = self.calculate_interim_to_final_latencies(self.current_turn_interim_details)
+
                             self.turn_latencies.append({
                                 'turn_id': self.current_turn_id,
                                 'sequence_id': self.current_turn_id,
-                                'interim_details': self.current_turn_interim_details
+                                'interim_details': self.current_turn_interim_details,
+                                'first_interim_to_final_ms': first_interim_to_final_ms,
+                                'last_interim_to_final_ms': last_interim_to_final_ms
                             })
 
                             # Complete turn reset - set flag to False to allow next utterance
@@ -464,10 +472,14 @@ class ElevenLabsTranscriber(BaseTranscriber):
                                             word_latency = round(timestamp_ms() - audio_sent_at, 5)
                                             word_obj['latency_ms'] = word_latency
 
+                            first_interim_to_final_ms, last_interim_to_final_ms = self.calculate_interim_to_final_latencies(self.current_turn_interim_details)
+
                             self.turn_latencies.append({
                                 'turn_id': self.current_turn_id,
                                 'sequence_id': self.current_turn_id,
                                 'interim_details': self.current_turn_interim_details,
+                                'first_interim_to_final_ms': first_interim_to_final_ms,
+                                'last_interim_to_final_ms': last_interim_to_final_ms,
                                 'words': words,
                                 'detected_language': detected_language
                             })
