@@ -1678,7 +1678,8 @@ class TaskManager(BaseManager):
                         "model": self.check_for_completion_llm,
                         "provider": "openai",  # TODO: Make dynamic based on provider used
                         "service_tier": metadata.get("service_tier", None),
-                        "llm_host": metadata.get("llm_host", None)
+                        "llm_host": metadata.get("llm_host", None),
+                        "sequence_id": meta_info.get("sequence_id")
                     })
 
                     prompt = [
@@ -1895,7 +1896,8 @@ class TaskManager(BaseManager):
                     "model": self.voicemail_llm,
                     "provider": "openai",  # TODO: Make dynamic based on provider used
                     "service_tier": metadata.get("service_tier", None),
-                    "llm_host": metadata.get("llm_host", None)
+                    "llm_host": metadata.get("llm_host", None),
+                    "sequence_id": meta_info.get("sequence_id")  # May be None for interim checks
                 })
 
                 convert_to_request_log(
