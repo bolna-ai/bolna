@@ -235,7 +235,7 @@ class LiteLLM(BaseLLM):
 
         self.started_streaming = False
 
-    async def generate(self, messages, stream=False, request_json=False, meta_info = None):
+    async def generate(self, messages, stream=False, request_json=False, meta_info = None, ret_metadata=False):
         text = ""
         model_args = self.model_args.copy()
         model_args["model"] = self.model
@@ -282,4 +282,7 @@ class LiteLLM(BaseLLM):
             error_message = str(e)
             logger.error(f'LiteLLM unexpected error generating response: {error_message}')
             raise
-        return text
+        if ret_metadata:
+            return text, {}
+        else:
+            return text

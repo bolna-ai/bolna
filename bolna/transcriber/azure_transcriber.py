@@ -249,10 +249,14 @@ class AzureTranscriber(BaseTranscriber):
                 if not self.current_turn_id:
                     self.current_turn_id = self.meta_info.get('turn_id') or self.meta_info.get('request_id')
 
+                first_interim_to_final_ms, last_interim_to_final_ms = self.calculate_interim_to_final_latencies(self.current_turn_interim_details)
+
                 turn_info = {
                     'turn_id': self.current_turn_id,
                     'sequence_id': self.current_turn_id,
-                    'interim_details': self.current_turn_interim_details
+                    'interim_details': self.current_turn_interim_details,
+                    'first_interim_to_final_ms': first_interim_to_final_ms,
+                    'last_interim_to_final_ms': last_interim_to_final_ms
                 }
                 self.turn_latencies.append(turn_info)
 
