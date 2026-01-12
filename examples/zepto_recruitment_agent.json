@@ -1,0 +1,159 @@
+{
+  "agent_name": "zepto_recruitment_tamil",
+  "agent_type": "graph_agent",
+  "agent_welcome_message": "வணக்கம், நான் கயல், Zepto-ல இருந்து கால் பண்றேன்.",
+  "tasks": [
+    {
+      "task_type": "conversation",
+      "toolchain": {
+        "execution": "parallel",
+        "pipelines": [["transcriber", "llm", "synthesizer"]]
+      },
+      "tools_config": {
+        "transcriber": {
+          "provider": "deepgram",
+          "model": "nova-2",
+          "language": "ta",
+          "stream": true,
+          "endpointing": 400
+        },
+        "llm_agent": {
+          "agent_type": "graph_agent",
+          "agent_flow_type": "streaming",
+          "llm_config": {
+            "agent_information": "Kayal, female Tamil-speaking recruitment agent for Zepto. Speaks naturally in Tamil with occasional English words. Friendly and professional tone.",
+            "model": "gpt-4o-mini",
+            "max_tokens": 150,
+            "temperature": 0.7,
+
+            "routing_provider": "groq",
+            "routing_model": "llama-3.3-70b-versatile",
+
+            "current_node_id": "opener",
+            "nodes": [
+              {
+                "id": "opener",
+                "prompt": "You are Kayal, a friendly Tamil-speaking female recruiter for Zepto. Start by asking if the user is free to talk for 2 minutes. Say in Tamil: 'இப்போ ஒரு ரெண்டு நிமிஷம் ஃப்ரீயா இருக்கீங்களா?' Be warm and natural.",
+                "edges": [
+                  {
+                    "to_node_id": "city_question",
+                    "condition": "User confirms they are available and willing to talk (e.g., 'yes', 'free', 'sollunga', 'ஆமா')"
+                  },
+                  {
+                    "to_node_id": "not_interested_closing",
+                    "condition": "User explicitly says they are not interested or declines (e.g., 'no', 'not interested', 'வேண்டாம்')"
+                  },
+                  {
+                    "to_node_id": "busy_closing",
+                    "condition": "User says they are busy and wants a callback later (e.g., 'busy', 'call later', 'அப்புறம் call பண்ணுங்க')"
+                  }
+                ]
+              },
+              {
+                "id": "city_question",
+                "prompt": "Now ask which city they are currently living in. Mention that Zepto is hiring for Picker and Packer roles. Say in Tamil: 'ஜெப்டோல Picker and Packer வேலைக்கு ஆள் எடுக்குறாங்க. நீங்க இப்போ எந்த சிட்டில இருக்கீங்கனு சொல்ல முடியுமா?'",
+                "edges": [
+                  {
+                    "to_node_id": "job_pitch",
+                    "condition": "User provides a city name (any Indian city)",
+                    "parameters": {"city": "string"}
+                  }
+                ]
+              },
+              {
+                "id": "job_pitch",
+                "prompt": "Explain the job details and ask if interested. Key points: Warehouse work, packing orders, salary 13,500-16,000 per month. Say in Tamil: 'இது Warehouse-ல ஆர்டர்ஸ் pack பண்ற வேலை. சம்பளம் மாசம் 13,500 to 16,000 ரூபாய். உங்களுக்கு இந்த வேலையில இன்ட்ரஸ்ட் இருக்கா?'",
+                "edges": [
+                  {
+                    "to_node_id": "age_check",
+                    "condition": "User expresses interest in the job (e.g., 'yes', 'interested', 'ஆமா', 'சரி')"
+                  },
+                  {
+                    "to_node_id": "not_interested_closing",
+                    "condition": "User says they are not interested in this job"
+                  }
+                ]
+              },
+              {
+                "id": "age_check",
+                "prompt": "Check if the user is 18 years or older (eligibility requirement). Ask in Tamil: 'உங்களுக்கு பதினெட்டு வயசு ஆயிடுச்சா?'",
+                "edges": [
+                  {
+                    "to_node_id": "education_check",
+                    "condition": "User confirms they are 18 years or older"
+                  },
+                  {
+                    "to_node_id": "ineligible_closing",
+                    "condition": "User says they are under 18 years old"
+                  }
+                ]
+              },
+              {
+                "id": "education_check",
+                "prompt": "Check if the user has completed 10th grade (eligibility requirement). Ask in Tamil: 'நீங்க பத்தாம் வகுப்பு பாஸ் பண்ணிருக்கீங்களா?'",
+                "edges": [
+                  {
+                    "to_node_id": "shift_preference",
+                    "condition": "User confirms they have completed 10th grade or higher education"
+                  },
+                  {
+                    "to_node_id": "ineligible_closing",
+                    "condition": "User says they have not completed 10th grade"
+                  }
+                ]
+              },
+              {
+                "id": "shift_preference",
+                "prompt": "Ask about their preferred work shift. Say in Tamil: 'Day shift அல்லது night shift - எது உங்களுக்கு சரியா வரும்?'",
+                "edges": [
+                  {
+                    "to_node_id": "success_closing",
+                    "condition": "User provides their shift preference (day or night)",
+                    "parameters": {"shift": "string"}
+                  }
+                ]
+              },
+              {
+                "id": "success_closing",
+                "prompt": "Thank the user warmly and confirm that HR will contact them. Say in Tamil: 'மிக்க நன்றி! உங்க details-ஐ நான் HR-கிட்ட share பண்றேன். அவங்க உங்களை விரைவில் contact பண்ணுவாங்க. உங்க நாள் நல்லா போகட்டும்!'",
+                "edges": []
+              },
+              {
+                "id": "not_interested_closing",
+                "prompt": "Politely close the call, thank them for their time. Say in Tamil: 'பரவாயில்லை, உங்க நேரத்துக்கு ரொம்ப நன்றி. Have a nice day!'",
+                "edges": []
+              },
+              {
+                "id": "busy_closing",
+                "prompt": "Acknowledge they are busy and offer to call back. Say in Tamil: 'சரி புரியுது. நான் உங்களை வேற நேரத்தில் call பண்றேன். எப்போ call பண்ணலாம்னு சொல்லுங்க.'",
+                "edges": []
+              },
+              {
+                "id": "ineligible_closing",
+                "prompt": "Politely explain the eligibility requirements. Say in Tamil: 'இந்த role-க்கு 18 வயசும் 10th pass-உம் கண்டிப்பா வேணும். நீங்க eligible ஆனதுக்கு அப்புறம் apply பண்ணுங்க. நன்றி!'",
+                "edges": []
+              }
+            ]
+          }
+        },
+        "synthesizer": {
+          "provider": "smallest",
+          "stream": true,
+          "provider_config": {
+            "voice": "ta-IN-PallaviNeural",
+            "voice_id": "ta-IN-PallaviNeural",
+            "model": "lightning",
+            "language": "ta"
+          }
+        }
+      },
+      "task_config": {
+        "optimize_latency": true,
+        "hangup_after_silence": 15,
+        "interruption_backoff_period": 100,
+        "number_of_words_for_interruption": 2,
+        "backchanneling": false
+      }
+    }
+  ]
+}

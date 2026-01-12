@@ -11,7 +11,15 @@ from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.rag_service_client import RAGServiceClient, RAGServiceClientSingleton
 from bolna.helpers.utils import now_ms
 
-from typing import List, Tuple, Generator, AsyncGenerator
+from typing import List, Tuple, Generator, AsyncGenerator, Optional, Dict, Any
+
+# Optional Groq support for fast routing
+try:
+    from groq import Groq
+    GROQ_AVAILABLE = True
+except ImportError:
+    GROQ_AVAILABLE = False
+    Groq = None
 
 load_dotenv()
 logger = configure_logger(__name__)
@@ -29,6 +37,11 @@ class GraphAgent(BaseAgent):
         self.node_structure = self.build_node_structure()
         self.rag_configs = self.initialize_rag_configs()
         self.rag_server_url = os.getenv('RAG_SERVER_URL', 'http://localhost:8000')
+
+        # Initialize routing client (Groq for speed, or fallback to OpenAI)
+        self.routing_provider = self.config.get('routing_provider')  # None = auto-detect
+        self.routing_model = self.config.get('routing_model')  # None = use provider default
+        self._init_routing_client()
 
     def initialize_rag_configs(self) -> Dict[str, Dict]:
         """Initialize RAG configurations for each node."""
@@ -64,8 +77,195 @@ class GraphAgent(BaseAgent):
                 }
                 
                 logger.info(f"Initialized RAG config for node {node['id']} with collections: {collections}")
-                
+
         return rag_configs
+
+    def _init_routing_client(self):
+        """Initialize the routing client for fast node transitions.
+
+        Priority:
+        1. If routing_provider='groq' and GROQ_API_KEY set -> use Groq (fastest, ~200ms)
+        2. If routing_provider='openai' -> use OpenAI
+        3. Auto-detect: if GROQ_API_KEY available, use Groq, else OpenAI
+
+        Default models:
+        - Groq: llama-3.3-70b-versatile (best accuracy + speed for multilingual)
+        - OpenAI: gpt-4o-mini (good balance of speed and accuracy)
+        """
+        groq_available = GROQ_AVAILABLE and os.getenv('GROQ_API_KEY')
+
+        # Auto-detect provider if not specified
+        if not self.routing_provider:
+            self.routing_provider = 'groq' if groq_available else 'openai'
+
+        if self.routing_provider == 'groq':
+            if groq_available:
+                self.routing_client = Groq(api_key=os.getenv('GROQ_API_KEY'))
+                # Default to llama-3.3-70b-versatile (best for multilingual routing)
+                if not self.routing_model:
+                    self.routing_model = 'llama-3.3-70b-versatile'
+                logger.info(f"Routing initialized with Groq ({self.routing_model}) - fast mode ~200ms")
+            else:
+                logger.warning("Groq requested but GROQ_API_KEY not set or groq package not installed, falling back to OpenAI")
+                self.routing_client = self.openai
+                self.routing_provider = 'openai'
+                if not self.routing_model:
+                    self.routing_model = 'gpt-4o-mini'
+        else:
+            self.routing_client = self.openai
+            if not self.routing_model:
+                self.routing_model = 'gpt-4o-mini'
+            logger.info(f"Routing initialized with OpenAI ({self.routing_model})")
+
+    def _build_transition_tools(self, node: dict) -> List[dict]:
+        """Build function/tool definitions for all edges from a node.
+
+        Each edge becomes a callable function that the LLM can invoke to transition.
+        """
+        tools = []
+        edges = node.get('edges', [])
+
+        for edge in edges:
+            to_node_id = edge.get('to_node_id')
+            condition = edge.get('condition', '')
+
+            # Generate function name if not provided
+            func_name = edge.get('function_name') or f"transition_to_{to_node_id}"
+
+            # Generate description from condition if not provided
+            func_description = edge.get('function_description') or f"Call this function when: {condition}"
+
+            # Build parameters schema
+            parameters = {"type": "object", "properties": {}, "required": []}
+            if edge.get('parameters'):
+                for param_name, param_type in edge['parameters'].items():
+                    parameters["properties"][param_name] = {
+                        "type": param_type,
+                        "description": f"The {param_name} provided by the user"
+                    }
+                    parameters["required"].append(param_name)
+
+            tool = {
+                "type": "function",
+                "function": {
+                    "name": func_name,
+                    "description": func_description,
+                    "parameters": parameters
+                }
+            }
+            tools.append(tool)
+
+            logger.debug(f"Built transition tool: {func_name} -> {to_node_id}")
+
+        # Add a "stay_on_current_node" function for when no transition is needed
+        tools.append({
+            "type": "function",
+            "function": {
+                "name": "stay_on_current_node",
+                "description": "Call this when the user's response doesn't clearly match any transition condition, or when you need more information from the user.",
+                "parameters": {"type": "object", "properties": {}, "required": []}
+            }
+        })
+
+        return tools
+
+    def _get_edge_by_function_name(self, node: dict, function_name: str) -> Optional[dict]:
+        """Find the edge that corresponds to a function name."""
+        for edge in node.get('edges', []):
+            expected_name = edge.get('function_name') or f"transition_to_{edge['to_node_id']}"
+            if expected_name == function_name:
+                return edge
+        return None
+
+    async def decide_next_node_with_functions(self, history: List[dict]) -> Tuple[Optional[str], Optional[Dict[str, Any]], float]:
+        """Decide next node using LLM function calling.
+
+        This is the new Pipecat-style routing that uses structured function calls
+        instead of free-text node ID extraction.
+
+        Args:
+            history: Conversation history
+
+        Returns:
+            Tuple of (next_node_id, extracted_params, latency_ms)
+            - next_node_id: The node to transition to, or None to stay
+            - extracted_params: Any parameters extracted during transition
+            - latency_ms: Time taken for the routing decision
+        """
+        start_time = time.perf_counter()
+
+        current_node = self.get_node_by_id(self.current_node_id)
+        if not current_node:
+            logger.error(f"Current node '{self.current_node_id}' not found")
+            return None, None, 0
+
+        edges = current_node.get('edges', [])
+        if not edges:
+            logger.debug(f"Node '{self.current_node_id}' has no edges, staying on current node")
+            return None, None, 0
+
+        # Build transition tools from edges
+        tools = self._build_transition_tools(current_node)
+
+        # Build the routing prompt
+        system_prompt = f"""You are a conversation flow controller for {self.agent_information}.
+
+Current conversation state: {current_node['id']}
+Current node objective: {current_node.get('prompt', '')}
+
+Your task: Analyze the user's latest message and decide which transition function to call.
+- Call the appropriate transition function if the user's response matches that condition
+- Call 'stay_on_current_node' if the response is unclear or needs clarification
+
+Be decisive. If the user's intent is clear, call the transition function immediately."""
+
+        # Get the last user message
+        user_message = history[-1]["content"] if history else ""
+
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_message}
+        ]
+
+        try:
+            response = self.routing_client.chat.completions.create(
+                model=self.routing_model,
+                messages=messages,
+                tools=tools,
+                tool_choice="required",  # Force a function call
+                max_tokens=100,
+                temperature=0.1  # Low temperature for consistent routing
+            )
+
+            latency_ms = (time.perf_counter() - start_time) * 1000
+
+            # Extract the function call
+            message = response.choices[0].message
+            if message.tool_calls:
+                tool_call = message.tool_calls[0]
+                function_name = tool_call.function.name
+                function_args = json.loads(tool_call.function.arguments) if tool_call.function.arguments else {}
+
+                logger.info(f"Routing decision: {function_name} (latency: {latency_ms:.1f}ms)")
+
+                if function_name == "stay_on_current_node":
+                    return None, None, latency_ms
+
+                # Find the edge for this function
+                edge = self._get_edge_by_function_name(current_node, function_name)
+                if edge:
+                    return edge['to_node_id'], function_args, latency_ms
+                else:
+                    logger.warning(f"Function {function_name} not found in edges")
+                    return None, None, latency_ms
+            else:
+                logger.warning("No tool call in response")
+                return None, None, latency_ms
+
+        except Exception as e:
+            latency_ms = (time.perf_counter() - start_time) * 1000
+            logger.error(f"Routing error: {e} (latency: {latency_ms:.1f}ms)")
+            return None, None, latency_ms
 
     def build_node_structure(self) -> Dict[str, List[str]]:
         structure = {}
@@ -268,10 +468,16 @@ Use this information naturally when it helps answer the user's questions. Don't 
         }
 
         try:
-            # Decide next move
-            next_node_id = await self.decide_next_move_cyclic(message)
+            # Decide next move using function-calling based routing
+            next_node_id, extracted_params, routing_latency_ms = await self.decide_next_node_with_functions(message)
+            latency_data["routing_latency_ms"] = routing_latency_ms
+
             if next_node_id:
+                logger.info(f"Transitioning: {self.current_node_id} -> {next_node_id} (params: {extracted_params})")
                 self.current_node_id = next_node_id
+                # Store extracted params in context for use in response generation
+                if extracted_params:
+                    self.context_data.update(extracted_params)
                 if self.current_node_id == "end":
                     response_text = "\nThank you for using our service. Goodbye!"
 

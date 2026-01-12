@@ -278,8 +278,18 @@ class LlmAgentGraph(BaseModel):
     edges: List[Edge]
 
 class GraphEdge(BaseModel):
+    """Edge definition for graph-based conversation flow.
+
+    Each edge represents a possible transition from the current node.
+    The LLM will call the transition function when the condition is met.
+    """
     to_node_id: str
-    condition: str
+    condition: str  # Human-readable description of when to transition
+    # Function definition for LLM to call (auto-generated if not provided)
+    function_name: Optional[str] = None  # e.g., "go_to_city_question"
+    function_description: Optional[str] = None  # Detailed description for LLM
+    # Optional parameters to collect during transition
+    parameters: Optional[Dict[str, str]] = None  # e.g., {"city": "string"}
 
 class GraphNodeRAGConfig(BaseModel):
     """RAG configuration for Graph Agent nodes."""
@@ -302,6 +312,9 @@ class GraphAgentConfig(Llm):
     nodes: List[GraphNode]
     current_node_id: str
     context_data: Optional[dict] = None
+    # Routing configuration
+    routing_model: Optional[str] = None  # Model for routing decisions (default: same as main model)
+    routing_provider: Optional[str] = None  # Provider for routing (e.g., "groq" for fast inference)
 
 class KnowledgeAgentConfig(Llm):
     agent_information: Optional[str] = "Knowledge-based AI assistant"
