@@ -1,5 +1,6 @@
 import os
 import json
+import time
 import asyncio
 import uuid
 from bolna.llms import OpenAiLLM
@@ -23,6 +24,7 @@ class LanguageDetector:
         self._in_progress = False
         self._task = None
         self._llm = None
+        self._latency_ms = None
 
         if self.turns_threshold > 0:
             self._llm = OpenAiLLM(model=os.getenv('LANGUAGE_DETECTION_LLM', 'gpt-4.1-mini'))
@@ -35,6 +37,18 @@ class LanguageDetector:
     def dominant_language(self) -> str | None:
         if self._complete and self._result:
             return self._result.get('dominant_language')
+        return None
+
+    @property
+    def latency_data(self) -> dict | None:
+        """Return latency data for other_latencies tracking."""
+        if self._complete and self._latency_ms is not None:
+            return {
+                'type': 'language_detection',
+                'latency_ms': self._latency_ms,
+                'model': self._llm.model if self._llm else None,
+                'provider': 'openai'
+            }
         return None
 
     async def collect_transcript(self, transcript: str):
@@ -56,7 +70,9 @@ class LanguageDetector:
         try:
             formatted = "\n".join([f"- {t}" for t in self._transcripts])
             prompt = LANGUAGE_DETECTION_PROMPT.format(transcripts=formatted)
+            start_time = time.time()
             response = await self._llm.generate([{'role': 'system', 'content': prompt}], request_json=True)
+            self._latency_ms = (time.time() - start_time) * 1000
             self._result = json.loads(response)
             self._complete = True
             logger.info(f"Language detection complete: {self._result}")

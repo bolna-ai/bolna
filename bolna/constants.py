@@ -79,3 +79,14 @@ LANGUAGE_NAMES = {
     'nl': 'Dutch', 'id': 'Indonesian', 'ms': 'Malay',
     'th': 'Thai', 'vi': 'Vietnamese', 'od': 'Odia'
 }
+
+LLM_DEFAULT_CONFIGS = {
+    "summarization": {
+        "model": "gpt-4.1-mini",
+        "provider": "openai"
+    },
+    "extraction": {
+        "model": "gpt-4.1-mini",
+        "provider": "openai"
+    }
+}

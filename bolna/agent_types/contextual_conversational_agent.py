@@ -1,5 +1,6 @@
 import json
 import os
+import time
 from dotenv import load_dotenv
 from .base_agent import BaseAgent
 from bolna.helpers.utils import format_messages
@@ -16,6 +17,7 @@ class StreamingContextualAgent(BaseAgent):
         super().__init__()
         self.llm = llm
         self.conversation_completion_llm = OpenAiLLM(model=os.getenv('CHECK_FOR_COMPLETION_LLM', llm.model))
+        self.voicemail_llm = OpenAiLLM(model=os.getenv('VOICEMAIL_DETECTION_LLM', "gpt-4.1-mini"))
         self.history = [{'content': ""}]
 
     async def check_for_completion(self, messages, check_for_completion_prompt):
@@ -25,13 +27,17 @@ class StreamingContextualAgent(BaseAgent):
                 {'role': 'user', 'content': format_messages(messages)}
             ]
 
-            response = await self.conversation_completion_llm.generate(prompt, request_json=True)
+            start_time = time.time()
+            response, metadata = await self.conversation_completion_llm.generate(prompt, request_json=True, ret_metadata=True)
+            latency_ms = (time.time() - start_time) * 1000
+            
             hangup = json.loads(response)
+            metadata['latency_ms'] = latency_ms
 
-            return hangup
+            return hangup, metadata
         except Exception as e:
             logger.error('check_for_completion exception: {}'.format(str(e)))
-            return {'hangup': 'No'}
+            return {'hangup': 'No'}, {}
 
     async def check_for_voicemail(self, user_message, voicemail_detection_prompt=None):
         """
@@ -42,7 +48,7 @@ class StreamingContextualAgent(BaseAgent):
             voicemail_detection_prompt: Custom prompt for voicemail detection (optional)
         
         Returns:
-            dict with 'is_voicemail': 'Yes' or 'No'
+            dict with 'is_voicemail': 'Yes' or 'No', 'latency_ms': float
         """
         try:
             detection_prompt = voicemail_detection_prompt or VOICEMAIL_DETECTION_PROMPT
@@ -51,13 +57,16 @@ class StreamingContextualAgent(BaseAgent):
                 {'role': 'user', 'content': f"User message: {user_message}"}
             ]
 
-            response = await self.conversation_completion_llm.generate(prompt, request_json=True)
+            start_time = time.time()
+            response, metadata = await self.voicemail_llm.generate(prompt, request_json=True, ret_metadata=True)
+            latency_ms = (time.time() - start_time) * 1000
+            
             result = json.loads(response)
-            logger.info(f"Voicemail detection result: {result}")
-            return result
+            metadata['latency_ms'] = latency_ms
+            return result, metadata
         except Exception as e:
             logger.error('check_for_voicemail exception: {}'.format(str(e)))
-            return {'is_voicemail': 'No'}
+            return {'is_voicemail': 'No'}, {}
 
     async def generate(self, history, synthesize=False, meta_info = None):
         async for token in self.llm.generate_stream(history, synthesize=synthesize, meta_info = meta_info):

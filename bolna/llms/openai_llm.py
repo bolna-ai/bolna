@@ -245,14 +245,21 @@ class OpenAiLLM(BaseLLM):
 
         self.started_streaming = False
     
-    async def generate(self, messages, request_json=False):
+    async def generate(self, messages, request_json=False, ret_metadata=False):
         response_format = self.get_response_format(request_json)
 
         try:
             completion = await self.async_client.chat.completions.create(model=self.model, temperature=0.0, messages=messages,
                                                                          stream=False, response_format=response_format)
             res = completion.choices[0].message.content
-            return res
+            if ret_metadata:
+                metadata = {
+                    "llm_host": self.llm_host,
+                    "service_tier": completion.service_tier if hasattr(completion, 'service_tier') else None
+                }
+                return res, metadata
+            else:
+                return res
         except AuthenticationError as e:
             logger.error(f"OpenAI authentication failed: Invalid or expired API key - {e}")
             raise

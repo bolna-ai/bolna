@@ -61,3 +61,14 @@ class BaseTranscriber:
     async def cleanup(self):
         """Clean up transcriber resources. Override in subclasses."""
         pass
+
+    def calculate_interim_to_final_latencies(self, interim_details):
+        """Calculate time from first/last interim to final result."""
+        if not interim_details:
+            return None, None
+        now = time.time()
+        first_received_at = interim_details[0].get('received_at')
+        last_received_at = interim_details[-1].get('received_at')
+        first_interim_to_final_ms = round((now - first_received_at) * 1000, 2) if first_received_at else None
+        last_interim_to_final_ms = round((now - last_received_at) * 1000, 2) if last_received_at else None
+        return first_interim_to_final_ms, last_interim_to_final_ms
