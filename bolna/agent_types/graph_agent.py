@@ -30,7 +30,7 @@ class GraphAgent(BaseAgent):
         self.config = config
         self.agent_information = self.config.get('agent_information')
         self.current_node_id = self.config.get('current_node_id')
-        self.context_data = self.config.get('context_data', {})
+        self.context_data = self.config.get('context_data') or {}
         self.llm_model = self.config.get('model')
         self.openai = OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
         self.node_history = ["root"]
@@ -109,8 +109,8 @@ class GraphAgent(BaseAgent):
                 logger.warning("Groq requested but GROQ_API_KEY not set or groq package not installed, falling back to OpenAI")
                 self.routing_client = self.openai
                 self.routing_provider = 'openai'
-                if not self.routing_model:
-                    self.routing_model = 'gpt-4o-mini'
+                # Reset routing_model to OpenAI default (config may have Groq-specific model)
+                self.routing_model = 'gpt-4o-mini'
         else:
             self.routing_client = self.openai
             if not self.routing_model:
@@ -284,12 +284,42 @@ Be decisive. If the user's intent is clear, call the transition function immedia
     def get_node_by_id(self, node_id: str) -> Optional[dict]:
         return next((node for node in self.config.get('nodes', []) if node['id'] == node_id), None)
 
+    def _get_prompt_with_example(self, node: dict, detected_lang: str) -> str:
+        """Get node prompt with language-specific example injected.
+
+        Args:
+            node: The node configuration dict
+            detected_lang: The detected language code (e.g., 'en', 'hi', 'ta')
+
+        Returns:
+            The prompt string with the appropriate language example appended
+        """
+        prompt = node.get('prompt', '')
+        examples = node.get('examples', {})
+
+        if not examples:
+            return prompt
+
+        # Get example for detected language, fallback to English, then first available
+        example = (
+            examples.get(detected_lang) or
+            examples.get('en') or
+            next(iter(examples.values()), None)
+        )
+
+        if example:
+            return f"{prompt}\n\nExample response: \"{example}\""
+
+        return prompt
+
     async def generate_response(self, history: List[dict]) -> dict:
         current_node = self.get_node_by_id(self.current_node_id)
         if not current_node:
             raise ValueError("Current node is not found in the configuration.")
 
-        prompt = current_node['prompt']
+        # Get prompt with language-specific example
+        detected_lang = self.context_data.get('detected_language', 'en')
+        prompt = self._get_prompt_with_example(current_node, detected_lang)
         rag_config = self.rag_configs.get(self.current_node_id)
 
         if rag_config and rag_config.get('collections'):
@@ -456,7 +486,7 @@ Use this information naturally when it helps answer the user's questions. Don't 
         return next_node_id
 
     async def generate(self, message: List[dict], **kwargs) -> AsyncGenerator[Tuple[str, bool, Optional[Dict], bool, None, None], None]:
-        meta_info = kwargs.get('meta_info')
+        meta_info = kwargs.get('meta_info', {})
         start_time = now_ms()
         first_token_time = None
         buffer = ""
@@ -466,6 +496,10 @@ Use this information naturally when it helps answer the user's questions. Don't 
             "first_token_latency_ms": None,
             "total_stream_duration_ms": None
         }
+
+        # Get detected language from meta_info (set by LanguageDetector in task_manager)
+        detected_language = meta_info.get('detected_language', 'en')
+        self.context_data['detected_language'] = detected_language
 
         try:
             # Decide next move using function-calling based routing
