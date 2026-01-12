@@ -302,6 +302,7 @@ class GraphNode(BaseModel):
     id: str
     description: Optional[str] = None
     prompt: str
+    examples: Optional[Dict[str, str]] = None  # Language-specific examples: {"en": "...", "hi": "..."}
     edges: List[GraphEdge] = Field(default_factory=list)
     completion_check: Optional[Callable[[List[dict]], bool]] = None
     rag_config: Optional[GraphNodeRAGConfig] = None
