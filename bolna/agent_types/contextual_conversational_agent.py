@@ -69,5 +69,9 @@ class StreamingContextualAgent(BaseAgent):
             return {'is_voicemail': 'No'}, {}
 
     async def generate(self, history, synthesize=False, meta_info = None):
+        meta_info['llm_metadata'] = meta_info.get('llm_metadata', {})
         async for token in self.llm.generate_stream(history, synthesize=synthesize, meta_info = meta_info):
+            if isinstance(token, dict) and 'usage' in token:
+                meta_info['llm_metadata']['usage'] = token['usage']
+                continue
             yield token
