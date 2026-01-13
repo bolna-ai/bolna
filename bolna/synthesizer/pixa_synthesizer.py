@@ -301,9 +301,7 @@ class PixaSynthesizer(BaseSynthesizer):
             # Send initial configuration
             config_message = {
                 "type": "config",
-                "model": self.model,
-                "language": self.language,
-                "voice_id": self.voice_id,
+                "voice": self.voice_id,
                 "top_p": self.top_p,
                 "repetition_penalty": self.repetition_penalty
             }
