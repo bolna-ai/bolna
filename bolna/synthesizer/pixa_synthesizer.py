@@ -4,6 +4,7 @@ import uuid
 import time
 import websockets
 from websockets.exceptions import InvalidHandshake
+import aiohttp
 import base64
 import json
 import audioop
@@ -186,53 +187,45 @@ class PixaSynthesizer(BaseSynthesizer):
                 logger.error(f"Error occurred in receiver: {e}")
 
     async def synthesize(self, text):
-        """One-off synthesis without streaming. Returns PCM audio for preview."""
+        """One-off synthesis using HTTP API. Returns PCM audio for preview."""
         try:
-            websocket = await self.establish_connection()
-            if not websocket:
-                return None
-
-            config_message = {
-                "type": "config",
-                "model": self.model,
-                "language": self.language,
-                "voice_id": self.voice_id,
+            url = f"https://{self.api_host}/api/v1/synthesize"
+            headers = {
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json"
+            }
+            payload = {
+                "text": text,
+                "voice": self.voice_id,
                 "top_p": self.top_p,
                 "repetition_penalty": self.repetition_penalty
             }
-            await websocket.send(json.dumps(config_message))
 
-            text_message = {
-                "type": "text",
-                "content": text,
-                "is_final": True
-            }
-            await websocket.send(json.dumps(text_message))
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, headers=headers, json=payload) as response:
+                    if response.status != 200:
+                        error_text = await response.text()
+                        logger.error(f"Pixa HTTP API error: {response.status} - {error_text}")
+                        return None
 
-            audio_chunks = []
-            resample_state = None
-            while True:
-                response = await websocket.recv()
-                if isinstance(response, bytes):
-                    # Resample from 32kHz to 8kHz PCM (no mulaw for preview)
-                    # Maintain state across chunks for proper resampling
-                    resampled, resample_state = audioop.ratecv(
-                        response, 2, 1,
+                    # Response is WAV audio (PCM16 at 32kHz)
+                    wav_audio = await response.read()
+
+                    # Skip WAV header (44 bytes) to get raw PCM
+                    pcm_audio = wav_audio[44:] if len(wav_audio) > 44 else wav_audio
+
+                    # Resample from 32kHz to 8kHz
+                    resampled, _ = audioop.ratecv(
+                        pcm_audio, 2, 1,
                         self.native_sampling_rate,
                         self.target_sampling_rate,
-                        resample_state
+                        None
                     )
-                    audio_chunks.append(resampled)
-                else:
-                    data = json.loads(response)
-                    if data.get('type') == 'done' or data.get('done'):
-                        break
-
-            await websocket.close()
-            return b''.join(audio_chunks)
+                    return resampled
 
         except Exception as e:
             logger.error(f"Error in synthesize: {e}")
+            traceback.print_exc()
             return None
 
     def get_synthesized_characters(self):
