@@ -229,6 +229,7 @@ class TaskManager(BaseManager):
                         "max_tokens": self.llm_agent_config['llm_config']['max_tokens'],
                         "provider": self.llm_agent_config['llm_config']['provider'],
                         "buffer_size": self.task_config["tools_config"]["synthesizer"].get('buffer_size'),
+                        "temperature": self.llm_agent_config['llm_config']['temperature']
                     }
                 elif self.__is_graph_agent():
                     self.llm_agent_config = self.task_config["tools_config"]["llm_agent"]
@@ -247,7 +248,8 @@ class TaskManager(BaseManager):
                     self.llm_config = {
                         "model": self.llm_agent_config['model'],
                         "max_tokens": self.llm_agent_config['max_tokens'],
-                        "provider": self.llm_agent_config['provider']
+                        "provider": self.llm_agent_config['provider'],
+                        "temperature": self.llm_agent_config['temperature']
                     }
 
         # Output stuff

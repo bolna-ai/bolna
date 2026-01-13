@@ -71,6 +71,15 @@ class SarvamConfig(BaseModel):
     speed: Optional[float] = 1.0
 
 
+class PixaConfig(BaseModel):
+    voice_id: str
+    voice: str
+    model: str
+    language: str
+    top_p: Optional[float] = 0.95
+    repetition_penalty: Optional[float] = 1.3
+
+
 class AzureConfig(BaseModel):
     voice: str
     model: str
@@ -96,7 +105,7 @@ class Transcriber(BaseModel):
 
 class Synthesizer(BaseModel):
     provider: str
-    provider_config: Union[PollyConfig, ElevenLabsConfig, AzureConfig, RimeConfig, SmallestConfig, SarvamConfig, CartesiaConfig, DeepgramConfig, OpenAIConfig] = Field(union_mode='smart')
+    provider_config: Union[PollyConfig, ElevenLabsConfig, AzureConfig, RimeConfig, SmallestConfig, SarvamConfig, PixaConfig, CartesiaConfig, DeepgramConfig, OpenAIConfig] = Field(union_mode='smart')
     stream: bool = False
     buffer_size: Optional[int] = 40  # 40 characters in a buffer
     audio_format: Optional[str] = "pcm"
@@ -110,12 +119,41 @@ class Synthesizer(BaseModel):
         if provider == "elevenlabs":
             if not config.get("voice") or not config.get("voice_id"):
                 raise ValueError("ElevenLabs config requires 'voice' or 'voice_id'.")
+            if isinstance(config, dict):
+                values["provider_config"] = ElevenLabsConfig(**config)
+        elif provider == "pixa":
+            if isinstance(config, dict):
+                values["provider_config"] = PixaConfig(**config)
+        elif provider == "cartesia":
+            if isinstance(config, dict):
+                values["provider_config"] = CartesiaConfig(**config)
+        elif provider == "polly":
+            if isinstance(config, dict):
+                values["provider_config"] = PollyConfig(**config)
+        elif provider == "azuretts":
+            if isinstance(config, dict):
+                values["provider_config"] = AzureConfig(**config)
+        elif provider == "deepgram":
+            if isinstance(config, dict):
+                values["provider_config"] = DeepgramConfig(**config)
+        elif provider == "openai":
+            if isinstance(config, dict):
+                values["provider_config"] = OpenAIConfig(**config)
+        elif provider == "smallest":
+            if isinstance(config, dict):
+                values["provider_config"] = SmallestConfig(**config)
+        elif provider == "sarvam":
+            if isinstance(config, dict):
+                values["provider_config"] = SarvamConfig(**config)
+        elif provider == "rime":
+            if isinstance(config, dict):
+                values["provider_config"] = RimeConfig(**config)
 
         return values
 
     @field_validator("provider")
     def validate_model(cls, value):
-        return validate_attribute(value, ["polly", "elevenlabs", "azuretts", "openai", "deepgram", "cartesia", "smallest", "sarvam", "rime"])
+        return validate_attribute(value, ["polly", "elevenlabs", "azuretts", "openai", "deepgram", "cartesia", "smallest", "sarvam", "rime", "pixa"])
 
 
 
