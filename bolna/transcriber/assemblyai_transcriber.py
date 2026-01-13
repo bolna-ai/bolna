@@ -74,7 +74,7 @@ class AssemblyAITranscriber(BaseTranscriber):
             "format_turns": self.format_turns
         }
 
-        if self.provider in ('twilio', 'exotel', 'plivo'):
+        if self.provider in ('twilio', 'exotel', 'plivo', 'vobiz'):
             self.encoding = 'mulaw' if self.provider in ("twilio") else "linear16"
             self.sampling_rate = 8000
             self.audio_frame_duration = 0.2
