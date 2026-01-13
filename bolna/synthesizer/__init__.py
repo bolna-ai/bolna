@@ -7,3 +7,4 @@ from .cartesia_synthesizer import CartesiaSynthesizer
 from .rime_synthesizer import RimeSynthesizer
 from .smallest_synthesizer import SmallestSynthesizer
 from .sarvam_synthesizer import SarvamSynthesizer
+from .pixa_synthesizer import PixaSynthesizer

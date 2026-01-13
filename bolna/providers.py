@@ -1,4 +1,4 @@
-from .synthesizer import PollySynthesizer, ElevenlabsSynthesizer, OPENAISynthesizer, DeepgramSynthesizer, AzureSynthesizer, CartesiaSynthesizer, SmallestSynthesizer, SarvamSynthesizer, RimeSynthesizer
+from .synthesizer import PollySynthesizer, ElevenlabsSynthesizer, OPENAISynthesizer, DeepgramSynthesizer, AzureSynthesizer, CartesiaSynthesizer, SmallestSynthesizer, SarvamSynthesizer, RimeSynthesizer, PixaSynthesizer
 from .transcriber import DeepgramTranscriber, AzureTranscriber, SarvamTranscriber, AssemblyAITranscriber, GoogleTranscriber, PixaTranscriber, GladiaTranscriber, ElevenLabsTranscriber, SmallestTranscriber
 from .input_handlers import DefaultInputHandler, TwilioInputHandler, ExotelInputHandler, PlivoInputHandler
 from .output_handlers import DefaultOutputHandler, TwilioOutputHandler, ExotelOutputHandler, PlivoOutputHandler
@@ -13,7 +13,8 @@ SUPPORTED_SYNTHESIZER_MODELS = {
     'cartesia': CartesiaSynthesizer,
     'smallest': SmallestSynthesizer,
     'sarvam': SarvamSynthesizer,
-    'rime': RimeSynthesizer
+    'rime': RimeSynthesizer,
+    'pixa': PixaSynthesizer
 }
 
 SUPPORTED_TRANSCRIBER_PROVIDERS = {
