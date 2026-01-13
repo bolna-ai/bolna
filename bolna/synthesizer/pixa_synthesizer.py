@@ -385,8 +385,14 @@ class PixaSynthesizer(BaseSynthesizer):
                 await self.sender_task
             except asyncio.CancelledError:
                 logger.info("Sender task was successfully cancelled during WebSocket cleanup.")
+            except Exception as e:
+                logger.error(f"Error cancelling sender task: {e}")
 
-        if self.websocket_holder["websocket"]:
-            await self.websocket_holder["websocket"].close()
-        self.websocket_holder["websocket"] = None
+        try:
+            if self.websocket_holder["websocket"]:
+                await self.websocket_holder["websocket"].close()
+        except Exception as e:
+            logger.error(f"Error closing WebSocket: {e}")
+        finally:
+            self.websocket_holder["websocket"] = None
         logger.info("Pixa WebSocket connection closed.")
