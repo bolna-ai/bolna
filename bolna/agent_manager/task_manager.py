@@ -1402,6 +1402,7 @@ class TaskManager(BaseManager):
         await self._handle_llm_output(next_step, filler, should_bypass_synth, new_meta_info, is_filler=True)
 
     async def __execute_function_call(self, url, method, param, api_token, headers, model_args, meta_info, next_step, called_fun, **resp):
+        meta_info = copy.deepcopy(meta_info)
         self.check_if_user_online = False
 
         if called_fun.startswith("transfer_call"):
@@ -1462,13 +1463,22 @@ class TaskManager(BaseManager):
                     await asyncio.sleep(1)
                 convert_to_request_log(str(payload), meta_info, None, "function_call", direction="request", is_cached=False,
                                        run_id=self.run_id)
-                async with session.post(url, json = payload) as response:
-                    response_text = await response.text()
-                    logger.info(f"Response from the server after call transfer: {response_text}")
-                    convert_to_request_log(str(response_text), meta_info, None, "function_call", direction="response", is_cached=False, run_id=self.run_id)
-                    return
+                try:
+                    function_call_metadata = {}
+                    response_text = ""  
+                    async with session.post(url, json = payload) as response:
+                        response_text = await response.text()
+                        response.raise_for_status()
+                        logger.info(f"Response from the server after call transfer: {response_text}")
+                except Exception as e:
+                    logger.info(f"Error while transferring the call: {e}")
+                    function_call_metadata = {'error': str(e)}
+                    response_text = "Transfer call failed"
+                finally:
+                        convert_to_request_log(str(response_text), meta_info | {"function_call_metadata": function_call_metadata}, None, "function_call", direction="response", is_cached=False, run_id=self.run_id)
+                        return
 
-        response = await trigger_api(url=url, method=method.lower(), param=param, api_token=api_token, headers_data=headers, meta_info=meta_info, run_id=self.run_id, **resp)
+        response, function_call_metadata = await trigger_api(url=url, method=method.lower(), param=param, api_token=api_token, headers_data=headers, meta_info=meta_info, run_id=self.run_id, **resp)
         function_response = str(response)
         get_res_keys, get_res_values = await computed_api_response(function_response)
         if called_fun.startswith('check_availability_of_slots') and (not get_res_values or (len(get_res_values) == 1 and len(get_res_values[0]) == 0)):
@@ -1485,8 +1495,11 @@ class TaskManager(BaseManager):
         model_args["messages"].append({"role": "assistant", "content": None, "tool_calls": resp["model_response"]})
         model_args["messages"].append({"role": "tool", "tool_call_id": resp.get("tool_call_id", ""), "content": function_response})
 
-        logger.info(f"Logging function call parameters ")
-        convert_to_request_log(function_response, meta_info , None, "function_call", direction = "response", is_cached= False, run_id = self.run_id)
+        if function_call_metadata:
+            convert_to_request_log(function_response, meta_info | {"function_call_metadata": function_call_metadata}, None, "function_call", direction="response", is_cached=False, run_id=self.run_id)
+        else:
+            convert_to_request_log(function_response, meta_info, None, "function_call", direction="response", is_cached=False, run_id=self.run_id)
+
 
         convert_to_request_log(format_messages(model_args['messages'], True), meta_info, self.llm_config['model'], "llm", direction = "request", is_cached= False, run_id = self.run_id)
         self.check_if_user_online = self.conversation_config.get("check_if_user_online", True)
