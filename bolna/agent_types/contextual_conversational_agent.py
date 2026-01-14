@@ -3,7 +3,7 @@ import os
 import time
 from dotenv import load_dotenv
 from .base_agent import BaseAgent
-from bolna.helpers.utils import format_messages
+from bolna.helpers.utils import format_messages, now_ms
 from bolna.llms import OpenAiLLM
 from bolna.prompts import CHECK_FOR_COMPLETION_PROMPT, VOICEMAIL_DETECTION_PROMPT
 from bolna.helpers.logger_config import configure_logger
@@ -70,8 +70,18 @@ class StreamingContextualAgent(BaseAgent):
 
     async def generate(self, history, synthesize=False, meta_info = None):
         meta_info['llm_metadata'] = meta_info.get('llm_metadata', {})
-        async for token in self.llm.generate_stream(history, synthesize=synthesize, meta_info = meta_info):
-            if isinstance(token, dict) and 'usage' in token:
-                meta_info['llm_metadata']['usage'] = token['usage']
-                continue
-            yield token
+        start_time = now_ms()
+        try:
+            async for token in self.llm.generate_stream(history, synthesize=synthesize, meta_info = meta_info):
+                if isinstance(token, dict) and 'usage' in token:
+                    meta_info['llm_metadata']['usage'] = token['usage']
+                    continue
+                yield token
+        except Exception as e:
+            logger.error(f"generate() error: {e}")
+            latency_data = {
+                "sequence_id": meta_info.get("sequence_id") if meta_info else None,
+                "first_token_latency_ms": 0,
+                "total_stream_duration_ms": now_ms() - start_time
+            }
+            yield {"error": str(e), "data": "An error occurred.", "latency_data": latency_data}

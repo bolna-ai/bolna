@@ -1550,12 +1550,23 @@ class TaskManager(BaseManager):
         if detected_lang:
             meta_info['detected_language'] = detected_lang
 
+        llm_error = None
         async for llm_message in self.tools['llm_agent'].generate(messages, synthesize=synthesize, meta_info=meta_info):
+            data, end_of_llm_stream, latency, trigger_function_call, function_tool, function_tool_message = None, None, None, None, None, None
+            
             if isinstance(llm_message, dict) and 'messages' in llm_message: # custom list of messages before the llm call
                 convert_to_request_log(format_messages(llm_message['messages'], True), meta_info, self.llm_config['model'], "llm", direction="request", is_cached=False, run_id=self.run_id)
                 continue
 
-            data, end_of_llm_stream, latency, trigger_function_call, function_tool, function_tool_message = llm_message
+            if isinstance(llm_message, dict) and 'error' in llm_message:
+                llm_response = ""
+                data = llm_message.get('data', "")
+                end_of_llm_stream = llm_message.get('end_of_llm_stream', True)
+                latency = llm_message.get('latency', {})
+                llm_error = llm_message['error']
+                trigger_function_call = False
+            else:
+                data, end_of_llm_stream, latency, trigger_function_call, function_tool, function_tool_message = llm_message
 
             if trigger_function_call:
                 logger.info(f"Triggering function call for {data}")
@@ -1591,16 +1602,19 @@ class TaskManager(BaseManager):
 
                 await self._handle_llm_output(next_step, text_chunk, should_bypass_synth, meta_info)
 
+        llm_metadata = meta_info.get('llm_metadata', {})
+        if llm_error:
+            llm_metadata['error'] = llm_error
         detected_lang = self.language_detector.dominant_language or self.language
         filler_message = compute_function_pre_call_message(detected_lang, function_tool, function_tool_message)
         if self.stream and llm_response != filler_message:
-            self.__store_into_history(meta_info, messages, llm_response, should_trigger_function_call= should_trigger_function_call)
+            self.__store_into_history(meta_info | {'llm_metadata': llm_metadata}, messages, llm_response, should_trigger_function_call= should_trigger_function_call)
         elif not self.stream:
             llm_response = llm_response.strip()
             if self.turn_based_conversation:
                 self.history.append({"role": "assistant", "content": llm_response})
             await self._handle_llm_output(next_step, llm_response, should_bypass_synth, meta_info, is_function_call=should_trigger_function_call)
-            convert_to_request_log(message=llm_response, meta_info=meta_info, component="llm", direction="response", model=self.llm_config["model"], run_id=self.run_id)
+            convert_to_request_log(message=llm_response, meta_info=meta_info | {'llm_metadata': llm_metadata}, component="llm", direction="response", model=self.llm_config["model"], run_id=self.run_id)
 
         # Collect RAG latency if present (from KnowledgeBaseAgent)
         if meta_info.get('rag_latency'):

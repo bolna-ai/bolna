@@ -304,4 +304,4 @@ Use this information naturally when it helps answer the user's questions. Don't 
                 "first_token_latency_ms": 0,
                 "total_stream_duration_ms": now_ms() - start_time
             }
-            yield f"An error occurred: {str(e)}", True, latency_data, False, None, None
+            yield {"error": str(e), "data": "An error occurred.", "latency_data": latency_data}
