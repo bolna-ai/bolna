@@ -44,8 +44,9 @@ class CartesiaSynthesizer(BaseSynthesizer):
         self.context_id = None
         self.sender_task = None
 
-        self.ws_url = f"wss://api.cartesia.ai/tts/websocket?api_key={self.api_key}&cartesia_version=2024-06-10"
-        self.api_url = "https://api.cartesia.ai/tts/bytes"
+        self.cartesia_host = os.getenv("CARTESIA_API_HOST", "api.cartesia.ai")
+        self.ws_url = f"wss://{self.cartesia_host}/tts/websocket?api_key={self.api_key}&cartesia_version=2024-06-10"
+        self.api_url = f"https://{self.cartesia_host}/tts/bytes"
         self.turn_id = 0
         self.sequence_id = 0
         self.context_ids_to_ignore = set()
