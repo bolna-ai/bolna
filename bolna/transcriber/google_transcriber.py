@@ -40,7 +40,7 @@ class GoogleTranscriber(BaseTranscriber):
         self.run_id = run_id or kwargs.get("run_id", "")
 
         # Provider-specific audio configuration
-        if self.provider in ('twilio', 'exotel', 'plivo'):
+        if self.provider in ('twilio', 'exotel', 'plivo', 'vobiz'):
             self.encoding = "MULAW" if self.provider in ("twilio") else "LINEAR16"
             self.sample_rate_hertz = 8000  
         elif self.provider == "web_based_call":
@@ -71,7 +71,7 @@ class GoogleTranscriber(BaseTranscriber):
         # Audio frame tracking
         self.audio_frame_duration = 0.0
         self.num_frames = 0
-        if self.provider in ('twilio', 'exotel', 'plivo'):
+        if self.provider in ('twilio', 'exotel', 'plivo', 'vobiz'):
             self.audio_frame_duration = 0.2
         elif self.provider == "web_based_call":
             self.audio_frame_duration = 0.256

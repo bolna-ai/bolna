@@ -86,7 +86,7 @@ class DeepgramTranscriber(BaseTranscriber):
 
         self.audio_frame_duration = 0.5  # We're sending 8k samples with a sample rate of 16k
 
-        if self.provider in ('twilio', 'exotel', 'plivo'):
+        if self.provider in ('twilio', 'exotel', 'plivo', 'vobiz'):
             self.encoding = 'mulaw' if self.provider in ("twilio") else "linear16"
             self.sampling_rate = 8000
             self.audio_frame_duration = 0.2  # With twilio we are sending 200ms at a time
