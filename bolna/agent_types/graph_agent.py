@@ -9,7 +9,9 @@ from bolna.models import *
 from bolna.agent_types.base_agent import BaseAgent
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.rag_service_client import RAGServiceClient, RAGServiceClientSingleton
-from bolna.helpers.utils import now_ms
+from bolna.helpers.utils import now_ms, format_messages
+from bolna.llms import OpenAiLLM
+from bolna.prompts import CHECK_FOR_COMPLETION_PROMPT, VOICEMAIL_DETECTION_PROMPT
 
 from typing import List, Tuple, Generator, AsyncGenerator, Optional, Dict, Any
 
@@ -39,9 +41,13 @@ class GraphAgent(BaseAgent):
         self.rag_server_url = os.getenv('RAG_SERVER_URL', 'http://localhost:8000')
 
         # Initialize routing client (Groq for speed, or fallback to OpenAI)
-        self.routing_provider = self.config.get('routing_provider')  # None = auto-detect
-        self.routing_model = self.config.get('routing_model')  # None = use provider default
+        self.routing_provider = self.config.get('routing_provider')
+        self.routing_model = self.config.get('routing_model')
         self._init_routing_client()
+
+        # Initialize LLMs for hangup and voicemail detection (same as simple_llm_agent)
+        self.conversation_completion_llm = OpenAiLLM(model=os.getenv('CHECK_FOR_COMPLETION_LLM', self.llm_model or 'gpt-4o-mini'))
+        self.voicemail_llm = OpenAiLLM(model=os.getenv('VOICEMAIL_DETECTION_LLM', 'gpt-4.1-mini'))
 
     def initialize_rag_configs(self) -> Dict[str, Dict]:
         """Initialize RAG configurations for each node."""
@@ -81,17 +87,7 @@ class GraphAgent(BaseAgent):
         return rag_configs
 
     def _init_routing_client(self):
-        """Initialize the routing client for fast node transitions.
-
-        Priority:
-        1. If routing_provider='groq' and GROQ_API_KEY set -> use Groq (fastest, ~200ms)
-        2. If routing_provider='openai' -> use OpenAI
-        3. Auto-detect: if GROQ_API_KEY available, use Groq, else OpenAI
-
-        Default models:
-        - Groq: llama-3.3-70b-versatile (best accuracy + speed for multilingual)
-        - OpenAI: gpt-4o-mini (good balance of speed and accuracy)
-        """
+        """Initialize routing client. Uses Groq if available, else OpenAI."""
         groq_available = GROQ_AVAILABLE and os.getenv('GROQ_API_KEY')
 
         # Auto-detect provider if not specified
@@ -116,6 +112,46 @@ class GraphAgent(BaseAgent):
             if not self.routing_model:
                 self.routing_model = 'gpt-4o-mini'
             logger.info(f"Routing initialized with OpenAI ({self.routing_model})")
+
+    async def check_for_completion(self, messages, check_for_completion_prompt):
+        """Check if the conversation should end. Returns (hangup_dict, metadata)."""
+        try:
+            prompt = [
+                {'role': 'system', 'content': check_for_completion_prompt},
+                {'role': 'user', 'content': format_messages(messages)}
+            ]
+
+            start_time = time.time()
+            response, metadata = await self.conversation_completion_llm.generate(prompt, request_json=True, ret_metadata=True)
+            latency_ms = (time.time() - start_time) * 1000
+
+            hangup = json.loads(response)
+            metadata['latency_ms'] = latency_ms
+
+            return hangup, metadata
+        except Exception as e:
+            logger.error(f'check_for_completion exception: {str(e)}')
+            return {'hangup': 'No'}, {}
+
+    async def check_for_voicemail(self, user_message, voicemail_detection_prompt=None):
+        """Check if message indicates a voicemail system. Returns (result_dict, metadata)."""
+        try:
+            detection_prompt = voicemail_detection_prompt or VOICEMAIL_DETECTION_PROMPT
+            prompt = [
+                {'role': 'system', 'content': detection_prompt},
+                {'role': 'user', 'content': f"User message: {user_message}"}
+            ]
+
+            start_time = time.time()
+            response, metadata = await self.voicemail_llm.generate(prompt, request_json=True, ret_metadata=True)
+            latency_ms = (time.time() - start_time) * 1000
+
+            result = json.loads(response)
+            metadata['latency_ms'] = latency_ms
+            return result, metadata
+        except Exception as e:
+            logger.error(f'check_for_voicemail exception: {str(e)}')
+            return {'is_voicemail': 'No'}, {}
 
     def _build_transition_tools(self, node: dict) -> List[dict]:
         """Build function/tool definitions for all edges from a node.
@@ -180,17 +216,7 @@ class GraphAgent(BaseAgent):
     async def decide_next_node_with_functions(self, history: List[dict]) -> Tuple[Optional[str], Optional[Dict[str, Any]], float]:
         """Decide next node using LLM function calling.
 
-        This is the new Pipecat-style routing that uses structured function calls
-        instead of free-text node ID extraction.
-
-        Args:
-            history: Conversation history
-
-        Returns:
-            Tuple of (next_node_id, extracted_params, latency_ms)
-            - next_node_id: The node to transition to, or None to stay
-            - extracted_params: Any parameters extracted during transition
-            - latency_ms: Time taken for the routing decision
+        Returns (next_node_id, extracted_params, latency_ms).
         """
         start_time = time.perf_counter()
 
@@ -232,9 +258,9 @@ Be decisive. If the user's intent is clear, call the transition function immedia
                 model=self.routing_model,
                 messages=messages,
                 tools=tools,
-                tool_choice="required",  # Force a function call
+                tool_choice="required",
                 max_tokens=100,
-                temperature=0.1  # Low temperature for consistent routing
+                temperature=0.1
             )
 
             latency_ms = (time.perf_counter() - start_time) * 1000
@@ -285,15 +311,7 @@ Be decisive. If the user's intent is clear, call the transition function immedia
         return next((node for node in self.config.get('nodes', []) if node['id'] == node_id), None)
 
     def _get_prompt_with_example(self, node: dict, detected_lang: str) -> str:
-        """Get node prompt with language-specific example injected.
-
-        Args:
-            node: The node configuration dict
-            detected_lang: The detected language code (e.g., 'en', 'hi', 'ta')
-
-        Returns:
-            The prompt string with the appropriate language example appended
-        """
+        """Get node prompt with language-specific example appended."""
         prompt = node.get('prompt', '')
         examples = node.get('examples', {})
 

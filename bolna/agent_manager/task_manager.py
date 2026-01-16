@@ -1723,41 +1723,42 @@ class TaskManager(BaseManager):
             await self.__do_llm_generation(messages, meta_info, next_step, should_bypass_synth)
             # TODO : Write a better check for completion prompt
 
-            if self.agent_type not in ["graph_agent"]:
-                if self.use_llm_to_determine_hangup and not self.turn_based_conversation:
-                    completion_res, metadata = await self.tools["llm_agent"].check_for_completion(messages, self.check_for_completion_prompt)
+            # Hangup detection - now supported for all agent types including graph_agent
+            if self.use_llm_to_determine_hangup and not self.turn_based_conversation:
+                completion_res, metadata = await self.tools["llm_agent"].check_for_completion(messages, self.check_for_completion_prompt)
 
-                    should_hangup = (
-                        str(completion_res.get("hangup", "")).lower() == "yes"
-                        if isinstance(completion_res, dict)
-                        else False
-                    )
+                should_hangup = (
+                    str(completion_res.get("hangup", "")).lower() == "yes"
+                    if isinstance(completion_res, dict)
+                    else False
+                )
 
-                    # Track hangup check latency (latency returned by agent)
-                    self.llm_latencies['other_latencies'].append({
-                        "type": 'hangup_check',
-                        "latency_ms": metadata.get("latency_ms", None),
-                        "model": self.check_for_completion_llm,
-                        "provider": "openai",  # TODO: Make dynamic based on provider used
-                        "service_tier": metadata.get("service_tier", None),
-                        "llm_host": metadata.get("llm_host", None),
-                        "sequence_id": meta_info.get("sequence_id")
-                    })
+                # Track hangup check latency (latency returned by agent)
+                self.llm_latencies['other_latencies'].append({
+                    "type": 'hangup_check',
+                    "latency_ms": metadata.get("latency_ms", None),
+                    "model": self.check_for_completion_llm,
+                    "provider": "openai",  # TODO: Make dynamic based on provider used
+                    "service_tier": metadata.get("service_tier", None),
+                    "llm_host": metadata.get("llm_host", None),
+                    "sequence_id": meta_info.get("sequence_id")
+                })
 
-                    prompt = [
-                            {'role': 'system', 'content': self.check_for_completion_prompt},
-                            {'role': 'user', 'content': format_messages(self.history, use_system_prompt= True)}]
-                    logger.info(f"##### Answer from the LLM {completion_res}")
-                    convert_to_request_log(message=format_messages(prompt, use_system_prompt= True), meta_info= meta_info, component="llm_hangup", direction="request", model=self.check_for_completion_llm, run_id= self.run_id)
-                    convert_to_request_log(message=completion_res, meta_info= meta_info, component="llm_hangup", direction="response", model=self.check_for_completion_llm, run_id= self.run_id)
+                prompt = [
+                    {'role': 'system', 'content': self.check_for_completion_prompt},
+                    {'role': 'user', 'content': format_messages(self.history, use_system_prompt=True)}
+                ]
+                logger.info(f"##### Answer from the LLM {completion_res}")
+                convert_to_request_log(message=format_messages(prompt, use_system_prompt=True), meta_info=meta_info, component="llm_hangup", direction="request", model=self.check_for_completion_llm, run_id=self.run_id)
+                convert_to_request_log(message=completion_res, meta_info=meta_info, component="llm_hangup", direction="response", model=self.check_for_completion_llm, run_id=self.run_id)
 
-                    if should_hangup:
-                        if self.hangup_triggered or self.conversation_ended:
-                            logger.info(f"Hangup already triggered or conversation ended, skipping duplicate hangup request")
-                            return
-                        self.hangup_detail = "llm_prompted_hangup"
-                        await self.process_call_hangup()
+                if should_hangup:
+                    if self.hangup_triggered or self.conversation_ended:
+                        logger.info(f"Hangup already triggered or conversation ended, skipping duplicate hangup request")
                         return
+                    self.hangup_detail = "llm_prompted_hangup"
+                    await self.process_call_hangup()
+                    return
 
             self.llm_processed_request_ids.add(self.current_request_id)
             llm_response = ""
