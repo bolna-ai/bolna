@@ -95,6 +95,10 @@ class OpenAiLLM(BaseLLM):
 
         if not self.model.startswith("gpt-5"):
             model_args["stop"] = ["User:"]
+        else:
+            logger.info(f"{self.model} starts with gpt-5")
+            model_args["reasoning_effort"] = "low"
+
 
         if self.trigger_function_call:
             model_args["tools"] = json.loads(self.tools) if isinstance(self.tools, str) else self.tools
