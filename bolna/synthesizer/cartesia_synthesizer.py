@@ -21,7 +21,7 @@ logger = configure_logger(__name__)
 
 class CartesiaSynthesizer(BaseSynthesizer):
     def __init__(self, voice_id, voice, language="en", model="sonic-english", audio_format="mp3", sampling_rate="16000",
-                 stream=False, buffer_size=400, synthesizer_key=None, caching=True, **kwargs):
+                 stream=False, buffer_size=400, synthesizer_key=None, caching=True, speed=1.0, **kwargs):
         super().__init__(kwargs.get("task_manager_instance", None), stream)
         self.api_key = os.environ["CARTESIA_API_KEY"] if synthesizer_key is None else synthesizer_key
         self.version = '2024-06-10'
@@ -43,9 +43,11 @@ class CartesiaSynthesizer(BaseSynthesizer):
         self.websocket_holder = {"websocket": None}
         self.context_id = None
         self.sender_task = None
+        self.speed = speed
 
-        self.ws_url = f"wss://api.cartesia.ai/tts/websocket?api_key={self.api_key}&cartesia_version=2024-06-10"
-        self.api_url = "https://api.cartesia.ai/tts/bytes"
+        self.cartesia_host = os.getenv("CARTESIA_API_HOST", "api.cartesia.ai")
+        self.ws_url = f"wss://{self.cartesia_host}/tts/websocket?api_key={self.api_key}&cartesia_version=2024-06-10"
+        self.api_url = f"https://{self.cartesia_host}/tts/bytes"
         self.turn_id = 0
         self.sequence_id = 0
         self.context_ids_to_ignore = set()
@@ -91,6 +93,9 @@ class CartesiaSynthesizer(BaseSynthesizer):
                 "container": "raw",
                 "encoding": "pcm_mulaw",
                 "sample_rate": 8000
+            },
+            "generation_config": {
+                "speed": self.speed
             }
         }
 
@@ -202,7 +207,10 @@ class CartesiaSynthesizer(BaseSynthesizer):
                 "encoding": "mp3",
                 "sample_rate": 44100
             },
-            "language": self.language
+            "language": self.language,
+            "generation_config": {
+                "speed": self.speed
+            }
         }
         response = await self.__send_payload(payload)
         return response
