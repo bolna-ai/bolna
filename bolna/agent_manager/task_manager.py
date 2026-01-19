@@ -254,6 +254,9 @@ class TaskManager(BaseManager):
                         "temperature": self.llm_agent_config['temperature']
                     }
 
+                if 'reasoning_effort' in self.llm_agent_config:
+                    self.llm_config['reasoning_effort'] = self.llm_agent_config['reasoning_effort']
+
         # Output stuff
         self.output_task = None
         self.buffered_output_queue = asyncio.Queue()
