@@ -13,6 +13,7 @@ class InterruptionManager:
         number_of_words_for_interruption: int = 3,
         accidental_interruption_phrases: list = None,
         incremental_delay: int = 900,
+        minimum_wait_duration: int = 0,
     ):
         # User speaking state
         self.callee_speaking: bool = False
@@ -37,6 +38,7 @@ class InterruptionManager:
         self.accidental_interruption_phrases: Set[str] = set(
             accidental_interruption_phrases or []
         )
+        self.minimum_wait_duration: int = minimum_wait_duration
 
         logger.info(
             f"InterruptionManager initialized: "
@@ -174,8 +176,9 @@ class InterruptionManager:
             return self._check_delay_with_passthrough()
 
     def _check_delay_without_passthrough(self) -> Tuple[bool, float]:
+        # If no interim result received yet, no need to delay
         if self.time_since_first_interim_result == -1:
-            return True, 0.1
+            return False, 0
 
         elapsed = (time.time() * 1000) - self.time_since_first_interim_result
         if elapsed < self.required_delay_before_speaking:
@@ -200,12 +203,12 @@ class InterruptionManager:
         else:
             self.required_delay_before_speaking = 0
 
-    def reset_delay_for_speech_final(self, history_length: int, minimum_wait_duration: int) -> None:
+    def reset_delay_for_speech_final(self, history_length: int) -> None:
         """Resets delay variables when speech_final is received."""
         self.time_since_first_interim_result = -1
         if history_length > 2:
             self.required_delay_before_speaking = max(
-                minimum_wait_duration - self.incremental_delay, 0
+                self.minimum_wait_duration - self.incremental_delay, 0
             )
         else:
             self.required_delay_before_speaking = 0
@@ -239,3 +242,36 @@ class InterruptionManager:
         if self.utterance_end_time == -1:
             return -1
         return (time.time() * 1000) - self.utterance_end_time
+
+    def reset_utterance_end_time(self) -> None:
+        """Resets utterance end time, typically when user continues speaking."""
+        self.utterance_end_time = -1
+        logger.info("Utterance end time reset")
+
+    def has_pending_responses(self) -> bool:
+        """Returns True if there are pending audio responses."""
+        return len(self.sequence_ids) > 1
+
+    def get_current_sequence_id(self) -> int:
+        """Returns the current sequence ID."""
+        return self.curr_sequence_id
+
+    def get_callee_speaking_start_time(self) -> float:
+        """Returns the timestamp when user started speaking."""
+        return self.callee_speaking_start_time
+
+    def is_passthrough_enabled(self) -> bool:
+        """Returns True if remaining audio should pass through."""
+        return self.let_remaining_audio_pass_through
+
+    def get_required_delay(self) -> float:
+        """Returns the required delay before speaking in milliseconds."""
+        return self.required_delay_before_speaking
+
+    def get_first_interim_timestamp(self) -> float:
+        """Returns the timestamp of first interim result, or -1 if none."""
+        return self.time_since_first_interim_result
+
+    def set_first_interim_for_immediate_response(self) -> None:
+        """Sets first interim timestamp to allow immediate response."""
+        self.time_since_first_interim_result = (time.time() * 1000) - 1000

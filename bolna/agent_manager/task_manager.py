@@ -181,10 +181,7 @@ class TaskManager(BaseManager):
         self.should_respond = False
         self.last_response_time = time.time()
         self.consider_next_transcript_after = time.time()
-        self.callee_speaking = False
-        self.callee_speaking_start_time = -1
         self.llm_response_generated = False
-        self.turn_id = 0
 
         # Language detection
         self.language_detector = LanguageDetector(
@@ -258,10 +255,6 @@ class TaskManager(BaseManager):
 
         # Memory
         self.cache = cache
-
-        # Sequence id for interruption
-        self.curr_sequence_id = 0
-        self.sequence_ids = {-1} #-1 is used for data that needs to be passed and is developed by task manager like backchannleing etc.
 
         # Initialize InterruptionManager with defaults (will be reconfigured for task_id == 0)
         self.interruption_manager = InterruptionManager()
@@ -340,13 +333,10 @@ class TaskManager(BaseManager):
                 self.minimum_wait_duration = self.task_config["tools_config"]["transcriber"]["endpointing"]
                 self.last_spoken_timestamp = time.time() * 1000
                 self.incremental_delay = self.conversation_config.get("incremental_delay", 100)
-                self.required_delay_before_speaking = max(self.minimum_wait_duration - self.incremental_delay, 0)  #Everytime we get a message we increase it by 100 miliseconds
-                self.time_since_first_interim_result = -1
 
                 #Cut conversation
                 self.hang_conversation_after = self.conversation_config.get("hangup_after_silence", 10)
                 self.last_transmitted_timestamp = 0
-                self.let_remaining_audio_pass_through = False #Will be used to let remaining audio pass through in case of utterenceEnd event and there's still audio left to be sent
 
                 self.use_llm_to_determine_hangup = self.conversation_config.get("hangup_after_LLMCall", False)
                 self.check_for_completion_prompt = None
@@ -409,6 +399,7 @@ class TaskManager(BaseManager):
                     number_of_words_for_interruption=self.number_of_words_for_interruption,
                     accidental_interruption_phrases=ACCIDENTAL_INTERRUPTION_PHRASES,
                     incremental_delay=self.incremental_delay,
+                    minimum_wait_duration=self.minimum_wait_duration,
                 )
 
                 #Backchanneling
@@ -1093,7 +1084,6 @@ class TaskManager(BaseManager):
             self.tools["input"].reset_response_heard_by_user()
 
         self.interruption_manager.invalidate_pending_responses()
-        self.sequence_ids = {-1}
         await self.tools["synthesizer"].flush_synthesizer_stream()
 
         #Stop the output loop first so that we do not transmit anything else
@@ -1134,7 +1124,7 @@ class TaskManager(BaseManager):
         self.output_task = asyncio.create_task(self.__process_output_loop())
         self.started_transmitting_audio = False #Since we're interrupting we need to stop transmitting as well
         self.last_transmitted_timestamp = time.time()
-        logger.info(f"Cleaning up downstream tasks sequenxce ids {self.sequence_ids}. Time taken to send a clear message {time.time() - start_time}")
+        logger.info(f"Cleaning up downstream tasks. Time taken to send a clear message {time.time() - start_time}")
 
     def __get_updated_meta_info(self, meta_info = None):
         #This is used in case there's silence from callee's side
@@ -1146,8 +1136,6 @@ class TaskManager(BaseManager):
         new_sequence_id = self.interruption_manager.get_next_sequence_id()
         meta_info_copy["sequence_id"] = new_sequence_id
         meta_info_copy['turn_id'] = self.interruption_manager.get_turn_id()
-        self.curr_sequence_id = new_sequence_id
-        self.sequence_ids.add(new_sequence_id)
 
         return meta_info_copy
 
@@ -2024,9 +2012,6 @@ class TaskManager(BaseManager):
                             continue
 
                         self.interruption_manager.on_user_speech_started()
-                        if not self.callee_speaking:
-                            self.callee_speaking_start_time = time.time()
-                            self.callee_speaking = True
 
                         interim_transcript_len += len(message["data"].get("content").strip().split(" "))
                         transcript_content = message["data"].get("content", "")
@@ -2039,12 +2024,11 @@ class TaskManager(BaseManager):
                         ):
                             logger.info(f"Condition for interruption hit")
                             self.interruption_manager.on_interruption_triggered()
-                            self.turn_id += 1
                             self.tools["input"].update_is_audio_being_played(False)
                             await self.__cleanup_downstream_tasks()
                         # User continuation detection: cancel pending response if user continues within grace period
                         elif not self.tools["input"].is_audio_being_played_to_user() and self.tools["input"].welcome_message_played():
-                            has_pending_response = len(self.sequence_ids) > 1
+                            has_pending_response = self.interruption_manager.has_pending_responses()
                             time_since_utterance_end = self.interruption_manager.get_time_since_utterance_end()
                             within_grace_period = (
                                 time_since_utterance_end != -1 and
@@ -2054,7 +2038,7 @@ class TaskManager(BaseManager):
 
                             if has_pending_response and within_grace_period and interim_transcript_len > self.number_of_words_for_interruption:
                                 logger.info(f"User continuation detected ({interim_transcript_len} words within {time_since_utterance_end:.0f}ms), canceling pending response")
-                                self.interruption_manager.utterance_end_time = -1
+                                self.interruption_manager.reset_utterance_end_time()
                                 await self.__cleanup_downstream_tasks()
                         elif self.tools["input"].is_audio_being_played_to_user() and self.tools["input"].welcome_message_played() and self.number_of_words_for_interruption != 0:
                             # Not enough words for interruption - ignore
@@ -2063,20 +2047,12 @@ class TaskManager(BaseManager):
 
                         self.interruption_manager.update_required_delay(len(self.history))
                         self.interruption_manager.on_interim_transcript_received()
-                        self.required_delay_before_speaking = self.incremental_delay if len(self.history) > 2 else 0
-                        logger.info(f"Increased the incremental delay time to {self.required_delay_before_speaking}")
-                        if self.time_since_first_interim_result == -1:
-                            self.time_since_first_interim_result = time.time() * 1000
-                            logger.info(f"Setting time for first interim result as {self.time_since_first_interim_result}")
 
                         # Trigger background voicemail check on interim transcripts (non-blocking)
                         if self.voicemail_detection_enabled and not self.voicemail_detected:
                             interim_content = message["data"].get("content", "")
                             self._trigger_voicemail_check(interim_content, meta_info, is_final=False)
 
-                        # self.callee_silent = False
-                        # TODO check where this needs to be added post understanding it's usage
-                        self.let_remaining_audio_pass_through = False
                         self.llm_response_generated = False
 
                     # Whenever speech_final or UtteranceEnd is received from Deepgram, this condition would get triggered
@@ -2095,25 +2071,13 @@ class TaskManager(BaseManager):
                             continue
 
                         self.interruption_manager.on_user_speech_ended()
-                        self.callee_speaking = False
-                        # self.callee_silent = True
                         temp_transcriber_message = ""
 
                         if self.output_task is None:
                             logger.info(f"Output task was none and hence starting it")
                             self.output_task = asyncio.create_task(self.__process_output_loop())
 
-                        # TODO remove this variable if we do not use the below condition
-                        # if self.llm_response_generated:
-                        #     self.history = copy.deepcopy(self.interim_history)
-
-                        # TODO check where this needs to be added post understanding it's usage
-                        self.let_remaining_audio_pass_through = True
-
-                        self.interruption_manager.reset_delay_for_speech_final(len(self.history), self.minimum_wait_duration)
-                        self.time_since_first_interim_result = -1
-                        self.required_delay_before_speaking = max(
-                            self.minimum_wait_duration - self.incremental_delay, 0) if len(self.history) > 2 else 0
+                        self.interruption_manager.reset_delay_for_speech_final(len(self.history))
 
                         transcriber_message = message["data"].get("content")
                         meta_info = self.__get_updated_meta_info(meta_info)
@@ -2123,7 +2087,6 @@ class TaskManager(BaseManager):
                     elif isinstance(message.get("data"), dict) and message["data"].get("type", "") == "speech_ended":
                         logger.info(f"Received speech_ended notification, resetting callee_speaking state")
                         self.interruption_manager.on_user_speech_ended()
-                        self.callee_speaking = False
                         temp_transcriber_message = ""
 
                     elif message["data"] == "transcriber_connection_closed":
@@ -2200,7 +2163,7 @@ class TaskManager(BaseManager):
                         sequence_id = meta_info.get("sequence_id", None)
 
                         # Check if the message is valid to process
-                        if is_first_message or (not self.conversation_ended and sequence_id in self.sequence_ids):
+                        if is_first_message or (not self.conversation_ended and self.interruption_manager.is_valid_sequence(sequence_id)):
                             logger.info(f"Processing message with sequence_id: {sequence_id}")
 
                             if self.stream:
@@ -2326,14 +2289,12 @@ class TaskManager(BaseManager):
         meta_info["type"] = "audio"
         meta_info["synthesizer_start_time"] = time.time()
         try:
-            if not self.conversation_ended and ('is_first_message' in meta_info and meta_info['is_first_message'] or message["meta_info"]["sequence_id"] in self.sequence_ids):
+            if not self.conversation_ended and ('is_first_message' in meta_info and meta_info['is_first_message'] or self.interruption_manager.is_valid_sequence(message["meta_info"]["sequence_id"])):
                 if meta_info["is_md5_hash"]:
                     logger.info('sending preprocessed audio response to {}'.format(self.task_config["tools_config"]["output"]["provider"]))
                     await self.__send_preprocessed_audio(meta_info, text)
 
                 elif self.synthesizer_provider in SUPPORTED_SYNTHESIZER_MODELS.keys():
-                    # self.sequence_ids.add(meta_info["sequence_id"])
-                    # logger.info(f"After adding into sequence id {self.sequence_ids}")
                     convert_to_request_log(message = text, meta_info= meta_info, component="synthesizer", direction="request", model = self.synthesizer_provider, engine=self.tools['synthesizer'].get_engine(), run_id= self.run_id)
                     if 'cached' in message['meta_info'] and meta_info['cached'] is True:
                         logger.info(f"Cached response and hence sending preprocessed text")
@@ -2345,7 +2306,7 @@ class TaskManager(BaseManager):
                 else:
                     logger.info("other synthesizer models not supported yet")
             else:
-                logger.info(f"{message['meta_info']['sequence_id']} is not in sequence ids  {self.sequence_ids} and hence not synthesizing this")
+                logger.info(f"{message['meta_info']['sequence_id']} is not a valid sequence id and hence not synthesizing this")
 
         except Exception as e:
             traceback.print_exc()
@@ -2360,7 +2321,7 @@ class TaskManager(BaseManager):
         sequence = meta_info["sequence"]
         next_task = self._get_next_step(sequence, "transcriber")
         await self._handle_transcriber_output(next_task, message, meta_info)
-        self.time_since_first_interim_result = (time.time() * 1000) - 1000
+        self.interruption_manager.set_first_interim_for_immediate_response()
 
     """
     When the welcome message is playing we accumulate the transcript in the self.transcriber_message variable and once 
@@ -2386,25 +2347,12 @@ class TaskManager(BaseManager):
     async def __process_output_loop(self):
         try:
             while True:
-                if (not self.let_remaining_audio_pass_through) and self.tools["input"].welcome_message_played():
-                    time_since_first_interim_result = (time.time() * 1000) - self.time_since_first_interim_result if self.time_since_first_interim_result != -1 else -1
-                    logger.info(f"##### It's been {time_since_first_interim_result} ms since first  interim result and required time to wait for it is {self.required_delay_before_speaking}. Hence sleeping for 100ms. self.time_since_first_interim_result {self.time_since_first_interim_result}")
-                    if time_since_first_interim_result != -1 and time_since_first_interim_result < self.required_delay_before_speaking:
-                        await asyncio.sleep(0.1) #sleep for 100ms and continue
-                        continue
-                    else:
-                        logger.info(f"First interim result hasn't been gotten yet and hence sleeping ")
-                        await asyncio.sleep(0.1)
-
-                    logger.info(f"##### Got to wait {self.required_delay_before_speaking} ms before speaking and alreasy waited {time_since_first_interim_result} since the first interim result")
-
-                elif self.let_remaining_audio_pass_through:
-                    time_since_first_interim_result = (time.time() *1000)- self.time_since_first_interim_result if self.time_since_first_interim_result != -1 else -1
-
-                    # Grace period is now handled by get_audio_send_status() after dequeue
-                    logger.info(f"##### In elif been {time_since_first_interim_result} ms since first  interim result and required time to wait for it is {self.required_delay_before_speaking}. Hence sleeping for 100ms. self.time_since_first_interim_result {self.time_since_first_interim_result}")
-                    if time_since_first_interim_result != -1 and time_since_first_interim_result < self.required_delay_before_speaking:
-                        await asyncio.sleep(0.1) #sleep for 100ms and continue
+                if self.tools["input"].welcome_message_played():
+                    should_delay, sleep_duration = self.interruption_manager.should_delay_output(
+                        self.tools["input"].welcome_message_played()
+                    )
+                    if should_delay:
+                        await asyncio.sleep(sleep_duration)
                         continue
                 else:
                     logger.info(f"Started transmitting at {time.time()}")
@@ -2550,7 +2498,8 @@ class TaskManager(BaseManager):
 
     async def __check_for_backchanneling(self):
         while True:
-            if self.callee_speaking and time.time() - self.callee_speaking_start_time > self.backchanneling_start_delay:
+            user_speaking_duration = self.interruption_manager.get_user_speaking_duration()
+            if self.interruption_manager.is_user_speaking() and user_speaking_duration > self.backchanneling_start_delay:
                 filename = random.choice(self.filenames)
                 logger.info(f"Should send a random backchanneling words and sending them {filename}")
                 audio = await get_raw_audio_bytes(f"{self.backchanneling_audios}/{filename}", local= True, is_location=True)
@@ -2559,7 +2508,7 @@ class TaskManager(BaseManager):
                     audio = wav_bytes_to_pcm(audio)
                 await self.tools["output"].handle(create_ws_data_packet(audio, self.__get_updated_meta_info()))
             else:
-                logger.info(f"Callee isn't speaking and hence not sending or {time.time() - self.callee_speaking_start_time} is not greater than {self.backchanneling_start_delay}")
+                logger.info(f"Callee isn't speaking and hence not sending or {user_speaking_duration} is not greater than {self.backchanneling_start_delay}")
             await asyncio.sleep(self.backchanneling_message_gap)
 
     async def __first_message(self, timeout=10.0):
