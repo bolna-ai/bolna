@@ -2460,7 +2460,6 @@ class TaskManager(BaseManager):
                     time_since_hangup = time.time() - self.hangup_triggered_at
                     if time_since_hangup > self.hangup_mark_event_timeout:
                         logger.warning(f"Hangup mark event not received within {self.hangup_mark_event_timeout}s (waited {time_since_hangup:.1f}s), forcing conversation end")
-                        self.hangup_detail = f"{self.hangup_detail}_mark_event_timeout" if self.hangup_detail else "mark_event_timeout"
                         # Set hangup_sent since mark event didn't arrive
                         if "output" in self.tools:
                             self.tools["output"].set_hangup_sent()
