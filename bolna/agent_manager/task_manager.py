@@ -104,7 +104,10 @@ class TaskManager(BaseManager):
         self.sampling_rate = 24000
         self.conversation_ended = False
         self.hangup_triggered = False
+        self.hangup_triggered_at = None
         self.hangup_message_queued = False
+        self._end_of_conversation_in_progress = False
+        self.hangup_mark_event_timeout = 10
 
         # Prompts
         self.prompts, self.system_prompt = {}, {}
@@ -1266,6 +1269,11 @@ class TaskManager(BaseManager):
                 logger.info(f"DTMF LLM processing triggered with exception {e}")
 
     async def __process_end_of_conversation(self, web_call_timeout=False):
+        if self._end_of_conversation_in_progress or self.conversation_ended:
+            logger.info("__process_end_of_conversation: Already in progress or ended, skipping duplicate call")
+            return
+
+        self._end_of_conversation_in_progress = True
         logger.info("Got end of conversation. I'm stopping now")
 
         await self.wait_for_current_message()
@@ -1289,7 +1297,6 @@ class TaskManager(BaseManager):
 
         self.conversation_ended = True
         self.ended_by_assistant = True
-
 
         await self.tools["input"].stop_handler()
         logger.info("Stopped input handler")
@@ -1692,6 +1699,9 @@ class TaskManager(BaseManager):
                     convert_to_request_log(message=completion_res, meta_info= meta_info, component="llm_hangup", direction="response", model=self.check_for_completion_llm, run_id= self.run_id)
 
                     if should_hangup:
+                        if self.hangup_triggered or self.conversation_ended:
+                            logger.info(f"Hangup already triggered or conversation ended, skipping duplicate hangup request")
+                            return
                         self.hangup_detail = "llm_prompted_hangup"
                         await self.process_call_hangup()
                         return
@@ -1700,8 +1710,14 @@ class TaskManager(BaseManager):
             llm_response = ""
 
     async def process_call_hangup(self):
+        # Guard: Prevent multiple concurrent hangup attempts
+        if self.hangup_triggered or self.conversation_ended:
+            logger.info(f"process_call_hangup: Hangup already in progress or conversation ended, skipping")
+            return
+
         # Set immediately to prevent user interruptions from cancelling hangup
         self.hangup_triggered = True
+        self.hangup_triggered_at = time.time()  # Track when hangup was triggered for timeout monitoring
         message = self.call_hangup_message if not self.voicemail_detected else ""
         if not message or message.strip() == "":
             self.hangup_message_queued = False  # No hangup message to wait for
@@ -2436,8 +2452,23 @@ class TaskManager(BaseManager):
                 continue
 
             if self.hangup_triggered:
-                logger.info(f"Call is going to hangup")
-                break
+                if self.conversation_ended:
+                    logger.info(f"Call hangup completed successfully")
+                    break
+
+                if self.hangup_triggered_at:
+                    time_since_hangup = time.time() - self.hangup_triggered_at
+                    if time_since_hangup > self.hangup_mark_event_timeout:
+                        logger.warning(f"Hangup mark event not received within {self.hangup_mark_event_timeout}s (waited {time_since_hangup:.1f}s), forcing conversation end")
+                        self.hangup_detail = f"{self.hangup_detail}_mark_event_timeout" if self.hangup_detail else "mark_event_timeout"
+                        # Set hangup_sent since mark event didn't arrive
+                        if "output" in self.tools:
+                            self.tools["output"].set_hangup_sent()
+                        await self.__process_end_of_conversation()
+                        break
+                    else:
+                        logger.info(f"Waiting for hangup mark event ({time_since_hangup:.1f}s / {self.hangup_mark_event_timeout}s)")
+                continue
 
             if self.tools["input"].is_audio_being_played_to_user():
                 continue
