@@ -843,6 +843,10 @@ class TaskManager(BaseManager):
             if 'base_url' in self.kwargs:
                 injected_cfg['base_url'] = self.kwargs['base_url']
 
+            # Pass context_data for variable replacement in node prompts
+            if self.context_data:
+                injected_cfg['context_data'] = self.context_data
+
             llm_agent = GraphAgent(injected_cfg)
             logger.info("Graph agent created with rag-proxy-server support")
         elif agent_type == "knowledgebase_agent":
