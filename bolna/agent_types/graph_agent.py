@@ -9,7 +9,7 @@ from bolna.models import *
 from bolna.agent_types.base_agent import BaseAgent
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.rag_service_client import RAGServiceClient, RAGServiceClientSingleton
-from bolna.helpers.utils import now_ms, format_messages
+from bolna.helpers.utils import now_ms, format_messages, update_prompt_with_context
 from bolna.llms import OpenAiLLM
 from bolna.prompts import CHECK_FOR_COMPLETION_PROMPT, VOICEMAIL_DETECTION_PROMPT
 
@@ -355,9 +355,16 @@ Be decisive. If the user's intent is clear, call the transition function immedia
         detected_lang = self.context_data.get('detected_language', 'en')
         node_prompt = self._get_prompt_with_example(current_node, detected_lang)
 
+        # Replace {variables} with context_data values (same as simple LLM agent)
+        if self.context_data:
+            node_prompt = update_prompt_with_context(node_prompt, self.context_data)
+
         # Prepend agent_information to node prompt (global context for all nodes)
         if self.agent_information:
-            prompt = f"{self.agent_information}\n\n{node_prompt}"
+            agent_info = self.agent_information
+            if self.context_data:
+                agent_info = update_prompt_with_context(agent_info, self.context_data)
+            prompt = f"{agent_info}\n\n{node_prompt}"
         else:
             prompt = node_prompt
 
