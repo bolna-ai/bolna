@@ -34,7 +34,18 @@ class GraphAgent(BaseAgent):
         self.current_node_id = self.config.get('current_node_id')
         self.context_data = self.config.get('context_data') or {}
         self.llm_model = self.config.get('model')
-        self.openai = OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
+
+        # Get credentials from config (injected by task_manager) or fall back to env vars
+        self.llm_key = self.config.get('llm_key') or os.getenv('OPENAI_API_KEY')
+        self.base_url = self.config.get('base_url')
+
+        # Initialize OpenAI client with credentials (supports EU routing)
+        if self.base_url:
+            self.openai = OpenAI(api_key=self.llm_key, base_url=self.base_url)
+            logger.info(f"OpenAI client initialized with custom base_url: {self.base_url}")
+        else:
+            self.openai = OpenAI(api_key=self.llm_key)
+
         self.node_history = ["root"]
         self.node_structure = self.build_node_structure()
         self.rag_configs = self.initialize_rag_configs()
@@ -45,9 +56,14 @@ class GraphAgent(BaseAgent):
         self.routing_model = self.config.get('routing_model')
         self._init_routing_client()
 
-        # Initialize LLMs for hangup and voicemail detection (same as simple_llm_agent)
-        self.conversation_completion_llm = OpenAiLLM(model=os.getenv('CHECK_FOR_COMPLETION_LLM', self.llm_model or 'gpt-4o-mini'))
-        self.voicemail_llm = OpenAiLLM(model=os.getenv('VOICEMAIL_DETECTION_LLM', 'gpt-4.1-mini'))
+        # Initialize LLMs for hangup and voicemail detection
+        llm_kwargs = {}
+        if self.llm_key:
+            llm_kwargs['llm_key'] = self.llm_key
+        if self.base_url:
+            llm_kwargs['base_url'] = self.base_url
+        self.conversation_completion_llm = OpenAiLLM(model=os.getenv('CHECK_FOR_COMPLETION_LLM', self.llm_model or 'gpt-4o-mini'), **llm_kwargs)
+        self.voicemail_llm = OpenAiLLM(model=os.getenv('VOICEMAIL_DETECTION_LLM', 'gpt-4.1-mini'), **llm_kwargs)
 
     def initialize_rag_configs(self) -> Dict[str, Dict]:
         """Initialize RAG configurations for each node."""
