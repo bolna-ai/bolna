@@ -337,7 +337,14 @@ Be decisive. If the user's intent is clear, call the transition function immedia
 
         # Get prompt with language-specific example
         detected_lang = self.context_data.get('detected_language', 'en')
-        prompt = self._get_prompt_with_example(current_node, detected_lang)
+        node_prompt = self._get_prompt_with_example(current_node, detected_lang)
+
+        # Prepend agent_information to node prompt (global context for all nodes)
+        if self.agent_information:
+            prompt = f"{self.agent_information}\n\n{node_prompt}"
+        else:
+            prompt = node_prompt
+
         rag_config = self.rag_configs.get(self.current_node_id)
 
         if rag_config and rag_config.get('collections'):
