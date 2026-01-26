@@ -11,5 +11,5 @@ class BaseLLM:
     async def respond_back_with_filler(self, messages):
         pass
 
-    async def generate(self, messages, stream=True):
+    async def generate(self, messages, stream=True, ret_metadata=False):
         pass

@@ -1,6 +1,7 @@
 import os
 import asyncio
 import json
+import time
 from typing import List, Tuple, AsyncGenerator, Optional, Dict
 
 from bolna.models import *
@@ -37,7 +38,7 @@ class KnowledgeBaseAgent(BaseAgent):
 
         # Separate LLM for checking if call should end
         self.conversation_completion_llm = OpenAiLLM(model=os.getenv('CHECK_FOR_COMPLETION_LLM', self.llm_model))
-
+        self.voicemail_llm = OpenAiLLM(model=os.getenv('VOICEMAIL_DETECTION_LLM', "gpt-4.1-mini"))
         # RAG configuration
         self.rag_config = self._initialize_rag_config()
         self.rag_server_url = os.getenv('RAG_SERVER_URL', 'http://localhost:8000')
@@ -62,7 +63,7 @@ class KnowledgeBaseAgent(BaseAgent):
 
             # Pass through credentials
             for key in ['llm_key', 'base_url', 'api_version', 'language', 'api_tools', 'buffer_size']:
-                if key in self.config:
+                if self.config.get(key, None):
                     llm_kwargs[key] = self.config[key]
 
             llm_class = SUPPORTED_LLM_PROVIDERS[provider]
@@ -118,12 +119,17 @@ class KnowledgeBaseAgent(BaseAgent):
                 {'role': 'system', 'content': check_for_completion_prompt},
                 {'role': 'user', 'content': format_messages(messages)}
             ]
-            response = await self.conversation_completion_llm.generate(prompt, request_json=True)
-            return json.loads(response)
+            start_time = time.time()
+            response, metadata = await self.conversation_completion_llm.generate(prompt, request_json=True, ret_metadata=True)
+            latency_ms = (time.time() - start_time) * 1000
+            
+            result = json.loads(response)
+            metadata['latency_ms'] = latency_ms
+            return result, metadata
         except Exception as e:
             logger.error(f'check_for_completion error: {e}')
-            return {'hangup': 'No'}
-        
+            return {'hangup': 'No'}, {}
+
     async def check_for_voicemail(self, user_message, voicemail_detection_prompt=None):
         """
         Check if the user message indicates a voicemail system.
@@ -133,7 +139,7 @@ class KnowledgeBaseAgent(BaseAgent):
             voicemail_detection_prompt: Custom prompt for voicemail detection (optional)
         
         Returns:
-            dict with 'is_voicemail': 'Yes' or 'No'
+            dict with 'is_voicemail': 'Yes' or 'No', 'latency_ms': float
         """
         try:
             detection_prompt = voicemail_detection_prompt or VOICEMAIL_DETECTION_PROMPT
@@ -147,13 +153,16 @@ class KnowledgeBaseAgent(BaseAgent):
                 {'role': 'user', 'content': f"User message: {user_message}"}
             ]
 
-            response = await self.conversation_completion_llm.generate(prompt, request_json=True)
+            start_time = time.time()
+            response, metadata = await self.voicemail_llm.generate(prompt, request_json=True, ret_metadata=True)
+            latency_ms = (time.time() - start_time) * 1000
+            
             result = json.loads(response)
-            logger.info(f"Voicemail detection result: {result}")
-            return result
+            metadata['latency_ms'] = latency_ms
+            return result, metadata
         except Exception as e:
             logger.error('check_for_voicemail exception: {}'.format(str(e)))
-            return {'is_voicemail': 'No'}
+            return {'is_voicemail': 'No'}, {}
 
     async def _add_rag_context(self, messages: List[dict]) -> Tuple[List[dict], dict]:
         """

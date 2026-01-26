@@ -38,11 +38,11 @@ class LiteLLM(BaseLLM):
             self.model_args["api_version"] = self.api_version
 
         if len(kwargs) != 0:
-            if "base_url" in kwargs:
+            if kwargs.get("base_url", None):
                 self.model_args["api_base"] = kwargs["base_url"]
-            if "llm_key" in kwargs:
+            if kwargs.get("llm_key", None):
                 self.model_args["api_key"] = kwargs["llm_key"]
-            if "api_version" in kwargs:
+            if kwargs.get("api_version", None):
                 self.model_args["api_version"] = kwargs["api_version"]
 
         self.custom_tools = kwargs.get("api_tools", None)
@@ -235,7 +235,7 @@ class LiteLLM(BaseLLM):
 
         self.started_streaming = False
 
-    async def generate(self, messages, stream=False, request_json=False, meta_info = None):
+    async def generate(self, messages, stream=False, request_json=False, meta_info = None, ret_metadata=False):
         text = ""
         model_args = self.model_args.copy()
         model_args["model"] = self.model
@@ -282,4 +282,7 @@ class LiteLLM(BaseLLM):
             error_message = str(e)
             logger.error(f'LiteLLM unexpected error generating response: {error_message}')
             raise
-        return text
+        if ret_metadata:
+            return text, {}
+        else:
+            return text
