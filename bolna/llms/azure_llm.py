@@ -68,7 +68,10 @@ class AzureLLM(BaseLLM):
             "messages": messages,
             "stream": True,
             "stop": ["User:"],
-            "user": f"{self.run_id}#{meta_info.get('turn_id', '')}" if meta_info else self.run_id
+            "user": f"{self.run_id}#{meta_info.get('turn_id', '')}" if meta_info else self.run_id,
+            "stream_options": {
+			"include_usage": True
+		    }
         }
 
         if self.trigger_function_call:
@@ -116,6 +119,19 @@ class AzureLLM(BaseLLM):
             raise
 
         async for chunk in completion_stream:
+
+            if chunk.usage:
+                try:
+                    yield {"usage": {
+                            "completion_tokens": chunk.usage.completion_tokens,
+                        "prompt_tokens": chunk.usage.prompt_tokens
+                        }}
+                except Exception as e:
+                    logger.error(f"Error processing usage data: {e}")
+                    yield {"usage": {}}
+                finally:
+                    continue
+
             if not chunk.choices or len(chunk.choices) == 0:
                 continue
 

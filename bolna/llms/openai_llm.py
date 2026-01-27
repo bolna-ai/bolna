@@ -90,7 +90,10 @@ class OpenAiLLM(BaseLLM):
             "response_format": response_format,
             "messages": messages,
             "stream": True,
-            "user": f"{self.run_id}#{meta_info['turn_id']}"
+            "user": f"{self.run_id}#{meta_info['turn_id']}",
+            "stream_options": {
+			"include_usage": True
+		    }
         }
 
         if not self.model.startswith("gpt-5"):
@@ -139,6 +142,19 @@ class OpenAiLLM(BaseLLM):
             raise
 
         async for chunk in completion_stream:
+
+            if chunk.usage:
+                try:
+                    yield {"usage": {
+                            "completion_tokens": chunk.usage.completion_tokens,
+                        "prompt_tokens": chunk.usage.prompt_tokens
+                        }}
+                except Exception as e:
+                    logger.error(f"Error processing usage data: {e}")
+                    yield {"usage": {}}
+                finally:
+                    continue
+
             now = now_ms()
             if hasattr(chunk, 'service_tier') and chunk.service_tier:
                 service_tier = chunk.service_tier

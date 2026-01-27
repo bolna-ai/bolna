@@ -1,5 +1,6 @@
 import asyncio
 import json
+from typing import Tuple, Dict
 
 import aiohttp
 from bolna.helpers.logger_config import configure_logger
@@ -64,7 +65,10 @@ def substitute_var_markers(obj, values):
         return obj  # Primitives returned as-is
 
 
-async def trigger_api(url, method, param, api_token, headers_data, meta_info, run_id, **kwargs):
+async def trigger_api(url, method, param, api_token, headers_data, meta_info, run_id, **kwargs) -> Tuple[Dict, Dict]:
+    '''
+    Returns the API response after making an async HTTP call, along with the associate metadata (including errors)
+    '''
     try:
         request_body, api_params = None, None
         if param:
@@ -104,28 +108,39 @@ async def trigger_api(url, method, param, api_token, headers_data, meta_info, ru
             content_type = 'form'
         convert_to_request_log(request_body, meta_info , None, "function_call", direction="request", is_cached=False, run_id=run_id)
 
-        await asyncio.sleep(0.7)
+    except Exception as e:
+        message = f"Error in formatting API request: {e}"
+        logger.error(message)
+        return {"message": "Tool call failed"}, {"error": message}
 
+
+    try:
+        await asyncio.sleep(0.7)
         async with aiohttp.ClientSession() as session:
             if method.lower() == "get":
                 logger.info(f"Sending request {request_body}, {url}, {headers}")
                 async with session.get(url, params=api_params, headers=headers) as response:
+                    response.raise_for_status()
                     response_text = await response.text()
             elif method.lower() == "post":
                 logger.info(f"Sending request {api_params}, {url}, {headers}")
                 if content_type == "json":
                     async with session.post(url, json=api_params, headers=headers) as response:
+                        response.raise_for_status()
                         response_text = await response.text()
                 elif content_type == "form":
                     normalized_api_params = normalize_for_form(api_params)
                     async with session.post(url, data=normalized_api_params, headers=headers) as response:
+                        response.raise_for_status()
                         response_text = await response.text()
+            else:
+                raise ValueError(f"Unsupported HTTP method: {method}")
 
-            return response_text
+            return {"message": response_text}, {}
     except Exception as e:
-        message = f"ERROR CALLING API: Please check your API: {e}"
-        logger.error(message)
-        return message
+        message = f"Error in API call: {e}"
+        logger.info(message)
+        return {"message": "Tool call failed"}, {"error": message}
 
 
 async def computed_api_response(response):
