@@ -238,6 +238,8 @@ class TaskManager(BaseManager):
                         "model": self.llm_agent_config['llm_config']['model'],
                         "max_tokens": self.llm_agent_config['llm_config']['max_tokens'],
                         "provider": self.llm_agent_config['llm_config']['provider'],
+                        "buffer_size": self.task_config["tools_config"]["synthesizer"].get('buffer_size'),
+                        "temperature": self.llm_agent_config['llm_config']['temperature']
                     }
                 else:
                     agent_type = self.task_config["tools_config"]["llm_agent"].get("agent_type", None)
@@ -846,6 +848,13 @@ class TaskManager(BaseManager):
             # Pass context_data for variable replacement in node prompts
             if self.context_data:
                 injected_cfg['context_data'] = self.context_data
+
+            if 'api_version' in self.kwargs:
+                injected_cfg['api_version'] = self.kwargs['api_version']
+            if 'api_tools' in self.kwargs:
+                injected_cfg['api_tools'] = self.kwargs['api_tools']
+            injected_cfg['buffer_size'] = self.task_config["tools_config"]["synthesizer"].get('buffer_size')
+            injected_cfg['language'] = self.language
 
             llm_agent = GraphAgent(injected_cfg)
             logger.info("Graph agent created with rag-proxy-server support")
@@ -1728,7 +1737,7 @@ class TaskManager(BaseManager):
             ### TODO CHECK IF THIS IS EVEN REQUIRED
 
             # Request logs converted inside do_llm_generation for knowledgebase agent
-            if not self.__is_knowledgebase_agent():
+            if not self.__is_knowledgebase_agent() and not self.__is_graph_agent():
                 convert_to_request_log(message=format_messages(messages, use_system_prompt=True), meta_info=meta_info, component="llm", direction="request", model=self.llm_config["model"], run_id= self.run_id)
 
             await self.__do_llm_generation(messages, meta_info, next_step, should_bypass_synth)
