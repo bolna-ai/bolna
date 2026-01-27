@@ -11,6 +11,7 @@ from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.rag_service_client import RAGServiceClient, RAGServiceClientSingleton
 from bolna.helpers.utils import now_ms, format_messages, update_prompt_with_context
 from bolna.llms import OpenAiLLM
+from bolna.providers import SUPPORTED_LLM_PROVIDERS
 from bolna.prompts import CHECK_FOR_COMPLETION_PROMPT, VOICEMAIL_DETECTION_PROMPT
 
 from typing import List, Tuple, Generator, AsyncGenerator, Optional, Dict, Any
@@ -56,6 +57,9 @@ class GraphAgent(BaseAgent):
         self.routing_model = self.config.get('routing_model')
         self._init_routing_client()
 
+        # Initialize main LLM for response generation (supports api_tools/function calling + real streaming)
+        self.llm = self._initialize_llm()
+
         # Initialize LLMs for hangup and voicemail detection
         llm_kwargs = {}
         if self.llm_key:
@@ -64,6 +68,31 @@ class GraphAgent(BaseAgent):
             llm_kwargs['base_url'] = self.base_url
         self.conversation_completion_llm = OpenAiLLM(model=os.getenv('CHECK_FOR_COMPLETION_LLM', self.llm_model or 'gpt-4o-mini'), **llm_kwargs)
         self.voicemail_llm = OpenAiLLM(model=os.getenv('VOICEMAIL_DETECTION_LLM', 'gpt-4.1-mini'), **llm_kwargs)
+
+    def _initialize_llm(self):
+        """Initialize LLM with api_tools support (same pattern as KnowledgeBaseAgent)."""
+        try:
+            provider = self.config.get('provider') or self.config.get('llm_provider', 'openai')
+            if provider not in SUPPORTED_LLM_PROVIDERS:
+                logger.warning(f"Unknown provider: {provider}, using openai")
+                provider = 'openai'
+
+            llm_kwargs = {
+                'model': self.llm_model,
+                'temperature': self.config.get('temperature', 0.7),
+                'max_tokens': self.config.get('max_tokens', 150),
+                'provider': provider,
+            }
+
+            for key in ['llm_key', 'base_url', 'api_version', 'language', 'api_tools', 'buffer_size']:
+                if self.config.get(key, None):
+                    llm_kwargs[key] = self.config[key]
+
+            llm_class = SUPPORTED_LLM_PROVIDERS[provider]
+            return llm_class(**llm_kwargs)
+        except Exception as e:
+            logger.error(f"Failed to create LLM: {e}")
+            return None
 
     def initialize_rag_configs(self) -> Dict[str, Dict]:
         """Initialize RAG configurations for each node."""
@@ -346,136 +375,6 @@ Be decisive. If the user's intent is clear, call the transition function immedia
 
         return prompt
 
-    async def generate_response(self, history: List[dict]) -> dict:
-        current_node = self.get_node_by_id(self.current_node_id)
-        if not current_node:
-            raise ValueError("Current node is not found in the configuration.")
-
-        # Get prompt with language-specific example
-        detected_lang = self.context_data.get('detected_language', 'en')
-        node_prompt = self._get_prompt_with_example(current_node, detected_lang)
-
-        # Replace {variables} with context_data values (same as simple LLM agent)
-        if self.context_data:
-            node_prompt = update_prompt_with_context(node_prompt, self.context_data)
-
-        # Prepend agent_information to node prompt (global context for all nodes)
-        if self.agent_information:
-            agent_info = self.agent_information
-            if self.context_data:
-                agent_info = update_prompt_with_context(agent_info, self.context_data)
-            prompt = f"{agent_info}\n\n{node_prompt}"
-        else:
-            prompt = node_prompt
-
-        rag_config = self.rag_configs.get(self.current_node_id)
-
-        if rag_config and rag_config.get('collections'):
-            try:
-                client = await RAGServiceClientSingleton.get_client(self.rag_server_url)
-                latest_message = history[-1]["content"]
-
-                rag_response = await client.query_for_conversation(
-                    query=latest_message,
-                    collections=rag_config['collections'],
-                    max_results=rag_config.get('similarity_top_k', 10),
-                    similarity_threshold=0.0
-                )
-
-                if not rag_response.contexts or len(rag_response.contexts) == 0:
-                    return await self._generate_standard_response(prompt, history)
-
-                top_score = rag_response.contexts[0].score if rag_response.contexts else 0.0
-                logger.info(f"RAG (node {self.current_node_id}): Retrieved {rag_response.total_results} contexts, top score: {top_score:.3f}")
-
-                rag_context = await client.format_context_for_prompt(rag_response.contexts)
-                return await self._generate_response_with_knowledge(prompt, history, rag_context)
-
-            except asyncio.TimeoutError:
-                logger.error(f"RAG service timeout for node {self.current_node_id}")
-                return await self._generate_standard_response(prompt, history)
-
-            except Exception as e:
-                logger.error(f"RAG service error: {e}")
-                return await self._generate_standard_response(prompt, history)
-
-        else:
-            return await self._generate_standard_response(prompt, history)
-
-
-    async def _generate_standard_response(self, node_prompt: str, history: List[dict]) -> dict:
-        """Generate response using node prompt + conversation history without RAG."""
-        max_history = 50
-        history_subset = history[-max_history:] if len(history) > max_history else history
-
-        messages = [{"role": "system", "content": node_prompt}] + [
-            {"role": item["role"], "content": item["content"]} for item in history_subset
-        ]
-
-        response = self.openai.chat.completions.create(
-            model=self.llm_model,
-            messages=messages,
-            max_tokens=self.config.get('max_tokens', 150),
-            temperature=self.config.get('temperature', 0.7),
-            top_p=self.config.get('top_p', 1.0),
-            frequency_penalty=self.config.get('frequency_penalty', 0),
-            presence_penalty=self.config.get('presence_penalty', 0),
-        )
-        response_text = response.choices[0].message.content
-        return {"role": "assistant", "content": response_text}
-
-    async def _generate_response_with_knowledge(self, node_prompt: str, history: List[dict], rag_context: str) -> dict:
-        """Generate response with node prompt augmented by RAG knowledge."""
-        augmented_prompt = f"""{node_prompt}
-
-You have access to relevant information from the knowledge base:
-
-{rag_context}
-
-Use this information naturally when it helps answer the user's questions. Don't force references if not relevant to the conversation."""
-
-        max_history = 50
-        history_subset = history[-max_history:] if len(history) > max_history else history
-
-        messages = [{"role": "system", "content": augmented_prompt}] + [
-            {"role": item["role"], "content": item["content"]} for item in history_subset
-        ]
-
-        response = self.openai.chat.completions.create(
-            model=self.llm_model,
-            messages=messages,
-            max_tokens=self.config.get('max_tokens', 150),
-            temperature=self.config.get('temperature', 0.7),
-            top_p=self.config.get('top_p', 1.0),
-            frequency_penalty=self.config.get('frequency_penalty', 0),
-            presence_penalty=self.config.get('presence_penalty', 0),
-        )
-        response_text = response.choices[0].message.content
-        return {"role": "assistant", "content": response_text}
-
-    async def _generate_fallback_response(self, prompt: str, history: List[dict]) -> dict:
-        """
-        Deprecated: Use _generate_standard_response instead.
-        Kept for backward compatibility.
-        """
-        latest_message = history[-1]["content"]
-        system_message = f"{prompt}\n\nPlease respond based on the latest user message: '{latest_message}'."
-
-        messages = [{"role": "system", "content": system_message}] + [
-            {"role": item["role"], "content": item["content"]} for item in history[-5:]
-        ]
-        response = self.openai.chat.completions.create(
-            model=self.llm_model,
-            messages=messages,
-            max_tokens=self.config.get('max_tokens', 150),
-            temperature=self.config.get('temperature', 0.7),
-            top_p=self.config.get('top_p', 1.0),
-            frequency_penalty=self.config.get('frequency_penalty', 0),
-            presence_penalty=self.config.get('presence_penalty', 0),
-        )
-        response_text = response.choices[0].message.content
-        return {"role": "assistant", "content": response_text}
-    
     def is_response_valid(self, response: str) -> bool:
         if not response or len(response.strip()) < 5:  
             return False
@@ -533,61 +432,83 @@ Use this information naturally when it helps answer the user's questions. Don't 
         
         return next_node_id
 
-    async def generate(self, message: List[dict], **kwargs) -> AsyncGenerator[Tuple[str, bool, Optional[Dict], bool, None, None], None]:
-        meta_info = kwargs.get('meta_info', {})
-        start_time = now_ms()
-        first_token_time = None
-        buffer = ""
-        buffer_size = 20
-        latency_data = {
-            "sequence_id": meta_info.get("sequence_id") if meta_info else None,
-            "first_token_latency_ms": None,
-            "total_stream_duration_ms": None
-        }
+    async def _build_messages(self, history: List[dict]) -> List[dict]:
+        """Build messages array: system prompt (+ optional RAG) + conversation history."""
+        current_node = self.get_node_by_id(self.current_node_id)
+        if not current_node:
+            raise ValueError("Current node not found.")
 
-        # Get detected language from meta_info (set by LanguageDetector in task_manager)
+        detected_lang = self.context_data.get('detected_language', 'en')
+        node_prompt = self._get_prompt_with_example(current_node, detected_lang)
+
+        if self.context_data:
+            node_prompt = update_prompt_with_context(node_prompt, self.context_data)
+
+        if self.agent_information:
+            agent_info = self.agent_information
+            if self.context_data:
+                agent_info = update_prompt_with_context(agent_info, self.context_data)
+            prompt = f"{agent_info}\n\n{node_prompt}"
+        else:
+            prompt = node_prompt
+
+        # Try RAG if configured for this node
+        rag_config = self.rag_configs.get(self.current_node_id)
+        if rag_config and rag_config.get('collections'):
+            try:
+                client = await RAGServiceClientSingleton.get_client(self.rag_server_url)
+                latest_message = history[-1]["content"] if history else ""
+                rag_response = await client.query_for_conversation(
+                    query=latest_message,
+                    collections=rag_config['collections'],
+                    max_results=rag_config.get('similarity_top_k', 10),
+                    similarity_threshold=0.0
+                )
+                if rag_response.contexts:
+                    rag_context = await client.format_context_for_prompt(rag_response.contexts)
+                    prompt = f"{prompt}\n\nKnowledge base:\n{rag_context}\n\nUse this information naturally."
+            except Exception as e:
+                logger.error(f"RAG error for node {self.current_node_id}: {e}")
+
+        max_history = 50
+        history_subset = history[-max_history:] if len(history) > max_history else history
+        return [{"role": "system", "content": prompt}] + [
+            {"role": item["role"], "content": item["content"]} for item in history_subset
+        ]
+
+    async def generate(self, message: List[dict], **kwargs) -> AsyncGenerator:
+        meta_info = kwargs.get('meta_info', {})
+        synthesize = kwargs.get('synthesize', True)
+        start_time = now_ms()
+
         detected_language = meta_info.get('detected_language', 'en')
         self.context_data['detected_language'] = detected_language
 
         try:
-            # Decide next move using function-calling based routing
+            # 1. Route to next node (unchanged - uses self.routing_client)
             next_node_id, extracted_params, routing_latency_ms = await self.decide_next_node_with_functions(message)
-            latency_data["routing_latency_ms"] = routing_latency_ms
 
             if next_node_id:
                 logger.info(f"Transitioning: {self.current_node_id} -> {next_node_id} (params: {extracted_params})")
                 self.current_node_id = next_node_id
-                # Store extracted params in context for use in response generation
                 if extracted_params:
                     self.context_data.update(extracted_params)
-                if self.current_node_id == "end":
-                    response_text = "\nThank you for using our service. Goodbye!"
 
-            response = await self.generate_response(message)
-            response_text = response["content"]
+            # 2. Build messages (system prompt + RAG + history)
+            messages = await self._build_messages(message)
 
-            words = response_text.split()
-            for i, word in enumerate(words):
-                if first_token_time is None:
-                    first_token_time = now_ms()
-                    latency_data["first_token_latency_ms"] = first_token_time - start_time
+            # 3. Yield messages for request logging (matches KnowledgeBaseAgent)
+            yield {'messages': messages}
 
-                buffer += word + " "
-
-                if len(buffer.split()) >= buffer_size or i == len(words) - 1:
-                    is_final = (i == len(words) - 1)
-                    if is_final and latency_data:
-                        latency_data["total_stream_duration_ms"] = now_ms() - start_time
-                    yield buffer.strip(), is_final, latency_data, False, None, None
-                    buffer = ""
-
-            if buffer:
-                if latency_data:
-                    latency_data["total_stream_duration_ms"] = now_ms() - start_time
-                yield buffer.strip(), True, latency_data, False, None, None
+            # 4. Stream via OpenAiLLM (handles function calls + real streaming)
+            async for chunk in self.llm.generate_stream(messages, synthesize=synthesize, meta_info=meta_info):
+                yield chunk
 
         except Exception as e:
-            logger.error(f"Error in generate function: {e}")
-            latency_data["first_token_latency_ms"] = latency_data.get("first_token_latency_ms") or 0
-            latency_data["total_stream_duration_ms"] = now_ms() - start_time
+            logger.error(f"Error in generate: {e}")
+            latency_data = {
+                "sequence_id": meta_info.get("sequence_id") if meta_info else None,
+                "first_token_latency_ms": 0,
+                "total_stream_duration_ms": now_ms() - start_time
+            }
             yield f"An error occurred: {str(e)}", True, latency_data, False, None, None
