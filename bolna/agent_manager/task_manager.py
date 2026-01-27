@@ -1487,9 +1487,10 @@ class TaskManager(BaseManager):
         else:
             set_response_prompt = function_response
 
-        self.history.append({"role": "assistant", "content": None, "tool_calls": resp["model_response"]})
+        textual_response = resp.get("textual_response", None)
+        self.history.append({"role": "assistant", "content": textual_response, "tool_calls": resp["model_response"]})
         self.history.append({"role": "tool", "tool_call_id": resp.get("tool_call_id", ""), "content": function_response})
-        model_args["messages"].append({"role": "assistant", "content": None, "tool_calls": resp["model_response"]})
+        model_args["messages"].append({"role": "assistant", "content": textual_response, "tool_calls": resp["model_response"]})
         model_args["messages"].append({"role": "tool", "tool_call_id": resp.get("tool_call_id", ""), "content": function_response})
 
         logger.info(f"Logging function call parameters ")
