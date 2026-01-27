@@ -191,10 +191,12 @@ class CallingServiceOutputHandler(TelephonyOutputHandler):
                         
                         # Send audio as BINARY frame to Asterisk
                         # Asterisk expects raw audio data without any encoding or wrapping
-                        logger.info(f"[CALLING_SERVICE OUTPUT] Sending via websocket.send_bytes(): {len(audio_chunk)} bytes")
-                        await self.websocket.send_bytes(audio_chunk)
+                        # Chunk large audio data to prevent websocket timeout
+                        original_size = len(audio_chunk)
+                        logger.info(f"[CALLING_SERVICE OUTPUT] Sending via chunked websocket.send_bytes(): {original_size} bytes")
+                        bytes_sent = await self._send_audio_chunked(audio_chunk, audio_format)
                         
-                        logger.info(f"[CALLING_SERVICE OUTPUT] ✓ Successfully sent {len(audio_chunk)} bytes of audio to Asterisk - "
+                        logger.info(f"[CALLING_SERVICE OUTPUT] ✓ Successfully sent {bytes_sent} bytes of audio to Asterisk (chunked from {original_size} bytes) - "
                                   f"Format: {audio_format}, Category: {meta_info.get('message_category', 'N/A')}")
                         
                         # Track mark events internally for our own timing/debugging
@@ -275,6 +277,61 @@ class CallingServiceOutputHandler(TelephonyOutputHandler):
         else:
             # Default to 8kHz 2-byte samples
             return len(audio_data) / 16000.0
+    
+    def _get_chunk_size(self, audio_format):
+        """
+        Get optimal chunk size for sending audio to Asterisk.
+        Returns chunk size in bytes based on audio format.
+        
+        We use 100ms chunks to avoid blocking the websocket:
+        - ulaw/alaw: 800 bytes (100ms at 8kHz, 1 byte/sample)
+        - slin: 1600 bytes (100ms at 8kHz, 2 bytes/sample)
+        - slin16: 3200 bytes (100ms at 16kHz, 2 bytes/sample)
+        """
+        if audio_format in ('ulaw', 'alaw', 'mulaw'):
+            # 100ms at 8kHz = 800 bytes
+            return 800
+        elif audio_format in ('slin', 'pcm'):
+            # 100ms at 8kHz = 1600 bytes
+            return 1600
+        elif audio_format == 'slin16':
+            # 100ms at 16kHz = 3200 bytes
+            return 3200
+        else:
+            # Default to 1600 bytes (100ms at 8kHz, 2 bytes/sample)
+            return 1600
+    
+    async def _send_audio_chunked(self, audio_data, audio_format):
+        """
+        Send audio data in smaller chunks to prevent Asterisk from timing out.
+        Large chunks can block the websocket and cause Asterisk to disconnect.
+        """
+        chunk_size = self._get_chunk_size(audio_format)
+        total_bytes = len(audio_data)
+        
+        # Only chunk if the data is larger than chunk_size
+        if total_bytes <= chunk_size:
+            await self.websocket.send_bytes(audio_data)
+            return total_bytes
+        
+        # Send in chunks with small delays to keep websocket responsive
+        bytes_sent = 0
+        offset = 0
+        
+        while offset < total_bytes:
+            chunk = audio_data[offset:offset + chunk_size]
+            if chunk:
+                await self.websocket.send_bytes(chunk)
+                bytes_sent += len(chunk)
+                
+                # Small delay between chunks to keep websocket responsive
+                # Only delay if there's more data to send
+                if offset + chunk_size < total_bytes:
+                    await asyncio.sleep(0.001)  # 1ms delay between chunks
+            
+            offset += chunk_size
+        
+        return bytes_sent
     
     async def _simulate_mark_event_after_duration(self, mark_id, duration, message_category):
         """
