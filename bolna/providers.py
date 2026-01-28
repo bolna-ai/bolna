@@ -1,7 +1,7 @@
 from .synthesizer import PollySynthesizer, ElevenlabsSynthesizer, OPENAISynthesizer, DeepgramSynthesizer, AzureSynthesizer, CartesiaSynthesizer, SmallestSynthesizer, SarvamSynthesizer, RimeSynthesizer, PixaSynthesizer
 from .transcriber import DeepgramTranscriber, AzureTranscriber, SarvamTranscriber, AssemblyAITranscriber, GoogleTranscriber, PixaTranscriber, GladiaTranscriber, ElevenLabsTranscriber, SmallestTranscriber
-from .input_handlers import DefaultInputHandler, TwilioInputHandler, ExotelInputHandler, PlivoInputHandler, VobizInputHandler
-from .output_handlers import DefaultOutputHandler, TwilioOutputHandler, ExotelOutputHandler, PlivoOutputHandler, VobizOutputHandler
+from .input_handlers import DefaultInputHandler, TwilioInputHandler, ExotelInputHandler, PlivoInputHandler, VobizInputHandler, CallingServiceInputHandler
+from .output_handlers import DefaultOutputHandler, TwilioOutputHandler, ExotelOutputHandler, PlivoOutputHandler, VobizOutputHandler, CallingServiceOutputHandler
 from .llms import OpenAiLLM, LiteLLM, AzureLLM
 
 SUPPORTED_SYNTHESIZER_MODELS = {
@@ -58,24 +58,28 @@ SUPPORTED_INPUT_HANDLERS = {
     'twilio': TwilioInputHandler,
     'exotel': ExotelInputHandler,
     'plivo': PlivoInputHandler,
-    'vobiz': VobizInputHandler
+    'vobiz': VobizInputHandler,
+    'calling_service': CallingServiceInputHandler
 }
 SUPPORTED_INPUT_TELEPHONY_HANDLERS = {
     'twilio': TwilioInputHandler,
     'exotel': ExotelInputHandler,
     'plivo': PlivoInputHandler,
-    'vobiz': VobizInputHandler
+    'vobiz': VobizInputHandler,
+    'calling_service': CallingServiceInputHandler
 }
 SUPPORTED_OUTPUT_HANDLERS = {
     'default': DefaultOutputHandler,
     'twilio': TwilioOutputHandler,
     'exotel': ExotelOutputHandler,
     'plivo': PlivoOutputHandler,
-    'vobiz': VobizOutputHandler
+    'vobiz': VobizOutputHandler,
+    'calling_service': CallingServiceOutputHandler
 }
 SUPPORTED_OUTPUT_TELEPHONY_HANDLERS = {
     'twilio': TwilioOutputHandler,
     'exotel': ExotelOutputHandler,
     'plivo': PlivoOutputHandler,
-    'vobiz': VobizOutputHandler
+    'vobiz': VobizOutputHandler,
+    'calling_service': CallingServiceOutputHandler
 }

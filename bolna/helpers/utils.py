@@ -25,7 +25,7 @@ from .logger_config import configure_logger
 from bolna.constants import PREPROCESS_DIR, PRE_FUNCTION_CALL_MESSAGE, DEFAULT_LANGUAGE_CODE, TRANSFERING_CALL_FILLER
 from bolna.prompts import DATE_PROMPT
 from pydub import AudioSegment
-
+import audioop
 logger = configure_logger(__name__)
 load_dotenv()
 BUCKET_NAME = os.getenv('BUCKET_NAME')
@@ -122,6 +122,17 @@ def raw_to_mulaw(raw_bytes):
     samples = samples.astype(np.float32) / (2 ** 15)
     mulaw_encoded = mu_law_encode(samples)
     return mulaw_encoded
+
+
+def pcm_to_ulaw(pcm_bytes):
+    """
+    Convert PCM audio (16-bit signed linear) to ulaw format.
+    PCM is int16 samples, ulaw is 8-bit compressed format.
+    """
+    
+    # audioop.lin2ulaw expects 16-bit PCM and returns 8-bit ulaw
+    ulaw_bytes = audioop.lin2ulaw(pcm_bytes, 2)  # 2 = sample width in bytes (16-bit)
+    return ulaw_bytes
 
 
 async def get_s3_file(bucket_name = BUCKET_NAME, file_key = ""):
