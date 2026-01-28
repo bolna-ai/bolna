@@ -23,7 +23,7 @@ from bolna.providers import *
 from bolna.prompts import *
 from bolna.helpers.language_detector import LanguageDetector
 from bolna.helpers.utils import structure_system_prompt, compute_function_pre_call_message, select_message_by_language, get_date_time_from_timezone, get_route_info, calculate_audio_duration, create_ws_data_packet, get_file_names_in_directory, get_raw_audio_bytes, is_valid_md5, \
-    get_required_input_types, format_messages, get_prompt_responses, resample, save_audio_file_to_s3, update_prompt_with_context, get_md5_hash, clean_json_string, wav_bytes_to_pcm, convert_to_request_log, yield_chunks_from_memory, process_task_cancellation
+    get_required_input_types, format_messages, get_prompt_responses, resample, save_audio_file_to_s3, update_prompt_with_context, get_md5_hash, clean_json_string, wav_bytes_to_pcm, convert_to_request_log, yield_chunks_from_memory, process_task_cancellation, pcm_to_ulaw
 from bolna.helpers.logger_config import configure_logger
 from semantic_router import Route
 from semantic_router.layer import RouteLayer
@@ -600,7 +600,18 @@ class TaskManager(BaseManager):
                     output_kwargs['mark_event_meta_data'] = self.mark_event_meta_data
                     logger.info(f"Making sure that the sampling rate for output handler is 8000")
                     self.task_config['tools_config']['synthesizer']['provider_config']['sampling_rate'] = 8000
-                    self.task_config['tools_config']['synthesizer']['audio_format'] = 'pcm'
+                    # Use ulaw for Asterisk/calling_service, pcm for others
+                    if self.task_config["tools_config"]["output"]["provider"] == 'calling_service':
+                        self.task_config['tools_config']['synthesizer']['audio_format'] = 'ulaw'
+                        logger.info(f"Setting synthesizer audio format to ulaw for Asterisk calling_service")
+                        # Pass input handler to output handler so it can simulate mark events
+                        input_handler = self.tools.get("input")
+                        output_kwargs['input_handler'] = input_handler
+                        logger.info(f"Passing input_handler to calling_service output handler for mark event simulation: {input_handler is not None}")
+                        if input_handler is None:
+                            logger.error("WARNING: input_handler is None! Mark events will NOT be simulated!")
+                    else:
+                        self.task_config['tools_config']['synthesizer']['audio_format'] = 'pcm'
                 else:
                     self.task_config['tools_config']['synthesizer']['provider_config']['sampling_rate'] = 24000
                     output_kwargs['queue'] = output_queue
@@ -652,6 +663,11 @@ class TaskManager(BaseManager):
                     input_kwargs['queue'] = input_queue
 
                 input_kwargs["observable_variables"] = self.observable_variables
+            
+            # Pass context data for calling_service provider (for pre-parsed MEDIA_START)
+            if self.task_config["tools_config"]["input"]["provider"] == 'calling_service' and self.context_data:
+                input_kwargs["ws_context_data"] = self.context_data
+            
             self.tools["input"] = input_handler_class(**input_kwargs)
         else:
             raise "Other input handlers not supported yet"
@@ -680,7 +696,14 @@ class TaskManager(BaseManager):
                 if meta_info['text'] == '':
                     audio_chunk = None
 
-                meta_info["format"] = "pcm"
+                # Convert to ulaw for Asterisk/calling_service provider
+                if self.tools["output"].get_provider() == 'calling_service' and audio_chunk:
+                    original_size = len(audio_chunk)
+                    audio_chunk = pcm_to_ulaw(audio_chunk)
+                    logger.info(f"[CALLING_SERVICE] Converted welcome message PCM to ulaw: {original_size} bytes -> {len(audio_chunk)} bytes")
+                    meta_info["format"] = "ulaw"
+                else:
+                    meta_info["format"] = "pcm"
                 meta_info['is_first_chunk'] = True
                 meta_info["end_of_synthesizer_stream"] = True
                 meta_info['chunk_id'] = 1
@@ -728,6 +751,12 @@ class TaskManager(BaseManager):
                 self.task_config["tools_config"]["transcriber"]["input_queue"] = self.audio_queue
                 self.task_config['tools_config']["transcriber"]["output_queue"] = self.transcriber_output_queue
 
+                # Configure encoding for Asterisk/calling_service (uses ulaw like Twilio)
+                if provider == 'calling_service':
+                    self.task_config["tools_config"]["transcriber"]["encoding"] = "mulaw"
+                    self.task_config["tools_config"]["transcriber"]["sampling_rate"] = 8000
+                    logger.info(f"Configured transcriber for Asterisk calling_service with mulaw encoding @ 8kHz")
+
                 # Checking models for backwards compatibility
                 if self.task_config["tools_config"]["transcriber"]["model"] in SUPPORTED_TRANSCRIBER_MODELS.keys() or self.task_config["tools_config"]["transcriber"]["provider"] in SUPPORTED_TRANSCRIBER_PROVIDERS.keys():
                     if self.turn_based_conversation:
@@ -760,7 +789,19 @@ class TaskManager(BaseManager):
                 self.task_config["tools_config"]["synthesizer"]["audio_format"] = "mp3" # Hard code mp3 if we're connected through dashboard
                 self.task_config["tools_config"]["synthesizer"]["stream"] = True if self.enforce_streaming else False #Hardcode stream to be False as we don't want to get blocked by a __listen_synthesizer co-routine
 
-            self.tools["synthesizer"] = synthesizer_class(**self.task_config["tools_config"]["synthesizer"], **provider_config, **self.kwargs, caching=caching)
+            # Configure use_mulaw for Asterisk/calling_service to ensure synthesizer outputs ulaw
+            synthesizer_kwargs = self.kwargs.copy()
+            if self.task_config["tools_config"]["output"]["provider"] == 'calling_service':
+                synthesizer_kwargs['use_mulaw'] = True
+                logger.info(f"[CALLING_SERVICE] Configuring synthesizer with use_mulaw=True for Asterisk calling_service")
+                logger.info(f"[CALLING_SERVICE] Synthesizer class: {synthesizer_class.__name__}, audio_format: {self.task_config['tools_config']['synthesizer'].get('audio_format', 'not set')}")
+            
+            self.tools["synthesizer"] = synthesizer_class(**self.task_config["tools_config"]["synthesizer"], **provider_config, **synthesizer_kwargs, caching=caching)
+            
+            # Verify synthesizer was configured correctly
+            if self.task_config["tools_config"]["output"]["provider"] == 'calling_service':
+                use_mulaw_set = getattr(self.tools["synthesizer"], 'use_mulaw', None)
+                logger.info(f"[CALLING_SERVICE] Synthesizer initialized: use_mulaw={use_mulaw_set}")
             # if not self.turn_based_conversation:
             #     self.synthesizer_monitor_task = asyncio.create_task(self.tools['synthesizer'].monitor_connection())
             if self.task_config["tools_config"]["llm_agent"] is not None and llm_config is not None:
@@ -1999,6 +2040,10 @@ class TaskManager(BaseManager):
             while True:
                 message = await self.transcriber_output_queue.get()
                 logger.info(f"Message from the transcriber class {message}")
+                
+                # CALLING_SERVICE DEBUG: Log transcriber output
+                if message.get('meta_info', {}).get('io') == 'calling_service':
+                    logger.info(f"[CALLING_SERVICE] Transcriber output: data='{message.get('data', '')}', type={type(message.get('data', ''))}")
 
                 if self.hangup_triggered:
                     if message["data"] == "transcriber_connection_closed":
@@ -2148,6 +2193,10 @@ class TaskManager(BaseManager):
             copied_meta_info["is_first_chunk_of_entire_response"] = True
             copied_meta_info["is_final_chunk_of_entire_response"] = True
 
+        # CALLING_SERVICE DEBUG: Log chunk enqueue
+        if copied_meta_info.get('io') == 'calling_service':
+            logger.info(f"[CALLING_SERVICE] __enqueue_chunk: chunk_size={len(chunk)} bytes, format={copied_meta_info.get('format', 'unknown')}, chunk_idx={i}/{number_of_chunks}")
+        
         self.buffered_output_queue.put_nowait(create_ws_data_packet(chunk, copied_meta_info))
 
     def is_sequence_id_in_current_ids(self, sequence_id):
@@ -2155,6 +2204,11 @@ class TaskManager(BaseManager):
 
     async def __listen_synthesizer(self):
         all_text_to_be_synthesized = []
+        
+        # CALLING_SERVICE DEBUG: Log when starting to listen for calling_service
+        if self.task_config["tools_config"]["output"]["provider"] == 'calling_service':
+            logger.info(f"[CALLING_SERVICE] __listen_synthesizer: Starting to listen for calling_service provider")
+        
         try:
             while not self.conversation_ended:
                 logger.info("Listening to synthesizer")
@@ -2162,6 +2216,13 @@ class TaskManager(BaseManager):
                     async for message in self.tools["synthesizer"].generate():
                         meta_info = message.get("meta_info", {})
                         current_text = meta_info.get("text", "")
+                        audio_format = meta_info.get("format", "unknown")
+                        audio_size = len(message.get('data', b'')) if message.get('data') else 0
+                        
+                        # CALLING_SERVICE DEBUG: Log synthesizer output
+                        if meta_info.get('io') == 'calling_service':
+                            logger.info(f"[CALLING_SERVICE] __listen_synthesizer: Received message from synthesizer - format={audio_format}, size={audio_size} bytes, text='{current_text[:50]}...'")
+                        
                         write_to_log = False
                         if current_text not in all_text_to_be_synthesized:
                             all_text_to_be_synthesized.append(current_text)
@@ -2180,11 +2241,15 @@ class TaskManager(BaseManager):
 
                                 if self.tools["output"].process_in_chunks(self.yield_chunks):
                                     number_of_chunks = math.ceil(len(message['data']) / self.output_chunk_size)
+                                    if meta_info.get('io') == 'calling_service':
+                                        logger.info(f"[CALLING_SERVICE] __listen_synthesizer: Chunking audio into {number_of_chunks} chunks, chunk_size={self.output_chunk_size}")
                                     for chunk_idx, chunk in enumerate(
                                             yield_chunks_from_memory(message['data'], chunk_size=self.output_chunk_size)
                                     ):
                                         self.__enqueue_chunk(chunk, chunk_idx, number_of_chunks, meta_info)
                                 else:
+                                    if meta_info.get('io') == 'calling_service':
+                                        logger.info(f"[CALLING_SERVICE] __listen_synthesizer: Enqueuing entire audio to buffered_output_queue: size={len(message.get('data', b''))} bytes, format={message.get('meta_info', {}).get('format', 'unknown')}")
                                     self.buffered_output_queue.put_nowait(message)
                             else:
                                 # Non-streaming output
@@ -2263,7 +2328,15 @@ class TaskManager(BaseManager):
                     if not self.buffered_output_queue.empty():
                         logger.info(f"Output queue was not empty and hence emptying it")
                         self.buffered_output_queue = asyncio.Queue()
-                    meta_info["format"] = "pcm"
+                    
+                    # Convert to ulaw for Asterisk/calling_service provider
+                    if self.tools["output"].get_provider() == 'calling_service' and audio_chunk:
+                        original_size = len(audio_chunk)
+                        audio_chunk = pcm_to_ulaw(audio_chunk)
+                        logger.info(f"[CALLING_SERVICE] Converted cached welcome message PCM to ulaw: {original_size} bytes -> {len(audio_chunk)} bytes")
+                        meta_info["format"] = "ulaw"
+                    else:
+                        meta_info["format"] = "pcm"
                     if 'message_category' in meta_info and meta_info['message_category'] == "agent_welcome_message":
                         if audio_chunk is None:
                             logger.info(f"File doesn't exist in S3. Hence we're synthesizing it from synthesizer")
@@ -2296,6 +2369,11 @@ class TaskManager(BaseManager):
         text = message["data"]
         meta_info["type"] = "audio"
         meta_info["synthesizer_start_time"] = time.time()
+        
+        # CALLING_SERVICE DEBUG: Log synthesize request
+        if meta_info.get('io') == 'calling_service':
+            logger.info(f"[CALLING_SERVICE] _synthesize() called: text='{text[:100]}...', sequence_id={meta_info.get('sequence_id')}, cached={meta_info.get('cached', False)}")
+        
         try:
             if not self.conversation_ended and ('is_first_message' in meta_info and meta_info['is_first_message'] or message["meta_info"]["sequence_id"] in self.sequence_ids):
                 if meta_info["is_md5_hash"]:
@@ -2312,6 +2390,9 @@ class TaskManager(BaseManager):
                         await self.__send_preprocessed_audio(meta_info, get_md5_hash(text))
                     else:
                         self.synthesizer_characters += len(text)
+                        # CALLING_SERVICE DEBUG: Log pushing to synthesizer
+                        if meta_info.get('io') == 'calling_service':
+                            logger.info(f"[CALLING_SERVICE] Pushing text to synthesizer: '{text[:100]}...'")
                         await self.tools["synthesizer"].push(message)
                 else:
                     logger.info("other synthesizer models not supported yet")
@@ -2379,11 +2460,19 @@ class TaskManager(BaseManager):
                     logger.info(f"Started transmitting at {time.time()}")
 
                 message = await self.buffered_output_queue.get()
+                
+                # CALLING_SERVICE DEBUG: Log message dequeue
+                if message.get('meta_info', {}).get('io') == 'calling_service':
+                    logger.info(f"[CALLING_SERVICE] Dequeued message from buffered_output_queue: size={len(message.get('data', b''))} bytes, format={message.get('meta_info', {}).get('format', 'unknown')}, sequence_id={message.get('meta_info', {}).get('sequence_id')}")
 
                 if "end_of_conversation" in message['meta_info']:
                     await self.__process_end_of_conversation()
 
                 if 'sequence_id' in message['meta_info'] and message["meta_info"]["sequence_id"] in self.sequence_ids:
+                    # CALLING_SERVICE DEBUG: Log before sending to output handler
+                    if message.get('meta_info', {}).get('io') == 'calling_service':
+                        logger.info(f"[CALLING_SERVICE] Sending audio to output handler: size={len(message.get('data', b''))} bytes, format={message.get('meta_info', {}).get('format', 'unknown')}")
+                    
                     self.tools["input"].update_is_audio_being_played(True)
                     await self.tools["output"].handle(message)
                     try:
@@ -2830,7 +2919,7 @@ class TaskManager(BaseManager):
                     
 
             await asyncio.gather(*tasks_to_cancel)
-            return output
+        return output
 
     async def handle_cancellation(self, message):
         try:

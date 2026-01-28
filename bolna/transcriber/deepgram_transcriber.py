@@ -86,14 +86,19 @@ class DeepgramTranscriber(BaseTranscriber):
 
         self.audio_frame_duration = 0.5  # We're sending 8k samples with a sample rate of 16k
 
-        if self.provider in ('twilio', 'exotel', 'plivo', 'vobiz'):
-            self.encoding = 'mulaw' if self.provider in ("twilio") else "linear16"
+        if self.provider in ('twilio', 'exotel', 'plivo', 'vobiz', 'calling_service'):
+            # For calling_service (Asterisk), encoding is already set in task_manager
+            if self.provider != 'calling_service':
+                self.encoding = 'mulaw' if self.provider in ("twilio") else "linear16"
             self.sampling_rate = 8000
-            self.audio_frame_duration = 0.2  # With twilio we are sending 200ms at a time
+            self.audio_frame_duration = 0.2  # With twilio/calling_service we are sending 200ms at a time
 
             dg_params['encoding'] = self.encoding
             dg_params['sample_rate'] = self.sampling_rate
             dg_params['channels'] = "1"
+            
+            if self.provider == 'calling_service':
+                logger.info(f"[CALLING_SERVICE] Deepgram transcriber configured with encoding={self.encoding}, sample_rate={self.sampling_rate}")
 
         elif self.provider == "web_based_call":
             dg_params['encoding'] = "linear16"
@@ -476,6 +481,9 @@ class DeepgramTranscriber(BaseTranscriber):
                     if msg["speech_final"] and self.final_transcript.strip():
                         if not self.is_transcript_sent_for_processing and self.final_transcript.strip():
                             logger.info(f"Received speech final hence yielding the following transcript - {self.final_transcript}")
+                            
+                            if self.provider == 'calling_service':
+                                logger.info(f"[CALLING_SERVICE] Deepgram yielding transcript: '{self.final_transcript}'")
 
                             data = {
                                 "type": "transcript",
