@@ -1625,6 +1625,20 @@ class TaskManager(BaseManager):
             # Handle graph agent routing info
             if isinstance(llm_message, dict) and 'routing_info' in llm_message:
                 routing_info = llm_message['routing_info']
+
+                # Log routing request
+                routing_messages = routing_info.get('routing_messages')
+                if routing_messages:
+                    convert_to_request_log(
+                        message=format_messages(routing_messages, use_system_prompt=True),
+                        meta_info=meta_info,
+                        model=routing_info.get('routing_model', ''),
+                        component="graph_routing",
+                        direction="request",
+                        run_id=self.run_id
+                    )
+
+                # Build routing response data
                 if routing_info.get('transitioned'):
                     routing_data = f"Node: {routing_info.get('previous_node', '?')} → {routing_info['current_node']}"
                 else:
@@ -1637,6 +1651,7 @@ class TaskManager(BaseManager):
                 meta_info['llm_metadata'] = meta_info.get('llm_metadata') or {}
                 meta_info['llm_metadata']['graph_routing_info'] = routing_info
 
+                # Log routing response
                 convert_to_request_log(
                     message=routing_data,
                     meta_info=meta_info,
