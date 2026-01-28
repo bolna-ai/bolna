@@ -36,9 +36,16 @@ class OpenAiLLM(BaseLLM):
         self.temperature = temperature
 
         max_tokens_key = "max_tokens"
+        self.model_args = {}
         if model.startswith("gpt-5"):
             max_tokens_key = "max_completion_tokens"
-        self.model_args = {max_tokens_key: self.max_tokens, "temperature": self.temperature, "model": self.model}
+            reasoning_effort = kwargs.get('reasoning_effort', None)
+            if reasoning_effort:
+                self.model_args = {"reasoning_effort": reasoning_effort}
+            else:
+                self.model_args = {"reasoning_effort": os.getenv('DEFAULT_REASONING_EFFORT', 'low')}
+
+        self.model_args.update({max_tokens_key: self.max_tokens, "temperature": self.temperature, "model": self.model})
 
         if kwargs.get("service_tier") == "priority":
             self.model_args["service_tier"] = "priority"
@@ -96,11 +103,12 @@ class OpenAiLLM(BaseLLM):
         if not self.model.startswith("gpt-5"):
             model_args["stop"] = ["User:"]
 
+
         if self.trigger_function_call:
             model_args["tools"] = json.loads(self.tools) if isinstance(self.tools, str) else self.tools
             model_args["tool_choice"] = "auto"
             model_args["parallel_tool_calls"] = False
-
+        
         self.gave_out_prefunction_call_message = False
 
         answer, buffer = "", ""
@@ -225,7 +233,8 @@ class OpenAiLLM(BaseLLM):
                 "meta_info": meta_info,
                 "called_fun": called_fun,
                 "model_response": list(final_tool_calls_data.values()),
-                "tool_call_id": final_tool_calls_data[0].get("id", "")
+                "tool_call_id": final_tool_calls_data[0].get("id", ""),
+                "textual_response": answer.strip() if received_textual_response else None
             }
 
             all_required_keys = tools[i]["function"]["parameters"]["properties"].keys() and tools[i]["function"]["parameters"].get(

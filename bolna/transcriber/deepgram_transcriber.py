@@ -86,7 +86,7 @@ class DeepgramTranscriber(BaseTranscriber):
 
         self.audio_frame_duration = 0.5  # We're sending 8k samples with a sample rate of 16k
 
-        if self.provider in ('twilio', 'exotel', 'plivo', 'calling_service'):
+        if self.provider in ('twilio', 'exotel', 'plivo', 'vobiz', 'calling_service'):
             # For calling_service (Asterisk), encoding is already set in task_manager
             if self.provider != 'calling_service':
                 self.encoding = 'mulaw' if self.provider in ("twilio") else "linear16"
