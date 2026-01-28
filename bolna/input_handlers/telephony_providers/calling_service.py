@@ -65,12 +65,17 @@ class CallingServiceInputHandler(TelephonyInputHandler):
         """Send HANGUP command to Asterisk when disconnecting"""
         try:
             if self.websocket and self.channel_id:
-                hangup_cmd = {
-                    "command": "HANGUP",
-                    "channel_id": self.channel_id
-                }
-                await self.websocket.send_text(json.dumps(hangup_cmd))
-                logger.info(f"Sent HANGUP command for channel {self.channel_id}")
+                # Check if WebSocket is still open before attempting to send
+                # WebSocket state: 1 = OPEN, 2 = CLOSING, 3 = CLOSED
+                if hasattr(self.websocket, 'client_state') and self.websocket.client_state.value == 1:
+                    # According to Asterisk WebSocket documentation, control commands are sent as plain text
+                    # Format: HANGUP (not JSON)
+                    await self.websocket.send_text("HANGUP")
+                    logger.info(f"Sent HANGUP command for channel {self.channel_id}")
+                else:
+                    logger.info(f"WebSocket already closed/closing, skipping HANGUP command for channel {self.channel_id}")
+            else:
+                logger.info(f"Cannot send HANGUP - websocket or channel_id is None")
         except Exception as e:
             logger.error(f"Error sending HANGUP command: {e}")
     
