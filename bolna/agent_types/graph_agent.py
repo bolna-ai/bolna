@@ -363,17 +363,12 @@ Be decisive. If the user's intent is clear, call the transition function immedia
         if not examples:
             return prompt
 
-        # Get example for detected language, fallback to English, then first available
-        example = (
-            examples.get(detected_lang) or
-            examples.get('en') or
-            next(iter(examples.values()), None)
-        )
+        if detected_lang and detected_lang in examples:
+            return f"{prompt}\n\nExample response: \"{examples[detected_lang]}\""
 
-        if example:
-            return f"{prompt}\n\nExample response: \"{example}\""
-
-        return prompt
+        # Language not yet detected — include all examples
+        example_lines = [f"  {lang.upper()}: \"{text}\"" for lang, text in examples.items()]
+        return f"{prompt}\n\nExample responses:\n" + "\n".join(example_lines)
 
     def is_response_valid(self, response: str) -> bool:
         if not response or len(response.strip()) < 5:  
