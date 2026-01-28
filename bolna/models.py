@@ -245,6 +245,7 @@ class Llm(BaseModel):
     provider: Optional[str] = "openai"
     base_url: Optional[str] = None
     routes: Optional[Routes] = None
+    reasoning_effort: Optional[str] = None
 
 
 class SimpleLlmAgent(Llm):
