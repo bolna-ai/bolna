@@ -1625,7 +1625,10 @@ class TaskManager(BaseManager):
             # Handle graph agent routing info
             if isinstance(llm_message, dict) and 'routing_info' in llm_message:
                 routing_info = llm_message['routing_info']
-                routing_data = f"Node: {routing_info.get('previous_node', '?')} → {routing_info['current_node']}"
+                if routing_info.get('transitioned'):
+                    routing_data = f"Node: {routing_info.get('previous_node', '?')} → {routing_info['current_node']}"
+                else:
+                    routing_data = f"Node: {routing_info['current_node']} (no transition)"
                 if routing_info.get('extracted_params'):
                     routing_data += f" | Params: {json.dumps(routing_info['extracted_params'])}"
                 if routing_info.get('node_history'):
