@@ -66,6 +66,9 @@ class SmallestTranscriber(BaseTranscriber):
         # Queues
         self.transcriber_output_queue = output_queue
 
+        # Dashboard connection flag
+        self.connected_via_dashboard = kwargs.get("enforce_streaming", True)
+
         # Audio configuration (defaults, will be adjusted based on provider)
         self.encoding = encoding
         self.sampling_rate = int(sampling_rate)
@@ -112,9 +115,6 @@ class SmallestTranscriber(BaseTranscriber):
         # Timeout monitoring (like Deepgram)
         self.last_interim_time = None
         self.interim_timeout = kwargs.get("interim_timeout", 5.0)  # Default 5 seconds
-
-        # Dashboard connection flag
-        self.connected_via_dashboard = kwargs.get("enforce_streaming", True)
 
     def _configure_audio_params(self):
         """Configure audio parameters based on telephony provider."""
