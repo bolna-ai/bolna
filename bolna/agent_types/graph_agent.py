@@ -47,7 +47,7 @@ class GraphAgent(BaseAgent):
         else:
             self.openai = OpenAI(api_key=self.llm_key)
 
-        self.node_history = ["root"]
+        self.node_history = [self.current_node_id]
         self.node_structure = self.build_node_structure()
         self.rag_configs = self.initialize_rag_configs()
         self.rag_server_url = os.getenv('RAG_SERVER_URL', 'http://localhost:8000')
@@ -486,7 +486,7 @@ Be decisive. If the user's intent is clear, call the transition function immedia
         self.context_data['detected_language'] = detected_language
 
         try:
-            previous_node = self.node_history[-1] if self.node_history else None
+            previous_node = self.current_node_id
             next_node_id, extracted_params, routing_latency_ms = await self.decide_next_node_with_functions(message)
 
             if next_node_id:
@@ -494,6 +494,9 @@ Be decisive. If the user's intent is clear, call the transition function immedia
                 self.current_node_id = next_node_id
                 if extracted_params:
                     self.context_data.update(extracted_params)
+
+            if next_node_id and (not self.node_history or self.node_history[-1] != self.current_node_id):
+                self.node_history.append(self.current_node_id)
 
             yield {
                 'routing_info': {
@@ -507,9 +510,6 @@ Be decisive. If the user's intent is clear, call the transition function immedia
                     'node_history': list(self.node_history),
                 }
             }
-
-            if next_node_id and (not self.node_history or self.node_history[-1] != self.current_node_id):
-                self.node_history.append(self.current_node_id)
 
             messages = await self._build_messages(message)
             yield {'messages': messages}
