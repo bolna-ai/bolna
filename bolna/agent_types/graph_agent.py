@@ -472,9 +472,10 @@ Be decisive. If the user's intent is clear, call the transition function immedia
 
         max_history = 50
         history_subset = history[-max_history:] if len(history) > max_history else history
-        return [{"role": "system", "content": prompt}] + [
-            {"role": item["role"], "content": item["content"]} for item in history_subset
-        ]
+
+        # Pass conversation history as-is to preserve tool_calls/tool_call_id fields
+        conversation = [msg for msg in history_subset if msg.get("role") != "system"]
+        return [{"role": "system", "content": prompt}] + conversation
 
     async def generate(self, message: List[dict], **kwargs) -> AsyncGenerator:
         meta_info = kwargs.get('meta_info', {})
@@ -485,7 +486,7 @@ Be decisive. If the user's intent is clear, call the transition function immedia
         self.context_data['detected_language'] = detected_language
 
         try:
-            # 1. Route to next node (unchanged - uses self.routing_client)
+            previous_node = self.node_history[-1] if self.node_history else None
             next_node_id, extracted_params, routing_latency_ms = await self.decide_next_node_with_functions(message)
 
             if next_node_id:
@@ -494,13 +495,24 @@ Be decisive. If the user's intent is clear, call the transition function immedia
                 if extracted_params:
                     self.context_data.update(extracted_params)
 
-            # 2. Build messages (system prompt + RAG + history)
+            yield {
+                'routing_info': {
+                    'previous_node': previous_node,
+                    'current_node': self.current_node_id,
+                    'transitioned': next_node_id is not None,
+                    'routing_model': self.routing_model,
+                    'routing_provider': getattr(self, 'routing_provider', None),
+                    'routing_latency_ms': round(routing_latency_ms, 1),
+                    'extracted_params': extracted_params or {},
+                    'node_history': list(self.node_history),
+                }
+            }
+
+            if next_node_id and (not self.node_history or self.node_history[-1] != self.current_node_id):
+                self.node_history.append(self.current_node_id)
+
             messages = await self._build_messages(message)
-
-            # 3. Yield messages for request logging (matches KnowledgeBaseAgent)
             yield {'messages': messages}
-
-            # 4. Stream via OpenAiLLM (handles function calls + real streaming)
             async for chunk in self.llm.generate_stream(messages, synthesize=synthesize, meta_info=meta_info):
                 yield chunk
 

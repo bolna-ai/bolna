@@ -1622,6 +1622,28 @@ class TaskManager(BaseManager):
                 convert_to_request_log(format_messages(llm_message['messages'], True), meta_info, self.llm_config['model'], "llm", direction="request", is_cached=False, run_id=self.run_id)
                 continue
 
+            # Handle graph agent routing info
+            if isinstance(llm_message, dict) and 'routing_info' in llm_message:
+                routing_info = llm_message['routing_info']
+                routing_data = f"Node: {routing_info.get('previous_node', '?')} → {routing_info['current_node']}"
+                if routing_info.get('extracted_params'):
+                    routing_data += f" | Params: {json.dumps(routing_info['extracted_params'])}"
+                if routing_info.get('node_history'):
+                    routing_data += f" | Flow: {' → '.join(routing_info['node_history'])}"
+
+                meta_info['llm_metadata'] = meta_info.get('llm_metadata') or {}
+                meta_info['llm_metadata']['graph_routing_info'] = routing_info
+
+                convert_to_request_log(
+                    message=routing_data,
+                    meta_info=meta_info,
+                    model=routing_info.get('routing_model', ''),
+                    component="graph_routing",
+                    direction="response",
+                    run_id=self.run_id
+                )
+                continue
+
             data, end_of_llm_stream, latency, trigger_function_call, function_tool, function_tool_message = llm_message
 
             if trigger_function_call:
