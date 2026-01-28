@@ -58,14 +58,14 @@ SUPPORTED_INPUT_HANDLERS = {
     'twilio': TwilioInputHandler,
     'exotel': ExotelInputHandler,
     'plivo': PlivoInputHandler,
-    'vobiz': VobizInputHandler
+    'vobiz': VobizInputHandler,
     'calling_service': CallingServiceInputHandler
 }
 SUPPORTED_INPUT_TELEPHONY_HANDLERS = {
     'twilio': TwilioInputHandler,
     'exotel': ExotelInputHandler,
     'plivo': PlivoInputHandler,
-    'vobiz': VobizInputHandler
+    'vobiz': VobizInputHandler,
     'calling_service': CallingServiceInputHandler
 }
 SUPPORTED_OUTPUT_HANDLERS = {
@@ -73,13 +73,13 @@ SUPPORTED_OUTPUT_HANDLERS = {
     'twilio': TwilioOutputHandler,
     'exotel': ExotelOutputHandler,
     'plivo': PlivoOutputHandler,
-    'vobiz': VobizOutputHandler
+    'vobiz': VobizOutputHandler,
     'calling_service': CallingServiceOutputHandler
 }
 SUPPORTED_OUTPUT_TELEPHONY_HANDLERS = {
     'twilio': TwilioOutputHandler,
     'exotel': ExotelOutputHandler,
     'plivo': PlivoOutputHandler,
-    'vobiz': VobizOutputHandler
+    'vobiz': VobizOutputHandler,
     'calling_service': CallingServiceOutputHandler
 }
