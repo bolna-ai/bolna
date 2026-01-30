@@ -63,7 +63,7 @@ class KnowledgeBaseAgent(BaseAgent):
 
             # Pass through credentials
             for key in ['llm_key', 'base_url', 'api_version', 'language', 'api_tools', 'buffer_size']:
-                if key in self.config:
+                if self.config.get(key, None):
                     llm_kwargs[key] = self.config[key]
 
             llm_class = SUPPORTED_LLM_PROVIDERS[provider]

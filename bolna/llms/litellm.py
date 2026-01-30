@@ -38,11 +38,11 @@ class LiteLLM(BaseLLM):
             self.model_args["api_version"] = self.api_version
 
         if len(kwargs) != 0:
-            if "base_url" in kwargs:
+            if kwargs.get("base_url", None):
                 self.model_args["api_base"] = kwargs["base_url"]
-            if "llm_key" in kwargs:
+            if kwargs.get("llm_key", None):
                 self.model_args["api_key"] = kwargs["llm_key"]
-            if "api_version" in kwargs:
+            if kwargs.get("api_version", None):
                 self.model_args["api_version"] = kwargs["api_version"]
 
         self.custom_tools = kwargs.get("api_tools", None)
@@ -212,7 +212,8 @@ class LiteLLM(BaseLLM):
                 "meta_info": meta_info,
                 "called_fun": func_name,
                 "model_response": list(final_tool_calls_data.values()),
-                "tool_call_id": final_tool_calls_data[0].get("id")
+                "tool_call_id": final_tool_calls_data[0].get("id"),
+                "textual_response": answer.strip() if received_textual_response else None
             }
 
             # Merge function arguments into payload if all required keys exist

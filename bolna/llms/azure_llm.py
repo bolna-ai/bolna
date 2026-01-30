@@ -208,7 +208,8 @@ class AzureLLM(BaseLLM):
                 "meta_info": meta_info,
                 "called_fun": called_fun,
                 "model_response": list(final_tool_calls_data.values()),
-                "tool_call_id": final_tool_calls_data[0].get("id", "")
+                "tool_call_id": final_tool_calls_data[0].get("id", ""),
+                "textual_response": answer.strip() if received_textual_response else None
             }
 
             try:
