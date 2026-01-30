@@ -1550,6 +1550,22 @@ class TaskManager(BaseManager):
         response = await trigger_api(url=url, method=method.lower(), param=param, api_token=api_token, headers_data=headers, meta_info=meta_info, run_id=self.run_id, **resp)
         function_response = str(response)
         get_res_keys, get_res_values = await computed_api_response(function_response)
+
+        # Merge API response data into context_data for routing decisions
+        if self.__is_graph_agent():
+            try:
+                response_data = json.loads(function_response) if isinstance(function_response, str) else function_response
+                if isinstance(response_data, dict):
+                    # Update task manager's context_data
+                    if self.context_data is None:
+                        self.context_data = {}
+                    self.context_data.update(response_data)
+                    # Update graph agent's context_data for routing
+                    if hasattr(self.tools.get('llm_agent'), 'context_data'):
+                        self.tools['llm_agent'].context_data.update(response_data)
+                    logger.info(f"Merged API response into context_data: {list(response_data.keys())}")
+            except (json.JSONDecodeError, TypeError) as e:
+                logger.debug(f"Could not parse API response as JSON for context merge: {e}")
         if called_fun.startswith('check_availability_of_slots') and (not get_res_values or (len(get_res_values) == 1 and len(get_res_values[0]) == 0)):
             set_response_prompt = []
         elif called_fun.startswith('book_appointment') and 'id' not in get_res_keys:
