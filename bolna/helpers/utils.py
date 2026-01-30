@@ -28,6 +28,16 @@ from pydub import AudioSegment
 
 logger = configure_logger(__name__)
 load_dotenv()
+
+# Background task set to prevent fire-and-forget tasks from being garbage collected
+_background_tasks = set()
+
+def create_background_task(coro):
+    """Create a background task that won't be garbage collected until complete."""
+    task = asyncio.create_task(coro)
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+    return task
 BUCKET_NAME = os.getenv('BUCKET_NAME')
 RECORDING_BUCKET_NAME = os.getenv('RECORDING_BUCKET_NAME')
 RECORDING_BUCKET_URL = os.getenv('RECORDING_BUCKET_URL')
@@ -580,7 +590,7 @@ def convert_to_request_log(message, meta_info, model, component="transcriber", d
     else:
         log['is_final'] = False #This is logged only for users to know final transcript from the transcriber
     log['engine'] = engine
-    asyncio.create_task(write_request_logs(log, run_id))
+    create_background_task(write_request_logs(log, run_id))
 
 
 def get_route_info(message, route_layer):

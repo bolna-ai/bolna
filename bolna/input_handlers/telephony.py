@@ -25,6 +25,7 @@ class TelephonyInputHandler(DefaultInputHandler):
         self.last_media_received = 0
         self.io_provider = None
         self.websocket_listen_task = None
+        self.disconnect_task = None
 
     def get_stream_sid(self):
         return self.stream_sid
@@ -42,7 +43,7 @@ class TelephonyInputHandler(DefaultInputHandler):
     #     pass
 
     async def stop_handler(self):
-        asyncio.create_task(self.disconnect_stream())
+        self.disconnect_task = asyncio.create_task(self.disconnect_stream())
         logger.info("stopping handler")
         self.running = False
         logger.info("sleeping for 2 seconds so that whatever needs to pass is passed")
