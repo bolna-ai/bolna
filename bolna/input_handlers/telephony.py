@@ -42,9 +42,13 @@ class TelephonyInputHandler(DefaultInputHandler):
     #     pass
 
     async def stop_handler(self):
-        asyncio.create_task(self.disconnect_stream())
         logger.info("stopping handler")
         self.running = False
+        # Await disconnect so providers (e.g. sip-trunk) send HANGUP before we close the websocket
+        try:
+            await self.disconnect_stream()
+        except Exception as e:
+            logger.error(f"Error in disconnect_stream: {e}")
         logger.info("sleeping for 2 seconds so that whatever needs to pass is passed")
         await asyncio.sleep(2)
         try:
