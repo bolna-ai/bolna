@@ -258,31 +258,39 @@ class GraphAgent(BaseAgent):
                 return edge
         return None
 
-    async def decide_next_node_with_functions(self, history: List[dict]) -> Tuple[Optional[str], Optional[Dict[str, Any]], float, Optional[List[dict]]]:
+    async def decide_next_node_with_functions(self, history: List[dict]) -> Tuple[Optional[str], Optional[Dict[str, Any]], float, Optional[List[dict]], Optional[List[dict]]]:
         """Decide next node using LLM function calling.
 
-        Returns (next_node_id, extracted_params, latency_ms, routing_messages).
+        Returns (next_node_id, extracted_params, latency_ms, routing_messages, routing_tools).
         """
         start_time = time.perf_counter()
 
         current_node = self.get_node_by_id(self.current_node_id)
         if not current_node:
             logger.error(f"Current node '{self.current_node_id}' not found")
-            return None, None, 0, None
+            return None, None, 0, None, None
 
         edges = current_node.get('edges', [])
         if not edges:
             logger.debug(f"Node '{self.current_node_id}' has no edges, staying on current node")
-            return None, None, 0, None
+            return None, None, 0, None, None
 
         # Build transition tools from edges
         tools = self._build_transition_tools(current_node)
+
+        # Build context data section for routing decisions
+        context_section = ""
+        if self.context_data:
+            context_items = [f"- {key}: {value}" for key, value in self.context_data.items() if value is not None]
+            if context_items:
+                context_section = "\n\nCurrent context variables:\n" + "\n".join(context_items)
 
         # Build the routing prompt
         system_prompt = f"""You are a conversation flow controller for {self.agent_information}.
 
 Current conversation state: {current_node['id']}
 Current node objective: {current_node.get('prompt', '')}
+{context_section}
 
 Your task: Analyze the user's latest message and decide which transition function to call.
 - Call the appropriate transition function if the user's response matches that condition
@@ -320,23 +328,23 @@ Be decisive. If the user's intent is clear, call the transition function immedia
                 logger.info(f"Routing decision: {function_name} (latency: {latency_ms:.1f}ms)")
 
                 if function_name == "stay_on_current_node":
-                    return None, None, latency_ms, messages
+                    return None, None, latency_ms, messages, tools
 
                 # Find the edge for this function
                 edge = self._get_edge_by_function_name(current_node, function_name)
                 if edge:
-                    return edge['to_node_id'], function_args, latency_ms, messages
+                    return edge['to_node_id'], function_args, latency_ms, messages, tools
                 else:
                     logger.warning(f"Function {function_name} not found in edges")
-                    return None, None, latency_ms, messages
+                    return None, None, latency_ms, messages, tools
             else:
                 logger.warning("No tool call in response")
-                return None, None, latency_ms, messages
+                return None, None, latency_ms, messages, tools
 
         except Exception as e:
             latency_ms = (time.perf_counter() - start_time) * 1000
             logger.error(f"Routing error: {e} (latency: {latency_ms:.1f}ms)")
-            return None, None, latency_ms, messages
+            return None, None, latency_ms, messages, tools
 
     def build_node_structure(self) -> Dict[str, List[str]]:
         structure = {}
@@ -482,7 +490,7 @@ Be decisive. If the user's intent is clear, call the transition function immedia
 
         try:
             previous_node = self.current_node_id
-            next_node_id, extracted_params, routing_latency_ms, routing_messages = await self.decide_next_node_with_functions(message)
+            next_node_id, extracted_params, routing_latency_ms, routing_messages, routing_tools = await self.decide_next_node_with_functions(message)
 
             if next_node_id:
                 logger.info(f"Transitioning: {self.current_node_id} -> {next_node_id} (params: {extracted_params})")
@@ -504,6 +512,7 @@ Be decisive. If the user's intent is clear, call the transition function immedia
                     'extracted_params': extracted_params or {},
                     'node_history': list(self.node_history),
                     'routing_messages': routing_messages,
+                    'routing_tools': routing_tools,
                 }
             }
 
