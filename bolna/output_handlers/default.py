@@ -21,8 +21,18 @@ class DefaultOutputHandler:
         self.is_web_based_call = is_web_based_call
         self.mark_event_meta_data = mark_event_meta_data
         self.welcome_message_sent_ts = None
+        self._closed = False
+
+    def close(self):
+        """Mark the output handler as closed to prevent sends after websocket close."""
+        self._closed = True
+
+    def is_closed(self):
+        return self._closed
 
     async def handle_interruption(self):
+        if self._closed:
+            return
         response = {"data": None, "type": "clear"}
         await self.websocket.send_json(response)
         self.mark_event_meta_data.clear_data()
@@ -56,6 +66,8 @@ class DefaultOutputHandler:
         await self.websocket.send_text(json.dumps(data))
 
     async def handle(self, packet):
+        if self._closed:
+            return
         try:
             logger.info(f"Packet received:")
             # if (self.is_web_based_call and packet["meta_info"].get("message_category", "") == "agent_welcome_message" and
