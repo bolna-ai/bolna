@@ -53,6 +53,8 @@ class BaseTranscriber:
                 f"No confidence for the last vocal timeframe. Over transcription time {transcription_completion_time - self.transcription_start_time}")
 
     async def _close(self, ws, data):
+        if ws is None:
+            return
         try:
             await ws.send(json.dumps(data))
         except Exception as e:
