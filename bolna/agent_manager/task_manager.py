@@ -1626,11 +1626,24 @@ class TaskManager(BaseManager):
             if isinstance(llm_message, dict) and 'routing_info' in llm_message:
                 routing_info = llm_message['routing_info']
 
-                # Log routing request
+                # Log routing request with tools
                 routing_messages = routing_info.get('routing_messages')
+                routing_tools = routing_info.get('routing_tools', [])
                 if routing_messages:
+                    # Format tools for logging (show full descriptions with conditions)
+                    tools_summary = ""
+                    if routing_tools:
+                        tool_lines = []
+                        for t in routing_tools:
+                            if 'function' in t:
+                                name = t['function']['name']
+                                desc = t['function'].get('description', '')
+                                tool_lines.append(f"  - {name}: {desc}")
+                        if tool_lines:
+                            tools_summary = "\n\nAvailable transitions:\n" + "\n".join(tool_lines)
+
                     convert_to_request_log(
-                        message=format_messages(routing_messages, use_system_prompt=True),
+                        message=format_messages(routing_messages, use_system_prompt=True) + tools_summary,
                         meta_info=meta_info,
                         model=routing_info.get('routing_model', ''),
                         component="graph_routing",
