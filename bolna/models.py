@@ -164,7 +164,7 @@ class IOModel(BaseModel):
 
     @field_validator("provider")
     def validate_provider(cls, value):
-        return validate_attribute(value, ["twilio", "default", "database", "exotel", "plivo"])
+        return validate_attribute(value, ["twilio", "default", "database", "exotel", "plivo", "vobiz"])
 
 
 # Can be used to route across multiple prompts as well
@@ -245,6 +245,7 @@ class Llm(BaseModel):
     provider: Optional[str] = "openai"
     base_url: Optional[str] = None
     routes: Optional[Routes] = None
+    reasoning_effort: Optional[str] = None
 
 
 class SimpleLlmAgent(Llm):
