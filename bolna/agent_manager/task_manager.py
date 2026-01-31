@@ -1303,6 +1303,10 @@ class TaskManager(BaseManager):
         self.conversation_ended = True
         self.ended_by_assistant = True
 
+        # Close output handler to prevent sends after websocket close
+        if "output" in self.tools and self.tools["output"] is not None:
+            self.tools["output"].close()
+
         await self.tools["input"].stop_handler()
         logger.info("Stopped input handler")
         if "transcriber" in self.tools and not self.turn_based_conversation:

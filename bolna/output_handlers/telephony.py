@@ -34,6 +34,8 @@ class TelephonyOutputHandler(DefaultOutputHandler):
         self.stream_sid = stream_id
 
     async def handle(self, ws_data_packet):
+        if self._closed:
+            return
         try:
             audio_chunk = ws_data_packet.get('data')
             meta_info = ws_data_packet.get('meta_info')
