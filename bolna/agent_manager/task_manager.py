@@ -698,10 +698,12 @@ class TaskManager(BaseManager):
                     convert_to_request_log(message=text, meta_info=meta_info, component="synthesizer", direction="response", model=self.synthesizer_provider, is_cached=meta_info.get("is_cached", False), engine=self.tools['synthesizer'].get_engine(), run_id=self.run_id)
                     await self.tools["output"].handle(message)
                     try:
-                        duration = calculate_audio_duration(len(message["data"]), self.sampling_rate,
-                                                            format=message['meta_info']['format'])
-                        self.conversation_recording['output'].append(
-                            {'data': message['data'], "start_time": time.time(), "duration": duration})
+                        data = message.get("data")
+                        if data is not None:
+                            duration = calculate_audio_duration(len(data), self.sampling_rate,
+                                                                format=message['meta_info']['format'])
+                            self.conversation_recording['output'].append(
+                                {'data': data, "start_time": time.time(), "duration": duration})
                     except Exception as e:
                         duration = 0.256
                         logger.error("Exception in __forced_first_message for duration calculation: {}".format(str(e)))
@@ -1149,8 +1151,8 @@ class TaskManager(BaseManager):
         sequence, meta_info = None, None
         if isinstance(message, dict) and "meta_info" in message:
             self._set_call_details(message)
-            sequence = message["meta_info"]["sequence"]
             meta_info = message["meta_info"]
+            sequence = meta_info.get("sequence", 0)
         return sequence, meta_info
 
     def _is_extraction_task(self):
@@ -1782,10 +1784,11 @@ class TaskManager(BaseManager):
     # Transcriber task
     #################################################################
     async def process_transcriber_request(self, meta_info):
-        if not self.current_request_id or self.current_request_id != meta_info["request_id"]:
-            self.previous_request_id, self.current_request_id = self.current_request_id, meta_info["request_id"]
+        request_id = meta_info.get("request_id")
+        if request_id and (not self.current_request_id or self.current_request_id != request_id):
+            self.previous_request_id, self.current_request_id = self.current_request_id, request_id
 
-        sequence = meta_info["sequence"]
+        sequence = meta_info.get("sequence", 0)
 
         # check if previous request id is not in transmitted request id
         if self.previous_request_id is None:
@@ -2332,7 +2335,7 @@ class TaskManager(BaseManager):
 
     async def __send_first_message(self, message):
         meta_info = self.__get_updated_meta_info()
-        sequence = meta_info["sequence"]
+        sequence = meta_info.get("sequence", 0)
         next_task = self._get_next_step(sequence, "transcriber")
         await self._handle_transcriber_output(next_task, message, meta_info)
         self.time_since_first_interim_result = (time.time() * 1000) - 1000
