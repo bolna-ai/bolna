@@ -698,10 +698,12 @@ class TaskManager(BaseManager):
                     convert_to_request_log(message=text, meta_info=meta_info, component="synthesizer", direction="response", model=self.synthesizer_provider, is_cached=meta_info.get("is_cached", False), engine=self.tools['synthesizer'].get_engine(), run_id=self.run_id)
                     await self.tools["output"].handle(message)
                     try:
-                        duration = calculate_audio_duration(len(message["data"]), self.sampling_rate,
-                                                            format=message['meta_info']['format'])
-                        self.conversation_recording['output'].append(
-                            {'data': message['data'], "start_time": time.time(), "duration": duration})
+                        data = message.get("data")
+                        if data is not None:
+                            duration = calculate_audio_duration(len(data), self.sampling_rate,
+                                                                format=message['meta_info']['format'])
+                            self.conversation_recording['output'].append(
+                                {'data': data, "start_time": time.time(), "duration": duration})
                     except Exception as e:
                         duration = 0.256
                         logger.error("Exception in __forced_first_message for duration calculation: {}".format(str(e)))
