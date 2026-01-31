@@ -54,6 +54,7 @@ class BaseTranscriber:
 
     async def _close(self, ws, data):
         if ws is None:
+            logger.warning("Transcriber websocket already closed, skipping close message")
             return
         try:
             await ws.send(json.dumps(data))
