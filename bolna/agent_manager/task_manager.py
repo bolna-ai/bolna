@@ -1150,7 +1150,7 @@ class TaskManager(BaseManager):
         if isinstance(message, dict) and "meta_info" in message:
             self._set_call_details(message)
             meta_info = message["meta_info"]
-            sequence = meta_info.get("sequence", meta_info.get("sequence_id", 0))
+            sequence = meta_info.get("sequence", 0)
         return sequence, meta_info
 
     def _is_extraction_task(self):
@@ -1782,7 +1782,7 @@ class TaskManager(BaseManager):
         if request_id and (not self.current_request_id or self.current_request_id != request_id):
             self.previous_request_id, self.current_request_id = self.current_request_id, request_id
 
-        sequence = meta_info.get("sequence", meta_info.get("sequence_id", 0))
+        sequence = meta_info.get("sequence", 0)
 
         # check if previous request id is not in transmitted request id
         if self.previous_request_id is None:
@@ -2329,7 +2329,7 @@ class TaskManager(BaseManager):
 
     async def __send_first_message(self, message):
         meta_info = self.__get_updated_meta_info()
-        sequence = meta_info.get("sequence", meta_info.get("sequence_id", 0))
+        sequence = meta_info.get("sequence", 0)
         next_task = self._get_next_step(sequence, "transcriber")
         await self._handle_transcriber_output(next_task, message, meta_info)
         self.time_since_first_interim_result = (time.time() * 1000) - 1000
