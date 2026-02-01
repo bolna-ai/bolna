@@ -55,6 +55,7 @@ class GraphAgent(BaseAgent):
         # Initialize routing client (Groq for speed, or fallback to OpenAI)
         self.routing_provider = self.config.get('routing_provider')
         self.routing_model = self.config.get('routing_model')
+        self.routing_instructions = self.config.get('routing_instructions')  # Custom routing instructions
         self._init_routing_client()
 
         # Initialize main LLM for response generation (supports api_tools/function calling + real streaming)
@@ -285,18 +286,22 @@ class GraphAgent(BaseAgent):
             if context_items:
                 context_section = "\n\nCurrent context variables:\n" + "\n".join(context_items)
 
-        # Build the routing prompt
-        system_prompt = f"""You are a conversation flow controller for {self.agent_information}.
+        # Build the routing prompt (structure is fixed, instructions are customizable)
+        default_instructions = """Your task: Analyze the user's latest message and decide which transition function to call.
+- Call the appropriate transition function if the user's response matches that condition
+- Call 'stay_on_current_node' if the response is unclear or needs clarification
+
+Be decisive. If the user's intent is clear, call the transition function immediately."""
+
+        instructions = self.routing_instructions or default_instructions
+
+        system_prompt = f"""You are a conversation flow controller.
 
 Current conversation state: {current_node['id']}
 Current node objective: {current_node.get('prompt', '')}
 {context_section}
 
-Your task: Analyze the user's latest message and decide which transition function to call.
-- Call the appropriate transition function if the user's response matches that condition
-- Call 'stay_on_current_node' if the response is unclear or needs clarification
-
-Be decisive. If the user's intent is clear, call the transition function immediately."""
+{instructions}"""
 
         # Get the last user message
         user_message = history[-1]["content"] if history else ""
