@@ -52,6 +52,9 @@ class GraphAgent(BaseAgent):
         self.rag_configs = self.initialize_rag_configs()
         self.rag_server_url = os.getenv('RAG_SERVER_URL', 'http://localhost:8000')
 
+        # Cache transition tools per node for faster routing
+        self._transition_tools_cache: Dict[str, List[dict]] = {}
+
         # Initialize routing client (Groq for speed, or fallback to OpenAI)
         self.routing_provider = self.config.get('routing_provider')
         self.routing_model = self.config.get('routing_model')
@@ -151,12 +154,11 @@ class GraphAgent(BaseAgent):
                 logger.warning("Groq requested but GROQ_API_KEY not set or groq package not installed, falling back to OpenAI")
                 self.routing_client = self.openai
                 self.routing_provider = 'openai'
-                # Reset routing_model to OpenAI default (config may have Groq-specific model)
-                self.routing_model = 'gpt-4o-mini'
+                self.routing_model = 'gpt-4.1-mini'
         else:
             self.routing_client = self.openai
             if not self.routing_model:
-                self.routing_model = 'gpt-4o-mini'
+                self.routing_model = 'gpt-4.1-mini'
             logger.info(f"Routing initialized with OpenAI ({self.routing_model})")
 
     async def check_for_completion(self, messages, check_for_completion_prompt):
@@ -200,55 +202,35 @@ class GraphAgent(BaseAgent):
             return {'is_voicemail': 'No'}, {}
 
     def _build_transition_tools(self, node: dict) -> List[dict]:
-        """Build function/tool definitions for all edges from a node.
+        """Build and cache function/tool definitions for node edges."""
+        node_id = node.get('id')
+        if node_id and node_id in self._transition_tools_cache:
+            return self._transition_tools_cache[node_id]
 
-        Each edge becomes a callable function that the LLM can invoke to transition.
-        """
         tools = []
-        edges = node.get('edges', [])
-
-        for edge in edges:
+        for edge in node.get('edges', []):
             to_node_id = edge.get('to_node_id')
-            condition = edge.get('condition', '')
-
-            # Generate function name if not provided
             func_name = edge.get('function_name') or f"transition_to_{to_node_id}"
+            func_description = edge.get('function_description') or f"Call this function when: {edge.get('condition', '')}"
 
-            # Generate description from condition if not provided
-            func_description = edge.get('function_description') or f"Call this function when: {condition}"
-
-            # Build parameters schema
             parameters = {"type": "object", "properties": {}, "required": []}
             if edge.get('parameters'):
                 for param_name, param_type in edge['parameters'].items():
-                    parameters["properties"][param_name] = {
-                        "type": param_type,
-                        "description": f"The {param_name} provided by the user"
-                    }
+                    parameters["properties"][param_name] = {"type": param_type, "description": f"The {param_name} provided by the user"}
                     parameters["required"].append(param_name)
 
-            tool = {
+            tools.append({
                 "type": "function",
-                "function": {
-                    "name": func_name,
-                    "description": func_description,
-                    "parameters": parameters
-                }
-            }
-            tools.append(tool)
+                "function": {"name": func_name, "description": func_description, "parameters": parameters}
+            })
 
-            logger.debug(f"Built transition tool: {func_name} -> {to_node_id}")
-
-        # Add a "stay_on_current_node" function for when no transition is needed
         tools.append({
             "type": "function",
-            "function": {
-                "name": "stay_on_current_node",
-                "description": "Call this when the user's response doesn't clearly match any transition condition, or when you need more information from the user.",
-                "parameters": {"type": "object", "properties": {}, "required": []}
-            }
+            "function": {"name": "stay_on_current_node", "description": "No transition matches. Need more info or clarification.", "parameters": {"type": "object", "properties": {}, "required": []}}
         })
 
+        if node_id:
+            self._transition_tools_cache[node_id] = tools
         return tools
 
     def _get_edge_by_function_name(self, node: dict, function_name: str) -> Optional[dict]:
@@ -276,29 +258,21 @@ class GraphAgent(BaseAgent):
             logger.debug(f"Node '{self.current_node_id}' has no edges, staying on current node")
             return None, None, 0, None, None
 
-        # Build transition tools from edges
         tools = self._build_transition_tools(current_node)
 
-        # Build context data section for routing decisions
+        # Build compact context for routing
         context_section = ""
         if self.context_data:
-            context_items = [f"- {key}: {value}" for key, value in self.context_data.items() if value is not None]
+            context_items = [f"{k}={v}" for k, v in self.context_data.items()
+                          if v is not None and not isinstance(v, dict) and k != 'detected_language']
             if context_items:
-                context_section = "\n\nCurrent context variables:\n" + "\n".join(context_items)
+                context_section = f"\nContext: {', '.join(context_items)}"
 
-        # Build the routing prompt (structure is fixed, instructions are customizable)
-        default_instructions = """Your task: Analyze the user's latest message and decide which transition function to call.
-- Call the appropriate transition function if the user's response matches that condition
-- Call 'stay_on_current_node' if the response is unclear or needs clarification
-
-Be decisive. If the user's intent is clear, call the transition function immediately."""
-
+        default_instructions = "Call the transition function matching user intent, or stay_on_current_node if unclear."
         instructions = self.routing_instructions or default_instructions
 
-        # Apply variable substitution to instructions using context_data
         if self.context_data and instructions:
             try:
-                # Merge top-level context_data and recipient_data for variable access
                 substitution_data = dict(self.context_data)
                 if 'recipient_data' in self.context_data and isinstance(self.context_data['recipient_data'], dict):
                     substitution_data.update(self.context_data['recipient_data'])
@@ -306,51 +280,47 @@ Be decisive. If the user's intent is clear, call the transition function immedia
             except Exception as e:
                 logger.debug(f"Variable substitution in routing_instructions failed: {e}")
 
-        system_prompt = f"""You are a conversation flow controller.
-
-Current conversation state: {current_node['id']}
-Current node objective: {current_node.get('prompt', '')}
-{context_section}
-
+        node_objective = current_node.get('prompt', '')[:200]
+        system_prompt = f"""Route conversation. State: {current_node['id']}{context_section}
+Objective: {node_objective}
 {instructions}"""
 
-        # Build routing messages - always include tool context if available
         messages = [{"role": "system", "content": system_prompt}]
+        recent_history = history[-4:] if len(history) > 4 else history
+        has_tool_context = any(msg.get("role") == "assistant" and msg.get("tool_calls") for msg in recent_history)
 
-        # Find the most recent tool call and its response(s) anywhere in history
-        last_tool_call_idx = None
-        for i in range(len(history) - 1, -1, -1):
-            if history[i].get("role") == "assistant" and history[i].get("tool_calls"):
-                last_tool_call_idx = i
-                break
-
-        # If tool call exists, include it and all subsequent messages
-        if last_tool_call_idx is not None:
-            for msg in history[last_tool_call_idx:]:
+        if has_tool_context:
+            for msg in recent_history:
                 role = msg.get("role")
                 if role == "assistant" and msg.get("tool_calls"):
                     messages.append({"role": "assistant", "content": None, "tool_calls": msg["tool_calls"]})
                 elif role == "tool":
-                    messages.append({"role": "tool", "tool_call_id": msg.get("tool_call_id", ""), "content": msg.get("content", "")})
+                    content = msg.get("content", "")[:200]
+                    messages.append({"role": "tool", "tool_call_id": msg.get("tool_call_id", ""), "content": content})
                 elif role == "user" and msg.get("content"):
                     messages.append({"role": "user", "content": msg["content"]})
+        else:
+            for msg in recent_history:
+                if msg.get("role") == "user" and msg.get("content"):
+                    messages.append({"role": "user", "content": msg["content"]})
 
-        # Ensure at least the last user message is included
-        if not any(m.get("role") == "user" for m in messages[1:]):
-            user_message = history[-1]["content"] if history else ""
+        if len(messages) == 1:
+            user_message = history[-1].get("content", "") if history else ""
             if user_message:
                 messages.append({"role": "user", "content": user_message})
 
         try:
-            response = self.routing_client.chat.completions.create(
-                model=self.routing_model,
-                messages=messages,
-                tools=tools,
-                tool_choice="required",
-                max_tokens=100,
-                temperature=0.1
-            )
+            routing_kwargs = {
+                "model": self.routing_model,
+                "messages": messages,
+                "tools": tools,
+                "tool_choice": "required",
+                "max_tokens": 50,
+                "temperature": 0.0,
+                "parallel_tool_calls": False,
+            }
 
+            response = self.routing_client.chat.completions.create(**routing_kwargs)
             latency_ms = (time.perf_counter() - start_time) * 1000
 
             # Extract the function call
