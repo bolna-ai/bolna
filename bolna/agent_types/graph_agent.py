@@ -9,7 +9,7 @@ from bolna.models import *
 from bolna.agent_types.base_agent import BaseAgent
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.rag_service_client import RAGServiceClient, RAGServiceClientSingleton
-from bolna.helpers.utils import now_ms, format_messages, update_prompt_with_context
+from bolna.helpers.utils import now_ms, format_messages, update_prompt_with_context, DictWithMissing
 from bolna.llms import OpenAiLLM
 from bolna.providers import SUPPORTED_LLM_PROVIDERS
 from bolna.prompts import CHECK_FOR_COMPLETION_PROMPT, VOICEMAIL_DETECTION_PROMPT
@@ -295,6 +295,17 @@ Be decisive. If the user's intent is clear, call the transition function immedia
 
         instructions = self.routing_instructions or default_instructions
 
+        # Apply variable substitution to instructions using context_data
+        if self.context_data and instructions:
+            try:
+                # Merge top-level context_data and recipient_data for variable access
+                substitution_data = dict(self.context_data)
+                if 'recipient_data' in self.context_data and isinstance(self.context_data['recipient_data'], dict):
+                    substitution_data.update(self.context_data['recipient_data'])
+                instructions = instructions.format_map(DictWithMissing(substitution_data))
+            except Exception as e:
+                logger.debug(f"Variable substitution in routing_instructions failed: {e}")
+
         system_prompt = f"""You are a conversation flow controller.
 
 Current conversation state: {current_node['id']}
@@ -303,13 +314,32 @@ Current node objective: {current_node.get('prompt', '')}
 
 {instructions}"""
 
-        # Get the last user message
-        user_message = history[-1]["content"] if history else ""
+        # Build routing messages - always include tool context if available
+        messages = [{"role": "system", "content": system_prompt}]
 
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_message}
-        ]
+        # Find the most recent tool call and its response(s) anywhere in history
+        last_tool_call_idx = None
+        for i in range(len(history) - 1, -1, -1):
+            if history[i].get("role") == "assistant" and history[i].get("tool_calls"):
+                last_tool_call_idx = i
+                break
+
+        # If tool call exists, include it and all subsequent messages
+        if last_tool_call_idx is not None:
+            for msg in history[last_tool_call_idx:]:
+                role = msg.get("role")
+                if role == "assistant" and msg.get("tool_calls"):
+                    messages.append({"role": "assistant", "content": None, "tool_calls": msg["tool_calls"]})
+                elif role == "tool":
+                    messages.append({"role": "tool", "tool_call_id": msg.get("tool_call_id", ""), "content": msg.get("content", "")})
+                elif role == "user" and msg.get("content"):
+                    messages.append({"role": "user", "content": msg["content"]})
+
+        # Ensure at least the last user message is included
+        if not any(m.get("role") == "user" for m in messages[1:]):
+            user_message = history[-1]["content"] if history else ""
+            if user_message:
+                messages.append({"role": "user", "content": user_message})
 
         try:
             response = self.routing_client.chat.completions.create(
