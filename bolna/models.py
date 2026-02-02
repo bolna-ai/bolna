@@ -316,6 +316,7 @@ class GraphAgentConfig(Llm):
     # Routing configuration
     routing_model: Optional[str] = None  # Model for routing decisions (default: same as main model)
     routing_provider: Optional[str] = None  # Provider for routing (e.g., "groq" for fast inference)
+    routing_instructions: Optional[str] = None  # Custom instructions for routing LLM
 
 class KnowledgeAgentConfig(Llm):
     agent_information: Optional[str] = "Knowledge-based AI assistant"
