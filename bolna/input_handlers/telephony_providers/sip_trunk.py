@@ -20,28 +20,35 @@ ASTERISK_ULAW_OPTIMAL_FRAME_SIZE = 160
 
 
 def _parse_asterisk_control_message(text: str) -> dict:
-    """Parse Asterisk control: JSON or plain 'KEY value' / 'KEY:value' lines."""
+    """Parse Asterisk control: JSON or plain 'KEY value' / 'KEY:value' lines.
+
+    Returns dict with normalized 'event' key (uppercase, spaces replaced with underscores).
+    """
     text = (text or "").strip()
     if not text:
         return {}
+    result = {}
     # Try JSON first (Asterisk 20.18+, 22.8+, 23.2+)
     try:
         obj = json.loads(text)
         if isinstance(obj, dict):
-            return obj
+            result = obj
     except (json.JSONDecodeError, TypeError):
-        pass
-    # Plain text: "EVENT key:value key2:value2" or "KEY value"
-    out = {}
-    for part in text.split():
-        if ":" in part:
-            k, v = part.split(":", 1)
-            out[k.strip().lower()] = v.strip()
-    if " " in text:
-        first = text.split()[0]
-        if first not in out:
-            out["event"] = first
-    return out
+        # Plain text: "EVENT key:value key2:value2" or "KEY value"
+        for part in text.split():
+            if ":" in part:
+                k, v = part.split(":", 1)
+                result[k.strip().lower()] = v.strip()
+        if " " in text:
+            first = text.split()[0]
+            if first not in result:
+                result["event"] = first
+
+    # Normalize event key
+    event = (result.get("event") or result.get("command") or "").upper().replace(" ", "_")
+    if event:
+        result["event"] = event
+    return result
 
 
 class SipTrunkInputHandler(TelephonyInputHandler):
@@ -199,7 +206,7 @@ class SipTrunkInputHandler(TelephonyInputHandler):
                     message_text = message['text']
                     await self._handle_control_message(message_text)
                 else:
-                    logger.warning(f"Received unknown message type: {message}")
+                    logger.debug(f"Received unknown message type: {message}")
             except WebSocketDisconnect as e:
                 if getattr(e, "code", None) in (1000, 1001, 1006):
                     logger.info(f"WebSocket disconnected normally: code={getattr(e, 'code', None)}")
@@ -252,35 +259,33 @@ class SipTrunkInputHandler(TelephonyInputHandler):
     async def _handle_control_message(self, text: str):
         """Handle Asterisk TEXT control: MEDIA_START, DTMF_END, MEDIA_XOFF, MEDIA_XON, etc."""
         parsed = _parse_asterisk_control_message(text)
-        event = (parsed.get("event") or parsed.get("command") or "").upper().replace(" ", "_")
-        if not event and "event" in parsed:
-            event = str(parsed.get("event", "")).upper()
+        event = parsed.get("event", "")
 
-        if "MEDIA_START" in event or event == "MEDIA_START":
+        if event == "MEDIA_START":
             await self.call_start(parsed)
             return
-        if "DTMF_END" in event or event == "DTMF_END":
+        if event == "DTMF_END":
             digit = parsed.get("digit", "")
             if digit:
                 logger.info(f"Asterisk DTMF_END digit={digit}")
                 if self.is_dtmf_active:
                     self.queues["dtmf"].put_nowait(digit)
             return
-        if "MEDIA_XOFF" in event or event == "MEDIA_XOFF":
+        if event == "MEDIA_XOFF":
             self._media_xoff = True
             logger.warning(f"MEDIA_XOFF received - Asterisk queue is full for channel {self.channel_id}")
             # Notify output handler if available
             if hasattr(self, 'output_handler_ref'):
                 self.output_handler_ref.queue_full = True
             return
-        if "MEDIA_XON" in event or event == "MEDIA_XON":
+        if event == "MEDIA_XON":
             self._media_xoff = False
             logger.info(f"MEDIA_XON received - Asterisk queue has space for channel {self.channel_id}")
             # Notify output handler if available
             if hasattr(self, 'output_handler_ref'):
                 self.output_handler_ref.queue_full = False
             return
-        if "STATUS" in event or event == "STATUS":
+        if event == "STATUS":
             queue_length = parsed.get('queue_length', 0)
             xon_level = parsed.get('xon_level', 0)
             xoff_level = parsed.get('xoff_level', 0)
