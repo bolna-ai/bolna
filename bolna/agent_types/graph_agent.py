@@ -1,6 +1,5 @@
 import os
 import time
-import asyncio
 from openai import OpenAI
 from dotenv import load_dotenv
 import json
@@ -8,13 +7,13 @@ import json
 from bolna.models import *
 from bolna.agent_types.base_agent import BaseAgent
 from bolna.helpers.logger_config import configure_logger
-from bolna.helpers.rag_service_client import RAGServiceClient, RAGServiceClientSingleton
+from bolna.helpers.rag_service_client import RAGServiceClientSingleton
 from bolna.helpers.utils import now_ms, format_messages, update_prompt_with_context, DictWithMissing
 from bolna.llms import OpenAiLLM
 from bolna.providers import SUPPORTED_LLM_PROVIDERS
-from bolna.prompts import CHECK_FOR_COMPLETION_PROMPT, VOICEMAIL_DETECTION_PROMPT
+from bolna.prompts import VOICEMAIL_DETECTION_PROMPT
 
-from typing import List, Tuple, Generator, AsyncGenerator, Optional, Dict, Any
+from typing import List, Tuple, AsyncGenerator, Optional, Dict, Any
 
 # Optional Groq support for fast routing
 try:
@@ -48,7 +47,6 @@ class GraphAgent(BaseAgent):
             self.openai = OpenAI(api_key=self.llm_key)
 
         self.node_history = [self.current_node_id]
-        self.node_structure = self.build_node_structure()
         self.rag_configs = self.initialize_rag_configs()
         self.rag_server_url = os.getenv('RAG_SERVER_URL', 'http://localhost:8000')
 
@@ -354,20 +352,6 @@ Objective: {node_objective}
             logger.error(f"Routing error: {e} (latency: {latency_ms:.1f}ms)")
             return None, None, latency_ms, messages, tools
 
-    def build_node_structure(self) -> Dict[str, List[str]]:
-        structure = {}
-        for node in self.config.get('nodes', []):
-            structure[node['id']] = [edge['to_node_id'] for edge in node.get('edges', [])]
-        return structure
-
-    def get_accessible_nodes(self, current_node_id: str) -> List[str]:
-        accessible_nodes = []
-        for node_id, children in self.node_structure.items():
-            if current_node_id in children or node_id == current_node_id:
-                logger.info(f"Node Id : {node_id} is accessible")
-                accessible_nodes.extend([node_id] + children)
-        return list(set(accessible_nodes))
-
     def get_node_by_id(self, node_id: str) -> Optional[dict]:
         return next((node for node in self.config.get('nodes', []) if node['id'] == node_id), None)
 
@@ -385,63 +369,6 @@ Objective: {node_objective}
         # Language not yet detected — include all examples
         example_lines = [f"  {lang.upper()}: \"{text}\"" for lang, text in examples.items()]
         return f"{prompt}\n\nExample responses:\n" + "\n".join(example_lines)
-
-    def is_response_valid(self, response: str) -> bool:
-        if not response or len(response.strip()) < 5:  
-            return False
-        generic_responses = [
-            "I don't know", "I'm not sure", "Can you rephrase?",
-            "Sorry, I didn't understand", "I'm unable to assist"
-        ]
-        if any(generic in response.lower() for generic in generic_responses):
-            logger.info("Response contains a generic fallback phrase.")
-            return False
-
-    async def decide_next_move_cyclic(self, history: List[dict]) -> Optional[str]:
-        current_node = self.get_node_by_id(self.current_node_id)
-        accessible_nodes = self.get_accessible_nodes(current_node['id'])
-
-        node_info = {}
-        for node_id in accessible_nodes:
-            node = self.get_node_by_id(node_id)
-            if node:
-                node_info[node_id] = {
-                    "prompt": node['prompt'],
-                }
-        
-        prompt = f"""
-        Analyze the conversation in a {self.agent_information} and determine the user's intent based on the conversation history and their latest message.
-
-        Latest Message from user : {history[-1]["content"]}
-        Current node: {current_node['id']}
-        Accessible nodes and their information: {json.dumps(node_info, indent=2)}
-
-        Respond with the ID of the accessible nodes that best matches the user's intent, or "current" if the current node is still appropriate.
-        For example, if the user's intent is "x" node then write "x" as the output. 
-
-        NOTE: Don't write anything other than node id. No strings and sentences.
-        """
-
-        messages = [{"role": "system", "content": prompt}] + [{"role": item["role"], "content": item["content"]} for item in history[-3:]]
-
-        try:
-            response = self.openai.chat.completions.create(
-                model=self.llm_model,
-                messages=messages,
-                max_tokens=self.config.get('max_tokens', 150),
-                temperature=self.config.get('temperature', 0.7),
-            )
-        except Exception as e:
-            print(f"Error generating response: {e}")
-
-        next_node_id = response.choices[0].message.content.strip().lower()
-        logger.info(f"Next Node is : {next_node_id}")
-
-        if next_node_id == "current" or next_node_id not in accessible_nodes:
-            logger.info(f"No conditions met")
-            return None
-        
-        return next_node_id
 
     async def _build_messages(self, history: List[dict]) -> List[dict]:
         """Build messages array: system prompt (+ optional RAG) + conversation history."""
