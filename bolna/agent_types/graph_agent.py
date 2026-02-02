@@ -380,7 +380,7 @@ Objective: {node_objective}
             return prompt
 
         if detected_lang and detected_lang in examples:
-            return f"{prompt}\n\nLANGUAGE GUIDELINES \n\nPlease make sure to generate replies in the {detected_lang} language only. You can refer to the example given below to generate a reply in the given language.Example response: \"{examples[detected_lang]}\""
+            return f"{prompt}\n\nExample response: \"{examples[detected_lang]}\""
 
         # Language not yet detected — include all examples
         example_lines = [f"  {lang.upper()}: \"{text}\"" for lang, text in examples.items()]
@@ -449,7 +449,7 @@ Objective: {node_objective}
         if not current_node:
             raise ValueError("Current node not found.")
 
-        detected_lang = self.context_data.get('detected_language', 'en')
+        detected_lang = self.context_data.get('detected_language')  # None if not yet detected
         node_prompt = self._get_prompt_with_example(current_node, detected_lang)
 
         if self.context_data:
@@ -493,8 +493,9 @@ Objective: {node_objective}
         synthesize = kwargs.get('synthesize', True)
         start_time = now_ms()
 
-        detected_language = meta_info.get('detected_language', 'en')
-        self.context_data['detected_language'] = detected_language
+        detected_language = meta_info.get('detected_language')  # None if not yet detected
+        if detected_language:
+            self.context_data['detected_language'] = detected_language
 
         try:
             previous_node = self.current_node_id
