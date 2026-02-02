@@ -13,6 +13,7 @@ from websockets.exceptions import ConnectionClosedError, InvalidHandshake, Conne
 from .base_transcriber import BaseTranscriber
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.utils import create_ws_data_packet, timestamp_ms
+from bolna.enums import TelephonyProvider
 
 
 logger = configure_logger(__name__)
@@ -86,10 +87,10 @@ class DeepgramTranscriber(BaseTranscriber):
 
         self.audio_frame_duration = 0.5  # We're sending 8k samples with a sample rate of 16k
 
-        if self.provider in ('twilio', 'exotel', 'plivo', 'vobiz', 'sip-trunk'):
+        if self.provider in TelephonyProvider.telephony_values():
             # For sip-trunk (Asterisk), encoding and sampling_rate are already set in task_manager
             # Don't override them - use what was passed from task_config
-            if self.provider != 'sip-trunk':
+            if self.provider != TelephonyProvider.SIP_TRUNK.value:
                 self.encoding = 'mulaw' if self.provider in ("twilio") else "linear16"
                 self.sampling_rate = 8000
             # For sip-trunk, encoding and sampling_rate come from task_config (set in task_manager)
@@ -99,8 +100,8 @@ class DeepgramTranscriber(BaseTranscriber):
             dg_params['encoding'] = self.encoding
             dg_params['sample_rate'] = self.sampling_rate
             dg_params['channels'] = "1"
-            
-            if self.provider == 'sip-trunk':
+
+            if self.provider == TelephonyProvider.SIP_TRUNK.value:
                 logger.info(f"[SIP-TRUNK] Deepgram transcriber configured with encoding={self.encoding}, sample_rate={self.sampling_rate}")
 
         elif self.provider == "web_based_call":

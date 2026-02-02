@@ -3,6 +3,7 @@ from typing import Optional, List, Union, Dict, Callable
 from pydantic import BaseModel, Field, field_validator, ValidationError, Json, model_validator
 from pydantic_core import PydanticCustomError
 from .providers import *
+from .enums import TelephonyProvider, SynthesizerProvider, TranscriberProvider
 
 AGENT_WELCOME_MESSAGE = "This call is being recorded for quality assurance and training. Please speak now."
 
@@ -101,7 +102,7 @@ class Transcriber(BaseModel):
 
     @field_validator("provider")
     def validate_model(cls, value):
-        return validate_attribute(value, list(SUPPORTED_TRANSCRIBER_PROVIDERS.keys()))
+        return validate_attribute(value, TranscriberProvider.all_values())
 
 
 class Synthesizer(BaseModel):
@@ -154,7 +155,7 @@ class Synthesizer(BaseModel):
 
     @field_validator("provider")
     def validate_model(cls, value):
-        return validate_attribute(value, ["polly", "elevenlabs", "azuretts", "openai", "deepgram", "cartesia", "smallest", "sarvam", "rime", "pixa"])
+        return validate_attribute(value, SynthesizerProvider.all_values())
 
 
 
@@ -164,7 +165,7 @@ class IOModel(BaseModel):
 
     @field_validator("provider")
     def validate_provider(cls, value):
-        return validate_attribute(value, ["twilio", "default", "database", "exotel", "plivo", "vobiz"])
+        return validate_attribute(value, TelephonyProvider.all_values())
 
 
 # Can be used to route across multiple prompts as well
