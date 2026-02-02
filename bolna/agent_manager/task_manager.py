@@ -54,6 +54,7 @@ class TaskManager(BaseManager):
         self.transcriber_latencies = {'connection_latency_ms': None, 'turn_latencies': []}
         self.synthesizer_latencies = {'connection_latency_ms': None, 'turn_latencies': []}
         self.rag_latencies = {'turn_latencies': []}
+        self.routing_latencies = {'turn_latencies': []}
         self.stream_sid_ts = None
 
         self.task_config = task
@@ -1680,6 +1681,17 @@ class TaskManager(BaseManager):
                 meta_info['llm_metadata'] = meta_info.get('llm_metadata') or {}
                 meta_info['llm_metadata']['graph_routing_info'] = routing_info
 
+                if routing_info.get('routing_latency_ms') is not None:
+                    self.routing_latencies['turn_latencies'].append({
+                        'latency_ms': routing_info['routing_latency_ms'],
+                        'routing_model': routing_info.get('routing_model'),
+                        'routing_provider': routing_info.get('routing_provider'),
+                        'previous_node': routing_info.get('previous_node'),
+                        'current_node': routing_info.get('current_node'),
+                        'transitioned': routing_info.get('transitioned', False),
+                        'sequence_id': meta_info.get('sequence_id')
+                    })
+
                 # Log routing response
                 convert_to_request_log(
                     message=routing_data,
@@ -2962,6 +2974,7 @@ class TaskManager(BaseManager):
                         "transcriber_latencies": self.transcriber_latencies,
                         "synthesizer_latencies": self.synthesizer_latencies,
                         "rag_latencies": self.rag_latencies,
+                        "routing_latencies": self.routing_latencies,
                         "welcome_message_sent_ts": None,
                         "stream_sid_ts": None
                     },
