@@ -86,8 +86,9 @@ class TelephonyOutputHandler(DefaultOutputHandler):
                 else:
                     logger.info("Not sending")
             except Exception as e:
-                traceback.print_exc()
-                logger.info(f'something went wrong while sending message to twilio {e}')
+                self._closed = True  # Prevent further send attempts
+                logger.debug(f'WebSocket send failed (client disconnected): {e}')
 
         except Exception as e:
-            logger.info(f'something went wrong while handling twilio {e}')
+            self._closed = True
+            logger.debug(f'WebSocket handling failed (client disconnected): {e}')
