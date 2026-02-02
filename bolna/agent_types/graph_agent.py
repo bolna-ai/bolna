@@ -59,6 +59,7 @@ class GraphAgent(BaseAgent):
         self.routing_provider = self.config.get('routing_provider')
         self.routing_model = self.config.get('routing_model')
         self.routing_instructions = self.config.get('routing_instructions')  # Custom routing instructions
+        logger.info(f"GraphAgent routing_instructions loaded: {bool(self.routing_instructions)} (length: {len(self.routing_instructions) if self.routing_instructions else 0})")
         self._init_routing_client()
 
         # Initialize main LLM for response generation (supports api_tools/function calling + real streaming)
@@ -280,11 +281,13 @@ class GraphAgent(BaseAgent):
             except Exception as e:
                 logger.debug(f"Variable substitution in routing_instructions failed: {e}")
 
-        node_objective = current_node.get('prompt', '')[:200]
+        node_objective = current_node.get('prompt', '')
         system_prompt = f"""Route conversation. State: {current_node['id']}{context_section}
 Objective: {node_objective}
+
 {instructions}"""
 
+        logger.info(f"Routing system prompt:\n{system_prompt}")
         messages = [{"role": "system", "content": system_prompt}]
         recent_history = history[-4:] if len(history) > 4 else history
         has_tool_context = any(msg.get("role") == "assistant" and msg.get("tool_calls") for msg in recent_history)
@@ -295,7 +298,7 @@ Objective: {node_objective}
                 if role == "assistant" and msg.get("tool_calls"):
                     messages.append({"role": "assistant", "content": None, "tool_calls": msg["tool_calls"]})
                 elif role == "tool":
-                    content = msg.get("content", "")[:200]
+                    content = msg.get("content", "")
                     messages.append({"role": "tool", "tool_call_id": msg.get("tool_call_id", ""), "content": content})
                 elif role == "user" and msg.get("content"):
                     messages.append({"role": "user", "content": msg["content"]})
