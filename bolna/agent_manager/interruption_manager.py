@@ -161,10 +161,6 @@ class InterruptionManager:
         self.sequence_ids.add(self.curr_sequence_id)
         return self.curr_sequence_id
 
-    def reset_transmission_state(self) -> None:
-        """Resets state after cleanup/interruption."""
-        pass
-
     def should_delay_output(self, welcome_message_played: bool) -> Tuple[bool, float]:
         """Returns (should_delay, sleep_duration) for incremental delay logic."""
         if not welcome_message_played:
