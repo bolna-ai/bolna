@@ -44,8 +44,9 @@ class OpenAiLLM(BaseLLM):
                 self.model_args = {"reasoning_effort": reasoning_effort}
             else:
                 self.model_args = {"reasoning_effort": os.getenv('DEFAULT_REASONING_EFFORT', 'low')}
-
-        self.model_args.update({max_tokens_key: self.max_tokens, "temperature": self.temperature, "model": self.model})
+            self.model_args.update({max_tokens_key: self.max_tokens, "model": self.model})
+        else:
+            self.model_args.update({max_tokens_key: self.max_tokens, "temperature": self.temperature, "model": self.model})
 
         if kwargs.get("service_tier") == "priority":
             self.model_args["service_tier"] = "priority"
