@@ -18,13 +18,19 @@ class TwilioOutputHandler(TelephonyOutputHandler):
         self.is_chunking_supported = True
 
     async def handle_interruption(self):
-        logger.info("interrupting because user spoke in between")
-        message_clear = {
-            "event": "clear",
-            "streamSid": self.stream_sid,
-        }
-        await self.websocket.send_text(json.dumps(message_clear))
-        self.mark_event_meta_data.clear_data()
+        if self._closed:
+            return
+        try:
+            logger.info("interrupting because user spoke in between")
+            message_clear = {
+                "event": "clear",
+                "streamSid": self.stream_sid,
+            }
+            await self.websocket.send_text(json.dumps(message_clear))
+            self.mark_event_meta_data.clear_data()
+        except Exception as e:
+            logger.info(f"WebSocket closed during interruption: {e}")
+            self._closed = True
 
     async def form_media_message(self, audio_data, audio_format="wav"):
         if audio_format != "mulaw":

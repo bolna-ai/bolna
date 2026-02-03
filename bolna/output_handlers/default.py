@@ -21,11 +21,25 @@ class DefaultOutputHandler:
         self.is_web_based_call = is_web_based_call
         self.mark_event_meta_data = mark_event_meta_data
         self.welcome_message_sent_ts = None
+        self._closed = False
+
+    def close(self):
+        """Mark the output handler as closed to prevent sends after websocket close."""
+        self._closed = True
+
+    def is_closed(self):
+        return self._closed
 
     async def handle_interruption(self):
-        response = {"data": None, "type": "clear"}
-        await self.websocket.send_json(response)
-        self.mark_event_meta_data.clear_data()
+        if self._closed:
+            return
+        try:
+            response = {"data": None, "type": "clear"}
+            await self.websocket.send_json(response)
+            self.mark_event_meta_data.clear_data()
+        except Exception as e:
+            logger.info(f"WebSocket closed during interruption: {e}")
+            self._closed = True
 
     def process_in_chunks(self, yield_chunks=False):
         return self.is_chunking_supported and yield_chunks
@@ -49,13 +63,21 @@ class DefaultOutputHandler:
     #     return self.is_welcome_message_sent
 
     async def send_init_acknowledgement(self):
-        data = {
-            "type": "ack"
-        }
-        logger.info(f"Sending ack event")
-        await self.websocket.send_text(json.dumps(data))
+        if self._closed:
+            return
+        try:
+            data = {
+                "type": "ack"
+            }
+            logger.info(f"Sending ack event")
+            await self.websocket.send_text(json.dumps(data))
+        except Exception as e:
+            logger.info(f"WebSocket closed during init ack: {e}")
+            self._closed = True
 
     async def handle(self, packet):
+        if self._closed:
+            return
         try:
             logger.info(f"Packet received:")
             # if (self.is_web_based_call and packet["meta_info"].get("message_category", "") == "agent_welcome_message" and
@@ -114,4 +136,5 @@ class DefaultOutputHandler:
             else:
                 logger.error("Other modalities are not implemented yet")
         except Exception as e:
-            logger.error(f"something went wrong in speaking {e}")
+            self._closed = True  # Prevent further send attempts
+            logger.debug(f"WebSocket send failed (client disconnected): {e}")
