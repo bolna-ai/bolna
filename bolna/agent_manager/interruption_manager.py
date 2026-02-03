@@ -46,17 +46,6 @@ class InterruptionManager:
             f"incremental_delay={incremental_delay}ms"
         )
 
-    def should_send_audio(self, sequence_id: int) -> bool:
-        """Returns True if audio chunk should be sent (valid sequence and user not speaking)."""
-        if sequence_id not in self.sequence_ids:
-            return False
-
-        if self.callee_speaking:
-            logger.info(f"Blocking audio - user is speaking")
-            return False
-
-        return True
-
     def get_audio_send_status(self, sequence_id: int, history_length: int = 0) -> str:
         """
         Centralized decision for whether audio should be sent.
@@ -214,12 +203,6 @@ class InterruptionManager:
             return 0
         return time.time() - self.callee_speaking_start_time
 
-    def get_time_since_first_interim(self) -> float:
-        """Returns time since first interim in milliseconds, or -1 if none."""
-        if self.time_since_first_interim_result == -1:
-            return -1
-        return (time.time() * 1000) - self.time_since_first_interim_result
-
     def get_time_since_utterance_end(self) -> float:
         """Returns time since UtteranceEnd in milliseconds, or -1 if none."""
         if self.utterance_end_time == -1:
@@ -234,26 +217,6 @@ class InterruptionManager:
     def has_pending_responses(self) -> bool:
         """Returns True if there are pending audio responses."""
         return len(self.sequence_ids) > 1
-
-    def get_current_sequence_id(self) -> int:
-        """Returns the current sequence ID."""
-        return self.curr_sequence_id
-
-    def get_callee_speaking_start_time(self) -> float:
-        """Returns the timestamp when user started speaking."""
-        return self.callee_speaking_start_time
-
-    def is_passthrough_enabled(self) -> bool:
-        """Returns True if remaining audio should pass through."""
-        return self.let_remaining_audio_pass_through
-
-    def get_required_delay(self) -> float:
-        """Returns the required delay before speaking in milliseconds."""
-        return self.required_delay_before_speaking
-
-    def get_first_interim_timestamp(self) -> float:
-        """Returns the timestamp of first interim result, or -1 if none."""
-        return self.time_since_first_interim_result
 
     def set_first_interim_for_immediate_response(self) -> None:
         """Sets first interim timestamp to allow immediate response."""
