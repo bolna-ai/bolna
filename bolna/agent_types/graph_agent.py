@@ -47,6 +47,7 @@ class GraphAgent(BaseAgent):
             self.openai = OpenAI(api_key=self.llm_key)
 
         self.node_history = [self.current_node_id]
+        self.current_node_entry_index = 0  # Track message index when we entered current node
         self.rag_configs = self.initialize_rag_configs()
         self.rag_server_url = os.getenv('RAG_SERVER_URL', 'http://localhost:8000')
 
@@ -287,23 +288,28 @@ Objective: {node_objective}
 
         logger.info(f"Routing system prompt:\n{system_prompt}")
         messages = [{"role": "system", "content": system_prompt}]
-        recent_history = history[-4:] if len(history) > 4 else history
-        has_tool_context = any(msg.get("role") == "assistant" and msg.get("tool_calls") for msg in recent_history)
+        node_history = history[self.current_node_entry_index:] if self.current_node_entry_index < len(history) else history
+        has_tool_context = any(msg.get("role") == "assistant" and msg.get("tool_calls") for msg in node_history)
 
         if has_tool_context:
-            for msg in recent_history:
+            for msg in node_history:
                 role = msg.get("role")
-                if role == "assistant" and msg.get("tool_calls"):
-                    messages.append({"role": "assistant", "content": None, "tool_calls": msg["tool_calls"]})
+                if role == "assistant":
+                    if msg.get("tool_calls"):
+                        messages.append({"role": "assistant", "content": None, "tool_calls": msg["tool_calls"]})
+                    elif msg.get("content"):
+                        messages.append({"role": "assistant", "content": msg["content"]})
                 elif role == "tool":
                     content = msg.get("content", "")
                     messages.append({"role": "tool", "tool_call_id": msg.get("tool_call_id", ""), "content": content})
                 elif role == "user" and msg.get("content"):
                     messages.append({"role": "user", "content": msg["content"]})
         else:
-            for msg in recent_history:
-                if msg.get("role") == "user" and msg.get("content"):
-                    messages.append({"role": "user", "content": msg["content"]})
+            for msg in node_history:
+                role = msg.get("role")
+                content = msg.get("content")
+                if role in ("user", "assistant") and content:
+                    messages.append({"role": role, "content": content})
 
         if len(messages) == 1:
             user_message = history[-1].get("content", "") if history else ""
@@ -431,6 +437,7 @@ Objective: {node_objective}
             if next_node_id:
                 logger.info(f"Transitioning: {self.current_node_id} -> {next_node_id} (params: {extracted_params})")
                 self.current_node_id = next_node_id
+                self.current_node_entry_index = len(message)
                 if extracted_params:
                     self.context_data.update(extracted_params)
 
