@@ -166,23 +166,10 @@ class InterruptionManager:
         if not welcome_message_played:
             return False, 0
 
-        if not self.let_remaining_audio_pass_through:
-            return self._check_delay_without_passthrough()
-        else:
-            return self._check_delay_with_passthrough()
+        return self._check_delay()
 
-    def _check_delay_without_passthrough(self) -> Tuple[bool, float]:
-        # If no interim result received yet, no need to delay
-        if self.time_since_first_interim_result == -1:
-            return False, 0
-
-        elapsed = (time.time() * 1000) - self.time_since_first_interim_result
-        if elapsed < self.required_delay_before_speaking:
-            return True, 0.1
-
-        return False, 0
-
-    def _check_delay_with_passthrough(self) -> Tuple[bool, float]:
+    def _check_delay(self) -> Tuple[bool, float]:
+        """Check if output should be delayed based on interim result timing."""
         if self.time_since_first_interim_result == -1:
             return False, 0
 
