@@ -364,7 +364,7 @@ Objective: {node_objective}
             return prompt
 
         if detected_lang and detected_lang in examples:
-            return f"{prompt}\n\nExample response: \"{examples[detected_lang]}\""
+            return f"{prompt}\n\nLANGUAGE GUIDELINES\n\nPlease make sure to generate replies in the {detected_lang} language only. You can refer to the example given below to generate a reply in the given language.Example response: \"{examples[detected_lang]}\""
 
         # Language not yet detected — include all examples
         example_lines = [f"  {lang.upper()}: \"{text}\"" for lang, text in examples.items()]
