@@ -1524,6 +1524,9 @@ class TaskManager(BaseManager):
                 logger.info(f"Gotten response {resp}")
                 payload = {**payload, **resp}
 
+            if self.tools['input'].io_provider != 'default':
+                payload['call_sid'] = self.tools["input"].get_call_sid()
+
             if self.tools['input'].io_provider == 'default':
                 mock_response = f"This is a mocked response demonstrating a successful transfer of call to {call_transfer_number}"
                 convert_to_request_log(str(payload), meta_info, None, "function_call", direction="request", run_id=self.run_id)
