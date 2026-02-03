@@ -88,7 +88,7 @@ class GraphAgent(BaseAgent):
                 'provider': provider,
             }
 
-            for key in ['llm_key', 'base_url', 'api_version', 'language', 'api_tools', 'buffer_size']:
+            for key in ['llm_key', 'base_url', 'api_version', 'language', 'api_tools', 'buffer_size', 'reasoning_effort', 'service_tier']:
                 if self.config.get(key, None):
                     llm_kwargs[key] = self.config[key]
 
@@ -322,10 +322,15 @@ Objective: {node_objective}
                 "messages": messages,
                 "tools": tools,
                 "tool_choice": "required",
-                "max_tokens": 50,
-                "temperature": 0.0,
                 "parallel_tool_calls": False,
             }
+
+            if self.routing_model and self.routing_model.startswith("gpt-5"):
+                routing_kwargs["max_completion_tokens"] = 50
+                routing_kwargs["reasoning_effort"] = os.getenv('DEFAULT_REASONING_EFFORT', 'low')
+            else:
+                routing_kwargs["max_tokens"] = 50
+                routing_kwargs["temperature"] = 0.0
 
             response = self.routing_client.chat.completions.create(**routing_kwargs)
             latency_ms = (time.perf_counter() - start_time) * 1000

@@ -42,7 +42,7 @@ class OpenAiLLM(BaseLLM):
             max_tokens_key = "max_completion_tokens"
             self.model_args["reasoning_effort"] = kwargs.get("reasoning_effort", None) or ReasoningEffort.LOW.value
             self.model_args["verbosity"] = kwargs.get("verbosity", None) or Verbosity.LOW.value
-                
+
         self.model_args.update({max_tokens_key: self.max_tokens, "temperature": self.temperature, "model": self.model})
 
         if kwargs.get("service_tier") == "priority":

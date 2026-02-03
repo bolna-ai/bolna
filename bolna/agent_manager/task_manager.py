@@ -854,6 +854,10 @@ class TaskManager(BaseManager):
                 injected_cfg['api_version'] = self.kwargs['api_version']
             if 'api_tools' in self.kwargs:
                 injected_cfg['api_tools'] = self.kwargs['api_tools']
+            if 'reasoning_effort' in self.kwargs:
+                injected_cfg['reasoning_effort'] = self.kwargs['reasoning_effort']
+            if 'service_tier' in self.kwargs:
+                injected_cfg['service_tier'] = self.kwargs['service_tier']
             injected_cfg['buffer_size'] = self.task_config["tools_config"]["synthesizer"].get('buffer_size')
             injected_cfg['language'] = self.language
 
@@ -880,6 +884,10 @@ class TaskManager(BaseManager):
                 injected_cfg['api_version'] = self.kwargs['api_version']
             if 'api_tools' in self.kwargs:
                 injected_cfg['api_tools'] = self.kwargs['api_tools']
+            if 'reasoning_effort' in self.kwargs:
+                injected_cfg['reasoning_effort'] = self.kwargs['reasoning_effort']
+            if 'service_tier' in self.kwargs:
+                injected_cfg['service_tier'] = self.kwargs['service_tier']
             injected_cfg['buffer_size'] = self.task_config["tools_config"]["synthesizer"].get('buffer_size')
             injected_cfg['language'] = self.language
 
