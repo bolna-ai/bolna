@@ -858,6 +858,10 @@ class TaskManager(BaseManager):
                 injected_cfg['reasoning_effort'] = self.kwargs['reasoning_effort']
             if 'service_tier' in self.kwargs:
                 injected_cfg['service_tier'] = self.kwargs['service_tier']
+            if 'routing_reasoning_effort' in self.kwargs:
+                injected_cfg['routing_reasoning_effort'] = self.kwargs['routing_reasoning_effort']
+            if 'routing_max_tokens' in self.kwargs:
+                injected_cfg['routing_max_tokens'] = self.kwargs['routing_max_tokens']
             injected_cfg['buffer_size'] = self.task_config["tools_config"]["synthesizer"].get('buffer_size')
             injected_cfg['language'] = self.language
 
