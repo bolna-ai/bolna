@@ -2873,7 +2873,7 @@ class TaskManager(BaseManager):
                     
 
             await asyncio.gather(*tasks_to_cancel)
-        return output
+            return output
 
     async def handle_cancellation(self, message):
         try:
