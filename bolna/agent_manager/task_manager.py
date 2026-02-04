@@ -704,7 +704,7 @@ class TaskManager(BaseManager):
                     logger.info(f"[SIP-TRUNK] Converted welcome message PCM to ulaw: {original_size} bytes -> {len(audio_chunk)} bytes")
                     meta_info["format"] = "ulaw"
                 else:
-                    meta_info["format"] = self.task_config["tools_config"]["output"].get("format") or self.task_config["tools_config"]["output"].get("audio_format", "pcm")
+                    meta_info["format"] = "pcm"
                 meta_info['is_first_chunk'] = True
                 meta_info["end_of_synthesizer_stream"] = True
                 meta_info['chunk_id'] = 1
