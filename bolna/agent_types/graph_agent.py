@@ -58,6 +58,8 @@ class GraphAgent(BaseAgent):
         self.routing_provider = self.config.get('routing_provider')
         self.routing_model = self.config.get('routing_model')
         self.routing_instructions = self.config.get('routing_instructions')  # Custom routing instructions
+        self.routing_reasoning_effort = self.config.get('routing_reasoning_effort')
+        self.routing_max_tokens = self.config.get('routing_max_tokens')
         logger.info(f"GraphAgent routing_instructions loaded: {bool(self.routing_instructions)} (length: {len(self.routing_instructions) if self.routing_instructions else 0})")
         self._init_routing_client()
 
@@ -326,10 +328,10 @@ Objective: {node_objective}
             }
 
             if self.routing_model and self.routing_model.startswith("gpt-5"):
-                routing_kwargs["max_completion_tokens"] = 50
-                routing_kwargs["reasoning_effort"] = os.getenv('DEFAULT_REASONING_EFFORT', 'low')
+                routing_kwargs["max_completion_tokens"] = self.routing_max_tokens or 150
+                routing_kwargs["reasoning_effort"] = self.routing_reasoning_effort or os.getenv('GPT5_ROUTING_REASONING_EFFORT', 'minimal')
             else:
-                routing_kwargs["max_tokens"] = 50
+                routing_kwargs["max_tokens"] = self.routing_max_tokens or 50
                 routing_kwargs["temperature"] = 0.0
 
             response = self.routing_client.chat.completions.create(**routing_kwargs)
