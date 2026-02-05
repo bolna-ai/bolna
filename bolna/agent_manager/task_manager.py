@@ -20,10 +20,11 @@ from bolna.memory.cache.vector_cache import VectorCache
 from .base_manager import BaseManager
 from bolna.agent_types import *
 from bolna.providers import *
+from bolna.enums import TelephonyProvider
 from bolna.prompts import *
 from bolna.helpers.language_detector import LanguageDetector
 from bolna.helpers.utils import structure_system_prompt, compute_function_pre_call_message, select_message_by_language, get_date_time_from_timezone, get_route_info, calculate_audio_duration, create_ws_data_packet, get_file_names_in_directory, get_raw_audio_bytes, is_valid_md5, \
-    get_required_input_types, format_messages, get_prompt_responses, resample, save_audio_file_to_s3, update_prompt_with_context, get_md5_hash, clean_json_string, wav_bytes_to_pcm, convert_to_request_log, yield_chunks_from_memory, process_task_cancellation
+    get_required_input_types, format_messages, get_prompt_responses, resample, save_audio_file_to_s3, update_prompt_with_context, get_md5_hash, clean_json_string, wav_bytes_to_pcm, convert_to_request_log, yield_chunks_from_memory, process_task_cancellation, pcm_to_ulaw
 from bolna.helpers.logger_config import configure_logger
 from semantic_router import Route
 from semantic_router.layer import RouteLayer
@@ -600,7 +601,18 @@ class TaskManager(BaseManager):
                     output_kwargs['mark_event_meta_data'] = self.mark_event_meta_data
                     logger.info(f"Making sure that the sampling rate for output handler is 8000")
                     self.task_config['tools_config']['synthesizer']['provider_config']['sampling_rate'] = 8000
-                    self.task_config['tools_config']['synthesizer']['audio_format'] = 'pcm'
+                    # sip-trunk (Asterisk) uses ulaw; other telephony use pcm (handler converts to mulaw)
+                    if self.task_config["tools_config"]["output"]["provider"] == TelephonyProvider.SIP_TRUNK.value:
+                        self.task_config['tools_config']['synthesizer']['audio_format'] = 'ulaw'
+                        logger.info(f"Setting synthesizer audio format to ulaw for Asterisk sip-trunk")
+                        # Pass input handler to output handler so it can simulate mark events
+                        input_handler = self.tools.get("input")
+                        output_kwargs['input_handler'] = input_handler
+                        output_kwargs['asterisk_media_start'] = (self.context_data or {}).get("media_start_data")
+                        output_kwargs['agent_config'] = {"tasks": [self.task_config]}
+                        logger.info(f"Passing input_handler to sip-trunk output handler for mark event simulation: {input_handler is not None}")
+                    else:
+                        self.task_config['tools_config']['synthesizer']['audio_format'] = 'pcm'
                 else:
                     self.task_config['tools_config']['synthesizer']['provider_config']['sampling_rate'] = 24000
                     output_kwargs['queue'] = output_queue
@@ -652,6 +664,11 @@ class TaskManager(BaseManager):
                     input_kwargs['queue'] = input_queue
 
                 input_kwargs["observable_variables"] = self.observable_variables
+
+                # Asterisk (sip-trunk): pass context data for pre-parsed MEDIA_START
+                if self.task_config["tools_config"]["input"]["provider"] == TelephonyProvider.SIP_TRUNK.value and self.context_data:
+                    input_kwargs["ws_context_data"] = self.context_data
+                    input_kwargs["agent_config"] = {"tasks": [self.task_config]}
             self.tools["input"] = input_handler_class(**input_kwargs)
         else:
             raise "Other input handlers not supported yet"
@@ -680,7 +697,14 @@ class TaskManager(BaseManager):
                 if meta_info['text'] == '':
                     audio_chunk = None
 
-                meta_info["format"] = "pcm"
+                # Convert to ulaw for Asterisk/sip-trunk provider (cached welcome is PCM)
+                if self.tools["output"].get_provider() == TelephonyProvider.SIP_TRUNK.value and audio_chunk:
+                    original_size = len(audio_chunk)
+                    audio_chunk = pcm_to_ulaw(audio_chunk)
+                    logger.info(f"[SIP-TRUNK] Converted welcome message PCM to ulaw: {original_size} bytes -> {len(audio_chunk)} bytes")
+                    meta_info["format"] = "ulaw"
+                else:
+                    meta_info["format"] = "pcm"
                 meta_info['is_first_chunk'] = True
                 meta_info["end_of_synthesizer_stream"] = True
                 meta_info['chunk_id'] = 1
@@ -730,6 +754,12 @@ class TaskManager(BaseManager):
                 self.task_config["tools_config"]["transcriber"]["input_queue"] = self.audio_queue
                 self.task_config['tools_config']["transcriber"]["output_queue"] = self.transcriber_output_queue
 
+                # Configure encoding for Asterisk/sip-trunk (uses ulaw like Twilio)
+                if provider == TelephonyProvider.SIP_TRUNK.value:
+                    self.task_config["tools_config"]["transcriber"]["encoding"] = "mulaw"
+                    self.task_config["tools_config"]["transcriber"]["sampling_rate"] = 8000
+                    logger.info(f"Configured transcriber for Asterisk sip-trunk with mulaw encoding @ 8kHz")
+
                 # Checking models for backwards compatibility
                 if self.task_config["tools_config"]["transcriber"]["model"] in SUPPORTED_TRANSCRIBER_MODELS.keys() or self.task_config["tools_config"]["transcriber"]["provider"] in SUPPORTED_TRANSCRIBER_PROVIDERS.keys():
                     if self.turn_based_conversation:
@@ -762,7 +792,13 @@ class TaskManager(BaseManager):
                 self.task_config["tools_config"]["synthesizer"]["audio_format"] = "mp3" # Hard code mp3 if we're connected through dashboard
                 self.task_config["tools_config"]["synthesizer"]["stream"] = True if self.enforce_streaming else False #Hardcode stream to be False as we don't want to get blocked by a __listen_synthesizer co-routine
 
-            self.tools["synthesizer"] = synthesizer_class(**self.task_config["tools_config"]["synthesizer"], **provider_config, **self.kwargs, caching=caching)
+            # Configure use_mulaw for Asterisk/sip-trunk to ensure synthesizer outputs ulaw
+            synthesizer_kwargs = self.kwargs.copy()
+            if self.task_config["tools_config"]["output"]["provider"] == TelephonyProvider.SIP_TRUNK.value:
+                synthesizer_kwargs['use_mulaw'] = True
+                logger.info(f"[SIP-TRUNK] Configuring synthesizer with use_mulaw=True for Asterisk sip-trunk")
+            
+            self.tools["synthesizer"] = synthesizer_class(**self.task_config["tools_config"]["synthesizer"], **provider_config, **synthesizer_kwargs, caching=caching)
             # if not self.turn_based_conversation:
             #     self.synthesizer_monitor_task = asyncio.create_task(self.tools['synthesizer'].monitor_connection())
             if self.task_config["tools_config"]["llm_agent"] is not None and llm_config is not None:

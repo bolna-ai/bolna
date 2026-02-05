@@ -25,6 +25,7 @@ from .logger_config import configure_logger
 from bolna.constants import PREPROCESS_DIR, PRE_FUNCTION_CALL_MESSAGE, DEFAULT_LANGUAGE_CODE, TRANSFERING_CALL_FILLER
 from bolna.prompts import DATE_PROMPT
 from pydub import AudioSegment
+import audioop
 
 logger = configure_logger(__name__)
 load_dotenv()
@@ -626,6 +627,17 @@ def select_message_by_language(message_config: Union[str, dict], detected_langua
 def has_non_english_variants(message_config: Union[str, dict]) -> bool:
     """Check if dict has non-'en' languages."""
     return isinstance(message_config, dict) and len(message_config) > 0 and (len(message_config) > 1 or 'en' not in message_config)
+
+
+def pcm_to_ulaw(pcm_bytes):
+    """
+    Convert PCM audio (16-bit signed linear) to ulaw format.
+    PCM is int16 samples, ulaw is 8-bit compressed format.
+    """
+    
+    # audioop.lin2ulaw expects 16-bit PCM and returns 8-bit ulaw
+    ulaw_bytes = audioop.lin2ulaw(pcm_bytes, 2)  # 2 = sample width in bytes (16-bit)
+    return ulaw_bytes
 
 
 def compute_function_pre_call_message(language, function_name, api_tool_pre_call_message):

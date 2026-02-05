@@ -38,13 +38,21 @@ class TelephonyInputHandler(DefaultInputHandler):
     async def disconnect_stream(self):
         pass
 
+    async def _safe_disconnect_stream(self):
+        """Wrapper for disconnect_stream with error handling for background execution."""
+        try:
+            await self.disconnect_stream()
+        except Exception as e:
+            logger.error(f"Error in disconnect_stream: {e}")
+
     # def get_mark_event_meta_data_obj(self, packet):
     #     pass
 
     async def stop_handler(self):
-        asyncio.create_task(self.disconnect_stream())
         logger.info("stopping handler")
         self.running = False
+        # Fire and forget disconnect_stream - don't block the disconnection flow
+        asyncio.create_task(self._safe_disconnect_stream())
         logger.info("sleeping for 2 seconds so that whatever needs to pass is passed")
         await asyncio.sleep(2)
         try:
