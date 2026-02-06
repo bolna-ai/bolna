@@ -40,11 +40,16 @@ class OpenAiLLM(BaseLLM):
         if model.startswith("gpt-5"):
             max_tokens_key = "max_completion_tokens"
             reasoning_effort = kwargs.get('reasoning_effort', None)
+            verbosity = kwargs.get('verbosity', None)
             if reasoning_effort:
                 self.model_args = {"reasoning_effort": reasoning_effort}
             else:
                 self.model_args = {"reasoning_effort": os.getenv('DEFAULT_REASONING_EFFORT', 'low')}
 
+            if verbosity:
+                self.model_args["verbosity"] = verbosity
+            else:
+                self.model_args["verbosity"] = os.getenv('DEFAULT_VERBOSITY', 'low')
         self.model_args.update({max_tokens_key: self.max_tokens, "temperature": self.temperature, "model": self.model})
 
         if kwargs.get("service_tier") == "priority":
