@@ -383,12 +383,13 @@ Objective: {node_objective}
         example_lines = [f"  {lang.upper()}: \"{text}\"" for lang, text in examples.items()]
         return f"{prompt}\n\nExample responses:\n" + "\n".join(example_lines)
 
-    def _get_tool_choice_for_node(self) -> Optional[str]:
+    def _get_tool_choice_for_node(self):
         """Check if current node should force a tool call.
 
-        Returns "required" if the node has force_function_call=true and
-        the LLM has function calling enabled. Otherwise returns None
-        (which defaults to "auto").
+        Returns:
+        - {"type": "function", "function": {"name": "..."}} if force_function_call is a function name string
+        - "required" if force_function_call is True (LLM must call some function)
+        - None otherwise (defaults to "auto")
         """
         if not self.llm or not getattr(self.llm, 'trigger_function_call', False):
             return None
@@ -397,8 +398,12 @@ Objective: {node_objective}
         if not current_node:
             return None
 
-        if current_node.get('force_function_call', False):
-            logger.info(f"Node '{self.current_node_id}' has force_function_call=true, setting tool_choice='required'")
+        fn = current_node.get('function_call', False)
+        if isinstance(fn, str):
+            logger.info(f"Node '{self.current_node_id}' forcing specific function: {fn}")
+            return {"type": "function", "function": {"name": fn}}
+        elif fn:
+            logger.info(f"Node '{self.current_node_id}' forcing tool_choice='required'")
             return "required"
 
         return None
