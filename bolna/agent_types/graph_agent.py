@@ -398,13 +398,10 @@ Objective: {node_objective}
         if not current_node:
             return None
 
-        fn = current_node.get('function_call', False)
-        if isinstance(fn, str):
+        fn = current_node.get('function_call')
+        if fn:
             logger.info(f"Node '{self.current_node_id}' forcing specific function: {fn}")
             return {"type": "function", "function": {"name": fn}}
-        elif fn:
-            logger.info(f"Node '{self.current_node_id}' forcing tool_choice='required'")
-            return "required"
 
         return None
 
