@@ -1454,6 +1454,7 @@ class TaskManager(BaseManager):
         await self._handle_llm_output(next_step, filler, should_bypass_synth, new_meta_info, is_filler=True)
 
     async def __execute_function_call(self, url, method, param, api_token, headers, model_args, meta_info, next_step, called_fun, **resp):
+        meta_info = copy.deepcopy(meta_info)
         self.check_if_user_online = False
 
         if called_fun.startswith("transfer_call"):
@@ -1514,13 +1515,22 @@ class TaskManager(BaseManager):
                     await asyncio.sleep(1)
                 convert_to_request_log(str(payload), meta_info, None, "function_call", direction="request", is_cached=False,
                                        run_id=self.run_id)
-                async with session.post(url, json = payload) as response:
-                    response_text = await response.text()
-                    logger.info(f"Response from the server after call transfer: {response_text}")
-                    convert_to_request_log(str(response_text), meta_info, None, "function_call", direction="response", is_cached=False, run_id=self.run_id)
-                    return
+                try:
+                    function_call_metadata = {}
+                    response_text = ""  
+                    async with session.post(url, json = payload) as response:
+                        response_text = await response.text()
+                        response.raise_for_status()
+                        logger.info(f"Response from the server after call transfer: {response_text}")
+                except Exception as e:
+                    logger.info(f"Error while transferring the call: {e}")
+                    function_call_metadata = {'error': str(e)}
+                    response_text = "Transfer call failed"
+                finally:
+                        convert_to_request_log(str(response_text), meta_info | {"function_call_metadata": function_call_metadata}, None, "function_call", direction="response", is_cached=False, run_id=self.run_id)
+                        return
 
-        response = await trigger_api(url=url, method=method.lower(), param=param, api_token=api_token, headers_data=headers, meta_info=meta_info, run_id=self.run_id, **resp)
+        response, function_call_metadata = await trigger_api(url=url, method=method.lower(), param=param, api_token=api_token, headers_data=headers, meta_info=meta_info, run_id=self.run_id, **resp)
         function_response = str(response)
         get_res_keys, get_res_values = await computed_api_response(function_response)
         if called_fun.startswith('check_availability_of_slots') and (not get_res_values or (len(get_res_values) == 1 and len(get_res_values[0]) == 0)):
@@ -1538,8 +1548,11 @@ class TaskManager(BaseManager):
         model_args["messages"].append({"role": "assistant", "content": textual_response, "tool_calls": resp["model_response"]})
         model_args["messages"].append({"role": "tool", "tool_call_id": resp.get("tool_call_id", ""), "content": function_response})
 
-        logger.info(f"Logging function call parameters ")
-        convert_to_request_log(function_response, meta_info , None, "function_call", direction = "response", is_cached= False, run_id = self.run_id)
+        if function_call_metadata:
+            convert_to_request_log(function_response, meta_info | {"function_call_metadata": function_call_metadata}, None, "function_call", direction="response", is_cached=False, run_id=self.run_id)
+        else:
+            convert_to_request_log(function_response, meta_info, None, "function_call", direction="response", is_cached=False, run_id=self.run_id)
+
 
         convert_to_request_log(format_messages(model_args['messages'], True), meta_info, self.llm_config['model'], "llm", direction = "request", is_cached= False, run_id = self.run_id)
         self.check_if_user_online = self.conversation_config.get("check_if_user_online", True)
@@ -1590,12 +1603,23 @@ class TaskManager(BaseManager):
         if detected_lang:
             meta_info['detected_language'] = detected_lang
 
+        llm_error = None
         async for llm_message in self.tools['llm_agent'].generate(messages, synthesize=synthesize, meta_info=meta_info):
+            data, end_of_llm_stream, latency, trigger_function_call, function_tool, function_tool_message = None, None, None, None, None, None
+            
             if isinstance(llm_message, dict) and 'messages' in llm_message: # custom list of messages before the llm call
                 convert_to_request_log(format_messages(llm_message['messages'], True), meta_info, self.llm_config['model'], "llm", direction="request", is_cached=False, run_id=self.run_id)
                 continue
 
-            data, end_of_llm_stream, latency, trigger_function_call, function_tool, function_tool_message = llm_message
+            if isinstance(llm_message, dict) and 'error' in llm_message:
+                llm_response = ""
+                data = llm_message.get('data', "")
+                end_of_llm_stream = llm_message.get('end_of_llm_stream', True)
+                latency = llm_message.get('latency', {})
+                llm_error = llm_message['error']
+                trigger_function_call = False
+            else:
+                data, end_of_llm_stream, latency, trigger_function_call, function_tool, function_tool_message = llm_message
 
             if trigger_function_call:
                 logger.info(f"Triggering function call for {data}")
@@ -1631,16 +1655,19 @@ class TaskManager(BaseManager):
 
                 await self._handle_llm_output(next_step, text_chunk, should_bypass_synth, meta_info)
 
+        llm_metadata = meta_info.get('llm_metadata', {})
+        if llm_error:
+            llm_metadata['error'] = llm_error
         detected_lang = self.language_detector.dominant_language or self.language
         filler_message = compute_function_pre_call_message(detected_lang, function_tool, function_tool_message)
         if self.stream and llm_response != filler_message:
-            self.__store_into_history(meta_info, messages, llm_response, should_trigger_function_call= should_trigger_function_call)
+            self.__store_into_history(meta_info | {'llm_metadata': llm_metadata}, messages, llm_response, should_trigger_function_call= should_trigger_function_call)
         elif not self.stream:
             llm_response = llm_response.strip()
             if self.turn_based_conversation:
                 self.history.append({"role": "assistant", "content": llm_response})
             await self._handle_llm_output(next_step, llm_response, should_bypass_synth, meta_info, is_function_call=should_trigger_function_call)
-            convert_to_request_log(message=llm_response, meta_info=meta_info, component="llm", direction="response", model=self.llm_config["model"], run_id=self.run_id)
+            convert_to_request_log(message=llm_response, meta_info=meta_info | {'llm_metadata': llm_metadata}, component="llm", direction="response", model=self.llm_config["model"], run_id=self.run_id)
 
         # Collect RAG latency if present (from KnowledgeBaseAgent)
         if meta_info.get('rag_latency'):

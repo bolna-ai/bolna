@@ -576,6 +576,7 @@ def convert_to_request_log(message, meta_info, model, component="transcriber", d
             log['is_final'] = True
     if component == "function_call":
         log['latency'] = None
+        log['function_call_metadata'] = meta_info.get('function_call_metadata', None)
     if component == "llm-hangup":
         log['latency'] = meta_info.get('llm_latency', None) if direction == "response" else None
     else:
