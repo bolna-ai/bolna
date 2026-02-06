@@ -383,6 +383,26 @@ Objective: {node_objective}
         example_lines = [f"  {lang.upper()}: \"{text}\"" for lang, text in examples.items()]
         return f"{prompt}\n\nExample responses:\n" + "\n".join(example_lines)
 
+    def _get_tool_choice_for_node(self) -> Optional[str]:
+        """Check if current node should force a tool call.
+
+        Returns "required" if the node has force_function_call=true and
+        the LLM has function calling enabled. Otherwise returns None
+        (which defaults to "auto").
+        """
+        if not self.llm or not getattr(self.llm, 'trigger_function_call', False):
+            return None
+
+        current_node = self.get_node_by_id(self.current_node_id)
+        if not current_node:
+            return None
+
+        if current_node.get('force_function_call', False):
+            logger.info(f"Node '{self.current_node_id}' has force_function_call=true, setting tool_choice='required'")
+            return "required"
+
+        return None
+
     async def _build_messages(self, history: List[dict]) -> List[dict]:
         """Build messages array: system prompt (+ optional RAG) + conversation history."""
         current_node = self.get_node_by_id(self.current_node_id)
@@ -468,7 +488,8 @@ Objective: {node_objective}
 
             messages = await self._build_messages(message)
             yield {'messages': messages}
-            async for chunk in self.llm.generate_stream(messages, synthesize=synthesize, meta_info=meta_info):
+            tool_choice = self._get_tool_choice_for_node()
+            async for chunk in self.llm.generate_stream(messages, synthesize=synthesize, meta_info=meta_info, tool_choice=tool_choice):
                 yield chunk
 
         except Exception as e:
