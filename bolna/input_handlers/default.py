@@ -115,7 +115,11 @@ class DefaultInputHandler:
         is_content_audio = message_type not in ['ambient_noise', 'backchanneling']
 
         if message_type == "pre_mark_message":
-            self.update_is_audio_being_played(True)
+            # Flag is already set True by the SEND path in __process_output_loop
+            # (task_manager.py line 2440). Setting it here again is redundant in
+            # normal flow and harmful during cross-talk: late-arriving pre_mark
+            # callbacks from already-sent chunks would re-enable the flag after
+            # the blocked-final-chunk reset, re-creating the deadlock.
             return
 
         self.audio_chunks_received += 1
