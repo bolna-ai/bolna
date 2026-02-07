@@ -1497,8 +1497,6 @@ class TaskManager(BaseManager):
         self.check_if_user_online = False
 
         if called_fun.startswith("transfer_call"):
-            await asyncio.sleep(2)
-
             try:
                 from_number = self.context_data['recipient_data']['from_number']
             except Exception as e:
