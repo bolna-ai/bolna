@@ -3,7 +3,7 @@ from typing import Literal, Optional, List, Union, Dict, Callable
 from pydantic import BaseModel, Field, field_validator, ValidationError, Json, model_validator
 from pydantic_core import PydanticCustomError
 from .providers import *
-from .enums import TelephonyProvider, SynthesizerProvider, TranscriberProvider
+from .enums import TelephonyProvider, SynthesizerProvider, TranscriberProvider, ReasoningEffort, Verbosity
 
 AGENT_WELCOME_MESSAGE = "This call is being recorded for quality assurance and training. Please speak now."
 
@@ -246,8 +246,8 @@ class Llm(BaseModel):
     provider: Optional[str] = "openai"
     base_url: Optional[str] = None
     routes: Optional[Routes] = None
-    reasoning_effort: Optional[Literal["minimal", "low", "medium", "high"]] = None
-    verbosity: Optional[Literal["low", "medium", "high"]] = None
+    reasoning_effort: Optional[ReasoningEffort] = None
+    verbosity: Optional[Verbosity] = None
 
 
 class SimpleLlmAgent(Llm):
