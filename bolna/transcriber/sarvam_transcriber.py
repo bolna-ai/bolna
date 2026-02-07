@@ -58,7 +58,8 @@ class SarvamTranscriber(BaseTranscriber):
         self.api_key = kwargs.get("transcriber_key", os.getenv("SARVAM_API_KEY"))
         self.api_host = os.getenv("SARVAM_HOST", "api.sarvam.ai")
 
-        # saaras models use translate endpoint, saarika models use transcription endpoint
+        # old saaras models use translate endpoint, saarika models use transcription endpoint
+        # saaras:v3 supports direct transcription
         if model.startswith("saaras") and model != "saaras:v3":
             self.api_url = f"https://{self.api_host}/speech-to-text-translate"
             self.ws_url = f"wss://{self.api_host}/speech-to-text-translate/ws"
@@ -124,8 +125,11 @@ class SarvamTranscriber(BaseTranscriber):
         params = {"model": self.model}
 
         # saaras auto-detects language, saarika requires language-code
-        if not self.model.startswith("saaras"):
+        if not self.model.startswith("saaras") or self.model == "saaras:v3":
             params["language-code"] = self.language
+
+        if self.model == "saaras:v3":
+            params["mode"] = "transcribe"   # saaras:v3 supports direct transcription
 
         if self.high_vad_sensitivity:
             params["high_vad_sensitivity"] = "true"
