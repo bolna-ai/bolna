@@ -59,7 +59,7 @@ class SarvamTranscriber(BaseTranscriber):
         self.api_host = os.getenv("SARVAM_HOST", "api.sarvam.ai")
 
         # saaras models use translate endpoint, saarika models use transcription endpoint
-        if model.startswith("saaras"):
+        if model.startswith("saaras") and model != "saaras:v3":
             self.api_url = f"https://{self.api_host}/speech-to-text-translate"
             self.ws_url = f"wss://{self.api_host}/speech-to-text-translate/ws"
         else:
