@@ -93,6 +93,11 @@ class SarvamSynthesizer(BaseSynthesizer):
             "enable_preprocessing": self.enable_preprocessing,
             "model": self.model
         }
+
+        if self.model == "bulbul:v3":
+            payload.pop("pitch")
+            payload.pop("loudness")
+
         response = await self.__send_payload(payload)
         return response
 
@@ -142,6 +147,10 @@ class SarvamSynthesizer(BaseSynthesizer):
             "enable_preprocessing": self.enable_preprocessing,
             "model": self.model
         }
+
+        if self.model == "bulbul:v3":
+            payload.pop("pitch")
+            payload.pop("loudness")
 
         return payload
 
