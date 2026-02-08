@@ -88,3 +88,26 @@ class LLMProvider(str, Enum):
     def all_values(cls):
         """Return all provider values as a list of strings."""
         return [provider.value for provider in cls]
+
+
+class ReasoningEffort(str, Enum):
+    MINIMAL = "minimal"
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+
+    @classmethod
+    def all_values(cls):
+        """Return all reasoning effort values as a list of strings."""
+        return [effort.value for effort in cls]
+
+
+class Verbosity(str, Enum):
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+
+    @classmethod
+    def all_values(cls):
+        """Return all verbosity values as a list of strings."""
+        return [verbosity.value for verbosity in cls]
