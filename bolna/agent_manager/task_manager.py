@@ -2451,8 +2451,15 @@ class TaskManager(BaseManager):
                         # Audio blocked (user speaking or invalid sequence) - discard
                         logger.info(f'Audio blocked: discarding message (sequence_id={sequence_id})')
                         # If discarding the final chunk of the response, reset is_audio_being_played
-                        # to prevent state deadlock where mark event never arrives from telephony
-                        if message['meta_info'].get('is_final_chunk_of_entire_response', False):
+                        # to prevent state deadlock where mark event never arrives from telephony.
+                        # Check both chunked path (is_final_chunk_of_entire_response) and
+                        # non-chunked path (end_of_llm_stream + end_of_synthesizer_stream).
+                        is_final_message = (
+                            message['meta_info'].get('is_final_chunk_of_entire_response', False) or
+                            (message['meta_info'].get('end_of_llm_stream', False) and
+                             message['meta_info'].get('end_of_synthesizer_stream', False))
+                        )
+                        if is_final_message:
                             self.tools["input"].update_is_audio_being_played(False)
                             logger.info(f'Final chunk discarded, resetting is_audio_being_played to prevent deadlock')
                         should_continue_outer_loop = True
