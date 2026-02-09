@@ -99,9 +99,8 @@ class GraphAgent(BaseAgent):
             llm_class = SUPPORTED_LLM_PROVIDERS[provider]
             return llm_class(**llm_kwargs)
         except Exception as e:
-            logger.error(f"Failed to create LLM: {e}, falling back to basic OpenAI")
-            from openai import OpenAI
-            return OpenAI(api_key=self.llm_key or os.getenv('OPENAI_API_KEY'))
+            logger.error(f"Failed to create LLM: {e}, falling back to default OpenAiLLM")
+            return OpenAiLLM(model=self.llm_model or 'gpt-4o-mini', llm_key=self.llm_key or os.getenv('OPENAI_API_KEY'))
 
     def initialize_rag_configs(self) -> Dict[str, Dict]:
         """Initialize RAG configurations for each node."""
@@ -300,7 +299,7 @@ Objective: {node_objective}
 
 {instructions}"""
 
-        logger.info(f"Routing system prompt:\n{system_prompt}")
+        logger.debug(f"Routing system prompt:\n{system_prompt}")
         messages = [{"role": "system", "content": system_prompt}]
         node_history = history[self.current_node_entry_index:] if self.current_node_entry_index < len(history) else history
         has_tool_context = any(msg.get("role") == "assistant" and msg.get("tool_calls") for msg in node_history)
@@ -389,7 +388,7 @@ Objective: {node_objective}
             return prompt
 
         if detected_lang and detected_lang in examples:
-            return f"{prompt}\n\nLANGUAGE GUIDELINES\n\nPlease make sure to generate replies in the {detected_lang} language only. You can refer to the example given below to generate a reply in the given language.Example response: \"{examples[detected_lang]}\""
+            return f"{prompt}\n\nLANGUAGE GUIDELINES\n\nPlease make sure to generate replies in the {detected_lang} language only. You can refer to the example given below to generate a reply in the given language. Example response: \"{examples[detected_lang]}\""
 
         # Language not yet detected — include all examples
         example_lines = [f"  {lang.upper()}: \"{text}\"" for lang, text in examples.items()]
