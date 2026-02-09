@@ -378,11 +378,6 @@ def convert_audio_to_wav(audio_bytes, source_format = 'flac'):
     return buffer.getvalue()
 
 
-import io
-import torch
-import torchaudio
-import numpy as np
-
 def resample(audio_bytes, target_sample_rate, format="mp3", pcm_channels=1, original_sample_rate=None):
     """
     Resample audio bytes
