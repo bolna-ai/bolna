@@ -2450,18 +2450,23 @@ class TaskManager(BaseManager):
                     elif status == "BLOCK":
                         # Audio blocked (user speaking or invalid sequence) - discard
                         logger.info(f'Audio blocked: discarding message (sequence_id={sequence_id})')
-                        # If discarding the final chunk of the response, reset is_audio_being_played
-                        # to prevent state deadlock where mark event never arrives from telephony.
-                        # Check both chunked path (is_final_chunk_of_entire_response) and
-                        # non-chunked path (end_of_llm_stream + end_of_synthesizer_stream).
+                        # If discarding the final chunk of the response, ensure is_audio_being_played
+                        # will eventually reset to prevent state deadlock.
                         is_final_message = (
                             message['meta_info'].get('is_final_chunk_of_entire_response', False) or
                             (message['meta_info'].get('end_of_llm_stream', False) and
                              message['meta_info'].get('end_of_synthesizer_stream', False))
                         )
                         if is_final_message:
-                            self.tools["input"].update_is_audio_being_played(False)
-                            logger.info(f'Final chunk discarded, resetting is_audio_being_played to prevent deadlock')
+                            # Update the last pending post-mark to have is_final_chunk=True.
+                            # When Plivo finishes playing the last sent chunk and echoes it back,
+                            # process_mark_message will see is_final_chunk=True and reset
+                            # is_audio_being_played to False.
+                            updated = self.mark_event_meta_data.update_last_post_mark_as_final()
+                            if not updated:
+                                # No pending marks (all chunks already played or none sent)
+                                self.tools["input"].update_is_audio_being_played(False)
+                            logger.info(f'Final chunk discarded, {"updated last mark" if updated else "reset is_audio_being_played"} to prevent deadlock')
                         should_continue_outer_loop = True
                         break  # Exit inner loop, skip to next message
 
