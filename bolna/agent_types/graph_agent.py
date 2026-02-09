@@ -294,10 +294,8 @@ class GraphAgent(BaseAgent):
                 logger.debug(f"Variable substitution in routing_instructions failed: {e}")
 
         node_objective = current_node.get('prompt', '')
-        system_prompt = f"""Route conversation. State: {current_node['id']}{context_section}
-Objective: {node_objective}
-
-{instructions}"""
+        system_prompt = f"""Route conversation. Current Node: {current_node['id']}{context_section}
+Objective: {node_objective}\nRouting Guidelines: \n {instructions}\n Node Conversation History:\n"""
 
         logger.debug(f"Routing system prompt:\n{system_prompt}")
         messages = [{"role": "system", "content": system_prompt}]
