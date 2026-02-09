@@ -12,7 +12,8 @@ import base64
 from collections import deque
 from .base_synthesizer import BaseSynthesizer
 from bolna.helpers.logger_config import configure_logger
-from bolna.helpers.utils import create_ws_data_packet, resample, wav_bytes_to_pcm
+from bolna.helpers.utils import create_ws_data_packet, get_synth_audio_format, resample, wav_bytes_to_pcm
+from bolna.constants import SARVAM_MODEL_SAMPLING_RATE_MAPPING
 
 logger = configure_logger(__name__)
 
@@ -29,6 +30,7 @@ class SarvamSynthesizer(BaseSynthesizer):
             self.buffer_size = 200
 
         self.sampling_rate = int(sampling_rate)
+        self.original_sampling_rate = SARVAM_MODEL_SAMPLING_RATE_MAPPING.get(model, None) # Known for some models, inferred from file in other cases
         self.api_url = f"https://api.sarvam.ai/text-to-speech"
         self.ws_url = f"wss://api.sarvam.ai/text-to-speech/ws?model={model}"
 
@@ -255,6 +257,15 @@ class SarvamSynthesizer(BaseSynthesizer):
         return self.sender_task
 
     async def generate(self):
+        '''
+        Async generator that yields audio chunks as they are received from the WebSocket connection.
+
+        Received packets are slightly different for bulbul:v3 vs other models.
+        - For older models: Every chunk is a complete audio chunk in the specified format (e.g. wav, pcm etc)
+        - For bulbul:v3: The first chunk is a wav header chunk, while subsequent chunks are raw pcm data.
+        
+        Caution: Sampling rate received from bulbul:v3 differs from the documentation.
+        '''
         try:
             if self.stream:
                 async for message in self.receiver():
@@ -303,8 +314,27 @@ class SarvamSynthesizer(BaseSynthesizer):
                         except Exception:
                             pass
                     else:
-                        resampled_audio = resample(audio, int(self.sampling_rate), format="wav")
-                        audio = wav_bytes_to_pcm(resampled_audio)
+                        format = get_synth_audio_format(audio)
+
+                        if format == "wav" and self.model == "bulbul:v3":
+                            received_sampling_rate = int.from_bytes(audio[24:28], byteorder='little')
+
+                            if self.original_sampling_rate != received_sampling_rate:
+                                logger.warning(f"Expected sampling rate {self.original_sampling_rate} does not match received sampling rate {received_sampling_rate} for model {self.model}. Using received sampling rate for resampling.")
+                                self.original_sampling_rate = received_sampling_rate
+
+                            continue # This is only the header. Remaining chunks are PCM
+                        
+                        try:
+                            resampled_audio = resample(audio, int(self.sampling_rate), format=format, original_sample_rate=self.original_sampling_rate)
+                        except Exception as e:
+                            logger.error(f"Error in resampling audio: {e}")
+                            continue
+                        
+                        if format == "wav":
+                            audio = wav_bytes_to_pcm(resampled_audio)
+                        else:
+                            audio = resampled_audio
 
                     self.meta_info["mark_id"] = str(uuid.uuid4())
                     yield create_ws_data_packet(audio, self.meta_info)
