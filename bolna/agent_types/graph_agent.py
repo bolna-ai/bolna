@@ -1,3 +1,4 @@
+import asyncio
 import os
 import time
 from openai import OpenAI
@@ -51,8 +52,9 @@ class GraphAgent(BaseAgent):
         self.rag_configs = self.initialize_rag_configs()
         self.rag_server_url = os.getenv('RAG_SERVER_URL', 'http://localhost:8000')
 
-        # Cache transition tools per node for faster routing
+        # Cache transition tools per node for faster routing (bounded to prevent unbounded growth)
         self._transition_tools_cache: Dict[str, List[dict]] = {}
+        self._transition_tools_cache_max_size = 100
 
         # Initialize routing client (Groq for speed, or fallback to OpenAI)
         self.routing_provider = self.config.get('routing_provider')
@@ -97,8 +99,9 @@ class GraphAgent(BaseAgent):
             llm_class = SUPPORTED_LLM_PROVIDERS[provider]
             return llm_class(**llm_kwargs)
         except Exception as e:
-            logger.error(f"Failed to create LLM: {e}")
-            return None
+            logger.error(f"Failed to create LLM: {e}, falling back to basic OpenAI")
+            from openai import OpenAI
+            return OpenAI(api_key=self.llm_key or os.getenv('OPENAI_API_KEY'))
 
     def initialize_rag_configs(self) -> Dict[str, Dict]:
         """Initialize RAG configurations for each node."""
@@ -150,17 +153,17 @@ class GraphAgent(BaseAgent):
                 self.routing_client = Groq(api_key=os.getenv('GROQ_API_KEY'))
                 # Default to llama-3.3-70b-versatile (best for multilingual routing)
                 if not self.routing_model:
-                    self.routing_model = 'llama-3.3-70b-versatile'
+                    self.routing_model = os.getenv('DEFAULT_ROUTING_MODEL_GROQ', 'llama-3.3-70b-versatile')
                 logger.info(f"Routing initialized with Groq ({self.routing_model}) - fast mode ~200ms")
             else:
                 logger.warning("Groq requested but GROQ_API_KEY not set or groq package not installed, falling back to OpenAI")
                 self.routing_client = self.openai
                 self.routing_provider = 'openai'
-                self.routing_model = 'gpt-4.1-mini'
+                self.routing_model = os.getenv('DEFAULT_ROUTING_MODEL_OPENAI', 'gpt-4.1-mini')
         else:
             self.routing_client = self.openai
             if not self.routing_model:
-                self.routing_model = 'gpt-4.1-mini'
+                self.routing_model = os.getenv('DEFAULT_ROUTING_MODEL_OPENAI', 'gpt-4.1-mini')
             logger.info(f"Routing initialized with OpenAI ({self.routing_model})")
 
     async def check_for_completion(self, messages, check_for_completion_prompt):
@@ -188,7 +191,12 @@ class GraphAgent(BaseAgent):
         try:
             detection_prompt = voicemail_detection_prompt or VOICEMAIL_DETECTION_PROMPT
             prompt = [
-                {'role': 'system', 'content': detection_prompt},
+                {'role': 'system', 'content': detection_prompt + """
+                    Respond only in this JSON format:
+                    {
+                      "is_voicemail": "Yes" or "No"
+                    }
+                """},
                 {'role': 'user', 'content': f"User message: {user_message}"}
             ]
 
@@ -232,6 +240,10 @@ class GraphAgent(BaseAgent):
         })
 
         if node_id:
+            if len(self._transition_tools_cache) >= self._transition_tools_cache_max_size:
+                # Evict oldest entry
+                oldest_key = next(iter(self._transition_tools_cache))
+                del self._transition_tools_cache[oldest_key]
             self._transition_tools_cache[node_id] = tools
         return tools
 
@@ -334,7 +346,7 @@ Objective: {node_objective}
                 routing_kwargs["max_tokens"] = self.routing_max_tokens or 50
                 routing_kwargs["temperature"] = 0.0
 
-            response = self.routing_client.chat.completions.create(**routing_kwargs)
+            response = await asyncio.to_thread(self.routing_client.chat.completions.create, **routing_kwargs)
             latency_ms = (time.perf_counter() - start_time) * 1000
 
             # Extract the function call

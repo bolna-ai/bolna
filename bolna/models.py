@@ -318,7 +318,7 @@ class GraphAgentConfig(Llm):
     routing_model: Optional[str] = None  # Model for routing decisions (default: same as main model)
     routing_provider: Optional[str] = None  # Provider for routing (e.g., "groq" for fast inference)
     routing_instructions: Optional[str] = None  # Custom instructions for routing LLM
-    routing_reasoning_effort: Optional[str] = None  # GPT-5 reasoning effort: "minimal", "low", "medium", "high"
+    routing_reasoning_effort: Optional[ReasoningEffort] = None  # GPT-5 reasoning effort: "minimal", "low", "medium", "high"
     routing_max_tokens: Optional[int] = None  # Max tokens for routing response
 
 class KnowledgeAgentConfig(Llm):
