@@ -1705,6 +1705,9 @@ class TaskManager(BaseManager):
                         'sequence_id': meta_info.get('sequence_id')
                     })
 
+                if routing_info.get('node_history'):
+                    self.routing_latencies['node_flow'] = list(routing_info['node_history'])
+
                 # Log routing response
                 convert_to_request_log(
                     message=routing_data,
