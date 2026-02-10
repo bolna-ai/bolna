@@ -58,15 +58,6 @@ class SarvamTranscriber(BaseTranscriber):
         self.api_key = kwargs.get("transcriber_key", os.getenv("SARVAM_API_KEY"))
         self.api_host = os.getenv("SARVAM_HOST", "api.sarvam.ai")
 
-        # old saaras models use translate endpoint, saarika models use transcription endpoint
-        # saaras:v3 supports direct transcription
-        if model.startswith("saaras") and model != "saaras:v3":
-            self.api_url = f"https://{self.api_host}/speech-to-text-translate"
-            self.ws_url = f"wss://{self.api_host}/speech-to-text-translate/ws"
-        else:
-            self.api_url = f"https://{self.api_host}/speech-to-text"
-            self.ws_url = f"wss://{self.api_host}/speech-to-text/ws"
-
         self.transcriber_output_queue = output_queue
         self.transcription_task = None
         self.sender_task = None
@@ -99,10 +90,15 @@ class SarvamTranscriber(BaseTranscriber):
         self.finalized_transcript = ""
         self.interruption_signalled = False
 
+        self.api_url = None
+        self.ws_url = None
+        self._set_endpoints()
+
         self._configure_audio_params()
         self.session: Optional[aiohttp.ClientSession] = None
         if not self.stream:
             self.session = aiohttp.ClientSession()
+
 
     def _configure_audio_params(self):
         if self.telephony_provider == "plivo":
@@ -121,12 +117,20 @@ class SarvamTranscriber(BaseTranscriber):
             self.input_sampling_rate = self.sampling_rate
             self.audio_frame_duration = 0.2
 
-    def _get_ws_url(self):
+    def _set_endpoints(self):
         params = {"model": self.model}
+        ws_url = ""
 
-        # saaras auto-detects language, saarika requires language-code
-        if not self.model.startswith("saaras") or self.model == "saaras:v3":
+        # old saaras models use translate endpoint, saarika models use transcription endpoint
+        # saaras:v3 supports direct transcription
+        if self.model.startswith("saaras") and self.model != "saaras:v3":
+            self.api_url = f"https://{self.api_host}/speech-to-text-translate"
+            ws_url = f"wss://{self.api_host}/speech-to-text-translate/ws"
+
             params["language-code"] = self.language
+        else:
+            self.api_url = f"https://{self.api_host}/speech-to-text"
+            ws_url = f"wss://{self.api_host}/speech-to-text/ws"
 
         if self.model == "saaras:v3":
             params["mode"] = "transcribe"   # saaras:v3 supports direct transcription
@@ -137,8 +141,9 @@ class SarvamTranscriber(BaseTranscriber):
             params["vad_signals"] = "true"
         if self.target_language:
             params["target_language"] = self.target_language
+
         query_string = "&".join([f"{k}={v}" for k, v in params.items()])
-        return f"{self.ws_url}?{query_string}"
+        self.ws_url = f"{ws_url}?{query_string}"
 
     async def _get_http_transcription(self, audio_data):
         if self.session is None or self.session.closed:
@@ -426,7 +431,6 @@ class SarvamTranscriber(BaseTranscriber):
             pass
 
     async def sarvam_connect(self, retries: int = 3, timeout: float = 10.0) -> ClientConnection:
-        ws_url = self._get_ws_url()
         additional_headers = {
             'api-subscription-key': self.api_key,
         }
@@ -434,9 +438,9 @@ class SarvamTranscriber(BaseTranscriber):
         last_err = None
         while attempt < retries:
             try:
-                logger.info(f"Attempting to connect to Sarvam websocket: {ws_url}")
+                logger.info(f"Attempting to connect to Sarvam websocket: {self.ws_url}")
                 ws = await asyncio.wait_for(
-                    websockets.connect(ws_url, additional_headers=additional_headers),
+                    websockets.connect(self.ws_url, additional_headers=additional_headers),
                     timeout=timeout,
                 )
                 self.websocket_connection = ws
