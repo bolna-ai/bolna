@@ -45,8 +45,7 @@ class OpenAiLLM(BaseLLM):
 
         self.model_args.update({max_tokens_key: self.max_tokens, "temperature": self.temperature, "model": self.model})
 
-        if kwargs.get("service_tier") == "priority":
-            self.model_args["service_tier"] = "priority"
+        self.model_args["service_tier"] = kwargs.get("service_tier", "default")
 
         limits = httpx.Limits(
             max_connections=50,
