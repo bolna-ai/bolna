@@ -1,9 +1,9 @@
 import json
-from typing import Optional, List, Union, Dict, Callable
+from typing import Literal, Optional, List, Union, Dict, Callable
 from pydantic import BaseModel, Field, field_validator, ValidationError, Json, model_validator
 from pydantic_core import PydanticCustomError
 from .providers import *
-from .enums import TelephonyProvider, SynthesizerProvider, TranscriberProvider
+from .enums import TelephonyProvider, SynthesizerProvider, TranscriberProvider, ReasoningEffort, Verbosity
 
 AGENT_WELCOME_MESSAGE = "This call is being recorded for quality assurance and training. Please speak now."
 
@@ -246,7 +246,8 @@ class Llm(BaseModel):
     provider: Optional[str] = "openai"
     base_url: Optional[str] = None
     routes: Optional[Routes] = None
-    reasoning_effort: Optional[str] = None
+    reasoning_effort: Optional[ReasoningEffort] = None
+    verbosity: Optional[Verbosity] = None
 
 
 class SimpleLlmAgent(Llm):
@@ -277,8 +278,18 @@ class LlmAgentGraph(BaseModel):
     edges: List[Edge]
 
 class GraphEdge(BaseModel):
+    """Edge definition for graph-based conversation flow.
+
+    Each edge represents a possible transition from the current node.
+    The LLM will call the transition function when the condition is met.
+    """
     to_node_id: str
-    condition: str
+    condition: str  # Human-readable description of when to transition
+    # Function definition for LLM to call (auto-generated if not provided)
+    function_name: Optional[str] = None  # e.g., "go_to_city_question"
+    function_description: Optional[str] = None  # Detailed description for LLM
+    # Optional parameters to collect during transition
+    parameters: Optional[Dict[str, str]] = None  # e.g., {"city": "string"}
 
 class GraphNodeRAGConfig(BaseModel):
     """RAG configuration for Graph Agent nodes."""
@@ -291,7 +302,9 @@ class GraphNode(BaseModel):
     id: str
     description: Optional[str] = None
     prompt: str
+    examples: Optional[Dict[str, str]] = None
     edges: List[GraphEdge] = Field(default_factory=list)
+    function_call: Optional[str] = None
     completion_check: Optional[Callable[[List[dict]], bool]] = None
     rag_config: Optional[GraphNodeRAGConfig] = None
 
@@ -301,6 +314,12 @@ class GraphAgentConfig(Llm):
     nodes: List[GraphNode]
     current_node_id: str
     context_data: Optional[dict] = None
+    # Routing configuration
+    routing_model: Optional[str] = None  # Model for routing decisions (default: same as main model)
+    routing_provider: Optional[str] = None  # Provider for routing (e.g., "groq" for fast inference)
+    routing_instructions: Optional[str] = None  # Custom instructions for routing LLM
+    routing_reasoning_effort: Optional[ReasoningEffort] = None  # GPT-5 reasoning effort: "minimal", "low", "medium", "high"
+    routing_max_tokens: Optional[int] = None  # Max tokens for routing response
 
 class KnowledgeAgentConfig(Llm):
     agent_information: Optional[str] = "Knowledge-based AI assistant"

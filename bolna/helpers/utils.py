@@ -513,6 +513,9 @@ async def write_request_logs(message, run_id):
     elif message["component"] == "function_call":
         component_details = [message_data, None, None, None, message.get('latency', None), None, None, None]
         metadata = message.get('function_call_metadata', {})
+    elif message["component"] == "graph_routing":
+        component_details = [message_data, None, None, None, message.get('latency', None), False, None, None]
+        metadata = message.get('graph_routing_metadata', {})
     elif message["component"] == "error":
         component_details = [message_data, None, None, None, message.get('latency', None), False, None, None]
         metadata = message.get('error_metadata', {})
@@ -627,6 +630,9 @@ def convert_to_request_log(message, meta_info, model, component="transcriber", d
             log['is_final'] = True
     if component == "function_call":
         log['latency'] = None
+    if component == "graph_routing":
+        log['latency'] = None
+        log['graph_routing_metadata'] = meta_info.get('llm_metadata', {})
     if component == "llm-hangup":
         log['latency'] = meta_info.get('llm_latency', None) if direction == "response" else None
     else:
