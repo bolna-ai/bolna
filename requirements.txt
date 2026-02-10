@@ -11,6 +11,7 @@ llama_index==0.10.65
 llama-index-vector-stores-lancedb==0.1.7
 numpy==1.26.1
 openai>=1.10.0
+groq>=0.4.0
 plivo==4.47.0
 pydantic==2.5.3
 pydub==0.25.1

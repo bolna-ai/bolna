@@ -40,14 +40,9 @@ class OpenAiLLM(BaseLLM):
         self.model_args = {}
         if model.startswith("gpt-5"):
             max_tokens_key = "max_completion_tokens"
-            reasoning_effort = os.getenv('DEFAULT_REASONING_EFFORT', ReasoningEffort.LOW.value)
-            if kwargs.get("reasoning_effort"):
-                self.model_args["reasoning_effort"] = reasoning_effort
+            self.model_args["reasoning_effort"] = kwargs.get("reasoning_effort", None) or ReasoningEffort.LOW.value
+            self.model_args["verbosity"] = kwargs.get("verbosity", None) or Verbosity.LOW.value
 
-            verbosity = os.getenv('DEFAULT_VERBOSITY', Verbosity.LOW.value)
-            if kwargs.get("verbosity"):
-                self.model_args["verbosity"] = verbosity
-                
         self.model_args.update({max_tokens_key: self.max_tokens, "temperature": self.temperature, "model": self.model})
 
         self.model_args["service_tier"] = kwargs.get("service_tier", "default")
@@ -89,7 +84,7 @@ class OpenAiLLM(BaseLLM):
         self.run_id = kwargs.get("run_id", None)
         self.gave_out_prefunction_call_message = False
 
-    async def generate_stream(self, messages, synthesize=True, request_json=False, meta_info=None):
+    async def generate_stream(self, messages, synthesize=True, request_json=False, meta_info=None, tool_choice=None):
         if not messages or len(messages) == 0:
             raise Exception("No messages provided")
         
@@ -108,7 +103,7 @@ class OpenAiLLM(BaseLLM):
 
         if self.trigger_function_call:
             model_args["tools"] = json.loads(self.tools) if isinstance(self.tools, str) else self.tools
-            model_args["tool_choice"] = "auto"
+            model_args["tool_choice"] = tool_choice or "auto"
             model_args["parallel_tool_calls"] = False
         
         self.gave_out_prefunction_call_message = False

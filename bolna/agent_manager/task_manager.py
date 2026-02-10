@@ -54,6 +54,7 @@ class TaskManager(BaseManager):
         self.transcriber_latencies = {'connection_latency_ms': None, 'turn_latencies': []}
         self.synthesizer_latencies = {'connection_latency_ms': None, 'turn_latencies': []}
         self.rag_latencies = {'turn_latencies': []}
+        self.routing_latencies = {'turn_latencies': []}
         self.stream_sid_ts = None
 
         self.task_config = task
@@ -238,6 +239,8 @@ class TaskManager(BaseManager):
                         "model": self.llm_agent_config['llm_config']['model'],
                         "max_tokens": self.llm_agent_config['llm_config']['max_tokens'],
                         "provider": self.llm_agent_config['llm_config']['provider'],
+                        "buffer_size": self.task_config["tools_config"]["synthesizer"].get('buffer_size'),
+                        "temperature": self.llm_agent_config['llm_config']['temperature']
                     }
                 else:
                     agent_type = self.task_config["tools_config"]["llm_agent"].get("agent_type", None)
@@ -829,14 +832,40 @@ class TaskManager(BaseManager):
             logger.info("Setting up graph agent with rag-proxy-server support")
             llm_config = self.task_config["tools_config"]["llm_agent"].get("llm_config", {})
             rag_server_url = self.kwargs.get('rag_server_url', os.getenv('RAG_SERVER_URL', 'http://localhost:8000'))
-            
+
             logger.info(f"Graph agent config: {llm_config}")
             logger.info(f"RAG server URL: {rag_server_url}")
-            
+
             # Set RAG server URL in environment for GraphAgent to use
             os.environ['RAG_SERVER_URL'] = rag_server_url
-            
-            llm_agent = GraphAgent(llm_config)
+
+            # Inject provider credentials for routing and response generation
+            injected_cfg = dict(llm_config)
+            if 'llm_key' in self.kwargs:
+                injected_cfg['llm_key'] = self.kwargs['llm_key']
+            if 'base_url' in self.kwargs:
+                injected_cfg['base_url'] = self.kwargs['base_url']
+
+            # Pass context_data for variable replacement in node prompts
+            if self.context_data:
+                injected_cfg['context_data'] = self.context_data
+
+            if 'api_version' in self.kwargs:
+                injected_cfg['api_version'] = self.kwargs['api_version']
+            if 'api_tools' in self.kwargs:
+                injected_cfg['api_tools'] = self.kwargs['api_tools']
+            if 'reasoning_effort' in self.kwargs:
+                injected_cfg['reasoning_effort'] = self.kwargs['reasoning_effort']
+            if 'service_tier' in self.kwargs:
+                injected_cfg['service_tier'] = self.kwargs['service_tier']
+            if 'routing_reasoning_effort' in self.kwargs:
+                injected_cfg['routing_reasoning_effort'] = self.kwargs['routing_reasoning_effort']
+            if 'routing_max_tokens' in self.kwargs:
+                injected_cfg['routing_max_tokens'] = self.kwargs['routing_max_tokens']
+            injected_cfg['buffer_size'] = self.task_config["tools_config"]["synthesizer"].get('buffer_size')
+            injected_cfg['language'] = self.language
+
+            llm_agent = GraphAgent(injected_cfg)
             logger.info("Graph agent created with rag-proxy-server support")
         elif agent_type == "knowledgebase_agent":
             logger.info("Setting up knowledge agent with rag-proxy-server support")
@@ -859,6 +888,10 @@ class TaskManager(BaseManager):
                 injected_cfg['api_version'] = self.kwargs['api_version']
             if 'api_tools' in self.kwargs:
                 injected_cfg['api_tools'] = self.kwargs['api_tools']
+            if 'reasoning_effort' in self.kwargs:
+                injected_cfg['reasoning_effort'] = self.kwargs['reasoning_effort']
+            if 'service_tier' in self.kwargs:
+                injected_cfg['service_tier'] = self.kwargs['service_tier']
             injected_cfg['buffer_size'] = self.task_config["tools_config"]["synthesizer"].get('buffer_size')
             injected_cfg['language'] = self.language
 
@@ -1266,7 +1299,14 @@ class TaskManager(BaseManager):
             await self.__process_end_of_conversation()
 
     async def wait_for_current_message(self):
+        start_time = time.time()
         while not self.conversation_ended:
+            elapsed = time.time() - start_time
+            if elapsed > self.hangup_mark_event_timeout:
+                mark_events = self.mark_event_meta_data.mark_event_meta_data
+                logger.warning(f"wait_for_current_message timed out after {self.hangup_mark_event_timeout}s with {len(mark_events)} remaining marks")
+                break
+
             mark_events = self.mark_event_meta_data.mark_event_meta_data
             mark_items_list = [{'mark_id': k, 'mark_data': v} for k, v in mark_events.items()]
             logger.info(f"current_list: {mark_items_list}")
@@ -1458,7 +1498,6 @@ class TaskManager(BaseManager):
 
         if called_fun.startswith("transfer_call"):
             await asyncio.sleep(2)
-
             try:
                 from_number = self.context_data['recipient_data']['from_number']
             except Exception as e:
@@ -1496,6 +1535,9 @@ class TaskManager(BaseManager):
                 logger.info(f"Gotten response {resp}")
                 payload = {**payload, **resp}
 
+            if self.tools['input'].io_provider != 'default':
+                payload['call_sid'] = self.tools["input"].get_call_sid()
+
             if self.tools['input'].io_provider == 'default':
                 mock_response = f"This is a mocked response demonstrating a successful transfer of call to {call_transfer_number}"
                 convert_to_request_log(str(payload), meta_info, None, "function_call", direction="request", run_id=self.run_id)
@@ -1523,6 +1565,22 @@ class TaskManager(BaseManager):
         response = await trigger_api(url=url, method=method.lower(), param=param, api_token=api_token, headers_data=headers, meta_info=meta_info, run_id=self.run_id, **resp)
         function_response = str(response)
         get_res_keys, get_res_values = await computed_api_response(function_response)
+
+        # Merge API response data into context_data for routing decisions
+        if self.__is_graph_agent():
+            try:
+                response_data = json.loads(function_response) if isinstance(function_response, str) else function_response
+                if isinstance(response_data, dict):
+                    # Update task manager's context_data
+                    if self.context_data is None:
+                        self.context_data = {}
+                    self.context_data.update(response_data)
+                    # Update graph agent's context_data for routing
+                    if hasattr(self.tools.get('llm_agent'), 'context_data'):
+                        self.tools['llm_agent'].context_data.update(response_data)
+                    logger.info(f"Merged API response into context_data: {list(response_data.keys())}")
+            except (json.JSONDecodeError, TypeError) as e:
+                logger.debug(f"Could not parse API response as JSON for context merge: {e}")
         if called_fun.startswith('check_availability_of_slots') and (not get_res_values or (len(get_res_values) == 1 and len(get_res_values[0]) == 0)):
             set_response_prompt = []
         elif called_fun.startswith('book_appointment') and 'id' not in get_res_keys:
@@ -1593,6 +1651,73 @@ class TaskManager(BaseManager):
         async for llm_message in self.tools['llm_agent'].generate(messages, synthesize=synthesize, meta_info=meta_info):
             if isinstance(llm_message, dict) and 'messages' in llm_message: # custom list of messages before the llm call
                 convert_to_request_log(format_messages(llm_message['messages'], True), meta_info, self.llm_config['model'], "llm", direction="request", is_cached=False, run_id=self.run_id)
+                continue
+
+            # Handle graph agent routing info
+            if isinstance(llm_message, dict) and 'routing_info' in llm_message:
+                routing_info = llm_message['routing_info']
+
+                # Log routing request with tools
+                routing_messages = routing_info.get('routing_messages')
+                routing_tools = routing_info.get('routing_tools', [])
+                if routing_messages:
+                    # Format tools for logging (show full descriptions with conditions)
+                    tools_summary = ""
+                    if routing_tools:
+                        tool_lines = []
+                        for t in routing_tools:
+                            if 'function' in t:
+                                name = t['function']['name']
+                                desc = t['function'].get('description', '')
+                                tool_lines.append(f"  - {name}: {desc}")
+                        if tool_lines:
+                            tools_summary = "\n\nAvailable transitions:\n" + "\n".join(tool_lines)
+
+                    convert_to_request_log(
+                        message=format_messages(routing_messages, use_system_prompt=True) + tools_summary,
+                        meta_info=meta_info,
+                        model=routing_info.get('routing_model', ''),
+                        component="graph_routing",
+                        direction="request",
+                        run_id=self.run_id
+                    )
+
+                # Build routing response data
+                if routing_info.get('transitioned'):
+                    routing_data = f"Node: {routing_info.get('previous_node', '?')} → {routing_info['current_node']}"
+                else:
+                    routing_data = f"Node: {routing_info['current_node']} (no transition)"
+                if routing_info.get('extracted_params'):
+                    routing_data += f" | Params: {json.dumps(routing_info['extracted_params'])}"
+                if routing_info.get('node_history'):
+                    routing_data += f" | Flow: {' → '.join(routing_info['node_history'])}"
+
+                meta_info['llm_metadata'] = meta_info.get('llm_metadata') or {}
+                meta_info['llm_metadata']['graph_routing_info'] = routing_info
+
+                if routing_info.get('routing_latency_ms') is not None:
+                    self.routing_latencies['turn_latencies'].append({
+                        'latency_ms': routing_info['routing_latency_ms'],
+                        'routing_model': routing_info.get('routing_model'),
+                        'routing_provider': routing_info.get('routing_provider'),
+                        'previous_node': routing_info.get('previous_node'),
+                        'current_node': routing_info.get('current_node'),
+                        'transitioned': routing_info.get('transitioned', False),
+                        'sequence_id': meta_info.get('sequence_id')
+                    })
+
+                if routing_info.get('node_history'):
+                    self.routing_latencies['node_flow'] = list(routing_info['node_history'])
+
+                # Log routing response
+                convert_to_request_log(
+                    message=routing_data,
+                    meta_info=meta_info,
+                    model=routing_info.get('routing_model', ''),
+                    component="graph_routing",
+                    direction="response",
+                    run_id=self.run_id
+                )
                 continue
 
             data, end_of_llm_stream, latency, trigger_function_call, function_tool, function_tool_message = llm_message
@@ -1710,47 +1835,48 @@ class TaskManager(BaseManager):
             ### TODO CHECK IF THIS IS EVEN REQUIRED
 
             # Request logs converted inside do_llm_generation for knowledgebase agent
-            if not self.__is_knowledgebase_agent():
+            if not self.__is_knowledgebase_agent() and not self.__is_graph_agent():
                 convert_to_request_log(message=format_messages(messages, use_system_prompt=True), meta_info=meta_info, component="llm", direction="request", model=self.llm_config["model"], run_id= self.run_id)
 
             await self.__do_llm_generation(messages, meta_info, next_step, should_bypass_synth)
             # TODO : Write a better check for completion prompt
 
-            if self.agent_type not in ["graph_agent"]:
-                if self.use_llm_to_determine_hangup and not self.turn_based_conversation:
-                    completion_res, metadata = await self.tools["llm_agent"].check_for_completion(messages, self.check_for_completion_prompt)
+            # Hangup detection - now supported for all agent types including graph_agent
+            if self.use_llm_to_determine_hangup and not self.turn_based_conversation:
+                completion_res, metadata = await self.tools["llm_agent"].check_for_completion(messages, self.check_for_completion_prompt)
 
-                    should_hangup = (
-                        str(completion_res.get("hangup", "")).lower() == "yes"
-                        if isinstance(completion_res, dict)
-                        else False
-                    )
+                should_hangup = (
+                    str(completion_res.get("hangup", "")).lower() == "yes"
+                    if isinstance(completion_res, dict)
+                    else False
+                )
 
-                    # Track hangup check latency (latency returned by agent)
-                    self.llm_latencies['other_latencies'].append({
-                        "type": 'hangup_check',
-                        "latency_ms": metadata.get("latency_ms", None),
-                        "model": self.check_for_completion_llm,
-                        "provider": "openai",  # TODO: Make dynamic based on provider used
-                        "service_tier": metadata.get("service_tier", None),
-                        "llm_host": metadata.get("llm_host", None),
-                        "sequence_id": meta_info.get("sequence_id")
-                    })
+                # Track hangup check latency (latency returned by agent)
+                self.llm_latencies['other_latencies'].append({
+                    "type": 'hangup_check',
+                    "latency_ms": metadata.get("latency_ms", None),
+                    "model": self.check_for_completion_llm,
+                    "provider": "openai",  # TODO: Make dynamic based on provider used
+                    "service_tier": metadata.get("service_tier", None),
+                    "llm_host": metadata.get("llm_host", None),
+                    "sequence_id": meta_info.get("sequence_id")
+                })
 
-                    prompt = [
-                            {'role': 'system', 'content': self.check_for_completion_prompt},
-                            {'role': 'user', 'content': format_messages(self.history, use_system_prompt= True)}]
-                    logger.info(f"##### Answer from the LLM {completion_res}")
-                    convert_to_request_log(message=format_messages(prompt, use_system_prompt= True), meta_info= meta_info, component="llm_hangup", direction="request", model=self.check_for_completion_llm, run_id= self.run_id)
-                    convert_to_request_log(message=completion_res, meta_info= meta_info, component="llm_hangup", direction="response", model=self.check_for_completion_llm, run_id= self.run_id)
+                prompt = [
+                    {'role': 'system', 'content': self.check_for_completion_prompt},
+                    {'role': 'user', 'content': format_messages(self.history, use_system_prompt=True)}
+                ]
+                logger.info(f"##### Answer from the LLM {completion_res}")
+                convert_to_request_log(message=format_messages(prompt, use_system_prompt=True), meta_info=meta_info, component="llm_hangup", direction="request", model=self.check_for_completion_llm, run_id=self.run_id)
+                convert_to_request_log(message=completion_res, meta_info=meta_info, component="llm_hangup", direction="response", model=self.check_for_completion_llm, run_id=self.run_id)
 
-                    if should_hangup:
-                        if self.hangup_triggered or self.conversation_ended:
-                            logger.info(f"Hangup already triggered or conversation ended, skipping duplicate hangup request")
-                            return
-                        self.hangup_detail = "llm_prompted_hangup"
-                        await self.process_call_hangup()
+                if should_hangup:
+                    if self.hangup_triggered or self.conversation_ended:
+                        logger.info(f"Hangup already triggered or conversation ended, skipping duplicate hangup request")
                         return
+                    self.hangup_detail = "llm_prompted_hangup"
+                    await self.process_call_hangup()
+                    return
 
             self.llm_processed_request_ids.add(self.current_request_id)
             llm_response = ""
@@ -2450,11 +2576,23 @@ class TaskManager(BaseManager):
                     elif status == "BLOCK":
                         # Audio blocked (user speaking or invalid sequence) - discard
                         logger.info(f'Audio blocked: discarding message (sequence_id={sequence_id})')
-                        # If discarding the final chunk of the response, reset is_audio_being_played
-                        # to prevent state deadlock where mark event never arrives from telephony
-                        if message['meta_info'].get('is_final_chunk_of_entire_response', False):
-                            self.tools["input"].update_is_audio_being_played(False)
-                            logger.info(f'Final chunk discarded, resetting is_audio_being_played to prevent deadlock')
+                        # If discarding the final chunk of the response, ensure is_audio_being_played
+                        # will eventually reset to prevent state deadlock.
+                        is_final_message = (
+                            message['meta_info'].get('is_final_chunk_of_entire_response', False) or
+                            (message['meta_info'].get('end_of_llm_stream', False) and
+                             message['meta_info'].get('end_of_synthesizer_stream', False))
+                        )
+                        if is_final_message:
+                            # Update the last pending post-mark to have is_final_chunk=True.
+                            # When Plivo finishes playing the last sent chunk and echoes it back,
+                            # process_mark_message will see is_final_chunk=True and reset
+                            # is_audio_being_played to False.
+                            updated = self.mark_event_meta_data.update_last_post_mark_as_final()
+                            if not updated:
+                                # No pending marks (all chunks already played or none sent)
+                                self.tools["input"].update_is_audio_being_played(False)
+                            logger.info(f'Final chunk discarded, {"updated last mark" if updated else "reset is_audio_being_played"} to prevent deadlock')
                         should_continue_outer_loop = True
                         break  # Exit inner loop, skip to next message
 
@@ -2853,6 +2991,7 @@ class TaskManager(BaseManager):
                         "transcriber_latencies": self.transcriber_latencies,
                         "synthesizer_latencies": self.synthesizer_latencies,
                         "rag_latencies": self.rag_latencies,
+                        "routing_latencies": self.routing_latencies,
                         "welcome_message_sent_ts": None,
                         "stream_sid_ts": None
                     },
