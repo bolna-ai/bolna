@@ -1267,12 +1267,11 @@ class TaskManager(BaseManager):
 
     async def wait_for_current_message(self):
         start_time = time.time()
-        max_wait = 10
         while not self.conversation_ended:
             elapsed = time.time() - start_time
-            if elapsed > max_wait:
+            if elapsed > self.hangup_mark_event_timeout:
                 mark_events = self.mark_event_meta_data.mark_event_meta_data
-                logger.warning(f"wait_for_current_message timed out after {max_wait}s with {len(mark_events)} remaining marks")
+                logger.warning(f"wait_for_current_message timed out after {self.hangup_mark_event_timeout}s with {len(mark_events)} remaining marks")
                 break
 
             mark_events = self.mark_event_meta_data.mark_event_meta_data
