@@ -42,6 +42,7 @@ class CartesiaSynthesizer(BaseSynthesizer):
         self.previous_request_ids = []
         self.websocket_holder = {"websocket": None}
         self.context_id = None
+        self.ws_request_id = None  # Cartesia x-request-id for request correlation
         self.sender_task = None
         self.speed = speed
 
@@ -120,21 +121,23 @@ class CartesiaSynthesizer(BaseSynthesizer):
             if text != "":
                 try:
                     input_message = self.form_payload(text)
+                    logger.info(f"Cartesia sender context_id={self.context_id} text_len={len(text)} request_id={self.ws_request_id}")
                     await self.websocket_holder["websocket"].send(json.dumps(input_message))
                 except Exception as e:
-                    logger.error(f"Error sending chunk: {e}")
+                    logger.error(f"Error sending chunk context_id={self.context_id} request_id={self.ws_request_id}: {e}")
                     return
 
             # If end_of_llm_stream is True, mark the last chunk and send an empty message
             if end_of_llm_stream:
                 self.last_text_sent = True
+                logger.info(f"Cartesia sender end_of_llm_stream context_id={self.context_id} request_id={self.ws_request_id}")
 
                 # Send the end-of-stream signal with an empty string as text
                 try:
                     input_message = self.form_payload("")
                     await self.websocket_holder["websocket"].send(json.dumps(input_message))
                 except Exception as e:
-                    logger.error(f"Error sending end-of-stream signal: {e}")
+                    logger.error(f"Error sending end-of-stream signal context_id={self.context_id} request_id={self.ws_request_id}: {e}")
         except asyncio.CancelledError:
             logger.info("Sender task was cancelled.")
         except Exception as e:
@@ -163,9 +166,10 @@ class CartesiaSynthesizer(BaseSynthesizer):
                     yield chunk
 
                 elif "done" in data and data["done"]:
+                    logger.info(f"Cartesia recv done context_id={data.get('context_id')} request_id={self.ws_request_id}")
                     yield b'\x00'
                 else:
-                    logger.info("No audio data in the response")
+                    logger.info(f"No audio data in the response context_id={data.get('context_id')} request_id={self.ws_request_id}")
             except websockets.exceptions.ConnectionClosed:
                 break
             except Exception as e:
@@ -285,7 +289,12 @@ class CartesiaSynthesizer(BaseSynthesizer):
             )
             if not self.connection_time:
                 self.connection_time = round((time.perf_counter() - start_time) * 1000)
-            logger.info(f"Connected to {self.ws_url}")
+            # Extract x-request-id from WebSocket handshake response
+            if hasattr(websocket, 'response') and hasattr(websocket.response, 'headers'):
+                self.ws_request_id = websocket.response.headers.get('x-request-id')
+                logger.info(f"Cartesia WebSocket connected request_id={self.ws_request_id} connection_time={self.connection_time}ms")
+            else:
+                logger.info(f"Cartesia WebSocket connected connection_time={self.connection_time}ms")
             return websocket
         except asyncio.TimeoutError:
             logger.error("Timeout while connecting to Cartesia websocket")
@@ -327,6 +336,7 @@ class CartesiaSynthesizer(BaseSynthesizer):
         self.context_id = str(uuid.uuid4())
         self.turn_id = meta_info.get('turn_id', 0)
         self.sequence_id = meta_info.get('sequence_id', 0)
+        logger.info(f"Cartesia new context_id={self.context_id} turn_id={self.turn_id} sequence_id={self.sequence_id} request_id={self.ws_request_id}")
 
     async def push(self, message):
         if self.stream:
