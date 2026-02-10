@@ -314,34 +314,41 @@ class SarvamSynthesizer(BaseSynthesizer):
                         except Exception:
                             pass
                     else:
-                        format = get_synth_audio_format(audio)
-
-                        if format == "wav" and self.model == "bulbul:v3":
-                            received_sampling_rate = int.from_bytes(audio[24:28], byteorder='little')
-
-                            if self.original_sampling_rate != received_sampling_rate:
-                                logger.warning(f"Expected sampling rate {self.original_sampling_rate} does not match received sampling rate {received_sampling_rate} for model {self.model}. Using received sampling rate for resampling.")
-                                self.original_sampling_rate = received_sampling_rate
-
-                            continue # This is only the header. Remaining chunks are PCM
-                        
-                        try:
-                            resampled_audio = resample(audio, int(self.sampling_rate), format=format, original_sample_rate=self.original_sampling_rate)
-                        except Exception as e:
-                            logger.error(f"Error in resampling audio: {e}")
+                        processed_audio = await self._process_audio_data(audio)
+                        if processed_audio is None:
                             continue
-                        
-                        if format == "wav":
-                            audio = wav_bytes_to_pcm(resampled_audio)
-                        else:
-                            audio = resampled_audio
 
                     self.meta_info["mark_id"] = str(uuid.uuid4())
-                    yield create_ws_data_packet(audio, self.meta_info)
+                    yield create_ws_data_packet(processed_audio, self.meta_info)
 
         except Exception as e:
             traceback.print_exc()
             logger.info(f"Error in sarvam generate {e}")
+
+    async def _process_audio_data(self, audio):
+        format = get_synth_audio_format(audio)
+
+        if format == "wav" and self.model == "bulbul:v3":
+            received_sampling_rate = int.from_bytes(audio[24:28], byteorder='little')
+
+            if self.original_sampling_rate != received_sampling_rate:
+                logger.warning(f"Expected sampling rate {self.original_sampling_rate} does not match received sampling rate {received_sampling_rate} for model {self.model}. Using received sampling rate for resampling.")
+                self.original_sampling_rate = received_sampling_rate
+
+            return None # This is only the header. Remaining chunks are PCM
+        
+        try:
+            resampled_audio = resample(audio, int(self.sampling_rate), format=format, original_sample_rate=self.original_sampling_rate)
+        except Exception as e:
+            logger.error(f"Error in resampling audio: {e}")
+            return None
+        
+        if format == "wav":
+            audio = wav_bytes_to_pcm(resampled_audio)
+        else:
+            audio = resampled_audio
+
+        return audio
 
     async def push(self, message):
         if self.stream:
