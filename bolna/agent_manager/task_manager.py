@@ -1864,7 +1864,7 @@ class TaskManager(BaseManager):
 
                 prompt = [
                     {'role': 'system', 'content': self.check_for_completion_prompt},
-                    {'role': 'user', 'content': format_messages(self.history, use_system_prompt=True)}
+                    {'role': 'user', 'content': format_messages(self.history)}
                 ]
                 logger.info(f"##### Answer from the LLM {completion_res}")
                 convert_to_request_log(message=format_messages(prompt, use_system_prompt=True), meta_info=meta_info, component="llm_hangup", direction="request", model=self.check_for_completion_llm, run_id=self.run_id)
