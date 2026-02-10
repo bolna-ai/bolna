@@ -412,7 +412,7 @@ def resample(audio_bytes, target_sample_rate, format="mp3", pcm_channels=1, orig
         resampler = torchaudio.transforms.Resample(original_sample_rate, target_sample_rate)
         audio_waveform = resampler(waveform)
         
-        audio_int16 = (audio_waveform * 32768.0).to(torch.int16)
+        audio_int16 = (audio_waveform * PCM16_SCALE).to(torch.int16)
         return audio_int16.numpy().tobytes()
     
     # Handle other formats (wav, mp3, etc.)
