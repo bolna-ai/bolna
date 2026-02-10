@@ -22,7 +22,7 @@ from contextlib import AsyncExitStack
 from dotenv import load_dotenv
 from pydantic import create_model
 from .logger_config import configure_logger
-from bolna.constants import PREPROCESS_DIR, PRE_FUNCTION_CALL_MESSAGE, DEFAULT_LANGUAGE_CODE, TRANSFERING_CALL_FILLER
+from bolna.constants import PCM16_SCALE, PREPROCESS_DIR, PRE_FUNCTION_CALL_MESSAGE, DEFAULT_LANGUAGE_CODE, TRANSFERING_CALL_FILLER
 from bolna.prompts import DATE_PROMPT
 from pydub import AudioSegment
 import audioop
@@ -397,7 +397,7 @@ def resample(audio_bytes, target_sample_rate, format="mp3", pcm_channels=1, orig
         
         audio_array = np.frombuffer(audio_bytes, dtype=np.int16)
         
-        waveform = torch.from_numpy(audio_array).float() / 32768.0
+        waveform = torch.from_numpy(audio_array).float() / PCM16_SCALE
         
         if pcm_channels == 1:
             waveform = waveform.unsqueeze(0)  # (1, samples)

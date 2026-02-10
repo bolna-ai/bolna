@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 PREPROCESS_DIR = 'agent_data'
+PCM16_SCALE = 32768.0
 
 HIGH_LEVEL_ASSISTANT_ANALYTICS_DATA = {
         "extraction_details":{}, 
