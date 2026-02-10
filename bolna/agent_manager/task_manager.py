@@ -1266,7 +1266,14 @@ class TaskManager(BaseManager):
             await self.__process_end_of_conversation()
 
     async def wait_for_current_message(self):
+        start_time = time.time()
         while not self.conversation_ended:
+            elapsed = time.time() - start_time
+            if elapsed > self.hangup_mark_event_timeout:
+                mark_events = self.mark_event_meta_data.mark_event_meta_data
+                logger.warning(f"wait_for_current_message timed out after {self.hangup_mark_event_timeout}s with {len(mark_events)} remaining marks")
+                break
+
             mark_events = self.mark_event_meta_data.mark_event_meta_data
             mark_items_list = [{'mark_id': k, 'mark_data': v} for k, v in mark_events.items()]
             logger.info(f"current_list: {mark_items_list}")
@@ -2450,11 +2457,23 @@ class TaskManager(BaseManager):
                     elif status == "BLOCK":
                         # Audio blocked (user speaking or invalid sequence) - discard
                         logger.info(f'Audio blocked: discarding message (sequence_id={sequence_id})')
-                        # If discarding the final chunk of the response, reset is_audio_being_played
-                        # to prevent state deadlock where mark event never arrives from telephony
-                        if message['meta_info'].get('is_final_chunk_of_entire_response', False):
-                            self.tools["input"].update_is_audio_being_played(False)
-                            logger.info(f'Final chunk discarded, resetting is_audio_being_played to prevent deadlock')
+                        # If discarding the final chunk of the response, ensure is_audio_being_played
+                        # will eventually reset to prevent state deadlock.
+                        is_final_message = (
+                            message['meta_info'].get('is_final_chunk_of_entire_response', False) or
+                            (message['meta_info'].get('end_of_llm_stream', False) and
+                             message['meta_info'].get('end_of_synthesizer_stream', False))
+                        )
+                        if is_final_message:
+                            # Update the last pending post-mark to have is_final_chunk=True.
+                            # When Plivo finishes playing the last sent chunk and echoes it back,
+                            # process_mark_message will see is_final_chunk=True and reset
+                            # is_audio_being_played to False.
+                            updated = self.mark_event_meta_data.update_last_post_mark_as_final()
+                            if not updated:
+                                # No pending marks (all chunks already played or none sent)
+                                self.tools["input"].update_is_audio_being_played(False)
+                            logger.info(f'Final chunk discarded, {"updated last mark" if updated else "reset is_audio_being_played"} to prevent deadlock')
                         should_continue_outer_loop = True
                         break  # Exit inner loop, skip to next message
 
