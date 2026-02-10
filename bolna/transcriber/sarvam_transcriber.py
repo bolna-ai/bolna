@@ -127,10 +127,10 @@ class SarvamTranscriber(BaseTranscriber):
             self.api_url = f"https://{self.api_host}/speech-to-text-translate"
             ws_url = f"wss://{self.api_host}/speech-to-text-translate/ws"
 
-            params["language-code"] = self.language
         else:
             self.api_url = f"https://{self.api_host}/speech-to-text"
             ws_url = f"wss://{self.api_host}/speech-to-text/ws"
+            params["language-code"] = self.language
 
         if self.model == "saaras:v3":
             params["mode"] = "transcribe"   # saaras:v3 supports direct transcription

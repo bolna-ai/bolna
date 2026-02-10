@@ -314,12 +314,12 @@ class SarvamSynthesizer(BaseSynthesizer):
                         except Exception:
                             pass
                     else:
-                        processed_audio = await self._process_audio_data(audio)
-                        if processed_audio is None:
+                        audio = await self._process_audio_data(audio)
+                        if audio is None:
                             continue
 
                     self.meta_info["mark_id"] = str(uuid.uuid4())
-                    yield create_ws_data_packet(processed_audio, self.meta_info)
+                    yield create_ws_data_packet(audio, self.meta_info)
 
         except Exception as e:
             traceback.print_exc()
