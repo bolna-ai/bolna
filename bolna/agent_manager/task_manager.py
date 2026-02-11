@@ -2261,6 +2261,7 @@ class TaskManager(BaseManager):
                             welcome_played=self.tools["input"].welcome_message_played()
                         ):
                             logger.info(f"Continuing the loop and ignoring the transcript received ({transcript_content}) in speech final as it is false interruption")
+                            continue
 
                         self.interruption_manager.on_user_speech_ended()
                         temp_transcriber_message = ""
