@@ -2576,23 +2576,12 @@ class TaskManager(BaseManager):
                     elif status == "BLOCK":
                         # Audio blocked (user speaking or invalid sequence) - discard
                         logger.info(f'Audio blocked: discarding message (sequence_id={sequence_id})')
-                        # If discarding the final chunk of the response, ensure is_audio_being_played
-                        # will eventually reset to prevent state deadlock.
-                        is_final_message = (
-                            message['meta_info'].get('is_final_chunk_of_entire_response', False) or
-                            (message['meta_info'].get('end_of_llm_stream', False) and
-                             message['meta_info'].get('end_of_synthesizer_stream', False))
-                        )
-                        if is_final_message:
-                            # Update the last pending post-mark to have is_final_chunk=True.
-                            # When Plivo finishes playing the last sent chunk and echoes it back,
-                            # process_mark_message will see is_final_chunk=True and reset
-                            # is_audio_being_played to False.
-                            updated = self.mark_event_meta_data.update_last_post_mark_as_final()
-                            if not updated:
-                                # No pending marks (all chunks already played or none sent)
-                                self.tools["input"].update_is_audio_being_played(False)
-                            logger.info(f'Final chunk discarded, {"updated last mark" if updated else "reset is_audio_being_played"} to prevent deadlock')
+                        # Null byte (b'\x00') is the end-of-stream control signal, not audio.
+                        # Always send it through handle() so the is_final_chunk post-mark is
+                        # created and sent to Plivo. Without this, is_audio_being_played stays
+                        # True forever because no final mark echo ever arrives.
+                        if message['data'] == b'\x00':
+                            await self.tools["output"].handle(message)
                         should_continue_outer_loop = True
                         break  # Exit inner loop, skip to next message
 
