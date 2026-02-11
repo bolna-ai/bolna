@@ -85,6 +85,13 @@ class SipTrunkInputHandler(TelephonyInputHandler):
         self.connection_id = None
         self.ptime = 20
 
+        # Pending mark info set by the output handler so that QUEUE_DRAINED
+        # (authoritative Asterisk signal) can trigger proper mark processing
+        # — equivalent to Twilio's mark event for is_audio_being_played,
+        # welcome-message completion, and hangup detection.
+        self._pending_queue_drain_mark_id = None
+        self._pending_queue_drain_category = None
+
         # Resolve format from agent_config (must be ulaw for sip-trunk)
         input_config = self._get_input_config()
         self._expected_format = (input_config.get("audio_format") or input_config.get("format") or "ulaw").lower()
@@ -306,9 +313,19 @@ class SipTrunkInputHandler(TelephonyInputHandler):
             return
         if "QUEUE_DRAINED" in event or event == "QUEUE_DRAINED":
             logger.info(f"QUEUE_DRAINED received for channel {self.channel_id} - Asterisk finished playing media")
-            # Asterisk has finished playing the queue; clear playback flag so is_audio_being_played_to_user
-            # reflects reality (no mark events in chan_websocket, so this is the authoritative signal).
+            # Asterisk has finished playing the queue.  This is the authoritative
+            # signal (equivalent to Twilio mark events).  Process the pending
+            # mark so that is_audio_being_played, welcome-message completion,
+            # and hangup detection all work correctly.
             self.update_is_audio_being_played(False)
+            if self._pending_queue_drain_mark_id:
+                mark_id = self._pending_queue_drain_mark_id
+                mark_category = self._pending_queue_drain_category
+                self._pending_queue_drain_mark_id = None
+                self._pending_queue_drain_category = None
+                mark_packet = {"name": mark_id, "type": mark_category}
+                logger.info(f"QUEUE_DRAINED: processing pending mark {mark_id}")
+                self.process_mark_message(mark_packet)
             return
         # Unknown or empty
         if event or parsed:
