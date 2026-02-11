@@ -246,7 +246,7 @@ class SipTrunkOutputHandler(TelephonyOutputHandler):
                             self._simulate_mark_event_after_duration(mark_id, total_duration, message_category))
                         logger.info(
                             f"[SIP-TRUNK OUTPUT] Final chunk sent. Total response duration: {total_duration:.3f}s. "
-                            f"Waiting for QUEUE_DRAINED (fallback after {total_duration + 1.0:.1f}s).")
+                            f"Waiting for QUEUE_DRAINED (fallback after {total_duration + 0.3:.1f}s).")
 
                     self._response_audio_duration = 0.0
 
@@ -307,22 +307,42 @@ class SipTrunkOutputHandler(TelephonyOutputHandler):
 
         QUEUE_DRAINED from Asterisk is the authoritative signal that playback has
         finished.  This task fires only as a safety net (total audio duration +
-        1 s buffer).  If QUEUE_DRAINED already processed the mark, the pending
-        id will have been cleared and this becomes a no-op.
+        buffer).  If QUEUE_DRAINED already processed the marks, the pending id
+        will have been cleared and this becomes a no-op.
+
+        Unlike Twilio/Plivo which send per-mark callbacks, Asterisk only gives
+        a single "everything done" signal.  When the fallback fires we must
+        process ALL remaining marks — not just the pending one — to prevent
+        orphaned marks from blocking wait_for_current_message().
         """
         try:
-            await asyncio.sleep(duration + 1.0)
+            # Buffer reduced from 1.0s to 0.3s: QUEUE_DRAINED from Asterisk
+            # doesn't reliably arrive so the fallback
+            # is the primary path; keep buffer small to minimise hangup lag.
+            await asyncio.sleep(duration + 0.3)
             if not self.input_handler:
                 return
-            # Check whether QUEUE_DRAINED already handled this mark
-            if getattr(self.input_handler, '_pending_queue_drain_mark_id', None) == mark_id:
-                logger.info(
-                    f"[SIP-TRUNK OUTPUT] QUEUE_DRAINED fallback: simulating mark after "
-                    f"{duration:.3f}s for {message_category}")
-                self.input_handler._pending_queue_drain_mark_id = None
-                self.input_handler._pending_queue_drain_category = None
-                self.input_handler.update_is_audio_being_played(False)
-                mark_packet = {"name": mark_id, "type": message_category}
+            # Check whether QUEUE_DRAINED already handled all marks
+            remaining_marks = list(
+                self.input_handler.mark_event_meta_data.mark_event_meta_data.keys()
+            )
+            if not remaining_marks:
+                return  # QUEUE_DRAINED already cleared everything — no-op
+
+            logger.info(
+                f"[SIP-TRUNK OUTPUT] QUEUE_DRAINED fallback: simulating mark after "
+                f"{duration:.3f}s for {message_category} — "
+                f"processing {len(remaining_marks)} remaining mark(s)")
+
+            self.input_handler._pending_queue_drain_mark_id = None
+            self.input_handler._pending_queue_drain_category = None
+            self.input_handler.update_is_audio_being_played(False)
+
+            # Process ALL remaining marks (snapshot keys first; fetch_data pops)
+            for mid in remaining_marks:
+                mark_data = self.input_handler.mark_event_meta_data.mark_event_meta_data.get(mid, {})
+                cat = mark_data.get("type", message_category)
+                mark_packet = {"name": mid, "type": cat}
                 self.input_handler.process_mark_message(mark_packet)
         except asyncio.CancelledError:
             pass  # Cancelled by interruption — expected

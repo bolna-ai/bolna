@@ -122,7 +122,11 @@ class SipTrunkInputHandler(TelephonyInputHandler):
         return {}
 
     async def disconnect_stream(self):
-        """Send HANGUP command to Asterisk when disconnecting"""
+        """Send HANGUP command to Asterisk when disconnecting.
+
+        Per Asterisk WebSocket docs, HANGUP causes the channel to be hung up
+        and the WebSocket to be closed immediately.
+        """
         try:
             if self.websocket and self.channel_id:
                 # Check if WebSocket is still open before attempting to send
@@ -137,6 +141,26 @@ class SipTrunkInputHandler(TelephonyInputHandler):
                 logger.info(f"Cannot send HANGUP - websocket or channel_id is None")
         except Exception as e:
             logger.error(f"Error sending HANGUP command: {e}")
+
+    async def stop_handler(self):
+        """Override base stop_handler for faster SIP trunk disconnect.
+
+        Per Asterisk docs, the HANGUP command causes the WebSocket channel to
+        be hung up and the WebSocket to be closed immediately.  The base class
+        sleeps 2 s after firing disconnect_stream, but Asterisk processes
+        HANGUP within milliseconds so we only need a brief pause.
+        """
+        logger.info(f"stopping handler for channel {self.channel_id}")
+        self.running = False
+        await self.disconnect_stream()  # Send HANGUP (awaited, not fire-and-forget)
+        # Asterisk closes the WebSocket almost immediately after HANGUP;
+        # a brief wait is sufficient for the close to propagate.
+        await asyncio.sleep(0.5)
+        try:
+            await self.websocket.close()
+            logger.info("WebSocket connection closed")
+        except Exception as e:
+            logger.info(f"Error closing WebSocket: {e}")
 
     def _initialize_from_media_start(self, media_start_data):
         """Initialize channel info from pre-parsed MEDIA_START data"""
@@ -314,18 +338,27 @@ class SipTrunkInputHandler(TelephonyInputHandler):
         if "QUEUE_DRAINED" in event or event == "QUEUE_DRAINED":
             logger.info(f"QUEUE_DRAINED received for channel {self.channel_id} - Asterisk finished playing media")
             # Asterisk has finished playing the queue.  This is the authoritative
-            # signal (equivalent to Twilio mark events).  Process the pending
-            # mark so that is_audio_being_played, welcome-message completion,
-            # and hangup detection all work correctly.
+            # signal (equivalent to Twilio mark events).  Unlike Twilio/Plivo
+            # which send per-mark callbacks, Asterisk only gives a single
+            # "everything done" signal.  Process ALL remaining marks so that
+            # is_audio_being_played, welcome-message completion, and hangup
+            # detection all work correctly.
             self.update_is_audio_being_played(False)
-            if self._pending_queue_drain_mark_id:
-                mark_id = self._pending_queue_drain_mark_id
-                mark_category = self._pending_queue_drain_category
-                self._pending_queue_drain_mark_id = None
-                self._pending_queue_drain_category = None
-                mark_packet = {"name": mark_id, "type": mark_category}
-                logger.info(f"QUEUE_DRAINED: processing pending mark {mark_id}")
-                self.process_mark_message(mark_packet)
+
+            # Clear pending tracking state
+            self._pending_queue_drain_mark_id = None
+            self._pending_queue_drain_category = None
+
+            # Process every mark still in mark_event_meta_data.
+            # fetch_data() pops each entry, so snapshot keys first.
+            all_mark_ids = list(self.mark_event_meta_data.mark_event_meta_data.keys())
+            if all_mark_ids:
+                logger.info(f"QUEUE_DRAINED: processing {len(all_mark_ids)} remaining mark(s)")
+                for mid in all_mark_ids:
+                    mark_data = self.mark_event_meta_data.mark_event_meta_data.get(mid, {})
+                    cat = mark_data.get("type", "agent_response")
+                    mark_packet = {"name": mid, "type": cat}
+                    self.process_mark_message(mark_packet)
             return
         # Unknown or empty
         if event or parsed:
