@@ -71,7 +71,6 @@ class SarvamTranscriber(BaseTranscriber):
         self.audio_frame_duration = 0.0
         self.audio_cursor = 0.0
 
-        self.final_transcript = ""
         self.websocket_connection = None
         self.connection_authenticated = False
         self.meta_info = {}
@@ -363,10 +362,6 @@ class SarvamTranscriber(BaseTranscriber):
                             self.last_vocal_frame_timestamp = now_timestamp
                             self.meta_info["last_vocal_frame_timestamp"] = self.last_vocal_frame_timestamp
 
-                            yield create_ws_data_packet(
-                                {"type": "interim_transcript_received", "content": transcript.strip()},
-                                self.meta_info,
-                            )
                             yield create_ws_data_packet(transcript_data, self.meta_info)
 
                     elif isinstance(data, dict) and data.get("type") == "events":
@@ -381,37 +376,33 @@ class SarvamTranscriber(BaseTranscriber):
 
                         elif vad.get("signal_type") == "END_SPEECH":
                             logger.debug("Sarvam VAD: speech ended")
-                            now = time.time()
-                            self.last_vocal_frame_timestamp = now
-                            self.meta_info["last_vocal_frame_timestamp"] = self.last_vocal_frame_timestamp
+                            # now = time.time()
+                            # self.last_vocal_frame_timestamp = now
+                            # self.meta_info["last_vocal_frame_timestamp"] = self.last_vocal_frame_timestamp
 
-                            if self.current_turn_start_time:
-                                total_stream_duration = time.perf_counter() - self.current_turn_start_time
-                                total_stream_duration_ms = round(total_stream_duration * 1000)
+                            # if self.current_turn_start_time:
+                            #     total_stream_duration = time.perf_counter() - self.current_turn_start_time
+                            #     total_stream_duration_ms = round(total_stream_duration * 1000)
                                 
-                                self.meta_info['transcriber_total_stream_duration'] = total_stream_duration
-                                self.meta_info['transcriber_latency'] = total_stream_duration  
+                            #     self.meta_info['transcriber_total_stream_duration'] = total_stream_duration
+                            #     self.meta_info['transcriber_latency'] = total_stream_duration  
 
-                                turn_info = {
-                                    "turn_id": self.current_turn_id,
-                                    "sequence_id": self.current_turn_id,
-                                    "first_result_latency_ms": self.turn_first_result_latency,
-                                    "total_stream_duration_ms": total_stream_duration_ms,  
-                                }
-                                self.turn_latencies.append(turn_info)
-                                self.meta_info["turn_latencies"] = self.turn_latencies
+                            #     turn_info = {
+                            #         "turn_id": self.current_turn_id,
+                            #         "sequence_id": self.current_turn_id,
+                            #         "first_result_latency_ms": self.turn_first_result_latency,
+                            #         "total_stream_duration_ms": total_stream_duration_ms,  
+                            #     }
+                            #     self.turn_latencies.append(turn_info)
+                            #     self.meta_info["turn_latencies"] = self.turn_latencies
                                 
-                                # Reset turn tracking 
-                                self.current_turn_start_time = None
-                                self.current_turn_id = None
+                            #     # Reset turn tracking 
+                            #     self.current_turn_start_time = None
+                            #     self.current_turn_id = None
 
-                            if self.final_transcript:
-                                yield create_ws_data_packet(
-                                    {"type": "transcript", "content": self.final_transcript}, self.meta_info
-                                )
-                                self.final_transcript = ""
-
-                            yield create_ws_data_packet("speech_ended", self.meta_info)
+                            # yield create_ws_data_packet("speech_ended", self.meta_info)
+                            
+                            #TEMPORARY: Checking if useful
 
                     elif isinstance(data, dict) and data.get("type") == "connection_closed":
                         self.meta_info["transcriber_duration"] = data.get("duration", 0)
