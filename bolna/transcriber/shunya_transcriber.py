@@ -17,6 +17,7 @@ from scipy.signal import resample_poly
 from .base_transcriber import BaseTranscriber
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.utils import create_ws_data_packet, timestamp_ms
+from bolna.constants import PCM16_SCALE, SHUNYA_SILENCE_DURATION
 
 load_dotenv()
 logger = configure_logger(__name__)
@@ -46,8 +47,9 @@ class ShunyaTranscriber(BaseTranscriber):
         self.provider = telephony_provider
         self.stream = stream
         self.language = language
+        self.frames_silence_duration = SHUNYA_SILENCE_DURATION
         self.endpointing = int(endpointing)
-        self.model = model  # Currently unused but reserved for future model selection
+        self.model = model
 
         # API configuration
         self.api_key = kwargs.get("transcriber_key", os.getenv('SHUNYA_API_KEY'))
@@ -150,7 +152,9 @@ class ShunyaTranscriber(BaseTranscriber):
             "type": "init",
             "config": {
                 "language": self.language,
-                "api_key": self.api_key
+                "api_key": self.api_key,
+                "enable_frames_silence_flush": True,
+                "frames_silence_duration": self.frames_silence_duration
             }
         }
 
@@ -208,7 +212,7 @@ class ShunyaTranscriber(BaseTranscriber):
             audio_int16 = np.frombuffer(audio_bytes, dtype=np.int16)
 
             # Convert to float32 FIRST (-1.0 to 1.0 range)
-            audio_f32 = audio_int16.astype(np.float32) / 32768.0
+            audio_f32 = audio_int16.astype(np.float32) / PCM16_SCALE
 
             # Resample in float domain
             audio_f32 = self._resample_audio_float(audio_f32, self.sampling_rate, self.target_sampling_rate)
@@ -258,7 +262,7 @@ class ShunyaTranscriber(BaseTranscriber):
                 # Send initialization message
                 init_msg = self._create_init_message()
                 await ws.send(json.dumps(init_msg))
-                logger.info("Sent initialization message to Shunya Labs")
+                logger.info(f"Sent initialization message to Shunya Labs, {json.dumps(init_msg)}")
                 
                 self.session_initialized = True
                 self.connection_authenticated = True
@@ -495,6 +499,10 @@ class ShunyaTranscriber(BaseTranscriber):
         """
         try:
             while True:
+                if self.connection_start_time is None:
+                    logger.warning("Connection time not set yet, waiting before sending audio...")
+                    await asyncio.sleep(0.2)
+                    continue
                 ws_data_packet = await self.input_queue.get()
 
                 if ws_data_packet is None:
