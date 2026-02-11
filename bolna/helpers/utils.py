@@ -22,7 +22,7 @@ from contextlib import AsyncExitStack
 from dotenv import load_dotenv
 from pydantic import create_model
 from .logger_config import configure_logger
-from bolna.constants import PREPROCESS_DIR, PRE_FUNCTION_CALL_MESSAGE, DEFAULT_LANGUAGE_CODE, TRANSFERING_CALL_FILLER
+from bolna.constants import PCM16_SCALE, PREPROCESS_DIR, PRE_FUNCTION_CALL_MESSAGE, DEFAULT_LANGUAGE_CODE, TRANSFERING_CALL_FILLER
 from bolna.prompts import DATE_PROMPT
 from pydub import AudioSegment
 import audioop
@@ -378,17 +378,68 @@ def convert_audio_to_wav(audio_bytes, source_format = 'flac'):
     return buffer.getvalue()
 
 
-def resample(audio_bytes, target_sample_rate, format = "mp3"):
+def resample(audio_bytes, target_sample_rate, format="mp3", pcm_channels=1, original_sample_rate=None):
+    """
+    Resample audio bytes
+    
+    Args:
+        audio_bytes: Audio data as bytes
+        target_sample_rate: Target sample rate
+        format: Audio format ('wav', 'mp3', 'pcm', etc.)
+        original_sample_rate: Required if format='pcm'
+        pcm_channels: Number of channels for PCM (default: 1 mono)
+    """
+    
+    # Handle PCM separately
+    if format == "pcm":
+        if original_sample_rate is None:
+            raise ValueError("original_sample_rate must be provided for PCM format")
+        
+        audio_array = np.frombuffer(audio_bytes, dtype=np.int16)
+        
+        waveform = torch.from_numpy(audio_array).float() / PCM16_SCALE
+        
+        if pcm_channels == 1:
+            waveform = waveform.unsqueeze(0)  # (1, samples)
+        else:
+            # For multi-channel, interleaved PCM
+            waveform = waveform.reshape(pcm_channels, -1)
+        
+        if original_sample_rate == target_sample_rate:
+            return audio_bytes
+        
+        # Resample
+        resampler = torchaudio.transforms.Resample(original_sample_rate, target_sample_rate)
+        audio_waveform = resampler(waveform)
+        
+        audio_int16 = (audio_waveform * PCM16_SCALE).to(torch.int16)
+        return audio_int16.numpy().tobytes()
+    
+    # Handle other formats (wav, mp3, etc.)
     audio_buffer = io.BytesIO(audio_bytes)
-    waveform, orig_sample_rate = torchaudio.load(audio_buffer, format = format)
-    if orig_sample_rate == target_sample_rate:
+    waveform, original_sample_rate = torchaudio.load(audio_buffer, format=format)
+    
+    if original_sample_rate == target_sample_rate:
         return audio_bytes
-    resampler = torchaudio.transforms.Resample(orig_sample_rate, target_sample_rate)
+    
+    resampler = torchaudio.transforms.Resample(original_sample_rate, target_sample_rate)
     audio_waveform = resampler(waveform)
+    
     audio_buffer = io.BytesIO()
-    logger.info(f"Resampling from {orig_sample_rate} to {target_sample_rate}")
+    logger.info(f"Resampling from {original_sample_rate} to {target_sample_rate}")
     torchaudio.save(audio_buffer, audio_waveform, target_sample_rate, format="wav")
+    
     return audio_buffer.getvalue()
+
+
+def get_synth_audio_format(audio_bytes):
+    # input to this can be WAV or PCM
+    try:
+        audio_buffer = io.BytesIO(audio_bytes)
+        with wave.open(audio_buffer, 'rb') as wav_file:
+            return "wav"
+    except wave.Error:
+        return "pcm"
 
 
 def merge_wav_bytes(wav_files_bytes):

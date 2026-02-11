@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 PREPROCESS_DIR = 'agent_data'
+PCM16_SCALE = 32768.0
 
 HIGH_LEVEL_ASSISTANT_ANALYTICS_DATA = {
         "extraction_details":{}, 
@@ -89,4 +90,9 @@ LLM_DEFAULT_CONFIGS = {
         "model": "gpt-4.1-mini",
         "provider": "openai"
     }
+}
+
+SARVAM_MODEL_SAMPLING_RATE_MAPPING = {
+    "bulbul:v2": 22050,
+    "bulbul:v3": 22050 # NOTE: Documentation claims 24000, but WAV header shows 22050
 }
