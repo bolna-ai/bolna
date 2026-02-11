@@ -1505,7 +1505,6 @@ class TaskManager(BaseManager):
             try:
                 from_number = self.context_data['recipient_data']['from_number']
             except Exception as e:
-                logger.warning(f"__execute_function_call[transfer_call] could not read from_number from context_data: {e}")
                 from_number = None
 
             call_sid = None
@@ -1534,7 +1533,7 @@ class TaskManager(BaseManager):
                     if call_transfer_number:
                         payload['call_transfer_number'] = call_transfer_number
                 except Exception as e:
-                    logger.error(f"Error in __execute_function_call while extracting call_transfer_number: {e}")
+                    logger.error(f"Error in __execute_function_call {e}")
 
             if param is not None:
                 logger.info(f"Gotten response {resp}")
@@ -1557,32 +1556,15 @@ class TaskManager(BaseManager):
 
             async with aiohttp.ClientSession() as session:
                 logger.info(f"Sending the payload to stop the conversation {payload} url {url}")
-                convert_to_request_log(
-                    str(payload),
-                    meta_info,
-                    None,
-                    "function_call",
-                    direction="request",
-                    is_cached=False,
-                    run_id=self.run_id,
-                )
-                try:
-                    async with session.post(url, json=payload) as response:
-                        response_text = await response.text()
-                        logger.info(f"Response from the server after call transfer: {response_text}")
-                        convert_to_request_log(
-                            str(response_text),
-                            meta_info,
-                            None,
-                            "function_call",
-                            direction="response",
-                            is_cached=False,
-                            run_id=self.run_id,
-                        )
-                        return
-                except Exception as e:
-                    logger.error(f"Error calling transfer webhook url={url}: {e}")
-                    raise
+                while self.tools["input"].is_audio_being_played_to_user():
+                    await asyncio.sleep(1)
+                convert_to_request_log(str(payload), meta_info, None, "function_call", direction="request", is_cached=False,
+                                       run_id=self.run_id)
+                async with session.post(url, json = payload) as response:
+                    response_text = await response.text()
+                    logger.info(f"Response from the server after call transfer: {response_text}")
+                    convert_to_request_log(str(response_text), meta_info, None, "function_call", direction="response", is_cached=False, run_id=self.run_id)
+                    return
 
         response = await trigger_api(url=url, method=method.lower(), param=param, api_token=api_token, headers_data=headers, meta_info=meta_info, run_id=self.run_id, **resp)
         function_response = str(response)
@@ -2279,12 +2261,6 @@ class TaskManager(BaseManager):
                             welcome_played=self.tools["input"].welcome_message_played()
                         ):
                             logger.info(f"Continuing the loop and ignoring the transcript received ({transcript_content}) in speech final as it is false interruption")
-                            # Reset callee_speaking so that echoed audio does not
-                            # keep the flag stuck and block subsequent agent audio
-                            # via get_audio_send_status → BLOCK.
-                            self.interruption_manager.on_user_speech_ended()
-                            temp_transcriber_message = ""
-                            continue
 
                         self.interruption_manager.on_user_speech_ended()
                         temp_transcriber_message = ""
