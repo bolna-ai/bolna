@@ -162,7 +162,10 @@ class SipTrunkInputHandler(TelephonyInputHandler):
         self._initialize_from_media_start(packet)
 
     async def _listen(self):
-        """Receive both TEXT (control) and BINARY (ulaw) frames. Asterisk: TEXT=control, BINARY=media."""
+        """Receive both TEXT (control) and BINARY (ulaw) frames. Asterisk: TEXT=control, BINARY=media.
+        Audio from Asterisk is 160 bytes per 20ms (optimal_frame_size). We forward to the transcriber
+        in small batches so the full phrase is delivered before endpointing commits (avoids truncated finals).
+        """
         buffer = []
         while self.running:
             try:
@@ -190,10 +193,12 @@ class SipTrunkInputHandler(TelephonyInputHandler):
                     }
                     buffer.append(media_audio)
                     self.message_count += 1
-                    # Buffer audio based on ptime (default 20ms chunks)
-                    # For ulaw/alaw at 8kHz: 160 bytes per 20ms chunk
-                    # Accumulate 5 chunks (100ms) before sending
-                    chunks_to_accumulate = max(1, 100 // self.ptime) if self.ptime else 5
+                    # Forward audio to transcriber frequently so the full phrase is received before
+                    # Deepgram endpointing commits. Asterisk sends 160-byte frames every 20ms;
+                    # batching too much (e.g. 100ms) can leave the tail of the utterance in our
+                    # buffer when the final is emitted, causing truncated transcripts.
+                    # Use 2 frames (~40ms) as a balance between latency and queue load.
+                    chunks_to_accumulate = max(1, 40 // self.ptime) if self.ptime else 2
                     
                     if self.message_count >= chunks_to_accumulate:
                         merged_audio = b''.join(buffer)
@@ -300,7 +305,10 @@ class SipTrunkInputHandler(TelephonyInputHandler):
             logger.info(f"MEDIA_BUFFERING_COMPLETED received - Correlation ID: {correlation_id}")
             return
         if "QUEUE_DRAINED" in event or event == "QUEUE_DRAINED":
-            logger.info(f"QUEUE_DRAINED received for channel {self.channel_id}")
+            logger.info(f"QUEUE_DRAINED received for channel {self.channel_id} - Asterisk finished playing media")
+            # Asterisk has finished playing the queue; clear playback flag so is_audio_being_played_to_user
+            # reflects reality (no mark events in chan_websocket, so this is the authoritative signal).
+            self.update_is_audio_being_played(False)
             return
         # Unknown or empty
         if event or parsed:

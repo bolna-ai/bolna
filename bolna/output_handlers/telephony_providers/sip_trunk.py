@@ -185,6 +185,10 @@ class SipTrunkOutputHandler(TelephonyOutputHandler):
                 if is_final and self.input_handler:
                     asyncio.create_task(self._simulate_mark_event_after_duration(mark_id, audio_duration, message_category))
                     logger.info(f"[SIP-TRUNK OUTPUT] Scheduled mark event simulation for {message_category} after {audio_duration:.3f}s")
+                # Ask Asterisk to notify when queue is drained (real playback finished); input handler
+                # will clear is_audio_being_played on QUEUE_DRAINED (see Asterisk WebSocket docs).
+                if is_final:
+                    asyncio.create_task(self._send_report_queue_drained())
 
         except Exception as e:
             traceback.print_exc()
@@ -213,43 +217,72 @@ class SipTrunkOutputHandler(TelephonyOutputHandler):
             return 800  # Default to ulaw
 
     async def _send_audio_chunked(self, audio_data, audio_format):
-        """Send audio data in smaller chunks to prevent Asterisk from timing out."""
+        """Send audio data in smaller chunks with START/STOP_MEDIA_BUFFERING.
+
+        Per Asterisk WebSocket docs, when sending a buffer from an external source
+        (like an AI agent) whose total size may not be an exact multiple of the
+        optimal frame size, we must wrap the transfer in START_MEDIA_BUFFERING /
+        STOP_MEDIA_BUFFERING so Asterisk can properly re-frame and re-time the
+        media.  Without this, leftover bytes that don't fill a complete frame are
+        silently dropped.
+        """
         chunk_size = self._get_chunk_size(audio_format)
         total_bytes = len(audio_data)
-        
-        # Only chunk if the data is larger than chunk_size
-        if total_bytes <= chunk_size:
-            await self.websocket.send_bytes(audio_data)
-            return total_bytes
-        
-        # Send in chunks with small delays to keep websocket responsive
-        bytes_sent = 0
-        offset = 0
-        
-        while offset < total_bytes:
-            chunk = audio_data[offset:offset + chunk_size]
-            if chunk:
-                await self.websocket.send_bytes(chunk)
-                bytes_sent += len(chunk)
-                
-                # Small delay between chunks to keep websocket responsive
-                if offset + chunk_size < total_bytes:
-                    await asyncio.sleep(0.001)  # 1ms delay between chunks
-            
-            offset += chunk_size
-        
+
+        # Use media buffering for any transfer that might have a remainder
+        use_buffering = total_bytes > self._optimal_frame_size
+
+        if use_buffering:
+            await self.send_control_command('START_MEDIA_BUFFERING')
+
+        try:
+            # Only chunk if the data is larger than chunk_size
+            if total_bytes <= chunk_size:
+                await self.websocket.send_bytes(audio_data)
+                bytes_sent = total_bytes
+            else:
+                # Send in chunks with small delays to keep websocket responsive
+                bytes_sent = 0
+                offset = 0
+
+                while offset < total_bytes:
+                    chunk = audio_data[offset:offset + chunk_size]
+                    if chunk:
+                        await self.websocket.send_bytes(chunk)
+                        bytes_sent += len(chunk)
+
+                        # Small delay between chunks to keep websocket responsive
+                        if offset + chunk_size < total_bytes:
+                            await asyncio.sleep(0.001)  # 1ms delay between chunks
+
+                    offset += chunk_size
+        finally:
+            if use_buffering:
+                correlation_id = str(uuid.uuid4())
+                await self.send_control_command('STOP_MEDIA_BUFFERING', {'correlation_id': correlation_id})
+
         return bytes_sent
+
+    async def _send_report_queue_drained(self):
+        """Send REPORT_QUEUE_DRAINED so Asterisk sends QUEUE_DRAINED when playback finishes."""
+        try:
+            await self.send_control_command("REPORT_QUEUE_DRAINED")
+        except Exception as e:
+            logger.debug(f"REPORT_QUEUE_DRAINED send failed: {e}")
 
     async def _simulate_mark_event_after_duration(self, mark_id, duration, message_category):
         """Simulate a mark event after the audio finishes playing (Asterisk doesn't send mark events back)."""
         try:
             await asyncio.sleep(duration)
-            if self.input_handler and message_category:
+            if not self.input_handler:
+                return
+            # Always clear the flag for final-chunk simulation so we don't rely on fetch_data
+            # (store may have been cleared by interruption); QUEUE_DRAINED from Asterisk is the
+            # authoritative signal when available.
+            self.input_handler.update_is_audio_being_played(False)
+            if message_category:
                 logger.info(f"[SIP-TRUNK OUTPUT] Simulating mark event after {duration:.3f}s for category: {message_category}")
-                mark_packet = {
-                    "name": mark_id,
-                    "type": message_category
-                }
+                mark_packet = {"name": mark_id, "type": message_category}
                 self.input_handler.process_mark_message(mark_packet)
         except Exception as e:
             logger.error(f"Error simulating mark event: {e}")
