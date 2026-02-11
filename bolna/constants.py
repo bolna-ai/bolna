@@ -96,3 +96,5 @@ SARVAM_MODEL_SAMPLING_RATE_MAPPING = {
     "bulbul:v2": 22050,
     "bulbul:v3": 22050 # NOTE: Documentation claims 24000, but WAV header shows 22050
 }
+
+SHUNYA_SILENCE_DURATION = 1.0
