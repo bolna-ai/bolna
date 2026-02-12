@@ -2388,8 +2388,8 @@ class TaskManager(BaseManager):
                                 # TODO handle is audio playing over here
                                 await self.tools["output"].handle(message)
 
-                            logger.info(f"writing response to log {meta_info.get('text')}")
                             if write_to_log:
+                                logger.info(f"Writing response to log {meta_info.get('text')}")
                                 convert_to_request_log(
                                     message=current_text,
                                     meta_info=meta_info,

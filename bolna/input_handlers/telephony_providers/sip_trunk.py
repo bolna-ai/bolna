@@ -85,6 +85,13 @@ class SipTrunkInputHandler(TelephonyInputHandler):
         self.connection_id = None
         self.ptime = 20
 
+        # Pending mark info set by the output handler so that QUEUE_DRAINED
+        # (authoritative Asterisk signal) can trigger proper mark processing
+        # — equivalent to Twilio's mark event for is_audio_being_played,
+        # welcome-message completion, and hangup detection.
+        self._pending_queue_drain_mark_id = None
+        self._pending_queue_drain_category = None
+
         # Resolve format from agent_config (must be ulaw for sip-trunk)
         input_config = self._get_input_config()
         self._expected_format = (input_config.get("audio_format") or input_config.get("format") or "ulaw").lower()
@@ -115,7 +122,11 @@ class SipTrunkInputHandler(TelephonyInputHandler):
         return {}
 
     async def disconnect_stream(self):
-        """Send HANGUP command to Asterisk when disconnecting"""
+        """Send HANGUP command to Asterisk when disconnecting.
+
+        Per Asterisk WebSocket docs, HANGUP causes the channel to be hung up
+        and the WebSocket to be closed immediately.
+        """
         try:
             if self.websocket and self.channel_id:
                 # Check if WebSocket is still open before attempting to send
@@ -130,6 +141,26 @@ class SipTrunkInputHandler(TelephonyInputHandler):
                 logger.info(f"Cannot send HANGUP - websocket or channel_id is None")
         except Exception as e:
             logger.error(f"Error sending HANGUP command: {e}")
+
+    async def stop_handler(self):
+        """Override base stop_handler for faster SIP trunk disconnect.
+
+        Per Asterisk docs, the HANGUP command causes the WebSocket channel to
+        be hung up and the WebSocket to be closed immediately.  The base class
+        sleeps 2 s after firing disconnect_stream, but Asterisk processes
+        HANGUP within milliseconds so we only need a brief pause.
+        """
+        logger.info(f"stopping handler for channel {self.channel_id}")
+        self.running = False
+        await self.disconnect_stream()  # Send HANGUP (awaited, not fire-and-forget)
+        # Asterisk closes the WebSocket almost immediately after HANGUP;
+        # a brief wait is sufficient for the close to propagate.
+        await asyncio.sleep(0.5)
+        try:
+            await self.websocket.close()
+            logger.info("WebSocket connection closed")
+        except Exception as e:
+            logger.info(f"Error closing WebSocket: {e}")
 
     def _initialize_from_media_start(self, media_start_data):
         """Initialize channel info from pre-parsed MEDIA_START data"""
@@ -162,7 +193,10 @@ class SipTrunkInputHandler(TelephonyInputHandler):
         self._initialize_from_media_start(packet)
 
     async def _listen(self):
-        """Receive both TEXT (control) and BINARY (ulaw) frames. Asterisk: TEXT=control, BINARY=media."""
+        """Receive both TEXT (control) and BINARY (ulaw) frames. Asterisk: TEXT=control, BINARY=media.
+        Audio from Asterisk is 160 bytes per 20ms (optimal_frame_size). We forward to the transcriber
+        in small batches so the full phrase is delivered before endpointing commits (avoids truncated finals).
+        """
         buffer = []
         while self.running:
             try:
@@ -190,10 +224,12 @@ class SipTrunkInputHandler(TelephonyInputHandler):
                     }
                     buffer.append(media_audio)
                     self.message_count += 1
-                    # Buffer audio based on ptime (default 20ms chunks)
-                    # For ulaw/alaw at 8kHz: 160 bytes per 20ms chunk
-                    # Accumulate 5 chunks (100ms) before sending
-                    chunks_to_accumulate = max(1, 100 // self.ptime) if self.ptime else 5
+                    # Forward audio to transcriber frequently so the full phrase is received before
+                    # Deepgram endpointing commits. Asterisk sends 160-byte frames every 20ms;
+                    # batching too much (e.g. 100ms) can leave the tail of the utterance in our
+                    # buffer when the final is emitted, causing truncated transcripts.
+                    # Use 2 frames (~40ms) as a balance between latency and queue load.
+                    chunks_to_accumulate = max(1, 40 // self.ptime) if self.ptime else 2
                     
                     if self.message_count >= chunks_to_accumulate:
                         merged_audio = b''.join(buffer)
@@ -300,7 +336,29 @@ class SipTrunkInputHandler(TelephonyInputHandler):
             logger.info(f"MEDIA_BUFFERING_COMPLETED received - Correlation ID: {correlation_id}")
             return
         if "QUEUE_DRAINED" in event or event == "QUEUE_DRAINED":
-            logger.info(f"QUEUE_DRAINED received for channel {self.channel_id}")
+            logger.info(f"QUEUE_DRAINED received for channel {self.channel_id} - Asterisk finished playing media")
+            # Asterisk has finished playing the queue.  This is the authoritative
+            # signal (equivalent to Twilio mark events).  Unlike Twilio/Plivo
+            # which send per-mark callbacks, Asterisk only gives a single
+            # "everything done" signal.  Process ALL remaining marks so that
+            # is_audio_being_played, welcome-message completion, and hangup
+            # detection all work correctly.
+            self.update_is_audio_being_played(False)
+
+            # Clear pending tracking state
+            self._pending_queue_drain_mark_id = None
+            self._pending_queue_drain_category = None
+
+            # Process every mark still in mark_event_meta_data.
+            # fetch_data() pops each entry, so snapshot keys first.
+            all_mark_ids = list(self.mark_event_meta_data.mark_event_meta_data.keys())
+            if all_mark_ids:
+                logger.info(f"QUEUE_DRAINED: processing {len(all_mark_ids)} remaining mark(s)")
+                for mid in all_mark_ids:
+                    mark_data = self.mark_event_meta_data.mark_event_meta_data.get(mid, {})
+                    cat = mark_data.get("type", "agent_response")
+                    mark_packet = {"name": mid, "type": cat}
+                    self.process_mark_message(mark_packet)
             return
         # Unknown or empty
         if event or parsed:
