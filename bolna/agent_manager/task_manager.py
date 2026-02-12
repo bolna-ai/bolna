@@ -187,6 +187,7 @@ class TaskManager(BaseManager):
         self.last_response_time = time.time()
         self.consider_next_transcript_after = time.time()
         self.llm_response_generated = False
+        self.response_in_pipeline = False
 
         # Language detection
         self.language_detector = LanguageDetector(
@@ -1161,6 +1162,7 @@ class TaskManager(BaseManager):
             self.tools["input"].reset_response_heard_by_user()
 
         self.interruption_manager.invalidate_pending_responses()
+        self.response_in_pipeline = False
         await self.tools["synthesizer"].flush_synthesizer_stream()
 
         #Stop the output loop first so that we do not transmit anything else
@@ -1940,6 +1942,7 @@ class TaskManager(BaseManager):
         except Exception as e:
             traceback.print_exc()
             logger.error(f"Something went wrong in llm: {e}")
+            self.response_in_pipeline = False
 
 
     #################################################################
@@ -2150,6 +2153,18 @@ class TaskManager(BaseManager):
             logger.info(f"Running llm Tasks")
             meta_info["origin"] = "transcriber"
             transcriber_package = create_ws_data_packet(transcriber_message, meta_info)
+
+            # Cancel any existing LLM task to prevent orphaned concurrent responses
+            if self.llm_task is not None and not self.llm_task.done():
+                logger.info("Cancelling existing LLM task for new speech_final")
+                self.llm_task.cancel()
+                self.llm_task = None
+                self.interruption_manager.invalidate_pending_responses()
+                # Re-register the current sequence_id (already allocated by
+                # __get_updated_meta_info) so the new response's audio is not blocked
+                self.interruption_manager.revalidate_sequence_id(meta_info["sequence_id"])
+
+            self.response_in_pipeline = True
             self.llm_task = asyncio.create_task(
                 self._run_llm_task(transcriber_package))
             if self.use_fillers:
@@ -2208,7 +2223,7 @@ class TaskManager(BaseManager):
                         if self.interruption_manager.should_trigger_interruption(
                             word_count=interim_transcript_len,
                             transcript=transcript_content,
-                            is_audio_playing=self.tools["input"].is_audio_being_played_to_user(),
+                            is_audio_playing=self.tools["input"].is_audio_being_played_to_user() or self.response_in_pipeline,
                             welcome_played=self.tools["input"].welcome_message_played()
                         ):
                             logger.info(f"Condition for interruption hit")
@@ -2229,7 +2244,7 @@ class TaskManager(BaseManager):
                                 logger.info(f"User continuation detected ({interim_transcript_len} words within {time_since_utterance_end:.0f}ms), canceling pending response")
                                 self.interruption_manager.reset_utterance_end_time()
                                 await self.__cleanup_downstream_tasks()
-                        elif self.tools["input"].is_audio_being_played_to_user() and self.tools["input"].welcome_message_played() and self.number_of_words_for_interruption != 0:
+                        elif (self.tools["input"].is_audio_being_played_to_user() or self.response_in_pipeline) and self.tools["input"].welcome_message_played() and self.number_of_words_for_interruption != 0:
                             # Not enough words for interruption - ignore
                             logger.info(f"Ignoring transcript: {transcript_content.strip()}")
                             continue
@@ -2253,7 +2268,7 @@ class TaskManager(BaseManager):
                         if self.interruption_manager.is_false_interruption(
                             word_count=word_count,
                             transcript=transcript_content,
-                            is_audio_playing=self.tools["input"].is_audio_being_played_to_user(),
+                            is_audio_playing=self.tools["input"].is_audio_being_played_to_user() or self.response_in_pipeline,
                             welcome_played=self.tools["input"].welcome_message_played()
                         ):
                             logger.info(f"Continuing the loop and ignoring the transcript received ({transcript_content}) in speech final as it is false interruption")
@@ -2564,6 +2579,7 @@ class TaskManager(BaseManager):
                     if status == "SEND":
                         # Audio approved - send it
                         self.tools["input"].update_is_audio_being_played(True)
+                        self.response_in_pipeline = False
                         await self.tools["output"].handle(message)
                         try:
                             duration = calculate_audio_duration(len(message["data"]), self.sampling_rate, format=message['meta_info']['format'])

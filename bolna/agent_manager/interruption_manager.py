@@ -144,6 +144,12 @@ class InterruptionManager:
         self.sequence_ids = {-1}
         logger.info("Pending responses invalidated")
 
+    def revalidate_sequence_id(self, sequence_id: int) -> None:
+        """Re-adds a sequence ID after invalidation when a new response's
+        sequence_id was already allocated by __get_updated_meta_info."""
+        self.sequence_ids.add(sequence_id)
+        logger.info(f"Re-validated sequence_id={sequence_id}")
+
     def get_next_sequence_id(self) -> int:
         """Generates and registers a new sequence ID."""
         self.curr_sequence_id += 1
