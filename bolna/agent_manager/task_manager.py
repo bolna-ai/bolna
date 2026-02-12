@@ -730,10 +730,6 @@ class TaskManager(BaseManager):
                                                                 format=message['meta_info']['format'])
                             self.conversation_recording['output'].append(
                                 {'data': data, "start_time": time.time(), "duration": duration})
-                        else:
-                            logger.info("Welcome message audio was None - marking welcome as played to avoid conversation deadlock")
-                            self.tools["input"].is_welcome_message_played = True
-                            self.tools["input"].update_is_audio_being_played(False)
                     except Exception as e:
                         duration = 0.256
                         logger.error("Exception in __forced_first_message for duration calculation: {}".format(str(e)))
