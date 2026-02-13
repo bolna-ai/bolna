@@ -52,17 +52,18 @@ class InterruptionManager:
 
         Returns:
         - "SEND" - audio should be sent now
-        - "BLOCK" - audio should be discarded (user speaking, invalid sequence)
+        - "BLOCK" - audio should be discarded (invalid/cancelled sequence)
         - "WAIT" - audio should be delayed (grace period active)
         """
         # Check 1: Invalid sequence - discard
         if sequence_id not in self.sequence_ids:
             return "BLOCK"
 
-        # Check 2: User is speaking - discard (interruption)
+        # Check 2: User is speaking - hold audio until they stop
+        # Only invalid sequences (from real interruptions) get hard BLOCK above
         if self.callee_speaking:
-            logger.info(f"Audio status=BLOCK - user is speaking")
-            return "BLOCK"
+            logger.info(f"Audio status=WAIT - user is speaking")
+            return "WAIT"
 
         # Check 3: Grace period (only after first 2 turns to avoid latency on welcome)
         if history_length > 2:
