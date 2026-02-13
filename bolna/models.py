@@ -89,6 +89,13 @@ class AzureConfig(BaseModel):
     speed: Optional[float] = 1.0
 
 
+class GeminiConfig(BaseModel):
+    voice: str
+    voice_name: str
+    model: str
+    language: Optional[str] = "en"
+
+
 class Transcriber(BaseModel):
     model: Optional[str] = "nova-2"
     language: Optional[str] = None
@@ -107,7 +114,7 @@ class Transcriber(BaseModel):
 
 class Synthesizer(BaseModel):
     provider: str
-    provider_config: Union[PollyConfig, ElevenLabsConfig, AzureConfig, RimeConfig, SmallestConfig, SarvamConfig, PixaConfig, CartesiaConfig, DeepgramConfig, OpenAIConfig] = Field(union_mode='smart')
+    provider_config: Union[PollyConfig, ElevenLabsConfig, AzureConfig, RimeConfig, SmallestConfig, SarvamConfig, PixaConfig, CartesiaConfig, DeepgramConfig, OpenAIConfig, GeminiConfig] = Field(union_mode='smart')
     stream: bool = False
     buffer_size: Optional[int] = 40  # 40 characters in a buffer
     audio_format: Optional[str] = "pcm"
@@ -150,6 +157,9 @@ class Synthesizer(BaseModel):
         elif provider == "rime":
             if isinstance(config, dict):
                 values["provider_config"] = RimeConfig(**config)
+        elif provider == "gemini":
+            if isinstance(config, dict):
+                values["provider_config"] = GeminiConfig(**config)
 
         return values
 

@@ -8,3 +8,5 @@ from .rime_synthesizer import RimeSynthesizer
 from .smallest_synthesizer import SmallestSynthesizer
 from .sarvam_synthesizer import SarvamSynthesizer
 from .pixa_synthesizer import PixaSynthesizer
+from .gemini_synthesizer import GeminiSynthesizer
+

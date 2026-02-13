@@ -1,4 +1,4 @@
-from .synthesizer import PollySynthesizer, ElevenlabsSynthesizer, OPENAISynthesizer, DeepgramSynthesizer, AzureSynthesizer, CartesiaSynthesizer, SmallestSynthesizer, SarvamSynthesizer, RimeSynthesizer, PixaSynthesizer
+from .synthesizer import PollySynthesizer, ElevenlabsSynthesizer, OPENAISynthesizer, DeepgramSynthesizer, AzureSynthesizer, CartesiaSynthesizer, SmallestSynthesizer, SarvamSynthesizer, RimeSynthesizer, PixaSynthesizer, GeminiSynthesizer
 from .transcriber import DeepgramTranscriber, AzureTranscriber, SarvamTranscriber, AssemblyAITranscriber, GoogleTranscriber, PixaTranscriber, GladiaTranscriber, ElevenLabsTranscriber, SmallestTranscriber
 from .input_handlers import DefaultInputHandler, TwilioInputHandler, ExotelInputHandler, PlivoInputHandler, VobizInputHandler, SipTrunkInputHandler
 from .output_handlers import DefaultOutputHandler, TwilioOutputHandler, ExotelOutputHandler, PlivoOutputHandler, VobizOutputHandler, SipTrunkOutputHandler
@@ -15,7 +15,8 @@ SUPPORTED_SYNTHESIZER_MODELS = {
     SynthesizerProvider.SMALLEST.value: SmallestSynthesizer,
     SynthesizerProvider.SARVAM.value: SarvamSynthesizer,
     SynthesizerProvider.RIME.value: RimeSynthesizer,
-    SynthesizerProvider.PIXA.value: PixaSynthesizer
+    SynthesizerProvider.PIXA.value: PixaSynthesizer,
+    SynthesizerProvider.GEMINI.value: GeminiSynthesizer
 }
 
 SUPPORTED_TRANSCRIBER_PROVIDERS = {
