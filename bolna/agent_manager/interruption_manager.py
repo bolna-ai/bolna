@@ -125,12 +125,20 @@ class InterruptionManager:
             self.time_since_first_interim_result = time.time() * 1000
             logger.info(f"First interim at {self.time_since_first_interim_result}")
 
-    def on_user_speech_ended(self) -> None:
-        """Called when user stops speaking (speech_final/UtteranceEnd)."""
+    def on_user_speech_ended(self, update_utterance_time: bool = True) -> None:
+        """Called when user stops speaking (speech_final/UtteranceEnd).
+
+        Args:
+            update_utterance_time: If True (default), updates utterance_end_time
+                to start a new grace period. Pass False when the speech was ignored
+                (false interruption) or redundant (late UtteranceEnd) so that the
+                grace period stays anchored to the last real user turn.
+        """
         self.callee_speaking = False
         self.let_remaining_audio_pass_through = True
         self.time_since_first_interim_result = -1
-        self.utterance_end_time = time.time() * 1000
+        if update_utterance_time:
+            self.utterance_end_time = time.time() * 1000
         logger.info("User speech ended")
 
     def on_interruption_triggered(self) -> None:
