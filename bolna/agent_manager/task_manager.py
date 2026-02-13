@@ -27,6 +27,7 @@ from bolna.helpers.language_detector import LanguageDetector
 from bolna.helpers.utils import structure_system_prompt, compute_function_pre_call_message, select_message_by_language, get_date_time_from_timezone, calculate_audio_duration, create_ws_data_packet, get_file_names_in_directory, get_raw_audio_bytes, is_valid_md5, \
     get_required_input_types, format_messages, get_prompt_responses, resample, save_audio_file_to_s3, update_prompt_with_context, get_md5_hash, clean_json_string, wav_bytes_to_pcm, convert_to_request_log, yield_chunks_from_memory, process_task_cancellation, pcm_to_ulaw
 from bolna.helpers.logger_config import configure_logger
+from bolna.helpers.ambient_noise_mixer import AmbientNoiseMixer
 from ..helpers.mark_event_meta_data import MarkEventMetaData
 from ..helpers.observable_variable import ObservableVariable
 
@@ -101,6 +102,7 @@ class TaskManager(BaseManager):
 
         self.mark_event_meta_data = MarkEventMetaData()
         self.sampling_rate = 24000
+        self.ambient_noise_mixer = AmbientNoiseMixer()
         self.conversation_ended = False
         self.hangup_triggered = False
         self.hangup_triggered_at = None
@@ -407,13 +409,6 @@ class TaskManager(BaseManager):
                     logger.info(f"Agent welcome message: {self.kwargs['agent_welcome_message']}")
                     self.first_message_task = None
                     self.transcriber_message = ''
-
-                # Ambient noise
-                self.ambient_noise = self.conversation_config.get("ambient_noise", False)
-                self.ambient_noise_task = None
-                if self.ambient_noise:
-                    logger.info(f"Ambient noise is True {self.ambient_noise}")
-                    self.soundtrack = f"{self.conversation_config.get('ambient_noise_track', 'coffee-shop')}.wav"
 
         # setting transcriber and synthesizer in parallel
         self.__setup_transcriber()
@@ -1031,7 +1026,7 @@ class TaskManager(BaseManager):
                     mark_data = mark.get('mark_data', {})
                     mark_type = mark_data.get('type', '')
                     text = mark_data.get('text_synthesized', '')
-                    if mark_type in ['pre_mark_message', 'ambient_noise', 'backchanneling'] or not text:
+                    if mark_type in ['pre_mark_message', 'backchanneling'] or not text:
                         continue
                     pending_chunks.append({
                         'text': text,
@@ -2246,6 +2241,14 @@ class TaskManager(BaseManager):
                 try:
                     async for message in self.tools["synthesizer"].generate():
                         meta_info = message.get("meta_info", {})
+
+                        # Overlay ambient noise onto outgoing audio
+                        if message.get('data') and message['data'] not in (b'\x00', b'\x00\x00'):
+                            audio_format = meta_info.get('format', 'wav')
+                            message['data'] = self.ambient_noise_mixer.mix(
+                                message['data'], audio_format, self.sampling_rate
+                            )
+
                         current_text = meta_info.get("text", "")
                         write_to_log = False
                         if current_text not in all_text_to_be_synthesized:
@@ -2687,33 +2690,6 @@ class TaskManager(BaseManager):
         except Exception as e:
             logger.error(f"Exception in __first_message {str(e)}")
 
-    async def __start_transmitting_ambient_noise(self):
-        try:
-            audio = await get_raw_audio_bytes(f'{os.getenv("AMBIENT_NOISE_PRESETS_DIR")}/{self.soundtrack}', local=True, is_location=True)
-            audio = resample(audio, self.sampling_rate, format = "wav")
-            if self.task_config["tools_config"]["output"]["provider"] in SUPPORTED_OUTPUT_TELEPHONY_HANDLERS.keys():
-                audio = wav_bytes_to_pcm(audio)
-            logger.info(f"Length of audio {len(audio)} {self.sampling_rate}")
-            # TODO whenever this feature is redone ensure to have a look at the metadata of other messages which have the sequence_id of -1. Fields such as end_of_synthesizer_stream and end_of_llm_stream would need to be added here
-            if self.should_record:
-                meta_info={'io': 'default', 'message_category': 'ambient_noise', "request_id": str(uuid.uuid4()), "sequence_id": -1, "type":'audio', 'format': 'wav'}
-            else:
-
-                meta_info={'io': self.tools["output"].get_provider(), 'message_category': 'ambient_noise', 'stream_sid': self.stream_sid , "request_id": str(uuid.uuid4()), "cached": True, "type":'audio', "sequence_id": -1, 'format': 'pcm'}
-            while True:
-                logger.info(f"Before yielding ambient noise")
-                for chunk in yield_chunks_from_memory(audio, self.output_chunk_size*2):
-                    # Only play ambient noise if no content is being transmitted
-                    # Check if any real content audio (sequence_id > 0) is being played
-                    is_content_playing = self.tools["input"].is_audio_being_played_to_user()
-                    
-                    if not is_content_playing:
-                        logger.info(f"Transmitting ambient noise {len(chunk)}")
-                        await self.tools["output"].handle(create_ws_data_packet(chunk, meta_info=meta_info))
-                    logger.info("Sleeping for 800 ms")
-                    await asyncio.sleep(0.5)
-        except Exception as e:
-            logger.error(f"Something went wrong while transmitting noise {e}")
 
     async def handle_init_event(self, init_meta_data):
         """
@@ -2794,8 +2770,6 @@ class TaskManager(BaseManager):
 
                     if self.should_backchannel:
                         self.backchanneling_task = asyncio.create_task(self.__check_for_backchanneling())
-                    if self.ambient_noise:
-                        self.ambient_noise_task = asyncio.create_task(self.__start_transmitting_ambient_noise())
                 try:
                     await asyncio.gather(*tasks)
                 except asyncio.CancelledError as e:
@@ -2913,7 +2887,6 @@ class TaskManager(BaseManager):
                 tasks_to_cancel.append(process_task_cancellation(self.output_task,'output_task'))
                 tasks_to_cancel.append(process_task_cancellation(self.hangup_task,'hangup_task'))
                 tasks_to_cancel.append(process_task_cancellation(self.backchanneling_task, 'backchanneling_task'))
-                tasks_to_cancel.append(process_task_cancellation(self.ambient_noise_task, 'ambient_noise_task'))
                 # tasks_to_cancel.append(process_task_cancellation(self.initial_silence_task, 'initial_silence_task'))
                 tasks_to_cancel.append(process_task_cancellation(self.first_message_task, 'first_message_task'))
                 tasks_to_cancel.append(process_task_cancellation(self.dtmf_task, 'dtmf_task'))
