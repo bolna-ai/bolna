@@ -1,4 +1,5 @@
 import asyncio
+from collections import defaultdict
 import os
 import time
 from openai import OpenAI
@@ -289,13 +290,12 @@ class GraphAgent(BaseAgent):
                 substitution_data = dict(self.context_data)
                 if 'recipient_data' in self.context_data and isinstance(self.context_data['recipient_data'], dict):
                     substitution_data.update(self.context_data['recipient_data'])
-                instructions = instructions.format_map(DictWithMissing(substitution_data))
+                instructions = instructions.format_map(defaultdict(lambda: 'NULL', substitution_data))
             except Exception as e:
                 logger.debug(f"Variable substitution in routing_instructions failed: {e}")
 
         node_objective = current_node.get('prompt', '')
-        system_prompt = f"""Route conversation. Current Node: {current_node['id']}{context_section}
-Objective: {node_objective}\nRouting Guidelines: \n {instructions}\n Node Conversation History:\n"""
+        system_prompt = f"""Routing Guidelines: \n {instructions}\n Current Node: {current_node['id']}{context_section} \n Node Objective: {node_objective}\n\n Node Conversation History:\n"""
 
         logger.debug(f"Routing system prompt:\n{system_prompt}")
         messages = [{"role": "system", "content": system_prompt}]
