@@ -51,8 +51,7 @@ class TelephonyInputHandler(DefaultInputHandler):
     async def stop_handler(self):
         logger.info("stopping handler")
         self.running = False
-        # Fire and forget disconnect_stream - don't block the disconnection flow
-        asyncio.create_task(self._safe_disconnect_stream())
+        self._disconnect_task = asyncio.create_task(self._safe_disconnect_stream())
         logger.info("sleeping for 2 seconds so that whatever needs to pass is passed")
         await asyncio.sleep(2)
         try:
@@ -60,6 +59,12 @@ class TelephonyInputHandler(DefaultInputHandler):
             logger.info("WebSocket connection closed")
         except Exception as e:
             logger.info(f"Error closing WebSocket: {e}")
+        # Ensure disconnect task is complete before returning
+        if self._disconnect_task and not self._disconnect_task.done():
+            try:
+                await asyncio.wait_for(self._disconnect_task, timeout=5.0)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                logger.warning("disconnect_stream task did not complete in time")
 
     async def ingest_audio(self, audio_data, meta_info):
         ws_data_packet = create_ws_data_packet(data=audio_data, meta_info=meta_info)
