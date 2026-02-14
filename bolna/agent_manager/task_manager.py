@@ -2146,6 +2146,24 @@ class TaskManager(BaseManager):
         # Collect transcript for language detection
         await self.language_detector.collect_transcript(transcriber_message)
 
+        # Merge with previous user transcript if the response hasn't been heard yet.
+        # This handles Deepgram splitting continuous speech into multiple speech_finals
+        # due to natural pauses — instead of each segment triggering a separate LLM call,
+        # we combine them into one and re-run.
+        if self.response_in_pipeline and next_task == "llm":
+            # Pop all unheard assistant/tool responses (could be filler + LLM response, or none if LLM still running)
+            while len(self.history) > 0 and self.history[-1].get("role") in ("assistant", "tool"):
+                self.history.pop()
+
+            # Merge with the previous user message
+            if len(self.history) > 0 and self.history[-1].get("role") == "user":
+                prev_user = self.history.pop()
+                transcriber_message = prev_user["content"] + " " + transcriber_message
+                logger.info(f"Merged transcript with unheard response: {transcriber_message}")
+
+            # Clean up the pending (unheard) response pipeline
+            await self.__cleanup_downstream_tasks()
+
         self.history.append({"role": "user", "content": transcriber_message})
 
         convert_to_request_log(message=transcriber_message, meta_info=meta_info, model=self.task_config["tools_config"]["transcriber"]["provider"], run_id= self.run_id)
