@@ -2,6 +2,12 @@ from datetime import datetime, timezone
 PREPROCESS_DIR = 'agent_data'
 PCM16_SCALE = 32768.0
 
+# Chat message roles
+ROLE_SYSTEM = "system"
+ROLE_USER = "user"
+ROLE_ASSISTANT = "assistant"
+ROLE_TOOL = "tool"
+
 HIGH_LEVEL_ASSISTANT_ANALYTICS_DATA = {
         "extraction_details":{}, 
         "cost_details": {
