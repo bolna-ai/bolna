@@ -8,6 +8,7 @@ import json
 from bolna.constants import DEFAULT_LANGUAGE_CODE
 from bolna.helpers.utils import convert_to_request_log, compute_function_pre_call_message, now_ms
 from .llm import BaseLLM
+from .tool_call_accumulator import ToolCallAccumulator
 from bolna.enums import ReasoningEffort, Verbosity
 from bolna.helpers.logger_config import configure_logger
 
@@ -110,9 +111,9 @@ class OpenAiLLM(BaseLLM):
 
         answer, buffer = "", ""
         tools = model_args.get("tools", [])
-        final_tool_calls_data = {}
-        received_textual_response = False
-        called_fun = None
+        accumulator = None
+        if self.trigger_function_call:
+            accumulator = ToolCallAccumulator(self.api_params, tools, self.language, self.model, self.run_id)
 
         start_time = now_ms()
         first_token_time = None
@@ -157,49 +158,27 @@ class OpenAiLLM(BaseLLM):
                 latency_data = {
                     "sequence_id": meta_info.get("sequence_id"),
                     "first_token_latency_ms": first_token_time - start_time,
-                    "total_stream_duration_ms": None,  # Will be filled at end
+                    "total_stream_duration_ms": None,
                     "service_tier": service_tier,
                     "llm_host": self.llm_host
                 }
 
             delta = chunk.choices[0].delta
 
-            # Function call chunk
-            if hasattr(delta, 'tool_calls') and delta.tool_calls:
+            if hasattr(delta, 'tool_calls') and delta.tool_calls and accumulator:
                 if buffer:
                     yield buffer, True, latency_data, False, None, None
                     buffer = ""
 
-                # This for loop is going to cover the case of multiple tool calls. Currently, we are not allowing parallel
-                # tool calls but if enabled in the future then this code should take care of accumulating the tool call data
-                for tool_call in delta.tool_calls or []:
-                    idx = tool_call.index
-                    if idx not in final_tool_calls_data:
-                        called_fun = tool_call.function.name
-                        logger.info(f"Function given by LLM to trigger is - {called_fun}")
-                        final_tool_calls_data[idx] = {
-                            "index": tool_call.index,
-                            "id": tool_call.id,
-                            "function": {
-                                "name": called_fun,
-                                "arguments": tool_call.function.arguments
-                            },
-                            "type": "function"
-                        }
-                    else:
-                        final_tool_calls_data[idx]["function"]["arguments"] += tool_call.function.arguments
+                accumulator.process_delta(delta.tool_calls)
 
-                if not self.gave_out_prefunction_call_message and not received_textual_response:
-                    api_tool_pre_call_message = self.api_params[called_fun].get('pre_call_message', None)
-                    detected_lang = meta_info.get('detected_language') if meta_info else None
-                    active_language = detected_lang or self.language
-                    pre_msg = compute_function_pre_call_message(active_language, called_fun, api_tool_pre_call_message)
-                    yield pre_msg, True, latency_data, False, called_fun, api_tool_pre_call_message
-                    self.gave_out_prefunction_call_message = True
+                pre_call = accumulator.get_pre_call_message(meta_info)
+                if pre_call:
+                    yield pre_call[0], True, latency_data, False, pre_call[1], pre_call[2]
 
-            # Normal text delta
             elif hasattr(delta, 'content') and delta.content is not None:
-                received_textual_response = True
+                if accumulator:
+                    accumulator.received_textual = True
                 answer += delta.content
                 buffer += delta.content
                 if synthesize and len(buffer) >= self.buffer_size:
@@ -207,44 +186,15 @@ class OpenAiLLM(BaseLLM):
                     yield split[0], False, latency_data, False, None, None
                     buffer = split[1] if len(split) > 1 else ""
 
-        # Set final duration
         if latency_data:
             latency_data["total_stream_duration_ms"] = now_ms() - start_time
 
-        # Post-processing for function call payload
-        if self.trigger_function_call and final_tool_calls_data and final_tool_calls_data[0]["function"]["name"] in self.api_params:
-            i = [i for i in range(len(tools)) if called_fun == tools[i]["function"]["name"]][0]
-            func_conf = self.api_params[called_fun]
-            arguments_received = final_tool_calls_data[0]["function"]["arguments"]
+        if accumulator and accumulator.final_tool_calls:
+            api_call_payload = accumulator.build_api_payload(model_args, meta_info, answer)
+            if api_call_payload:
+                yield api_call_payload, False, latency_data, True, None, None
 
-            logger.info(f"Payload to send {arguments_received} func_dict {func_conf}")
-            self.gave_out_prefunction_call_message = False
-
-            api_call_payload = {
-                "url": func_conf['url'],
-                "method": None if func_conf['method'] is None else func_conf['method'].lower(),
-                "param": func_conf['param'],
-                "api_token": func_conf['api_token'],
-                "headers": func_conf.get('headers', None),
-                "model_args": model_args,
-                "meta_info": meta_info,
-                "called_fun": called_fun,
-                "model_response": list(final_tool_calls_data.values()),
-                "tool_call_id": final_tool_calls_data[0].get("id", ""),
-                "textual_response": answer.strip() if received_textual_response else None
-            }
-
-            all_required_keys = tools[i]["function"]["parameters"]["properties"].keys() and tools[i]["function"]["parameters"].get(
-                "required", [])
-            if tools[i]["function"].get("parameters", None) is not None and (all(key in arguments_received for key in all_required_keys)):
-                convert_to_request_log(arguments_received, meta_info, self.model, "llm", direction="response", is_cached=False,
-                                       run_id=self.run_id)
-                api_call_payload.update(json.loads(arguments_received))
-            else:
-                api_call_payload['resp'] = None
-            yield api_call_payload, False, latency_data, True, None, None
-
-        if synthesize:  # This is used only in streaming sense
+        if synthesize:
             yield buffer, True, latency_data, False, None, None
         else:
             yield answer, True, latency_data, False, None, None

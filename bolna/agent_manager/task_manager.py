@@ -16,6 +16,7 @@ import aiohttp
 
 from bolna.constants import ACCIDENTAL_INTERRUPTION_PHRASES, DEFAULT_USER_ONLINE_MESSAGE, DEFAULT_USER_ONLINE_MESSAGE_TRIGGER_DURATION, FILLER_DICT, DEFAULT_LANGUAGE_CODE, DEFAULT_TIMEZONE, LANGUAGE_NAMES, LLM_DEFAULT_CONFIGS
 from bolna.helpers.function_calling_helpers import trigger_api, computed_api_response
+from bolna.helpers.conversation_history import ConversationHistory
 from bolna.memory.cache.vector_cache import VectorCache
 from .base_manager import BaseManager
 from .interruption_manager import InterruptionManager
@@ -165,8 +166,9 @@ class TaskManager(BaseManager):
         # Agent stuff
         # Need to maintain current conversation history and overall persona/history kinda thing.
         # Soon we will maintain a separate history for this
-        self.history = [] if conversation_history is None else conversation_history
-        self.interim_history = copy.deepcopy(self.history.copy())
+        self.conversation_history = ConversationHistory(
+            [] if conversation_history is None else conversation_history
+        )
         self.label_flow = []
 
         # Setup IO SERVICE, TRANSCRIBER, LLM, SYNTHESIZER
@@ -497,8 +499,23 @@ class TaskManager(BaseManager):
             self.tools["webhook_agent"] = WebhookAgent(webhook_url=webhook_url)
 
     @property
+    def history(self):
+        return self.conversation_history.messages
+
+    @history.setter
+    def history(self, value):
+        self.conversation_history._messages = value
+
+    @property
+    def interim_history(self):
+        return self.conversation_history.interim
+
+    @interim_history.setter
+    def interim_history(self, value):
+        self.conversation_history._interim = value
+
+    @property
     def call_hangup_message(self):
-        """Get the hangup message based on detected language."""
         detected_lang = self.language_detector.dominant_language if hasattr(self, 'language_detector') else None
         return select_message_by_language(self.call_hangup_message_config, detected_lang)
 
@@ -991,10 +1008,10 @@ class TaskManager(BaseManager):
                 'content': ""
             }
 
-        if len(self.system_prompt['content']) == 0:
-            self.history = [] if len(self.history) == 0 else self.history
-        else:
-            self.history = [self.system_prompt] if len(self.history) == 0 else [self.system_prompt] + self.history
+        welcome_msg = ""
+        if task_id == 0 and self.kwargs.get('agent_welcome_message'):
+            welcome_msg = self.kwargs['agent_welcome_message']
+        self.conversation_history.setup_system_prompt(self.system_prompt, welcome_msg)
 
         # If using knowledge_agent, inject the prompt into agent config so agent can read it
         try:
@@ -1003,12 +1020,6 @@ class TaskManager(BaseManager):
                     self.task_config['tools_config']['llm_agent']['llm_config']['prompt'] = self.system_prompt['content']
         except Exception as e:
             logger.error(f"Failed to inject prompt into knowledge agent config: {e}")
-
-        #If history is empty and agent welcome message is not empty add it to history
-        if task_id == 0 and len(self.history) == 1 and len(self.kwargs['agent_welcome_message']) != 0:
-            self.history.append({'role': 'assistant', 'content': self.kwargs['agent_welcome_message']})
-
-        self.interim_history = copy.deepcopy(self.history)
 
     def __prefill_prompts(self, task, prompt, task_type):
         if self.context_data and 'recipient_data' in self.context_data and self.context_data[
@@ -1120,30 +1131,10 @@ class TaskManager(BaseManager):
                     # No pending content marks - response likely completed normally
                     return
 
-            # Update last assistant message in history
-            for i in range(len(self.history) - 1, -1, -1):
-                if self.history[i]['role'] == 'assistant':
-                    original = self.history[i]['content']
-                    if original is None:
-                        continue
-                    updated = self.update_transcript_for_interruption(original, response_heard)
-                    if not updated or not updated.strip():
-                        self.history.pop(i)
-                    else:
-                        self.history[i]['content'] = updated
-                    break
-
-            for i in range(len(self.interim_history) - 1, -1, -1):
-                if self.interim_history[i]['role'] == 'assistant':
-                    original = self.interim_history[i]['content']
-                    if original is None:
-                        continue
-                    updated = self.update_transcript_for_interruption(original, response_heard)
-                    if not updated or not updated.strip():
-                        self.interim_history.pop(i)
-                    else:
-                        self.interim_history[i]['content'] = updated
-                    break
+            self.conversation_history.sync_after_interruption(
+                response_heard, self.update_transcript_for_interruption)
+            self.conversation_history.sync_interim_after_interruption(
+                response_heard, self.update_transcript_for_interruption)
 
         except Exception as e:
             logger.error(f"sync_history failed: {e}")
@@ -1439,7 +1430,7 @@ class TaskManager(BaseManager):
 
     async def _process_conversation_preprocessed_task(self, message, sequence, meta_info):
         if self.task_config["tools_config"]["llm_agent"]['agent_flow_type'] == "preprocessed":
-            messages = copy.deepcopy(self.history)
+            messages = self.conversation_history.get_copy()
             # TODO revisit this
             messages.append({'role': 'user', 'content': message['data']})
             logger.info(f"Starting LLM Agent {messages}")
@@ -1458,10 +1449,7 @@ class TaskManager(BaseManager):
                         self._synthesize(create_ws_data_packet(next_state['audio'], meta_info, is_md5_hash=True))))
             logger.info(f"Interim history after the LLM task {messages}")
             self.llm_response_generated = True
-            self.interim_history = copy.deepcopy(messages)
-            # if self.callee_silent:
-            #     logger.info("When we got utterance end, maybe LLM was still generating response. So, copying into history")
-            #     self.history = copy.deepcopy(self.interim_history)
+            self.conversation_history.sync_interim(messages)
 
     async def _process_conversation_formulaic_task(self, message, sequence, meta_info):
         llm_response = ""
@@ -1593,26 +1581,23 @@ class TaskManager(BaseManager):
             set_response_prompt = function_response
 
         textual_response = resp.get("textual_response", None)
-        self.history.append({"role": "assistant", "content": textual_response, "tool_calls": resp["model_response"]})
-        self.history.append({"role": "tool", "tool_call_id": resp.get("tool_call_id", ""), "content": function_response})
-        model_args["messages"].append({"role": "assistant", "content": textual_response, "tool_calls": resp["model_response"]})
-        model_args["messages"].append({"role": "tool", "tool_call_id": resp.get("tool_call_id", ""), "content": function_response})
+        self.conversation_history.append_assistant(textual_response, tool_calls=resp["model_response"])
+        self.conversation_history.append_tool_result(resp.get("tool_call_id", ""), function_response)
 
         logger.info(f"Logging function call parameters ")
         convert_to_request_log(function_response, meta_info , None, "function_call", direction = "response", is_cached= False, run_id = self.run_id)
 
-        convert_to_request_log(format_messages(model_args['messages'], True), meta_info, self.llm_config['model'], "llm", direction = "request", is_cached= False, run_id = self.run_id)
+        messages = self.conversation_history.get_copy()
+        convert_to_request_log(format_messages(messages, True), meta_info, self.llm_config['model'], "llm", direction = "request", is_cached= False, run_id = self.run_id)
         self.check_if_user_online = self.conversation_config.get("check_if_user_online", True)
 
         if not called_fun.startswith("transfer_call"):
             should_bypass_synth = meta_info.get('bypass_synth', False)
-            await self.__do_llm_generation(model_args["messages"], meta_info, next_step, should_bypass_synth=should_bypass_synth, should_trigger_function_call=True)
+            await self.__do_llm_generation(messages, meta_info, next_step, should_bypass_synth=should_bypass_synth, should_trigger_function_call=True)
 
         self.execute_function_call_task = None
 
     def __store_into_history(self, meta_info, messages, llm_response, should_trigger_function_call = False):
-        # TODO revisit this
-        # if self.current_request_id in self.llm_rejected_request_ids:
         if False:
             logger.info("##### User spoke while LLM was generating response")
         else:
@@ -1620,17 +1605,11 @@ class TaskManager(BaseManager):
             convert_to_request_log(message=llm_response, meta_info= meta_info, component="llm", direction="response", model=self.llm_config["model"], run_id= self.run_id)
             if should_trigger_function_call:
                 logger.info(f"There was a function call and need to make that work")
-                self.history.append({"role": "assistant", "content": llm_response})
-                #Assuming that callee was silent
-                # self.history = copy.deepcopy(self.interim_history)
+                self.conversation_history.append_assistant(llm_response)
             else:
                 messages.append({"role": "assistant", "content": llm_response})
-                self.history.append({"role": "assistant", "content": llm_response})
-                self.interim_history = copy.deepcopy(messages)
-                # if self.callee_silent:
-                #     logger.info("##### When we got utterance end, maybe LLM was still generating response. So, copying into history")
-                #     self.history = copy.deepcopy(self.interim_history)
-                #self.__update_transcripts()
+                self.conversation_history.append_assistant(llm_response)
+                self.conversation_history.sync_interim(messages)
 
     async def __do_llm_generation(self, messages, meta_info, next_step, should_bypass_synth=False, should_trigger_function_call=False):
         # Reset response tracking for new turn
@@ -1753,8 +1732,8 @@ class TaskManager(BaseManager):
                 if text_chunk == filler_message:
                     logger.info("Got a pre function call message")
                     messages.append({'role':'assistant', 'content': filler_message})
-                    self.history.append({'role': 'assistant', 'content': filler_message})
-                    self.interim_history = copy.deepcopy(messages)
+                    self.conversation_history.append_assistant(filler_message)
+                    self.conversation_history.sync_interim(messages)
 
                 await self._handle_llm_output(next_step, text_chunk, should_bypass_synth, meta_info)
 
@@ -1765,7 +1744,7 @@ class TaskManager(BaseManager):
         elif not self.stream:
             llm_response = llm_response.strip()
             if self.turn_based_conversation:
-                self.history.append({"role": "assistant", "content": llm_response})
+                self.conversation_history.append_assistant(llm_response)
             await self._handle_llm_output(next_step, llm_response, should_bypass_synth, meta_info, is_function_call=should_trigger_function_call)
             convert_to_request_log(message=llm_response, meta_info=meta_info, component="llm", direction="response", model=self.llm_config["model"], run_id=self.run_id)
 
@@ -1810,14 +1789,10 @@ class TaskManager(BaseManager):
                 cache_response = self.route_responses_dict[route][relevant_utterance]
                 convert_to_request_log(message=message['data'], meta_info=meta_info, component="llm", direction="request", model=self.llm_config["model"], run_id=self.run_id)
                 convert_to_request_log(message=message['data'], meta_info=meta_info, component="llm", direction="response", model=self.llm_config["model"], is_cached=True, run_id= self.run_id)
-                messages = copy.deepcopy(self.history)
-                # TODO revisit this
+                messages = self.conversation_history.get_copy()
                 messages += [{'role': 'user', 'content': message['data']},{'role': 'assistant', 'content': cache_response}]
-                self.interim_history = copy.deepcopy(messages)
+                self.conversation_history.sync_interim(messages)
                 self.llm_response_generated = True
-                # if self.callee_silent:
-                #     logger.info("##### When we got utterance end, maybe LLM was still generating response. So, copying into history")
-                #     self.history = copy.deepcopy(self.interim_history)
 
             else:
                 logger.info(f"Route doesn't have a vector cache, and hence simply returning back a given response")
@@ -1831,10 +1806,8 @@ class TaskManager(BaseManager):
             self.llm_processed_request_ids.add(self.current_request_id)
         else:
             if self.turn_based_conversation:
-                self.history.append({"role": "user", "content": message['data']})
-            messages = copy.deepcopy(self.history)
-            # messages.append({'role': 'user', 'content': message['data']})
-            ### TODO CHECK IF THIS IS EVEN REQUIRED
+                self.conversation_history.append_user(message['data'])
+            messages = self.conversation_history.get_copy()
 
             # Request logs converted inside do_llm_generation for knowledgebase agent
             if not self.__is_knowledgebase_agent() and not self.__is_graph_agent():
@@ -2124,47 +2097,31 @@ class TaskManager(BaseManager):
         await self.process_call_hangup()
 
     async def _handle_transcriber_output(self, next_task, transcriber_message, meta_info):
-        if not self.tools["input"].welcome_message_played() and len(self.history) > 2:
+        if not self.tools["input"].welcome_message_played() and len(self.conversation_history) > 2:
             logger.info(f"Welcome message is playing while spoken: {transcriber_message}")
             return
 
-        # Skip only if exact same content as last user message (true duplicate)
-        if (len(self.history) > 0
-            and self.history[-1].get("role") == "user"
-            and self.history[-1].get("content", "").strip() == transcriber_message.strip()):
+        if self.conversation_history.is_duplicate_user(transcriber_message):
             logger.info(f"Skipping duplicate transcript (same content): {transcriber_message}")
             return
 
-        # Trigger background voicemail check (non-blocking) for final transcripts
         self._trigger_voicemail_check(transcriber_message, meta_info, is_final=True)
 
-        # Skip processing if voicemail was already detected
         if self.voicemail_detected:
             logger.info("Voicemail already detected - skipping normal transcriber output processing")
             return
 
-        # Collect transcript for language detection
         await self.language_detector.collect_transcript(transcriber_message)
 
-        # Merge with previous user transcript if the response hasn't been heard yet.
-        # This handles Deepgram splitting continuous speech into multiple speech_finals
-        # due to natural pauses — instead of each segment triggering a separate LLM call,
-        # we combine them into one and re-run.
         if self.response_in_pipeline and next_task == "llm":
-            # Pop all unheard assistant/tool responses (could be filler + LLM response, or none if LLM still running)
-            while len(self.history) > 0 and self.history[-1].get("role") in ("assistant", "tool"):
-                self.history.pop()
-
-            # Merge with the previous user message
-            if len(self.history) > 0 and self.history[-1].get("role") == "user":
-                prev_user = self.history.pop()
-                transcriber_message = prev_user["content"] + " " + transcriber_message
+            self.conversation_history.pop_unheard_responses()
+            original_message = transcriber_message
+            transcriber_message = self.conversation_history.pop_and_merge_user(transcriber_message)
+            if transcriber_message != original_message:
                 logger.info(f"Merged transcript with unheard response: {transcriber_message}")
-
-            # Clean up the pending (unheard) response pipeline
             await self.__cleanup_downstream_tasks()
 
-        self.history.append({"role": "user", "content": transcriber_message})
+        self.conversation_history.append_user(transcriber_message)
 
         convert_to_request_log(message=transcriber_message, meta_info=meta_info, model=self.task_config["tools_config"]["transcriber"]["provider"], run_id= self.run_id)
         if next_task == "llm":
@@ -2857,7 +2814,7 @@ class TaskManager(BaseManager):
                 system_prompt = self.system_prompt['content']
                 system_prompt = update_prompt_with_context(system_prompt, self.context_data)
                 self.system_prompt['content'] = system_prompt
-                self.history[0]['content'] = system_prompt
+                self.conversation_history.update_system_prompt(system_prompt)
 
             if self.call_hangup_message_config and self.context_data:
                 if isinstance(self.call_hangup_message_config, dict):
@@ -2872,8 +2829,8 @@ class TaskManager(BaseManager):
             agent_welcome_message = update_prompt_with_context(agent_welcome_message, self.context_data)
             logger.info(f"Updated agent welcome message after context data replacement - {agent_welcome_message}")
             self.kwargs["agent_welcome_message"] = agent_welcome_message
-            if len(self.history) == 2 and agent_welcome_message and self.history[1]["role"] == "assistant":
-                self.history[1]["content"] = agent_welcome_message
+            if len(self.conversation_history) == 2 and agent_welcome_message:
+                self.conversation_history.update_welcome_message(agent_welcome_message)
 
             await self.tools["output"].send_init_acknowledgement()
             self.first_message_task = asyncio.create_task(self.__first_message())
