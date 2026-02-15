@@ -13,3 +13,6 @@ class BaseLLM:
 
     async def generate(self, messages, stream=True, ret_metadata=False):
         pass
+
+    def invalidate_response_chain(self):
+        pass

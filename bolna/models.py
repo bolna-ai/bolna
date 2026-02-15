@@ -248,6 +248,7 @@ class Llm(BaseModel):
     routes: Optional[Routes] = None
     reasoning_effort: Optional[ReasoningEffort] = None
     verbosity: Optional[Verbosity] = None
+    use_responses_api: Optional[bool] = False
 
 
 class SimpleLlmAgent(Llm):

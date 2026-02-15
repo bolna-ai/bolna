@@ -1,6 +1,7 @@
 import json
 from bolna.helpers.utils import convert_to_request_log, compute_function_pre_call_message
 from bolna.helpers.logger_config import configure_logger
+from .types import FunctionCallPayload
 
 logger = configure_logger(__name__)
 
@@ -45,7 +46,7 @@ class ToolCallAccumulator:
         pre_msg = compute_function_pre_call_message(active_language, self.called_fun, api_tool_pre_call_message)
         return pre_msg, self.called_fun, api_tool_pre_call_message
 
-    def build_api_payload(self, model_args: dict, meta_info: dict, answer: str) -> dict | None:
+    def build_api_payload(self, model_args: dict, meta_info: dict, answer: str) -> FunctionCallPayload | None:
         if not self.final_tool_calls:
             return None
 
@@ -59,12 +60,13 @@ class ToolCallAccumulator:
         logger.info(f"Payload to send {arguments_received} func_dict {func_conf}")
         self._gave_pre_call_msg = False
 
-        api_call_payload = {
+        method = func_conf.get('method')
+        api_call_payload: FunctionCallPayload = {
             "url": func_conf.get('url'),
-            "method": (func_conf.get('method') or "").lower() or None,
+            "method": method.lower() if method else None,
             "param": func_conf.get('param'),
             "api_token": func_conf.get('api_token'),
-            "headers": func_conf.get('headers', None),
+            "headers": func_conf.get('headers'),
             "model_args": model_args,
             "meta_info": meta_info,
             "called_fun": first_func_name,
@@ -73,7 +75,7 @@ class ToolCallAccumulator:
             "textual_response": answer.strip() if self.received_textual else None
         }
 
-        # Find tool spec for validation
+        # Chat Completions tools use nested {"function": {"name": ..., "parameters": ...}}
         tool_spec = next((t for t in self.tools if t["function"]["name"] == first_func_name), None)
 
         if tool_spec:

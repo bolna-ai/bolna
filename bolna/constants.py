@@ -8,6 +8,27 @@ ROLE_USER = "user"
 ROLE_ASSISTANT = "assistant"
 ROLE_TOOL = "tool"
 
+# Model prefixes
+GPT5_MODEL_PREFIX = "gpt-5"
+
+# Responses API stream event types
+RESPONSE_CREATED = "response.created"
+RESPONSE_COMPLETED = "response.completed"
+RESPONSE_FAILED = "response.failed"
+RESPONSE_INCOMPLETE = "response.incomplete"
+RESPONSE_OUTPUT_TEXT_DELTA = "response.output_text.delta"
+RESPONSE_OUTPUT_ITEM_ADDED = "response.output_item.added"
+RESPONSE_FUNCTION_CALL_ARGS_DELTA = "response.function_call_arguments.delta"
+
+# Responses API input item types
+ITEM_TYPE_MESSAGE = "message"
+ITEM_TYPE_FUNCTION_CALL = "function_call"
+ITEM_TYPE_FUNCTION_CALL_OUTPUT = "function_call_output"
+ITEM_TYPE_FUNCTION = "function"
+
+# Stale response ID error hints
+STALE_RESPONSE_ERROR_HINTS = ("previous_response", "not found", "invalid", "expired")
+
 HIGH_LEVEL_ASSISTANT_ANALYTICS_DATA = {
         "extraction_details":{}, 
         "cost_details": {
