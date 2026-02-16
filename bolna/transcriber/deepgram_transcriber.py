@@ -87,7 +87,7 @@ class DeepgramTranscriber(BaseTranscriber):
             'utterance_end_ms': '1000' if int(self.endpointing) < 1000 else str(self.endpointing)
         }
 
-        self.audio_frame_duration = 0.5  # We're sending 8k samples with a sample rate of 16k
+        self.audio_frame_duration = 0.1  # 100ms chunks for optimal latency
 
         if self.provider in TelephonyProvider.telephony_values():
             # For sip-trunk (Asterisk), encoding and sampling_rate are already set in task_manager
@@ -97,7 +97,7 @@ class DeepgramTranscriber(BaseTranscriber):
                 self.sampling_rate = 8000
             # For sip-trunk, encoding and sampling_rate come from task_config (set in task_manager)
             # They're already set from the __init__ parameters, so we don't override
-            self.audio_frame_duration = 0.2  # 200ms chunks for telephony
+            self.audio_frame_duration = 0.1  # 100ms chunks for telephony
 
             dg_params['encoding'] = self.encoding
             dg_params['sample_rate'] = self.sampling_rate
@@ -111,8 +111,7 @@ class DeepgramTranscriber(BaseTranscriber):
             dg_params['sample_rate'] = 16000
             dg_params['channels'] = "1"
             self.sampling_rate = 16000
-            # TODO what is the purpose of this?
-            self.audio_frame_duration = 0.256
+            self.audio_frame_duration = 0.1  # 100ms chunks for web calls
 
         elif not self.connected_via_dashboard:
             dg_params['encoding'] = "linear16"
