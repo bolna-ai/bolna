@@ -123,15 +123,26 @@ class TelephonyInputHandler(DefaultInputHandler):
                     self.process_mark_message(packet)
 
                 elif packet['event'] == 'dtmf':
+                    # Verbose: log raw DTMF packet from provider (e.g. Plivo) for production debugging
+                    logger.info(
+                        f"DTMF raw packet io={self.io_provider} event={packet.get('event')} "
+                        f"payload={packet}"
+                    )
                     digit = packet.get('dtmf', {}).get('digit', '')
-                    logger.info(f"DTMF key pressed: '{digit}' | Accumulated: '{self.dtmf_digits}'")
+                    logger.info(
+                        f"DTMF key pressed: '{digit}' | Accumulated: '{self.dtmf_digits}' "
+                        f"io={self.io_provider} is_dtmf_active={self.is_dtmf_active}"
+                    )
                     if not digit:
+                        logger.info("DTMF event had no digit, skipping")
                         continue
 
                     is_complete = await self._handle_dtmf_digit(digit)
                     if is_complete and self.dtmf_digits:
                         if self.is_dtmf_active:
-                            logger.info(f"DTMF complete - Sending: '{self.dtmf_digits}'")
+                            logger.info(
+                                f"DTMF complete - Sending to queue: '{self.dtmf_digits}' io={self.io_provider}"
+                            )
                             self.queues['dtmf'].put_nowait(self.dtmf_digits)
                         self.dtmf_digits = ""
 

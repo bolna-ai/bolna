@@ -1336,16 +1336,24 @@ class TaskManager(BaseManager):
         while True:
             try:
                 dtmf_digits = await self.queues["dtmf"].get()
-                logger.info(f"DTMF collected {dtmf_digits}")
+                io_provider = self.tools['input'].io_provider
+                logger.info(
+                    f"DTMF collected from queue digits='{dtmf_digits}' io={io_provider} "
+                    f"type={type(dtmf_digits).__name__} len={len(dtmf_digits) if dtmf_digits else 0}"
+                )
 
                 dtmf_message = "dtmf_number: " + dtmf_digits
                 base_meta_info = {
-                    'io': self.tools['input'].io_provider,
+                    'io': io_provider,
                     'type': 'text',
                     'sequence': 0,
                     'origin': 'dtmf'
                 }
                 meta_info = self.__get_updated_meta_info(base_meta_info)
+                logger.info(
+                    f"DTMF sending to LLM message='{dtmf_message}' meta_info={base_meta_info} "
+                    f"sequence_id={meta_info.get('sequence_id')}"
+                )
                 await self._handle_transcriber_output("llm", dtmf_message, meta_info)
                 logger.info(f"DTMF LLM processing triggered with sequence_id={meta_info['sequence_id']}")
             except Exception as e:
