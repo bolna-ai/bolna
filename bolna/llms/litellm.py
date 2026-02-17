@@ -56,7 +56,6 @@ class LiteLLM(BaseLLM):
         else:
             self.trigger_function_call = False
         self.run_id = kwargs.get("run_id", None)
-        self.gave_out_prefunction_call_message = False
 
     async def generate_stream(self, messages, synthesize=True, meta_info=None, tool_choice=None):
         if not messages or len(messages) == 0:

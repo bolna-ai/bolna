@@ -56,7 +56,6 @@ class AzureLLM(BaseLLM):
         )
 
         self.run_id = kwargs.get("run_id", None)
-        self.gave_out_prefunction_call_message = False
 
     async def generate_stream(self, messages, synthesize=True, request_json=False, meta_info=None, tool_choice=None):
         if not messages or len(messages) == 0:
@@ -76,8 +75,6 @@ class AzureLLM(BaseLLM):
             model_args["tools"] = json.loads(self.tools) if isinstance(self.tools, str) else self.tools
             model_args["tool_choice"] = tool_choice or "auto"
             model_args["parallel_tool_calls"] = False
-
-        self.gave_out_prefunction_call_message = False
 
         answer, buffer = "", ""
         tools = model_args.get("tools", [])

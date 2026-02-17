@@ -83,7 +83,6 @@ class OpenAiLLM(BaseLLM):
                 self.tools = [i for i in my_assistant.tools if i.type == "function"]
             #logger.info(f'thread id : {self.thread_id}')
         self.run_id = kwargs.get("run_id", None)
-        self.gave_out_prefunction_call_message = False
 
     async def generate_stream(self, messages, synthesize=True, request_json=False, meta_info=None, tool_choice=None):
         if not messages or len(messages) == 0:
@@ -107,8 +106,6 @@ class OpenAiLLM(BaseLLM):
             model_args["tool_choice"] = tool_choice or "auto"
             model_args["parallel_tool_calls"] = False
         
-        self.gave_out_prefunction_call_message = False
-
         answer, buffer = "", ""
         tools = model_args.get("tools", [])
         accumulator = None
