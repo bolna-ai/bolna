@@ -194,8 +194,7 @@ class SipTrunkInputHandler(TelephonyInputHandler):
             except RuntimeError as e:
                 if "disconnect message has been received" in str(e):
                     break
-                logger.error(f"Runtime error: {e}")
-                traceback.print_exc()
+                logger.error(f"Runtime error: {e}", exc_info=True)
                 break
             except asyncio.CancelledError:
                 break
