@@ -1,5 +1,38 @@
+from typing import Optional
+
+from pydantic import BaseModel
+
 from bolna.constants import ROLE_SYSTEM, ROLE_USER, ROLE_ASSISTANT, ROLE_TOOL
 from bolna.enums import ResponseItemType
+
+
+class ChatToolCallFunction(BaseModel):
+    name: str = ""
+    arguments: str = ""
+
+
+class ChatToolCall(BaseModel):
+    id: str = ""
+    function: ChatToolCallFunction = ChatToolCallFunction()
+
+
+class ChatMessage(BaseModel):
+    role: str
+    content: Optional[str] = None
+    tool_calls: Optional[list[ChatToolCall]] = None
+    tool_call_id: Optional[str] = None
+
+
+class ChatToolFunction(BaseModel):
+    name: str = ""
+    description: str = ""
+    parameters: dict = {}
+    strict: bool = False
+
+
+class ChatToolDefinition(BaseModel):
+    type: str = "function"
+    function: ChatToolFunction = ChatToolFunction()
 
 
 class MessageFormatAdapter:
@@ -9,44 +42,40 @@ class MessageFormatAdapter:
         instructions = ""
         input_items = []
 
-        for msg in messages:
-            role = msg.get("role")
+        parsed = [ChatMessage(**msg) for msg in messages]
+        for msg in parsed:
+            if msg.role == ROLE_SYSTEM:
+                instructions = msg.content or ""
 
-            if role == ROLE_SYSTEM:
-                instructions = msg.get("content", "")
-
-            elif role == ROLE_USER:
+            elif msg.role == ROLE_USER:
                 input_items.append({
                     "type": ResponseItemType.MESSAGE,
                     "role": ROLE_USER,
-                    "content": msg.get("content", ""),
+                    "content": msg.content or "",
                 })
 
-            elif role == ROLE_ASSISTANT:
-                tool_calls = msg.get("tool_calls")
-                if tool_calls:
-                    for tc in tool_calls:
-                        func = tc.get("function", {})
+            elif msg.role == ROLE_ASSISTANT:
+                if msg.tool_calls:
+                    for tc in msg.tool_calls:
                         input_items.append({
                             "type": ResponseItemType.FUNCTION_CALL,
-                            "call_id": tc.get("id", ""),
-                            "name": func.get("name", ""),
-                            "arguments": func.get("arguments", ""),
+                            "call_id": tc.id,
+                            "name": tc.function.name,
+                            "arguments": tc.function.arguments,
                         })
                 else:
-                    content = msg.get("content")
-                    if content is not None:
+                    if msg.content is not None:
                         input_items.append({
                             "type": ResponseItemType.MESSAGE,
                             "role": ROLE_ASSISTANT,
-                            "content": content,
+                            "content": msg.content,
                         })
 
-            elif role == ROLE_TOOL:
+            elif msg.role == ROLE_TOOL:
                 input_items.append({
                     "type": ResponseItemType.FUNCTION_CALL_OUTPUT,
-                    "call_id": msg.get("tool_call_id", ""),
-                    "output": msg.get("content", ""),
+                    "call_id": msg.tool_call_id or "",
+                    "output": msg.content or "",
                 })
 
         return instructions, input_items
@@ -59,13 +88,13 @@ class MessageFormatAdapter:
         -> {"type":"function","name":...,"description":...,"parameters":...,"strict":true}
         """
         result = []
-        for tool in chat_tools:
-            func = tool.get("function", {})
+        parsed = [ChatToolDefinition(**tool) for tool in chat_tools]
+        for tool in parsed:
             result.append({
                 "type": ResponseItemType.FUNCTION,
-                "name": func.get("name", ""),
-                "description": func.get("description", ""),
-                "parameters": func.get("parameters", {}),
-                "strict": func.get("strict", False),
+                "name": tool.function.name,
+                "description": tool.function.description,
+                "parameters": tool.function.parameters,
+                "strict": tool.function.strict,
             })
         return result
