@@ -303,11 +303,6 @@ class OpenAiLLM(BaseLLM):
         if request_json:
             create_kwargs["text"] = {"format": {"type": "json_object"}}
 
-        if not self.model.startswith(GPT5_MODEL_PREFIX):
-            text_config = create_kwargs.get("text", {})
-            text_config["stop"] = ["User:"]
-            create_kwargs["text"] = text_config
-
         answer, buffer = "", ""
         func_call_args = {}  # item_id -> accumulated arguments
         func_call_names = {}  # item_id -> function name
