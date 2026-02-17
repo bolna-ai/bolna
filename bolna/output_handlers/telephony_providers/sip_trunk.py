@@ -232,7 +232,11 @@ class SipTrunkOutputHandler(TelephonyOutputHandler):
 
                 if is_final:
                     total_duration = self._response_audio_duration
-                    self._response_audio_duration = 0.0
+                    # _response_audio_duration is reset when START_MEDIA_BUFFERING
+                    # is sent for the next response, not here. is_final fires twice
+                    # per response (last audio chunk + null-byte sentinel) and
+                    # resetting here caused the second fire to replace a valid
+                    # fallback timer with a 0-duration one.
 
                     if self._local_audio_queue:
                         self._pending_stop_after_drain = True
@@ -244,11 +248,12 @@ class SipTrunkOutputHandler(TelephonyOutputHandler):
                             await self._send_control("STOP_MEDIA_BUFFERING")
                             self._buffering_active = False
                         await self._send_control("REPORT_QUEUE_DRAINED")
-                        if self._playback_done_task:
-                            self._playback_done_task.cancel()
-                        self._playback_done_task = asyncio.create_task(
-                            self._playback_done_fallback(total_duration, message_category)
-                        )
+                        if total_duration > 0 or not self._playback_done_task:
+                            if self._playback_done_task:
+                                self._playback_done_task.cancel()
+                            self._playback_done_task = asyncio.create_task(
+                                self._playback_done_fallback(total_duration, message_category)
+                            )
                         logger.debug(f"sip-trunk: response done, fallback in {total_duration + PLAYBACK_DONE_BUFFER_S:.1f}s")
 
         except Exception as e:
