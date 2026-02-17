@@ -2,7 +2,7 @@ import os
 import httpx
 from urllib.parse import urlparse
 from dotenv import load_dotenv
-from openai import AsyncOpenAI, OpenAI, AuthenticationError, PermissionDeniedError, NotFoundError, RateLimitError, APIError, APIConnectionError
+from openai import AsyncOpenAI, OpenAI, AuthenticationError, PermissionDeniedError, NotFoundError, RateLimitError, APIError, APIConnectionError, BadRequestError
 import json
 
 from bolna.constants import (
@@ -10,7 +10,6 @@ from bolna.constants import (
     RESPONSE_CREATED, RESPONSE_COMPLETED, RESPONSE_FAILED, RESPONSE_INCOMPLETE,
     RESPONSE_OUTPUT_TEXT_DELTA, RESPONSE_OUTPUT_ITEM_ADDED, RESPONSE_FUNCTION_CALL_ARGS_DELTA,
     ITEM_TYPE_FUNCTION_CALL,
-    STALE_RESPONSE_ERROR_HINTS,
 )
 from bolna.helpers.utils import convert_to_request_log, compute_function_pre_call_message, now_ms
 from .llm import BaseLLM
@@ -258,9 +257,14 @@ class OpenAiLLM(BaseLLM):
 
     @staticmethod
     def _is_stale_response_error(error):
-        """Check if an API error is due to a stale/invalid previous_response_id."""
-        error_str = str(error).lower()
-        return any(hint in error_str for hint in STALE_RESPONSE_ERROR_HINTS)
+        """Check if an API error is likely due to a stale previous_response_id.
+
+        All known stale-response errors from OpenAI are BadRequestError (HTTP 400).
+        Since this is only called when previous_response_id is set, a BadRequestError
+        is most likely caused by it. The retry is self-limiting: it clears the ID,
+        so a second failure will raise the real error.
+        """
+        return isinstance(error, BadRequestError)
 
     def _parse_tools(self):
         """Parse tools from string or list format."""
@@ -306,6 +310,11 @@ class OpenAiLLM(BaseLLM):
         if request_json:
             create_kwargs["text"] = {"format": {"type": "json_object"}}
 
+        if not self.model.startswith(GPT5_MODEL_PREFIX):
+            text_config = create_kwargs.get("text", {})
+            text_config["stop"] = ["User:"]
+            create_kwargs["text"] = text_config
+
         answer, buffer = "", ""
         func_call_args = {}  # item_id -> accumulated arguments
         func_call_names = {}  # item_id -> function name
@@ -347,6 +356,7 @@ class OpenAiLLM(BaseLLM):
 
             if event.type == RESPONSE_INCOMPLETE:
                 logger.warning("Responses API stream incomplete, partial response returned")
+                self.previous_response_id = None
                 break
 
             if not first_token_time and event.type in (RESPONSE_OUTPUT_TEXT_DELTA, RESPONSE_FUNCTION_CALL_ARGS_DELTA):

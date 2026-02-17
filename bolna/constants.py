@@ -26,8 +26,6 @@ ITEM_TYPE_FUNCTION_CALL = "function_call"
 ITEM_TYPE_FUNCTION_CALL_OUTPUT = "function_call_output"
 ITEM_TYPE_FUNCTION = "function"
 
-# Stale response ID error hints
-STALE_RESPONSE_ERROR_HINTS = ("previous_response", "not found", "invalid", "expired")
 
 HIGH_LEVEL_ASSISTANT_ANALYTICS_DATA = {
         "extraction_details":{}, 
