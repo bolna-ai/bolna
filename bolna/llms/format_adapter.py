@@ -1,7 +1,5 @@
-from bolna.constants import (
-    ROLE_SYSTEM, ROLE_USER, ROLE_ASSISTANT, ROLE_TOOL,
-    ITEM_TYPE_MESSAGE, ITEM_TYPE_FUNCTION_CALL, ITEM_TYPE_FUNCTION_CALL_OUTPUT, ITEM_TYPE_FUNCTION,
-)
+from bolna.constants import ROLE_SYSTEM, ROLE_USER, ROLE_ASSISTANT, ROLE_TOOL
+from bolna.enums import ResponseItemType
 
 
 class MessageFormatAdapter:
@@ -19,7 +17,7 @@ class MessageFormatAdapter:
 
             elif role == ROLE_USER:
                 input_items.append({
-                    "type": ITEM_TYPE_MESSAGE,
+                    "type": ResponseItemType.MESSAGE,
                     "role": ROLE_USER,
                     "content": msg.get("content", ""),
                 })
@@ -30,7 +28,7 @@ class MessageFormatAdapter:
                     for tc in tool_calls:
                         func = tc.get("function", {})
                         input_items.append({
-                            "type": ITEM_TYPE_FUNCTION_CALL,
+                            "type": ResponseItemType.FUNCTION_CALL,
                             "call_id": tc.get("id", ""),
                             "name": func.get("name", ""),
                             "arguments": func.get("arguments", ""),
@@ -39,14 +37,14 @@ class MessageFormatAdapter:
                     content = msg.get("content")
                     if content is not None:
                         input_items.append({
-                            "type": ITEM_TYPE_MESSAGE,
+                            "type": ResponseItemType.MESSAGE,
                             "role": ROLE_ASSISTANT,
                             "content": content,
                         })
 
             elif role == ROLE_TOOL:
                 input_items.append({
-                    "type": ITEM_TYPE_FUNCTION_CALL_OUTPUT,
+                    "type": ResponseItemType.FUNCTION_CALL_OUTPUT,
                     "call_id": msg.get("tool_call_id", ""),
                     "output": msg.get("content", ""),
                 })
@@ -64,7 +62,7 @@ class MessageFormatAdapter:
         for tool in chat_tools:
             func = tool.get("function", {})
             result.append({
-                "type": ITEM_TYPE_FUNCTION,
+                "type": ResponseItemType.FUNCTION,
                 "name": func.get("name", ""),
                 "description": func.get("description", ""),
                 "parameters": func.get("parameters", {}),

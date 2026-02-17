@@ -5,18 +5,13 @@ from dotenv import load_dotenv
 from openai import AsyncOpenAI, OpenAI, AuthenticationError, PermissionDeniedError, NotFoundError, RateLimitError, APIError, APIConnectionError, BadRequestError
 import json
 
-from bolna.constants import (
-    DEFAULT_LANGUAGE_CODE, ROLE_SYSTEM, ROLE_ASSISTANT, GPT5_MODEL_PREFIX,
-    RESPONSE_CREATED, RESPONSE_COMPLETED, RESPONSE_FAILED, RESPONSE_INCOMPLETE,
-    RESPONSE_OUTPUT_TEXT_DELTA, RESPONSE_OUTPUT_ITEM_ADDED, RESPONSE_FUNCTION_CALL_ARGS_DELTA,
-    ITEM_TYPE_FUNCTION_CALL,
-)
+from bolna.constants import DEFAULT_LANGUAGE_CODE, ROLE_SYSTEM, ROLE_ASSISTANT, GPT5_MODEL_PREFIX
+from bolna.enums import ReasoningEffort, Verbosity, ResponseStreamEvent, ResponseItemType
 from bolna.helpers.utils import convert_to_request_log, compute_function_pre_call_message, now_ms
 from .llm import BaseLLM
 from .tool_call_accumulator import ToolCallAccumulator
 from .format_adapter import MessageFormatAdapter
 from .types import LLMStreamChunk, LatencyData, FunctionCallPayload
-from bolna.enums import ReasoningEffort, Verbosity
 from bolna.helpers.logger_config import configure_logger
 
 logger = configure_logger(__name__)
@@ -339,11 +334,11 @@ class OpenAiLLM(BaseLLM):
         async for event in stream:
             now = now_ms()
 
-            if event.type == RESPONSE_CREATED:
+            if event.type == ResponseStreamEvent.CREATED:
                 self.previous_response_id = event.response.id
                 continue
 
-            if event.type == RESPONSE_FAILED:
+            if event.type == ResponseStreamEvent.FAILED:
                 error_info = getattr(event.response, 'error', None) or getattr(event.response, 'last_error', None)
                 logger.error(f"Responses API stream failed: {error_info}")
                 self.previous_response_id = None
@@ -352,12 +347,12 @@ class OpenAiLLM(BaseLLM):
                     request=None, body=None
                 )
 
-            if event.type == RESPONSE_INCOMPLETE:
+            if event.type == ResponseStreamEvent.INCOMPLETE:
                 logger.warning("Responses API stream incomplete, partial response returned")
                 self.previous_response_id = None
                 break
 
-            if not first_token_time and event.type in (RESPONSE_OUTPUT_TEXT_DELTA, RESPONSE_FUNCTION_CALL_ARGS_DELTA):
+            if not first_token_time and event.type in (ResponseStreamEvent.OUTPUT_TEXT_DELTA, ResponseStreamEvent.FUNCTION_CALL_ARGS_DELTA):
                 first_token_time = now
                 self.started_streaming = True
                 latency_data = LatencyData(
@@ -368,7 +363,7 @@ class OpenAiLLM(BaseLLM):
                     llm_host=self.llm_host,
                 )
 
-            if event.type == RESPONSE_OUTPUT_TEXT_DELTA:
+            if event.type == ResponseStreamEvent.OUTPUT_TEXT_DELTA:
                 received_textual = True
                 answer += event.delta
                 buffer += event.delta
@@ -377,9 +372,9 @@ class OpenAiLLM(BaseLLM):
                     yield LLMStreamChunk(split[0], False, latency_data)
                     buffer = split[1] if len(split) > 1 else ""
 
-            elif event.type == RESPONSE_OUTPUT_ITEM_ADDED:
+            elif event.type == ResponseStreamEvent.OUTPUT_ITEM_ADDED:
                 item = event.item
-                if item.type == ITEM_TYPE_FUNCTION_CALL:
+                if item.type == ResponseItemType.FUNCTION_CALL:
                     if buffer:
                         yield LLMStreamChunk(buffer, True, latency_data)
                         buffer = ""
@@ -396,10 +391,10 @@ class OpenAiLLM(BaseLLM):
                         if pre_msg:
                             yield LLMStreamChunk(pre_msg, True, latency_data, False, item.name, api_tool_pre_call_message)
 
-            elif event.type == RESPONSE_FUNCTION_CALL_ARGS_DELTA:
+            elif event.type == ResponseStreamEvent.FUNCTION_CALL_ARGS_DELTA:
                 func_call_args[event.item_id] = func_call_args.get(event.item_id, "") + event.delta
 
-            elif event.type == RESPONSE_COMPLETED:
+            elif event.type == ResponseStreamEvent.COMPLETED:
                 if hasattr(event.response, 'id'):
                     self.previous_response_id = event.response.id
                 break
