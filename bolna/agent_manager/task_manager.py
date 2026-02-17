@@ -262,8 +262,7 @@ class TaskManager(BaseManager):
                 if 'reasoning_effort' in self.llm_agent_config:
                     self.llm_config['reasoning_effort'] = self.llm_agent_config['reasoning_effort']
 
-                llm_level_config = self.llm_agent_config.get('llm_config', self.llm_agent_config)
-                if llm_level_config.get('use_responses_api'):
+                if self.llm_agent_config.get('use_responses_api'):
                     self.llm_config['use_responses_api'] = True
 
         # Output stuff
