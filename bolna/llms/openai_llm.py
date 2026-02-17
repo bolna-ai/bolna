@@ -318,6 +318,7 @@ class OpenAiLLM(BaseLLM):
         start_time = now_ms()
         first_token_time = None
         latency_data = None
+        service_tier = None
 
         try:
             stream = await self.async_client.responses.create(**create_kwargs)
@@ -336,6 +337,7 @@ class OpenAiLLM(BaseLLM):
 
             if event.type == ResponseStreamEvent.CREATED:
                 self.previous_response_id = event.response.id
+                service_tier = getattr(event.response, 'service_tier', None)
                 continue
 
             if event.type == ResponseStreamEvent.FAILED:
@@ -359,7 +361,7 @@ class OpenAiLLM(BaseLLM):
                     sequence_id=meta_info.get("sequence_id"),
                     first_token_latency_ms=first_token_time - start_time,
                     total_stream_duration_ms=None,
-                    service_tier=None,
+                    service_tier=service_tier,
                     llm_host=self.llm_host,
                 )
 
@@ -397,10 +399,13 @@ class OpenAiLLM(BaseLLM):
             elif event.type == ResponseStreamEvent.COMPLETED:
                 if hasattr(event.response, 'id'):
                     self.previous_response_id = event.response.id
+                service_tier = service_tier or getattr(event.response, 'service_tier', None)
                 break
 
         if latency_data:
             latency_data.total_stream_duration_ms = now_ms() - start_time
+            if service_tier:
+                latency_data.service_tier = service_tier
 
         if func_call_args and self.trigger_function_call:
             first_item_id = next(iter(func_call_args))
@@ -536,7 +541,7 @@ class OpenAiLLM(BaseLLM):
             if ret_metadata:
                 metadata = {
                     "llm_host": self.llm_host,
-                    "service_tier": None,
+                    "service_tier": getattr(response, 'service_tier', None),
                 }
                 return res, metadata
             return res
