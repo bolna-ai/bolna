@@ -246,7 +246,14 @@ class SipTrunkInputHandler(TelephonyInputHandler):
             self._media_xoff = False
             if hasattr(self, "output_handler_ref") and self.output_handler_ref:
                 self.output_handler_ref.queue_full = False
-                asyncio.create_task(self.output_handler_ref.drain_local_queue())
+                task = asyncio.create_task(self.output_handler_ref.drain_local_queue())
+
+                def _on_drain_done(t):
+                    exc = t.exception()
+                    if exc is not None:
+                        logger.exception("sip-trunk drain_local_queue failed: %s", exc)
+
+                task.add_done_callback(_on_drain_done)
             logger.debug(f"MEDIA_XON for channel {self.channel_id}")
             return
         if event == "STATUS" or "MEDIA_BUFFERING_COMPLETED" in event:

@@ -9,6 +9,7 @@ import time
 import uuid
 import traceback
 import audioop
+from collections import deque
 from bolna.output_handlers.telephony import TelephonyOutputHandler
 from bolna.helpers.logger_config import configure_logger
 from dotenv import load_dotenv
@@ -55,8 +56,8 @@ class SipTrunkOutputHandler(TelephonyOutputHandler):
         self._buffering_active = False
         self._response_audio_duration = 0.0
         self._playback_done_task = None
-        # Local queue when Asterisk sends MEDIA_XOFF; drained on MEDIA_XON
-        self._local_audio_queue = []
+        # Local queue when Asterisk sends MEDIA_XOFF; drained on MEDIA_XON (deque for O(1) popleft)
+        self._local_audio_queue = deque()
         # If is_final arrived while we had queued audio, send STOP after drain
         self._pending_stop_after_drain = False
         self._pending_stop_duration = 0.0
@@ -107,7 +108,7 @@ class SipTrunkOutputHandler(TelephonyOutputHandler):
     async def drain_local_queue(self):
         """Send any audio queued during MEDIA_XOFF to Asterisk (called when MEDIA_XON is received)."""
         while self._local_audio_queue and not self.queue_full:
-            chunk = self._local_audio_queue.pop(0)
+            chunk = self._local_audio_queue.popleft()
             if not chunk:
                 continue
             await self._send_binary(chunk)
@@ -175,7 +176,7 @@ class SipTrunkOutputHandler(TelephonyOutputHandler):
             if self.stream_sid is None:
                 self.stream_sid = meta_info.get("stream_sid")
 
-            is_final = (
+            is_final = bool(
                 (meta_info.get("end_of_llm_stream") and meta_info.get("end_of_synthesizer_stream"))
                 or meta_info.get("is_final_chunk_of_entire_response")
                 or (meta_info.get("sequence_id") == -1 and meta_info.get("end_of_llm_stream"))
