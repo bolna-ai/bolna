@@ -161,7 +161,7 @@ class OpenAiLLM(BaseLLM):
             if hasattr(chunk, 'service_tier') and chunk.service_tier:
                 service_tier = chunk.service_tier
                 if latency_data:
-                    latency_data["service_tier"] = service_tier
+                    latency_data.service_tier = service_tier
 
             if not first_token_time:
                 first_token_time = now
@@ -179,14 +179,14 @@ class OpenAiLLM(BaseLLM):
 
             if hasattr(delta, 'tool_calls') and delta.tool_calls and accumulator:
                 if buffer:
-                    yield LLMStreamChunk(buffer, True, latency_data)
+                    yield LLMStreamChunk(data=buffer, end_of_stream=True, latency=latency_data)
                     buffer = ""
 
                 accumulator.process_delta(delta.tool_calls)
 
                 pre_call = accumulator.get_pre_call_message(meta_info)
                 if pre_call:
-                    yield LLMStreamChunk(pre_call[0], True, latency_data, False, pre_call[1], pre_call[2])
+                    yield LLMStreamChunk(data=pre_call[0], end_of_stream=True, latency=latency_data, function_name=pre_call[1], function_message=pre_call[2])
 
             elif hasattr(delta, 'content') and delta.content is not None:
                 if accumulator:
@@ -195,21 +195,21 @@ class OpenAiLLM(BaseLLM):
                 buffer += delta.content
                 if synthesize and len(buffer) >= self.buffer_size:
                     split = buffer.rsplit(" ", 1)
-                    yield LLMStreamChunk(split[0], False, latency_data)
+                    yield LLMStreamChunk(data=split[0], end_of_stream=False, latency=latency_data)
                     buffer = split[1] if len(split) > 1 else ""
 
         if latency_data:
-            latency_data["total_stream_duration_ms"] = now_ms() - start_time
+            latency_data.total_stream_duration_ms = now_ms() - start_time
 
         if accumulator and accumulator.final_tool_calls:
             api_call_payload = accumulator.build_api_payload(model_args, meta_info, answer)
             if api_call_payload:
-                yield LLMStreamChunk(api_call_payload, False, latency_data, True)
+                yield LLMStreamChunk(data=api_call_payload, end_of_stream=False, latency=latency_data, is_function_call=True)
 
         if synthesize:
-            yield LLMStreamChunk(buffer, True, latency_data)
+            yield LLMStreamChunk(data=buffer, end_of_stream=True, latency=latency_data)
         else:
-            yield LLMStreamChunk(answer, True, latency_data)
+            yield LLMStreamChunk(data=answer, end_of_stream=True, latency=latency_data)
 
         self.started_streaming = False
 
@@ -369,14 +369,14 @@ class OpenAiLLM(BaseLLM):
                 buffer += event.delta
                 if synthesize and len(buffer) >= self.buffer_size:
                     split = buffer.rsplit(" ", 1)
-                    yield LLMStreamChunk(split[0], False, latency_data)
+                    yield LLMStreamChunk(data=split[0], end_of_stream=False, latency=latency_data)
                     buffer = split[1] if len(split) > 1 else ""
 
             elif event.type == ResponseStreamEvent.OUTPUT_ITEM_ADDED:
                 item = event.item
                 if item.type == ResponseItemType.FUNCTION_CALL:
                     if buffer:
-                        yield LLMStreamChunk(buffer, True, latency_data)
+                        yield LLMStreamChunk(data=buffer, end_of_stream=True, latency=latency_data)
                         buffer = ""
                     func_call_args[item.id] = ""
                     func_call_names[item.id] = item.name
@@ -389,7 +389,7 @@ class OpenAiLLM(BaseLLM):
                         active_language = detected_lang or self.language
                         pre_msg = compute_function_pre_call_message(active_language, item.name, api_tool_pre_call_message)
                         if pre_msg:
-                            yield LLMStreamChunk(pre_msg, True, latency_data, False, item.name, api_tool_pre_call_message)
+                            yield LLMStreamChunk(data=pre_msg, end_of_stream=True, latency=latency_data, function_name=item.name, function_message=api_tool_pre_call_message)
 
             elif event.type == ResponseStreamEvent.FUNCTION_CALL_ARGS_DELTA:
                 func_call_args[event.item_id] = func_call_args.get(event.item_id, "") + event.delta
@@ -400,7 +400,7 @@ class OpenAiLLM(BaseLLM):
                 break
 
         if latency_data:
-            latency_data["total_stream_duration_ms"] = now_ms() - start_time
+            latency_data.total_stream_duration_ms = now_ms() - start_time
 
         if func_call_args and self.trigger_function_call:
             first_item_id = next(iter(func_call_args))
@@ -413,24 +413,24 @@ class OpenAiLLM(BaseLLM):
                 logger.info(f"Payload to send {arguments_str} func_dict {func_conf}")
 
                 method = func_conf.get('method')
-                api_call_payload: FunctionCallPayload = {
-                    "url": func_conf.get('url'),
-                    "method": method.lower() if method else None,
-                    "param": func_conf.get('param'),
-                    "api_token": func_conf.get('api_token'),
-                    "headers": func_conf.get('headers'),
-                    "model_args": create_kwargs,
-                    "meta_info": meta_info,
-                    "called_fun": func_name,
-                    "model_response": [{
+                api_call_payload = FunctionCallPayload(
+                    url=func_conf.get('url'),
+                    method=method.lower() if method else None,
+                    param=func_conf.get('param'),
+                    api_token=func_conf.get('api_token'),
+                    headers=func_conf.get('headers'),
+                    model_args=create_kwargs,
+                    meta_info=meta_info,
+                    called_fun=func_name,
+                    model_response=[{
                         "index": 0,
                         "id": call_id,
                         "function": {"name": func_name, "arguments": arguments_str},
                         "type": "function",
                     }],
-                    "tool_call_id": call_id,
-                    "textual_response": answer.strip() if received_textual else None,
-                }
+                    tool_call_id=call_id,
+                    textual_response=answer.strip() if received_textual else None,
+                )
 
                 tool_spec = next((t for t in responses_tools if t["name"] == func_name), None)
                 if tool_spec:
@@ -440,21 +440,22 @@ class OpenAiLLM(BaseLLM):
                         if tool_spec.get("parameters") is not None and all(k in parsed_args for k in required_keys):
                             convert_to_request_log(arguments_str, meta_info, self.model, "llm",
                                                    direction="response", is_cached=False, run_id=self.run_id)
-                            api_call_payload.update(parsed_args)
+                            for k, v in parsed_args.items():
+                                setattr(api_call_payload, k, v)
                         else:
-                            api_call_payload['resp'] = None
+                            api_call_payload.resp = None
                     except (json.JSONDecodeError, KeyError) as e:
                         logger.error(f"Error parsing function arguments: {e}")
-                        api_call_payload['resp'] = None
+                        api_call_payload.resp = None
                 else:
-                    api_call_payload['resp'] = None
+                    api_call_payload.resp = None
 
-                yield LLMStreamChunk(api_call_payload, False, latency_data, True)
+                yield LLMStreamChunk(data=api_call_payload, end_of_stream=False, latency=latency_data, is_function_call=True)
 
         if synthesize:
-            yield LLMStreamChunk(buffer, True, latency_data)
+            yield LLMStreamChunk(data=buffer, end_of_stream=True, latency=latency_data)
         else:
-            yield LLMStreamChunk(answer, True, latency_data)
+            yield LLMStreamChunk(data=answer, end_of_stream=True, latency=latency_data)
 
         self.started_streaming = False
 

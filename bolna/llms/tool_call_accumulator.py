@@ -61,19 +61,19 @@ class ToolCallAccumulator:
         self._gave_pre_call_msg = False
 
         method = func_conf.get('method')
-        api_call_payload: FunctionCallPayload = {
-            "url": func_conf.get('url'),
-            "method": method.lower() if method else None,
-            "param": func_conf.get('param'),
-            "api_token": func_conf.get('api_token'),
-            "headers": func_conf.get('headers'),
-            "model_args": model_args,
-            "meta_info": meta_info,
-            "called_fun": first_func_name,
-            "model_response": list(self.final_tool_calls.values()),
-            "tool_call_id": self.final_tool_calls[0].get("id", ""),
-            "textual_response": answer.strip() if self.received_textual else None
-        }
+        api_call_payload = FunctionCallPayload(
+            url=func_conf.get('url'),
+            method=method.lower() if method else None,
+            param=func_conf.get('param'),
+            api_token=func_conf.get('api_token'),
+            headers=func_conf.get('headers'),
+            model_args=model_args,
+            meta_info=meta_info,
+            called_fun=first_func_name,
+            model_response=list(self.final_tool_calls.values()),
+            tool_call_id=self.final_tool_calls[0].get("id", ""),
+            textual_response=answer.strip() if self.received_textual else None,
+        )
 
         # Chat Completions tools use nested {"function": {"name": ..., "parameters": ...}}
         tool_spec = next((t for t in self.tools if t["function"]["name"] == first_func_name), None)
@@ -85,13 +85,14 @@ class ToolCallAccumulator:
                 if tool_spec["function"].get("parameters") is not None and all(k in parsed_args for k in required_keys):
                     convert_to_request_log(arguments_received, meta_info, self.model, "llm",
                                            direction="response", is_cached=False, run_id=self.run_id)
-                    api_call_payload.update(parsed_args)
+                    for k, v in parsed_args.items():
+                        setattr(api_call_payload, k, v)
                 else:
-                    api_call_payload['resp'] = None
+                    api_call_payload.resp = None
             except (json.JSONDecodeError, KeyError) as e:
                 logger.error(f"Error parsing function arguments: {e}")
-                api_call_payload['resp'] = None
+                api_call_payload.resp = None
         else:
-            api_call_payload['resp'] = None
+            api_call_payload.resp = None
 
         return api_call_payload

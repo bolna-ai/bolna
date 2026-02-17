@@ -10,6 +10,7 @@ from bolna.constants import DEFAULT_LANGUAGE_CODE
 from bolna.helpers.utils import convert_to_request_log, compute_function_pre_call_message, now_ms
 from .llm import BaseLLM
 from .tool_call_accumulator import ToolCallAccumulator
+from .types import LLMStreamChunk, LatencyData
 from bolna.helpers.logger_config import configure_logger
 
 logger = configure_logger(__name__)
@@ -80,11 +81,9 @@ class LiteLLM(BaseLLM):
             accumulator = ToolCallAccumulator(self.api_params, tools, self.language, self.model, self.run_id)
 
         start_time = now_ms()
-        latency_data = {
-            "sequence_id": meta_info.get("sequence_id") if meta_info else None,
-            "first_token_latency_ms": None,
-            "total_stream_duration_ms": None,
-        }
+        latency_data = LatencyData(
+            sequence_id=meta_info.get("sequence_id") if meta_info else None,
+        )
 
         try:
             completion_stream = await acompletion(**model_args)
@@ -119,25 +118,24 @@ class LiteLLM(BaseLLM):
             if not first_token_time:
                 first_token_time = now
                 self.started_streaming = True
-                latency_data = {
-                    "sequence_id": meta_info.get("sequence_id"),
-                    "first_token_latency_ms": first_token_time - start_time,
-                    "total_stream_duration_ms": None
-                }
+                latency_data = LatencyData(
+                    sequence_id=meta_info.get("sequence_id"),
+                    first_token_latency_ms=first_token_time - start_time,
+                )
 
             choice = chunk["choices"][0]
             delta = choice.get("delta", {})
 
             if hasattr(delta, "tool_calls") and delta.tool_calls and accumulator:
                 if buffer:
-                    yield buffer, True, latency_data, False, None, None
+                    yield LLMStreamChunk(data=buffer, end_of_stream=True, latency=latency_data)
                     buffer = ""
 
                 accumulator.process_delta(delta.tool_calls)
 
                 pre_call = accumulator.get_pre_call_message(meta_info)
                 if pre_call:
-                    yield pre_call[0], True, latency_data, False, pre_call[1], pre_call[2]
+                    yield LLMStreamChunk(data=pre_call[0], end_of_stream=True, latency=latency_data, function_name=pre_call[1], function_message=pre_call[2])
 
             elif hasattr(delta, "content") and delta.content:
                 if accumulator:
@@ -146,21 +144,21 @@ class LiteLLM(BaseLLM):
                 buffer += delta.content
                 if synthesize and len(buffer) >= self.buffer_size:
                     split = buffer.rsplit(" ", 1)
-                    yield split[0], False, latency_data, False, None, None
+                    yield LLMStreamChunk(data=split[0], end_of_stream=False, latency=latency_data)
                     buffer = split[1] if len(split) > 1 else ""
 
         if latency_data:
-            latency_data["total_stream_duration_ms"] = now_ms() - start_time
+            latency_data.total_stream_duration_ms = now_ms() - start_time
 
         if accumulator and accumulator.final_tool_calls:
             api_call_payload = accumulator.build_api_payload(model_args, meta_info, answer)
             if api_call_payload:
-                yield api_call_payload, False, latency_data, True, None, None
+                yield LLMStreamChunk(data=api_call_payload, end_of_stream=False, latency=latency_data, is_function_call=True)
 
         if synthesize and buffer.strip():
-            yield buffer, True, latency_data, False, None, None
+            yield LLMStreamChunk(data=buffer, end_of_stream=True, latency=latency_data)
         elif not synthesize:
-            yield answer, True, latency_data, False, None, None
+            yield LLMStreamChunk(data=answer, end_of_stream=True, latency=latency_data)
 
         self.started_streaming = False
 
