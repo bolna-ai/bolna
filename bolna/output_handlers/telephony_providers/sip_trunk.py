@@ -19,6 +19,10 @@ load_dotenv()
 ASTERISK_ULAW_OPTIMAL_FRAME_SIZE = 160
 # Asterisk max WebSocket message size (docs: sending > 65500 closes the connection)
 MAX_WS_MESSAGE_BYTES = 65500
+# Preferred chunk size when sending binary to Asterisk. res_http_websocket.c allows only 10
+# short-read retries per frame; large frames (e.g. 65KB) can cause "Websocket seems unresponsive,
+# disconnecting" (ws_safe_read). Use smaller frames so Asterisk receives each in one or few reads.
+PREFERRED_WS_SEND_CHUNK_BYTES = 8192
 PLAYBACK_DONE_BUFFER_S = 0.5
 
 
@@ -132,17 +136,18 @@ class SipTrunkOutputHandler(TelephonyOutputHandler):
             traceback.print_exc()
 
     async def _send_binary(self, data: bytes):
-        """Send raw ulaw to Asterisk; split only if > MAX_WS_MESSAGE_BYTES."""
+        """Send raw ulaw to Asterisk in small chunks to avoid Asterisk ws_safe_read 'unresponsive' disconnect."""
         n = len(data)
-        if n <= MAX_WS_MESSAGE_BYTES:
+        if n <= PREFERRED_WS_SEND_CHUNK_BYTES:
             await self.websocket.send_bytes(data)
             return
         offset = 0
         while offset < n:
-            chunk = data[offset : offset + MAX_WS_MESSAGE_BYTES]
+            chunk_size = min(PREFERRED_WS_SEND_CHUNK_BYTES, n - offset, MAX_WS_MESSAGE_BYTES)
+            chunk = data[offset : offset + chunk_size]
             if chunk:
                 await self.websocket.send_bytes(chunk)
-            offset += MAX_WS_MESSAGE_BYTES
+            offset += chunk_size
 
     async def flush_media(self):
         await self._send_control("FLUSH_MEDIA")
