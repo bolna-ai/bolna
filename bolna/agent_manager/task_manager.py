@@ -552,8 +552,8 @@ class TaskManager(BaseManager):
             llm_agent = self.tools.get('llm_agent')
             if llm_agent and hasattr(llm_agent, 'llm'):
                 llm_agent.llm.invalidate_response_chain()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"Failed to invalidate response chain: {e}")
 
     def _inject_language_instruction(self, messages: list) -> list:
         """Inject language instruction into messages based on detected language."""

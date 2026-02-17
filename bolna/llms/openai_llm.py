@@ -250,9 +250,7 @@ class OpenAiLLM(BaseLLM):
             return instructions, input_items
 
         new_messages = messages[last_assistant_idx + 1:]
-        _, input_items = MessageFormatAdapter.chat_to_responses_input(
-            [{"role": ROLE_SYSTEM, "content": ""}] + new_messages
-        )
+        _, input_items = MessageFormatAdapter.chat_to_responses_input(new_messages)
         return instructions, input_items
 
     @staticmethod
