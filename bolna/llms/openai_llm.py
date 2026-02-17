@@ -10,7 +10,7 @@ from bolna.enums import ReasoningEffort, Verbosity, ResponseStreamEvent, Respons
 from bolna.helpers.utils import convert_to_request_log, compute_function_pre_call_message, now_ms
 from .llm import BaseLLM
 from .tool_call_accumulator import ToolCallAccumulator
-from .format_adapter import MessageFormatAdapter
+from .message_models import MessageFormatAdapter
 from .types import LLMStreamChunk, LatencyData, FunctionCallPayload
 from bolna.helpers.logger_config import configure_logger
 
