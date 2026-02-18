@@ -2,6 +2,6 @@ fastapi==0.108.0
 plivo==4.47.0
 python-dotenv==1.0.0
 redis==5.0.1
-requests==2.31.0
+requests>=2.31.0,<3.0
 twilio==8.9.0
 uvicorn==0.22.0
