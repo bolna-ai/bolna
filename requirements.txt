@@ -1,6 +1,6 @@
 aiobotocore==2.9.0
 aiofiles==23.2.1
-aiohttp>=3.9.2,<4
+aiohttp>=3.9.2,<3.10.0
 azure-cognitiveservices-speech==1.38.0
 google-cloud-speech==2.25.0
 fastapi==0.108.0
