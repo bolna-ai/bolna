@@ -27,10 +27,10 @@ class RAGServiceClient:
     This replaces all local RAG functionality in bolna agents.
     """
     
-    def __init__(self, rag_server_url: str, timeout: int = 30):
+    def __init__(self, rag_server_url: str, timeout: int = 5):
         """
         Initialize the RAG service client.
-        
+
         Args:
             rag_server_url: Base URL of the rag-proxy-server
             timeout: Request timeout in seconds
@@ -39,6 +39,12 @@ class RAGServiceClient:
         self.timeout = aiohttp.ClientTimeout(total=timeout)
         self.session: Optional[aiohttp.ClientSession] = None
         self.logger = logging.getLogger(__name__)
+
+        # Skip RAG queries after repeated failures instead of blocking the LLM pipeline
+        self._consecutive_failures = 0
+        self._failure_threshold = 3
+        self._last_failure_time = 0.0
+        self._cooldown_seconds = 30.0
         
     async def __aenter__(self):
         """Async context manager entry."""
@@ -54,6 +60,16 @@ class RAGServiceClient:
         """Ensure session exists."""
         if not self.session:
             self.session = aiohttp.ClientSession(timeout=self.timeout)
+
+    def _is_available(self) -> bool:
+        """Check if RAG service should be attempted. Skips if recently failing."""
+        if self._consecutive_failures < self._failure_threshold:
+            return True
+        # After cooldown, allow a single retry (stamp the time so concurrent calls don't all retry)
+        if time.time() - self._last_failure_time >= self._cooldown_seconds:
+            self._last_failure_time = time.time()
+            return True
+        return False
     
     async def health_check(self) -> Dict[str, Any]:
         """
@@ -127,6 +143,11 @@ class RAGServiceClient:
         await self._ensure_session()
         query_id = str(uuid.uuid4())
         query_preview = query[:100] + "..." if len(query) > 100 else query
+
+        if not self._is_available():
+            self.logger.warning(f"RAG query SKIPPED (service down) | query_id: {query_id} | consecutive_failures: {self._consecutive_failures}")
+            return RAGResponse(contexts=[], total_results=0, processing_time=0.0)
+
         self.logger.info(f"RAG query started | query_id: {query_id} | collections: {collections} | query: '{query_preview}' | max_results: {max_results}")
 
         # Track client-side timing (includes network latency)
@@ -154,6 +175,8 @@ class RAGServiceClient:
                 if response.status != 200:
                     error_text = await response.text()
                     self.logger.error(f"RAG query failed | query_id: {query_id} | status: {response.status} | error: {error_text}")
+                    self._consecutive_failures += 1
+                    self._last_failure_time = time.time()
                     return RAGResponse(contexts=[], total_results=0, processing_time=0.0)
                 
                 data = await response.json()
@@ -175,6 +198,10 @@ class RAGServiceClient:
                 processing_time = server_processing_time_ms / 1000.0
                 self.logger.info(f"RAG query completed | query_id: {query_id} | results: {total_results} | server_time: {processing_time:.3f}s | total_time: {total_query_time_ms:.1f}ms")
 
+                if self._consecutive_failures > 0:
+                    self.logger.info(f"RAG service recovered after {self._consecutive_failures} failures")
+                self._consecutive_failures = 0
+
                 return RAGResponse(
                     contexts=contexts,
                     total_results=total_results,
@@ -185,9 +212,13 @@ class RAGServiceClient:
             
         except asyncio.TimeoutError:
             self.logger.error(f"RAG query timeout | query_id: {query_id} | collections: {collections}")
+            self._consecutive_failures += 1
+            self._last_failure_time = time.time()
             return RAGResponse(contexts=[], total_results=0, processing_time=0.0)
         except Exception as e:
             self.logger.error(f"RAG query error | query_id: {query_id} | error: {e}")
+            self._consecutive_failures += 1
+            self._last_failure_time = time.time()
             return RAGResponse(contexts=[], total_results=0, processing_time=0.0)
     
     async def format_context_for_prompt(self, contexts: List[RAGContext]) -> str:

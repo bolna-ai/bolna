@@ -2146,6 +2146,24 @@ class TaskManager(BaseManager):
         # Collect transcript for language detection
         await self.language_detector.collect_transcript(transcriber_message)
 
+        # Merge with previous user transcript if the response hasn't been heard yet.
+        # This handles Deepgram splitting continuous speech into multiple speech_finals
+        # due to natural pauses — instead of each segment triggering a separate LLM call,
+        # we combine them into one and re-run.
+        if self.response_in_pipeline and next_task == "llm":
+            # Pop all unheard assistant/tool responses (could be filler + LLM response, or none if LLM still running)
+            while len(self.history) > 0 and self.history[-1].get("role") in ("assistant", "tool"):
+                self.history.pop()
+
+            # Merge with the previous user message
+            if len(self.history) > 0 and self.history[-1].get("role") == "user":
+                prev_user = self.history.pop()
+                transcriber_message = prev_user["content"] + " " + transcriber_message
+                logger.info(f"Merged transcript with unheard response: {transcriber_message}")
+
+            # Clean up the pending (unheard) response pipeline
+            await self.__cleanup_downstream_tasks()
+
         self.history.append({"role": "user", "content": transcriber_message})
 
         convert_to_request_log(message=transcriber_message, meta_info=meta_info, model=self.task_config["tools_config"]["transcriber"]["provider"], run_id= self.run_id)
@@ -2215,8 +2233,6 @@ class TaskManager(BaseManager):
                         if not self.tools["input"].welcome_message_played():
                             continue
 
-                        self.interruption_manager.on_user_speech_started()
-
                         interim_transcript_len += len(message["data"].get("content").strip().split(" "))
                         transcript_content = message["data"].get("content", "")
 
@@ -2227,11 +2243,13 @@ class TaskManager(BaseManager):
                             welcome_played=self.tools["input"].welcome_message_played()
                         ):
                             logger.info(f"Condition for interruption hit")
+                            self.interruption_manager.on_user_speech_started()
                             self.interruption_manager.on_interruption_triggered()
                             self.tools["input"].update_is_audio_being_played(False)
                             await self.__cleanup_downstream_tasks()
                         # User continuation detection: cancel pending response if user continues within grace period
                         elif not self.tools["input"].is_audio_being_played_to_user() and self.tools["input"].welcome_message_played():
+                            self.interruption_manager.on_user_speech_started()
                             has_pending_response = self.interruption_manager.has_pending_responses()
                             time_since_utterance_end = self.interruption_manager.get_time_since_utterance_end()
                             within_grace_period = (
@@ -2245,9 +2263,12 @@ class TaskManager(BaseManager):
                                 self.interruption_manager.reset_utterance_end_time()
                                 await self.__cleanup_downstream_tasks()
                         elif (self.tools["input"].is_audio_being_played_to_user() or self.response_in_pipeline) and self.tools["input"].welcome_message_played() and self.number_of_words_for_interruption != 0:
-                            # Not enough words for interruption - ignore
+                            # Not enough words for interruption - ignore (don't set callee_speaking)
                             logger.info(f"Ignoring transcript: {transcript_content.strip()}")
                             continue
+                        else:
+                            # Normal interim (no audio playing, no continuation) - mark user as speaking
+                            self.interruption_manager.on_user_speech_started()
 
                         self.interruption_manager.update_required_delay(len(self.history))
                         self.interruption_manager.on_interim_transcript_received()
@@ -2272,6 +2293,7 @@ class TaskManager(BaseManager):
                             welcome_played=self.tools["input"].welcome_message_played()
                         ):
                             logger.info(f"Continuing the loop and ignoring the transcript received ({transcript_content}) in speech final as it is false interruption")
+                            self.interruption_manager.on_user_speech_ended(update_utterance_time=False)
                             continue
 
                         self.interruption_manager.on_user_speech_ended()
@@ -2290,7 +2312,7 @@ class TaskManager(BaseManager):
                     # Handle speech_ended notification (UtteranceEnd with no new transcript)
                     elif isinstance(message.get("data"), dict) and message["data"].get("type", "") == "speech_ended":
                         logger.info(f"Received speech_ended notification, resetting callee_speaking state")
-                        self.interruption_manager.on_user_speech_ended()
+                        self.interruption_manager.on_user_speech_ended(update_utterance_time=False)
                         temp_transcriber_message = ""
 
                     elif message["data"] == "transcriber_connection_closed":

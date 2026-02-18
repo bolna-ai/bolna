@@ -52,17 +52,18 @@ class InterruptionManager:
 
         Returns:
         - "SEND" - audio should be sent now
-        - "BLOCK" - audio should be discarded (user speaking, invalid sequence)
+        - "BLOCK" - audio should be discarded (invalid/cancelled sequence)
         - "WAIT" - audio should be delayed (grace period active)
         """
         # Check 1: Invalid sequence - discard
         if sequence_id not in self.sequence_ids:
             return "BLOCK"
 
-        # Check 2: User is speaking - discard (interruption)
+        # Check 2: User is speaking - hold audio until they stop
+        # Only invalid sequences (from real interruptions) get hard BLOCK above
         if self.callee_speaking:
-            logger.info(f"Audio status=BLOCK - user is speaking")
-            return "BLOCK"
+            logger.info(f"Audio status=WAIT - user is speaking")
+            return "WAIT"
 
         # Check 3: Grace period (only after first 2 turns to avoid latency on welcome)
         if history_length > 2:
@@ -125,12 +126,20 @@ class InterruptionManager:
             self.time_since_first_interim_result = time.time() * 1000
             logger.info(f"First interim at {self.time_since_first_interim_result}")
 
-    def on_user_speech_ended(self) -> None:
-        """Called when user stops speaking (speech_final/UtteranceEnd)."""
+    def on_user_speech_ended(self, update_utterance_time: bool = True) -> None:
+        """Called when user stops speaking (speech_final/UtteranceEnd).
+
+        Args:
+            update_utterance_time: If True (default), updates utterance_end_time
+                to start a new grace period. Pass False when the speech was ignored
+                (false interruption) or redundant (late UtteranceEnd) so that the
+                grace period stays anchored to the last real user turn.
+        """
         self.callee_speaking = False
         self.let_remaining_audio_pass_through = True
         self.time_since_first_interim_result = -1
-        self.utterance_end_time = time.time() * 1000
+        if update_utterance_time:
+            self.utterance_end_time = time.time() * 1000
         logger.info("User speech ended")
 
     def on_interruption_triggered(self) -> None:
