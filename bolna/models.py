@@ -168,21 +168,6 @@ class IOModel(BaseModel):
         return validate_attribute(value, TelephonyProvider.all_values())
 
 
-# Can be used to route across multiple prompts as well
-class Route(BaseModel):
-    route_name: str
-    utterances: List[str]
-    response: Union[List[
-        str], str]  # If length of responses is less than utterances, a random sentence will be used as a response and if it's equal, respective index will be used to use it as FAQs caching
-    score_threshold: Optional[float] = 0.85  # this is the required threshold for cosine similarity
-
-
-# Routes can be used for FAQs caching, prompt routing, guard rails, agent assist function calling
-class Routes(BaseModel):
-    embedding_model: Optional[str] = "Snowflake/snowflake-arctic-embed-l"
-    routes: Optional[List[Route]] = []
-
-
 class MongoDBProviderConfig(BaseModel):
     connection_string: Optional[str] = None
     db_name: Optional[str] = None
@@ -245,14 +230,12 @@ class Llm(BaseModel):
     presence_penalty: Optional[float] = 0.0
     provider: Optional[str] = "openai"
     base_url: Optional[str] = None
-    routes: Optional[Routes] = None
     reasoning_effort: Optional[ReasoningEffort] = None
     verbosity: Optional[Verbosity] = None
 
 
 class SimpleLlmAgent(Llm):
     agent_flow_type: Optional[str] = "streaming" #It is used for backwards compatibility
-    routes: Optional[Routes] = None
     extraction_details: Optional[str] = None
     summarization_details: Optional[str] = None
 
@@ -349,7 +332,6 @@ class KnowledgebaseAgent(Llm):
 class LlmAgent(BaseModel):
     agent_flow_type: str
     agent_type: str
-    routes: Optional[Routes] = None
     llm_config: Union[KnowledgebaseAgent, LlmAgentGraph, MultiAgent, SimpleLlmAgent, GraphAgentConfig, KnowledgeAgentConfig]
 
     @field_validator('llm_config', mode='before')
