@@ -19,8 +19,6 @@ from bolna.enums import TelephonyProvider
 logger = configure_logger(__name__)
 load_dotenv()
 
-DEEPGRAM_HOST_PROTOCOL = os.getenv('DEEPGRAM_HOST_PROTOCOL', 'wss')
-
 
 class DeepgramTranscriber(BaseTranscriber):
     def __init__(self, telephony_provider, input_queue=None, model='nova-2', stream=True, language="en", endpointing="400",
@@ -134,7 +132,7 @@ class DeepgramTranscriber(BaseTranscriber):
             else:
                 dg_params['keywords'] = "&keywords=".join(self.keywords.split(","))
 
-        websocket_api = '{}://{}/v1/listen?'.format(DEEPGRAM_HOST_PROTOCOL, self.deepgram_host)
+        websocket_api = '{}://{}/v1/listen?'.format(os.getenv('DEEPGRAM_HOST_PROTOCOL', 'wss'), self.deepgram_host)
         websocket_url = websocket_api + urlencode(dg_params)
         return websocket_url
 
