@@ -134,7 +134,7 @@ class DeepgramTranscriber(BaseTranscriber):
             else:
                 dg_params['keywords'] = "&keywords=".join(self.keywords.split(","))
 
-        websocket_api = '{}://{}/v1/listen?'.format(DEEPGRAM_HOST_PROTOCOL, self.deepgram_host)
+        websocket_api = '{}://{}/v1/listen?'.format(os.getenv('DEEPGRAM_HOST_PROTOCOL', 'wss'), self.deepgram_host)
         websocket_url = websocket_api + urlencode(dg_params)
         return websocket_url
 
