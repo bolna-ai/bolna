@@ -5,6 +5,7 @@ from dotenv import load_dotenv
 from openai import AsyncAzureOpenAI, AuthenticationError, PermissionDeniedError, NotFoundError, RateLimitError, APIError, APIConnectionError, BadRequestError
 
 from bolna.constants import DEFAULT_LANGUAGE_CODE
+from bolna.enums import LogComponent, LogDirection
 from bolna.helpers.utils import convert_to_request_log, compute_function_pre_call_message, now_ms
 from .llm import BaseLLM
 from bolna.helpers.logger_config import configure_logger
@@ -201,7 +202,7 @@ class AzureLLM(BaseLLM):
                 all_required_keys = tools[i]["function"]["parameters"].get("required", [])
 
                 if tools[i]["function"].get("parameters", None) is not None and all(key in parsed_arguments for key in all_required_keys):
-                    convert_to_request_log(arguments_received, meta_info, self.model, "llm", direction="response", is_cached=False, run_id=self.run_id)
+                    convert_to_request_log(arguments_received, meta_info, self.model, LogComponent.LLM, direction=LogDirection.RESPONSE, is_cached=False, run_id=self.run_id)
                     api_call_payload.update(parsed_arguments)
                 else:
                     api_call_payload['resp'] = None

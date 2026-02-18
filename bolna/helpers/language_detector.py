@@ -5,6 +5,7 @@ import asyncio
 import uuid
 from bolna.llms import OpenAiLLM
 from bolna.prompts import LANGUAGE_DETECTION_PROMPT
+from bolna.enums import LogComponent, LogDirection
 from bolna.helpers.utils import convert_to_request_log
 from bolna.helpers.logger_config import configure_logger
 
@@ -91,11 +92,11 @@ class LanguageDetector:
         model = self._llm.model if self._llm else 'unknown'
         convert_to_request_log(
             message={'transcripts': self._transcripts},
-            meta_info=meta_info, component="llm_language_detection",
-            direction="request", model=model, run_id=self.run_id
+            meta_info=meta_info, component=LogComponent.LLM_LANGUAGE_DETECTION,
+            direction=LogDirection.REQUEST, model=model, run_id=self.run_id
         )
         convert_to_request_log(
             message=result, meta_info=meta_info,
-            component="llm_language_detection", direction="response",
+            component=LogComponent.LLM_LANGUAGE_DETECTION, direction=LogDirection.RESPONSE,
             model=model, run_id=self.run_id
         )

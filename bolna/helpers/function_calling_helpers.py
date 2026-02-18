@@ -3,7 +3,8 @@ import json
 
 import aiohttp
 from bolna.helpers.logger_config import configure_logger
-from bolna.helpers.utils import convert_to_request_log
+from bolna.enums import LogComponent, LogDirection
+from bolna.helpers.utils import convert_to_request_log, format_error_message
 
 logger = configure_logger(__name__)
 
@@ -102,7 +103,7 @@ async def trigger_api(url, method, param, api_token, headers_data, meta_info, ru
 
         if headers.get('Content-Type').lower().startswith('application/x-www-form-urlencoded'):
             content_type = 'form'
-        convert_to_request_log(request_body, meta_info , None, "function_call", direction="request", is_cached=False, run_id=run_id)
+        convert_to_request_log(request_body, meta_info , None, LogComponent.FUNCTION_CALL, direction=LogDirection.REQUEST, is_cached=False, run_id=run_id)
 
         await asyncio.sleep(0.7)
 
@@ -125,6 +126,16 @@ async def trigger_api(url, method, param, api_token, headers_data, meta_info, ru
     except Exception as e:
         message = f"ERROR CALLING API: Please check your API: {e}"
         logger.error(message)
+        if run_id:
+            convert_to_request_log(
+                format_error_message("function_call", url, str(e)),
+                meta_info,
+                model=None,
+                component=LogComponent.WARNING,
+                direction=LogDirection.WARNING,
+                is_cached=False,
+                run_id=run_id
+            )
         return message
 
 

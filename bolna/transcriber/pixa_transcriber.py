@@ -77,6 +77,7 @@ class PixaTranscriber(BaseTranscriber):
         self.websocket_connection = None
         self.connection_authenticated = False
         self.meta_info = {}
+        self.connection_error = None
 
         # Turn/latency tracking
         self.current_turn_start_time = None
@@ -529,14 +530,18 @@ class PixaTranscriber(BaseTranscriber):
                                 pass
                             break
                 except ConnectionClosedError as e:
+                    self.connection_error = str(e)
                     logger.error(f"Pixa websocket connection closed during streaming: {e}")
                 except Exception as e:
+                    self.connection_error = str(e)
                     logger.error(f"Error during Pixa streaming: {e}")
                     traceback.print_exc()
 
         except (ValueError, ConnectionError) as e:
+            self.connection_error = str(e)
             logger.error(f"Connection error in Pixa transcribe: {e}")
         except Exception as e:
+            self.connection_error = str(e)
             logger.error(f"Unexpected error in Pixa transcribe: {e}")
             traceback.print_exc()
         finally:
@@ -556,8 +561,11 @@ class PixaTranscriber(BaseTranscriber):
                     self.connection_authenticated = False
 
             # Send connection closed notification
+            meta = dict(getattr(self, 'meta_info', None) or {})
+            if self.connection_error:
+                meta['connection_error'] = self.connection_error
             await self.push_to_transcriber_queue(
-                create_ws_data_packet("transcriber_connection_closed", getattr(self, 'meta_info', {}))
+                create_ws_data_packet("transcriber_connection_closed", meta)
             )
 
     def get_meta_info(self):

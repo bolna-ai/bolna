@@ -20,11 +20,13 @@ from .base_manager import BaseManager
 from .interruption_manager import InterruptionManager
 from bolna.agent_types import *
 from bolna.providers import *
-from bolna.enums import TelephonyProvider
+from bolna.enums import TelephonyProvider, LogComponent, LogDirection
+from bolna.exceptions import BolnaComponentError, LLMError, SynthesizerError, TranscriberError
 from bolna.prompts import *
 from bolna.helpers.language_detector import LanguageDetector
 from bolna.helpers.utils import structure_system_prompt, compute_function_pre_call_message, select_message_by_language, get_date_time_from_timezone, calculate_audio_duration, create_ws_data_packet, get_file_names_in_directory, get_raw_audio_bytes, is_valid_md5, \
-    get_required_input_types, format_messages, get_prompt_responses, resample, save_audio_file_to_s3, update_prompt_with_context, get_md5_hash, clean_json_string, wav_bytes_to_pcm, convert_to_request_log, yield_chunks_from_memory, process_task_cancellation, pcm_to_ulaw
+    get_required_input_types, format_messages, get_prompt_responses, resample, save_audio_file_to_s3, update_prompt_with_context, get_md5_hash, clean_json_string, wav_bytes_to_pcm, convert_to_request_log, yield_chunks_from_memory, process_task_cancellation, pcm_to_ulaw, \
+    format_error_message
 from bolna.helpers.logger_config import configure_logger
 from ..helpers.mark_event_meta_data import MarkEventMetaData
 from ..helpers.observable_variable import ObservableVariable
@@ -648,7 +650,7 @@ class TaskManager(BaseManager):
                     self.stream_sid = stream_sid
                     await self.tools["output"].set_stream_sid(stream_sid)
                     self.tools["input"].update_is_audio_being_played(True)
-                    convert_to_request_log(message=text, meta_info=meta_info, component="synthesizer", direction="response", model=self.synthesizer_provider, is_cached=meta_info.get("is_cached", False), engine=self.tools['synthesizer'].get_engine(), run_id=self.run_id)
+                    convert_to_request_log(message=text, meta_info=meta_info, component=LogComponent.SYNTHESIZER, direction=LogDirection.RESPONSE, model=self.synthesizer_provider, is_cached=meta_info.get("is_cached", False), engine=self.tools['synthesizer'].get_engine(), run_id=self.run_id)
                     await self.tools["output"].handle(message)
                     try:
                         data = message.get("data")
@@ -1192,7 +1194,14 @@ class TaskManager(BaseManager):
             })
 
             start_time = time.time()
-            json_data = await self.tools["llm_agent"].generate(self.history)
+            try:
+                json_data = await self.tools["llm_agent"].generate(self.history)
+            except Exception as e:
+                raise LLMError(
+                    str(e),
+                    provider=self.llm_config.get("provider"),
+                    model=self.llm_config.get("model")
+                ) from e
             latency_ms = (time.time() - start_time) * 1000
             
             if self.task_config["task_type"] == "summarization":
@@ -1370,7 +1379,7 @@ class TaskManager(BaseManager):
             messages.append({'role': 'user', 'content': message['data']})
             logger.info(f"Starting LLM Agent {messages}")
             #Expose get current classification_response method from the agent class and use it for the response log
-            convert_to_request_log(message=format_messages(messages, use_system_prompt= True), meta_info= meta_info, component="llm", direction="request", model=self.llm_agent_config["model"], is_cached= True, run_id= self.run_id)
+            convert_to_request_log(message=format_messages(messages, use_system_prompt= True), meta_info= meta_info, component=LogComponent.LLM, direction=LogDirection.REQUEST, model=self.llm_agent_config["model"], is_cached= True, run_id= self.run_id)
             async for next_state in self.tools['llm_agent'].generate(messages, label_flow=self.label_flow):
                 if next_state == "<end_of_conversation>":
                     meta_info["end_of_conversation"] = True
@@ -1455,8 +1464,8 @@ class TaskManager(BaseManager):
 
             if self.tools['input'].io_provider == 'default':
                 mock_response = f"This is a mocked response demonstrating a successful transfer of call to {call_transfer_number}"
-                convert_to_request_log(str(payload), meta_info, None, "function_call", direction="request", run_id=self.run_id)
-                convert_to_request_log(mock_response, meta_info, None, "function_call", direction="response", run_id=self.run_id)
+                convert_to_request_log(str(payload), meta_info, None, LogComponent.FUNCTION_CALL, direction=LogDirection.REQUEST, run_id=self.run_id)
+                convert_to_request_log(mock_response, meta_info, None, LogComponent.FUNCTION_CALL, direction=LogDirection.RESPONSE, run_id=self.run_id)
 
                 bos_packet = create_ws_data_packet("<beginning_of_stream>", meta_info)
                 await self.tools["output"].handle(bos_packet)
@@ -1469,12 +1478,12 @@ class TaskManager(BaseManager):
                 logger.info(f"Sending the payload to stop the conversation {payload} url {url}")
                 while self.tools["input"].is_audio_being_played_to_user():
                     await asyncio.sleep(1)
-                convert_to_request_log(str(payload), meta_info, None, "function_call", direction="request", is_cached=False,
+                convert_to_request_log(str(payload), meta_info, None, LogComponent.FUNCTION_CALL, direction=LogDirection.REQUEST, is_cached=False,
                                        run_id=self.run_id)
                 async with session.post(url, json = payload) as response:
                     response_text = await response.text()
                     logger.info(f"Response from the server after call transfer: {response_text}")
-                    convert_to_request_log(str(response_text), meta_info, None, "function_call", direction="response", is_cached=False, run_id=self.run_id)
+                    convert_to_request_log(str(response_text), meta_info, None, LogComponent.FUNCTION_CALL, direction=LogDirection.RESPONSE, is_cached=False, run_id=self.run_id)
                     return
 
         response = await trigger_api(url=url, method=method.lower(), param=param, api_token=api_token, headers_data=headers, meta_info=meta_info, run_id=self.run_id, **resp)
@@ -1512,9 +1521,9 @@ class TaskManager(BaseManager):
         model_args["messages"].append({"role": "tool", "tool_call_id": resp.get("tool_call_id", ""), "content": function_response})
 
         logger.info(f"Logging function call parameters ")
-        convert_to_request_log(function_response, meta_info , None, "function_call", direction = "response", is_cached= False, run_id = self.run_id)
+        convert_to_request_log(function_response, meta_info , None, LogComponent.FUNCTION_CALL, direction=LogDirection.RESPONSE, is_cached= False, run_id = self.run_id)
 
-        convert_to_request_log(format_messages(model_args['messages'], True), meta_info, self.llm_config['model'], "llm", direction = "request", is_cached= False, run_id = self.run_id)
+        convert_to_request_log(format_messages(model_args['messages'], True), meta_info, self.llm_config['model'], LogComponent.LLM, direction=LogDirection.REQUEST, is_cached= False, run_id = self.run_id)
         self.check_if_user_online = self.conversation_config.get("check_if_user_online", True)
 
         if not called_fun.startswith("transfer_call"):
@@ -1530,7 +1539,7 @@ class TaskManager(BaseManager):
             logger.info("##### User spoke while LLM was generating response")
         else:
             self.llm_response_generated = True
-            convert_to_request_log(message=llm_response, meta_info= meta_info, component="llm", direction="response", model=self.llm_config["model"], run_id= self.run_id)
+            convert_to_request_log(message=llm_response, meta_info= meta_info, component=LogComponent.LLM, direction=LogDirection.RESPONSE, model=self.llm_config["model"], run_id= self.run_id)
             if should_trigger_function_call:
                 logger.info(f"There was a function call and need to make that work")
                 self.history.append({"role": "assistant", "content": llm_response})
@@ -1563,9 +1572,10 @@ class TaskManager(BaseManager):
         if detected_lang:
             meta_info['detected_language'] = detected_lang
 
-        async for llm_message in self.tools['llm_agent'].generate(messages, synthesize=synthesize, meta_info=meta_info):
+        try:
+          async for llm_message in self.tools['llm_agent'].generate(messages, synthesize=synthesize, meta_info=meta_info):
             if isinstance(llm_message, dict) and 'messages' in llm_message: # custom list of messages before the llm call
-                convert_to_request_log(format_messages(llm_message['messages'], True), meta_info, self.llm_config['model'], "llm", direction="request", is_cached=False, run_id=self.run_id)
+                convert_to_request_log(format_messages(llm_message['messages'], True), meta_info, self.llm_config['model'], LogComponent.LLM, direction=LogDirection.REQUEST, is_cached=False, run_id=self.run_id)
                 continue
 
             # Handle graph agent routing info
@@ -1592,8 +1602,8 @@ class TaskManager(BaseManager):
                         message=format_messages(routing_messages, use_system_prompt=True) + tools_summary,
                         meta_info=meta_info,
                         model=routing_info.get('routing_model', ''),
-                        component="graph_routing",
-                        direction="request",
+                        component=LogComponent.GRAPH_ROUTING,
+                        direction=LogDirection.REQUEST,
                         run_id=self.run_id
                     )
 
@@ -1629,8 +1639,8 @@ class TaskManager(BaseManager):
                     message=routing_data,
                     meta_info=meta_info,
                     model=routing_info.get('routing_model', ''),
-                    component="graph_routing",
-                    direction="response",
+                    component=LogComponent.GRAPH_ROUTING,
+                    direction=LogDirection.RESPONSE,
                     run_id=self.run_id
                 )
                 continue
@@ -1670,6 +1680,22 @@ class TaskManager(BaseManager):
                     self.interim_history = copy.deepcopy(messages)
 
                 await self._handle_llm_output(next_step, text_chunk, should_bypass_synth, meta_info)
+        except Exception as e:
+            if self.run_id:
+                error_msg = format_error_message("llm", self.llm_config.get("model", "unknown"), str(e))
+                convert_to_request_log(
+                    error_msg, meta_info,
+                    model=self.llm_config.get("model", "-"),
+                    component=LogComponent.ERROR,
+                    direction=LogDirection.ERROR,
+                    is_cached=False,
+                    run_id=self.run_id
+                )
+            raise LLMError(
+                str(e),
+                provider=self.llm_config.get("provider"),
+                model=self.llm_config.get("model")
+            ) from e
 
         detected_lang = self.language_detector.dominant_language or self.language
         filler_message = compute_function_pre_call_message(detected_lang, function_tool, function_tool_message)
@@ -1680,7 +1706,7 @@ class TaskManager(BaseManager):
             if self.turn_based_conversation:
                 self.history.append({"role": "assistant", "content": llm_response})
             await self._handle_llm_output(next_step, llm_response, should_bypass_synth, meta_info, is_function_call=should_trigger_function_call)
-            convert_to_request_log(message=llm_response, meta_info=meta_info, component="llm", direction="response", model=self.llm_config["model"], run_id=self.run_id)
+            convert_to_request_log(message=llm_response, meta_info=meta_info, component=LogComponent.LLM, direction=LogDirection.RESPONSE, model=self.llm_config["model"], run_id=self.run_id)
 
         # Collect RAG latency if present (from KnowledgeBaseAgent)
         if meta_info.get('rag_latency'):
@@ -1700,7 +1726,7 @@ class TaskManager(BaseManager):
 
         # Request logs converted inside do_llm_generation for knowledgebase agent
         if not self.__is_knowledgebase_agent() and not self.__is_graph_agent():
-            convert_to_request_log(message=format_messages(messages, use_system_prompt=True), meta_info=meta_info, component="llm", direction="request", model=self.llm_config["model"], run_id= self.run_id)
+            convert_to_request_log(message=format_messages(messages, use_system_prompt=True), meta_info=meta_info, component=LogComponent.LLM, direction=LogDirection.REQUEST, model=self.llm_config["model"], run_id= self.run_id)
 
         await self.__do_llm_generation(messages, meta_info, next_step, should_bypass_synth)
         # TODO : Write a better check for completion prompt
@@ -1731,8 +1757,8 @@ class TaskManager(BaseManager):
                 {'role': 'user', 'content': format_messages(self.history)}
             ]
             logger.info(f"##### Answer from the LLM {completion_res}")
-            convert_to_request_log(message=format_messages(prompt, use_system_prompt=True), meta_info=meta_info, component="llm_hangup", direction="request", model=self.check_for_completion_llm, run_id=self.run_id)
-            convert_to_request_log(message=completion_res, meta_info=meta_info, component="llm_hangup", direction="response", model=self.check_for_completion_llm, run_id=self.run_id)
+            convert_to_request_log(message=format_messages(prompt, use_system_prompt=True), meta_info=meta_info, component=LogComponent.LLM_HANGUP, direction=LogDirection.REQUEST, model=self.check_for_completion_llm, run_id=self.run_id)
+            convert_to_request_log(message=completion_res, meta_info=meta_info, component=LogComponent.LLM_HANGUP, direction=LogDirection.RESPONSE, model=self.check_for_completion_llm, run_id=self.run_id)
 
             if should_hangup:
                 if self.hangup_triggered or self.conversation_ended:
@@ -1801,6 +1827,12 @@ class TaskManager(BaseManager):
             else:
                 logger.error("unsupported task type: {}".format(self.task_config["task_type"]))
             self.llm_task = None
+        except BolnaComponentError as e:
+            traceback.print_exc()
+            logger.error(f"Component error in llm: {e}")
+            self.response_in_pipeline = False
+            self._component_error = e
+            raise
         except Exception as e:
             traceback.print_exc()
             logger.error(f"Something went wrong in llm: {e}")
@@ -1928,8 +1960,8 @@ class TaskManager(BaseManager):
                 convert_to_request_log(
                     message=format_messages(prompt, use_system_prompt=True),
                     meta_info=meta_info,
-                    component="llm_voicemail",
-                    direction="request",
+                    component=LogComponent.LLM_VOICEMAIL,
+                    direction=LogDirection.REQUEST,
                     model=self.voicemail_llm,
                     run_id=self.run_id
                 )
@@ -1959,8 +1991,8 @@ class TaskManager(BaseManager):
                 convert_to_request_log(
                     message=voicemail_result,
                     meta_info=meta_info,
-                    component="llm_voicemail",
-                    direction="response",
+                    component=LogComponent.LLM_VOICEMAIL,
+                    direction=LogDirection.RESPONSE,
                     model=self.voicemail_llm,
                     run_id=self.run_id
                 )
@@ -2028,7 +2060,7 @@ class TaskManager(BaseManager):
 
         self.history.append({"role": "user", "content": transcriber_message})
 
-        convert_to_request_log(message=transcriber_message, meta_info=meta_info, model=self.task_config["tools_config"]["transcriber"]["provider"], run_id= self.run_id)
+        convert_to_request_log(message=transcriber_message, meta_info=meta_info, model=self.task_config["tools_config"]["transcriber"]["provider"], run_id=self.run_id)
         if next_task == "llm":
             logger.info(f"Running llm Tasks")
             meta_info["origin"] = "transcriber"
@@ -2065,6 +2097,18 @@ class TaskManager(BaseManager):
                     if message["data"] == "transcriber_connection_closed":
                         logger.info(f"Transcriber connection has been closed")
                         self.transcriber_duration += message.get("meta_info", {}).get("transcriber_duration", 0) if message['meta_info'] is not None else 0
+                        connection_error = (message.get("meta_info") or {}).get("connection_error")
+                        if connection_error and self.run_id:
+                            error_msg = format_error_message("transcriber", self.task_config["tools_config"]["transcriber"].get("provider", "unknown"), connection_error)
+                            convert_to_request_log(
+                                error_msg,
+                                {"request_id": self.task_id, "sequence_id": None},
+                                model=self.task_config["tools_config"]["transcriber"].get("provider", "-"),
+                                component=LogComponent.ERROR,
+                                direction=LogDirection.ERROR,
+                                is_cached=False,
+                                run_id=self.run_id
+                            )
                         break
                     continue
 
@@ -2178,6 +2222,18 @@ class TaskManager(BaseManager):
                     elif message["data"] == "transcriber_connection_closed":
                         logger.info(f"Transcriber connection has been closed")
                         self.transcriber_duration += message.get("meta_info", {}).get("transcriber_duration", 0) if message["meta_info"] is not None else 0
+                        connection_error = (message.get("meta_info") or {}).get("connection_error")
+                        if connection_error and self.run_id:
+                            error_msg = format_error_message("transcriber", self.task_config["tools_config"]["transcriber"].get("provider", "unknown"), connection_error)
+                            convert_to_request_log(
+                                error_msg,
+                                {"request_id": self.task_id, "sequence_id": None},
+                                model=self.task_config["tools_config"]["transcriber"].get("provider", "-"),
+                                component=LogComponent.ERROR,
+                                direction=LogDirection.ERROR,
+                                is_cached=False,
+                                run_id=self.run_id
+                            )
                         break
 
                 else:
@@ -2185,6 +2241,18 @@ class TaskManager(BaseManager):
                     if message["data"] == "transcriber_connection_closed":
                         logger.info(f"Transcriber connection has been closed")
                         self.transcriber_duration += message.get("meta_info", {}).get("transcriber_duration", 0) if message["meta_info"] is not None else 0
+                        connection_error = (message.get("meta_info") or {}).get("connection_error")
+                        if connection_error and self.run_id:
+                            error_msg = format_error_message("transcriber", self.task_config["tools_config"]["transcriber"].get("provider", "unknown"), connection_error)
+                            convert_to_request_log(
+                                error_msg,
+                                {"request_id": self.task_id, "sequence_id": None},
+                                model=self.task_config["tools_config"]["transcriber"].get("provider", "-"),
+                                component=LogComponent.ERROR,
+                                direction=LogDirection.ERROR,
+                                is_cached=False,
+                                run_id=self.run_id
+                            )
                         break
 
                     await self.__process_http_transcription(message)
@@ -2195,6 +2263,10 @@ class TaskManager(BaseManager):
         except Exception as e:
             traceback.print_exc()
             logger.error(f"Error in transcriber {e}")
+            raise TranscriberError(
+                str(e),
+                provider=self.task_config["tools_config"]["transcriber"].get("provider")
+            ) from e
 
     async def __process_http_transcription(self, message):
         meta_info = self.__get_updated_meta_info(message["meta_info"])
@@ -2275,8 +2347,8 @@ class TaskManager(BaseManager):
                                 convert_to_request_log(
                                     message=current_text,
                                     meta_info=meta_info,
-                                    component="synthesizer",
-                                    direction="response",
+                                    component=LogComponent.SYNTHESIZER,
+                                    direction=LogDirection.RESPONSE,
                                     model=self.synthesizer_provider,
                                     is_cached=meta_info.get("is_cached", False),
                                     engine=self.tools['synthesizer'].get_engine(),
@@ -2295,6 +2367,18 @@ class TaskManager(BaseManager):
                     break
                 except Exception as e:
                     logger.error(f"Error in synthesizer: {e}", exc_info=True)
+                    if self.run_id:
+                        error_msg = format_error_message("synthesizer", self.synthesizer_provider, str(e))
+                        convert_to_request_log(
+                            error_msg,
+                            {"request_id": self.task_id, "sequence_id": None},
+                            model=self.synthesizer_provider,
+                            component=LogComponent.ERROR,
+                            direction=LogDirection.ERROR,
+                            is_cached=False,
+                            run_id=self.run_id
+                        )
+                    self._component_error = SynthesizerError(str(e), provider=self.synthesizer_provider)
                     break
 
             logger.info("Exiting __listen_synthesizer gracefully.")
@@ -2304,6 +2388,20 @@ class TaskManager(BaseManager):
             #await self.handle_cancellation("Synthesizer task was cancelled outside loop.")
         except Exception as e:
             logger.error(f"Unexpected error in __listen_synthesizer: {e}", exc_info=True)
+            if self.run_id:
+                error_msg = format_error_message("synthesizer", self.synthesizer_provider, str(e))
+                convert_to_request_log(
+                    error_msg,
+                    {"request_id": self.task_id, "sequence_id": None},
+                    model=self.synthesizer_provider,
+                    component=LogComponent.ERROR,
+                    direction=LogDirection.ERROR,
+                    is_cached=False,
+                    run_id=self.run_id
+                )
+            raise SynthesizerError(
+                str(e), provider=self.synthesizer_provider
+            ) from e
         finally:
             await self.tools["synthesizer"].cleanup()
 
@@ -2381,10 +2479,10 @@ class TaskManager(BaseManager):
                     await self.__send_preprocessed_audio(meta_info, text)
 
                 elif self.synthesizer_provider in SUPPORTED_SYNTHESIZER_MODELS.keys():
-                    convert_to_request_log(message = text, meta_info= meta_info, component="synthesizer", direction="request", model = self.synthesizer_provider, engine=self.tools['synthesizer'].get_engine(), run_id= self.run_id)
+                    convert_to_request_log(message = text, meta_info= meta_info, component=LogComponent.SYNTHESIZER, direction=LogDirection.REQUEST, model = self.synthesizer_provider, engine=self.tools['synthesizer'].get_engine(), run_id= self.run_id)
                     if 'cached' in message['meta_info'] and meta_info['cached'] is True:
                         logger.info(f"Cached response and hence sending preprocessed text")
-                        convert_to_request_log(message = text, meta_info= meta_info, component="synthesizer", direction="response", model = self.synthesizer_provider, is_cached= True, engine=self.tools['synthesizer'].get_engine(), run_id= self.run_id)
+                        convert_to_request_log(message = text, meta_info= meta_info, component=LogComponent.SYNTHESIZER, direction=LogDirection.RESPONSE, model = self.synthesizer_provider, is_cached= True, engine=self.tools['synthesizer'].get_engine(), run_id= self.run_id)
                         await self.__send_preprocessed_audio(meta_info, get_md5_hash(text))
                     else:
                         self.synthesizer_characters += len(text)
@@ -2741,6 +2839,7 @@ class TaskManager(BaseManager):
             logger.error(f"Error occurred in handling init event - {e}")
 
     async def run(self):
+        self._component_error = None
         try:
             if self._is_conversation_task():
                 logger.info("started running")
@@ -2787,6 +2886,35 @@ class TaskManager(BaseManager):
                 except Exception as e:
                     traceback.print_exc()
                     logger.error(f"Error: {e}")
+                    if self.run_id:
+                        if isinstance(e, BolnaComponentError):
+                            error_msg = format_error_message(e.component, e.provider or e.model or "-", str(e))
+                            model = e.model or "-"
+                        else:
+                            error_msg = format_error_message("unknown", "-", str(e))
+                            model = "-"
+                        convert_to_request_log(
+                            error_msg,
+                            {"request_id": self.task_id, "sequence_id": None},
+                            model=model,
+                            component=LogComponent.ERROR,
+                            direction=LogDirection.ERROR,
+                            is_cached=False,
+                            run_id=self.run_id
+                        )
+
+                # Surface component errors from fire-and-forget tasks or stored errors
+                if self._component_error is not None:
+                    raise self._component_error
+                for attr, cls, provider in [
+                    ('synthesizer_task', SynthesizerError, getattr(self, 'synthesizer_provider', None)),
+                    ('transcriber_task', TranscriberError, self.task_config.get("tools_config", {}).get("transcriber", {}).get("provider")),
+                ]:
+                    task = getattr(self, attr, None)
+                    if task and task.done() and not task.cancelled():
+                        exc = task.exception()
+                        if exc is not None:
+                            raise exc if isinstance(exc, BolnaComponentError) else cls(str(exc), provider=provider)
 
                 if self.generate_precise_transcript:
                     has_pending_marks = len(self.mark_event_meta_data.mark_event_meta_data) > 0
@@ -2803,9 +2931,11 @@ class TaskManager(BaseManager):
                         await self._process_followup_task()
                     else:
                         await self._run_llm_task(self.input_parameters)
+                except BolnaComponentError:
+                    raise
                 except Exception as e:
                     logger.error(f"Could not do llm call: {e}")
-                    raise Exception(e)
+                    raise
 
         except asyncio.CancelledError as e:
             # Cancel all tasks on cancel
@@ -2819,24 +2949,30 @@ class TaskManager(BaseManager):
             logger.error(f"Exception in task manager run: {error_message}")
             traceback.print_exc()
 
-            # Log call-breaking exception to CSV trace
+            # Log call-breaking exception to CSV trace with component attribution
             if self.run_id:
                 meta_info = {
                     'request_id': self.task_id,
                     'sequence_id': None
                 }
+                if isinstance(e, BolnaComponentError):
+                    error_msg = format_error_message(e.component, e.provider or e.model or "-", error_message)
+                    model = e.model or "-"
+                else:
+                    error_msg = format_error_message("unknown", "-", error_message)
+                    model = "-"
                 convert_to_request_log(
-                    f"Call Breaking Error: {error_message}",
+                    error_msg,
                     meta_info,
-                    model="-",
-                    component="error",
-                    direction="error",
+                    model=model,
+                    component=LogComponent.ERROR,
+                    direction=LogDirection.ERROR,
                     is_cached=False,
                     run_id=self.run_id
                 )
 
             await self.handle_cancellation(f"Exception occurred {e}")
-            raise Exception(e)
+            raise
 
         finally:
             # Construct output

@@ -56,6 +56,7 @@ class BodhiTranscriber(BaseTranscriber):
         self.utterance_end = 1000
         self.last_non_empty_transcript = time.time()
         self.start_time = time.time()
+        self.connection_error = None
 
     def get_ws_url(self):
         websocket_url = 'wss://{}'.format(self.api_host)
@@ -289,6 +290,7 @@ class BodhiTranscriber(BaseTranscriber):
         except Exception as e:
             traceback.print_exc()
             logger.error(f"Error while getting transcriptions {e}")
+            self.connection_error = str(e)
             self.interruption_signalled = False
             yield create_ws_data_packet("TRANSCRIBER_END", self.meta_info)
 
@@ -350,6 +352,10 @@ class BodhiTranscriber(BaseTranscriber):
                         await self.push_to_transcriber_queue(message)
             
             self.meta_info["transcriber_duration"] = time.time() - self.start_time
-            await self.push_to_transcriber_queue(create_ws_data_packet("transcriber_connection_closed", self.meta_info))
+            meta = dict(self.meta_info or {})
+            if self.connection_error:
+                meta['connection_error'] = self.connection_error
+            await self.push_to_transcriber_queue(create_ws_data_packet("transcriber_connection_closed", meta))
         except Exception as e:
+            self.connection_error = str(e)
             logger.error(f"Error in transcribe: {e}")
