@@ -19,8 +19,6 @@ from bolna.enums import TelephonyProvider
 logger = configure_logger(__name__)
 load_dotenv()
 
-DEEPGRAM_HOST_PROTOCOL = os.getenv('DEEPGRAM_HOST_PROTOCOL', 'wss')
-
 
 class DeepgramTranscriber(BaseTranscriber):
     def __init__(self, telephony_provider, input_queue=None, model='nova-2', stream=True, language="en", endpointing="400",
