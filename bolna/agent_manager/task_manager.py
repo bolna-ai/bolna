@@ -262,6 +262,9 @@ class TaskManager(BaseManager):
                 if 'reasoning_effort' in self.llm_agent_config:
                     self.llm_config['reasoning_effort'] = self.llm_agent_config['reasoning_effort']
 
+                if self.llm_agent_config.get('use_responses_api'):
+                    self.llm_config['use_responses_api'] = True
+
         # Output stuff
         self.output_task = None
         self.buffered_output_queue = asyncio.Queue()
@@ -542,6 +545,14 @@ class TaskManager(BaseManager):
     #         return False
     #     agent_type = self.task_config['tools_config']["llm_agent"].get("agent_type", None)
     #     return agent_type == "knowledge_agent"
+
+    def _invalidate_response_chain(self):
+        try:
+            llm_agent = self.tools.get('llm_agent')
+            if llm_agent and hasattr(llm_agent, 'llm'):
+                llm_agent.llm.invalidate_response_chain()
+        except Exception as e:
+            logger.debug(f"Failed to invalidate response chain: {e}")
 
     def _inject_language_instruction(self, messages: list) -> list:
         """Inject language instruction into messages based on detected language."""
@@ -1135,6 +1146,7 @@ class TaskManager(BaseManager):
                 response_heard, self.update_transcript_for_interruption)
             self.conversation_history.sync_interim_after_interruption(
                 response_heard, self.update_transcript_for_interruption)
+            self._invalidate_response_chain()
 
         except Exception as e:
             logger.error(f"sync_history failed: {e}")
@@ -1701,19 +1713,25 @@ class TaskManager(BaseManager):
                 )
                 continue
 
-            data, end_of_llm_stream, latency, trigger_function_call, function_tool, function_tool_message = llm_message
+            data = llm_message.data
+            end_of_llm_stream = llm_message.end_of_stream
+            latency = llm_message.latency
+            trigger_function_call = llm_message.is_function_call
+            function_tool = llm_message.function_name
+            function_tool_message = llm_message.function_message
 
             if trigger_function_call:
                 logger.info(f"Triggering function call for {data}")
-                self.llm_task = asyncio.create_task(self.__execute_function_call(next_step = next_step, **data))
+                self.llm_task = asyncio.create_task(self.__execute_function_call(next_step = next_step, **data.model_dump()))
                 return
 
             if latency:
+                latency_dict = latency.model_dump()
                 previous_latency_item = self.llm_latencies['turn_latencies'][-1] if self.llm_latencies['turn_latencies'] else None
-                if previous_latency_item and previous_latency_item.get('sequence_id') == latency.get('sequence_id'):
-                    self.llm_latencies['turn_latencies'][-1] = latency
+                if previous_latency_item and previous_latency_item.get('sequence_id') == latency_dict.get('sequence_id'):
+                    self.llm_latencies['turn_latencies'][-1] = latency_dict
                 else:
-                    self.llm_latencies['turn_latencies'].append(latency)
+                    self.llm_latencies['turn_latencies'].append(latency_dict)
 
             llm_response += " " + data
 
@@ -2115,6 +2133,7 @@ class TaskManager(BaseManager):
 
         if self.response_in_pipeline and next_task == "llm":
             self.conversation_history.pop_unheard_responses()
+            self._invalidate_response_chain()
             original_message = transcriber_message
             transcriber_message = self.conversation_history.pop_and_merge_user(transcriber_message)
             if transcriber_message != original_message:
