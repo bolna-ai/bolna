@@ -298,6 +298,20 @@ class GraphNodeRAGConfig(BaseModel):
     model: Optional[str] = "gpt-4" 
     max_tokens: Optional[int] = 150
 
+class GraphNodeLLMConfig(BaseModel):
+    """Per-node LLM overrides. None fields fall back to global GraphAgentConfig."""
+    model_config = {"extra": "ignore"}
+
+    model: Optional[str] = None
+    provider: Optional[str] = None
+    temperature: Optional[float] = None
+    max_tokens: Optional[int] = None
+    reasoning_effort: Optional[ReasoningEffort] = None
+    routing_model: Optional[str] = None
+    routing_provider: Optional[str] = None
+    routing_max_tokens: Optional[int] = None
+    routing_reasoning_effort: Optional[ReasoningEffort] = None
+
 class GraphNode(BaseModel):
     id: str
     description: Optional[str] = None
@@ -307,6 +321,7 @@ class GraphNode(BaseModel):
     function_call: Optional[str] = None
     completion_check: Optional[Callable[[List[dict]], bool]] = None
     rag_config: Optional[GraphNodeRAGConfig] = None
+    llm_config: Optional[GraphNodeLLMConfig] = None
 
 
 class GraphAgentConfig(Llm):

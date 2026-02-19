@@ -66,8 +66,26 @@ class GraphAgent(BaseAgent):
         logger.info(f"GraphAgent routing_instructions loaded: {bool(self.routing_instructions)} (length: {len(self.routing_instructions) if self.routing_instructions else 0})")
         self._init_routing_client()
 
+        # Canonical global provider (used by cache seeding, _get_effective_llm_config, etc.)
+        self._global_provider = self.config.get('provider') or self.config.get('llm_provider', 'openai')
+
         # Initialize main LLM for response generation (supports api_tools/function calling + real streaming)
         self.llm = self._initialize_llm()
+
+        # Per-node LLM/routing caches
+        self._llm_cache: Dict[tuple, Any] = {}       # keyed by (provider, model, temp, max_tokens, reasoning_effort)
+        self._routing_client_cache: Dict[str, Any] = {}  # keyed by provider name ('groq' or 'openai')
+
+        # Seed caches with global instances
+        global_llm_key = (
+            self._global_provider,
+            self.llm_model,
+            self.config.get('temperature', 0.7),
+            self.config.get('max_tokens', 150),
+            self.config.get('reasoning_effort'),
+        )
+        self._llm_cache[global_llm_key] = self.llm
+        self._routing_client_cache[self.routing_provider] = self.routing_client
 
         # Initialize LLMs for hangup and voicemail detection
         llm_kwargs = {}
@@ -81,7 +99,7 @@ class GraphAgent(BaseAgent):
     def _initialize_llm(self):
         """Initialize LLM with api_tools support (same pattern as KnowledgeBaseAgent)."""
         try:
-            provider = self.config.get('provider') or self.config.get('llm_provider', 'openai')
+            provider = self._global_provider
             if provider not in SUPPORTED_LLM_PROVIDERS:
                 logger.warning(f"Unknown provider: {provider}, using openai")
                 provider = 'openai'
@@ -102,6 +120,92 @@ class GraphAgent(BaseAgent):
         except Exception as e:
             logger.error(f"Failed to create LLM: {e}, falling back to default OpenAiLLM")
             return OpenAiLLM(model=self.llm_model or 'gpt-4o-mini', llm_key=self.llm_key or os.getenv('OPENAI_API_KEY'))
+
+    def _get_effective_llm_config(self, node_id: str) -> dict:
+        """Resolve per-node LLM overrides merged with global defaults."""
+        node = self.get_node_by_id(node_id)
+        node_llm = node.get('llm_config') if node else None
+
+        def _pick(field, global_val):
+            if node_llm and node_llm.get(field) is not None:
+                return node_llm[field]
+            return global_val
+
+        return {
+            'model': _pick('model', self.llm_model),
+            'provider': _pick('provider', self._global_provider),
+            'temperature': _pick('temperature', self.config.get('temperature', 0.7)),
+            'max_tokens': _pick('max_tokens', self.config.get('max_tokens', 150)),
+            'reasoning_effort': _pick('reasoning_effort', self.config.get('reasoning_effort')),
+            'routing_model': _pick('routing_model', self.routing_model),
+            'routing_provider': _pick('routing_provider', self.routing_provider),
+            'routing_max_tokens': _pick('routing_max_tokens', self.routing_max_tokens),
+            'routing_reasoning_effort': _pick('routing_reasoning_effort', self.routing_reasoning_effort),
+        }
+
+    def _get_llm_for_config(self, effective: dict):
+        """Return a cached LLM instance for the given effective config."""
+        # Normalize provider before cache key so fallback doesn't create duplicates
+        provider = effective['provider']
+        if provider not in SUPPORTED_LLM_PROVIDERS:
+            logger.warning(f"Unknown provider '{provider}' in per-node config, using openai")
+            provider = 'openai'
+
+        cache_key = (
+            provider,
+            effective['model'],
+            effective['temperature'],
+            effective['max_tokens'],
+            effective['reasoning_effort'],
+        )
+
+        if cache_key in self._llm_cache:
+            return self._llm_cache[cache_key]
+
+        llm_kwargs = {
+            'model': effective['model'],
+            'temperature': effective['temperature'],
+            'max_tokens': effective['max_tokens'],
+            'provider': provider,
+        }
+
+        # Forward global credentials
+        for key in ['llm_key', 'base_url', 'api_version', 'language', 'api_tools', 'buffer_size', 'service_tier']:
+            if self.config.get(key, None):
+                llm_kwargs[key] = self.config[key]
+
+        if effective['reasoning_effort']:
+            llm_kwargs['reasoning_effort'] = effective['reasoning_effort']
+
+        try:
+            llm_class = SUPPORTED_LLM_PROVIDERS[provider]
+            llm = llm_class(**llm_kwargs)
+            logger.info(f"Created new LLM instance: provider={provider}, model={effective['model']}")
+        except Exception as e:
+            logger.error(f"Failed to create per-node LLM ({provider}/{effective['model']}): {e}, using global LLM")
+            return self.llm
+
+        self._llm_cache[cache_key] = llm
+        return llm
+
+    def _get_routing_client_for_provider(self, provider: str):
+        """Return a cached routing client for the given provider."""
+        if provider in self._routing_client_cache:
+            return self._routing_client_cache[provider]
+
+        if provider == 'groq':
+            groq_available = GROQ_AVAILABLE and os.getenv('GROQ_API_KEY')
+            if groq_available:
+                client = Groq(api_key=os.getenv('GROQ_API_KEY'))
+                logger.info(f"Created new Groq routing client for per-node config")
+            else:
+                logger.warning("Groq requested for per-node routing but unavailable, falling back to OpenAI")
+                client = self._routing_client_cache.get('openai', self.openai)
+        else:
+            client = self.openai
+
+        self._routing_client_cache[provider] = client
+        return client
 
     def initialize_rag_configs(self) -> Dict[str, Dict]:
         """Initialize RAG configurations for each node."""
@@ -255,22 +359,35 @@ class GraphAgent(BaseAgent):
                 return edge
         return None
 
-    async def decide_next_node_with_functions(self, history: List[dict]) -> Tuple[Optional[str], Optional[Dict[str, Any]], float, Optional[List[dict]], Optional[List[dict]]]:
+    async def decide_next_node_with_functions(self, history: List[dict]) -> Tuple[Optional[str], Optional[Dict[str, Any]], float, Optional[List[dict]], Optional[List[dict]], Optional[Dict[str, str]]]:
         """Decide next node using LLM function calling.
 
-        Returns (next_node_id, extracted_params, latency_ms, routing_messages, routing_tools).
+        Returns (next_node_id, extracted_params, latency_ms, routing_messages, routing_tools, effective_routing_info).
         """
         start_time = time.perf_counter()
 
         current_node = self.get_node_by_id(self.current_node_id)
         if not current_node:
             logger.error(f"Current node '{self.current_node_id}' not found")
-            return None, None, 0, None, None
+            return None, None, 0, None, None, None
 
         edges = current_node.get('edges', [])
         if not edges:
             logger.debug(f"Node '{self.current_node_id}' has no edges, staying on current node")
-            return None, None, 0, None, None
+            return None, None, 0, None, None, None
+
+        # Resolve per-node routing config
+        effective = self._get_effective_llm_config(self.current_node_id)
+        effective_routing_model = effective['routing_model']
+        effective_routing_provider = effective['routing_provider']
+        effective_routing_max_tokens = effective['routing_max_tokens']
+        effective_routing_reasoning_effort = effective['routing_reasoning_effort']
+        routing_client = self._get_routing_client_for_provider(effective_routing_provider)
+
+        effective_routing_info = {
+            'routing_model': effective_routing_model,
+            'routing_provider': effective_routing_provider,
+        }
 
         tools = self._build_transition_tools(current_node)
 
@@ -329,21 +446,21 @@ class GraphAgent(BaseAgent):
 
         try:
             routing_kwargs = {
-                "model": self.routing_model,
+                "model": effective_routing_model,
                 "messages": messages,
                 "tools": tools,
                 "tool_choice": "required",
                 "parallel_tool_calls": False,
             }
 
-            if self.routing_model and self.routing_model.startswith("gpt-5"):
-                routing_kwargs["max_completion_tokens"] = self.routing_max_tokens or 150
-                routing_kwargs["reasoning_effort"] = self.routing_reasoning_effort or os.getenv('GPT5_ROUTING_REASONING_EFFORT', 'minimal')
+            if effective_routing_model and effective_routing_model.startswith("gpt-5"):
+                routing_kwargs["max_completion_tokens"] = effective_routing_max_tokens or 150
+                routing_kwargs["reasoning_effort"] = effective_routing_reasoning_effort or os.getenv('GPT5_ROUTING_REASONING_EFFORT', 'minimal')
             else:
-                routing_kwargs["max_tokens"] = self.routing_max_tokens or 50
+                routing_kwargs["max_tokens"] = effective_routing_max_tokens or 50
                 routing_kwargs["temperature"] = 0.0
 
-            response = await asyncio.to_thread(self.routing_client.chat.completions.create, **routing_kwargs)
+            response = await asyncio.to_thread(routing_client.chat.completions.create, **routing_kwargs)
             latency_ms = (time.perf_counter() - start_time) * 1000
 
             # Extract the function call
@@ -353,26 +470,26 @@ class GraphAgent(BaseAgent):
                 function_name = tool_call.function.name
                 function_args = json.loads(tool_call.function.arguments) if tool_call.function.arguments else {}
 
-                logger.info(f"Routing decision: {function_name} (latency: {latency_ms:.1f}ms)")
+                logger.info(f"Routing decision: {function_name} (model: {effective_routing_model}, provider: {effective_routing_provider}, latency: {latency_ms:.1f}ms)")
 
                 if function_name == "stay_on_current_node":
-                    return None, None, latency_ms, messages, tools
+                    return None, None, latency_ms, messages, tools, effective_routing_info
 
                 # Find the edge for this function
                 edge = self._get_edge_by_function_name(current_node, function_name)
                 if edge:
-                    return edge['to_node_id'], function_args, latency_ms, messages, tools
+                    return edge['to_node_id'], function_args, latency_ms, messages, tools, effective_routing_info
                 else:
                     logger.warning(f"Function {function_name} not found in edges")
-                    return None, None, latency_ms, messages, tools
+                    return None, None, latency_ms, messages, tools, effective_routing_info
             else:
                 logger.warning("No tool call in response")
-                return None, None, latency_ms, messages, tools
+                return None, None, latency_ms, messages, tools, effective_routing_info
 
         except Exception as e:
             latency_ms = (time.perf_counter() - start_time) * 1000
             logger.error(f"Routing error: {e} (latency: {latency_ms:.1f}ms)")
-            return None, None, latency_ms, messages, tools
+            return None, None, latency_ms, messages, tools, effective_routing_info
 
     def get_node_by_id(self, node_id: str) -> Optional[dict]:
         return next((node for node in self.config.get('nodes', []) if node['id'] == node_id), None)
@@ -392,15 +509,19 @@ class GraphAgent(BaseAgent):
         example_lines = [f"  {lang.upper()}: \"{text}\"" for lang, text in examples.items()]
         return f"{prompt}\n\nExample responses:\n" + "\n".join(example_lines)
 
-    def _get_tool_choice_for_node(self):
+    def _get_tool_choice_for_node(self, llm=None):
         """Check if current node should force a tool call.
+
+        Args:
+            llm: LLM instance to check trigger_function_call on (defaults to self.llm).
 
         Returns:
         - {"type": "function", "function": {"name": "..."}} if force_function_call is a function name string
         - "required" if force_function_call is True (LLM must call some function)
         - None otherwise (defaults to "auto")
         """
-        if not self.llm or not getattr(self.llm, 'trigger_function_call', False):
+        effective_llm = llm or self.llm
+        if not effective_llm or not getattr(effective_llm, 'trigger_function_call', False):
             return None
 
         current_node = self.get_node_by_id(self.current_node_id)
@@ -470,7 +591,7 @@ class GraphAgent(BaseAgent):
 
         try:
             previous_node = self.current_node_id
-            next_node_id, extracted_params, routing_latency_ms, routing_messages, routing_tools = await self.decide_next_node_with_functions(message)
+            next_node_id, extracted_params, routing_latency_ms, routing_messages, routing_tools, effective_routing_info = await self.decide_next_node_with_functions(message)
 
             if next_node_id:
                 logger.info(f"Transitioning: {self.current_node_id} -> {next_node_id} (params: {extracted_params})")
@@ -482,25 +603,35 @@ class GraphAgent(BaseAgent):
             if next_node_id and (not self.node_history or self.node_history[-1] != self.current_node_id):
                 self.node_history.append(self.current_node_id)
 
-            yield {
-                'routing_info': {
-                    'previous_node': previous_node,
-                    'current_node': self.current_node_id,
-                    'transitioned': next_node_id is not None,
-                    'routing_model': self.routing_model,
-                    'routing_provider': getattr(self, 'routing_provider', None),
-                    'routing_latency_ms': round(routing_latency_ms, 1),
-                    'extracted_params': extracted_params or {},
-                    'node_history': list(self.node_history),
-                    'routing_messages': routing_messages,
-                    'routing_tools': routing_tools,
-                }
+            # Resolve per-node answer generation config for the (possibly new) current node
+            effective_answer = self._get_effective_llm_config(self.current_node_id)
+            current_llm = self._get_llm_for_config(effective_answer)
+
+            routing_info_dict = {
+                'previous_node': previous_node,
+                'current_node': self.current_node_id,
+                'transitioned': next_node_id is not None,
+                'routing_latency_ms': round(routing_latency_ms, 1),
+                'extracted_params': extracted_params or {},
+                'node_history': list(self.node_history),
+                'routing_messages': routing_messages,
+                'routing_tools': routing_tools,
+                'answer_model': effective_answer['model'],
+                'answer_provider': effective_answer['provider'],
             }
+            if effective_routing_info:
+                routing_info_dict['routing_model'] = effective_routing_info['routing_model']
+                routing_info_dict['routing_provider'] = effective_routing_info['routing_provider']
+            else:
+                routing_info_dict['routing_model'] = self.routing_model
+                routing_info_dict['routing_provider'] = getattr(self, 'routing_provider', None)
+
+            yield {'routing_info': routing_info_dict}
 
             messages = await self._build_messages(message)
             yield {'messages': messages}
-            tool_choice = self._get_tool_choice_for_node()
-            async for chunk in self.llm.generate_stream(messages, synthesize=synthesize, meta_info=meta_info, tool_choice=tool_choice):
+            tool_choice = self._get_tool_choice_for_node(llm=current_llm)
+            async for chunk in current_llm.generate_stream(messages, synthesize=synthesize, meta_info=meta_info, tool_choice=tool_choice):
                 yield chunk
 
         except Exception as e:
