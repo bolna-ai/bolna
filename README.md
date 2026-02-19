@@ -57,7 +57,7 @@ graph LR;
 ```
 
 ## Supported providers and models
-1. Initiating a phone call using telephony providers like `Twilio`, `Plivo`, `Exotel` (coming soon), `Vonage` (coming soon) etc.
+1. Initiating a phone call using telephony providers like `Twilio`, `Plivo`, `Exotel` (coming soon), `Vonage` (coming soon), or your own SIP trunk via [Bring Your Own Trunk (BYOT)](docs/bring-your-own-trunk.md).
 2. Transcribing the conversations using `Deepgram`, `Azure` etc.
 3. Using LLMs like `OpenAI`, `DeepSeek`, `Llama`, `Cohere`, `Mistral`,  etc to handle conversations
 4. Synthesizing LLM responses back to telephony using `AWS Polly`, `ElevenLabs`, `Deepgram`, `OpenAI`, `Azure`, `Cartesia`, `Smallest` etc.
@@ -311,6 +311,7 @@ These are the current supported Telephony Providers:
 |----------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | Twilio   | `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_PHONE_NUMBER`|
 | Plivo    | `PLIVO_AUTH_ID`, `PLIVO_AUTH_TOKEN`, `PLIVO_PHONE_NUMBER`|
+| SIP Trunk (BYOT) | Bring your own SIP trunk — see [BYOT guide](docs/bring-your-own-trunk.md) |
 
 </details>
 

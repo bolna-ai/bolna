@@ -175,6 +175,5 @@ test_3.wav
 
 # Graph agent exploration (temporary)
 scripts/
-docs/
 GRAPH_AGENT_GUIDE.md
 .env.example
