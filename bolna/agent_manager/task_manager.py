@@ -700,27 +700,37 @@ class TaskManager(BaseManager):
                 if meta_info['text'] == '':
                     audio_chunk = None
 
-                # Convert to ulaw for Asterisk/sip-trunk provider (cached welcome is PCM)
-                if self.tools["output"].get_provider() == TelephonyProvider.SIP_TRUNK.value and audio_chunk:
-                    original_size = len(audio_chunk)
-                    audio_chunk = pcm_to_ulaw(audio_chunk)
-                    logger.info(f"[SIP-TRUNK] Converted welcome message PCM to ulaw: {original_size} bytes -> {len(audio_chunk)} bytes")
-                    meta_info["format"] = "ulaw"
-                else:
-                    meta_info["format"] = "pcm"
-                meta_info['is_first_chunk'] = True
-                meta_info["end_of_synthesizer_stream"] = True
-                meta_info['chunk_id'] = 1
-                meta_info["is_first_chunk_of_entire_response"] = True
-                meta_info["is_final_chunk_of_entire_response"] = True
-                message = create_ws_data_packet(audio_chunk, meta_info)
-
                 stream_sid = self.tools["input"].get_stream_sid()
                 if stream_sid is not None and self.output_handler_set:
                     self.stream_sid_ts = time.time() * 1000
                     logger.info(f"Got stream sid and hence sending the first message {stream_sid}")
                     self.stream_sid = stream_sid
                     await self.tools["output"].set_stream_sid(stream_sid)
+
+                    # If no pre-cached welcome audio, synthesize it in real-time
+                    # (matches __send_preprocessed_audio / __first_message fallback behavior)
+                    if audio_chunk is None and meta_info.get('text'):
+                        logger.info("No pre-cached welcome audio, synthesizing in real-time")
+                        meta_info['cached'] = False
+                        self.tools["input"].update_is_audio_being_played(True)
+                        await self._synthesize(create_ws_data_packet(meta_info['text'], meta_info=meta_info))
+                        break
+
+                    # Convert to ulaw for Asterisk/sip-trunk provider (cached welcome is PCM)
+                    if self.tools["output"].get_provider() == TelephonyProvider.SIP_TRUNK.value and audio_chunk:
+                        original_size = len(audio_chunk)
+                        audio_chunk = pcm_to_ulaw(audio_chunk)
+                        logger.info(f"[SIP-TRUNK] Converted welcome message PCM to ulaw: {original_size} bytes -> {len(audio_chunk)} bytes")
+                        meta_info["format"] = "ulaw"
+                    else:
+                        meta_info["format"] = "pcm"
+                    meta_info['is_first_chunk'] = True
+                    meta_info["end_of_synthesizer_stream"] = True
+                    meta_info['chunk_id'] = 1
+                    meta_info["is_first_chunk_of_entire_response"] = True
+                    meta_info["is_final_chunk_of_entire_response"] = True
+                    message = create_ws_data_packet(audio_chunk, meta_info)
+
                     self.tools["input"].update_is_audio_being_played(True)
                     convert_to_request_log(message=text, meta_info=meta_info, component="synthesizer", direction="response", model=self.synthesizer_provider, is_cached=meta_info.get("is_cached", False), engine=self.tools['synthesizer'].get_engine(), run_id=self.run_id)
                     await self.tools["output"].handle(message)
@@ -2881,6 +2891,7 @@ class TaskManager(BaseManager):
             logger.error(f"Error occurred in handling init event - {e}")
 
     async def run(self):
+        output = None
         try:
             if self._is_conversation_task():
                 logger.info("started running")
@@ -2976,7 +2987,6 @@ class TaskManager(BaseManager):
                 )
 
             await self.handle_cancellation(f"Exception occurred {e}")
-            raise Exception(e)
 
         finally:
             # Construct output
@@ -3067,7 +3077,8 @@ class TaskManager(BaseManager):
                     
 
             await asyncio.gather(*tasks_to_cancel)
-            return output
+
+        return output
 
     async def handle_cancellation(self, message):
         try:
