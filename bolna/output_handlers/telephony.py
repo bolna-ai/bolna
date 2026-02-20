@@ -43,6 +43,10 @@ class TelephonyOutputHandler(DefaultOutputHandler):
                 self.stream_sid = meta_info.get('stream_sid', None)
 
             try:
+                if audio_chunk is None:
+                    logger.info("No audio data in packet, skipping media send")
+                    return
+
                 if len(audio_chunk) == 1:
                     audio_chunk += b'\x00'
 
