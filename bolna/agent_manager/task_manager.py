@@ -17,7 +17,6 @@ import aiohttp
 from bolna.constants import ACCIDENTAL_INTERRUPTION_PHRASES, DEFAULT_USER_ONLINE_MESSAGE, DEFAULT_USER_ONLINE_MESSAGE_TRIGGER_DURATION, FILLER_DICT, DEFAULT_LANGUAGE_CODE, DEFAULT_TIMEZONE, LANGUAGE_NAMES, LLM_DEFAULT_CONFIGS
 from bolna.helpers.function_calling_helpers import trigger_api, computed_api_response
 from bolna.helpers.conversation_history import ConversationHistory
-from bolna.memory.cache.vector_cache import VectorCache
 from .base_manager import BaseManager
 from .interruption_manager import InterruptionManager
 from bolna.agent_types import *
@@ -25,13 +24,9 @@ from bolna.providers import *
 from bolna.enums import TelephonyProvider
 from bolna.prompts import *
 from bolna.helpers.language_detector import LanguageDetector
-from bolna.helpers.utils import structure_system_prompt, compute_function_pre_call_message, select_message_by_language, get_date_time_from_timezone, get_route_info, calculate_audio_duration, create_ws_data_packet, get_file_names_in_directory, get_raw_audio_bytes, is_valid_md5, \
+from bolna.helpers.utils import structure_system_prompt, compute_function_pre_call_message, select_message_by_language, get_date_time_from_timezone, calculate_audio_duration, create_ws_data_packet, get_file_names_in_directory, get_raw_audio_bytes, is_valid_md5, \
     get_required_input_types, format_messages, get_prompt_responses, resample, save_audio_file_to_s3, update_prompt_with_context, get_md5_hash, clean_json_string, wav_bytes_to_pcm, convert_to_request_log, yield_chunks_from_memory, process_task_cancellation, pcm_to_ulaw
 from bolna.helpers.logger_config import configure_logger
-from semantic_router import Route
-from semantic_router.layer import RouteLayer
-from semantic_router.encoders import FastEmbedEncoder
-
 from ..helpers.mark_event_meta_data import MarkEventMetaData
 from ..helpers.observable_variable import ObservableVariable
 
@@ -311,32 +306,6 @@ class TaskManager(BaseManager):
                     self.check_user_online_message_config = update_prompt_with_context(self.check_user_online_message_config, self.context_data)
 
             self.kwargs["process_interim_results"] = "true" if self.conversation_config.get("optimize_latency", False) is True else "false"
-            # Routes
-            self.routes = task['tools_config']['llm_agent'].get("routes", None)
-            self.route_layer = None
-
-            if self.routes:
-                start_time = time.time()
-                if self.__is_multiagent():
-                    routes_meta = self.kwargs.get('routes', None)
-                    routes_meta = routes_meta['routes']
-                else:
-                    routes_meta = self.kwargs.get('routes', None)
-
-                if routes_meta:
-                    self.vector_caches = routes_meta["vector_caches"]
-                    self.route_responses_dict = routes_meta["route_responses_dict"]
-                    self.route_layer = routes_meta["route_layer"]
-                    logger.info(f"Time to setup routes from warmed up cache {time.time() - start_time}")
-                else:
-                    self.__setup_routes(self.routes)
-                    logger.info(f"Time to setup routes {time.time() - start_time}")
-
-            if self.__is_multiagent():
-                routes_meta = self.kwargs.pop('routes', None)
-                self.agent_routing = routes_meta['agent_routing_config']['route_layer']
-                self.default_agent = task['tools_config']['llm_agent']['llm_config']['default_agent']
-                logger.info(f"Initialised with default agent {self.default_agent}, agent_routing {self.agent_routing}")
 
             # for long pauses and rushing
             if self.conversation_config is not None:
@@ -349,6 +318,7 @@ class TaskManager(BaseManager):
                 self.hang_conversation_after = self.conversation_config.get("hangup_after_silence", 10)
                 self.last_transmitted_timestamp = 0
 
+                self.use_fillers = self.conversation_config.get("use_fillers", False)
                 self.use_llm_to_determine_hangup = self.conversation_config.get("hangup_after_LLMCall", False)
                 self.check_for_completion_prompt = None
                 if self.use_llm_to_determine_hangup:
@@ -442,15 +412,6 @@ class TaskManager(BaseManager):
                 if self.ambient_noise:
                     logger.info(f"Ambient noise is True {self.ambient_noise}")
                     self.soundtrack = f"{self.conversation_config.get('ambient_noise_track', 'coffee-shop')}.wav"
-
-            # Classifier for filler
-            self.use_fillers = self.conversation_config.get("use_fillers", False)
-            if self.use_fillers:
-                self.filler_classifier = kwargs.get("classifier", None)
-                if self.filler_classifier is None:
-                    logger.info("Not using fillers to decrease latency")
-                else:
-                    self.filler_preset_directory = f"{os.getenv('FILLERS_PRESETS_DIR')}/{self.synthesizer_voice.lower()}"
 
         # setting transcriber and synthesizer in parallel
         self.__setup_transcriber()
@@ -574,41 +535,6 @@ class TaskManager(BaseManager):
             logger.error(f"Language injection error: {e}")
 
         return messages
-
-    def __setup_routes(self, routes):
-        embedding_model = routes.get("embedding_model", os.getenv("ROUTE_EMBEDDING_MODEL"))
-        route_encoder = FastEmbedEncoder(name=embedding_model)
-
-        routes_list = []
-        self.vector_caches = {}
-        self.route_responses_dict = {}
-        for route in routes['routes']:
-            logger.info(f"Setting up route {route}")
-            utterances = route['utterances']
-            r = Route(
-                name=route['route_name'],
-                utterances=utterances,
-                score_threshold=route['score_threshold']
-            )
-            utterance_response_dict = {}
-            if type(route['response']) is list and len(route['response']) == len(route['utterances']):
-                for i, utterance in enumerate(utterances):
-                    utterance_response_dict[utterance] =  route['response'][i]
-                self.route_responses_dict[route['route_name']] = utterance_response_dict
-            elif type(route['response']) is str:
-                self.route_responses_dict[route['route_name']] = route['response']
-            else:
-                raise Exception("Invalid number of responses for the responses array")
-
-            routes_list.append(r)
-            if type(route['response']) is list:
-                logger.info(f"Setting up vector cache for {route} and embedding model {embedding_model}")
-                vector_cache = VectorCache(embedding_model=embedding_model)
-                vector_cache.set(utterances)
-                self.vector_caches[route['route_name']] = vector_cache
-
-        self.route_layer = RouteLayer(encoder=route_encoder, routes=routes_list)
-        logger.info("Routes are set")
 
     def __setup_output_handlers(self, turn_based_conversation, output_queue):
         output_kwargs = {"websocket": self.websocket}
@@ -1477,19 +1403,6 @@ class TaskManager(BaseManager):
                     self.synthesizer_tasks.append(asyncio.create_task(
                         self._synthesize(create_ws_data_packet(text_chunk, meta_info, is_md5_hash=False))))
 
-    async def __filler_classification_task(self, message):
-        logger.info(f"doing the classification task")
-        sequence, meta_info = self._extract_sequence_and_meta(message)
-        next_step = self._get_next_step(sequence, "llm")
-        start_time = time.perf_counter()
-        filler_class = self.filler_classifier.classify(message['data'])
-        logger.info(f"doing the classification task in {time.perf_counter() - start_time}")
-        new_meta_info = copy.deepcopy(meta_info)
-        self.current_filler = filler_class
-        should_bypass_synth = 'bypass_synth' in meta_info and meta_info['bypass_synth'] == True
-        filler = random.choice((FILLER_DICT[filler_class]))
-        await self._handle_llm_output(next_step, filler, should_bypass_synth, new_meta_info, is_filler=True)
-
     async def __execute_function_call(self, url, method, param, api_token, headers, model_args, meta_info, next_step, called_fun, **resp):
         self.check_if_user_online = False
 
@@ -1769,102 +1682,57 @@ class TaskManager(BaseManager):
         should_bypass_synth = 'bypass_synth' in meta_info and meta_info['bypass_synth'] is True
         next_step = self._get_next_step(sequence, "llm")
         meta_info['llm_start_time'] = time.time()
-        route = None
 
-        if self.__is_multiagent():
-            tasks = [(lambda: get_route_info(message['data'], self.agent_routing))]
-            if self.route_layer is not None:
-                tasks.append(lambda: get_route_info(message['data'], self.route_layer))
-            tasks_op = await asyncio.gather(*tasks)
-            current_agent = tasks_op[0]
-            if self.route_layer is not None:
-                route = tasks_op[1]
+        if self.turn_based_conversation:
+            self.conversation_history.append_user(message['data'])
+        messages = self.conversation_history.get_copy()
 
-            logger.info(f"Current agent {current_agent}")
-            self.tools['llm_agent'] = self.llm_agent_map[current_agent]
-        elif self.route_layer is not None:
-            route_layer_data = self.route_layer(message['data'])
-            if route_layer_data:
-                route = route_layer_data.name
-            logger.info(f"Got route name {route}")
+        # Request logs converted inside do_llm_generation for knowledgebase agent
+        if not self.__is_knowledgebase_agent() and not self.__is_graph_agent():
+            convert_to_request_log(message=format_messages(messages, use_system_prompt=True), meta_info=meta_info, component="llm", direction="request", model=self.llm_config["model"], run_id= self.run_id)
 
-        if route is not None:
-            logger.info(f"It was a route hit and we've got to respond from cache hence simply returning and the route is {route}")
-            # Check if for the particular route if there's a vector store
-            # If not send the response else get the response from the vector store
-            logger.info(f"Vector caches {self.vector_caches}")
-            if route in self.vector_caches:
-                logger.info(f"Route {route} has a vector cache")
-                relevant_utterance = self.vector_caches[route].get(message['data'])
-                cache_response = self.route_responses_dict[route][relevant_utterance]
-                convert_to_request_log(message=message['data'], meta_info=meta_info, component="llm", direction="request", model=self.llm_config["model"], run_id=self.run_id)
-                convert_to_request_log(message=message['data'], meta_info=meta_info, component="llm", direction="response", model=self.llm_config["model"], is_cached=True, run_id= self.run_id)
-                messages = self.conversation_history.get_copy()
-                messages += [{'role': 'user', 'content': message['data']},{'role': 'assistant', 'content': cache_response}]
-                self.conversation_history.sync_interim(messages)
-                self.llm_response_generated = True
+        await self.__do_llm_generation(messages, meta_info, next_step, should_bypass_synth)
+        # TODO : Write a better check for completion prompt
 
-            else:
-                logger.info(f"Route doesn't have a vector cache, and hence simply returning back a given response")
-                cache_response = self.route_responses_dict[route]
+        # Hangup detection - now supported for all agent types including graph_agent
+        if self.use_llm_to_determine_hangup and not self.turn_based_conversation:
+            completion_res, metadata = await self.tools["llm_agent"].check_for_completion(messages, self.check_for_completion_prompt)
 
-            logger.info(f"Cached response {cache_response}")
-            meta_info['cached'] = False
-            meta_info["end_of_llm_stream"] = True
+            should_hangup = (
+                str(completion_res.get("hangup", "")).lower() == "yes"
+                if isinstance(completion_res, dict)
+                else False
+            )
 
-            await self._handle_llm_output(next_step, cache_response, should_bypass_synth, meta_info)
-            self.llm_processed_request_ids.add(self.current_request_id)
-        else:
-            if self.turn_based_conversation:
-                self.conversation_history.append_user(message['data'])
-            messages = self.conversation_history.get_copy()
+            # Track hangup check latency (latency returned by agent)
+            self.llm_latencies['other_latencies'].append({
+                "type": 'hangup_check',
+                "latency_ms": metadata.get("latency_ms", None),
+                "model": self.check_for_completion_llm,
+                "provider": "openai",  # TODO: Make dynamic based on provider used
+                "service_tier": metadata.get("service_tier", None),
+                "llm_host": metadata.get("llm_host", None),
+                "sequence_id": meta_info.get("sequence_id")
+            })
 
-            # Request logs converted inside do_llm_generation for knowledgebase agent
-            if not self.__is_knowledgebase_agent() and not self.__is_graph_agent():
-                convert_to_request_log(message=format_messages(messages, use_system_prompt=True), meta_info=meta_info, component="llm", direction="request", model=self.llm_config["model"], run_id= self.run_id)
+            prompt = [
+                {'role': 'system', 'content': self.check_for_completion_prompt},
+                {'role': 'user', 'content': format_messages(self.history)}
+            ]
+            logger.info(f"##### Answer from the LLM {completion_res}")
+            convert_to_request_log(message=format_messages(prompt, use_system_prompt=True), meta_info=meta_info, component="llm_hangup", direction="request", model=self.check_for_completion_llm, run_id=self.run_id)
+            convert_to_request_log(message=completion_res, meta_info=meta_info, component="llm_hangup", direction="response", model=self.check_for_completion_llm, run_id=self.run_id)
 
-            await self.__do_llm_generation(messages, meta_info, next_step, should_bypass_synth)
-            # TODO : Write a better check for completion prompt
-
-            # Hangup detection - now supported for all agent types including graph_agent
-            if self.use_llm_to_determine_hangup and not self.turn_based_conversation:
-                completion_res, metadata = await self.tools["llm_agent"].check_for_completion(messages, self.check_for_completion_prompt)
-
-                should_hangup = (
-                    str(completion_res.get("hangup", "")).lower() == "yes"
-                    if isinstance(completion_res, dict)
-                    else False
-                )
-
-                # Track hangup check latency (latency returned by agent)
-                self.llm_latencies['other_latencies'].append({
-                    "type": 'hangup_check',
-                    "latency_ms": metadata.get("latency_ms", None),
-                    "model": self.check_for_completion_llm,
-                    "provider": "openai",  # TODO: Make dynamic based on provider used
-                    "service_tier": metadata.get("service_tier", None),
-                    "llm_host": metadata.get("llm_host", None),
-                    "sequence_id": meta_info.get("sequence_id")
-                })
-
-                prompt = [
-                    {'role': 'system', 'content': self.check_for_completion_prompt},
-                    {'role': 'user', 'content': format_messages(self.history)}
-                ]
-                logger.info(f"##### Answer from the LLM {completion_res}")
-                convert_to_request_log(message=format_messages(prompt, use_system_prompt=True), meta_info=meta_info, component="llm_hangup", direction="request", model=self.check_for_completion_llm, run_id=self.run_id)
-                convert_to_request_log(message=completion_res, meta_info=meta_info, component="llm_hangup", direction="response", model=self.check_for_completion_llm, run_id=self.run_id)
-
-                if should_hangup:
-                    if self.hangup_triggered or self.conversation_ended:
-                        logger.info(f"Hangup already triggered or conversation ended, skipping duplicate hangup request")
-                        return
-                    self.hangup_detail = "llm_prompted_hangup"
-                    await self.process_call_hangup()
+            if should_hangup:
+                if self.hangup_triggered or self.conversation_ended:
+                    logger.info(f"Hangup already triggered or conversation ended, skipping duplicate hangup request")
                     return
+                self.hangup_detail = "llm_prompted_hangup"
+                await self.process_call_hangup()
+                return
 
-            self.llm_processed_request_ids.add(self.current_request_id)
-            llm_response = ""
+        self.llm_processed_request_ids.add(self.current_request_id)
+        llm_response = ""
 
     async def process_call_hangup(self):
         # Guard: Prevent multiple concurrent hangup attempts
@@ -2153,8 +2021,6 @@ class TaskManager(BaseManager):
             self.response_in_pipeline = True
             self.llm_task = asyncio.create_task(
                 self._run_llm_task(transcriber_package))
-            if self.use_fillers:
-                self.filler_task = asyncio.create_task(self.__filler_classification_task(transcriber_package))
 
         elif next_task == "synthesizer":
             self.synthesizer_tasks.append(asyncio.create_task(
