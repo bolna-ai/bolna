@@ -1,6 +1,14 @@
 from enum import Enum
 
 
+class ChatRole(str, Enum):
+    """Chat message roles."""
+    SYSTEM = "system"
+    USER = "user"
+    ASSISTANT = "assistant"
+    TOOL = "tool"
+
+
 class TelephonyProvider(str, Enum):
     """Enum for telephony/IO providers (input/output handlers)."""
     TWILIO = "twilio"

@@ -5,8 +5,8 @@ from dotenv import load_dotenv
 from openai import AsyncOpenAI, OpenAI, AuthenticationError, PermissionDeniedError, NotFoundError, RateLimitError, APIError, APIConnectionError, BadRequestError
 import json
 
-from bolna.constants import DEFAULT_LANGUAGE_CODE, ROLE_SYSTEM, ROLE_ASSISTANT, GPT5_MODEL_PREFIX
-from bolna.enums import ReasoningEffort, Verbosity, ResponseStreamEvent, ResponseItemType
+from bolna.constants import DEFAULT_LANGUAGE_CODE, GPT5_MODEL_PREFIX
+from bolna.enums import ChatRole, ReasoningEffort, Verbosity, ResponseStreamEvent, ResponseItemType
 from bolna.helpers.utils import convert_to_request_log, compute_function_pre_call_message, now_ms
 from .llm import BaseLLM
 from .tool_call_accumulator import ToolCallAccumulator
@@ -231,12 +231,12 @@ class OpenAiLLM(BaseLLM):
         - Function call outputs (tool results)
         """
         instructions = ""
-        if messages and messages[0].get("role") == ROLE_SYSTEM:
+        if messages and messages[0].get("role") == ChatRole.SYSTEM:
             instructions = messages[0].get("content", "")
 
         last_assistant_idx = -1
         for i in range(len(messages) - 1, -1, -1):
-            if messages[i].get("role") == ROLE_ASSISTANT:
+            if messages[i].get("role") == ChatRole.ASSISTANT:
                 last_assistant_idx = i
                 break
 

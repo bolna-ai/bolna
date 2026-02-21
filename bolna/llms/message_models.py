@@ -2,8 +2,7 @@ from typing import Optional
 
 from pydantic import BaseModel
 
-from bolna.constants import ROLE_SYSTEM, ROLE_USER, ROLE_ASSISTANT, ROLE_TOOL
-from bolna.enums import ResponseItemType
+from bolna.enums import ChatRole, ResponseItemType
 
 
 class ChatToolCallFunction(BaseModel):
@@ -44,17 +43,17 @@ class MessageFormatAdapter:
 
         parsed = [ChatMessage(**msg) for msg in messages]
         for msg in parsed:
-            if msg.role == ROLE_SYSTEM:
+            if msg.role == ChatRole.SYSTEM:
                 instructions = msg.content or ""
 
-            elif msg.role == ROLE_USER:
+            elif msg.role == ChatRole.USER:
                 input_items.append({
                     "type": ResponseItemType.MESSAGE,
-                    "role": ROLE_USER,
+                    "role": ChatRole.USER,
                     "content": msg.content or "",
                 })
 
-            elif msg.role == ROLE_ASSISTANT:
+            elif msg.role == ChatRole.ASSISTANT:
                 if msg.tool_calls:
                     for tc in msg.tool_calls:
                         input_items.append({
@@ -67,11 +66,11 @@ class MessageFormatAdapter:
                     if msg.content is not None:
                         input_items.append({
                             "type": ResponseItemType.MESSAGE,
-                            "role": ROLE_ASSISTANT,
+                            "role": ChatRole.ASSISTANT,
                             "content": msg.content,
                         })
 
-            elif msg.role == ROLE_TOOL:
+            elif msg.role == ChatRole.TOOL:
                 input_items.append({
                     "type": ResponseItemType.FUNCTION_CALL_OUTPUT,
                     "call_id": msg.tool_call_id or "",

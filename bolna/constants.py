@@ -2,12 +2,6 @@ from datetime import datetime, timezone
 PREPROCESS_DIR = 'agent_data'
 PCM16_SCALE = 32768.0
 
-# Chat message roles
-ROLE_SYSTEM = "system"
-ROLE_USER = "user"
-ROLE_ASSISTANT = "assistant"
-ROLE_TOOL = "tool"
-
 # Model prefixes
 GPT5_MODEL_PREFIX = "gpt-5"
 

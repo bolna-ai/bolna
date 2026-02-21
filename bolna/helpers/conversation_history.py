@@ -1,10 +1,10 @@
 import copy
-from bolna.constants import ROLE_SYSTEM, ROLE_USER, ROLE_ASSISTANT, ROLE_TOOL
+from bolna.enums import ChatRole
 from bolna.helpers.logger_config import configure_logger
 
 logger = configure_logger(__name__)
 
-_UNHEARD_ROLES = frozenset({ROLE_ASSISTANT, ROLE_TOOL})
+_UNHEARD_ROLES = frozenset({ChatRole.ASSISTANT, ChatRole.TOOL})
 
 
 class ConversationHistory:
@@ -20,32 +20,32 @@ class ConversationHistory:
                 self._messages = [system_prompt] + self._messages
 
         if welcome_message and len(self._messages) == 1:
-            self._messages.append({"role": ROLE_ASSISTANT, "content": welcome_message})
+            self._messages.append({"role": ChatRole.ASSISTANT, "content": welcome_message})
 
         self._interim = copy.deepcopy(self._messages)
 
     def append_user(self, content: str):
-        self._messages.append({"role": ROLE_USER, "content": content})
+        self._messages.append({"role": ChatRole.USER, "content": content})
 
     def append_assistant(self, content: str, tool_calls: list | None = None):
-        msg = {"role": ROLE_ASSISTANT, "content": content}
+        msg = {"role": ChatRole.ASSISTANT, "content": content}
         if tool_calls is not None:
             msg["tool_calls"] = tool_calls
         self._messages.append(msg)
 
     def append_tool_result(self, tool_call_id: str, content: str):
         self._messages.append({
-            "role": ROLE_TOOL,
+            "role": ChatRole.TOOL,
             "tool_call_id": tool_call_id,
             "content": content,
         })
 
     def update_system_prompt(self, content: str):
-        if self._messages and self._messages[0].get("role") == ROLE_SYSTEM:
+        if self._messages and self._messages[0].get("role") == ChatRole.SYSTEM:
             self._messages[0]["content"] = content
 
     def update_welcome_message(self, content: str):
-        if len(self._messages) >= 2 and self._messages[1].get("role") == ROLE_ASSISTANT:
+        if len(self._messages) >= 2 and self._messages[1].get("role") == ChatRole.ASSISTANT:
             self._messages[1]["content"] = content
 
     def pop_unheard_responses(self) -> list[dict]:
@@ -55,7 +55,7 @@ class ConversationHistory:
         return popped
 
     def pop_and_merge_user(self, new_content: str) -> str:
-        if self._messages and self._messages[-1].get("role") == ROLE_USER:
+        if self._messages and self._messages[-1].get("role") == ChatRole.USER:
             prev_user = self._messages.pop()
             return prev_user["content"] + " " + new_content
         return new_content
@@ -69,7 +69,7 @@ class ConversationHistory:
     @staticmethod
     def _trim_last_assistant(msgs: list[dict], response_heard: str | None, update_fn):
         for i in range(len(msgs) - 1, -1, -1):
-            if msgs[i]["role"] == ROLE_ASSISTANT:
+            if msgs[i]["role"] == ChatRole.ASSISTANT:
                 original = msgs[i]["content"]
                 if original is None:
                     continue
@@ -99,7 +99,7 @@ class ConversationHistory:
         if not self._messages:
             return False
         last = self._messages[-1]
-        return last.get("role") == ROLE_USER and last.get("content", "").strip() == content.strip()
+        return last.get("role") == ChatRole.USER and last.get("content", "").strip() == content.strip()
 
     def __len__(self) -> int:
         return len(self._messages)
