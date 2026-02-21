@@ -510,7 +510,7 @@ class OpenAiLLM(BaseLLM):
             "input": input_items,
             "store": True,
             "max_output_tokens": self.max_tokens,
-            "temperature": 0.0,
+            "temperature": 0.0,  # Intentional: non-streaming uses deterministic output
         }
 
         service_tier = self.model_args.get("service_tier")
