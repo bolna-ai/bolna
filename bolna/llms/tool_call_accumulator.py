@@ -7,6 +7,12 @@ logger = configure_logger(__name__)
 
 
 class ToolCallAccumulator:
+    """Accumulates streamed tool-call deltas into complete function-call payloads.
+
+    Used by OpenAI, Azure, and LiteLLM providers to consolidate the identical
+    tool-call streaming logic that was previously duplicated across each provider.
+    """
+
     def __init__(self, api_params: dict, tools: list, language: str, model: str, run_id: str):
         self.api_params = api_params
         self.tools = tools
@@ -19,6 +25,7 @@ class ToolCallAccumulator:
         self.received_textual = False
 
     def process_delta(self, tool_calls_delta) -> None:
+        """Accumulate streamed tool-call chunks into ``final_tool_calls``."""
         for tool_call in tool_calls_delta or []:
             idx = tool_call.index
             if idx not in self.final_tool_calls:
@@ -37,6 +44,11 @@ class ToolCallAccumulator:
                 self.final_tool_calls[idx]["function"]["arguments"] += tool_call.function.arguments or ""
 
     def get_pre_call_message(self, meta_info: dict) -> tuple[str, str | None, str | None] | None:
+        """Return a user-facing filler message for the first detected function call.
+
+        Returns ``(message, function_name, raw_pre_call_config)`` once, then
+        ``None`` on subsequent calls.
+        """
         if self._gave_pre_call_msg or self.received_textual or not self.called_fun:
             return None
         self._gave_pre_call_msg = True
@@ -47,6 +59,12 @@ class ToolCallAccumulator:
         return pre_msg, self.called_fun, api_tool_pre_call_message
 
     def build_api_payload(self, model_args: dict, meta_info: dict, answer: str) -> FunctionCallPayload | None:
+        """Build the final API call payload from accumulated tool-call data.
+
+        Validates required parameters against the tool spec and merges parsed
+        arguments into the payload. Returns ``None`` if no tool calls or the
+        function isn't in ``api_params``.
+        """
         if not self.final_tool_calls:
             return None
 
@@ -78,21 +96,22 @@ class ToolCallAccumulator:
         # Chat Completions tools use nested {"function": {"name": ..., "parameters": ...}}
         tool_spec = next((t for t in self.tools if t["function"]["name"] == first_func_name), None)
 
-        if tool_spec:
-            try:
-                parsed_args = json.loads(arguments_received)
-                required_keys = tool_spec["function"].get("parameters", {}).get("required", [])
-                if tool_spec["function"].get("parameters") is not None and all(k in parsed_args for k in required_keys):
-                    convert_to_request_log(arguments_received, meta_info, self.model, "llm",
-                                           direction="response", is_cached=False, run_id=self.run_id)
-                    for k, v in parsed_args.items():
-                        setattr(api_call_payload, k, v)
-                else:
-                    api_call_payload.resp = None
-            except (json.JSONDecodeError, KeyError) as e:
-                logger.error(f"Error parsing function arguments: {e}")
+        if not tool_spec:
+            api_call_payload.resp = None
+            return api_call_payload
+
+        try:
+            parsed_args = json.loads(arguments_received)
+            required_keys = tool_spec["function"].get("parameters", {}).get("required", [])
+            if tool_spec["function"].get("parameters") is not None and all(k in parsed_args for k in required_keys):
+                convert_to_request_log(arguments_received, meta_info, self.model, "llm",
+                                       direction="response", is_cached=False, run_id=self.run_id)
+                for k, v in parsed_args.items():
+                    setattr(api_call_payload, k, v)
+            else:
                 api_call_payload.resp = None
-        else:
+        except (json.JSONDecodeError, KeyError) as e:
+            logger.error(f"Error parsing function arguments: {e}")
             api_call_payload.resp = None
 
         return api_call_payload
