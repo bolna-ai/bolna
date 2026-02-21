@@ -163,12 +163,7 @@ class TaskManager(BaseManager):
 
         self.first_message_task_new = asyncio.create_task(self.message_task_new())
 
-        # Agent stuff
-        # Need to maintain current conversation history and overall persona/history kinda thing.
-        # Soon we will maintain a separate history for this
-        self.conversation_history = ConversationHistory(
-            [] if conversation_history is None else conversation_history
-        )
+        self.conversation_history = ConversationHistory(conversation_history)
         self.label_flow = []
 
         # Setup IO SERVICE, TRANSCRIBER, LLM, SYNTHESIZER
