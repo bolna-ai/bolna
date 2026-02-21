@@ -18,10 +18,10 @@ classifiers = [
     "Programming Language :: Python :: 3",
 ]
 dynamic = ["dependencies"]
-requires-python = ">=3.8"
+requires-python = ">=3.10"
 
 [project.optional-dependencies]
-dev = ["pip-tools"]
+dev = ["pip-tools", "pytest", "pytest-asyncio"]
 
 [tool.setuptools]
 package-dir = {"bolna" = "bolna"}
