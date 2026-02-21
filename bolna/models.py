@@ -232,6 +232,7 @@ class Llm(BaseModel):
     base_url: Optional[str] = None
     reasoning_effort: Optional[ReasoningEffort] = None
     verbosity: Optional[Verbosity] = None
+    use_responses_api: Optional[bool] = False
 
 
 class SimpleLlmAgent(Llm):
