@@ -17,60 +17,17 @@ classifiers = [
     "Programming Language :: Python",
     "Programming Language :: Python :: 3",
 ]
+dynamic = ["dependencies"]
 requires-python = ">=3.10"
-
-dependencies = [
-    # Core async & web
-    "aiobotocore==2.9.0",
-    "aiofiles==23.2.1",
-    "aiohttp>=3.9.2,<3.10.0",
-    "fastapi==0.108.0",
-    "uvicorn==0.22.0",
-    "websockets==15.0.1",
-    "httpx[http2]>=0.25.0",
-    "requests>=2.31.0,<3",
-
-    # Data & validation
-    "pydantic==2.5.3",
-    "python-dateutil==2.8.2",
-    "python-dotenv==1.0.0",
-    "pytz>=2024.1",
-    "redis==5.0.1",
-    "numpy==1.26.1",
-
-    # LLM
-    "litellm==1.65.0",
-    "openai>=1.10.0",
-    "tiktoken>=0.6.0",
-
-    # Audio processing
-    "pydub==0.25.1",
-    "torchaudio==2.0.1",
-    "scipy==1.11.4",
-    "onnxruntime>=1.16.3",
-]
 
 [project.optional-dependencies]
 dev = ["pip-tools", "pytest", "pytest-asyncio"]
 
-# Provider-specific extras
-azure = ["azure-cognitiveservices-speech==1.38.0"]
-google = ["google-cloud-speech==2.25.0"]
-groq = ["groq>=0.4.0"]
-plivo = ["plivo==4.47.0"]
-twilio = ["twilio==8.9.0"]
-
-# Install all providers at once
-all = [
-    "bolna[azure]",
-    "bolna[google]",
-    "bolna[groq]",
-    "bolna[plivo]",
-    "bolna[twilio]",
-]
-
 [tool.setuptools]
 package-dir = {"bolna" = "bolna"}
+
+[tool.setuptools.dynamic]
+dependencies = {file = ["requirements.txt"]}
 
 [tool.bumpver]
 current_version = "0.10.1"
