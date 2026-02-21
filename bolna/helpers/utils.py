@@ -13,8 +13,7 @@ import io
 import wave
 import numpy as np
 import aiofiles
-import torch
-import torchaudio
+import scipy.signal
 from scipy.io import wavfile
 from botocore.exceptions import BotoCoreError, ClientError
 from aiobotocore.session import AioSession
@@ -22,7 +21,7 @@ from contextlib import AsyncExitStack
 from dotenv import load_dotenv
 from pydantic import create_model
 from .logger_config import configure_logger
-from bolna.constants import PCM16_SCALE, PREPROCESS_DIR, PRE_FUNCTION_CALL_MESSAGE, DEFAULT_LANGUAGE_CODE, TRANSFERING_CALL_FILLER
+from bolna.constants import PREPROCESS_DIR, PRE_FUNCTION_CALL_MESSAGE, TRANSFERING_CALL_FILLER
 from bolna.prompts import DATE_PROMPT
 from pydub import AudioSegment
 import audioop
@@ -357,14 +356,14 @@ def yield_chunks_from_memory(audio_bytes, chunk_size=512):
 
 
 def pcm_to_wav_bytes(pcm_data, sample_rate=16000, num_channels=1, sample_width=2):
-    buffer = io.BytesIO()
-    bit_depth = 16 
-    if len(pcm_data)%2 == 1:
+    if len(pcm_data) % 2 == 1:
         pcm_data += b'\x00'
-    tensor_pcm = torch.frombuffer(pcm_data, dtype=torch.int16)
-    tensor_pcm = tensor_pcm.float() / (2**(bit_depth - 1))  
-    tensor_pcm = tensor_pcm.unsqueeze(0)  
-    torchaudio.save(buffer, tensor_pcm, sample_rate, format='wav')
+    buffer = io.BytesIO()
+    with wave.open(buffer, 'wb') as wav_file:
+        wav_file.setnchannels(num_channels)
+        wav_file.setsampwidth(sample_width)
+        wav_file.setframerate(sample_rate)
+        wav_file.writeframes(pcm_data)
     return buffer.getvalue()
 
 
@@ -381,7 +380,7 @@ def convert_audio_to_wav(audio_bytes, source_format = 'flac'):
 def resample(audio_bytes, target_sample_rate, format="mp3", pcm_channels=1, original_sample_rate=None):
     """
     Resample audio bytes
-    
+
     Args:
         audio_bytes: Audio data as bytes
         target_sample_rate: Target sample rate
@@ -389,47 +388,28 @@ def resample(audio_bytes, target_sample_rate, format="mp3", pcm_channels=1, orig
         original_sample_rate: Required if format='pcm'
         pcm_channels: Number of channels for PCM (default: 1 mono)
     """
-    
     # Handle PCM separately
     if format == "pcm":
         if original_sample_rate is None:
             raise ValueError("original_sample_rate must be provided for PCM format")
-        
-        audio_array = np.frombuffer(audio_bytes, dtype=np.int16)
-        
-        waveform = torch.from_numpy(audio_array).float() / PCM16_SCALE
-        
-        if pcm_channels == 1:
-            waveform = waveform.unsqueeze(0)  # (1, samples)
-        else:
-            # For multi-channel, interleaved PCM
-            waveform = waveform.reshape(pcm_channels, -1)
-        
         if original_sample_rate == target_sample_rate:
             return audio_bytes
-        
-        # Resample
-        resampler = torchaudio.transforms.Resample(original_sample_rate, target_sample_rate)
-        audio_waveform = resampler(waveform)
-        
-        audio_int16 = (audio_waveform * PCM16_SCALE).to(torch.int16)
-        return audio_int16.numpy().tobytes()
-    
-    # Handle other formats (wav, mp3, etc.)
-    audio_buffer = io.BytesIO(audio_bytes)
-    waveform, original_sample_rate = torchaudio.load(audio_buffer, format=format)
-    
-    if original_sample_rate == target_sample_rate:
+        audio_array = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32)
+        if pcm_channels > 1:
+            audio_array = audio_array.reshape(-1, pcm_channels)
+        g = math.gcd(original_sample_rate, target_sample_rate)
+        resampled = scipy.signal.resample_poly(audio_array, target_sample_rate // g, original_sample_rate // g, axis=0)
+        return np.clip(resampled, -32768, 32767).astype(np.int16).tobytes()
+
+    # Handle other formats (wav, mp3, etc.) via pydub
+    audio = AudioSegment.from_file(io.BytesIO(audio_bytes), format=format)
+    if audio.frame_rate == target_sample_rate:
         return audio_bytes
-    
-    resampler = torchaudio.transforms.Resample(original_sample_rate, target_sample_rate)
-    audio_waveform = resampler(waveform)
-    
-    audio_buffer = io.BytesIO()
-    logger.info(f"Resampling from {original_sample_rate} to {target_sample_rate}")
-    torchaudio.save(audio_buffer, audio_waveform, target_sample_rate, format="wav")
-    
-    return audio_buffer.getvalue()
+    logger.info(f"Resampling from {audio.frame_rate} to {target_sample_rate}")
+    audio = audio.set_frame_rate(target_sample_rate)
+    buffer = io.BytesIO()
+    audio.export(buffer, format="wav")
+    return buffer.getvalue()
 
 
 def get_synth_audio_format(audio_bytes):
@@ -639,17 +619,6 @@ def convert_to_request_log(message, meta_info, model, component="transcriber", d
         log['is_final'] = False #This is logged only for users to know final transcript from the transcriber
     log['engine'] = engine
     asyncio.create_task(write_request_logs(log, run_id))
-
-
-def get_route_info(message, route_layer):
-    route = route_layer(message)
-    logger.info(f"route gotten {route}")
-    return route.name
-
-
-async def run_in_seperate_thread(fun):
-    resp = await asyncio.to_thread(fun)
-    return resp
 
 
 async def process_task_cancellation(asyncio_task, task_name):
