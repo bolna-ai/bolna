@@ -1610,18 +1610,15 @@ class TaskManager(BaseManager):
         self.execute_function_call_task = None
 
     def __store_into_history(self, meta_info, messages, llm_response, should_trigger_function_call = False):
-        if False:
-            logger.info("##### User spoke while LLM was generating response")
+        self.llm_response_generated = True
+        convert_to_request_log(message=llm_response, meta_info= meta_info, component="llm", direction="response", model=self.llm_config["model"], run_id= self.run_id)
+        if should_trigger_function_call:
+            logger.info(f"There was a function call and need to make that work")
+            self.conversation_history.append_assistant(llm_response)
         else:
-            self.llm_response_generated = True
-            convert_to_request_log(message=llm_response, meta_info= meta_info, component="llm", direction="response", model=self.llm_config["model"], run_id= self.run_id)
-            if should_trigger_function_call:
-                logger.info(f"There was a function call and need to make that work")
-                self.conversation_history.append_assistant(llm_response)
-            else:
-                messages.append({"role": "assistant", "content": llm_response})
-                self.conversation_history.append_assistant(llm_response)
-                self.conversation_history.sync_interim(messages)
+            messages.append({"role": "assistant", "content": llm_response})
+            self.conversation_history.append_assistant(llm_response)
+            self.conversation_history.sync_interim(messages)
 
     async def __do_llm_generation(self, messages, meta_info, next_step, should_bypass_synth=False, should_trigger_function_call=False):
         # Reset response tracking for new turn
