@@ -11,8 +11,6 @@ ROLE_TOOL = "tool"
 # Model prefixes
 GPT5_MODEL_PREFIX = "gpt-5"
 
-
-
 HIGH_LEVEL_ASSISTANT_ANALYTICS_DATA = {
         "extraction_details":{}, 
         "cost_details": {
