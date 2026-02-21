@@ -1197,6 +1197,8 @@ class TaskManager(BaseManager):
             start_time = time.time()
             try:
                 json_data = await self.tools["llm_agent"].generate(self.history)
+            except BolnaComponentError:
+                raise
             except Exception as e:
                 raise LLMError(
                     str(e),
@@ -1681,6 +1683,8 @@ class TaskManager(BaseManager):
                         self.interim_history = copy.deepcopy(messages)
 
                     await self._handle_llm_output(next_step, text_chunk, should_bypass_synth, meta_info)
+        except BolnaComponentError:
+            raise
         except Exception as e:
             # CSV error logging is handled by the top-level handler in run()
             raise LLMError(
@@ -1823,7 +1827,8 @@ class TaskManager(BaseManager):
             traceback.print_exc()
             logger.error(f"Component error in llm: {e}")
             self.response_in_pipeline = False
-            self._component_error = e
+            if self._component_error is None:
+                self._component_error = e
             raise
         except Exception as e:
             traceback.print_exc()
@@ -2354,7 +2359,8 @@ class TaskManager(BaseManager):
                             is_cached=False,
                             run_id=self.run_id
                         )
-                    self._component_error = SynthesizerError(str(e), provider=self.synthesizer_provider)
+                    if self._component_error is None:
+                        self._component_error = SynthesizerError(str(e), provider=self.synthesizer_provider)
                     break
 
             logger.info("Exiting __listen_synthesizer gracefully.")
@@ -2816,6 +2822,7 @@ class TaskManager(BaseManager):
 
     async def run(self):
         self._component_error = None  # Reset for each run
+        self._error_logged = False
         try:
             if self._is_conversation_task():
                 logger.info("started running")
@@ -2862,6 +2869,7 @@ class TaskManager(BaseManager):
                 except Exception as e:
                     traceback.print_exc()
                     logger.error(f"Error: {e}")
+                    self._error_logged = True
                     if self.run_id:
                         if isinstance(e, BolnaComponentError):
                             error_msg = format_error_message(e.component, e.provider or e.model or "-", str(e))
@@ -2925,8 +2933,8 @@ class TaskManager(BaseManager):
             logger.error(f"Exception in task manager run: {error_message}")
             traceback.print_exc()
 
-            # Log call-breaking exception to CSV trace with component attribution
-            if self.run_id:
+            # Log call-breaking exception to CSV trace with component attribution (skip if already logged)
+            if self.run_id and not self._error_logged:
                 meta_info = {
                     'request_id': self.task_id,
                     'sequence_id': None

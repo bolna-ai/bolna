@@ -500,7 +500,7 @@ async def write_request_logs(message, run_id):
 
     row = [message['time'], message["component"], message["direction"], message["leg_id"], message['sequence_id'], message['model']]
     metadata = {}
-    if message["component"] in (LogComponent.LLM, LogComponent.LLM_HANGUP, LogComponent.LLM_VOICEMAIL):
+    if message["component"] in (LogComponent.LLM, LogComponent.LLM_HANGUP, LogComponent.LLM_VOICEMAIL, LogComponent.LLM_LANGUAGE_DETECTION):
         # Convert dict to string if necessary
         if isinstance(message_data, dict):
             message_data = json.dumps(message_data)
