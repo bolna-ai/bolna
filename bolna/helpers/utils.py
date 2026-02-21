@@ -618,7 +618,11 @@ COMPONENT_DISPLAY_NAMES = {
     "transcriber": "Speech recognition",
     "synthesizer": "Text-to-speech",
     "llm": "LLM",
+    "llm_hangup": "LLM hangup check",
+    "llm_voicemail": "LLM voicemail check",
+    "llm_language_detection": "LLM language detection",
     "function_call": "Function call",
+    "graph_routing": "Graph routing",
 }
 
 

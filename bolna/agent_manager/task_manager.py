@@ -171,6 +171,7 @@ class TaskManager(BaseManager):
         self.execute_function_call_task = None
         self.synthesizer_tasks = []
         self.synthesizer_task = None
+        self._component_error = None
         self.synthesizer_monitor_task = None
         self.dtmf_task = None
 
@@ -1573,124 +1574,115 @@ class TaskManager(BaseManager):
             meta_info['detected_language'] = detected_lang
 
         try:
-          async for llm_message in self.tools['llm_agent'].generate(messages, synthesize=synthesize, meta_info=meta_info):
-            if isinstance(llm_message, dict) and 'messages' in llm_message: # custom list of messages before the llm call
-                convert_to_request_log(format_messages(llm_message['messages'], True), meta_info, self.llm_config['model'], LogComponent.LLM, direction=LogDirection.REQUEST, is_cached=False, run_id=self.run_id)
-                continue
+            async for llm_message in self.tools['llm_agent'].generate(messages, synthesize=synthesize, meta_info=meta_info):
+                if isinstance(llm_message, dict) and 'messages' in llm_message: # custom list of messages before the llm call
+                    convert_to_request_log(format_messages(llm_message['messages'], True), meta_info, self.llm_config['model'], LogComponent.LLM, direction=LogDirection.REQUEST, is_cached=False, run_id=self.run_id)
+                    continue
 
-            # Handle graph agent routing info
-            if isinstance(llm_message, dict) and 'routing_info' in llm_message:
-                routing_info = llm_message['routing_info']
+                # Handle graph agent routing info
+                if isinstance(llm_message, dict) and 'routing_info' in llm_message:
+                    routing_info = llm_message['routing_info']
 
-                # Log routing request with tools
-                routing_messages = routing_info.get('routing_messages')
-                routing_tools = routing_info.get('routing_tools', [])
-                if routing_messages:
-                    # Format tools for logging (show full descriptions with conditions)
-                    tools_summary = ""
-                    if routing_tools:
-                        tool_lines = []
-                        for t in routing_tools:
-                            if 'function' in t:
-                                name = t['function']['name']
-                                desc = t['function'].get('description', '')
-                                tool_lines.append(f"  - {name}: {desc}")
-                        if tool_lines:
-                            tools_summary = "\n\nAvailable transitions:\n" + "\n".join(tool_lines)
+                    # Log routing request with tools
+                    routing_messages = routing_info.get('routing_messages')
+                    routing_tools = routing_info.get('routing_tools', [])
+                    if routing_messages:
+                        # Format tools for logging (show full descriptions with conditions)
+                        tools_summary = ""
+                        if routing_tools:
+                            tool_lines = []
+                            for t in routing_tools:
+                                if 'function' in t:
+                                    name = t['function']['name']
+                                    desc = t['function'].get('description', '')
+                                    tool_lines.append(f"  - {name}: {desc}")
+                            if tool_lines:
+                                tools_summary = "\n\nAvailable transitions:\n" + "\n".join(tool_lines)
 
+                        convert_to_request_log(
+                            message=format_messages(routing_messages, use_system_prompt=True) + tools_summary,
+                            meta_info=meta_info,
+                            model=routing_info.get('routing_model', ''),
+                            component=LogComponent.GRAPH_ROUTING,
+                            direction=LogDirection.REQUEST,
+                            run_id=self.run_id
+                        )
+
+                    # Build routing response data
+                    if routing_info.get('transitioned'):
+                        routing_data = f"Node: {routing_info.get('previous_node', '?')} → {routing_info['current_node']}"
+                    else:
+                        routing_data = f"Node: {routing_info['current_node']} (no transition)"
+                    if routing_info.get('extracted_params'):
+                        routing_data += f" | Params: {json.dumps(routing_info['extracted_params'])}"
+                    if routing_info.get('node_history'):
+                        routing_data += f" | Flow: {' → '.join(routing_info['node_history'])}"
+
+                    meta_info['llm_metadata'] = meta_info.get('llm_metadata') or {}
+                    meta_info['llm_metadata']['graph_routing_info'] = routing_info
+
+                    if routing_info.get('routing_latency_ms') is not None:
+                        self.routing_latencies['turn_latencies'].append({
+                            'latency_ms': routing_info['routing_latency_ms'],
+                            'routing_model': routing_info.get('routing_model'),
+                            'routing_provider': routing_info.get('routing_provider'),
+                            'previous_node': routing_info.get('previous_node'),
+                            'current_node': routing_info.get('current_node'),
+                            'transitioned': routing_info.get('transitioned', False),
+                            'sequence_id': meta_info.get('sequence_id')
+                        })
+
+                    if routing_info.get('node_history'):
+                        self.routing_latencies['node_flow'] = list(routing_info['node_history'])
+
+                    # Log routing response
                     convert_to_request_log(
-                        message=format_messages(routing_messages, use_system_prompt=True) + tools_summary,
+                        message=routing_data,
                         meta_info=meta_info,
                         model=routing_info.get('routing_model', ''),
                         component=LogComponent.GRAPH_ROUTING,
-                        direction=LogDirection.REQUEST,
+                        direction=LogDirection.RESPONSE,
                         run_id=self.run_id
                     )
+                    continue
 
-                # Build routing response data
-                if routing_info.get('transitioned'):
-                    routing_data = f"Node: {routing_info.get('previous_node', '?')} → {routing_info['current_node']}"
-                else:
-                    routing_data = f"Node: {routing_info['current_node']} (no transition)"
-                if routing_info.get('extracted_params'):
-                    routing_data += f" | Params: {json.dumps(routing_info['extracted_params'])}"
-                if routing_info.get('node_history'):
-                    routing_data += f" | Flow: {' → '.join(routing_info['node_history'])}"
+                data, end_of_llm_stream, latency, trigger_function_call, function_tool, function_tool_message = llm_message
 
-                meta_info['llm_metadata'] = meta_info.get('llm_metadata') or {}
-                meta_info['llm_metadata']['graph_routing_info'] = routing_info
+                if trigger_function_call:
+                    logger.info(f"Triggering function call for {data}")
+                    self.llm_task = asyncio.create_task(self.__execute_function_call(next_step = next_step, **data))
+                    return
 
-                if routing_info.get('routing_latency_ms') is not None:
-                    self.routing_latencies['turn_latencies'].append({
-                        'latency_ms': routing_info['routing_latency_ms'],
-                        'routing_model': routing_info.get('routing_model'),
-                        'routing_provider': routing_info.get('routing_provider'),
-                        'previous_node': routing_info.get('previous_node'),
-                        'current_node': routing_info.get('current_node'),
-                        'transitioned': routing_info.get('transitioned', False),
-                        'sequence_id': meta_info.get('sequence_id')
-                    })
+                if latency:
+                    previous_latency_item = self.llm_latencies['turn_latencies'][-1] if self.llm_latencies['turn_latencies'] else None
+                    if previous_latency_item and previous_latency_item.get('sequence_id') == latency.get('sequence_id'):
+                        self.llm_latencies['turn_latencies'][-1] = latency
+                    else:
+                        self.llm_latencies['turn_latencies'].append(latency)
 
-                if routing_info.get('node_history'):
-                    self.routing_latencies['node_flow'] = list(routing_info['node_history'])
+                llm_response += " " + data
 
-                # Log routing response
-                convert_to_request_log(
-                    message=routing_data,
-                    meta_info=meta_info,
-                    model=routing_info.get('routing_model', ''),
-                    component=LogComponent.GRAPH_ROUTING,
-                    direction=LogDirection.RESPONSE,
-                    run_id=self.run_id
-                )
-                continue
+                logger.info(f"Got a response from LLM {llm_response}")
+                if end_of_llm_stream:
+                    meta_info["end_of_llm_stream"] = True
 
-            data, end_of_llm_stream, latency, trigger_function_call, function_tool, function_tool_message = llm_message
+                if self.stream:
+                    text_chunk = self.__process_stop_words(data, meta_info)
 
-            if trigger_function_call:
-                logger.info(f"Triggering function call for {data}")
-                self.llm_task = asyncio.create_task(self.__execute_function_call(next_step = next_step, **data))
-                return
+                    # A hack as during the 'await' part control passes to llm streaming function parameters
+                    # So we have to make sure we've commited the filler message
+                    detected_lang = self.language_detector.dominant_language or self.language
+                    filler_message = compute_function_pre_call_message(detected_lang, function_tool, function_tool_message)
+                    #filler_message = PRE_FUNCTION_CALL_MESSAGE.get(self.language, PRE_FUNCTION_CALL_MESSAGE[DEFAULT_LANGUAGE_CODE])
+                    if text_chunk == filler_message:
+                        logger.info("Got a pre function call message")
+                        messages.append({'role':'assistant', 'content': filler_message})
+                        self.history.append({'role': 'assistant', 'content': filler_message})
+                        self.interim_history = copy.deepcopy(messages)
 
-            if latency:
-                previous_latency_item = self.llm_latencies['turn_latencies'][-1] if self.llm_latencies['turn_latencies'] else None
-                if previous_latency_item and previous_latency_item.get('sequence_id') == latency.get('sequence_id'):
-                    self.llm_latencies['turn_latencies'][-1] = latency
-                else:
-                    self.llm_latencies['turn_latencies'].append(latency)
-
-            llm_response += " " + data
-
-            logger.info(f"Got a response from LLM {llm_response}")
-            if end_of_llm_stream:
-                meta_info["end_of_llm_stream"] = True
-
-            if self.stream:
-                text_chunk = self.__process_stop_words(data, meta_info)
-
-                # A hack as during the 'await' part control passes to llm streaming function parameters
-                # So we have to make sure we've commited the filler message
-                detected_lang = self.language_detector.dominant_language or self.language
-                filler_message = compute_function_pre_call_message(detected_lang, function_tool, function_tool_message)
-                #filler_message = PRE_FUNCTION_CALL_MESSAGE.get(self.language, PRE_FUNCTION_CALL_MESSAGE[DEFAULT_LANGUAGE_CODE])
-                if text_chunk == filler_message:
-                    logger.info("Got a pre function call message")
-                    messages.append({'role':'assistant', 'content': filler_message})
-                    self.history.append({'role': 'assistant', 'content': filler_message})
-                    self.interim_history = copy.deepcopy(messages)
-
-                await self._handle_llm_output(next_step, text_chunk, should_bypass_synth, meta_info)
+                    await self._handle_llm_output(next_step, text_chunk, should_bypass_synth, meta_info)
         except Exception as e:
-            if self.run_id:
-                error_msg = format_error_message("llm", self.llm_config.get("model", "unknown"), str(e))
-                convert_to_request_log(
-                    error_msg, meta_info,
-                    model=self.llm_config.get("model", "-"),
-                    component=LogComponent.ERROR,
-                    direction=LogDirection.ERROR,
-                    is_cached=False,
-                    run_id=self.run_id
-                )
+            # CSV error logging is handled by the top-level handler in run()
             raise LLMError(
                 str(e),
                 provider=self.llm_config.get("provider"),
@@ -2086,6 +2078,23 @@ class TaskManager(BaseManager):
         else:
             logger.info(f"Need to separate out output task")
 
+    def _log_transcriber_connection_error(self, connection_error):
+        if connection_error and self.run_id:
+            error_msg = format_error_message(
+                "transcriber",
+                self.task_config["tools_config"]["transcriber"].get("provider", "unknown"),
+                connection_error,
+            )
+            convert_to_request_log(
+                error_msg,
+                {"request_id": self.task_id, "sequence_id": None},
+                model=self.task_config["tools_config"]["transcriber"].get("provider", "-"),
+                component=LogComponent.ERROR,
+                direction=LogDirection.ERROR,
+                is_cached=False,
+                run_id=self.run_id,
+            )
+
     async def _listen_transcriber(self):
         temp_transcriber_message = ""
         try:
@@ -2097,18 +2106,7 @@ class TaskManager(BaseManager):
                     if message["data"] == "transcriber_connection_closed":
                         logger.info(f"Transcriber connection has been closed")
                         self.transcriber_duration += message.get("meta_info", {}).get("transcriber_duration", 0) if message['meta_info'] is not None else 0
-                        connection_error = (message.get("meta_info") or {}).get("connection_error")
-                        if connection_error and self.run_id:
-                            error_msg = format_error_message("transcriber", self.task_config["tools_config"]["transcriber"].get("provider", "unknown"), connection_error)
-                            convert_to_request_log(
-                                error_msg,
-                                {"request_id": self.task_id, "sequence_id": None},
-                                model=self.task_config["tools_config"]["transcriber"].get("provider", "-"),
-                                component=LogComponent.ERROR,
-                                direction=LogDirection.ERROR,
-                                is_cached=False,
-                                run_id=self.run_id
-                            )
+                        self._log_transcriber_connection_error((message.get("meta_info") or {}).get("connection_error"))
                         break
                     continue
 
@@ -2222,18 +2220,7 @@ class TaskManager(BaseManager):
                     elif message["data"] == "transcriber_connection_closed":
                         logger.info(f"Transcriber connection has been closed")
                         self.transcriber_duration += message.get("meta_info", {}).get("transcriber_duration", 0) if message["meta_info"] is not None else 0
-                        connection_error = (message.get("meta_info") or {}).get("connection_error")
-                        if connection_error and self.run_id:
-                            error_msg = format_error_message("transcriber", self.task_config["tools_config"]["transcriber"].get("provider", "unknown"), connection_error)
-                            convert_to_request_log(
-                                error_msg,
-                                {"request_id": self.task_id, "sequence_id": None},
-                                model=self.task_config["tools_config"]["transcriber"].get("provider", "-"),
-                                component=LogComponent.ERROR,
-                                direction=LogDirection.ERROR,
-                                is_cached=False,
-                                run_id=self.run_id
-                            )
+                        self._log_transcriber_connection_error((message.get("meta_info") or {}).get("connection_error"))
                         break
 
                 else:
@@ -2241,18 +2228,7 @@ class TaskManager(BaseManager):
                     if message["data"] == "transcriber_connection_closed":
                         logger.info(f"Transcriber connection has been closed")
                         self.transcriber_duration += message.get("meta_info", {}).get("transcriber_duration", 0) if message["meta_info"] is not None else 0
-                        connection_error = (message.get("meta_info") or {}).get("connection_error")
-                        if connection_error and self.run_id:
-                            error_msg = format_error_message("transcriber", self.task_config["tools_config"]["transcriber"].get("provider", "unknown"), connection_error)
-                            convert_to_request_log(
-                                error_msg,
-                                {"request_id": self.task_id, "sequence_id": None},
-                                model=self.task_config["tools_config"]["transcriber"].get("provider", "-"),
-                                component=LogComponent.ERROR,
-                                direction=LogDirection.ERROR,
-                                is_cached=False,
-                                run_id=self.run_id
-                            )
+                        self._log_transcriber_connection_error((message.get("meta_info") or {}).get("connection_error"))
                         break
 
                     await self.__process_http_transcription(message)
@@ -2839,7 +2815,7 @@ class TaskManager(BaseManager):
             logger.error(f"Error occurred in handling init event - {e}")
 
     async def run(self):
-        self._component_error = None
+        self._component_error = None  # Reset for each run
         try:
             if self._is_conversation_task():
                 logger.info("started running")
