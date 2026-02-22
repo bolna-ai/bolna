@@ -72,6 +72,7 @@ class ElevenLabsTranscriber(BaseTranscriber):
         self.current_turn_id = None
         self.websocket_connection = None
         self.connection_authenticated = False
+        self.connection_error = None
         self.speech_start_time = None
         self.speech_end_time = None
         self.current_turn_interim_details = []
@@ -580,8 +581,10 @@ class ElevenLabsTranscriber(BaseTranscriber):
                             break
                 except ConnectionClosedError as e:
                     logger.error(f"ElevenLabs websocket connection closed during streaming: {e}")
+                    self.connection_error = str(e)
                 except Exception as e:
                     logger.error(f"Error during streaming: {e}")
+                    self.connection_error = str(e)
                     raise
 
         except (ValueError, ConnectionError) as e:
@@ -606,6 +609,9 @@ class ElevenLabsTranscriber(BaseTranscriber):
             if hasattr(self, 'utterance_timeout_task') and self.utterance_timeout_task is not None:
                 self.utterance_timeout_task.cancel()
 
+            meta = dict(getattr(self, 'meta_info', None) or {})
+            if self.connection_error:
+                meta['connection_error'] = self.connection_error
             await self.push_to_transcriber_queue(
-                create_ws_data_packet("transcriber_connection_closed", getattr(self, 'meta_info', {}))
+                create_ws_data_packet("transcriber_connection_closed", meta)
             )

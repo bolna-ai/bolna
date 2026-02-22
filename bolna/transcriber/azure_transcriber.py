@@ -160,6 +160,7 @@ class AzureTranscriber(BaseTranscriber):
                 self.connection_time = round((time.perf_counter() - start_time) * 1000)
 
         except Exception as e:
+            self.connection_error = str(e)
             logger.error(f"Error in initialize_connection - {e}")
 
     # Synchronous wrapper functions that schedule the async handlers
@@ -282,6 +283,8 @@ class AzureTranscriber(BaseTranscriber):
 
     async def canceled_handler(self, evt):
         logger.info(f"Canceled event received: {evt} | run_id - {self.run_id}")
+        if evt.cancellation_details and evt.cancellation_details.error_details:
+            self.connection_error = evt.cancellation_details.error_details
 
     async def session_started_handler(self, evt):
         logger.info(f"Session start event received: {evt} | run_id - {self.run_id}")
@@ -291,8 +294,11 @@ class AzureTranscriber(BaseTranscriber):
         logger.info(f"Session stop event received: {evt} | run_id - {self.run_id}")
         self.end_time = time.time()
         self.meta_info["transcriber_duration"] = self.end_time - self.start_time
+        meta = dict(self.meta_info or {})
+        if self.connection_error:
+            meta['connection_error'] = self.connection_error
         await self.transcriber_output_queue.put(
-            create_ws_data_packet("transcriber_connection_closed", self.meta_info))
+            create_ws_data_packet("transcriber_connection_closed", meta))
 
     async def toggle_connection(self):
         self.connection_on = False

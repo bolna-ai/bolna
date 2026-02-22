@@ -111,3 +111,33 @@ class Verbosity(str, Enum):
     def all_values(cls):
         """Return all verbosity values as a list of strings."""
         return [verbosity.value for verbosity in cls]
+
+
+class LogComponent(str, Enum):
+    """Enum for CSV trace log component types."""
+    ERROR = "error"
+    FUNCTION_CALL = "function_call"
+    GRAPH_ROUTING = "graph_routing"
+    LLM = "llm"
+    LLM_HANGUP = "llm_hangup"
+    LLM_LANGUAGE_DETECTION = "llm_language_detection"
+    LLM_VOICEMAIL = "llm_voicemail"
+    SYNTHESIZER = "synthesizer"
+    TRANSCRIBER = "transcriber"
+    WARNING = "warning"
+
+    @classmethod
+    def all_values(cls):
+        return [c.value for c in cls]
+
+
+class LogDirection(str, Enum):
+    """Enum for CSV trace log direction types."""
+    ERROR = "error"
+    REQUEST = "request"
+    RESPONSE = "response"
+    WARNING = "warning"
+
+    @classmethod
+    def all_values(cls):
+        return [d.value for d in cls]

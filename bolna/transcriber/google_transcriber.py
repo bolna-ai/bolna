@@ -362,6 +362,8 @@ class GoogleTranscriber(BaseTranscriber):
                         closed_meta['transcriber_total_stream_duration'] = time.perf_counter() - closed_meta['transcriber_start_time']
                     except Exception:
                         pass
+                if self.connection_error:
+                    closed_meta['connection_error'] = self.connection_error
                 self._enqueue_output("transcriber_connection_closed", meta=closed_meta)
 
             except Exception as stream_error:
@@ -376,18 +378,22 @@ class GoogleTranscriber(BaseTranscriber):
                     logger.warning("Service unavailable - connection issue")
                 
                 # Send error to output
+                self.connection_error = str(stream_error)
                 err_meta = (self.meta_info or {}).copy()
                 err_meta['error'] = str(stream_error)
                 err_meta['error_type'] = 'streaming_error'
+                err_meta['connection_error'] = self.connection_error
                 self._enqueue_output("transcriber_connection_closed", meta=err_meta)
                 return
                 
         except Exception as e:
             # Configuration or setup error
             logger.exception(f"Google transcriber setup error: {e}")
+            self.connection_error = str(e)
             err_meta = (self.meta_info or {}).copy()
             err_meta['error'] = str(e)
             err_meta['error_type'] = 'setup_error'
+            err_meta['connection_error'] = self.connection_error
             self._enqueue_output("transcriber_connection_closed", meta=err_meta)
         finally:
             self.connection_authenticated = False

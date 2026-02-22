@@ -19,10 +19,12 @@ from scipy.io import wavfile
 from botocore.exceptions import BotoCoreError, ClientError
 from aiobotocore.session import AioSession
 from contextlib import AsyncExitStack
+from enum import Enum
 from dotenv import load_dotenv
 from pydantic import create_model
 from .logger_config import configure_logger
 from bolna.constants import PCM16_SCALE, PREPROCESS_DIR, PRE_FUNCTION_CALL_MESSAGE, DEFAULT_LANGUAGE_CODE, TRANSFERING_CALL_FILLER
+from bolna.enums import LogComponent, LogDirection
 from bolna.prompts import DATE_PROMPT
 from pydub import AudioSegment
 import audioop
@@ -498,27 +500,30 @@ async def write_request_logs(message, run_id):
 
     row = [message['time'], message["component"], message["direction"], message["leg_id"], message['sequence_id'], message['model']]
     metadata = {}
-    if message["component"] in ("llm", "llm_hangup", "llm_voicemail"):
+    if message["component"] in (LogComponent.LLM, LogComponent.LLM_HANGUP, LogComponent.LLM_VOICEMAIL, LogComponent.LLM_LANGUAGE_DETECTION):
         # Convert dict to string if necessary
         if isinstance(message_data, dict):
             message_data = json.dumps(message_data)
         component_details = [message_data, message.get('input_tokens', 0), message.get('output_tokens', 0), None, message.get('latency', None), message['cached'], None, None]
         metadata = message.get('llm_metadata', {})
-    elif message["component"] == "transcriber":
+    elif message["component"] == LogComponent.TRANSCRIBER:
         component_details = [message_data, None, None, None, message.get('latency', None), False, message.get('is_final', False), None]
         metadata = message.get('transcriber_metadata', {})
-    elif message["component"] == "synthesizer":
+    elif message["component"] == LogComponent.SYNTHESIZER:
         component_details = [message_data, None, None, len(message_data), message.get('latency', None), message['cached'], None, message['engine']]
         metadata = message.get('synthesizer_metadata', {})
-    elif message["component"] == "function_call":
+    elif message["component"] == LogComponent.FUNCTION_CALL:
         component_details = [message_data, None, None, None, message.get('latency', None), None, None, None]
         metadata = message.get('function_call_metadata', {})
-    elif message["component"] == "graph_routing":
+    elif message["component"] == LogComponent.GRAPH_ROUTING:
         component_details = [message_data, None, None, None, message.get('latency', None), False, None, None]
         metadata = message.get('graph_routing_metadata', {})
-    elif message["component"] == "error":
+    elif message["component"] == LogComponent.ERROR:
         component_details = [message_data, None, None, None, message.get('latency', None), False, None, None]
         metadata = message.get('error_metadata', {})
+    elif message["component"] == LogComponent.WARNING:
+        component_details = [message_data, None, None, None, message.get('latency', None), False, None, None]
+        metadata = message.get('warning_metadata', {})
 
     metadata_str = None
     if metadata:
@@ -609,32 +614,74 @@ def get_file_names_in_directory(directory):
     return os.listdir(directory)
 
 
-def convert_to_request_log(message, meta_info, model, component="transcriber", direction='response', is_cached=False, engine=None, run_id=None):
+COMPONENT_DISPLAY_NAMES = {
+    "transcriber": "Speech recognition",
+    "synthesizer": "Text-to-speech",
+    "llm": "LLM",
+    "llm_hangup": "LLM hangup check",
+    "llm_voicemail": "LLM voicemail check",
+    "llm_language_detection": "LLM language detection",
+    "function_call": "Function call",
+    "graph_routing": "Graph routing",
+}
+
+
+def format_error_message(component, provider, error_str):
+    """Map technical error strings to customer-friendly messages for CSV trace data."""
+    display = COMPONENT_DISPLAY_NAMES.get(component, component)
+    provider_str = f" ({provider})" if provider and provider != "-" else ""
+    err_lower = error_str.lower() if error_str else ""
+
+    if "content policy" in err_lower or "content_policy" in err_lower:
+        return "Content policy violation - response blocked by safety filter"
+    if "timeout" in err_lower:
+        return f"{display} service{provider_str} connection timed out"
+    if "auth" in err_lower or "401" in err_lower or "invalid api key" in err_lower:
+        return f"{display} service{provider_str} authentication failed - please check API key"
+    if "rate limit" in err_lower or "429" in err_lower or "too many requests" in err_lower:
+        return f"{display} service{provider_str} rate limit exceeded - too many requests"
+    if "permission" in err_lower or "403" in err_lower:
+        return f"{display} service{provider_str} permission denied"
+    if "not found" in err_lower or "404" in err_lower:
+        return f"{display} service{provider_str} resource not found"
+    if "connection closed" in err_lower or "connection reset" in err_lower or "connectionclosed" in err_lower:
+        return f"{display} service{provider_str} disconnected unexpectedly"
+    if "connection" in err_lower:
+        return f"{display} service{provider_str} connection error"
+
+    # Truncate long error messages for readability
+    truncated = error_str[:200] if len(error_str) > 200 else error_str
+    return f"{display} service{provider_str} error: {truncated}"
+
+
+def convert_to_request_log(message, meta_info, model, component=LogComponent.TRANSCRIBER, direction=LogDirection.RESPONSE, is_cached=False, engine=None, run_id=None):
     log = dict()
-    log['direction'] = direction
+    log['direction'] = direction.value if isinstance(direction, Enum) else direction
     log['data'] = message
     log['leg_id'] = meta_info['request_id'] if "request_id" in meta_info else "-"
     log['time'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")
-    log['component'] = component
+    log['component'] = component.value if isinstance(component, Enum) else component
     log['sequence_id'] = meta_info.get('sequence_id', None)
     log['model'] = model
     log['cached'] = is_cached
-    if component == "llm":
-        log['latency'] = meta_info.get('llm_latency', None) if direction == "response" else None
+    if component == LogComponent.LLM:
+        log['latency'] = meta_info.get('llm_latency', None) if direction == LogDirection.RESPONSE else None
         log['llm_metadata'] = meta_info.get('llm_metadata', None)
-    if component == "synthesizer":
-        log['latency'] = meta_info.get('synthesizer_latency', None) if direction == "response" else None
-    if component == "transcriber":
-        log['latency'] = meta_info.get('transcriber_latency', None) if direction == "response" else None
+    if component == LogComponent.SYNTHESIZER:
+        log['latency'] = meta_info.get('synthesizer_latency', None) if direction == LogDirection.RESPONSE else None
+    if component == LogComponent.TRANSCRIBER:
+        log['latency'] = meta_info.get('transcriber_latency', None) if direction == LogDirection.RESPONSE else None
         if 'is_final' in meta_info and meta_info['is_final']:
             log['is_final'] = True
-    if component == "function_call":
+    if component == LogComponent.FUNCTION_CALL:
         log['latency'] = None
-    if component == "graph_routing":
+    if component == LogComponent.GRAPH_ROUTING:
         log['latency'] = None
         log['graph_routing_metadata'] = meta_info.get('llm_metadata', {})
-    if component == "llm-hangup":
-        log['latency'] = meta_info.get('llm_latency', None) if direction == "response" else None
+    if component == LogComponent.WARNING:
+        log['latency'] = None
+    if component == LogComponent.LLM_HANGUP:
+        log['latency'] = meta_info.get('llm_latency', None) if direction == LogDirection.RESPONSE else None
     else:
         log['is_final'] = False #This is logged only for users to know final transcript from the transcriber
     log['engine'] = engine

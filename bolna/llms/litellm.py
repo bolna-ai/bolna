@@ -7,6 +7,7 @@ from litellm.exceptions import AuthenticationError, RateLimitError, APIError, AP
 from dotenv import load_dotenv
 
 from bolna.constants import DEFAULT_LANGUAGE_CODE
+from bolna.enums import LogComponent, LogDirection
 from bolna.helpers.utils import convert_to_request_log, compute_function_pre_call_message, now_ms
 from .llm import BaseLLM
 from bolna.helpers.logger_config import configure_logger
@@ -90,14 +91,14 @@ class LiteLLM(BaseLLM):
             error_message = str(e)
             logger.error(f'Content policy violation in stream: {error_message}')
 
-            # Log to CSV trace
+            # Log to CSV trace as warning (non-call-breaking)
             if meta_info and self.run_id:
                 convert_to_request_log(
                     f"Content Policy Violation: {error_message}",
                     meta_info,
                     self.model,
-                    component="llm",
-                    direction="error",
+                    component=LogComponent.WARNING,
+                    direction=LogDirection.WARNING,
                     is_cached=False,
                     run_id=self.run_id
                 )
@@ -220,7 +221,7 @@ class LiteLLM(BaseLLM):
             if tool_spec:
                 required_keys = tool_spec["function"].get("parameters", {}).get("required", [])
                 if all(k in parsed_args for k in required_keys):
-                    convert_to_request_log(parsed_args, meta_info, self.model, "llm", direction="response",
+                    convert_to_request_log(parsed_args, meta_info, self.model, LogComponent.LLM, direction=LogDirection.RESPONSE,
                                            is_cached=False, run_id=self.run_id)
                     api_call_payload.update(parsed_args)
                 else:
@@ -255,14 +256,14 @@ class LiteLLM(BaseLLM):
             error_message = str(e)
             logger.error(f'Content policy violation: {error_message}')
 
-            # Log to CSV trace
+            # Log to CSV trace as warning (non-call-breaking)
             if meta_info and self.run_id:
                 convert_to_request_log(
                     f"Content Policy Violation: {error_message}",
                     meta_info,
                     self.model,
-                    component="llm",
-                    direction="error",
+                    component=LogComponent.WARNING,
+                    direction=LogDirection.WARNING,
                     is_cached=False,
                     run_id=self.run_id
                 )
