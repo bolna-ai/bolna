@@ -171,6 +171,8 @@ class TaskManager(BaseManager):
         self.synthesizer_task = None
         self.synthesizer_monitor_task = None
         self.dtmf_task = None
+        self.filler_task = None
+        self.llm_queue_task = None
 
         # state of conversation
         self.current_request_id = None
@@ -2897,12 +2899,25 @@ class TaskManager(BaseManager):
                 tasks_to_cancel.append(process_task_cancellation(self.hangup_task,'hangup_task'))
                 tasks_to_cancel.append(process_task_cancellation(self.backchanneling_task, 'backchanneling_task'))
                 tasks_to_cancel.append(process_task_cancellation(self.ambient_noise_task, 'ambient_noise_task'))
-                # tasks_to_cancel.append(process_task_cancellation(self.initial_silence_task, 'initial_silence_task'))
                 tasks_to_cancel.append(process_task_cancellation(self.first_message_task, 'first_message_task'))
                 tasks_to_cancel.append(process_task_cancellation(self.dtmf_task, 'dtmf_task'))
                 tasks_to_cancel.append(process_task_cancellation(self.voicemail_check_task, 'voicemail_check_task'))
                 tasks_to_cancel.append(
                     process_task_cancellation(self.handle_accumulated_message_task, "handle_accumulated_message_task"))
+
+                # Cancel tasks that were previously missed
+                tasks_to_cancel.append(process_task_cancellation(self.llm_task, 'llm_task'))
+                tasks_to_cancel.append(process_task_cancellation(self.llm_queue_task, 'llm_queue_task'))
+                tasks_to_cancel.append(process_task_cancellation(self.filler_task, 'filler_task'))
+                tasks_to_cancel.append(process_task_cancellation(
+                    self.first_message_task_new, 'first_message_task_new'))
+                tasks_to_cancel.append(process_task_cancellation(
+                    self.execute_function_call_task, 'execute_function_call_task'))
+
+                # Cancel all pending synthesizer tasks in the list
+                for i, synth_task in enumerate(self.synthesizer_tasks):
+                    tasks_to_cancel.append(process_task_cancellation(synth_task, f'synthesizer_tasks[{i}]'))
+                self.synthesizer_tasks = []
 
                 output['recording_url'] = ""
                 if self.should_record:
@@ -2931,13 +2946,34 @@ class TaskManager(BaseManager):
 
     async def handle_cancellation(self, message):
         try:
-            # Cancel all tasks on cancellation
-            tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
-            logger.info(f"tasks {len(tasks)}")
-            for task in tasks:
-                await process_task_cancellation(task, task.get_name())
-                logger.info(f"Cancelling task {task.get_name()}")
-                task.cancel()
+            # Cancel only tasks owned by this TaskManager instance
+            owned_tasks = [
+                (self.llm_task, 'llm_task'),
+                (self.execute_function_call_task, 'execute_function_call_task'),
+                (self.synthesizer_task, 'synthesizer_task'),
+                (self.synthesizer_monitor_task, 'synthesizer_monitor_task'),
+                (self.dtmf_task, 'dtmf_task'),
+                (self.output_task, 'output_task'),
+                (self.hangup_task, 'hangup_task'),
+                (getattr(self, 'handle_accumulated_message_task', None), 'handle_accumulated_message_task'),
+                (getattr(self, 'transcriber_task', None), 'transcriber_task'),
+                (getattr(self, 'voicemail_check_task', None), 'voicemail_check_task'),
+                (getattr(self, 'backchanneling_task', None), 'backchanneling_task'),
+                (getattr(self, 'first_message_task', None), 'first_message_task'),
+                (self.first_message_task_new, 'first_message_task_new'),
+                (getattr(self, 'ambient_noise_task', None), 'ambient_noise_task'),
+                (self.filler_task, 'filler_task'),
+                (self.llm_queue_task, 'llm_queue_task'),
+            ]
+            for task, name in owned_tasks:
+                if task is not None and not task.done():
+                    await process_task_cancellation(task, name)
+
+            for i, synth_task in enumerate(self.synthesizer_tasks):
+                if synth_task is not None and not synth_task.done():
+                    await process_task_cancellation(synth_task, f'synthesizer_tasks[{i}]')
+            self.synthesizer_tasks = []
+
             logger.info(message)
         except Exception as e:
             traceback.print_exc()
