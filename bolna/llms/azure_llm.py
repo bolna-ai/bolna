@@ -1,12 +1,13 @@
 import os
 import json
 import httpx
+from urllib.parse import urlparse
 from dotenv import load_dotenv
-from openai import AsyncAzureOpenAI, AuthenticationError, PermissionDeniedError, NotFoundError, RateLimitError, APIError, APIConnectionError, BadRequestError
+from openai import AsyncAzureOpenAI, AsyncOpenAI, AuthenticationError, PermissionDeniedError, NotFoundError, RateLimitError, APIError, APIConnectionError, BadRequestError
 
 from bolna.constants import DEFAULT_LANGUAGE_CODE
 from bolna.helpers.utils import convert_to_request_log, compute_function_pre_call_message, now_ms
-from .llm import BaseLLM
+from .openai_base import OpenAICompatibleLLM
 from .tool_call_accumulator import ToolCallAccumulator
 from .types import LLMStreamChunk, LatencyData
 from bolna.helpers.logger_config import configure_logger
@@ -15,7 +16,7 @@ logger = configure_logger(__name__)
 load_dotenv()
 
 
-class AzureLLM(BaseLLM):
+class AzureLLM(OpenAICompatibleLLM):
     def __init__(self, max_tokens=100, buffer_size=40, model="gpt-4.1-mini", temperature=0.1, language=DEFAULT_LANGUAGE_CODE, **kwargs):
         super().__init__(max_tokens, buffer_size)
 
@@ -57,8 +58,31 @@ class AzureLLM(BaseLLM):
         )
 
         self.run_id = kwargs.get("run_id", None)
+        self.llm_host = urlparse(azure_endpoint).netloc if azure_endpoint else None
+
+        # Responses API: uses v1 endpoint with regular AsyncOpenAI client
+        self._init_responses_api(kwargs.get("use_responses_api", False))
+        if self.use_responses_api:
+            v1_base_url = f"{azure_endpoint.rstrip('/')}/openai/v1/"
+            self._responses_api_client = AsyncOpenAI(
+                api_key=api_key,
+                base_url=v1_base_url,
+                http_client=http_client,
+            )
+
+    @property
+    def _responses_client(self):
+        return getattr(self, '_responses_api_client', self.async_client)
 
     async def generate_stream(self, messages, synthesize=True, request_json=False, meta_info=None, tool_choice=None):
+        if self.use_responses_api:
+            async for chunk in self._generate_stream_responses(messages, synthesize, request_json, meta_info, tool_choice):
+                yield chunk
+        else:
+            async for chunk in self._generate_stream_chat(messages, synthesize, request_json, meta_info, tool_choice):
+                yield chunk
+
+    async def _generate_stream_chat(self, messages, synthesize=True, request_json=False, meta_info=None, tool_choice=None):
         if not messages or len(messages) == 0:
             raise Exception("No messages provided")
 
@@ -167,6 +191,11 @@ class AzureLLM(BaseLLM):
         self.started_streaming = False
 
     async def generate(self, messages, request_json=False, ret_metadata=False):
+        if self.use_responses_api:
+            return await self._generate_responses(messages, request_json, ret_metadata)
+        return await self._generate_chat(messages, request_json, ret_metadata)
+
+    async def _generate_chat(self, messages, request_json=False, ret_metadata=False):
         response_format = self.get_response_format(request_json)
 
         try:
@@ -179,7 +208,7 @@ class AzureLLM(BaseLLM):
             )
 
             res = completion.choices[0].message.content
-            if ret_metadata:  
+            if ret_metadata:
                 return res, {}
             else:
                 return res
