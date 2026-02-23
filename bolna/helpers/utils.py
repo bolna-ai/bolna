@@ -15,14 +15,13 @@ import numpy as np
 import aiofiles
 import scipy.signal
 from scipy.io import wavfile
-from pydub import AudioSegment
 from botocore.exceptions import BotoCoreError, ClientError
 from aiobotocore.session import AioSession
 from contextlib import AsyncExitStack
 from dotenv import load_dotenv
 from pydantic import create_model
 from .logger_config import configure_logger
-from bolna.constants import PCM16_SCALE, PREPROCESS_DIR, PRE_FUNCTION_CALL_MESSAGE, DEFAULT_LANGUAGE_CODE, TRANSFERING_CALL_FILLER
+from bolna.constants import PREPROCESS_DIR, PRE_FUNCTION_CALL_MESSAGE, TRANSFERING_CALL_FILLER
 from bolna.prompts import DATE_PROMPT
 from pydub import AudioSegment
 import audioop
@@ -620,11 +619,6 @@ def convert_to_request_log(message, meta_info, model, component="transcriber", d
         log['is_final'] = False #This is logged only for users to know final transcript from the transcriber
     log['engine'] = engine
     asyncio.create_task(write_request_logs(log, run_id))
-
-
-async def run_in_seperate_thread(fun):
-    resp = await asyncio.to_thread(fun)
-    return resp
 
 
 async def process_task_cancellation(asyncio_task, task_name):
