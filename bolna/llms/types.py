@@ -1,4 +1,4 @@
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
 from pydantic import BaseModel, ConfigDict
 
@@ -35,4 +35,4 @@ class LLMStreamChunk(BaseModel):
     latency: Optional[LatencyData] = None
     is_function_call: bool = False
     function_name: Optional[str] = None
-    function_message: Optional[str] = None
+    function_message: Optional[Union[str, dict]] = None
