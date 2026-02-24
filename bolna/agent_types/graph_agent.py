@@ -11,6 +11,7 @@ from bolna.agent_types.base_agent import BaseAgent
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.rag_service_client import RAGServiceClientSingleton
 from bolna.helpers.utils import now_ms, format_messages, update_prompt_with_context, DictWithMissing
+from bolna.llms.types import LLMStreamChunk, LatencyData
 from bolna.llms import OpenAiLLM
 from bolna.providers import SUPPORTED_LLM_PROVIDERS
 from bolna.prompts import VOICEMAIL_DETECTION_PROMPT
@@ -505,9 +506,9 @@ class GraphAgent(BaseAgent):
 
         except Exception as e:
             logger.error(f"Error in generate: {e}")
-            latency_data = {
-                "sequence_id": meta_info.get("sequence_id") if meta_info else None,
-                "first_token_latency_ms": 0,
-                "total_stream_duration_ms": now_ms() - start_time
-            }
-            yield f"An error occurred: {str(e)}", True, latency_data, False, None, None
+            latency_data = LatencyData(
+                sequence_id=meta_info.get("sequence_id") if meta_info else None,
+                first_token_latency_ms=0,
+                total_stream_duration_ms=now_ms() - start_time,
+            )
+            yield LLMStreamChunk(data=f"An error occurred: {str(e)}", end_of_stream=True, latency=latency_data)

@@ -1,6 +1,14 @@
 from enum import Enum
 
 
+class ChatRole(str, Enum):
+    """Chat message roles."""
+    SYSTEM = "system"
+    USER = "user"
+    ASSISTANT = "assistant"
+    TOOL = "tool"
+
+
 class TelephonyProvider(str, Enum):
     """Enum for telephony/IO providers (input/output handlers)."""
     TWILIO = "twilio"
@@ -111,3 +119,30 @@ class Verbosity(str, Enum):
     def all_values(cls):
         """Return all verbosity values as a list of strings."""
         return [verbosity.value for verbosity in cls]
+
+
+class ResponseStreamEvent(str, Enum):
+    """Responses API server-sent event types."""
+    CREATED = "response.created"
+    COMPLETED = "response.completed"
+    FAILED = "response.failed"
+    INCOMPLETE = "response.incomplete"
+    OUTPUT_TEXT_DELTA = "response.output_text.delta"
+    OUTPUT_ITEM_ADDED = "response.output_item.added"
+    FUNCTION_CALL_ARGS_DELTA = "response.function_call_arguments.delta"
+
+    @classmethod
+    def all_values(cls):
+        return [e.value for e in cls]
+
+
+class ResponseItemType(str, Enum):
+    """Responses API input item types."""
+    MESSAGE = "message"
+    FUNCTION_CALL = "function_call"
+    FUNCTION_CALL_OUTPUT = "function_call_output"
+    FUNCTION = "function"
+
+    @classmethod
+    def all_values(cls):
+        return [e.value for e in cls]
