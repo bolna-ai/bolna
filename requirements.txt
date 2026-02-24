@@ -16,7 +16,6 @@ redis==5.0.1
 requests>=2.31.0,<3
 scipy==1.11.4
 tiktoken>=0.6.0
-torchaudio==2.0.1
 uvicorn==0.22.0
 websockets==15.0.1
 azure-cognitiveservices-speech==1.38.0
