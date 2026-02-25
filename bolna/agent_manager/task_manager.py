@@ -670,19 +670,26 @@ class TaskManager(BaseManager):
                     logger.info(f"Got stream sid and hence sending the first message {stream_sid}")
                     self.stream_sid = stream_sid
                     await self.tools["output"].set_stream_sid(stream_sid)
-                    self.tools["input"].update_is_audio_being_played(True)
-                    convert_to_request_log(message=text, meta_info=meta_info, component="synthesizer", direction="response", model=self.synthesizer_provider, is_cached=meta_info.get("is_cached", False), engine=self.tools['synthesizer'].get_engine(), run_id=self.run_id)
-                    await self.tools["output"].handle(message)
-                    try:
-                        data = message.get("data")
-                        if data is not None:
-                            duration = calculate_audio_duration(len(data), self.sampling_rate,
-                                                                format=message['meta_info']['format'])
-                            self.conversation_recording['output'].append(
-                                {'data': data, "start_time": time.time(), "duration": duration})
-                    except Exception as e:
-                        duration = 0.256
-                        logger.error("Exception in __forced_first_message for duration calculation: {}".format(str(e)))
+
+                    if audio_chunk is None:
+                        # No welcome message to play - mark as played immediately
+                        # so the system doesn't wait for a mark event that will never arrive
+                        logger.info("No welcome message audio to send, marking welcome message as played")
+                        self.tools["input"].is_welcome_message_played = True
+                    else:
+                        self.tools["input"].update_is_audio_being_played(True)
+                        convert_to_request_log(message=text, meta_info=meta_info, component="synthesizer", direction="response", model=self.synthesizer_provider, is_cached=meta_info.get("is_cached", False), engine=self.tools['synthesizer'].get_engine(), run_id=self.run_id)
+                        await self.tools["output"].handle(message)
+                        try:
+                            data = message.get("data")
+                            if data is not None:
+                                duration = calculate_audio_duration(len(data), self.sampling_rate,
+                                                                    format=message['meta_info']['format'])
+                                self.conversation_recording['output'].append(
+                                    {'data': data, "start_time": time.time(), "duration": duration})
+                        except Exception as e:
+                            duration = 0.256
+                            logger.error("Exception in __forced_first_message for duration calculation: {}".format(str(e)))
                     break
                 else:
                     logger.info(f"Stream id is still None ({stream_sid}) or output handler not set ({self.output_handler_set}), waiting...")
