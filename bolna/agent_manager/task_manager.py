@@ -812,6 +812,8 @@ class TaskManager(BaseManager):
                 injected_cfg['routing_reasoning_effort'] = self.kwargs['routing_reasoning_effort']
             if 'routing_max_tokens' in self.kwargs:
                 injected_cfg['routing_max_tokens'] = self.kwargs['routing_max_tokens']
+            if self.llm_config.get('use_responses_api'):
+                injected_cfg['use_responses_api'] = True
             injected_cfg['buffer_size'] = self.task_config["tools_config"]["synthesizer"].get('buffer_size')
             injected_cfg['language'] = self.language
 
