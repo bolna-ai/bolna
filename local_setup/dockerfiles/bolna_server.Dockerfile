@@ -34,14 +34,19 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     tqdm \
     requests
 
-# Install bolna package with verbose output for debugging
+# Copy local bolna source
+COPY bolna/ /app/bolna/
+COPY pyproject.toml /app/
+COPY requirements.txt /app/
+
+# Install bolna from local source
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install --verbose git+https://github.com/bolna-ai/bolna@master || \
+    pip install --verbose /app || \
     (echo "Failed to install bolna package. See error above." && exit 1)
 
 # Copy application files
-COPY quickstart_server.py /app/
-COPY presets /app/presets
+COPY local_setup/quickstart_server.py /app/
+COPY local_setup/presets /app/presets
 
 EXPOSE 5001
 
