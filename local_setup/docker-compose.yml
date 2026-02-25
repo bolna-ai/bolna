@@ -5,8 +5,8 @@ services:
   # main bolna service
   bolna-app:
     build:
-      context: .
-      dockerfile: dockerfiles/bolna_server.Dockerfile
+      context: ..
+      dockerfile: local_setup/dockerfiles/bolna_server.Dockerfile
     image: bolna-app:latest  # This will tag the built image
     ports:
       - "5001:5001"
