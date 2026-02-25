@@ -645,8 +645,18 @@ def select_message_by_language(message_config: Union[str, dict], detected_langua
         return message_config
 
     if isinstance(message_config, dict):
-        return message_config.get(detected_language) or message_config.get('en') or next(iter(message_config.values()))
+        lang_value = message_config.get(detected_language)
+        if lang_value and lang_value.strip():
+            return lang_value
 
+        en_value = message_config.get('en')
+        if en_value and en_value.strip():
+            return en_value
+
+        return next(
+            (v for v in message_config.values() if v and v.strip()),
+            ""
+        )
     return ""
 
 
