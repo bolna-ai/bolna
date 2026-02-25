@@ -80,5 +80,17 @@ class BaseSynthesizer:
     def supports_websocket(self):
         return True
     
+    def has_pending_work(self):
+        """Check if the synthesizer has pending work (text pushed but audio not yet fully generated).
+        
+        Covers both WS-streaming synthesizers (which use current_turn_start_time)
+        and HTTP-based synthesizers (which use internal_queue).
+        """
+        if getattr(self, 'current_turn_start_time', None) is not None:
+            return True
+        if not self.internal_queue.empty():
+            return True
+        return False
+
     def get_sleep_time(self):
         return 0.2

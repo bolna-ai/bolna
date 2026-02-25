@@ -1225,6 +1225,35 @@ class TaskManager(BaseManager):
             await self.__process_end_of_conversation()
 
     async def wait_for_current_message(self):
+        """
+        Wait for the current message to be processed. Checks if there are any outputs being generated, sent to telephony, or yet to be marked as played.
+        """
+
+        # Phase 1: Wait for synthesizer pipeline to drain (bounded)
+        # Covers: text pushed to synthesizer but audio not yet generated,
+        # and audio generated but not yet sent to telephony.
+
+        synth_timeout = 2  # seconds: don't wait indefinitely for synthesizer
+        synth_start = time.time()
+        while not self.conversation_ended:
+            elapsed = time.time() - synth_start
+            if elapsed > synth_timeout:
+                logger.warning(f"wait_for_current_message: synthesizer wait timed out after {synth_timeout}s")
+                break
+
+            has_pending_synth = self.tools["synthesizer"].has_pending_work()
+            has_pending_output = not self.buffered_output_queue.empty()
+
+            if has_pending_synth or has_pending_output:
+                logger.info(f"wait_for_current_message: waiting for synth pipeline "
+                            f"(synth={has_pending_synth}, output_q={has_pending_output})")
+                await asyncio.sleep(0.3)
+                continue
+
+            # Synthesizer pipeline is drained
+            break
+
+        # Phase 2: Wait for mark events (fresh timer)
         start_time = time.time()
         while not self.conversation_ended:
             elapsed = time.time() - start_time
