@@ -45,8 +45,13 @@ class DeepgramTranscriber(BaseTranscriber):
             self.api_url = f"https://{self.deepgram_host}/v1/listen?model={self.model}&filler_words=true&language={self.language}"
             self.session = aiohttp.ClientSession()
             if self.keywords is not None:
-                keyword_string = "&keywords=" + "&keywords=".join(self.keywords.split(","))
-                self.api_url = f"{self.api_url}{keyword_string}"
+                keyword_list = [kw.strip() for kw in self.keywords.split(",") if kw.strip()]
+                if keyword_list:
+                    if self.model.startswith('nova-3'):
+                        keyword_string = "&keyterm=" + "&keyterm=".join(keyword_list)
+                    else:
+                        keyword_string = "&keywords=" + "&keywords=".join(keyword_list)
+                    self.api_url = f"{self.api_url}{keyword_string}"
         self.audio_submitted = False
         self.audio_submission_time = None
         self.num_frames = 0
@@ -124,16 +129,17 @@ class DeepgramTranscriber(BaseTranscriber):
         if "en" not in self.language:
             dg_params['language'] = self.language
 
-        if self.keywords and len(self.keywords.split(",")) > 0:
-            if self.model.startswith('nova-3'):
-                dg_params['keyterm'] = "&keyterm=".join(self.keywords.split(","))
-                if self.language != 'en':
-                    dg_params.pop('keyterm', None)
-            else:
-                dg_params['keywords'] = "&keywords=".join(self.keywords.split(","))
-
         websocket_api = '{}://{}/v1/listen?'.format(os.getenv('DEEPGRAM_HOST_PROTOCOL', 'wss'), self.deepgram_host)
         websocket_url = websocket_api + urlencode(dg_params)
+
+        if self.keywords:
+            keyword_list = [kw.strip() for kw in self.keywords.split(",") if kw.strip()]
+            if keyword_list:
+                if self.model.startswith('nova-3'):
+                    websocket_url += "&keyterm=" + "&keyterm=".join(keyword_list)
+                else:
+                    websocket_url += "&keywords=" + "&keywords=".join(keyword_list)
+
         return websocket_url
 
     async def send_heartbeat(self, ws: ClientConnection):
