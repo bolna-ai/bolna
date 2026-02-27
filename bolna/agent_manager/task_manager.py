@@ -2287,9 +2287,11 @@ class TaskManager(BaseManager):
                 except asyncio.CancelledError:
                     logger.info("Synthesizer task was cancelled.")
                     #await self.handle_cancellation("Synthesizer task was cancelled.")
+                    self._turn_audio_flushed.set()
                     break
                 except Exception as e:
                     logger.error(f"Error in synthesizer: {e}", exc_info=True)
+                    self._turn_audio_flushed.set()
                     break
 
             logger.info("Exiting __listen_synthesizer gracefully.")
@@ -2392,6 +2394,7 @@ class TaskManager(BaseManager):
         except Exception as e:
             traceback.print_exc()
             logger.error(f"Error in synthesizer: {e}")
+            self._turn_audio_flushed.set()
 
     ############################################################
     # Output handling
@@ -2489,11 +2492,12 @@ class TaskManager(BaseManager):
                 if should_continue_outer_loop:
                     continue
 
-                # Reset asked_if_user_is_still_there flag after any message except is_user_online_message
-                if (message['meta_info'].get("end_of_llm_stream", False) or message['meta_info'].get("end_of_synthesizer_stream", False)) and \
-                        message['meta_info'].get('message_category', '') != 'is_user_online_message':
-                    self.asked_if_user_is_still_there = False
+                # Signal that the turn's audio has been fully flushed to the output
+                if message['meta_info'].get("end_of_llm_stream", False) or message['meta_info'].get("end_of_synthesizer_stream", False):
                     self._turn_audio_flushed.set()
+                    # Reset asked_if_user_is_still_there flag after any message except is_user_online_message
+                    if message['meta_info'].get('message_category', '') != 'is_user_online_message':
+                        self.asked_if_user_is_still_there = False
 
                 # # The below code is redundant in the case of telephony
                 # if "is_final_chunk_of_entire_response" in message['meta_info'] and message['meta_info']['is_final_chunk_of_entire_response']:
