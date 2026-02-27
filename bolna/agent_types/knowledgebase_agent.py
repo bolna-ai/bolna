@@ -62,7 +62,7 @@ class KnowledgeBaseAgent(BaseAgent):
                 'provider': provider,
             }
 
-            for key in ['llm_key', 'base_url', 'api_version', 'language', 'api_tools', 'buffer_size', 'reasoning_effort', 'service_tier']:
+            for key in ['llm_key', 'base_url', 'api_version', 'language', 'api_tools', 'buffer_size', 'reasoning_effort', 'service_tier', 'use_responses_api']:
                 if self.config.get(key, None):
                     llm_kwargs[key] = self.config[key]
 

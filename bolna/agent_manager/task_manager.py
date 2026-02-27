@@ -853,6 +853,8 @@ class TaskManager(BaseManager):
                 injected_cfg['reasoning_effort'] = self.kwargs['reasoning_effort']
             if 'service_tier' in self.kwargs:
                 injected_cfg['service_tier'] = self.kwargs['service_tier']
+            if self.llm_config.get('use_responses_api'):
+                injected_cfg['use_responses_api'] = True
             injected_cfg['buffer_size'] = self.task_config["tools_config"]["synthesizer"].get('buffer_size')
             injected_cfg['language'] = self.language
 
