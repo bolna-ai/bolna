@@ -165,9 +165,25 @@ class LogComponent(str, Enum):
     TRANSCRIBER = "transcriber"
     WARNING = "warning"
 
+    @property
+    def display_name(self):
+        return _DISPLAY_NAMES.get(self, self.value)
+
     @classmethod
     def all_values(cls):
         return [c.value for c in cls]
+
+
+_DISPLAY_NAMES = {
+    LogComponent.TRANSCRIBER: "Speech recognition",
+    LogComponent.SYNTHESIZER: "Text-to-speech",
+    LogComponent.LLM: "LLM",
+    LogComponent.LLM_HANGUP: "LLM hangup check",
+    LogComponent.LLM_VOICEMAIL: "LLM voicemail check",
+    LogComponent.LLM_LANGUAGE_DETECTION: "LLM language detection",
+    LogComponent.FUNCTION_CALL: "Function call",
+    LogComponent.GRAPH_ROUTING: "Graph routing",
+}
 
 
 class LogDirection(str, Enum):
