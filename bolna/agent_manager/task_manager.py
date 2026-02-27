@@ -1273,7 +1273,12 @@ class TaskManager(BaseManager):
             if first_item.get('text_synthesized') and first_item.get('is_final_chunk') is True:
                 break
 
-            await asyncio.sleep(0.5)
+            remaining = self.hangup_mark_event_timeout - elapsed
+            self.mark_event_meta_data.mark_changed.clear()
+            try:
+                await asyncio.wait_for(self.mark_event_meta_data.mark_changed.wait(), timeout=remaining)
+            except asyncio.TimeoutError:
+                pass  # re-enters loop, hits timeout check at top
         return
 
     async def inject_digits_to_conversation(self) -> None:
