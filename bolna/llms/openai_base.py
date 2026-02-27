@@ -3,7 +3,7 @@ import json
 from openai import BadRequestError, APIError
 
 from bolna.constants import GPT5_MODEL_PREFIX
-from bolna.enums import ChatRole, ResponseStreamEvent, ResponseItemType
+from bolna.enums import ChatRole, ResponseStreamEvent, ResponseItemType, LogComponent, LogDirection
 from bolna.helpers.utils import convert_to_request_log, compute_function_pre_call_message, now_ms
 from .llm import BaseLLM
 from .message_models import MessageFormatAdapter
@@ -281,8 +281,8 @@ class OpenAICompatibleLLM(BaseLLM):
                         parsed_args = json.loads(arguments_str)
                         required_keys = tool_spec.get("parameters", {}).get("required", [])
                         if tool_spec.get("parameters") is not None and all(k in parsed_args for k in required_keys):
-                            convert_to_request_log(arguments_str, meta_info, self.model, "llm",
-                                                   direction="response", is_cached=False, run_id=self.run_id)
+                            convert_to_request_log(arguments_str, meta_info, self.model, LogComponent.LLM,
+                                                   direction=LogDirection.RESPONSE, is_cached=False, run_id=self.run_id)
                             for k, v in parsed_args.items():
                                 setattr(api_call_payload, k, v)
                         else:
