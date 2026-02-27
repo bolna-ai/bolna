@@ -594,21 +594,12 @@ def get_file_names_in_directory(directory):
     return os.listdir(directory)
 
 
-COMPONENT_DISPLAY_NAMES = {
-    "transcriber": "Speech recognition",
-    "synthesizer": "Text-to-speech",
-    "llm": "LLM",
-    "llm_hangup": "LLM hangup check",
-    "llm_voicemail": "LLM voicemail check",
-    "llm_language_detection": "LLM language detection",
-    "function_call": "Function call",
-    "graph_routing": "Graph routing",
-}
-
-
 def format_error_message(component, provider, error_str):
     """Map technical error strings to customer-friendly messages for CSV trace data."""
-    display = COMPONENT_DISPLAY_NAMES.get(component, component)
+    try:
+        display = LogComponent(component).display_name
+    except ValueError:
+        display = component
     provider_str = f" ({provider})" if provider and provider != "-" else ""
     err_lower = error_str.lower() if error_str else ""
 
@@ -645,24 +636,23 @@ def convert_to_request_log(message, meta_info, model, component=LogComponent.TRA
     log['model'] = model
     log['cached'] = is_cached
     log['is_final'] = False
-    if component == LogComponent.LLM:
-        log['latency'] = meta_info.get('llm_latency', None) if direction == LogDirection.RESPONSE else None
-        log['llm_metadata'] = meta_info.get('llm_metadata', None)
-    elif component == LogComponent.SYNTHESIZER:
-        log['latency'] = meta_info.get('synthesizer_latency', None) if direction == LogDirection.RESPONSE else None
-    elif component == LogComponent.TRANSCRIBER:
-        log['latency'] = meta_info.get('transcriber_latency', None) if direction == LogDirection.RESPONSE else None
-        if 'is_final' in meta_info and meta_info['is_final']:
-            log['is_final'] = True
-    elif component == LogComponent.FUNCTION_CALL:
-        log['latency'] = None
-    elif component == LogComponent.GRAPH_ROUTING:
-        log['latency'] = None
-        log['graph_routing_metadata'] = meta_info.get('llm_metadata', {})
-    elif component == LogComponent.WARNING:
-        log['latency'] = None
-    elif component in (LogComponent.LLM_HANGUP, LogComponent.LLM_VOICEMAIL, LogComponent.LLM_LANGUAGE_DETECTION):
-        log['latency'] = meta_info.get('llm_latency', None) if direction == LogDirection.RESPONSE else None
+    match component:
+        case LogComponent.LLM:
+            log['latency'] = meta_info.get('llm_latency', None) if direction == LogDirection.RESPONSE else None
+            log['llm_metadata'] = meta_info.get('llm_metadata', None)
+        case LogComponent.SYNTHESIZER:
+            log['latency'] = meta_info.get('synthesizer_latency', None) if direction == LogDirection.RESPONSE else None
+        case LogComponent.TRANSCRIBER:
+            log['latency'] = meta_info.get('transcriber_latency', None) if direction == LogDirection.RESPONSE else None
+            if 'is_final' in meta_info and meta_info['is_final']:
+                log['is_final'] = True
+        case LogComponent.FUNCTION_CALL | LogComponent.WARNING:
+            log['latency'] = None
+        case LogComponent.GRAPH_ROUTING:
+            log['latency'] = None
+            log['graph_routing_metadata'] = meta_info.get('llm_metadata', {})
+        case LogComponent.LLM_HANGUP | LogComponent.LLM_VOICEMAIL | LogComponent.LLM_LANGUAGE_DETECTION:
+            log['latency'] = meta_info.get('llm_latency', None) if direction == LogDirection.RESPONSE else None
     log['engine'] = engine
     asyncio.create_task(write_request_logs(log, run_id))
 
