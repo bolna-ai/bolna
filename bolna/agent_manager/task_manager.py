@@ -106,6 +106,8 @@ class TaskManager(BaseManager):
         self.hangup_triggered_at = None
         self.hangup_message_queued = False
         self._end_of_conversation_in_progress = False
+        self._turn_audio_flushed = asyncio.Event()
+        self._turn_audio_flushed.set()
         self.hangup_mark_event_timeout = 10
 
         # Prompts
@@ -1132,6 +1134,8 @@ class TaskManager(BaseManager):
             logger.info(f"Output queue was not empty and hence emptying it")
             self.buffered_output_queue = asyncio.Queue()
 
+        self._turn_audio_flushed.set()
+
         #restart output task
         self.output_task = asyncio.create_task(self.__process_output_loop())
         self.started_transmitting_audio = False #Since we're interrupting we need to stop transmitting as well
@@ -1234,6 +1238,11 @@ class TaskManager(BaseManager):
             await self.__process_end_of_conversation()
 
     async def wait_for_current_message(self):
+        try:
+            await asyncio.wait_for(self._turn_audio_flushed.wait(), timeout=3.0)
+        except asyncio.TimeoutError:
+            logger.warning("wait_for_current_message: synth pipeline flush timed out after 3s")
+
         start_time = time.time()
         while not self.conversation_ended:
             elapsed = time.time() - start_time
@@ -1355,6 +1364,7 @@ class TaskManager(BaseManager):
             meta_info['message_category'] = 'filler'
 
         if next_step == "synthesizer" and not should_bypass_synth:
+            self._turn_audio_flushed.clear()
             task = asyncio.create_task(self._synthesize(create_ws_data_packet(text_chunk, meta_info)))
             self.synthesizer_tasks.append(asyncio.ensure_future(task))
         elif self.tools["output"] is not None:
@@ -2252,6 +2262,8 @@ class TaskManager(BaseManager):
                                 logger.info("Stream not enabled, sending entire audio")
                                 # TODO handle is audio playing over here
                                 await self.tools["output"].handle(message)
+                                if meta_info.get('end_of_synthesizer_stream', False):
+                                    self._turn_audio_flushed.set()
 
                             if write_to_log:
                                 logger.info(f"Writing response to log {meta_info.get('text')}")
@@ -2275,9 +2287,11 @@ class TaskManager(BaseManager):
                 except asyncio.CancelledError:
                     logger.info("Synthesizer task was cancelled.")
                     #await self.handle_cancellation("Synthesizer task was cancelled.")
+                    self._turn_audio_flushed.set()
                     break
                 except Exception as e:
                     logger.error(f"Error in synthesizer: {e}", exc_info=True)
+                    self._turn_audio_flushed.set()
                     break
 
             logger.info("Exiting __listen_synthesizer gracefully.")
@@ -2380,6 +2394,7 @@ class TaskManager(BaseManager):
         except Exception as e:
             traceback.print_exc()
             logger.error(f"Error in synthesizer: {e}")
+            self._turn_audio_flushed.set()
 
     ############################################################
     # Output handling
@@ -2463,6 +2478,9 @@ class TaskManager(BaseManager):
                         # True forever because no final mark echo ever arrives.
                         if message['data'] == b'\x00':
                             await self.tools["output"].handle(message)
+                        if message['meta_info'].get('end_of_llm_stream', False) or \
+                                message['meta_info'].get('end_of_synthesizer_stream', False):
+                            self._turn_audio_flushed.set()
                         should_continue_outer_loop = True
                         break  # Exit inner loop, skip to next message
 
@@ -2474,10 +2492,12 @@ class TaskManager(BaseManager):
                 if should_continue_outer_loop:
                     continue
 
-                # Reset asked_if_user_is_still_there flag after any message except is_user_online_message
-                if (message['meta_info'].get("end_of_llm_stream", False) or message['meta_info'].get("end_of_synthesizer_stream", False)) and \
-                        message['meta_info'].get('message_category', '') != 'is_user_online_message':
-                    self.asked_if_user_is_still_there = False
+                # Signal that the turn's audio has been fully flushed to the output
+                if message['meta_info'].get("end_of_llm_stream", False) or message['meta_info'].get("end_of_synthesizer_stream", False):
+                    self._turn_audio_flushed.set()
+                    # Reset asked_if_user_is_still_there flag after any message except is_user_online_message
+                    if message['meta_info'].get('message_category', '') != 'is_user_online_message':
+                        self.asked_if_user_is_still_there = False
 
                 # # The below code is redundant in the case of telephony
                 # if "is_final_chunk_of_entire_response" in message['meta_info'] and message['meta_info']['is_final_chunk_of_entire_response']:
