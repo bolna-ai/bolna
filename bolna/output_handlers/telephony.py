@@ -54,6 +54,12 @@ class TelephonyOutputHandler(DefaultOutputHandler):
                     if audio_chunk != b'\x00\x00':
                         audio_format = meta_info.get("format", "wav")
 
+                        # Ambient noise: send only the media, no marks
+                        if meta_info.get('message_category') == 'ambient_noise':
+                            media_message = await self.form_media_message(audio_chunk, audio_format)
+                            await self.websocket.send_text(json.dumps(media_message))
+                            return
+
                         # sending of pre-mark message
                         pre_mark_event_meta_data = {
                             "type": "pre_mark_message",

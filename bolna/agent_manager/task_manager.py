@@ -104,7 +104,8 @@ class TaskManager(BaseManager):
         self.sampling_rate = 24000
         self.ambient_noise_mixer = AmbientNoiseMixer()
         self.ambient_noise_enabled = False
-        self._noise_paused = False
+        self._noise_resumed = asyncio.Event()
+        self._noise_resumed.set()  # Start in "running" state
         self.noise_runner_task = None
         self.conversation_ended = False
         self.hangup_triggered = False
@@ -1151,7 +1152,7 @@ class TaskManager(BaseManager):
 
         # Resume ambient noise after interruption (agent audio is no longer playing)
         if self.ambient_noise_enabled:
-            self._noise_paused = False
+            self._noise_resumed.set()
         logger.info(f"Cleaning up downstream tasks. Time taken to send a clear message {time.time() - start_time}")
 
     def __get_updated_meta_info(self, meta_info = None):
@@ -1566,7 +1567,6 @@ class TaskManager(BaseManager):
             self.conversation_history.sync_interim(messages)
 
     async def __do_llm_generation(self, messages, meta_info, next_step, should_bypass_synth=False, should_trigger_function_call=False):
-        logger.info("[DEBUG] llm generation started")
         
         # Reset response tracking for new turn
         if self.generate_precise_transcript:
@@ -2253,7 +2253,7 @@ class TaskManager(BaseManager):
     async def __noise_runner(self):
         """Continuously feed noise-only frames into buffered_output_queue.
         Pauses when agent or welcome audio is being enqueued."""
-        CHUNK_MS = 400
+        CHUNK_MS = 800
         INTERVAL = CHUNK_MS / 1000.0
 
         # Wait for stream_sid before sending any audio
@@ -2263,9 +2263,7 @@ class TaskManager(BaseManager):
         logger.info("Noise runner started")
 
         while not self.conversation_ended:
-            if self._noise_paused:
-                await asyncio.sleep(INTERVAL)
-                continue
+            await self._noise_resumed.wait()
             try:
                 # audio_format = self.task_config['tools_config']['synthesizer'].get('audio_format', 'mulaw')
                 audio_format = 'mulaw'
@@ -2321,7 +2319,8 @@ class TaskManager(BaseManager):
 
                             # Pause noise runner before enqueuing agent audio
                             if self.ambient_noise_enabled and meta_info.get("is_first_chunk", False):
-                                self._noise_paused = True
+                                self._noise_resumed.clear()
+                                await asyncio.sleep(0.05)
 
                             if self.stream:
                                 if meta_info.get("is_first_chunk", False):
@@ -2345,7 +2344,7 @@ class TaskManager(BaseManager):
 
                             # Resume noise runner after last chunk of response is enqueued
                             if self.ambient_noise_enabled and meta_info.get("end_of_llm_stream") and meta_info.get("end_of_synthesizer_stream"):
-                                self._noise_paused = False
+                                self._noise_resumed.set()
 
                             if write_to_log:
                                 logger.info(f"Writing response to log {meta_info.get('text')}")
@@ -2363,7 +2362,7 @@ class TaskManager(BaseManager):
                             logger.info(f"Skipping message with sequence_id: {sequence_id}")
                             # Resume noise if we were paused but message was invalidated
                             if self.ambient_noise_enabled:
-                                self._noise_paused = False
+                                self._noise_resumed.set()
 
                         # Give control to other tasks
                         sleep_time = self.tools["synthesizer"].get_sleep_time()
@@ -2435,7 +2434,7 @@ class TaskManager(BaseManager):
 
                 # Pause noise runner while welcome/filler audio is being enqueued
                 if self.ambient_noise_enabled:
-                    self._noise_paused = True
+                    self._noise_resumed.clear()
 
                 meta_info["end_of_synthesizer_stream"] = True
                 if yield_in_chunks and audio_chunk is not None:
@@ -2454,7 +2453,7 @@ class TaskManager(BaseManager):
 
                 # Resume noise runner after welcome/filler audio is enqueued
                 if self.ambient_noise_enabled:
-                    self._noise_paused = False
+                    self._noise_resumed.set()
 
         except Exception as e:
             traceback.print_exc()
@@ -2479,6 +2478,8 @@ class TaskManager(BaseManager):
                         await self.__send_preprocessed_audio(meta_info, get_md5_hash(text))
                     else:
                         self.synthesizer_characters += len(text)
+                        # [DEBUG] Clearing the channel before pushing the audio
+                        await self.tools["output"].handle_interruption()
                         await self.tools["synthesizer"].push(message)
                 else:
                     logger.info("other synthesizer models not supported yet")
@@ -2539,6 +2540,11 @@ class TaskManager(BaseManager):
 
                 if "end_of_conversation" in message['meta_info']:
                     await self.__process_end_of_conversation()
+
+                # Ambient noise is non-content audio — always send, never block/wait
+                if message['meta_info'].get('message_category') == 'ambient_noise':
+                    await self.tools["output"].handle(message)
+                    continue
 
                 sequence_id = message['meta_info'].get('sequence_id')
 
