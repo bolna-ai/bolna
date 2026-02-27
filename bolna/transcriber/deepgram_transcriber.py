@@ -4,7 +4,7 @@ import os
 import json
 import aiohttp
 import time
-from urllib.parse import urlencode
+from urllib.parse import urlencode, quote
 from dotenv import load_dotenv
 import websockets
 from websockets.asyncio.client import ClientConnection
@@ -45,7 +45,7 @@ class DeepgramTranscriber(BaseTranscriber):
             self.api_url = f"https://{self.deepgram_host}/v1/listen?model={self.model}&filler_words=true&language={self.language}"
             self.session = aiohttp.ClientSession()
             if self.keywords is not None:
-                keyword_list = [kw.strip() for kw in self.keywords.split(",") if kw.strip()]
+                keyword_list = [quote(kw.strip()) for kw in self.keywords.split(",") if kw.strip()]
                 if keyword_list:
                     if self.model.startswith('nova-3'):
                         keyword_string = "&keyterm=" + "&keyterm=".join(keyword_list)
@@ -133,7 +133,7 @@ class DeepgramTranscriber(BaseTranscriber):
         websocket_url = websocket_api + urlencode(dg_params)
 
         if self.keywords:
-            keyword_list = [kw.strip() for kw in self.keywords.split(",") if kw.strip()]
+            keyword_list = [quote(kw.strip()) for kw in self.keywords.split(",") if kw.strip()]
             if keyword_list:
                 if self.model.startswith('nova-3'):
                     websocket_url += "&keyterm=" + "&keyterm=".join(keyword_list)
