@@ -57,6 +57,7 @@ class TelephonyOutputHandler(DefaultOutputHandler):
                         # sending of pre-mark message
                         pre_mark_event_meta_data = {
                             "type": "pre_mark_message",
+                            "is_content_audio": meta_info.get("is_content_audio", True),
                         }
                         mark_id = str(uuid.uuid4())
                         self.mark_event_meta_data.update_data(mark_id, pre_mark_event_meta_data)

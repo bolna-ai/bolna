@@ -103,6 +103,9 @@ class TaskManager(BaseManager):
         self.mark_event_meta_data = MarkEventMetaData()
         self.sampling_rate = 24000
         self.ambient_noise_mixer = AmbientNoiseMixer()
+        self.ambient_noise_enabled = False
+        self._noise_paused = False
+        self.noise_runner_task = None
         self.conversation_ended = False
         self.hangup_triggered = False
         self.hangup_triggered_at = None
@@ -404,6 +407,14 @@ class TaskManager(BaseManager):
                         self.should_backchannel = False
                 else:
                     self.backchanneling_audio_map = []
+
+                # Ambient noise
+                # self.ambient_noise_enabled = self.conversation_config.get("ambient_noise", False) #[DEBUG]
+                self.ambient_noise_enabled = True
+                if self.ambient_noise_enabled:
+                    self.ambient_noise_mixer.enabled = True
+                    logger.info("Ambient noise enabled")
+
                 # Agent welcome message
                 if "agent_welcome_message" in self.kwargs:
                     logger.info(f"Agent welcome message: {self.kwargs['agent_welcome_message']}")
@@ -1137,6 +1148,10 @@ class TaskManager(BaseManager):
         self.output_task = asyncio.create_task(self.__process_output_loop())
         self.started_transmitting_audio = False #Since we're interrupting we need to stop transmitting as well
         self.last_transmitted_timestamp = time.time()
+
+        # Resume ambient noise after interruption (agent audio is no longer playing)
+        if self.ambient_noise_enabled:
+            self._noise_paused = False
         logger.info(f"Cleaning up downstream tasks. Time taken to send a clear message {time.time() - start_time}")
 
     def __get_updated_meta_info(self, meta_info = None):
@@ -1551,6 +1566,8 @@ class TaskManager(BaseManager):
             self.conversation_history.sync_interim(messages)
 
     async def __do_llm_generation(self, messages, meta_info, next_step, should_bypass_synth=False, should_trigger_function_call=False):
+        logger.info("[DEBUG] llm generation started")
+        
         # Reset response tracking for new turn
         if self.generate_precise_transcript:
             self.tools["input"].reset_response_heard_by_user()
@@ -2233,6 +2250,46 @@ class TaskManager(BaseManager):
         """Check if sequence_id is valid. Delegates to InterruptionManager."""
         return self.interruption_manager.is_valid_sequence(sequence_id)
 
+    async def __noise_runner(self):
+        """Continuously feed noise-only frames into buffered_output_queue.
+        Pauses when agent or welcome audio is being enqueued."""
+        CHUNK_MS = 400
+        INTERVAL = CHUNK_MS / 1000.0
+
+        # Wait for stream_sid before sending any audio
+        while not self.stream_sid and not self.conversation_ended:
+            await asyncio.sleep(0.05)
+
+        logger.info("Noise runner started")
+
+        while not self.conversation_ended:
+            if self._noise_paused:
+                await asyncio.sleep(INTERVAL)
+                continue
+            try:
+                # audio_format = self.task_config['tools_config']['synthesizer'].get('audio_format', 'mulaw')
+                audio_format = 'mulaw'
+                noise = self.ambient_noise_mixer.generate_noise_chunk(
+                    CHUNK_MS, audio_format, self.sampling_rate
+                )
+                meta_info = {
+                    'is_content_audio': False,
+                    'message_category': 'ambient_noise',
+                    'format': audio_format,
+                    'sequence_id': -1,
+                    'end_of_llm_stream': True,
+                    'end_of_synthesizer_stream': True,
+                    'text_synthesized': '',
+                }
+                self.buffered_output_queue.put_nowait(
+                    create_ws_data_packet(noise, meta_info)
+                )
+            except Exception as e:
+                logger.error(f"Noise runner error: {e}")
+            await asyncio.sleep(INTERVAL)
+
+        logger.info("Noise runner stopped")
+
     async def __listen_synthesizer(self):
         all_text_to_be_synthesized = []
         try:
@@ -2262,6 +2319,10 @@ class TaskManager(BaseManager):
                         if is_first_message or (not self.conversation_ended and self.interruption_manager.is_valid_sequence(sequence_id)):
                             logger.info(f"Processing message with sequence_id: {sequence_id}")
 
+                            # Pause noise runner before enqueuing agent audio
+                            if self.ambient_noise_enabled and meta_info.get("is_first_chunk", False):
+                                self._noise_paused = True
+
                             if self.stream:
                                 if meta_info.get("is_first_chunk", False):
                                     first_chunk_generation_timestamp = time.time()
@@ -2282,6 +2343,10 @@ class TaskManager(BaseManager):
                                 if meta_info.get('end_of_synthesizer_stream', False):
                                     self._turn_audio_flushed.set()
 
+                            # Resume noise runner after last chunk of response is enqueued
+                            if self.ambient_noise_enabled and meta_info.get("end_of_llm_stream") and meta_info.get("end_of_synthesizer_stream"):
+                                self._noise_paused = False
+
                             if write_to_log:
                                 logger.info(f"Writing response to log {meta_info.get('text')}")
                                 convert_to_request_log(
@@ -2296,6 +2361,9 @@ class TaskManager(BaseManager):
                                 )
                         else:
                             logger.info(f"Skipping message with sequence_id: {sequence_id}")
+                            # Resume noise if we were paused but message was invalidated
+                            if self.ambient_noise_enabled:
+                                self._noise_paused = False
 
                         # Give control to other tasks
                         sleep_time = self.tools["synthesizer"].get_sleep_time()
@@ -2364,6 +2432,11 @@ class TaskManager(BaseManager):
                             return
                         else:
                             meta_info['is_first_chunk'] = True
+
+                # Pause noise runner while welcome/filler audio is being enqueued
+                if self.ambient_noise_enabled:
+                    self._noise_paused = True
+
                 meta_info["end_of_synthesizer_stream"] = True
                 if yield_in_chunks and audio_chunk is not None:
                     i = 0
@@ -2378,6 +2451,10 @@ class TaskManager(BaseManager):
                     meta_info["is_final_chunk_of_entire_response"] = True
                     message = create_ws_data_packet(audio_chunk, meta_info)
                     self.buffered_output_queue.put_nowait(message)
+
+                # Resume noise runner after welcome/filler audio is enqueued
+                if self.ambient_noise_enabled:
+                    self._noise_paused = False
 
         except Exception as e:
             traceback.print_exc()
@@ -2765,6 +2842,11 @@ class TaskManager(BaseManager):
                         traceback.print_exc()
 
                 self.output_task = asyncio.create_task(self.__process_output_loop())
+
+                # Start continuous ambient noise runner
+                if self.ambient_noise_enabled and not self.turn_based_conversation:
+                    self.noise_runner_task = asyncio.create_task(self.__noise_runner())
+
                 if not self.turn_based_conversation or self.enforce_streaming:
                     self.hangup_task = asyncio.create_task(self.__check_for_completion())
 
@@ -2893,6 +2975,8 @@ class TaskManager(BaseManager):
                 tasks_to_cancel.append(process_task_cancellation(self.voicemail_check_task, 'voicemail_check_task'))
                 tasks_to_cancel.append(
                     process_task_cancellation(self.handle_accumulated_message_task, "handle_accumulated_message_task"))
+                tasks_to_cancel.append(
+                    process_task_cancellation(self.noise_runner_task, 'noise_runner_task'))
 
                 output['recording_url'] = ""
                 if self.should_record:

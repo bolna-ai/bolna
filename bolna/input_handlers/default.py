@@ -112,10 +112,16 @@ class DefaultInputHandler:
             return
 
         message_type = mark_event_meta_data_obj.get("type")
+
+        # Ignore ambient noise marks entirely — no state updates, no latency tracking
+        if message_type == "ambient_noise":
+            return
+
         is_content_audio = message_type not in ['backchanneling']
 
         if message_type == "pre_mark_message":
-            self.update_is_audio_being_played(True)
+            if mark_event_meta_data_obj.get("is_content_audio", True):
+                self.update_is_audio_being_played(True)
             return
 
         self.audio_chunks_received += 1
@@ -125,9 +131,10 @@ class DefaultInputHandler:
             self.response_heard_by_user += mark_event_meta_data_obj.get("text_synthesized") or ""
 
         if mark_event_meta_data_obj.get("is_final_chunk"):
-            if message_type != "is_user_online_message":
-                self.observable_variables["final_chunk_played_observable"].value = not self.observable_variables["final_chunk_played_observable"].value
-            self.update_is_audio_being_played(False)
+            if is_content_audio:
+                if message_type != "is_user_online_message":
+                    self.observable_variables["final_chunk_played_observable"].value = not self.observable_variables["final_chunk_played_observable"].value
+                self.update_is_audio_being_played(False)
 
             if message_type == "agent_welcome_message":
                 logger.info("Received mark event for agent_welcome_message")

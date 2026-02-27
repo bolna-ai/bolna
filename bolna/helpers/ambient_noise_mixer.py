@@ -4,7 +4,6 @@ import audioop
 import numpy as np
 import os
 
-from pydub import AudioSegment
 from bolna.helpers.logger_config import configure_logger
 
 logger = configure_logger(__name__)
@@ -20,62 +19,63 @@ class AmbientNoiseMixer:
     Supports mulaw, ulaw, pcm (int16), and wav audio formats.
     """
 
-    def __init__(self, noise_file_path=None, snr_db=20):
+    def __init__(self, noise_pcm_dir=None, snr_db=10, noise_db=-12):
         """
         Args:
-            noise_file_path: Path to an MP3/WAV background noise file.
-                             Defaults to AMBIENT_NOISE_FILE env var or cafe.mp3 in repo root.
+            noise_pcm_dir: Directory containing pre-converted .npy noise files
+                           (noise_8000.npy, noise_16000.npy, etc.).
+                           Defaults to AMBIENT_NOISE_PCM_DIR env var or
+                           helpers/noise_pcm/ in the repo.
             snr_db: Signal-to-noise ratio in dB. Higher = quieter background.
                     20dB is subtle, 10dB is prominent.
         """
         self.snr_db = snr_db
+        self.noise_db = noise_db
         self.enabled = False
         self._cursor = 0  # Playback position in samples (mono)
+        self._loaded = False
 
         # Pre-loaded background noise as int16 numpy arrays, keyed by sample rate
         self._bg_samples = {}  # {sample_rate: np.ndarray of int16}
 
-        if noise_file_path is None:
-            noise_file_path = os.getenv(
-                "AMBIENT_NOISE_FILE",
-                os.path.join(os.path.dirname(__file__), "..", "..", "cafe.mp3")
+        if noise_pcm_dir is None:
+            noise_pcm_dir = os.getenv(
+                "AMBIENT_NOISE_PCM_DIR",
+                os.path.join(os.path.dirname(__file__), "noise_pcm")
             )
 
-        noise_file_path = os.path.abspath(noise_file_path)
+        noise_pcm_dir = os.path.abspath(noise_pcm_dir)
 
-        if not os.path.exists(noise_file_path):
+        if not os.path.isdir(noise_pcm_dir):
             logger.warning(
-                f"Ambient noise file not found at {noise_file_path}. "
+                f"Ambient noise PCM directory not found at {noise_pcm_dir}. "
                 f"Ambient noise overlay will be disabled."
             )
             return
 
         try:
-            self._load_noise(noise_file_path)
-            self.enabled = True
+            self._load_npy_files(noise_pcm_dir)
+            self._loaded = True
             logger.info(
-                f"AmbientNoiseMixer initialized with {noise_file_path}, "
+                f"AmbientNoiseMixer initialized from {noise_pcm_dir}, "
                 f"SNR={snr_db}dB"
             )
         except Exception as e:
-            logger.error(f"Failed to load ambient noise file: {e}. Overlay disabled.")
+            logger.error(f"Failed to load ambient noise npy files: {e}. Overlay disabled.")
 
-    def _load_noise(self, file_path):
-        """Load the noise file and pre-compute PCM int16 arrays at common sample rates."""
-        # Load with pydub (supports mp3, wav, etc.)
-        audio = AudioSegment.from_file(file_path)
-        # Convert to mono
-        audio = audio.set_channels(1)
-
-        # Pre-compute at common sample rates used in the system
+    def _load_npy_files(self, pcm_dir):
+        """Load pre-converted .npy noise files keyed by sample rate."""
         for rate in (8000, 16000, 24000, 44100):
-            resampled = audio.set_frame_rate(rate).set_sample_width(2)  # 16-bit
-            samples = np.frombuffer(resampled.raw_data, dtype=np.int16).copy()
-            self._bg_samples[rate] = samples
-            logger.info(
-                f"Pre-loaded ambient noise at {rate}Hz: "
-                f"{len(samples)} samples ({len(samples)/rate:.1f}s)"
-            )
+            npy_path = os.path.join(pcm_dir, f"noise_{rate}.npy")
+            if os.path.exists(npy_path):
+                samples = np.load(npy_path)
+                self._bg_samples[rate] = samples.astype(np.int16)
+                logger.info(
+                    f"Loaded ambient noise at {rate}Hz: "
+                    f"{len(samples)} samples ({len(samples)/rate:.1f}s)"
+                )
+            else:
+                logger.warning(f"Noise file not found: {npy_path}")
 
     def _get_bg_slice(self, num_samples, sample_rate):
         """
@@ -144,6 +144,42 @@ class AmbientNoiseMixer:
         # Clip to int16 range
         adjusted = np.clip(adjusted, -32768, 32767).astype(np.int16)
         return adjusted
+
+    def generate_noise_chunk(self, duration_ms, audio_format, sample_rate=8000):
+        """
+        Generate a standalone noise-only audio chunk for continuous background playback.
+
+        Uses the same shared cursor as mix() so noise is seamless across
+        noise-only frames and agent-overlaid frames.
+
+        Args:
+            duration_ms: Duration of the chunk in milliseconds.
+            audio_format: One of 'mulaw', 'ulaw', 'pcm'.
+            sample_rate: Sample rate (default 8000 for telephony).
+
+        Returns:
+            Raw audio bytes of noise-only audio in the specified format.
+        """
+
+
+        if not self.enabled or not self._bg_samples:
+            num_samples = int(sample_rate * duration_ms / 1000)
+            silence = np.zeros(num_samples, dtype=np.int16)
+            if audio_format in ('mulaw', 'ulaw'):
+                return audioop.lin2ulaw(silence.tobytes(), 2)
+            return silence.tobytes()
+
+        num_samples = int(sample_rate * duration_ms / 1000)
+        bg_samples = self._get_bg_slice(num_samples, sample_rate)
+
+        # Fixed gain — no voice signal to reference, so use snr_db directly
+        gain = 10 ** (self.noise_db / 20.0)
+        adjusted = (bg_samples.astype(np.float64) * gain)
+        adjusted = np.clip(adjusted, -32768, 32767).astype(np.int16)
+
+        if audio_format in ('mulaw', 'ulaw'):
+            return audioop.lin2ulaw(adjusted.tobytes(), 2)
+        return adjusted.tobytes()
 
     def mix(self, audio_bytes, audio_format, sample_rate=8000):
         """
@@ -254,3 +290,29 @@ class AmbientNoiseMixer:
             wf.writeframes(mixed_pcm)
 
         return out_buf.getvalue()
+
+
+def main():
+    import wave
+    noise_mixer = AmbientNoiseMixer()
+    noise_mixer.enabled = True
+    
+    # take a wav file as input, mix it, and store it in the same directory
+    
+    file = "rec.wav"
+
+    # load the bytes using wave
+    with wave.open(file, "rb") as wf:
+        pcm_data = wf.readframes(wf.getnframes())
+        params = wf.getparams()
+    
+    # mix it
+    mixed_audio = noise_mixer._mix_pcm(pcm_data, params.framerate)
+    
+    # store it
+    with wave.open("rec_mixed.wav", "wb") as wf:
+        wf.setparams(params)
+        wf.writeframes(mixed_audio)
+
+if __name__ == "__main__":
+    main()
