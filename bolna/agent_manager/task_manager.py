@@ -2100,7 +2100,7 @@ class TaskManager(BaseManager):
                         if self.interruption_manager.should_trigger_interruption(
                             word_count=interim_transcript_len,
                             transcript=transcript_content,
-                            is_audio_playing=self.tools["input"].is_audio_being_played_to_user() or self.response_in_pipeline,
+                            is_audio_playing=self.tools["input"].is_audio_being_played_to_user(),
                             welcome_played=self.tools["input"].welcome_message_played()
                         ):
                             logger.info(f"Condition for interruption hit")
