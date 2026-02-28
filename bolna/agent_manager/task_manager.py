@@ -1273,7 +1273,12 @@ class TaskManager(BaseManager):
             if first_item.get('text_synthesized') and first_item.get('is_final_chunk') is True:
                 break
 
-            await asyncio.sleep(0.5)
+            remaining = self.hangup_mark_event_timeout - elapsed
+            self.mark_event_meta_data.mark_changed.clear()
+            try:
+                await asyncio.wait_for(self.mark_event_meta_data.mark_changed.wait(), timeout=remaining)
+            except asyncio.TimeoutError:
+                pass  # re-enters loop, hits timeout check at top
         return
 
     async def inject_digits_to_conversation(self) -> None:
@@ -1493,6 +1498,7 @@ class TaskManager(BaseManager):
                     convert_to_request_log(str(response_text), meta_info, None, "function_call", direction="response", is_cached=False, run_id=self.run_id)
                     return
 
+        await self.wait_for_current_message()
         response = await trigger_api(url=url, method=method.lower(), param=param, api_token=api_token, headers_data=headers, meta_info=meta_info, run_id=self.run_id, **resp)
         function_response = str(response)
         get_res_keys, get_res_values = await computed_api_response(function_response)

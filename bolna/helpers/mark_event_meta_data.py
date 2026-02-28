@@ -1,3 +1,4 @@
+import asyncio
 import copy
 
 from bolna.helpers.logger_config import configure_logger
@@ -10,6 +11,7 @@ class MarkEventMetaData:
         self.mark_event_meta_data = {}
         self.previous_mark_event_meta_data = {}
         self.counter = 0
+        self.mark_changed = asyncio.Event()
 
     def update_data(self, mark_id, value):
         value['counter'] = self.counter
@@ -17,13 +19,17 @@ class MarkEventMetaData:
         self.mark_event_meta_data[mark_id] = value
 
     def fetch_data(self, mark_id):
-        return self.mark_event_meta_data.pop(mark_id, {})
+        result = self.mark_event_meta_data.pop(mark_id, {})
+        if result:
+            self.mark_changed.set()
+        return result
 
     def clear_data(self):
         logger.info(f"Clearing mark meta data dict")
         self.counter = 0
         self.previous_mark_event_meta_data = copy.deepcopy(self.mark_event_meta_data)
         self.mark_event_meta_data = {}
+        self.mark_changed.set()
 
     def fetch_cleared_mark_event_data(self):
         return self.previous_mark_event_meta_data

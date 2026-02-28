@@ -104,8 +104,6 @@ async def trigger_api(url, method, param, api_token, headers_data, meta_info, ru
             content_type = 'form'
         convert_to_request_log(request_body, meta_info , None, "function_call", direction="request", is_cached=False, run_id=run_id)
 
-        await asyncio.sleep(0.7)
-
         async with aiohttp.ClientSession() as session:
             if method.lower() == "get":
                 logger.info(f"Sending request {request_body}, {url}, {headers}")
