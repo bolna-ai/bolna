@@ -29,6 +29,7 @@ from bolna.helpers.utils import structure_system_prompt, compute_function_pre_ca
 from bolna.helpers.logger_config import configure_logger
 from ..helpers.mark_event_meta_data import MarkEventMetaData
 from ..helpers.observable_variable import ObservableVariable
+from .llm_pipeline import LLMPipeline
 
 logger = configure_logger(__name__)
 
@@ -166,6 +167,7 @@ class TaskManager(BaseManager):
         # Setup IO SERVICE, TRANSCRIBER, LLM, SYNTHESIZER
         self.llm_task = None
         self.execute_function_call_task = None
+        self._llm_pipeline = LLMPipeline(self)
         self.synthesizer_tasks = []
         self.synthesizer_task = None
         self.synthesizer_monitor_task = None
@@ -219,7 +221,7 @@ class TaskManager(BaseManager):
                     'buffer_size']
         else:
             if self.task_config["tools_config"]["llm_agent"] is not None:
-                if self.__is_knowledgebase_agent():
+                if self._is_knowledgebase_agent():
                     self.llm_agent_config = self.task_config["tools_config"]["llm_agent"]
                     self.llm_config = {
                         "model": self.llm_agent_config['llm_config']['model'],
@@ -228,7 +230,7 @@ class TaskManager(BaseManager):
                         "buffer_size": self.task_config["tools_config"]["synthesizer"].get('buffer_size'),
                         "temperature": self.llm_agent_config['llm_config']['temperature']
                     }
-                elif self.__is_graph_agent():
+                elif self._is_graph_agent():
                     self.llm_agent_config = self.task_config["tools_config"]["llm_agent"]
                     self.llm_config = {
                         "model": self.llm_agent_config['llm_config']['model'],
@@ -486,13 +488,13 @@ class TaskManager(BaseManager):
         agent_type = self.task_config['tools_config']["llm_agent"].get("agent_type", None)
         return agent_type == "multiagent"
 
-    def __is_knowledgebase_agent(self):
+    def _is_knowledgebase_agent(self):
         if self.task_config["task_type"] == "webhook":
             return False
         agent_type = self.task_config['tools_config']["llm_agent"].get("agent_type", None)
         return agent_type == "knowledgebase_agent"
 
-    def __is_graph_agent(self):
+    def _is_graph_agent(self):
         if self.task_config["task_type"] == "webhook":
             return False
         agent_type = self.task_config['tools_config']["llm_agent"].get("agent_type", None)
@@ -960,7 +962,7 @@ class TaskManager(BaseManager):
 
         # If using knowledge_agent, inject the prompt into agent config so agent can read it
         try:
-            if self.__is_knowledgebase_agent() and 'llm_agent' in self.task_config['tools_config']:
+            if self._is_knowledgebase_agent() and 'llm_agent' in self.task_config['tools_config']:
                 if 'llm_config' in self.task_config['tools_config']['llm_agent']:
                     self.task_config['tools_config']['llm_agent']['llm_config']['prompt'] = self.system_prompt['content']
         except Exception as e:
@@ -1356,410 +1358,25 @@ class TaskManager(BaseManager):
     # LLM task
     ##############################################################
     async def _handle_llm_output(self, next_step, text_chunk, should_bypass_synth, meta_info, is_filler=False, is_function_call=False):
-        if "request_id" not in meta_info:
-            meta_info["request_id"] = str(uuid.uuid4())
-
-        if not self.stream and not is_filler:
-            first_buffer_latency = time.time() - meta_info["llm_start_time"]
-            meta_info["llm_first_buffer_generation_latency"] = first_buffer_latency
-
-        elif is_filler:
-            logger.info(f"It's a filler message and hence adding required metadata")
-            meta_info['origin'] = "classifier"
-            meta_info['cached'] = True
-            meta_info['local'] = True
-            meta_info['message_category'] = 'filler'
-
-        if next_step == "synthesizer" and not should_bypass_synth:
-            self._turn_audio_flushed.clear()
-            task = asyncio.create_task(self._synthesize(create_ws_data_packet(text_chunk, meta_info)))
-            self.synthesizer_tasks.append(asyncio.ensure_future(task))
-        elif self.tools["output"] is not None:
-            logger.info("Synthesizer not the next step and hence simply returning back")
-            overall_time = time.time() - meta_info["llm_start_time"]
-            #self.history = copy.deepcopy(self.interim_history)
-            if is_function_call:
-                bos_packet = create_ws_data_packet("<beginning_of_stream>", meta_info)
-                await self.tools["output"].handle(bos_packet)
-                await self.tools["output"].handle(create_ws_data_packet(text_chunk, meta_info))
-                eos_packet = create_ws_data_packet("<end_of_stream>", meta_info)
-                await self.tools["output"].handle(eos_packet)
-            else:
-                await self.tools["output"].handle(create_ws_data_packet(text_chunk, meta_info))
+        await self._llm_pipeline.handle_output(next_step, text_chunk, should_bypass_synth, meta_info, is_filler, is_function_call)
 
     async def _process_conversation_preprocessed_task(self, message, sequence, meta_info):
-        if self.task_config["tools_config"]["llm_agent"]['agent_flow_type'] == "preprocessed":
-            messages = self.conversation_history.get_copy()
-            # TODO revisit this
-            messages.append({'role': 'user', 'content': message['data']})
-            logger.info(f"Starting LLM Agent {messages}")
-            #Expose get current classification_response method from the agent class and use it for the response log
-            convert_to_request_log(message=format_messages(messages, use_system_prompt= True), meta_info= meta_info, component="llm", direction="request", model=self.llm_agent_config["model"], is_cached= True, run_id= self.run_id)
-            async for next_state in self.tools['llm_agent'].generate(messages, label_flow=self.label_flow):
-                if next_state == "<end_of_conversation>":
-                    meta_info["end_of_conversation"] = True
-                    self.buffered_output_queue.put_nowait(create_ws_data_packet("<end_of_conversation>", meta_info))
-                    return
-
-                logger.info(f"Text chunk {next_state['text']}")
-                # TODO revisit this
-                messages.append({'role': 'assistant', 'content': next_state['text']})
-                self.synthesizer_tasks.append(asyncio.create_task(
-                        self._synthesize(create_ws_data_packet(next_state['audio'], meta_info, is_md5_hash=True))))
-            logger.info(f"Interim history after the LLM task {messages}")
-            self.llm_response_generated = True
-            self.conversation_history.sync_interim(messages)
+        await self._llm_pipeline.process_preprocessed(message, sequence, meta_info)
 
     async def _process_conversation_formulaic_task(self, message, sequence, meta_info):
-        llm_response = ""
-        logger.info("Agent flow is formulaic and hence moving smoothly")
-        async for text_chunk in self.tools['llm_agent'].generate(self.history):
-            if is_valid_md5(text_chunk):
-                self.synthesizer_tasks.append(asyncio.create_task(
-                    self._synthesize(create_ws_data_packet(text_chunk, meta_info, is_md5_hash=True))))
-            else:
-                # TODO Make it more modular
-                llm_response += " " +text_chunk
-                next_step = self._get_next_step(sequence, "llm")
-                if next_step == "synthesizer":
-                    self.synthesizer_tasks.append(asyncio.create_task(self._synthesize(create_ws_data_packet(text_chunk, meta_info))))
-                else:
-                    logger.info(f"Sending output text {sequence}")
-                    await self.tools["output"].handle(create_ws_data_packet(text_chunk, meta_info))
-                    self.synthesizer_tasks.append(asyncio.create_task(
-                        self._synthesize(create_ws_data_packet(text_chunk, meta_info, is_md5_hash=False))))
+        await self._llm_pipeline.process_formulaic(message, sequence, meta_info)
 
     async def __execute_function_call(self, url, method, param, api_token, headers, model_args, meta_info, next_step, called_fun, **resp):
-        self.check_if_user_online = False
-
-        if called_fun.startswith("transfer_call"):
-            await asyncio.sleep(2)
-            try:
-                from_number = self.context_data['recipient_data']['from_number']
-            except Exception as e:
-                from_number = None
-
-            call_sid = None
-            call_transfer_number = None
-            payload = {
-                'call_sid': call_sid,
-                'provider': self.tools['input'].io_provider,
-                'stream_sid': self.stream_sid,
-                'from_number': from_number,
-                'execution_id': self.run_id,
-                **(self.transfer_call_params or {})
-            }
-
-            if self.tools['input'].io_provider != 'default':
-                call_sid = self.tools["input"].get_call_sid()
-                payload['call_sid'] = call_sid
-
-            if url is None:
-                url = os.getenv("CALL_TRANSFER_WEBHOOK_URL")
-
-                try:
-                    json_function_call_params = copy.deepcopy(param)
-                    if isinstance(param, str):
-                        json_function_call_params = json.loads(param)
-                    call_transfer_number = json_function_call_params['call_transfer_number']
-                    if call_transfer_number:
-                        payload['call_transfer_number'] = call_transfer_number
-                except Exception as e:
-                    logger.error(f"Error in __execute_function_call {e}")
-
-            if param is not None:
-                logger.info(f"Gotten response {resp}")
-                payload = {**payload, **resp}
-
-            if self.tools['input'].io_provider != 'default':
-                payload['call_sid'] = self.tools["input"].get_call_sid()
-
-            if self.tools['input'].io_provider == 'default':
-                mock_response = f"This is a mocked response demonstrating a successful transfer of call to {call_transfer_number}"
-                convert_to_request_log(str(payload), meta_info, None, "function_call", direction="request", run_id=self.run_id)
-                convert_to_request_log(mock_response, meta_info, None, "function_call", direction="response", run_id=self.run_id)
-
-                bos_packet = create_ws_data_packet("<beginning_of_stream>", meta_info)
-                await self.tools["output"].handle(bos_packet)
-                await self.tools["output"].handle(create_ws_data_packet(mock_response, meta_info))
-                eos_packet = create_ws_data_packet("<end_of_stream>", meta_info)
-                await self.tools["output"].handle(eos_packet)
-                return
-
-            async with aiohttp.ClientSession() as session:
-                logger.info(f"Sending the payload to stop the conversation {payload} url {url}")
-                while self.tools["input"].is_audio_being_played_to_user():
-                    await asyncio.sleep(1)
-                convert_to_request_log(str(payload), meta_info, None, "function_call", direction="request", is_cached=False,
-                                       run_id=self.run_id)
-                async with session.post(url, json = payload) as response:
-                    response_text = await response.text()
-                    logger.info(f"Response from the server after call transfer: {response_text}")
-                    convert_to_request_log(str(response_text), meta_info, None, "function_call", direction="response", is_cached=False, run_id=self.run_id)
-                    return
-
-        await self.wait_for_current_message()
-        response = await trigger_api(url=url, method=method.lower(), param=param, api_token=api_token, headers_data=headers, meta_info=meta_info, run_id=self.run_id, **resp)
-        function_response = str(response)
-        get_res_keys, get_res_values = await computed_api_response(function_response)
-
-        # Merge API response data into context_data for routing decisions
-        if self.__is_graph_agent():
-            try:
-                response_data = json.loads(function_response) if isinstance(function_response, str) else function_response
-                if isinstance(response_data, dict):
-                    # Update task manager's context_data
-                    if self.context_data is None:
-                        self.context_data = {}
-                    self.context_data.update(response_data)
-                    # Update graph agent's context_data for routing
-                    if hasattr(self.tools.get('llm_agent'), 'context_data'):
-                        self.tools['llm_agent'].context_data.update(response_data)
-                    logger.info(f"Merged API response into context_data: {list(response_data.keys())}")
-            except (json.JSONDecodeError, TypeError) as e:
-                logger.debug(f"Could not parse API response as JSON for context merge: {e}")
-        if called_fun.startswith('check_availability_of_slots') and (not get_res_values or (len(get_res_values) == 1 and len(get_res_values[0]) == 0)):
-            set_response_prompt = []
-        elif called_fun.startswith('book_appointment') and 'id' not in get_res_keys:
-            if get_res_values and get_res_values[0] == 'no_available_users_found_error':
-                function_response = "Sorry, the host isn't available at this time. Are you available at any other time?"
-            set_response_prompt = []
-        else:
-            set_response_prompt = function_response
-
-        textual_response = resp.get("textual_response", None)
-        self.conversation_history.append_assistant(textual_response, tool_calls=resp["model_response"])
-        self.conversation_history.append_tool_result(resp.get("tool_call_id", ""), function_response)
-
-        logger.info(f"Logging function call parameters ")
-        convert_to_request_log(function_response, meta_info , None, "function_call", direction = "response", is_cached= False, run_id = self.run_id)
-
-        messages = self.conversation_history.get_copy()
-        convert_to_request_log(format_messages(messages, True), meta_info, self.llm_config['model'], "llm", direction = "request", is_cached= False, run_id = self.run_id)
-        self.check_if_user_online = self.conversation_config.get("check_if_user_online", True)
-
-        if not called_fun.startswith("transfer_call"):
-            should_bypass_synth = meta_info.get('bypass_synth', False)
-            await self.__do_llm_generation(messages, meta_info, next_step, should_bypass_synth=should_bypass_synth, should_trigger_function_call=True)
-
-        self.execute_function_call_task = None
+        await self._llm_pipeline.execute_function_call(url, method, param, api_token, headers, model_args, meta_info, next_step, called_fun, **resp)
 
     def __store_into_history(self, meta_info, messages, llm_response, should_trigger_function_call = False):
-        self.llm_response_generated = True
-        convert_to_request_log(message=llm_response, meta_info= meta_info, component="llm", direction="response", model=self.llm_config["model"], run_id= self.run_id)
-        if should_trigger_function_call:
-            logger.info(f"There was a function call and need to make that work")
-            self.conversation_history.append_assistant(llm_response)
-        else:
-            messages.append({"role": "assistant", "content": llm_response})
-            self.conversation_history.append_assistant(llm_response)
-            self.conversation_history.sync_interim(messages)
+        self._llm_pipeline.store_into_history(meta_info, messages, llm_response, should_trigger_function_call)
 
     async def __do_llm_generation(self, messages, meta_info, next_step, should_bypass_synth=False, should_trigger_function_call=False):
-        # Reset response tracking for new turn
-        if self.generate_precise_transcript:
-            self.tools["input"].reset_response_heard_by_user()
-
-        llm_response, function_tool, function_tool_message = '', '', ''
-        synthesize = True
-        if should_bypass_synth:
-            synthesize = False
-
-        # Inject language instruction if detection complete
-        messages = self._inject_language_instruction(messages)
-
-        # Pass detected language to LLM for pre_call_message selection
-        detected_lang = self.language_detector.dominant_language
-        if detected_lang:
-            meta_info['detected_language'] = detected_lang
-
-        async for llm_message in self.tools['llm_agent'].generate(messages, synthesize=synthesize, meta_info=meta_info):
-            if isinstance(llm_message, dict) and 'messages' in llm_message: # custom list of messages before the llm call
-                convert_to_request_log(format_messages(llm_message['messages'], True), meta_info, self.llm_config['model'], "llm", direction="request", is_cached=False, run_id=self.run_id)
-                continue
-
-            # Handle graph agent routing info
-            if isinstance(llm_message, dict) and 'routing_info' in llm_message:
-                routing_info = llm_message['routing_info']
-
-                # Log routing request with tools
-                routing_messages = routing_info.get('routing_messages')
-                routing_tools = routing_info.get('routing_tools', [])
-                if routing_messages:
-                    # Format tools for logging (show full descriptions with conditions)
-                    tools_summary = ""
-                    if routing_tools:
-                        tool_lines = []
-                        for t in routing_tools:
-                            if 'function' in t:
-                                name = t['function']['name']
-                                desc = t['function'].get('description', '')
-                                tool_lines.append(f"  - {name}: {desc}")
-                        if tool_lines:
-                            tools_summary = "\n\nAvailable transitions:\n" + "\n".join(tool_lines)
-
-                    convert_to_request_log(
-                        message=format_messages(routing_messages, use_system_prompt=True) + tools_summary,
-                        meta_info=meta_info,
-                        model=routing_info.get('routing_model', ''),
-                        component="graph_routing",
-                        direction="request",
-                        run_id=self.run_id
-                    )
-
-                # Build routing response data
-                if routing_info.get('transitioned'):
-                    routing_data = f"Node: {routing_info.get('previous_node', '?')} → {routing_info['current_node']}"
-                else:
-                    routing_data = f"Node: {routing_info['current_node']} (no transition)"
-                if routing_info.get('extracted_params'):
-                    routing_data += f" | Params: {json.dumps(routing_info['extracted_params'])}"
-                if routing_info.get('node_history'):
-                    routing_data += f" | Flow: {' → '.join(routing_info['node_history'])}"
-
-                meta_info['llm_metadata'] = meta_info.get('llm_metadata') or {}
-                meta_info['llm_metadata']['graph_routing_info'] = routing_info
-
-                if routing_info.get('routing_latency_ms') is not None:
-                    self.routing_latencies['turn_latencies'].append({
-                        'latency_ms': routing_info['routing_latency_ms'],
-                        'routing_model': routing_info.get('routing_model'),
-                        'routing_provider': routing_info.get('routing_provider'),
-                        'previous_node': routing_info.get('previous_node'),
-                        'current_node': routing_info.get('current_node'),
-                        'transitioned': routing_info.get('transitioned', False),
-                        'sequence_id': meta_info.get('sequence_id')
-                    })
-
-                if routing_info.get('node_history'):
-                    self.routing_latencies['node_flow'] = list(routing_info['node_history'])
-
-                # Log routing response
-                convert_to_request_log(
-                    message=routing_data,
-                    meta_info=meta_info,
-                    model=routing_info.get('routing_model', ''),
-                    component="graph_routing",
-                    direction="response",
-                    run_id=self.run_id
-                )
-                continue
-
-            data = llm_message.data
-            end_of_llm_stream = llm_message.end_of_stream
-            latency = llm_message.latency
-            trigger_function_call = llm_message.is_function_call
-            function_tool = llm_message.function_name
-            function_tool_message = llm_message.function_message
-
-            if trigger_function_call:
-                logger.info(f"Triggering function call for {data}")
-                self.llm_task = asyncio.create_task(self.__execute_function_call(next_step = next_step, **data.model_dump()))
-                return
-
-            if latency:
-                latency_dict = latency.model_dump()
-                previous_latency_item = self.llm_latencies['turn_latencies'][-1] if self.llm_latencies['turn_latencies'] else None
-                if previous_latency_item and previous_latency_item.get('sequence_id') == latency_dict.get('sequence_id'):
-                    self.llm_latencies['turn_latencies'][-1] = latency_dict
-                else:
-                    self.llm_latencies['turn_latencies'].append(latency_dict)
-
-            llm_response += " " + data
-
-            logger.info(f"Got a response from LLM {llm_response}")
-            if end_of_llm_stream:
-                meta_info["end_of_llm_stream"] = True
-
-            if self.stream:
-                text_chunk = self.__process_stop_words(data, meta_info)
-
-                # A hack as during the 'await' part control passes to llm streaming function parameters
-                # So we have to make sure we've commited the filler message
-                detected_lang = self.language_detector.dominant_language or self.language
-                filler_message = compute_function_pre_call_message(detected_lang, function_tool, function_tool_message)
-                #filler_message = PRE_FUNCTION_CALL_MESSAGE.get(self.language, PRE_FUNCTION_CALL_MESSAGE[DEFAULT_LANGUAGE_CODE])
-                if text_chunk == filler_message:
-                    logger.info("Got a pre function call message")
-                    messages.append({'role':'assistant', 'content': filler_message})
-                    self.conversation_history.append_assistant(filler_message)
-                    self.conversation_history.sync_interim(messages)
-
-                await self._handle_llm_output(next_step, text_chunk, should_bypass_synth, meta_info)
-
-        detected_lang = self.language_detector.dominant_language or self.language
-        filler_message = compute_function_pre_call_message(detected_lang, function_tool, function_tool_message)
-        if self.stream and llm_response != filler_message:
-            self.__store_into_history(meta_info, messages, llm_response, should_trigger_function_call= should_trigger_function_call)
-        elif not self.stream:
-            llm_response = llm_response.strip()
-            if self.turn_based_conversation:
-                self.conversation_history.append_assistant(llm_response)
-            await self._handle_llm_output(next_step, llm_response, should_bypass_synth, meta_info, is_function_call=should_trigger_function_call)
-            convert_to_request_log(message=llm_response, meta_info=meta_info, component="llm", direction="response", model=self.llm_config["model"], run_id=self.run_id)
-
-        # Collect RAG latency if present (from KnowledgeBaseAgent)
-        if meta_info.get('rag_latency'):
-            rag_latency = meta_info['rag_latency']
-            existing_seq_ids = [t.get('sequence_id') for t in self.rag_latencies['turn_latencies']]
-            if rag_latency.get('sequence_id') not in existing_seq_ids:
-                self.rag_latencies['turn_latencies'].append(rag_latency)
+        await self._llm_pipeline.do_generation(messages, meta_info, next_step, should_bypass_synth, should_trigger_function_call)
 
     async def _process_conversation_task(self, message, sequence, meta_info):
-        should_bypass_synth = 'bypass_synth' in meta_info and meta_info['bypass_synth'] is True
-        next_step = self._get_next_step(sequence, "llm")
-        meta_info['llm_start_time'] = time.time()
-
-        if self.turn_based_conversation:
-            self.history.append({"role": "user", "content": message['data']})
-        messages = copy.deepcopy(self.history)
-
-        # Request logs converted inside do_llm_generation for knowledgebase agent
-        if not self.__is_knowledgebase_agent() and not self.__is_graph_agent():
-            convert_to_request_log(message=format_messages(messages, use_system_prompt=True), meta_info=meta_info, component="llm", direction="request", model=self.llm_config["model"], run_id= self.run_id)
-
-        await self.__do_llm_generation(messages, meta_info, next_step, should_bypass_synth)
-        # TODO : Write a better check for completion prompt
-
-        # Hangup detection - now supported for all agent types including graph_agent
-        if self.use_llm_to_determine_hangup and not self.turn_based_conversation:
-            completion_res, metadata = await self.tools["llm_agent"].check_for_completion(messages, self.check_for_completion_prompt)
-
-            should_hangup = (
-                str(completion_res.get("hangup", "")).lower() == "yes"
-                if isinstance(completion_res, dict)
-                else False
-            )
-
-            # Track hangup check latency (latency returned by agent)
-            self.llm_latencies['other_latencies'].append({
-                "type": 'hangup_check',
-                "latency_ms": metadata.get("latency_ms", None),
-                "model": self.check_for_completion_llm,
-                "provider": "openai",  # TODO: Make dynamic based on provider used
-                "service_tier": metadata.get("service_tier", None),
-                "llm_host": metadata.get("llm_host", None),
-                "sequence_id": meta_info.get("sequence_id")
-            })
-
-            prompt = [
-                {'role': 'system', 'content': self.check_for_completion_prompt},
-                {'role': 'user', 'content': format_messages(self.history)}
-            ]
-            logger.info(f"##### Answer from the LLM {completion_res}")
-            convert_to_request_log(message=format_messages(prompt, use_system_prompt=True), meta_info=meta_info, component="llm_hangup", direction="request", model=self.check_for_completion_llm, run_id=self.run_id)
-            convert_to_request_log(message=completion_res, meta_info=meta_info, component="llm_hangup", direction="response", model=self.check_for_completion_llm, run_id=self.run_id)
-
-            if should_hangup:
-                if self.hangup_triggered or self.conversation_ended:
-                    logger.info(f"Hangup already triggered or conversation ended, skipping duplicate hangup request")
-                    return
-                self.hangup_detail = "llm_prompted_hangup"
-                await self.process_call_hangup()
-                return
-
-        self.llm_processed_request_ids.add(self.current_request_id)
-        llm_response = ""
+        await self._llm_pipeline.process_conversation(message, sequence, meta_info)
 
     async def process_call_hangup(self):
         # Guard: Prevent multiple concurrent hangup attempts
@@ -1785,42 +1402,10 @@ class TaskManager(BaseManager):
         return
 
     async def _listen_llm_input_queue(self):
-        logger.info(
-            f"Starting listening to LLM queue as either Connected to dashboard = {self.turn_based_conversation} or  it's a textual chat agent {self.textual_chat_agent}")
-        while True:
-            try:
-                ws_data_packet = await self.queues["llm"].get()
-                logger.info(f"ws_data_packet {ws_data_packet}")
-                meta_info = self.__get_updated_meta_info(ws_data_packet['meta_info'])
-                bos_packet = create_ws_data_packet("<beginning_of_stream>", meta_info)
-                await self.tools["output"].handle(bos_packet)
-                # self.interim_history = self.history.copy()
-                # self.history.append({'role': 'user', 'content': ws_data_packet['data']})
-                await self._run_llm_task(
-                    create_ws_data_packet(ws_data_packet['data'], meta_info))
-                eos_packet = create_ws_data_packet("<end_of_stream>", meta_info)
-                await self.tools["output"].handle(eos_packet)
-
-            except Exception as e:
-                traceback.print_exc()
-                logger.error(f"Something went wrong with LLM queue {e}")
-                break
+        await self._llm_pipeline.listen_input_queue()
 
     async def _run_llm_task(self, message):
-        sequence, meta_info = self._extract_sequence_and_meta(message)
-
-        try:
-            if self._is_extraction_task() or self._is_summarization_task():
-                await self._process_followup_task(message)
-            elif self._is_conversation_task():
-                await self._process_conversation_task(message, sequence, meta_info)
-            else:
-                logger.error("unsupported task type: {}".format(self.task_config["task_type"]))
-            self.llm_task = None
-        except Exception as e:
-            traceback.print_exc()
-            logger.error(f"Something went wrong in llm: {e}")
-            self.response_in_pipeline = False
+        await self._llm_pipeline.run_task(message)
 
 
     #################################################################
