@@ -35,6 +35,8 @@ from bolna.helpers.utils import structure_system_prompt, compute_function_pre_ca
 from bolna.helpers.logger_config import configure_logger
 from ..helpers.mark_event_meta_data import MarkEventMetaData
 from ..helpers.observable_variable import ObservableVariable
+from .models import ComponentLatencies
+from .voicemail_handler import VoicemailHandler
 
 logger = configure_logger(__name__)
 
@@ -48,13 +50,9 @@ class TaskManager(BaseManager):
         self.kwargs["task_manager_instance"] = self
 
         self.conversation_start_init_ts = time.time() * 1000
-        self.llm_latencies = {
-            'connection_latency_ms': None, 
-            'turn_latencies': [],
-            'other_latencies': []  # List of {type, latency_ms, timestamp}
-        }
-        self.transcriber_latencies = {'connection_latency_ms': None, 'turn_latencies': []}
-        self.synthesizer_latencies = {'connection_latency_ms': None, 'turn_latencies': []}
+        self.llm_latencies = ComponentLatencies()
+        self.transcriber_latencies = ComponentLatencies()
+        self.synthesizer_latencies = ComponentLatencies()
         self.rag_latencies = {'turn_latencies': []}
         self.routing_latencies = {'turn_latencies': []}
         self.stream_sid_ts = None
@@ -358,26 +356,12 @@ class TaskManager(BaseManager):
                 self.check_for_completion_llm = os.getenv("CHECK_FOR_COMPLETION_LLM")
 
                 # Voicemail detection (time-based)
-                self.voicemail_detection_enabled = self.conversation_config.get('voicemail', False)
-                self.voicemail_llm = os.getenv('VOICEMAIL_DETECTION_LLM', "gpt-4.1-mini")
-
-                if 'output' not in self.tools or (self.tools['output'] and not self.tools['output'].requires_custom_voicemail_detection()):
-                    self.voicemail_detection_enabled = False
-
-                self.voicemail_detection_duration = self.conversation_config.get('voicemail_detection_duration', 30.0)  # Time window in seconds
-                self.voicemail_check_interval = self.conversation_config.get('voicemail_check_interval', 7.0)  # Min time between interim checks
-                self.voicemail_min_transcript_length = self.conversation_config.get('voicemail_min_transcript_length', 7)  # Min words for interim check
-                self.voicemail_detection_prompt = VOICEMAIL_DETECTION_PROMPT
-                self.voicemail_detection_prompt += """
-                    Respond only in this JSON format:
-                        {{
-                          "is_voicemail": "Yes" or "No"
-                        }}
-                """
-                self.voicemail_detected = False
-                self.voicemail_detection_start_time = None  # Will be set when detection window starts
-                self.voicemail_last_check_time = None  # Last time we checked for voicemail
-                self.voicemail_check_task = None  # Background task for voicemail detection
+                output_tool_available = (
+                    'output' in self.tools
+                    and self.tools['output']
+                    and self.tools['output'].requires_custom_voicemail_detection()
+                )
+                self.voicemail_handler = VoicemailHandler(self, self.conversation_config, output_tool_available)
 
                 self.time_since_last_spoken_human_word = 0
 
@@ -1276,11 +1260,7 @@ class TaskManager(BaseManager):
             self.first_message_task.cancel()
             self.first_message_task = None
 
-        # Cancel voicemail check task if running
-        if self.voicemail_check_task is not None and not self.voicemail_check_task.done():
-            logger.info("Cancelling voicemail check task")
-            self.voicemail_check_task.cancel()
-            self.voicemail_check_task = None
+        self.voicemail_handler.cancel_task()
 
         # self.synthesizer_task.cancel()
         # self.synthesizer_task = asyncio.create_task(self.__listen_synthesizer())
@@ -1377,7 +1357,7 @@ class TaskManager(BaseManager):
             
             if self.task_config["task_type"] == "summarization":
                 self.summarized_data = json_data["summary"]
-                self.llm_latencies['other_latencies'].append({
+                self.llm_latencies.other_latencies.append({
                     'type': 'summarization',
                     "latency_ms": latency_ms,
                     "model": LLM_DEFAULT_CONFIGS["summarization"]["model"],
@@ -1388,7 +1368,7 @@ class TaskManager(BaseManager):
                 if type(json_data) is not dict:
                     json_data = json.loads(json_data)
                 self.extracted_data = json_data
-                self.llm_latencies['other_latencies'].append({
+                self.llm_latencies.other_latencies.append({
                     "type": 'extraction',
                     "latency_ms": latency_ms,
                     "model": LLM_DEFAULT_CONFIGS["extraction"]["model"],
@@ -1515,11 +1495,7 @@ class TaskManager(BaseManager):
             await self.tools["transcriber"].toggle_connection()
             await asyncio.sleep(2)  # Making sure whatever message was passed is over
             
-        # Cancel voicemail check task if still running
-        if self.voicemail_check_task is not None and not self.voicemail_check_task.done():
-            logger.info("Cancelling voicemail check task during conversation end")
-            self.voicemail_check_task.cancel()
-            self.voicemail_check_task = None
+        self.voicemail_handler.cancel_task()
 
     def __update_preprocessed_tree_node(self):
         logger.info(f"It's a preprocessed flow and hence updating current node")
@@ -1875,11 +1851,11 @@ class TaskManager(BaseManager):
 
                 if latency:
                     latency_dict = latency.model_dump()
-                    previous_latency_item = self.llm_latencies['turn_latencies'][-1] if self.llm_latencies['turn_latencies'] else None
+                    previous_latency_item = self.llm_latencies.turn_latencies[-1] if self.llm_latencies.turn_latencies else None
                     if previous_latency_item and previous_latency_item.get('sequence_id') == latency_dict.get('sequence_id'):
-                        self.llm_latencies['turn_latencies'][-1] = latency_dict
+                        self.llm_latencies.turn_latencies[-1] = latency_dict
                     else:
-                        self.llm_latencies['turn_latencies'].append(latency_dict)
+                        self.llm_latencies.turn_latencies.append(latency_dict)
 
                 llm_response += " " + data
 
@@ -1957,7 +1933,7 @@ class TaskManager(BaseManager):
             )
 
             # Track hangup check latency (latency returned by agent)
-            self.llm_latencies['other_latencies'].append({
+            self.llm_latencies.other_latencies.append({
                 "type": 'hangup_check',
                 "latency_ms": metadata.get("latency_ms", None),
                 "model": self.check_for_completion_llm,
@@ -1995,7 +1971,7 @@ class TaskManager(BaseManager):
         # Set immediately to prevent user interruptions from cancelling hangup
         self.hangup_triggered = True
         self.hangup_triggered_at = time.time()  # Track when hangup was triggered for timeout monitoring
-        message = self.call_hangup_message if not self.voicemail_detected else ""
+        message = self.call_hangup_message if not self.voicemail_handler.detected else ""
         if not message or message.strip() == "":
             self.hangup_message_queued = False  # No hangup message to wait for
             await self.__process_end_of_conversation()
@@ -2077,163 +2053,8 @@ class TaskManager(BaseManager):
             skip_append_to_data = False
         return sequence
 
-    def _should_check_voicemail(self, transcriber_message, is_final=True):
-        """
-        Determine if voicemail check should be triggered based on timing and conditions.
-        This is a non-blocking check that returns quickly.
-
-        Args:
-            transcriber_message (str): The transcribed message from the user
-            is_final (bool): Whether this is a final transcript or interim
-
-        Returns:
-            bool: True if voicemail check should be triggered, False otherwise
-        """
-        # Skip if voicemail detection is disabled
-        if not self.voicemail_detection_enabled:
-            return False
-
-        # Skip if voicemail already detected (call is ending)
-        if self.voicemail_detected:
-            return False
-
-        # Skip if a voicemail check is already in progress
-        if self.voicemail_check_task is not None and not self.voicemail_check_task.done():
-            logger.info("Voicemail check already in progress, skipping")
-            return False
-
-        current_time = time.time()
-
-        # Initialize detection start time on first check
-        if self.voicemail_detection_start_time is None:
-            self.voicemail_detection_start_time = current_time
-            logger.info(f"Voicemail detection window started at {self.voicemail_detection_start_time}")
-
-        # Skip if we've exceeded the detection time window
-        time_elapsed = current_time - self.voicemail_detection_start_time
-        if time_elapsed > self.voicemail_detection_duration:
-            logger.info(f"Voicemail detection window expired ({time_elapsed:.2f}s > {self.voicemail_detection_duration}s)")
-            return False
-
-        # For interim transcripts, check additional conditions
-        if not is_final:
-            # Check if enough time has passed since the last check
-            time_since_last_check = (current_time - self.voicemail_last_check_time) if self.voicemail_last_check_time else float('inf')
-            if time_since_last_check < self.voicemail_check_interval:
-                logger.info(f"Skipping interim voicemail check - only {time_since_last_check:.2f}s since last check (need {self.voicemail_check_interval}s)")
-                return False
-
-            # Check if transcript length meets the minimum threshold
-            word_count = len(transcriber_message.strip().split())
-            if word_count < self.voicemail_min_transcript_length:
-                logger.info(f"Skipping interim voicemail check - transcript too short ({word_count} words < {self.voicemail_min_transcript_length})")
-                return False
-
-        return True
-
     def _trigger_voicemail_check(self, transcriber_message, meta_info, is_final=True):
-        """
-        Trigger a background voicemail check if conditions are met.
-        This is non-blocking and returns immediately.
-
-        Args:
-            transcriber_message (str): The transcribed message from the user
-            meta_info (dict): Metadata from transcriber
-            is_final (bool): Whether this is a final transcript or interim
-        """
-        if not self._should_check_voicemail(transcriber_message, is_final):
-            return
-
-        # Update last check time before starting the background task
-        self.voicemail_last_check_time = time.time()
-        time_elapsed = self.voicemail_last_check_time - self.voicemail_detection_start_time
-        logger.info(f"Triggering background voicemail check at {time_elapsed:.2f}s into detection window (is_final={is_final}): {transcriber_message}")
-
-        # Create background task for voicemail detection
-        try:
-            self.voicemail_check_task = asyncio.create_task(
-                self._voicemail_check_background_task(transcriber_message, meta_info, is_final)
-            )
-        except Exception as e:
-            logger.error(f"Error starting voicemail check background task: {e}")
-
-    async def _voicemail_check_background_task(self, transcriber_message, meta_info, is_final):
-        """
-        Background task that performs the actual voicemail detection LLM call.
-        If voicemail is detected, it will trigger the hangup process.
-
-        Args:
-            transcriber_message (str): The transcribed message from the user
-            meta_info (dict): Metadata from transcriber
-            is_final (bool): Whether this is a final transcript or interim
-        """
-        try:
-            # Use the LLM agent to check for voicemail
-            if "llm_agent" in self.tools and hasattr(self.tools["llm_agent"], 'check_for_voicemail'):
-                prompt = [
-                    {"role": "system", "content": self.voicemail_detection_prompt},
-                    {"role": "user", "content": f"User message: {transcriber_message}"}
-                ]
-
-                convert_to_request_log(
-                    message=format_messages(prompt, use_system_prompt=True),
-                    meta_info=meta_info,
-                    component=LogComponent.LLM_VOICEMAIL,
-                    direction=LogDirection.REQUEST,
-                    model=self.voicemail_llm,
-                    run_id=self.run_id
-                )
-
-                voicemail_result, metadata = await self.tools["llm_agent"].check_for_voicemail(
-                    transcriber_message,
-                    self.voicemail_detection_prompt
-                )
-
-                is_voicemail = (
-                    str(voicemail_result.get("is_voicemail", "")).lower() == "yes"
-                    if isinstance(voicemail_result, dict)
-                    else False
-                )
-
-                # Track voicemail check latency (latency returned by agent)
-                self.llm_latencies['other_latencies'].append({
-                    "type": 'voicemail_check',
-                    "latency_ms": metadata.get("latency_ms", None),
-                    "model": self.voicemail_llm,
-                    "provider": "openai",  # TODO: Make dynamic based on provider used
-                    "service_tier": metadata.get("service_tier", None),
-                    "llm_host": metadata.get("llm_host", None),
-                    "sequence_id": meta_info.get("sequence_id")  # May be None for interim checks
-                })
-
-                convert_to_request_log(
-                    message=voicemail_result,
-                    meta_info=meta_info,
-                    component=LogComponent.LLM_VOICEMAIL,
-                    direction=LogDirection.RESPONSE,
-                    model=self.voicemail_llm,
-                    run_id=self.run_id
-                )
-
-                if is_voicemail:
-                    logger.info(f"Voicemail detected in background task! Message: {transcriber_message}")
-                    self.voicemail_detected = True
-                    self.hangup_detail = HangupReason.VOICEMAIL_DETECTED
-
-                    # Trigger voicemail handling and call hangup
-                    await self._handle_voicemail_detected()
-            else:
-                logger.warning("Voicemail detection enabled but llm_agent doesn't support check_for_voicemail")
-        except Exception as e:
-            logger.error(f"Error during background voicemail detection: {e}")
-
-    async def _handle_voicemail_detected(self):
-        """
-        Handle the case when voicemail is detected - say the message and end the call.
-        """
-        logger.info(f"Handling voicemail detection - ending call")
-
-        await self.process_call_hangup()
+        self.voicemail_handler.trigger_check(transcriber_message, meta_info, is_final)
 
     async def _handle_transcriber_output(self, next_task, transcriber_message, meta_info):
         if not self.tools["input"].welcome_message_played() and (self.discard_pre_welcome_utterance or len(self.conversation_history) > 2):
@@ -2251,7 +2072,7 @@ class TaskManager(BaseManager):
 
         self._trigger_voicemail_check(transcriber_message, meta_info, is_final=True)
 
-        if self.voicemail_detected:
+        if self.voicemail_handler.detected:
             logger.info("Voicemail already detected - skipping normal transcriber output processing")
             return
 
@@ -2422,7 +2243,7 @@ class TaskManager(BaseManager):
                         self.interruption_manager.on_interim_transcript_received()
 
                         # Trigger background voicemail check on interim transcripts (non-blocking)
-                        if self.voicemail_detection_enabled and not self.voicemail_detected:
+                        if self.voicemail_handler.enabled and not self.voicemail_handler.detected:
                             interim_content = message["data"].get("content", "")
                             self._trigger_voicemail_check(interim_content, meta_info, is_final=False)
 
@@ -3257,15 +3078,15 @@ class TaskManager(BaseManager):
                     tasks_to_cancel.append(process_task_cancellation(self.transcriber_task, 'transcriber_task'))
 
             if self._is_conversation_task():
-                self.transcriber_latencies['connection_latency_ms'] = self.tools["transcriber"].connection_time
-                self.synthesizer_latencies['connection_latency_ms'] = self.tools["synthesizer"].connection_time
+                self.transcriber_latencies.connection_latency_ms = self.tools["transcriber"].connection_time
+                self.synthesizer_latencies.connection_latency_ms = self.tools["synthesizer"].connection_time
 
-                self.transcriber_latencies['turn_latencies'] = self.tools["transcriber"].turn_latencies
-                self.synthesizer_latencies['turn_latencies'] = self.tools["synthesizer"].turn_latencies
+                self.transcriber_latencies.turn_latencies = self.tools["transcriber"].turn_latencies
+                self.synthesizer_latencies.turn_latencies = self.tools["synthesizer"].turn_latencies
 
                 # Collect language detection latency if available
                 if hasattr(self, 'language_detector') and self.language_detector.latency_data:
-                    self.llm_latencies['other_latencies'].append(self.language_detector.latency_data)
+                    self.llm_latencies.other_latencies.append(self.language_detector.latency_data)
 
                 welcome_message_sent_ts = self.tools["output"].get_welcome_message_sent_ts()
 
@@ -3278,9 +3099,9 @@ class TaskManager(BaseManager):
                     "transcriber_duration": self.transcriber_duration,
                     "synthesizer_characters": self.tools['synthesizer'].get_synthesized_characters(), "ended_by_assistant": self.ended_by_assistant,
                     "latency_dict": {
-                        "llm_latencies": self.llm_latencies,
-                        "transcriber_latencies": self.transcriber_latencies,
-                        "synthesizer_latencies": self.synthesizer_latencies,
+                        "llm_latencies": self.llm_latencies.model_dump(),
+                        "transcriber_latencies": self.transcriber_latencies.model_dump(),
+                        "synthesizer_latencies": self.synthesizer_latencies.model_dump(),
                         "rag_latencies": self.rag_latencies,
                         "routing_latencies": self.routing_latencies,
                         "welcome_message_sent_ts": None,
@@ -3304,7 +3125,7 @@ class TaskManager(BaseManager):
                 # tasks_to_cancel.append(process_task_cancellation(self.initial_silence_task, 'initial_silence_task'))
                 tasks_to_cancel.append(process_task_cancellation(self.first_message_task, 'first_message_task'))
                 tasks_to_cancel.append(process_task_cancellation(self.dtmf_task, 'dtmf_task'))
-                tasks_to_cancel.append(process_task_cancellation(self.voicemail_check_task, 'voicemail_check_task'))
+                tasks_to_cancel.append(process_task_cancellation(self.voicemail_handler.check_task, 'voicemail_check_task'))
                 tasks_to_cancel.append(
                     process_task_cancellation(self.handle_accumulated_message_task, "handle_accumulated_message_task"))
 
@@ -3317,14 +3138,14 @@ class TaskManager(BaseManager):
                     output = { "extracted_data" : self.extracted_data,
                               "task_type": "extraction",
                               "latency_dict": {
-                                "llm_latencies": self.llm_latencies
+                                "llm_latencies": self.llm_latencies.model_dump()
                             }}
                 elif self.task_config["task_type"] == "summarization":
                     logger.info(f"self.summarized_data {self.summarized_data}")
                     output = {"summary" : self.summarized_data,
                               "task_type": "summarization",
                               "latency_dict": {
-                                "llm_latencies": self.llm_latencies
+                                "llm_latencies": self.llm_latencies.model_dump()
                             }}
                 elif self.task_config["task_type"] == "webhook":
                     output = {"status": self.webhook_response, "task_type": "webhook"}
