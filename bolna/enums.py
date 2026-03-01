@@ -152,6 +152,22 @@ class ResponseItemType(str, Enum):
         return [e.value for e in cls]
 
 
+class HangupReason(str, Enum):
+    """Enum for hangup_detail values — why the call ended."""
+    LLM_PROMPTED_HANGUP = "llm_prompted_hangup"
+    VOICEMAIL_DETECTED = "voicemail_detected"
+    WEB_CALL_MAX_DURATION_REACHED = "web_call_max_duration_reached"
+    INACTIVITY_TIMEOUT = "inactivity_timeout"
+    TRANSCRIBER_ERROR = "transcriber_error"
+    TRANSCRIBER_CONNECTION_ERROR = "transcriber_connection_error"
+    SYNTHESIZER_ERROR = "synthesizer_error"
+    LLM_ERROR = "llm_error"
+
+    @classmethod
+    def all_values(cls):
+        return [r.value for r in cls]
+
+
 class LogComponent(str, Enum):
     """Enum for CSV trace log component types."""
     ERROR = "error"

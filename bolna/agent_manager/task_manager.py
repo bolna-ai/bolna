@@ -23,7 +23,7 @@ from .base_manager import BaseManager
 from .interruption_manager import InterruptionManager
 from bolna.agent_types import *
 from bolna.providers import *
-from bolna.enums import TelephonyProvider, LogComponent, LogDirection
+from bolna.enums import TelephonyProvider, LogComponent, LogDirection, HangupReason
 from bolna.exceptions import BolnaComponentError, LLMError, SynthesizerError, TranscriberError
 from bolna.prompts import *
 from bolna.helpers.language_detector import LanguageDetector
@@ -1970,7 +1970,7 @@ class TaskManager(BaseManager):
                 if self.hangup_triggered or self.conversation_ended:
                     logger.info(f"Hangup already triggered or conversation ended, skipping duplicate hangup request")
                     return
-                self.hangup_detail = "llm_prompted_hangup"
+                self.hangup_detail = HangupReason.LLM_PROMPTED_HANGUP
                 await self.process_call_hangup()
                 return
 
@@ -2036,7 +2036,7 @@ class TaskManager(BaseManager):
         except BolnaComponentError as e:
             logger.error(f"Component error in llm: {e}", exc_info=True)
             self.response_in_pipeline = False
-            await self._end_call_on_component_error(e, "llm_error")
+            await self._end_call_on_component_error(e, HangupReason.LLM_ERROR)
             raise
         except Exception as e:
             traceback.print_exc()
@@ -2044,7 +2044,7 @@ class TaskManager(BaseManager):
             self.response_in_pipeline = False
             await self._end_call_on_component_error(
                 LLMError(str(e), provider=self.llm_config.get("provider", "unknown"), model=self.llm_config.get("model")),
-                "llm_error"
+                HangupReason.LLM_ERROR
             )
 
 
@@ -2209,7 +2209,7 @@ class TaskManager(BaseManager):
                 if is_voicemail:
                     logger.info(f"Voicemail detected in background task! Message: {transcriber_message}")
                     self.voicemail_detected = True
-                    self.hangup_detail = "voicemail_detected"
+                    self.hangup_detail = HangupReason.VOICEMAIL_DETECTED
 
                     # Trigger voicemail handling and call hangup
                     await self._handle_voicemail_detected()
@@ -2324,7 +2324,7 @@ class TaskManager(BaseManager):
             provider = self.task_config["tools_config"]["transcriber"].get("provider", "unknown")
             await self._end_call_on_component_error(
                 TranscriberError(connection_error, provider=provider),
-                "transcriber_connection_error"
+                HangupReason.TRANSCRIBER_CONNECTION_ERROR
             )
 
     async def _listen_transcriber(self):
@@ -2487,7 +2487,7 @@ class TaskManager(BaseManager):
             provider = self.task_config["tools_config"]["transcriber"].get("provider")
             await self._end_call_on_component_error(
                 TranscriberError(str(e), provider=provider),
-                "transcriber_error"
+                HangupReason.TRANSCRIBER_ERROR
             )
             raise TranscriberError(
                 str(e),
@@ -2628,7 +2628,7 @@ class TaskManager(BaseManager):
                     self._turn_audio_flushed.set()
                     await self._end_call_on_component_error(
                         SynthesizerError(str(e), provider=self.synthesizer_provider),
-                        "synthesizer_error"
+                        HangupReason.SYNTHESIZER_ERROR
                     )
                     break
 
@@ -2641,7 +2641,7 @@ class TaskManager(BaseManager):
             logger.error(f"Unexpected error in __listen_synthesizer: {e}", exc_info=True)
             await self._end_call_on_component_error(
                 SynthesizerError(str(e), provider=self.synthesizer_provider),
-                "synthesizer_error"
+                HangupReason.SYNTHESIZER_ERROR
             )
             raise SynthesizerError(
                 str(e), provider=self.synthesizer_provider
@@ -2891,7 +2891,7 @@ class TaskManager(BaseManager):
                     self.task_config["task_config"]["call_terminate"]):
                 logger.info("Hanging up for web call as max time of call has been reached")
                 await self.__process_end_of_conversation(web_call_timeout=True)
-                self.hangup_detail = "web_call_max_duration_reached"
+                self.hangup_detail = HangupReason.WEB_CALL_MAX_DURATION_REACHED
                 break
 
             if self.last_transmitted_timestamp == 0:
@@ -2924,7 +2924,7 @@ class TaskManager(BaseManager):
 
             if self.hang_conversation_after > 0 and time_since_last_spoken_ai_word > self.hang_conversation_after and time_since_user_last_spoke > self.hang_conversation_after:
                 logger.info(f"{time_since_last_spoken_ai_word} seconds since AI last spoke and {time_since_user_last_spoke} seconds since user last spoke, both exceed {self.hang_conversation_after}s timeout - hanging up")
-                self.hangup_detail = "inactivity_timeout"
+                self.hangup_detail = HangupReason.INACTIVITY_TIMEOUT
                 await self.process_call_hangup()
                 break
 
