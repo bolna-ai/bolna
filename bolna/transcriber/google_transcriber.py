@@ -154,7 +154,13 @@ class GoogleTranscriber(BaseTranscriber):
             
         except Exception as e:
             logger.exception(f"Error starting GoogleTranscriber: {e}")
+            self.connection_error = str(e)
             await self.toggle_connection()
+            meta = (self.meta_info or {}).copy()
+            meta['connection_error'] = self.connection_error
+            await self.transcriber_output_queue.put(
+                create_ws_data_packet("transcriber_connection_closed", meta)
+            )
     
     async def _transcribe_wrapper(self):
         """Wrapper to make gRPC streaming fit async pattern better"""
