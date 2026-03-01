@@ -46,6 +46,7 @@ class RimeSynthesizer(BaseSynthesizer):
         self.sender_task = None
         self.last_text_sent = False
         self.conversation_ended = False
+        self.connection_error = None
         self.current_text = ""
         self.context_id = None
         self.text_queue = deque()
@@ -148,6 +149,7 @@ class RimeSynthesizer(BaseSynthesizer):
                         await self.websocket_holder["websocket"].send(json.dumps({"text": text_chunk, "contextId": self.context_id}))
                     except Exception as e:
                         logger.info(f"Error sending chunk: {e}")
+                        self.connection_error = str(e)
                         return
 
             # If end_of_llm_stream is True, mark the last chunk and send an empty message
@@ -160,6 +162,7 @@ class RimeSynthesizer(BaseSynthesizer):
                 await self.websocket_holder["websocket"].send(json.dumps({"operation": "flush"}))
             except Exception as e:
                 logger.info(f"Error sending end-of-stream signal: {e}")
+                self.connection_error = str(e)
 
         except asyncio.CancelledError:
             logger.info("Sender task was cancelled.")
@@ -174,6 +177,8 @@ class RimeSynthesizer(BaseSynthesizer):
 
                 if (self.websocket_holder["websocket"] is None or
                         self.websocket_holder["websocket"].state is websockets.protocol.State.CLOSED):
+                    if self.connection_error:
+                        return
                     logger.info("WebSocket is not connected, skipping receive.")
                     await asyncio.sleep(0.1)
                     continue
@@ -203,6 +208,8 @@ class RimeSynthesizer(BaseSynthesizer):
         try:
             if self.stream:
                 async for message in self.receiver():
+                    if self.connection_error:
+                        raise Exception(self.connection_error)
                     logger.info(f"Received message from server")
 
                     if len(self.text_queue) > 0:
@@ -247,6 +254,8 @@ class RimeSynthesizer(BaseSynthesizer):
 
                     self.meta_info["mark_id"] = str(uuid.uuid4())
                     yield create_ws_data_packet(audio, self.meta_info)
+                if self.connection_error:
+                    raise Exception(self.connection_error)
             else:
                 while True:
                     message = await self.internal_queue.get()
@@ -289,7 +298,8 @@ class RimeSynthesizer(BaseSynthesizer):
 
         except Exception as e:
             traceback.print_exc()
-            logger.info(f"Error in eleven labs generate {e}")
+            logger.info(f"Error in rime generate {e}")
+            raise
 
     async def establish_connection(self):
         try:

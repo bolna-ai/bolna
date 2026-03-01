@@ -53,6 +53,7 @@ class CartesiaSynthesizer(BaseSynthesizer):
         self.sequence_id = 0
         self.context_ids_to_ignore = set()
         self.conversation_ended = False
+        self.connection_error = None
         self.current_turn_start_time = None
         self.current_turn_id = None
 
@@ -125,6 +126,7 @@ class CartesiaSynthesizer(BaseSynthesizer):
                     await self.websocket_holder["websocket"].send(json.dumps(input_message))
                 except Exception as e:
                     logger.error(f"Error sending chunk context_id={self.context_id} request_id={self.ws_request_id}: {e}")
+                    self.connection_error = str(e)
                     return
 
             # If end_of_llm_stream is True, mark the last chunk and send an empty message
@@ -138,6 +140,7 @@ class CartesiaSynthesizer(BaseSynthesizer):
                     await self.websocket_holder["websocket"].send(json.dumps(input_message))
                 except Exception as e:
                     logger.error(f"Error sending end-of-stream signal context_id={self.context_id} request_id={self.ws_request_id}: {e}")
+                    self.connection_error = str(e)
         except asyncio.CancelledError:
             logger.info("Sender task was cancelled.")
         except Exception as e:
@@ -150,6 +153,8 @@ class CartesiaSynthesizer(BaseSynthesizer):
                     return
 
                 if self.websocket_holder["websocket"] is None or self.websocket_holder["websocket"].state is websockets.protocol.State.CLOSED:
+                    if self.connection_error:
+                        return
                     logger.info("WebSocket is not connected, skipping receive.")
                     await asyncio.sleep(0.1)
                     continue
@@ -225,6 +230,8 @@ class CartesiaSynthesizer(BaseSynthesizer):
     async def generate(self):
         try:
             async for message in self.receiver():
+                if self.connection_error:
+                    raise Exception(self.connection_error)
                 if len(self.text_queue) > 0:
                     self.meta_info = self.text_queue.popleft()
                     # Compute first-result latency on first audio chunk
@@ -275,10 +282,13 @@ class CartesiaSynthesizer(BaseSynthesizer):
                         pass
 
                 yield create_ws_data_packet(audio, self.meta_info)
+            if self.connection_error:
+                raise Exception(self.connection_error)
 
         except Exception as e:
             traceback.print_exc()
             logger.error(f"Error in cartesia generate {e}")
+            raise
 
     async def establish_connection(self):
         try:
@@ -303,10 +313,13 @@ class CartesiaSynthesizer(BaseSynthesizer):
             error_msg = str(e)
             if '401' in error_msg or '403' in error_msg:
                 logger.error(f"Cartesia authentication failed: Invalid or expired API key - {e}")
+                self.connection_error = str(e)
             elif '404' in error_msg:
                 logger.error(f"Cartesia endpoint not found: {e}")
+                self.connection_error = str(e)
             else:
                 logger.error(f"Cartesia handshake failed: {e}")
+                self.connection_error = str(e)
             return None
         except Exception as e:
             logger.error(f"Failed to connect to Cartesia: {e}")
@@ -326,6 +339,7 @@ class CartesiaSynthesizer(BaseSynthesizer):
                     logger.warning(f"Cartesia connection failed (attempt {consecutive_failures}/{max_failures})")
                     if consecutive_failures >= max_failures:
                         logger.error("Max connection failures reached for Cartesia - stopping reconnection attempts")
+                        self.connection_error = self.connection_error or "Max connection failures reached"
                         break
                 else:
                     self.websocket_holder["websocket"] = result
