@@ -2042,6 +2042,10 @@ class TaskManager(BaseManager):
             traceback.print_exc()
             logger.error(f"Something went wrong in llm: {e}")
             self.response_in_pipeline = False
+            await self._end_call_on_component_error(
+                LLMError(str(e), provider=self.llm_config.get("provider", "unknown"), model=self.llm_config.get("model")),
+                "llm_error"
+            )
 
 
     #################################################################
