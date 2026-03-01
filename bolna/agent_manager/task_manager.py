@@ -2458,9 +2458,14 @@ class TaskManager(BaseManager):
         except Exception as e:
             traceback.print_exc()
             logger.error(f"Error in transcriber {e}")
+            provider = self.task_config["tools_config"]["transcriber"].get("provider")
+            await self._end_call_on_component_error(
+                TranscriberError(str(e), provider=provider),
+                "transcriber_error"
+            )
             raise TranscriberError(
                 str(e),
-                provider=self.task_config["tools_config"]["transcriber"].get("provider")
+                provider=provider
             ) from e
 
     async def __process_http_transcription(self, message):
