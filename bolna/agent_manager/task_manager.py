@@ -2014,8 +2014,7 @@ class TaskManager(BaseManager):
         except BolnaComponentError as e:
             logger.error(f"Component error in llm: {e}", exc_info=True)
             self.response_in_pipeline = False
-            if self._component_error is None:
-                self._component_error = e
+            await self._end_call_on_component_error(e, "llm_error")
             raise
         except Exception as e:
             traceback.print_exc()
@@ -2260,22 +2259,47 @@ class TaskManager(BaseManager):
         else:
             logger.info(f"Need to separate out output task")
 
-    def _log_transcriber_connection_error(self, connection_error):
-        if connection_error and self.run_id:
-            provider = self.task_config["tools_config"]["transcriber"].get("provider", "unknown")
-            error_msg = format_error_message("transcriber", provider, connection_error)
+    async def _end_call_on_component_error(self, error, hangup_detail):
+        """End the call gracefully when a critical pipeline component fails.
+
+        Handles: CSV error logging, _component_error tracking, and triggering
+        __process_end_of_conversation for immediate graceful shutdown.
+        """
+        if self._component_error is None:
+            self._component_error = error
+
+        # Log to CSV if not already done
+        if self.run_id and not self._error_logged:
+            if isinstance(error, BolnaComponentError):
+                error_msg = format_error_message(error.component, error.provider or error.model or "-", str(error))
+                model = error.model or error.provider or "-"
+            else:
+                error_msg = format_error_message("unknown", "-", str(error))
+                model = "-"
             convert_to_request_log(
                 error_msg,
                 {"request_id": self.task_id, "sequence_id": None},
-                model=provider,
+                model=model,
                 component=LogComponent.ERROR,
                 direction=LogDirection.ERROR,
                 is_cached=False,
                 run_id=self.run_id,
             )
             self._error_logged = True
-            if self._component_error is None:
-                self._component_error = TranscriberError(connection_error, provider=provider)
+
+        # Trigger graceful shutdown
+        if not self.conversation_ended and not self._end_of_conversation_in_progress:
+            logger.error(f"Critical component failure, ending call: {hangup_detail} - {error}")
+            self.hangup_detail = hangup_detail
+            await self.__process_end_of_conversation()
+
+    async def _log_transcriber_connection_error(self, connection_error):
+        if connection_error:
+            provider = self.task_config["tools_config"]["transcriber"].get("provider", "unknown")
+            await self._end_call_on_component_error(
+                TranscriberError(connection_error, provider=provider),
+                "transcriber_connection_error"
+            )
 
     async def _listen_transcriber(self):
         temp_transcriber_message = ""
@@ -2288,7 +2312,7 @@ class TaskManager(BaseManager):
                     if message["data"] == "transcriber_connection_closed":
                         logger.info(f"Transcriber connection has been closed")
                         self.transcriber_duration += message.get("meta_info", {}).get("transcriber_duration", 0) if message['meta_info'] is not None else 0
-                        self._log_transcriber_connection_error((message.get("meta_info") or {}).get("connection_error"))
+                        await self._log_transcriber_connection_error((message.get("meta_info") or {}).get("connection_error"))
                         break
                     continue
 
@@ -2413,7 +2437,7 @@ class TaskManager(BaseManager):
                         if isinstance(self.tools.get("transcriber"), TranscriberPool):
                             logger.info(f"TranscriberPool: a transcriber connection closed (standby drop), continuing")
                             continue
-                        self._log_transcriber_connection_error((message.get("meta_info") or {}).get("connection_error"))
+                        await self._log_transcriber_connection_error((message.get("meta_info") or {}).get("connection_error"))
                         break
 
                 else:
@@ -2423,7 +2447,7 @@ class TaskManager(BaseManager):
                         if isinstance(self.tools.get("transcriber"), TranscriberPool):
                             logger.info(f"TranscriberPool: a transcriber connection closed (standby drop), continuing")
                             continue
-                        self._log_transcriber_connection_error((message.get("meta_info") or {}).get("connection_error"))
+                        await self._log_transcriber_connection_error((message.get("meta_info") or {}).get("connection_error"))
                         break
 
                     await self.__process_http_transcription(message)
@@ -2571,20 +2595,10 @@ class TaskManager(BaseManager):
                 except Exception as e:
                     logger.error(f"Error in synthesizer: {e}", exc_info=True)
                     self._turn_audio_flushed.set()
-                    if self.run_id and not self._error_logged:
-                        error_msg = format_error_message("synthesizer", self.synthesizer_provider, str(e))
-                        convert_to_request_log(
-                            error_msg,
-                            {"request_id": self.task_id, "sequence_id": None},
-                            model=self.synthesizer_provider,
-                            component=LogComponent.ERROR,
-                            direction=LogDirection.ERROR,
-                            is_cached=False,
-                            run_id=self.run_id
-                        )
-                        self._error_logged = True
-                    if self._component_error is None:
-                        self._component_error = SynthesizerError(str(e), provider=self.synthesizer_provider)
+                    await self._end_call_on_component_error(
+                        SynthesizerError(str(e), provider=self.synthesizer_provider),
+                        "synthesizer_error"
+                    )
                     break
 
             logger.info("Exiting __listen_synthesizer gracefully.")
@@ -2594,18 +2608,10 @@ class TaskManager(BaseManager):
             #await self.handle_cancellation("Synthesizer task was cancelled outside loop.")
         except Exception as e:
             logger.error(f"Unexpected error in __listen_synthesizer: {e}", exc_info=True)
-            if self.run_id and not self._error_logged:
-                error_msg = format_error_message("synthesizer", self.synthesizer_provider, str(e))
-                convert_to_request_log(
-                    error_msg,
-                    {"request_id": self.task_id, "sequence_id": None},
-                    model=self.synthesizer_provider,
-                    component=LogComponent.ERROR,
-                    direction=LogDirection.ERROR,
-                    is_cached=False,
-                    run_id=self.run_id
-                )
-                self._error_logged = True
+            await self._end_call_on_component_error(
+                SynthesizerError(str(e), provider=self.synthesizer_provider),
+                "synthesizer_error"
+            )
             raise SynthesizerError(
                 str(e), provider=self.synthesizer_provider
             ) from e
