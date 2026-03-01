@@ -64,9 +64,20 @@ class AzureTranscriber(BaseTranscriber):
     async def run(self):
         try:
             await self.initialize_connection()
+            if self.connection_error:
+                meta = dict(self.meta_info or {})
+                meta['connection_error'] = self.connection_error
+                await self.transcriber_output_queue.put(
+                    create_ws_data_packet("transcriber_connection_closed", meta))
+                return
             self.send_audio_to_transcriber_task = asyncio.create_task(self.send_audio_to_transcriber())
         except Exception as e:
             logger.error(f"Error received in run method - {e}")
+            self.connection_error = self.connection_error or str(e)
+            meta = dict(self.meta_info or {})
+            meta['connection_error'] = self.connection_error
+            await self.transcriber_output_queue.put(
+                create_ws_data_packet("transcriber_connection_closed", meta))
 
     def _check_and_process_end_of_stream(self, ws_data_packet):
         if 'eos' in ws_data_packet['meta_info'] and ws_data_packet['meta_info']['eos'] is True:
@@ -293,7 +304,8 @@ class AzureTranscriber(BaseTranscriber):
     async def session_stopped_handler(self, evt):
         logger.info(f"Session stop event received: {evt} | run_id - {self.run_id}")
         self.end_time = time.time()
-        self.meta_info["transcriber_duration"] = self.end_time - self.start_time
+        if self.meta_info is not None and self.start_time is not None:
+            self.meta_info["transcriber_duration"] = self.end_time - self.start_time
         meta = dict(self.meta_info or {})
         if self.connection_error:
             meta['connection_error'] = self.connection_error

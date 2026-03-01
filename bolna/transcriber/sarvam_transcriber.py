@@ -555,6 +555,12 @@ class SarvamTranscriber(BaseTranscriber):
             except (ValueError, ConnectionError) as e:
                 self.connection_error = str(e)
                 await self.toggle_connection()
+                try:
+                    meta = dict(self.meta_info or {})
+                    meta['connection_error'] = self.connection_error
+                    await self.push_to_transcriber_queue(create_ws_data_packet("transcriber_connection_closed", meta))
+                except Exception:
+                    traceback.print_exc()
                 return
 
             if not self.connection_time:

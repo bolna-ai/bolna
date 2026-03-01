@@ -679,6 +679,7 @@ class DeepgramTranscriber(BaseTranscriber):
                 deepgram_ws = await self.deepgram_connect()
             except (ValueError, ConnectionError) as e:
                 logger.error(f"Failed to establish Deepgram connection: {e}")
+                self.connection_error = str(e)
                 await self.toggle_connection()
                 return
 
@@ -742,7 +743,7 @@ class DeepgramTranscriber(BaseTranscriber):
                 self.utterance_timeout_task.cancel()
 
             # Use Deepgram's actual audio duration for billing
-            if "deepgram_duration" in self.meta_info:
+            if self.meta_info is not None and "deepgram_duration" in self.meta_info:
                 self.meta_info["transcriber_duration"] = self.meta_info["deepgram_duration"]
 
             meta = dict(getattr(self, 'meta_info', None) or {})
