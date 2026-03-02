@@ -14,7 +14,7 @@ import websockets
 
 import aiohttp
 
-from bolna.constants import ACCIDENTAL_INTERRUPTION_PHRASES, DEFAULT_USER_ONLINE_MESSAGE, DEFAULT_USER_ONLINE_MESSAGE_TRIGGER_DURATION, FILLER_DICT, DEFAULT_LANGUAGE_CODE, DEFAULT_TIMEZONE, LANGUAGE_NAMES, LLM_DEFAULT_CONFIGS
+from bolna.constants import ACCIDENTAL_INTERRUPTION_PHRASES, DEFAULT_USER_ONLINE_MESSAGE, DEFAULT_USER_ONLINE_MESSAGE_TRIGGER_DURATION, FILLER_DICT, DEFAULT_LANGUAGE_CODE, DEFAULT_TIMEZONE, LANGUAGE_NAMES, LLM_DEFAULT_CONFIGS, END_CALL_FUNCTION_PREFIX
 from bolna.helpers.function_calling_helpers import trigger_api, computed_api_response
 from bolna.helpers.conversation_history import ConversationHistory
 from .base_manager import BaseManager
@@ -1431,6 +1431,33 @@ class TaskManager(BaseManager):
 
     async def __execute_function_call(self, url, method, param, api_token, headers, model_args, meta_info, next_step, called_fun, **resp):
         self.check_if_user_online = False
+
+        if called_fun.startswith(END_CALL_FUNCTION_PREFIX):
+            reason = resp.get("reason", "")
+            logger.info(f"end_call tool invoked, reason: {reason}")
+            convert_to_request_log(
+                json.dumps({"called_fun": called_fun, "reason": reason}),
+                meta_info, None, "function_call", direction="request", run_id=self.run_id
+            )
+
+            # Tool-result flow: feed result back to LLM so it generates a clean goodbye
+            textual_response = resp.get("textual_response", None)
+            tool_result = json.dumps({"status": "success", "message": "Call is ending now. Say a brief goodbye to the user."})
+            self.conversation_history.append_assistant(textual_response, tool_calls=resp["model_response"])
+            self.conversation_history.append_tool_result(resp.get("tool_call_id", ""), tool_result)
+            convert_to_request_log(tool_result, meta_info, None, "function_call", direction="response", run_id=self.run_id)
+
+            messages = self.conversation_history.get_copy()
+            convert_to_request_log(format_messages(messages, True), meta_info, self.llm_config['model'], "llm", direction="request", run_id=self.run_id)
+
+            # Generate goodbye with should_trigger_function_call=False to prevent recursion
+            await self.__do_llm_generation(messages, meta_info, next_step, should_trigger_function_call=False)
+            await self.wait_for_current_message()
+
+            self.hangup_detail = "end_call_tool"
+            self.call_hangup_message_config = None
+            await self.process_call_hangup()
+            return
 
         if called_fun.startswith("transfer_call"):
             await asyncio.sleep(2)
