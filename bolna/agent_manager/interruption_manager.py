@@ -55,6 +55,10 @@ class InterruptionManager:
         - "BLOCK" - audio should be discarded (invalid/cancelled sequence)
         - "WAIT" - audio should be delayed (grace period active)
         """
+        # Background audio (backchanneling, ambient noise) always passes through
+        if sequence_id == -1:
+            return "SEND"
+
         # Check 1: Invalid sequence - discard
         if sequence_id not in self.sequence_ids:
             return "BLOCK"

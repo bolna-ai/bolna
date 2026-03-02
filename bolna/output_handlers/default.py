@@ -22,6 +22,17 @@ class DefaultOutputHandler:
         self.mark_event_meta_data = mark_event_meta_data
         self.welcome_message_sent_ts = None
         self._closed = False
+        self.ambient_noise_mixer = None
+
+    def set_ambient_noise_mixer(self, mixer):
+        """Attach an AmbientNoiseMixer so all outgoing audio has background noise."""
+        self.ambient_noise_mixer = mixer
+
+    def _apply_ambient_noise(self, audio_bytes):
+        """Mix ambient noise into raw PCM bytes if a mixer is set."""
+        if self.ambient_noise_mixer and audio_bytes and len(audio_bytes) >= 2:
+            return self.ambient_noise_mixer.mix_into(audio_bytes)
+        return audio_bytes
 
     def close(self):
         """Mark the output handler as closed to prevent sends after websocket close."""
@@ -88,7 +99,9 @@ class DefaultOutputHandler:
             if packet["meta_info"]['type'] in ('audio', 'text'):
                 if packet["meta_info"]['type'] == 'audio':
                     logger.info(f"Sending audio")
-                    data = base64.b64encode(packet['data']).decode("utf-8")
+                    # Mix ambient noise into outgoing audio
+                    audio_data = self._apply_ambient_noise(packet['data'])
+                    data = base64.b64encode(audio_data).decode("utf-8")
                 elif packet["meta_info"]['type'] == 'text':
                     logger.info(f"Sending text response {packet['data']}")
                     data = packet['data']

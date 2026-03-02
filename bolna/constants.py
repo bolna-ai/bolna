@@ -99,3 +99,14 @@ SARVAM_MODEL_SAMPLING_RATE_MAPPING = {
     "bulbul:v2": 22050,
     "bulbul:v3": 22050 # NOTE: Documentation claims 24000, but WAV header shows 22050
 }
+
+# Ambient noise defaults
+DEFAULT_AMBIENT_NOISE_VOLUME = 0.15
+AMBIENT_NOISE_CHUNK_DURATION = 0.1  # seconds per silence-fill packet
+
+# Backchanneling fallback phrases (used when LLM is unavailable)
+BACKCHANNELING_FALLBACK_PHRASES = [
+    "Mm-hmm", "I see", "Right", "Okay", "Got it",
+    "Sure", "Yeah", "Understood", "Makes sense", "Go on",
+    "Absolutely", "Of course", "Alright", "Noted"
+]

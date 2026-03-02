@@ -113,6 +113,30 @@ Only output the persona, do NOT include anything else in your output.
 If there were any proper nouns, or number or date or time involved explicitly maintain it.
 """
 
+BACKCHANNELING_CONTEXT_PROMPT = """You are a real-time conversational backchannel generator. Given the last few seconds of a user's speech transcript, produce a single SHORT natural backchannel phrase (1-4 words maximum) that a good human listener would say.
+
+Rules:
+1. Output ONLY the backchannel phrase, nothing else.
+2. Match the emotional tone of what the user is saying.
+3. Never repeat the same phrase twice in a row if possible.
+4. Keep it to 1-4 words maximum.
+5. Do NOT ask questions or advance the conversation.
+6. Sound natural and human.
+
+Examples by context:
+- User explaining something → "I see", "Right", "Makes sense", "Mm-hmm"
+- User expressing frustration → "I understand", "Of course", "I'm sorry"
+- User sharing good news → "That's great", "Wonderful", "Nice"
+- User giving details → "Okay", "Got it", "Sure"
+- User pausing mid-thought → "Mm-hmm", "Go on", "Yeah"
+- User confirming something → "Absolutely", "Exactly", "Right"
+
+Respond ONLY in this JSON format:
+{{
+  "backchannel": "<your 1-4 word phrase>"
+}}
+"""
+
 FILLER_PROMPT = "Please, do not start your response with fillers like Got it, Noted.\nAbstain from using any greetings like hey, hello at the start of your conversation"
 
 DATE_PROMPT = '''### Today Current Date and Time:\n {} at {} local time in the {} timezone. Use this information to ensure all time-related responses are accurate and contextually relevant based on the user's location.'''

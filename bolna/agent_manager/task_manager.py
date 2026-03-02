@@ -14,7 +14,7 @@ import websockets
 
 import aiohttp
 
-from bolna.constants import ACCIDENTAL_INTERRUPTION_PHRASES, DEFAULT_USER_ONLINE_MESSAGE, DEFAULT_USER_ONLINE_MESSAGE_TRIGGER_DURATION, FILLER_DICT, DEFAULT_LANGUAGE_CODE, DEFAULT_TIMEZONE, LANGUAGE_NAMES, LLM_DEFAULT_CONFIGS
+from bolna.constants import ACCIDENTAL_INTERRUPTION_PHRASES, DEFAULT_USER_ONLINE_MESSAGE, DEFAULT_USER_ONLINE_MESSAGE_TRIGGER_DURATION, FILLER_DICT, DEFAULT_LANGUAGE_CODE, DEFAULT_TIMEZONE, LANGUAGE_NAMES, LLM_DEFAULT_CONFIGS, DEFAULT_AMBIENT_NOISE_VOLUME, AMBIENT_NOISE_CHUNK_DURATION, BACKCHANNELING_FALLBACK_PHRASES
 from bolna.helpers.function_calling_helpers import trigger_api, computed_api_response
 from bolna.helpers.conversation_history import ConversationHistory
 from .base_manager import BaseManager
@@ -388,18 +388,27 @@ class TaskManager(BaseManager):
                 self.backchanneling_task = None
                 self.backchanneling_start_delay = self.conversation_config.get("backchanneling_start_delay", 5)
                 self.backchanneling_message_gap = self.conversation_config.get("backchanneling_message_gap", 2) #Amount of duration co routine will sleep
+                self.backchanneling_mode = self.conversation_config.get("backchanneling_mode", "context")
+                self.backchanneling_llm = None
+                self._last_backchannel_phrase = ""
                 if self.should_backchannel and not turn_based_conversation and task_id == 0:
-                    logger.info(f"Should backchannel")
-                    self.backchanneling_audios = f'{kwargs.get("backchanneling_audio_location", os.getenv("BACKCHANNELING_PRESETS_DIR"))}/{self.synthesizer_voice.lower()}'
-                    #self.num_files = list_number_of_wav_files_in_directory(self.backchanneling_audios)
-                    try:
-                        self.filenames = get_file_names_in_directory(self.backchanneling_audios)
-                        logger.info(f"Backchanneling audio location {self.backchanneling_audios}")
-                    except Exception as e:
-                        logger.error(f"Something went wrong an putting should backchannel to false {e}")
-                        self.should_backchannel = False
-                else:
-                    self.backchanneling_audio_map = []
+                    logger.info(f"Backchanneling enabled in '{self.backchanneling_mode}' mode")
+                    # Set up LLM for context-based backchanneling
+                    if self.backchanneling_mode == "context":
+                        try:
+                            from bolna.llms import OpenAiLLM
+                            backchannel_model = os.getenv("BACKCHANNELING_LLM", "gpt-4.1-nano")
+                            self.backchanneling_llm = OpenAiLLM(
+                                model=backchannel_model,
+                                max_tokens=30,
+                                temperature=0.7,
+                                **{k: v for k, v in self.kwargs.items()
+                                   if k in ('llm_key', 'base_url')}
+                            )
+                            logger.info(f"Backchanneling LLM initialized with model={backchannel_model}")
+                        except Exception as e:
+                            logger.error(f"Failed to initialize backchanneling LLM, falling back to random mode: {e}")
+                            self.backchanneling_mode = "random"
                 # Agent welcome message
                 if "agent_welcome_message" in self.kwargs:
                     logger.info(f"Agent welcome message: {self.kwargs['agent_welcome_message']}")
@@ -409,9 +418,11 @@ class TaskManager(BaseManager):
                 # Ambient noise
                 self.ambient_noise = self.conversation_config.get("ambient_noise", False)
                 self.ambient_noise_task = None
+                self.ambient_noise_mixer = None
                 if self.ambient_noise:
                     logger.info(f"Ambient noise is True {self.ambient_noise}")
                     self.soundtrack = f"{self.conversation_config.get('ambient_noise_track', 'coffee-shop')}.wav"
+                    self.ambient_noise_volume = self.conversation_config.get("ambient_noise_volume", DEFAULT_AMBIENT_NOISE_VOLUME)
 
         # setting transcriber and synthesizer in parallel
         self.__setup_transcriber()
@@ -2588,19 +2599,95 @@ class TaskManager(BaseManager):
                 logger.info(f"Only {time_since_last_spoken_ai_word} seconds since last spoken time stamp and hence not cutting the phone call")
 
     async def __check_for_backchanneling(self):
+        """Context-aware backchanneling: uses an LLM to pick a short phrase
+        based on what the user is currently saying, then synthesizes it in
+        real-time through the existing synthesizer pipeline."""
         while True:
-            user_speaking_duration = self.interruption_manager.get_user_speaking_duration()
-            if self.interruption_manager.is_user_speaking() and user_speaking_duration > self.backchanneling_start_delay:
-                filename = random.choice(self.filenames)
-                logger.info(f"Should send a random backchanneling words and sending them {filename}")
-                audio = await get_raw_audio_bytes(f"{self.backchanneling_audios}/{filename}", local= True, is_location=True)
-                if not self.turn_based_conversation and self.task_config['tools_config']['output'] != "default":
-                    audio = resample(audio, target_sample_rate= 8000, format="wav")
-                    audio = wav_bytes_to_pcm(audio)
-                await self.tools["output"].handle(create_ws_data_packet(audio, self.__get_updated_meta_info()))
-            else:
-                logger.info(f"Callee isn't speaking and hence not sending or {user_speaking_duration} is not greater than {self.backchanneling_start_delay}")
+            try:
+                user_speaking_duration = self.interruption_manager.get_user_speaking_duration()
+                if self.interruption_manager.is_user_speaking() and user_speaking_duration > self.backchanneling_start_delay:
+                    backchannel_text = await self._generate_backchannel_phrase()
+                    if backchannel_text:
+                        logger.info(f"Sending context-based backchannel: '{backchannel_text}'")
+                        meta_info = {
+                            'io': self.tools["output"].get_provider() if not self.should_record else 'default',
+                            'message_category': 'backchanneling',
+                            'request_id': str(uuid.uuid4()),
+                            'sequence_id': -1,
+                            'text': backchannel_text,
+                            'end_of_llm_stream': True,
+                            'cached': False,
+                            'format': 'pcm' if not self.should_record else 'wav',
+                        }
+                        await self._synthesize(create_ws_data_packet(backchannel_text, meta_info=meta_info))
+                else:
+                    logger.info(
+                        f"Callee isn't speaking or speaking duration "
+                        f"{user_speaking_duration:.1f}s < {self.backchanneling_start_delay}s"
+                    )
+            except Exception as e:
+                logger.error(f"Error in backchanneling loop: {e}")
             await asyncio.sleep(self.backchanneling_message_gap)
+
+    async def _generate_backchannel_phrase(self) -> str:
+        """Generate a context-appropriate backchannel phrase.
+
+        In 'context' mode, makes a lightweight LLM call using the recent
+        user transcript.  Falls back to random selection on error or if
+        the LLM is unavailable.
+        """
+        try:
+            if self.backchanneling_mode == "context" and self.backchanneling_llm is not None:
+                # Gather recent user messages for context
+                recent_transcript = self._get_recent_user_transcript()
+                if not recent_transcript:
+                    return random.choice(BACKCHANNELING_FALLBACK_PHRASES)
+
+                prompt = [
+                    {'role': 'system', 'content': BACKCHANNELING_CONTEXT_PROMPT},
+                    {'role': 'user', 'content': f"User is saying: {recent_transcript}"}
+                ]
+                if self._last_backchannel_phrase:
+                    prompt.append({
+                        'role': 'user',
+                        'content': f"(Do NOT use the phrase \"{self._last_backchannel_phrase}\" — pick something different.)"
+                    })
+
+                response = await self.backchanneling_llm.generate(prompt, request_json=True)
+                result = json.loads(response)
+                phrase = result.get("backchannel", "").strip()
+                if phrase:
+                    self._last_backchannel_phrase = phrase
+                    return phrase
+
+            # Random fallback
+            phrase = random.choice(BACKCHANNELING_FALLBACK_PHRASES)
+            while phrase == self._last_backchannel_phrase and len(BACKCHANNELING_FALLBACK_PHRASES) > 1:
+                phrase = random.choice(BACKCHANNELING_FALLBACK_PHRASES)
+            self._last_backchannel_phrase = phrase
+            return phrase
+
+        except Exception as e:
+            logger.error(f"Backchannel phrase generation error: {e}")
+            phrase = random.choice(BACKCHANNELING_FALLBACK_PHRASES)
+            self._last_backchannel_phrase = phrase
+            return phrase
+
+    def _get_recent_user_transcript(self) -> str:
+        """Extract the most recent user message(s) from conversation history
+        for backchanneling context."""
+        try:
+            user_messages = []
+            # Walk history backwards, collect last 2 user messages
+            for msg in reversed(self.history):
+                if msg.get('role') == 'user':
+                    user_messages.insert(0, msg['content'])
+                    if len(user_messages) >= 2:
+                        break
+            return " ".join(user_messages).strip() if user_messages else ""
+        except Exception as e:
+            logger.error(f"Error getting recent transcript: {e}")
+            return ""
 
     async def __first_message(self, timeout=10.0):
         logger.info(f"Executing the first message task")
@@ -2655,32 +2742,81 @@ class TaskManager(BaseManager):
             logger.error(f"Exception in __first_message {str(e)}")
 
     async def __start_transmitting_ambient_noise(self):
+        """Continuous ambient noise: loads the WAV track, creates an
+        AmbientNoiseMixer, attaches it to the output handler (so all content
+        audio gets noise mixed in), and then fills silence gaps with pure
+        ambient-noise packets at a tight interval for seamless playback."""
         try:
-            audio = await get_raw_audio_bytes(f'{os.getenv("AMBIENT_NOISE_PRESETS_DIR")}/{self.soundtrack}', local=True, is_location=True)
-            audio = resample(audio, self.sampling_rate, format = "wav")
-            if self.task_config["tools_config"]["output"]["provider"] in SUPPORTED_OUTPUT_TELEPHONY_HANDLERS.keys():
-                audio = wav_bytes_to_pcm(audio)
-            logger.info(f"Length of audio {len(audio)} {self.sampling_rate}")
-            # TODO whenever this feature is redone ensure to have a look at the metadata of other messages which have the sequence_id of -1. Fields such as end_of_synthesizer_stream and end_of_llm_stream would need to be added here
-            if self.should_record:
-                meta_info={'io': 'default', 'message_category': 'ambient_noise', "request_id": str(uuid.uuid4()), "sequence_id": -1, "type":'audio', 'format': 'wav'}
-            else:
+            from bolna.helpers.audio_mixer import AmbientNoiseMixer
 
-                meta_info={'io': self.tools["output"].get_provider(), 'message_category': 'ambient_noise', 'stream_sid': self.stream_sid , "request_id": str(uuid.uuid4()), "cached": True, "type":'audio', "sequence_id": -1, 'format': 'pcm'}
-            while True:
-                logger.info(f"Before yielding ambient noise")
-                for chunk in yield_chunks_from_memory(audio, self.output_chunk_size*2):
-                    # Only play ambient noise if no content is being transmitted
-                    # Check if any real content audio (sequence_id > 0) is being played
+            # Load and prepare the noise track
+            noise_dir = os.getenv("AMBIENT_NOISE_PRESETS_DIR", "presets/ambient_noise")
+            wav_bytes = await get_raw_audio_bytes(
+                f'{noise_dir}/{self.soundtrack}', local=True, is_location=True
+            )
+            if not wav_bytes:
+                logger.error(f"Could not load ambient noise file: {noise_dir}/{self.soundtrack}")
+                return
+
+            target_rate = self.sampling_rate
+            self.ambient_noise_mixer = AmbientNoiseMixer.from_wav_bytes(
+                wav_bytes,
+                volume=self.ambient_noise_volume,
+                target_sample_rate=target_rate
+            )
+
+            # Attach the mixer to the output handler so every content packet
+            # automatically gets ambient noise mixed in.
+            self.tools["output"].set_ambient_noise_mixer(self.ambient_noise_mixer)
+            logger.info(f"Ambient noise mixer attached to output handler "
+                        f"(rate={target_rate}, volume={self.ambient_noise_volume})")
+
+            # Wait for stream_sid before sending silence-fill packets
+            while self.stream_sid is None and not self.conversation_ended:
+                await asyncio.sleep(0.05)
+
+            # Build meta_info for silence-fill packets
+            if self.should_record:
+                noise_meta = {
+                    'io': 'default',
+                    'message_category': 'ambient_noise',
+                    'request_id': str(uuid.uuid4()),
+                    'sequence_id': -1,
+                    'type': 'audio',
+                    'format': 'wav'
+                }
+            else:
+                noise_meta = {
+                    'io': self.tools["output"].get_provider(),
+                    'message_category': 'ambient_noise',
+                    'stream_sid': self.stream_sid,
+                    'request_id': str(uuid.uuid4()),
+                    'cached': True,
+                    'sequence_id': -1,
+                    'type': 'audio',
+                    'format': 'pcm'
+                }
+
+            chunk_duration = AMBIENT_NOISE_CHUNK_DURATION  # ~100ms per packet
+
+            # Continuous loop: send ambient noise during silences.
+            # Content audio already has noise mixed in via the output handler,
+            # so we only need to fill the gaps when nothing else is being sent.
+            while not self.conversation_ended:
+                try:
                     is_content_playing = self.tools["input"].is_audio_being_played_to_user()
-                    
                     if not is_content_playing:
-                        logger.info(f"Transmitting ambient noise {len(chunk)}")
-                        await self.tools["output"].handle(create_ws_data_packet(chunk, meta_info=meta_info))
-                    logger.info("Sleeping for 800 ms")
-                    await asyncio.sleep(0.5)
+                        chunk = self.ambient_noise_mixer.get_chunk(chunk_duration)
+                        if chunk:
+                            await self.tools["output"].handle(
+                                create_ws_data_packet(chunk, noise_meta)
+                            )
+                except Exception as inner_e:
+                    logger.error(f"Error in ambient noise loop iteration: {inner_e}")
+                await asyncio.sleep(chunk_duration)
+
         except Exception as e:
-            logger.error(f"Something went wrong while transmitting noise {e}")
+            logger.error(f"Failed to start ambient noise: {e}")
 
     async def handle_init_event(self, init_meta_data):
         """

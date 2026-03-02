@@ -417,8 +417,10 @@ class ConversationConfig(BaseModel):
     backchanneling: Optional[bool] = False
     backchanneling_message_gap: Optional[int] = 5
     backchanneling_start_delay: Optional[int] = 5
+    backchanneling_mode: Optional[str] = "context"  # "context" (LLM-based) or "random" (fallback phrases)
     ambient_noise: Optional[bool] = False
     ambient_noise_track: Optional[str] = "convention_hall"
+    ambient_noise_volume: Optional[float] = 0.15
     call_terminate: Optional[int] = 90
     use_fillers: Optional[bool] = False
     trigger_user_online_message_after: Optional[int] = 10
