@@ -1,4 +1,5 @@
 import json
+from bolna.constants import END_CALL_FUNCTION_PREFIX
 from bolna.helpers.utils import convert_to_request_log, compute_function_pre_call_message
 from bolna.helpers.logger_config import configure_logger
 from .types import FunctionCallPayload
@@ -50,6 +51,8 @@ class ToolCallAccumulator:
         ``None`` on subsequent calls.
         """
         if self._gave_pre_call_msg or self.received_textual or not self.called_fun:
+            return None
+        if self.called_fun.startswith(END_CALL_FUNCTION_PREFIX):
             return None
         self._gave_pre_call_msg = True
         api_tool_pre_call_message = self.api_params.get(self.called_fun, {}).get('pre_call_message', None)

@@ -22,7 +22,7 @@ from enum import Enum
 from dotenv import load_dotenv
 from pydantic import create_model
 from .logger_config import configure_logger
-from bolna.constants import PREPROCESS_DIR, PRE_FUNCTION_CALL_MESSAGE, TRANSFERING_CALL_FILLER
+from bolna.constants import PREPROCESS_DIR, PRE_FUNCTION_CALL_MESSAGE, TRANSFERING_CALL_FILLER, END_CALL_FUNCTION_PREFIX
 from bolna.enums import LogComponent, LogDirection, UsageSource
 from bolna.prompts import DATE_PROMPT
 from pydub import AudioSegment
@@ -784,6 +784,10 @@ def compute_function_pre_call_message(language, function_name, api_tool_pre_call
     # Built-in tools that should switch silently — no audible filler.
     if function_name and function_name == "switch_language":
         return ""
+
+    # No filler for end_call — LLM's textual response is the goodbye
+    if function_name and function_name.startswith(END_CALL_FUNCTION_PREFIX):
+        return None
 
     if function_name and function_name.startswith("transfer_call"):
         default_message = TRANSFERING_CALL_FILLER
