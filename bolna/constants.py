@@ -101,8 +101,9 @@ SARVAM_MODEL_SAMPLING_RATE_MAPPING = {
 }
 
 # Ambient noise defaults
-DEFAULT_AMBIENT_NOISE_VOLUME = 0.08
-MAX_AMBIENT_NOISE_VOLUME = 0.3  # hard cap — higher values drown out speech & cause clipping
+NOISE_REFERENCE_PEAK = 3000  # noise track normalized to this int16 peak before volume
+DEFAULT_AMBIENT_NOISE_VOLUME = 0.5
+MAX_AMBIENT_NOISE_VOLUME = 1.0  # safe because noise is normalized to NOISE_REFERENCE_PEAK first
 AMBIENT_NOISE_CHUNK_DURATION = 0.1  # seconds per silence-fill packet
 
 # Backchanneling fallback phrases (used when LLM is unavailable)

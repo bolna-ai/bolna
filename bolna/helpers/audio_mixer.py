@@ -9,7 +9,7 @@ continuous, gap-free noise stream.
 import io
 import numpy as np
 from scipy.io import wavfile
-from bolna.constants import MAX_AMBIENT_NOISE_VOLUME
+from bolna.constants import MAX_AMBIENT_NOISE_VOLUME, NOISE_REFERENCE_PEAK
 from bolna.helpers.logger_config import configure_logger
 
 logger = configure_logger(__name__)
@@ -18,43 +18,53 @@ logger = configure_logger(__name__)
 class AmbientNoiseMixer:
     """Mix a looping ambient-noise track into outgoing audio.
 
+    The noise track is **normalized** to ``NOISE_REFERENCE_PEAK`` (int16 scale)
+    at load time so that ``volume`` behaves predictably regardless of the
+    source WAV file's recording level.
+
+    At volume = 1.0 the noise peaks at ``NOISE_REFERENCE_PEAK`` (≈ 3000),
+    which is ~10-20 % of typical speech amplitude — audible background but
+    well below speech.  At volume = 0.5 the noise peaks at ~1500, which is
+    a very subtle whisper-level backdrop.  This means users can safely set
+    volume anywhere in 0.0–1.0 without drowning out the agent.
+
     Parameters
     ----------
     pcm_data : bytes
         Raw **signed 16-bit mono PCM** samples at *sample_rate*.
     volume : float
-        Gain applied to the noise before mixing (0.0–MAX_AMBIENT_NOISE_VOLUME).
-        Values above the cap are clamped to prevent speech from being drowned out.
+        Gain applied to the *normalized* noise (0.0–1.0).
     sample_rate : int
         The playback sample rate (must match the content audio rate).
     """
 
-    def __init__(self, pcm_data: bytes, volume: float = 0.08, sample_rate: int = 8000):
+    def __init__(self, pcm_data: bytes, volume: float = 0.5, sample_rate: int = 8000):
         if not pcm_data or len(pcm_data) < 2:
             raise ValueError("pcm_data must contain at least one sample")
 
         self.sample_rate = sample_rate
+        self.volume = np.float64(max(0.0, min(MAX_AMBIENT_NOISE_VOLUME, volume)))
 
-        # Clamp volume: values above the cap cause clipping & drown out speech.
-        requested_volume = volume
-        clamped = max(0.0, min(MAX_AMBIENT_NOISE_VOLUME, volume))
-        if requested_volume > MAX_AMBIENT_NOISE_VOLUME:
-            logger.warning(
-                f"Ambient noise volume {requested_volume} exceeds maximum "
-                f"{MAX_AMBIENT_NOISE_VOLUME} — clamping. "
-                f"Recommended range: 0.05–0.15 for subtle background."
-            )
-        self.volume = np.float64(clamped)
+        # Store as float64 for mixing precision.
+        raw = np.frombuffer(pcm_data, dtype=np.int16).astype(np.float64)
 
-        # Store as float64 for mixing precision; the copy avoids repeated casts.
-        self._data = np.frombuffer(pcm_data, dtype=np.int16).astype(np.float64)
+        # ── Normalize to NOISE_REFERENCE_PEAK ────────────────────────
+        # This makes volume independent of the WAV file's recording level.
+        # A loud WAV and a quiet WAV both end up with the same peak after
+        # normalization, so volume=0.3 always sounds the same.
+        peak = np.max(np.abs(raw))
+        if peak > 0:
+            raw = raw * (NOISE_REFERENCE_PEAK / peak)
+
+        self._data = raw
         self._length = len(self._data)
         self._position = 0
 
         logger.info(
             f"AmbientNoiseMixer initialized: {self._length} samples "
             f"({self._length / sample_rate:.1f}s), volume={self.volume:.2f}, "
-            f"rate={sample_rate}"
+            f"rate={sample_rate}, ref_peak={NOISE_REFERENCE_PEAK}, "
+            f"orig_peak={peak:.0f}"
         )
 
     # ------------------------------------------------------------------
@@ -122,14 +132,14 @@ class AmbientNoiseMixer:
 
     def set_volume(self, volume: float) -> None:
         """Hot-update the volume without reloading the audio."""
-        self.volume = np.float64(max(0.0, min(MAX_AMBIENT_NOISE_VOLUME, volume)))
+        self.volume = np.float64(max(0.0, min(1.0, volume)))
 
     # ------------------------------------------------------------------
     # Factory helpers
     # ------------------------------------------------------------------
 
     @classmethod
-    def from_wav_bytes(cls, wav_bytes: bytes, volume: float = 0.08,
+    def from_wav_bytes(cls, wav_bytes: bytes, volume: float = 0.5,
                        target_sample_rate: int = 8000) -> "AmbientNoiseMixer":
         """Create a mixer from raw WAV file bytes.
 
