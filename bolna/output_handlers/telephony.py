@@ -51,23 +51,31 @@ class TelephonyOutputHandler(DefaultOutputHandler):
                     audio_chunk += b'\x00'
 
                 if audio_chunk and self.stream_sid and len(audio_chunk) != 1:
+                    is_ambient_noise = meta_info.get('message_category') == 'ambient_noise'
+
                     if audio_chunk != b'\x00\x00':
                         audio_format = meta_info.get("format", "wav")
 
                         # Mix ambient noise into outgoing audio before encoding.
                         # Skip for 'ambient_noise' packets — they are already
                         # pure noise from the mixer and must not be double-mixed.
-                        if meta_info.get('message_category') != 'ambient_noise':
+                        if not is_ambient_noise:
                             audio_chunk = self._apply_ambient_noise(audio_chunk, audio_format)
 
-                        # sending of pre-mark message
-                        pre_mark_event_meta_data = {
-                            "type": "pre_mark_message",
-                        }
-                        mark_id = str(uuid.uuid4())
-                        self.mark_event_meta_data.update_data(mark_id, pre_mark_event_meta_data)
-                        mark_message = await self.form_mark_message(mark_id)
-                        await self.websocket.send_text(json.dumps(mark_message))
+                        # Ambient-noise silence-fill packets are lightweight
+                        # background filler.  They must NOT send mark events
+                        # because the pre-mark would set is_audio_being_played
+                        # = True and the post-mark (is_final_chunk=False) would
+                        # never clear it, stopping the silence-fill loop.
+                        if not is_ambient_noise:
+                            # sending of pre-mark message
+                            pre_mark_event_meta_data = {
+                                "type": "pre_mark_message",
+                            }
+                            mark_id = str(uuid.uuid4())
+                            self.mark_event_meta_data.update_data(mark_id, pre_mark_event_meta_data)
+                            mark_message = await self.form_mark_message(mark_id)
+                            await self.websocket.send_text(json.dumps(mark_message))
 
                         # sending of audio chunk
                         if audio_format == 'pcm' and meta_info.get('message_category', '') == 'agent_welcome_message' and self.io_provider in ('plivo', 'vobiz') and meta_info['cached'] is True:
@@ -78,21 +86,23 @@ class TelephonyOutputHandler(DefaultOutputHandler):
                             self.welcome_message_sent_ts = time.time() * 1000
                         logger.info(f"Sending media event - {meta_info.get('mark_id')}")
 
-                    # sending of post-mark message
-                    mark_event_meta_data = {
-                        "text_synthesized": "" if meta_info["sequence_id"] == -1 else meta_info.get("text_synthesized", ""),
-                        "type": meta_info.get('message_category', ''),
-                        "is_first_chunk": meta_info.get("is_first_chunk", False),
-                        "is_final_chunk": meta_info.get("end_of_llm_stream", False) and meta_info.get("end_of_synthesizer_stream", False),
-                        "sequence_id": meta_info["sequence_id"],
-                        "duration": len(audio_chunk) / 8000 if meta_info.get('format', 'mulaw') == 'mulaw' else len(audio_chunk) / 16000,
-                        "sent_ts": time.time()  # Track when audio was actually sent to telephony provider
-                    }
-                    mark_id = meta_info.get("mark_id") if (meta_info.get("mark_id") and meta_info.get("mark_id") != "") else str(uuid.uuid4())
+                    # Ambient-noise packets: no post-mark needed either.
+                    if not is_ambient_noise:
+                        # sending of post-mark message
+                        mark_event_meta_data = {
+                            "text_synthesized": "" if meta_info["sequence_id"] == -1 else meta_info.get("text_synthesized", ""),
+                            "type": meta_info.get('message_category', ''),
+                            "is_first_chunk": meta_info.get("is_first_chunk", False),
+                            "is_final_chunk": meta_info.get("end_of_llm_stream", False) and meta_info.get("end_of_synthesizer_stream", False),
+                            "sequence_id": meta_info["sequence_id"],
+                            "duration": len(audio_chunk) / 8000 if meta_info.get('format', 'mulaw') == 'mulaw' else len(audio_chunk) / 16000,
+                            "sent_ts": time.time()  # Track when audio was actually sent to telephony provider
+                        }
+                        mark_id = meta_info.get("mark_id") if (meta_info.get("mark_id") and meta_info.get("mark_id") != "") else str(uuid.uuid4())
 
-                    self.mark_event_meta_data.update_data(mark_id, mark_event_meta_data)
-                    mark_message = await self.form_mark_message(mark_id)
-                    await self.websocket.send_text(json.dumps(mark_message))
+                        self.mark_event_meta_data.update_data(mark_id, mark_event_meta_data)
+                        mark_message = await self.form_mark_message(mark_id)
+                        await self.websocket.send_text(json.dumps(mark_message))
                 else:
                     logger.info("Not sending")
             except Exception as e:

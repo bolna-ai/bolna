@@ -96,17 +96,16 @@ class DefaultOutputHandler:
             return
         try:
             logger.info(f"Packet received:")
-            # if (self.is_web_based_call and packet["meta_info"].get("message_category", "") == "agent_welcome_message" and
-            #         packet["meta_info"].get("is_final_chunk_of_entire_response", True)):
-            #     self.is_welcome_message_sent = True
 
             data = None
+            is_ambient_noise = packet["meta_info"].get('message_category') == 'ambient_noise'
+
             if packet["meta_info"]['type'] in ('audio', 'text'):
                 if packet["meta_info"]['type'] == 'audio':
                     logger.info(f"Sending audio")
                     # Mix ambient noise into outgoing audio (skip for ambient_noise packets)
                     audio_data = packet['data']
-                    if packet["meta_info"].get('message_category') != 'ambient_noise':
+                    if not is_ambient_noise:
                         audio_fmt = packet["meta_info"].get('format', 'pcm')
                         audio_data = self._apply_ambient_noise(audio_data, audio_fmt)
                     data = base64.b64encode(audio_data).decode("utf-8")
@@ -114,8 +113,10 @@ class DefaultOutputHandler:
                     logger.info(f"Sending text response {packet['data']}")
                     data = packet['data']
 
-                # sending of pre-mark message
-                if packet["meta_info"]['type'] == 'audio':
+                # Ambient-noise packets skip marks to avoid setting
+                # is_audio_being_played (see telephony.py for details).
+                if packet["meta_info"]['type'] == 'audio' and not is_ambient_noise:
+                    # sending of pre-mark message
                     pre_mark_event_meta_data = {
                         "type": "pre_mark_message",
                     }
@@ -135,7 +136,7 @@ class DefaultOutputHandler:
                 await self.websocket.send_json(response)
 
                 # sending of post-mark message
-                if packet["meta_info"]['type'] == 'audio':
+                if packet["meta_info"]['type'] == 'audio' and not is_ambient_noise:
                     meta_info = packet["meta_info"]
                     mark_event_meta_data = {
                         "text_synthesized": "" if meta_info["sequence_id"] == -1 else meta_info.get("text_synthesized",
