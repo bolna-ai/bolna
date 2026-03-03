@@ -82,6 +82,22 @@ class AmbientNoiseMixer:
         mixed = np.clip(content + noise, -32768, 32767).astype(np.int16)
         return mixed.tobytes()
 
+    def mix_into_mulaw(self, mulaw_bytes: bytes) -> bytes:
+        """Mix ambient noise into *mulaw_bytes* (8-bit mu-law, 1 byte/sample).
+
+        Converts mulaw → int16 PCM, mixes noise, converts back to mulaw.
+        """
+        import audioop
+        if not mulaw_bytes or len(mulaw_bytes) < 1:
+            return mulaw_bytes
+
+        # mulaw → int16 PCM (2 bytes/sample)
+        pcm_data = audioop.ulaw2lin(mulaw_bytes, 2)
+        # Mix noise into PCM
+        mixed_pcm = self.mix_into(pcm_data)
+        # int16 PCM → mulaw
+        return audioop.lin2ulaw(mixed_pcm, 2)
+
     def get_chunk(self, duration_seconds: float) -> bytes:
         """Return a pure ambient-noise chunk for *duration_seconds* as int16
         PCM bytes.  Used to fill silence when no content audio is being sent.

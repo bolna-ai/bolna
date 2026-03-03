@@ -28,9 +28,14 @@ class DefaultOutputHandler:
         """Attach an AmbientNoiseMixer so all outgoing audio has background noise."""
         self.ambient_noise_mixer = mixer
 
-    def _apply_ambient_noise(self, audio_bytes):
-        """Mix ambient noise into raw PCM bytes if a mixer is set."""
+    def _apply_ambient_noise(self, audio_bytes, audio_format='pcm'):
+        """Mix ambient noise into audio bytes if a mixer is set.
+
+        Handles both raw int16 PCM and 8-bit mu-law formats.
+        """
         if self.ambient_noise_mixer and audio_bytes and len(audio_bytes) >= 2:
+            if audio_format == 'mulaw':
+                return self.ambient_noise_mixer.mix_into_mulaw(audio_bytes)
             return self.ambient_noise_mixer.mix_into(audio_bytes)
         return audio_bytes
 
@@ -99,8 +104,11 @@ class DefaultOutputHandler:
             if packet["meta_info"]['type'] in ('audio', 'text'):
                 if packet["meta_info"]['type'] == 'audio':
                     logger.info(f"Sending audio")
-                    # Mix ambient noise into outgoing audio
-                    audio_data = self._apply_ambient_noise(packet['data'])
+                    # Mix ambient noise into outgoing audio (skip for ambient_noise packets)
+                    audio_data = packet['data']
+                    if packet["meta_info"].get('message_category') != 'ambient_noise':
+                        audio_fmt = packet["meta_info"].get('format', 'pcm')
+                        audio_data = self._apply_ambient_noise(audio_data, audio_fmt)
                     data = base64.b64encode(audio_data).decode("utf-8")
                 elif packet["meta_info"]['type'] == 'text':
                     logger.info(f"Sending text response {packet['data']}")

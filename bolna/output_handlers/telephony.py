@@ -54,8 +54,11 @@ class TelephonyOutputHandler(DefaultOutputHandler):
                     if audio_chunk != b'\x00\x00':
                         audio_format = meta_info.get("format", "wav")
 
-                        # Mix ambient noise into outgoing audio before encoding
-                        audio_chunk = self._apply_ambient_noise(audio_chunk)
+                        # Mix ambient noise into outgoing audio before encoding.
+                        # Skip for 'ambient_noise' packets — they are already
+                        # pure noise from the mixer and must not be double-mixed.
+                        if meta_info.get('message_category') != 'ambient_noise':
+                            audio_chunk = self._apply_ambient_noise(audio_chunk, audio_format)
 
                         # sending of pre-mark message
                         pre_mark_event_meta_data = {
