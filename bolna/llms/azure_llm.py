@@ -5,7 +5,8 @@ from urllib.parse import urlparse
 from dotenv import load_dotenv
 from openai import AsyncAzureOpenAI, AsyncOpenAI, AuthenticationError, PermissionDeniedError, NotFoundError, RateLimitError, APIError, APIConnectionError, BadRequestError
 
-from bolna.constants import DEFAULT_LANGUAGE_CODE
+from bolna.constants import DEFAULT_LANGUAGE_CODE, GPT5_MODEL_PREFIX
+from bolna.enums import ReasoningEffort, Verbosity
 from bolna.helpers.utils import convert_to_request_log, compute_function_pre_call_message, now_ms
 from .openai_base import OpenAICompatibleLLM
 from .tool_call_accumulator import ToolCallAccumulator
@@ -37,7 +38,15 @@ class AzureLLM(OpenAICompatibleLLM):
         self.started_streaming = False
         self.max_tokens = max_tokens
         self.temperature = temperature
-        self.model_args = {"max_tokens": self.max_tokens, "temperature": self.temperature, "model": self.model}
+        max_tokens_key = "max_tokens"
+        self.model_args = {}
+        if self.model.startswith(GPT5_MODEL_PREFIX):
+            max_tokens_key = "max_completion_tokens"
+            self.model_args["reasoning_effort"] = kwargs.get("reasoning_effort", None) or ReasoningEffort.LOW.value
+            self.model_args["verbosity"] = kwargs.get("verbosity", None) or Verbosity.LOW.value
+
+        self.model_args.update({max_tokens_key: self.max_tokens, "temperature": self.temperature, "model": self.model})
+        self.model_args["service_tier"] = kwargs.get("service_tier", "default")
 
         azure_endpoint = kwargs.get("base_url", os.getenv('AZURE_OPENAI_ENDPOINT'))
         api_key = kwargs.get('llm_key', os.getenv('AZURE_OPENAI_API_KEY'))
@@ -92,9 +101,11 @@ class AzureLLM(OpenAICompatibleLLM):
             "response_format": response_format,
             "messages": messages,
             "stream": True,
-            "stop": ["User:"],
             "user": f"{self.run_id}#{meta_info.get('turn_id', '')}" if meta_info else self.run_id
         }
+
+        if not self.model.startswith(GPT5_MODEL_PREFIX):
+            model_args["stop"] = ["User:"]
 
         if self.trigger_function_call:
             model_args["tools"] = json.loads(self.tools) if isinstance(self.tools, str) else self.tools
@@ -238,7 +249,7 @@ class AzureLLM(OpenAICompatibleLLM):
             raise
 
     def get_response_format(self, is_json_format: bool):
-        if is_json_format and self.model in ('gpt-4-1106-preview', 'gpt-3.5-turbo-1106', 'gpt-4o-mini'):
+        if is_json_format and self.model in ('gpt-4-1106-preview', 'gpt-3.5-turbo-1106', 'gpt-4o-mini', 'gpt-4.1-mini'):
             return {"type": "json_object"}
         else:
             return {"type": "text"}
