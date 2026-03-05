@@ -80,6 +80,7 @@ class SipTrunkInputHandler(TelephonyInputHandler):
         self.channel_id = None
         self.connection_id = None
         self.ptime = 20
+        self._pending_stream_sid = None  # promoted to stream_sid on first audio frame
 
         input_config = self._get_input_config()
         self._expected_format = (input_config.get("audio_format") or input_config.get("format") or "ulaw").lower()
@@ -127,12 +128,24 @@ class SipTrunkInputHandler(TelephonyInputHandler):
             logger.info(f"Error closing WebSocket: {e}")
 
     def _initialize_from_media_start(self, media_start_data):
-        """Set channel info from MEDIA_START."""
+        """Set channel info from MEDIA_START.
+
+        NOTE: stream_sid is intentionally NOT set here. It is held in
+        _pending_stream_sid and promoted to stream_sid only when the first
+        binary audio frame arrives from Asterisk.
+
+        Why: the channel is auto-answered by Asterisk when the WebSocket
+        connects, but it is NOT in any bridge yet. The sip-server still needs
+        to call add_channel_to_bridge() after this. __forced_first_message polls
+        stream_sid != None before sending welcome audio, so deferring here
+        guarantees welcome audio is only sent once the bridge is active (proven
+        by Asterisk writing audio frames back to us).
+        """
         self.channel_id = media_start_data.get("channel_id")
         self.connection_id = media_start_data.get("connection_id", self.channel_id)
         self.format = media_start_data.get("format")
         self.ptime = int(media_start_data.get("ptime", 20))
-        self.stream_sid = self.connection_id or self.channel_id
+        self._pending_stream_sid = self.connection_id or self.channel_id
         self.call_sid = self.channel_id.split("_")[0] if (self.channel_id and "_" in self.channel_id) else self.channel_id
 
         opt = media_start_data.get("optimal_frame_size")
@@ -143,7 +156,8 @@ class SipTrunkInputHandler(TelephonyInputHandler):
                 pass
         self.media_started = True
         logger.info(
-            f"Initialized from MEDIA_START - channel_id={self.channel_id}, format={self.format}, ptime={self.ptime}ms"
+            f"Initialized from MEDIA_START - channel_id={self.channel_id}, format={self.format}, ptime={self.ptime}ms "
+            f"(stream_sid deferred until first audio frame from bridge)"
         )
 
     async def call_start(self, packet):
@@ -167,6 +181,15 @@ class SipTrunkInputHandler(TelephonyInputHandler):
                     media_audio = message["bytes"]
                     if not media_audio:
                         continue
+                    # First audio frame from Asterisk proves the channel is now
+                    # in the mixing bridge (Asterisk only writes frames to the
+                    # WebSocket once bridged). Promote pending stream_sid so
+                    # __forced_first_message can unblock and send welcome audio.
+                    if self.stream_sid is None and self._pending_stream_sid:
+                        self.stream_sid = self._pending_stream_sid
+                        logger.info(
+                            f"First audio frame received — bridge active, stream_sid={self.stream_sid}"
+                        )
                     buffer.append(media_audio)
                     message_count += 1
                     if message_count >= chunks_per_batch:
