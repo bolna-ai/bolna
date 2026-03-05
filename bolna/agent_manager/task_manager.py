@@ -1614,6 +1614,10 @@ class TaskManager(BaseManager):
                     routing_data = f"Node: {routing_info['current_node']} (no transition)"
                 if routing_info.get('extracted_params'):
                     routing_data += f" | Params: {json.dumps(routing_info['extracted_params'])}"
+                if routing_info.get('confidence') is not None:
+                    routing_data += f" | Confidence: {routing_info['confidence']}"
+                if routing_info.get('reasoning'):
+                    routing_data += f" | Reasoning: {routing_info['reasoning']}"
                 if routing_info.get('node_history'):
                     routing_data += f" | Flow: {' → '.join(routing_info['node_history'])}"
 
@@ -1628,7 +1632,9 @@ class TaskManager(BaseManager):
                         'previous_node': routing_info.get('previous_node'),
                         'current_node': routing_info.get('current_node'),
                         'transitioned': routing_info.get('transitioned', False),
-                        'sequence_id': meta_info.get('sequence_id')
+                        'sequence_id': meta_info.get('sequence_id'),
+                        'reasoning': routing_info.get('reasoning'),
+                        'confidence': routing_info.get('confidence'),
                     })
 
                 if routing_info.get('node_history'):
