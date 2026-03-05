@@ -1,6 +1,5 @@
 import os
 import json
-import httpx
 from urllib.parse import urlparse
 from dotenv import load_dotenv
 from openai import AsyncAzureOpenAI, AsyncOpenAI, AuthenticationError, PermissionDeniedError, NotFoundError, RateLimitError, APIError, APIConnectionError, BadRequestError
@@ -11,6 +10,7 @@ from bolna.helpers.utils import convert_to_request_log, compute_function_pre_cal
 from .openai_base import OpenAICompatibleLLM
 from .tool_call_accumulator import ToolCallAccumulator
 from .types import LLMStreamChunk, LatencyData
+from bolna.helpers.httpx_client_pool import HttpxClientPool
 from bolna.helpers.logger_config import configure_logger
 
 logger = configure_logger(__name__)
@@ -52,12 +52,7 @@ class AzureLLM(OpenAICompatibleLLM):
         api_key = kwargs.get('llm_key', os.getenv('AZURE_OPENAI_API_KEY'))
         api_version = kwargs.get("api_version", os.getenv('AZURE_OPENAI_API_VERSION', '2024-12-01-preview'))
 
-        limits = httpx.Limits(
-            max_connections=50,
-            max_keepalive_connections=50,
-            keepalive_expiry=30
-        )
-        http_client = httpx.AsyncClient(limits=limits, timeout=httpx.Timeout(600.0, connect=10.0))
+        http_client = HttpxClientPool.get_client(base_url=azure_endpoint, api_key=api_key, http2=False)
 
         self.async_client = AsyncAzureOpenAI(
             azure_endpoint=azure_endpoint,
