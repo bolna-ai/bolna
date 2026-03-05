@@ -66,6 +66,10 @@ def substitute_var_markers(obj, values):
 
 async def trigger_api(url, method, param, api_token, headers_data, meta_info, run_id, **kwargs):
     try:
+        # Substitute {variable} placeholders in the URL with actual kwargs values
+        for key, value in kwargs.items():
+            url = url.replace(f"{{{key}}}", str(value))
+
         request_body, api_params = None, None
         if param:
             # NEW FORMAT: Check for $var markers (type-safe JSON substitution)
