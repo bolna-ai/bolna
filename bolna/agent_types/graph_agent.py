@@ -230,6 +230,11 @@ class GraphAgent(BaseAgent):
                     parameters["properties"][param_name] = {"type": param_type, "description": f"The {param_name} provided by the user"}
                     parameters["required"].append(param_name)
 
+            # Add reasoning and confidence as required parameters on every transition tool
+            parameters["properties"]["reasoning"] = {"type": "string", "description": "Brief explanation of why this routing decision was made"}
+            parameters["properties"]["confidence"] = {"type": "number", "description": "Confidence score from 0.0 to 1.0 for this routing decision"}
+            parameters["required"].extend(["reasoning", "confidence"])
+
             tools.append({
                 "type": "function",
                 "function": {"name": func_name, "description": func_description, "parameters": parameters}
@@ -237,7 +242,7 @@ class GraphAgent(BaseAgent):
 
         tools.append({
             "type": "function",
-            "function": {"name": "stay_on_current_node", "description": "No transition matches. Need more info or clarification.", "parameters": {"type": "object", "properties": {}, "required": []}}
+            "function": {"name": "stay_on_current_node", "description": "No transition matches. Need more info or clarification.", "parameters": {"type": "object", "properties": {"reasoning": {"type": "string", "description": "Brief explanation of why this routing decision was made"}, "confidence": {"type": "number", "description": "Confidence score from 0.0 to 1.0 for this routing decision"}}, "required": ["reasoning", "confidence"]}}
         })
 
         if node_id:
@@ -256,22 +261,22 @@ class GraphAgent(BaseAgent):
                 return edge
         return None
 
-    async def decide_next_node_with_functions(self, history: List[dict]) -> Tuple[Optional[str], Optional[Dict[str, Any]], float, Optional[List[dict]], Optional[List[dict]]]:
+    async def decide_next_node_with_functions(self, history: List[dict]) -> Tuple[Optional[str], Optional[Dict[str, Any]], float, Optional[List[dict]], Optional[List[dict]], Optional[str], Optional[float]]:
         """Decide next node using LLM function calling.
 
-        Returns (next_node_id, extracted_params, latency_ms, routing_messages, routing_tools).
+        Returns (next_node_id, extracted_params, latency_ms, routing_messages, routing_tools, reasoning, confidence).
         """
         start_time = time.perf_counter()
 
         current_node = self.get_node_by_id(self.current_node_id)
         if not current_node:
             logger.error(f"Current node '{self.current_node_id}' not found")
-            return None, None, 0, None, None
+            return None, None, 0, None, None, None, None
 
         edges = current_node.get('edges', [])
         if not edges:
             logger.debug(f"Node '{self.current_node_id}' has no edges, staying on current node")
-            return None, None, 0, None, None
+            return None, None, 0, None, None, None, None
 
         tools = self._build_transition_tools(current_node)
 
@@ -341,7 +346,7 @@ class GraphAgent(BaseAgent):
                 routing_kwargs["max_completion_tokens"] = self.routing_max_tokens or 150
                 routing_kwargs["reasoning_effort"] = self.routing_reasoning_effort or os.getenv('GPT5_ROUTING_REASONING_EFFORT', 'minimal')
             else:
-                routing_kwargs["max_tokens"] = self.routing_max_tokens or 50
+                routing_kwargs["max_tokens"] = self.routing_max_tokens or 250
                 routing_kwargs["temperature"] = 0.0
 
             response = await asyncio.to_thread(self.routing_client.chat.completions.create, **routing_kwargs)
@@ -354,26 +359,30 @@ class GraphAgent(BaseAgent):
                 function_name = tool_call.function.name
                 function_args = json.loads(tool_call.function.arguments) if tool_call.function.arguments else {}
 
-                logger.info(f"Routing decision: {function_name} (latency: {latency_ms:.1f}ms)")
+                # Pop reasoning and confidence before they pollute extracted_params/context_data
+                reasoning = function_args.pop('reasoning', None)
+                confidence = function_args.pop('confidence', None)
+
+                logger.info(f"Routing decision: {function_name} | confidence: {confidence} | reasoning: {reasoning} (latency: {latency_ms:.1f}ms)")
 
                 if function_name == "stay_on_current_node":
-                    return None, None, latency_ms, messages, tools
+                    return None, None, latency_ms, messages, tools, reasoning, confidence
 
                 # Find the edge for this function
                 edge = self._get_edge_by_function_name(current_node, function_name)
                 if edge:
-                    return edge['to_node_id'], function_args, latency_ms, messages, tools
+                    return edge['to_node_id'], function_args, latency_ms, messages, tools, reasoning, confidence
                 else:
                     logger.warning(f"Function {function_name} not found in edges")
-                    return None, None, latency_ms, messages, tools
+                    return None, None, latency_ms, messages, tools, reasoning, confidence
             else:
                 logger.warning("No tool call in response")
-                return None, None, latency_ms, messages, tools
+                return None, None, latency_ms, messages, tools, None, None
 
         except Exception as e:
             latency_ms = (time.perf_counter() - start_time) * 1000
             logger.error(f"Routing error: {e} (latency: {latency_ms:.1f}ms)")
-            return None, None, latency_ms, messages, tools
+            return None, None, latency_ms, messages, tools, None, None
 
     def get_node_by_id(self, node_id: str) -> Optional[dict]:
         return next((node for node in self.config.get('nodes', []) if node['id'] == node_id), None)
@@ -471,7 +480,7 @@ class GraphAgent(BaseAgent):
 
         try:
             previous_node = self.current_node_id
-            next_node_id, extracted_params, routing_latency_ms, routing_messages, routing_tools = await self.decide_next_node_with_functions(message)
+            next_node_id, extracted_params, routing_latency_ms, routing_messages, routing_tools, reasoning, confidence = await self.decide_next_node_with_functions(message)
 
             if next_node_id:
                 logger.info(f"Transitioning: {self.current_node_id} -> {next_node_id} (params: {extracted_params})")
@@ -495,6 +504,8 @@ class GraphAgent(BaseAgent):
                     'node_history': list(self.node_history),
                     'routing_messages': routing_messages,
                     'routing_tools': routing_tools,
+                    'reasoning': reasoning,
+                    'confidence': confidence,
                 }
             }
 
