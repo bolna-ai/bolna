@@ -146,3 +146,35 @@ class ResponseItemType(str, Enum):
     @classmethod
     def all_values(cls):
         return [e.value for e in cls]
+
+
+class AsteriskEvent(str, Enum):
+    """Asterisk WebSocket channel control events (chan_websocket)."""
+    MEDIA_START = "MEDIA_START"
+    MEDIA_XOFF = "MEDIA_XOFF"
+    MEDIA_XON = "MEDIA_XON"
+    DTMF_END = "DTMF_END"
+    QUEUE_DRAINED = "QUEUE_DRAINED"
+    STATUS = "STATUS"
+    MEDIA_BUFFERING_COMPLETED = "MEDIA_BUFFERING_COMPLETED"
+
+
+class AsteriskCommand(str, Enum):
+    """Asterisk WebSocket channel commands sent by the application."""
+    START_MEDIA_BUFFERING = "START_MEDIA_BUFFERING"
+    STOP_MEDIA_BUFFERING = "STOP_MEDIA_BUFFERING"
+    FLUSH_MEDIA = "FLUSH_MEDIA"
+    REPORT_QUEUE_DRAINED = "REPORT_QUEUE_DRAINED"
+    HANGUP = "HANGUP"
+
+
+class AudioFormat(str, Enum):
+    """Audio encoding formats."""
+    ULAW = "ulaw"
+    MULAW = "mulaw"
+    PCM = "pcm"
+    WAV = "wav"
+
+    @classmethod
+    def is_compressed(cls, fmt: str) -> bool:
+        return fmt in (cls.ULAW.value, cls.MULAW.value)
