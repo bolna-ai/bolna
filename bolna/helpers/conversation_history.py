@@ -75,7 +75,13 @@ class ConversationHistory:
                     continue
                 updated = update_fn(original, response_heard)
                 if not updated or not updated.strip():
+                    has_tool_calls = bool(msgs[i].get("tool_calls"))
                     msgs.pop(i)
+                    # If the removed assistant had tool_calls, also remove its
+                    # dependent tool-role messages to keep the history valid.
+                    if has_tool_calls:
+                        while i < len(msgs) and msgs[i].get("role") == ChatRole.TOOL:
+                            msgs.pop(i)
                 else:
                     msgs[i]["content"] = updated
                 break
@@ -93,7 +99,44 @@ class ConversationHistory:
         return self._messages[-1].get("content") if self._messages else None
 
     def get_copy(self) -> list[dict]:
+        self._sanitize_tool_messages(self._messages)
         return copy.deepcopy(self._messages)
+
+    @staticmethod
+    def _sanitize_tool_messages(msgs: list[dict]):
+        """Remove orphaned tool-role messages that have no preceding assistant with tool_calls.
+
+        OpenAI requires every message with role='tool' to follow an assistant
+        message that contains a matching 'tool_calls' entry.  Interruptions can
+        cause the assistant message to be popped/trimmed while the tool result
+        stays, producing an invalid sequence.  This method walks the list and
+        removes any tool messages whose pairing is broken.
+        """
+        i = 0
+        while i < len(msgs):
+            if msgs[i].get("role") == ChatRole.TOOL:
+                # Walk backwards to find the nearest assistant with tool_calls
+                tool_call_id = msgs[i].get("tool_call_id", "")
+                found_parent = False
+                for j in range(i - 1, -1, -1):
+                    if msgs[j].get("role") == ChatRole.ASSISTANT and msgs[j].get("tool_calls"):
+                        # Check if this assistant message contains a matching tool_call id
+                        for tc in msgs[j]["tool_calls"]:
+                            tc_id = tc.get("id", "") if isinstance(tc, dict) else ""
+                            if tc_id == tool_call_id:
+                                found_parent = True
+                                break
+                        break  # stop at the nearest assistant with tool_calls
+                    if msgs[j].get("role") == ChatRole.USER:
+                        break  # crossed a user boundary, no parent
+                if not found_parent:
+                    logger.warning(
+                        f"Removing orphaned tool message at index {i} "
+                        f"(tool_call_id={tool_call_id}): no matching assistant with tool_calls"
+                    )
+                    msgs.pop(i)
+                    continue
+            i += 1
 
     def is_duplicate_user(self, content: str) -> bool:
         if not self._messages:
