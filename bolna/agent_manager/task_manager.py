@@ -21,7 +21,7 @@ from .base_manager import BaseManager
 from .interruption_manager import InterruptionManager
 from bolna.agent_types import *
 from bolna.providers import *
-from bolna.enums import TelephonyProvider
+from bolna.enums import TaskType, TelephonyProvider
 from bolna.prompts import *
 from bolna.helpers.language_detector import LanguageDetector
 from bolna.helpers.utils import structure_system_prompt, compute_function_pre_call_message, select_message_by_language, get_date_time_from_timezone, calculate_audio_duration, create_ws_data_packet, get_file_names_in_directory, get_raw_audio_bytes, is_valid_md5, \
@@ -29,6 +29,10 @@ from bolna.helpers.utils import structure_system_prompt, compute_function_pre_ca
 from bolna.helpers.logger_config import configure_logger
 from ..helpers.mark_event_meta_data import MarkEventMetaData
 from ..helpers.observable_variable import ObservableVariable
+from .setup_factories import (
+    setup_input_handlers, setup_output_handlers, setup_transcriber,
+    setup_synthesizer, setup_llm, get_agent_object, setup_tasks
+)
 
 logger = configure_logger(__name__)
 
@@ -155,8 +159,8 @@ class TaskManager(BaseManager):
             else:
                 self.should_record = self.task_config["tools_config"]["output"]["provider"] == 'default' and self.enforce_streaming #In this case, this is a websocket connection and we should record
 
-            self.__setup_input_handlers(turn_based_conversation, input_queue, self.should_record)
-        self.__setup_output_handlers(turn_based_conversation, output_queue)
+            setup_input_handlers(self, turn_based_conversation, input_queue, self.should_record)
+        setup_output_handlers(self, turn_based_conversation, output_queue)
 
         self.first_message_task_new = asyncio.create_task(self.message_task_new())
 
@@ -212,14 +216,14 @@ class TaskManager(BaseManager):
 
         self.llm_config_map = {}
         self.llm_agent_map = {}
-        if self.__is_multiagent():
+        if self._is_multiagent():
             for agent, config in self.task_config["tools_config"]["llm_agent"]['llm_config']['agent_map'].items():
                 self.llm_config_map[agent] = config.copy()
                 self.llm_config_map[agent]['buffer_size'] = self.task_config["tools_config"]["synthesizer"][
                     'buffer_size']
         else:
             if self.task_config["tools_config"]["llm_agent"] is not None:
-                if self.__is_knowledgebase_agent():
+                if self._is_knowledgebase_agent():
                     self.llm_agent_config = self.task_config["tools_config"]["llm_agent"]
                     self.llm_config = {
                         "model": self.llm_agent_config['llm_config']['model'],
@@ -228,7 +232,7 @@ class TaskManager(BaseManager):
                         "buffer_size": self.task_config["tools_config"]["synthesizer"].get('buffer_size'),
                         "temperature": self.llm_agent_config['llm_config']['temperature']
                     }
-                elif self.__is_graph_agent():
+                elif self._is_graph_agent():
                     self.llm_agent_config = self.task_config["tools_config"]["llm_agent"]
                     self.llm_config = {
                         "model": self.llm_agent_config['llm_config']['model'],
@@ -416,8 +420,8 @@ class TaskManager(BaseManager):
                     self.soundtrack = f"{self.conversation_config.get('ambient_noise_track', 'coffee-shop')}.wav"
 
         # setting transcriber and synthesizer in parallel
-        self.__setup_transcriber()
-        self.__setup_synthesizer(self.llm_config)
+        setup_transcriber(self)
+        setup_synthesizer(self, self.llm_config)
         if not self.turn_based_conversation and task_id == 0:
             self.synthesizer_monitor_task = asyncio.create_task(self.tools['synthesizer'].monitor_connection())
 
@@ -428,30 +432,30 @@ class TaskManager(BaseManager):
 
         # setting llm
         if self.llm_config is not None:
-            llm = self.__setup_llm(self.llm_config, task_id)
+            llm = setup_llm(self, self.llm_config, task_id)
             #Setup tasks
             agent_params = {
                 'llm': llm,
                 'agent_type': self.llm_agent_config.get("agent_type","simple_llm_agent")
             }
-            self.__setup_tasks(**agent_params)
+            setup_tasks(self, **agent_params)
 
-        elif self.__is_multiagent():
+        elif self._is_multiagent():
             # Setup task for multiagent conversation
             for agent in self.task_config["tools_config"]["llm_agent"]['llm_config']['agent_map']:
                 if 'routes' in self.llm_config_map[agent]:
                     del self.llm_config_map[agent]['routes'] #Remove routes from here as it'll create conflict ahead
-                llm = self.__setup_llm(self.llm_config_map[agent])
+                llm = setup_llm(self, self.llm_config_map[agent])
                 agent_type = self.llm_config_map[agent].get("agent_type", "simple_llm_agent")
                 logger.info(f"Getting response for {llm} and agent type {agent_type} and {agent}")
                 agent_params = {
                     'llm': llm,
                     'agent_type': agent_type
                 }
-                llm_agent = self.__setup_tasks(**agent_params)
+                llm_agent = setup_tasks(self, **agent_params)
                 self.llm_agent_map[agent] = llm_agent
 
-        elif self.task_config["task_type"] == "webhook":
+        elif self.task_config["task_type"] == TaskType.WEBHOOK:
             if "webhookURL" in self.task_config["tools_config"]["api_tools"]:
                 webhook_url = self.task_config["tools_config"]["api_tools"]["webhookURL"]
             else:
@@ -480,20 +484,20 @@ class TaskManager(BaseManager):
         detected_lang = self.language_detector.dominant_language if hasattr(self, 'language_detector') else None
         return select_message_by_language(self.call_hangup_message_config, detected_lang)
 
-    def __is_multiagent(self):
-        if self.task_config["task_type"] == "webhook":
+    def _is_multiagent(self):
+        if self.task_config["task_type"] == TaskType.WEBHOOK:
             return False
         agent_type = self.task_config['tools_config']["llm_agent"].get("agent_type", None)
         return agent_type == "multiagent"
 
-    def __is_knowledgebase_agent(self):
-        if self.task_config["task_type"] == "webhook":
+    def _is_knowledgebase_agent(self):
+        if self.task_config["task_type"] == TaskType.WEBHOOK:
             return False
         agent_type = self.task_config['tools_config']["llm_agent"].get("agent_type", None)
         return agent_type == "knowledgebase_agent"
 
-    def __is_graph_agent(self):
-        if self.task_config["task_type"] == "webhook":
+    def _is_graph_agent(self):
+        if self.task_config["task_type"] == TaskType.WEBHOOK:
             return False
         agent_type = self.task_config['tools_config']["llm_agent"].get("agent_type", None)
         return agent_type == "graph_agent"
@@ -539,48 +543,7 @@ class TaskManager(BaseManager):
         return messages
 
     def __setup_output_handlers(self, turn_based_conversation, output_queue):
-        output_kwargs = {"websocket": self.websocket}
-
-        if self.task_config["tools_config"]["output"] is None:
-            logger.info("Not setting up any output handler as it is none")
-        elif self.task_config["tools_config"]["output"]["provider"] in SUPPORTED_OUTPUT_HANDLERS.keys():
-            #Explicitly use default for turn based conversation as we expect to use HTTP endpoints
-            if turn_based_conversation:
-                logger.info("Connected through dashboard and hence using default output handler")
-                output_handler_class = SUPPORTED_OUTPUT_HANDLERS.get("default")
-            else:
-                output_handler_class = SUPPORTED_OUTPUT_HANDLERS.get(self.task_config["tools_config"]["output"]["provider"])
-
-                if self.task_config["tools_config"]["output"]["provider"] in SUPPORTED_OUTPUT_TELEPHONY_HANDLERS.keys():
-                    output_kwargs['mark_event_meta_data'] = self.mark_event_meta_data
-                    logger.info(f"Making sure that the sampling rate for output handler is 8000")
-                    self.task_config['tools_config']['synthesizer']['provider_config']['sampling_rate'] = 8000
-                    # sip-trunk (Asterisk) uses ulaw; other telephony use pcm (handler converts to mulaw)
-                    if self.task_config["tools_config"]["output"]["provider"] == TelephonyProvider.SIP_TRUNK.value:
-                        self.task_config['tools_config']['synthesizer']['audio_format'] = 'ulaw'
-                        logger.info(f"Setting synthesizer audio format to ulaw for Asterisk sip-trunk")
-                        # Pass input handler to output handler so it can simulate mark events
-                        input_handler = self.tools.get("input")
-                        output_kwargs['input_handler'] = input_handler
-                        output_kwargs['asterisk_media_start'] = (self.context_data or {}).get("media_start_data")
-                        output_kwargs['agent_config'] = {"tasks": [self.task_config]}
-                        logger.info(f"Passing input_handler to sip-trunk output handler for mark event simulation: {input_handler is not None}")
-                    else:
-                        self.task_config['tools_config']['synthesizer']['audio_format'] = 'pcm'
-                else:
-                    self.task_config['tools_config']['synthesizer']['provider_config']['sampling_rate'] = 24000
-                    output_kwargs['queue'] = output_queue
-                self.sampling_rate = self.task_config['tools_config']['synthesizer']['provider_config']['sampling_rate']
-
-            if self.task_config["tools_config"]["output"]["provider"] == "default":
-                output_kwargs["is_web_based_call"] = self.is_web_based_call
-                output_kwargs['mark_event_meta_data'] = self.mark_event_meta_data
-
-            self.tools["output"] = output_handler_class(**output_kwargs)
-            self.output_handler_set = True
-            logger.info("output handler set")
-        else:
-            raise "Other input handlers not supported yet"
+        setup_output_handlers(self, turn_based_conversation, output_queue)
 
     async def message_task_new(self):
         tasks = []
@@ -594,38 +557,7 @@ class TaskManager(BaseManager):
             await asyncio.gather(*tasks)
 
     def __setup_input_handlers(self, turn_based_conversation, input_queue, should_record):
-        if self.task_config["tools_config"]["input"]["provider"] in SUPPORTED_INPUT_HANDLERS.keys():
-            input_kwargs = {
-                "queues": self.queues,
-                "websocket": self.websocket,
-                "input_types": get_required_input_types(self.task_config),
-                "mark_event_meta_data": self.mark_event_meta_data,
-                "is_welcome_message_played": True if self.task_config["tools_config"]["output"]["provider"] == 'default' and not self.is_web_based_call else False
-            }
-
-            if should_record:
-                input_kwargs['conversation_recording'] = self.conversation_recording
-
-            if self.turn_based_conversation:
-                input_kwargs['turn_based_conversation'] = True
-                input_handler_class = SUPPORTED_INPUT_HANDLERS.get("default")
-                input_kwargs['queue'] = input_queue
-            else:
-                input_handler_class = SUPPORTED_INPUT_HANDLERS.get(
-                    self.task_config["tools_config"]["input"]["provider"])
-
-                if self.task_config['tools_config']['input']['provider'] == 'default':
-                    input_kwargs['queue'] = input_queue
-
-                input_kwargs["observable_variables"] = self.observable_variables
-
-                # Asterisk (sip-trunk): pass context data for pre-parsed MEDIA_START
-                if self.task_config["tools_config"]["input"]["provider"] == TelephonyProvider.SIP_TRUNK.value and self.context_data:
-                    input_kwargs["ws_context_data"] = self.context_data
-                    input_kwargs["agent_config"] = {"tasks": [self.task_config]}
-            self.tools["input"] = input_handler_class(**input_kwargs)
-        else:
-            raise "Other input handlers not supported yet"
+        setup_input_handlers(self, turn_based_conversation, input_queue, should_record)
 
     async def __forced_first_message(self, timeout=10.0):
         logger.info(f"Executing the first message task")
@@ -702,182 +634,19 @@ class TaskManager(BaseManager):
         return
 
     def __setup_transcriber(self):
-        try:
-            if self.task_config["tools_config"]["transcriber"] is not None:
-                self.language = self.task_config["tools_config"]["transcriber"].get('language', DEFAULT_LANGUAGE_CODE)
-                if self.turn_based_conversation:
-                    provider = "playground"
-                elif self.is_web_based_call:
-                    provider = "web_based_call"
-                else:
-                    provider = self.task_config["tools_config"]["input"]["provider"]
-
-                self.task_config["tools_config"]["transcriber"]["input_queue"] = self.audio_queue
-                self.task_config['tools_config']["transcriber"]["output_queue"] = self.transcriber_output_queue
-
-                # Configure encoding for Asterisk/sip-trunk (uses ulaw like Twilio)
-                if provider == TelephonyProvider.SIP_TRUNK.value:
-                    self.task_config["tools_config"]["transcriber"]["encoding"] = "mulaw"
-                    self.task_config["tools_config"]["transcriber"]["sampling_rate"] = 8000
-                    logger.info(f"Configured transcriber for Asterisk sip-trunk with mulaw encoding @ 8kHz")
-
-                # Checking models for backwards compatibility
-                if self.task_config["tools_config"]["transcriber"]["model"] in SUPPORTED_TRANSCRIBER_MODELS.keys() or self.task_config["tools_config"]["transcriber"]["provider"] in SUPPORTED_TRANSCRIBER_PROVIDERS.keys():
-                    if self.turn_based_conversation:
-                        self.task_config["tools_config"]["transcriber"]["stream"] = True if self.enforce_streaming else False
-                        logger.info(f'self.task_config["tools_config"]["transcriber"]["stream"] {self.task_config["tools_config"]["transcriber"]["stream"]} self.enforce_streaming {self.enforce_streaming}')
-                    if 'provider' in self.task_config["tools_config"]["transcriber"]:
-                        transcriber_class = SUPPORTED_TRANSCRIBER_PROVIDERS.get(
-                            self.task_config["tools_config"]["transcriber"]["provider"])
-                    else:
-                        transcriber_class = SUPPORTED_TRANSCRIBER_MODELS.get(
-                            self.task_config["tools_config"]["transcriber"]["model"])
-                    self.tools["transcriber"] = transcriber_class(provider, **self.task_config["tools_config"]["transcriber"], **self.kwargs)
-        except Exception as e:
-            logger.error(f"Something went wrong with starting transcriber {e}")
+        setup_transcriber(self)
 
     def __setup_synthesizer(self, llm_config=None):
-        if self._is_conversation_task():
-            self.kwargs["use_turbo"] = self.task_config["tools_config"]["transcriber"]["language"] == DEFAULT_LANGUAGE_CODE
-        if self.task_config["tools_config"]["synthesizer"] is not None:
-            if "caching" in self.task_config['tools_config']['synthesizer']:
-                caching = self.task_config["tools_config"]["synthesizer"].pop("caching")
-            else:
-                caching = True
-
-            self.synthesizer_provider = self.task_config["tools_config"]["synthesizer"].pop("provider")
-            synthesizer_class = SUPPORTED_SYNTHESIZER_MODELS.get(self.synthesizer_provider)
-            provider_config = self.task_config["tools_config"]["synthesizer"].pop("provider_config")
-            self.synthesizer_voice = provider_config["voice"]
-            if self.turn_based_conversation:
-                self.task_config["tools_config"]["synthesizer"]["audio_format"] = "mp3" # Hard code mp3 if we're connected through dashboard
-                self.task_config["tools_config"]["synthesizer"]["stream"] = True if self.enforce_streaming else False #Hardcode stream to be False as we don't want to get blocked by a __listen_synthesizer co-routine
-
-            # Configure use_mulaw for Asterisk/sip-trunk to ensure synthesizer outputs ulaw
-            synthesizer_kwargs = self.kwargs.copy()
-            if self.task_config["tools_config"]["output"]["provider"] == TelephonyProvider.SIP_TRUNK.value:
-                synthesizer_kwargs['use_mulaw'] = True
-                logger.info(f"[SIP-TRUNK] Configuring synthesizer with use_mulaw=True for Asterisk sip-trunk")
-            
-            self.tools["synthesizer"] = synthesizer_class(**self.task_config["tools_config"]["synthesizer"], **provider_config, **synthesizer_kwargs, caching=caching)
-            # if not self.turn_based_conversation:
-            #     self.synthesizer_monitor_task = asyncio.create_task(self.tools['synthesizer'].monitor_connection())
-            if self.task_config["tools_config"]["llm_agent"] is not None and llm_config is not None:
-                llm_config["buffer_size"] = self.task_config["tools_config"]["synthesizer"].get('buffer_size')
+        setup_synthesizer(self, llm_config)
 
     def __setup_llm(self, llm_config, task_id=0):
-        if self.task_config["tools_config"]["llm_agent"] is not None:
-            if task_id and task_id > 0:
-                self.kwargs.pop('llm_key', None)
-                self.kwargs.pop('base_url', None)
-                self.kwargs.pop('api_version', None)
-
-                if self._is_summarization_task() or self._is_extraction_task():
-                    llm_config['model'] = LLM_DEFAULT_CONFIGS["summarization"]["model"]
-                    llm_config['provider'] = LLM_DEFAULT_CONFIGS["summarization"]["provider"]
-
-            if llm_config["provider"] in SUPPORTED_LLM_PROVIDERS.keys():
-                llm_class = SUPPORTED_LLM_PROVIDERS.get(llm_config["provider"])
-                llm = llm_class(language=self.language, **llm_config, **self.kwargs)
-                return llm
-            else:
-                raise Exception(f'LLM {llm_config["provider"]} not supported')
+        return setup_llm(self, llm_config, task_id)
 
     def __get_agent_object(self, llm, agent_type, assistant_config=None):
-        self.agent_type = agent_type
-        if agent_type == "simple_llm_agent":
-            llm_agent = StreamingContextualAgent(llm)
-        elif agent_type == "graph_agent":
-            logger.info("Setting up graph agent with rag-proxy-server support")
-            llm_config = self.task_config["tools_config"]["llm_agent"].get("llm_config", {})
-            rag_server_url = self.kwargs.get('rag_server_url', os.getenv('RAG_SERVER_URL', 'http://localhost:8000'))
-
-            logger.info(f"Graph agent config: {llm_config}")
-            logger.info(f"RAG server URL: {rag_server_url}")
-
-            # Set RAG server URL in environment for GraphAgent to use
-            os.environ['RAG_SERVER_URL'] = rag_server_url
-
-            # Inject provider credentials for routing and response generation
-            injected_cfg = dict(llm_config)
-            if 'llm_key' in self.kwargs:
-                injected_cfg['llm_key'] = self.kwargs['llm_key']
-            if 'base_url' in self.kwargs:
-                injected_cfg['base_url'] = self.kwargs['base_url']
-
-            # Pass context_data for variable replacement in node prompts
-            if self.context_data:
-                injected_cfg['context_data'] = self.context_data
-
-            if 'api_version' in self.kwargs:
-                injected_cfg['api_version'] = self.kwargs['api_version']
-            if 'api_tools' in self.kwargs:
-                injected_cfg['api_tools'] = self.kwargs['api_tools']
-            if 'reasoning_effort' in self.kwargs:
-                injected_cfg['reasoning_effort'] = self.kwargs['reasoning_effort']
-            if 'service_tier' in self.kwargs:
-                injected_cfg['service_tier'] = self.kwargs['service_tier']
-            if 'routing_reasoning_effort' in self.kwargs:
-                injected_cfg['routing_reasoning_effort'] = self.kwargs['routing_reasoning_effort']
-            if 'routing_max_tokens' in self.kwargs:
-                injected_cfg['routing_max_tokens'] = self.kwargs['routing_max_tokens']
-            if self.llm_config.get('use_responses_api'):
-                injected_cfg['use_responses_api'] = True
-            injected_cfg['buffer_size'] = self.task_config["tools_config"]["synthesizer"].get('buffer_size')
-            injected_cfg['language'] = self.language
-
-            llm_agent = GraphAgent(injected_cfg)
-            logger.info("Graph agent created with rag-proxy-server support")
-        elif agent_type == "knowledgebase_agent":
-            logger.info("Setting up knowledge agent with rag-proxy-server support")
-            llm_config = self.task_config["tools_config"]["llm_agent"].get("llm_config", {})
-            rag_server_url = self.kwargs.get('rag_server_url', os.getenv('RAG_SERVER_URL', 'http://localhost:8000'))
-            
-            logger.info(f"Knowledge agent config: {llm_config}")
-            logger.info(f"RAG server URL: {rag_server_url}")
-            
-            # Set RAG server URL in environment for KnowledgeAgent to use
-            os.environ['RAG_SERVER_URL'] = rag_server_url
-            
-            # Inject provider credentials and endpoints into KnowledgeAgent config
-            injected_cfg = dict(llm_config)
-            if 'llm_key' in self.kwargs:
-                injected_cfg['llm_key'] = self.kwargs['llm_key']
-            if 'base_url' in self.kwargs:
-                injected_cfg['base_url'] = self.kwargs['base_url']
-            if 'api_version' in self.kwargs:
-                injected_cfg['api_version'] = self.kwargs['api_version']
-            if 'api_tools' in self.kwargs:
-                injected_cfg['api_tools'] = self.kwargs['api_tools']
-            if 'reasoning_effort' in self.kwargs:
-                injected_cfg['reasoning_effort'] = self.kwargs['reasoning_effort']
-            if 'service_tier' in self.kwargs:
-                injected_cfg['service_tier'] = self.kwargs['service_tier']
-            if self.llm_config.get('use_responses_api'):
-                injected_cfg['use_responses_api'] = True
-            injected_cfg['buffer_size'] = self.task_config["tools_config"]["synthesizer"].get('buffer_size')
-            injected_cfg['language'] = self.language
-
-            llm_agent = KnowledgeBaseAgent(injected_cfg)
-            logger.info("Knowledge agent created with rag-proxy-server support")
-        else:
-            raise f"{agent_type} Agent type is not created yet"
-        return llm_agent
+        return get_agent_object(self, llm, agent_type, assistant_config)
 
     def __setup_tasks(self, llm=None, agent_type=None, assistant_config=None):
-        if self.task_config["task_type"] == "conversation" and not self.__is_multiagent():
-            self.tools["llm_agent"] = self.__get_agent_object(llm, agent_type, assistant_config)
-        elif self.__is_multiagent():
-            return self.__get_agent_object(llm, agent_type, assistant_config)
-        elif self.task_config["task_type"] == "extraction":
-            logger.info("Setting up extraction agent")
-            self.tools["llm_agent"] = ExtractionContextualAgent(llm, prompt=self.system_prompt)
-            self.extracted_data = None
-        elif self.task_config["task_type"] == "summarization":
-            logger.info("Setting up summarization agent")
-            self.tools["llm_agent"] = SummarizationContextualAgent(llm, prompt=self.system_prompt)
-            self.summarized_data = None
-        logger.info("prompt and config setup completed")
+        return setup_tasks(self, llm, agent_type, assistant_config)
 
 
     ########################
@@ -894,7 +663,7 @@ class TaskManager(BaseManager):
         return f"{enriched_prompt}\n{notes}\n{DATE_PROMPT.format(today, current_time, current_timezone)}"
 
     async def load_prompt(self, assistant_name, task_id, local, **kwargs):
-        if self.task_config["task_type"] == "webhook":
+        if self.task_config["task_type"] == TaskType.WEBHOOK:
             return
 
         agent_type = self.task_config["tools_config"]["llm_agent"].get("agent_type", "simple_llm_agent")
@@ -909,7 +678,7 @@ class TaskManager(BaseManager):
             prompt_responses = await get_prompt_responses(assistant_id=self.assistant_id, local=self.is_local)
 
         current_task = "task_{}".format(task_id + 1)
-        if self.__is_multiagent():
+        if self._is_multiagent():
             logger.info(f"Getting {current_task} from prompt responses of type {type(prompt_responses)}, prompt responses key {prompt_responses.keys()}")
             prompts = prompt_responses.get(current_task, None)
             self.prompt_map = {}
@@ -960,7 +729,7 @@ class TaskManager(BaseManager):
 
         # If using knowledge_agent, inject the prompt into agent config so agent can read it
         try:
-            if self.__is_knowledgebase_agent() and 'llm_agent' in self.task_config['tools_config']:
+            if self._is_knowledgebase_agent() and 'llm_agent' in self.task_config['tools_config']:
                 if 'llm_config' in self.task_config['tools_config']['llm_agent']:
                     self.task_config['tools_config']['llm_agent']['llm_config']['prompt'] = self.system_prompt['content']
         except Exception as e:
@@ -972,12 +741,12 @@ class TaskManager(BaseManager):
             self.timezone = pytz.timezone(self.context_data['recipient_data']['timezone'])
         current_date, current_time = get_date_time_from_timezone(self.timezone)
 
-        if not prompt and task_type in ('extraction', 'summarization'):
-            if task_type == 'extraction':
+        if not prompt and task_type in (TaskType.EXTRACTION, TaskType.SUMMARIZATION):
+            if task_type == TaskType.EXTRACTION:
                 extraction_json = task.get("tools_config").get('llm_agent', {}).get('llm_config', {}).get('extraction_json')
                 prompt = EXTRACTION_PROMPT.format(current_date, current_time, self.timezone, extraction_json)
                 return {"system_prompt": prompt}
-            elif task_type == 'summarization':
+            elif task_type == TaskType.SUMMARIZATION:
                 return {"system_prompt": SUMMARIZATION_PROMPT}
         return prompt
 
@@ -1166,13 +935,13 @@ class TaskManager(BaseManager):
         return sequence, meta_info
 
     def _is_extraction_task(self):
-        return self.task_config["task_type"] == "extraction"
+        return self.task_config["task_type"] == TaskType.EXTRACTION
 
     def _is_summarization_task(self):
-        return self.task_config["task_type"] == "summarization"
+        return self.task_config["task_type"] == TaskType.SUMMARIZATION
 
     def _is_conversation_task(self):
-        return self.task_config["task_type"] == "conversation"
+        return self.task_config["task_type"] == TaskType.CONVERSATION
 
     def _get_next_step(self, sequence, origin):
         try:
@@ -1191,7 +960,7 @@ class TaskManager(BaseManager):
             self.stream_sid = message['meta_info']["stream_sid"]
 
     async def _process_followup_task(self, message=None):
-        if self.task_config["task_type"] == "webhook":
+        if self.task_config["task_type"] == TaskType.WEBHOOK:
             logger.info(f"Input patrameters {self.input_parameters}")
             extraction_details = self.input_parameters.get('extraction_details', {})
             logger.info(f"DOING THE POST REQUEST TO WEBHOOK {extraction_details}")
@@ -1208,7 +977,7 @@ class TaskManager(BaseManager):
             json_data = await self.tools["llm_agent"].generate(self.history)
             latency_ms = (time.time() - start_time) * 1000
             
-            if self.task_config["task_type"] == "summarization":
+            if self.task_config["task_type"] == TaskType.SUMMARIZATION:
                 self.summarized_data = json_data["summary"]
                 self.llm_latencies['other_latencies'].append({
                     'type': 'summarization',
@@ -1504,7 +1273,7 @@ class TaskManager(BaseManager):
         get_res_keys, get_res_values = await computed_api_response(function_response)
 
         # Merge API response data into context_data for routing decisions
-        if self.__is_graph_agent():
+        if self._is_graph_agent():
             try:
                 response_data = json.loads(function_response) if isinstance(function_response, str) else function_response
                 if isinstance(response_data, dict):
@@ -1721,7 +1490,7 @@ class TaskManager(BaseManager):
         messages = copy.deepcopy(self.history)
 
         # Request logs converted inside do_llm_generation for knowledgebase agent
-        if not self.__is_knowledgebase_agent() and not self.__is_graph_agent():
+        if not self._is_knowledgebase_agent() and not self._is_graph_agent():
             convert_to_request_log(message=format_messages(messages, use_system_prompt=True), meta_info=meta_info, component="llm", direction="request", model=self.llm_config["model"], run_id= self.run_id)
 
         await self.__do_llm_generation(messages, meta_info, next_step, should_bypass_synth)
@@ -2816,7 +2585,7 @@ class TaskManager(BaseManager):
             else:
                 # Run agent followup tasks
                 try:
-                    if self.task_config["task_type"] == "webhook":
+                    if self.task_config["task_type"] == TaskType.WEBHOOK:
                         await self._process_followup_task()
                     else:
                         await self._run_llm_task(self.input_parameters)
@@ -2926,21 +2695,21 @@ class TaskManager(BaseManager):
                     output['recording_url'] = await save_audio_file_to_s3(self.conversation_recording, self.sampling_rate, self.assistant_id, self.run_id)
             else:
                 output = self.input_parameters
-                if self.task_config["task_type"] == "extraction":
+                if self.task_config["task_type"] == TaskType.EXTRACTION:
                     output = { "extracted_data" : self.extracted_data,
-                              "task_type": "extraction",
+                              "task_type": TaskType.EXTRACTION,
                               "latency_dict": {
                                 "llm_latencies": self.llm_latencies
                             }}
-                elif self.task_config["task_type"] == "summarization":
+                elif self.task_config["task_type"] == TaskType.SUMMARIZATION:
                     logger.info(f"self.summarized_data {self.summarized_data}")
                     output = {"summary" : self.summarized_data,
-                              "task_type": "summarization",
+                              "task_type": TaskType.SUMMARIZATION,
                               "latency_dict": {
                                 "llm_latencies": self.llm_latencies
                             }}
-                elif self.task_config["task_type"] == "webhook":
-                    output = {"status": self.webhook_response, "task_type": "webhook"}
+                elif self.task_config["task_type"] == TaskType.WEBHOOK:
+                    output = {"status": self.webhook_response, "task_type": TaskType.WEBHOOK}
                     
 
             await asyncio.gather(*tasks_to_cancel)

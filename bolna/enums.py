@@ -1,6 +1,13 @@
 from enum import Enum
 
 
+class TaskType(str, Enum):
+    CONVERSATION = "conversation"
+    EXTRACTION = "extraction"
+    SUMMARIZATION = "summarization"
+    WEBHOOK = "webhook"
+
+
 class ChatRole(str, Enum):
     """Chat message roles."""
     SYSTEM = "system"
