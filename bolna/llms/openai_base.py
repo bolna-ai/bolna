@@ -129,6 +129,9 @@ class OpenAICompatibleLLM(BaseLLM):
             reasoning_effort = self.model_args.get("reasoning_effort")
             if reasoning_effort:
                 create_kwargs["reasoning"] = {"effort": reasoning_effort}
+            verbosity = self.model_args.get("verbosity")
+            if verbosity:
+                create_kwargs["verbosity"] = verbosity
 
         if self.previous_response_id:
             create_kwargs["previous_response_id"] = self.previous_response_id
@@ -322,6 +325,9 @@ class OpenAICompatibleLLM(BaseLLM):
             reasoning_effort = self.model_args.get("reasoning_effort")
             if reasoning_effort:
                 create_kwargs["reasoning"] = {"effort": reasoning_effort}
+            verbosity = self.model_args.get("verbosity")
+            if verbosity:
+                create_kwargs["verbosity"] = verbosity
 
         if self.previous_response_id:
             create_kwargs["previous_response_id"] = self.previous_response_id
