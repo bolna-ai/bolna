@@ -73,6 +73,7 @@ class TaskManager(BaseManager):
         self.task_id = task_id
         self.assistant_name = assistant_name
         self.tools = {}
+        self.multilingual_prompts = {}
         self.websocket = ws
         self.context_data = context_data
         self.turn_based_conversation = turn_based_conversation
@@ -1079,6 +1080,20 @@ class TaskManager(BaseManager):
         if task_id == 0 and self.kwargs.get('agent_welcome_message'):
             welcome_msg = self.kwargs['agent_welcome_message']
         self.conversation_history.setup_system_prompt(self.system_prompt, welcome_msg)
+
+        self.multilingual_prompts = {}
+        raw_multilingual = prompt_responses.get(current_task, {}).get('multilingual_prompts', {})
+        if raw_multilingual and not self.__is_multiagent():
+            for lang_code, lang_prompt in raw_multilingual.items():
+                enriched = structure_system_prompt(lang_prompt, self.run_id, self.assistant_id,
+                                                   self.call_sid, self.context_data, self.timezone,
+                                                   self.is_web_based_call)
+                notes = ""
+                if self._is_conversation_task() and self.use_fillers:
+                    notes = "### Note:\n"
+                    notes += f"1.{FILLER_PROMPT}\n"
+                self.multilingual_prompts[lang_code] = f"\n## Agent Prompt:\n\n{enriched}\n{notes}\n\n## Transcript:\n"
+            logger.info(f"Loaded multilingual prompts for languages: {list(self.multilingual_prompts.keys())}")
 
         # If using knowledge_agent, inject the prompt into agent config so agent can read it
         try:
@@ -2390,6 +2405,12 @@ class TaskManager(BaseManager):
             await self.tools["transcriber"].switch(label)
         if "synthesizer" in components and isinstance(self.tools.get("synthesizer"), SynthesizerPool):
             await self.tools["synthesizer"].switch(label)
+
+        if label in self.multilingual_prompts:
+            new_prompt = self.multilingual_prompts[label]
+            self.conversation_history.update_system_prompt(new_prompt)
+            self.system_prompt['content'] = new_prompt
+            logger.info(f"Switched system prompt to language '{label}'")
 
     async def __listen_synthesizer(self):
         all_text_to_be_synthesized = []
