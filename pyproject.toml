@@ -25,6 +25,10 @@ dev = ["pip-tools", "pytest", "pytest-asyncio"]
 
 [tool.setuptools]
 package-dir = {"bolna" = "bolna"}
+include-package-data = true
+
+[tool.setuptools.package-data]
+bolna = ["helpers/noise_pcm/*"]
 
 [tool.setuptools.dynamic]
 dependencies = {file = ["requirements.txt"]}
