@@ -99,3 +99,18 @@ SARVAM_MODEL_SAMPLING_RATE_MAPPING = {
     "bulbul:v2": 22050,
     "bulbul:v3": 22050 # NOTE: Documentation claims 24000, but WAV header shows 22050
 }
+
+
+# Models not listed here have no restrictions (all values are allowed).
+MODEL_REASONING_EFFORT_MAP = {
+    "gpt-5": ["minimal", "low", "medium", "high"],
+    "gpt-5-mini": ["minimal", "low", "medium", "high"],
+    "gpt-5-nano": ["minimal", "low", "medium", "high"],
+    "gpt-5-codex": ["low", "medium", "high"],
+    "gpt-5-pro": ["high"],
+    "gpt-5.1": ["none", "low", "medium", "high"],
+    "gpt-5.1-codex": ["low", "medium", "high"],
+    "gpt-5.1-codex-max": ["low", "medium", "high", "xhigh"],
+    "gpt-5.1-codex-mini": ["low", "medium", "high"],
+    "gpt-5.2": ["none", "low", "medium", "high", "xhigh"],
+}

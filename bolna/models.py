@@ -4,6 +4,7 @@ from pydantic import BaseModel, Field, field_validator, ValidationError, Json, m
 from pydantic_core import PydanticCustomError
 from .providers import *
 from .enums import TelephonyProvider, SynthesizerProvider, TranscriberProvider, ReasoningEffort, Verbosity
+from .constants import MODEL_REASONING_EFFORT_MAP
 
 AGENT_WELCOME_MESSAGE = "This call is being recorded for quality assurance and training. Please speak now."
 
@@ -12,6 +13,20 @@ def validate_attribute(value, allowed_values, value_type='provider'):
     if value not in allowed_values:
         raise ValueError(f"Invalid value for {value_type}:'{value}' provided. Supported values: {allowed_values}.")
     return value
+
+
+def validate_reasoning_effort_for_model(model: str, reasoning_effort: str) -> None:
+    if "gpt" not in model:
+        return
+
+    if "/" in model:
+        model = model.split("/")[-1]
+
+    supported = MODEL_REASONING_EFFORT_MAP.get(model, None)
+    if supported is not None and reasoning_effort not in supported:
+        raise ValueError(
+            f"reasoning_effort '{reasoning_effort}' is not supported for model '{model}'."
+        )
 
 
 class PollyConfig(BaseModel):
@@ -234,6 +249,13 @@ class Llm(BaseModel):
     verbosity: Optional[Verbosity] = None
     use_responses_api: Optional[bool] = False
 
+    @model_validator(mode="after")
+    def validate_reasoning_effort_for_model(self):
+        if self.reasoning_effort is not None and self.model is not None:
+            effort_value = self.reasoning_effort.value
+            validate_reasoning_effort_for_model(self.model, effort_value)
+        return self
+
 
 class SimpleLlmAgent(Llm):
     agent_flow_type: Optional[str] = "streaming" #It is used for backwards compatibility
@@ -304,6 +326,16 @@ class GraphAgentConfig(Llm):
     routing_instructions: Optional[str] = None  # Custom instructions for routing LLM
     routing_reasoning_effort: Optional[ReasoningEffort] = None  # GPT-5 reasoning effort: "minimal", "low", "medium", "high"
     routing_max_tokens: Optional[int] = None  # Max tokens for routing response
+
+    @model_validator(mode="after")
+    def validate_routing_reasoning_effort_for_model(self):
+        if self.routing_reasoning_effort is not None:
+            effort_value = self.routing_reasoning_effort.value
+            # Use routing_model if set, otherwise fall back to the main model
+            target_model = self.routing_model or self.model
+            if target_model is not None:
+                validate_reasoning_effort_for_model(target_model, effort_value)
+        return self
 
 class KnowledgeAgentConfig(Llm):
     agent_information: Optional[str] = "Knowledge-based AI assistant"
