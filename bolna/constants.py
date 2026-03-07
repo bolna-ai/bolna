@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+from bolna.enums import ReasoningEffort as RE
 PREPROCESS_DIR = 'agent_data'
 PCM16_SCALE = 32768.0
 
@@ -98,4 +99,17 @@ LLM_DEFAULT_CONFIGS = {
 SARVAM_MODEL_SAMPLING_RATE_MAPPING = {
     "bulbul:v2": 22050,
     "bulbul:v3": 22050 # NOTE: Documentation claims 24000, but WAV header shows 22050
+}
+
+MODEL_REASONING_EFFORT_MAP = {
+    "gpt-5":              [RE.MINIMAL, RE.LOW, RE.MEDIUM, RE.HIGH],
+    "gpt-5-mini":         [RE.MINIMAL, RE.LOW, RE.MEDIUM, RE.HIGH],
+    "gpt-5-nano":         [RE.MINIMAL, RE.LOW, RE.MEDIUM, RE.HIGH],
+    "gpt-5-codex":        [RE.LOW, RE.MEDIUM, RE.HIGH],
+    "gpt-5-pro":          [RE.HIGH],
+    "gpt-5.1":            [RE.NONE, RE.LOW, RE.MEDIUM, RE.HIGH],
+    "gpt-5.1-codex":      [RE.LOW, RE.MEDIUM, RE.HIGH],
+    "gpt-5.1-codex-max":  [RE.LOW, RE.MEDIUM, RE.HIGH, RE.XHIGH],
+    "gpt-5.1-codex-mini": [RE.LOW, RE.MEDIUM, RE.HIGH],
+    "gpt-5.2":            [RE.NONE, RE.LOW, RE.MEDIUM, RE.HIGH, RE.XHIGH],
 }
