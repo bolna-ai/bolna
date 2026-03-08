@@ -727,6 +727,9 @@ class TaskManager(BaseManager):
 
         # Enrich the tool schema with available labels in the description
         tool_def = copy.deepcopy(SWITCH_LANGUAGE_TOOL_DEFINITION)
+        custom_description = self.task_config.get("tools_config", {}).get("switch_tool_description")
+        if custom_description:
+            tool_def["function"]["description"] = custom_description
         lang_prop = tool_def["function"]["parameters"]["properties"]["language"]
         lang_prop["enum"] = sorted(labels)
         lang_prop["description"] = f"Language to switch to. Available: {sorted(labels)}"
