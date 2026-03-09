@@ -25,7 +25,7 @@ class GeminiLLM(BaseLLM):
                 cleaned[k] = [self._clean_schema(i) if isinstance(i, dict) else i for i in v]
         return cleaned
 
-    def __init__(self, max_tokens=100, buffer_size=40, model="gemini-1.5-flash", temperature=0.1, **kwargs):
+    def __init__(self, max_tokens=100, buffer_size=40, model="gemini-2.5-flash", temperature=0.1, **kwargs):
         super().__init__(max_tokens, buffer_size)
 
         # New SDK uses plain model names like "gemini-2.0-flash", no "models/" prefix
