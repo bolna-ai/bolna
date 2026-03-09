@@ -692,6 +692,9 @@ class TaskManager(BaseManager):
                         self.tools["input"].is_welcome_message_played = True
                     else:
                         self.tools["input"].update_is_audio_being_played(True)
+                        if self.ambient_noise_enabled:
+                            audio_chunk = self.ambient_noise_mixer.mix(audio_chunk, meta_info.get('format', 'pcm'), self.sampling_rate)
+                            message = create_ws_data_packet(audio_chunk, meta_info)
                         convert_to_request_log(message=text, meta_info=meta_info, component="synthesizer", direction="response", model=self.synthesizer_provider, is_cached=meta_info.get("is_cached", False), engine=self.tools['synthesizer'].get_engine(), run_id=self.run_id)
                         await self.tools["output"].handle(message)
                         try:
@@ -2283,7 +2286,7 @@ class TaskManager(BaseManager):
         CHUNK_BYTES = int(BYTES_PER_MS * CHUNK_MS)
 
         # Wait for stream_sid before sending any audio
-        while not self.stream_sid and not self.conversation_ended:
+        while not self.stream_sid and not self.conversation_ended and not self.tools["input"].welcome_message_played():
             await asyncio.sleep(0.05)
 
         logger.info("Ambient perpetual sender started")
@@ -2751,8 +2754,11 @@ class TaskManager(BaseManager):
                             # The perpetual sender will mix onto noise and send via handle()
                             self._agent_audio_deque.append((message['data'], message['meta_info']))
                         else:
-                            # Standard mode: send directly
+                            # Standard mode: send directly (mix ambient noise if enabled but sender not yet running)
                             self.tools["input"].update_is_audio_being_played(True)
+                            if self.ambient_noise_enabled and message['data'] and message['data'] not in (b'\x00', b''):
+                                audio_format = message['meta_info'].get('format', 'pcm')
+                                message['data'] = self.ambient_noise_mixer.mix(message['data'], audio_format, self.sampling_rate)
                             await self.tools["output"].handle(message)
                             try:
                                 duration = calculate_audio_duration(len(message["data"]), self.sampling_rate, format=message['meta_info']['format'])
