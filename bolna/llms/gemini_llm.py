@@ -138,16 +138,17 @@ class GeminiLLM(BaseLLM):
         return system_instruction, history
 
     def _build_config(self, system_instruction, request_json=False):
-        return types.GenerateContentConfig(
+        config = types.GenerateContentConfig(
             system_instruction=system_instruction or None,
             max_output_tokens=self.max_tokens,
             temperature=self.temperature,
-            tools=self.gemini_tools,
             response_mime_type="application/json" if request_json else "text/plain",
-            # Disable thinking to avoid thought_signature issues in multi-turn tool calling.
-            # Safe to set on all models; no-op on non-thinking models.
             thinking_config=types.ThinkingConfig(thinking_budget=0),
         )
+        if self.gemini_tools:
+            config.tools = self.gemini_tools
+            config.automatic_function_calling = types.AutomaticFunctionCallingConfig(disable=True)
+        return config
 
     async def generate_stream(self, messages, synthesize=True, meta_info=None, tool_choice=None) -> AsyncIterable[LLMStreamChunk]:
         system_instruction, history = self._prepare_history(messages)
