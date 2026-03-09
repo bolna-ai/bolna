@@ -2883,7 +2883,7 @@ class TaskManager(BaseManager):
                 welcome_message_sent_ts = self.tools["output"].get_welcome_message_sent_ts()
 
                 output = {
-                    "messages": self.history,
+                    "messages": list(self.history),  # snapshot before cleanup
                     "conversation_time": time.time() - self.start_time,
                     "label_flow": self.label_flow,
                     "call_sid": self.call_sid,
@@ -2924,6 +2924,9 @@ class TaskManager(BaseManager):
                 output['recording_url'] = ""
                 if self.should_record:
                     output['recording_url'] = await save_audio_file_to_s3(self.conversation_recording, self.sampling_rate, self.assistant_id, self.run_id)
+                    # Free audio buffers after S3 upload (3-20 MB per call)
+                    self.conversation_recording['input']['data'] = b''
+                    self.conversation_recording['output'].clear()
             else:
                 output = self.input_parameters
                 if self.task_config["task_type"] == "extraction":
@@ -2944,6 +2947,17 @@ class TaskManager(BaseManager):
                     
 
             await asyncio.gather(*tasks_to_cancel)
+
+            # Break circular references so GC can collect the TaskManager graph
+            for obs in self.observable_variables.values():
+                obs.cleanup()
+            self.observable_variables.clear()
+
+            self.tools.clear()
+
+            if hasattr(self, 'kwargs') and 'task_manager_instance' in self.kwargs:
+                self.kwargs['task_manager_instance'] = None
+
             return output
 
     async def handle_cancellation(self, message):
