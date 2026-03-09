@@ -144,6 +144,9 @@ class PollySynthesizer(BaseSynthesizer):
             meta_info["mark_id"] = str(uuid.uuid4())
             yield create_ws_data_packet(message, meta_info)
 
+    async def cleanup(self):
+        await super().cleanup()
+
     async def push(self, message):
         logger.info("Pushed message to internal queue")
         self.internal_queue.put_nowait(message)
