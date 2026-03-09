@@ -1,4 +1,5 @@
 import asyncio
+import collections
 from collections import defaultdict
 import math
 import os
@@ -107,6 +108,10 @@ class TaskManager(BaseManager):
         self._noise_resumed = asyncio.Event()
         self._noise_resumed.set()  # Start in "running" state
         self.noise_runner_task = None
+        # Perpetual sender state (used when ambient_noise_enabled)
+        self._agent_audio_deque = collections.deque()
+        self._current_drain_chunk = None  # {'data': bytes, 'meta_info': dict, 'offset': int}
+        self._ambient_sender_task = None
         self.conversation_ended = False
         self.hangup_triggered = False
         self.hangup_triggered_at = None
@@ -1098,7 +1103,16 @@ class TaskManager(BaseManager):
         current_ts = time.time()
         logger.info(f"Cleaning up downstream task")
         start_time = time.time()
-        await self.tools["output"].handle_interruption()
+
+        if self._ambient_sender_task:
+            # Perpetual sender mode: clear agent audio locally, no clearAudio to Plivo
+            self._agent_audio_deque.clear()
+            self._current_drain_chunk = None
+            self.mark_event_meta_data.clear_data()
+            self.tools["input"].update_is_audio_being_played(False)
+        else:
+            await self.tools["output"].handle_interruption()
+
         await self.tools["synthesizer"].handle_interruption()
 
         if self.generate_precise_transcript:
@@ -1150,8 +1164,8 @@ class TaskManager(BaseManager):
         self.started_transmitting_audio = False #Since we're interrupting we need to stop transmitting as well
         self.last_transmitted_timestamp = time.time()
 
-        # Resume ambient noise after interruption (agent audio is no longer playing)
-        if self.ambient_noise_enabled:
+        # Resume ambient noise after interruption (only for legacy noise runner)
+        if self.ambient_noise_enabled and not self._ambient_sender_task:
             self._noise_resumed.set()
         logger.info(f"Cleaning up downstream tasks. Time taken to send a clear message {time.time() - start_time}")
 
@@ -1256,6 +1270,14 @@ class TaskManager(BaseManager):
         except asyncio.TimeoutError:
             logger.warning("wait_for_current_message: synth pipeline flush timed out after 3s")
 
+        # If perpetual sender is active, wait for deque to drain so real marks replace synthetic ones
+        if self._ambient_sender_task:
+            drain_start = time.time()
+            while (self._agent_audio_deque or self._current_drain_chunk) and (time.time() - drain_start < 5.0):
+                await asyncio.sleep(0.1)
+            if self._agent_audio_deque or self._current_drain_chunk:
+                logger.warning("wait_for_current_message: agent audio deque drain timed out after 5s")
+
         start_time = time.time()
         while not self.conversation_ended:
             elapsed = time.time() - start_time
@@ -1265,7 +1287,8 @@ class TaskManager(BaseManager):
                 break
 
             mark_events = self.mark_event_meta_data.mark_event_meta_data
-            mark_items_list = [{'mark_id': k, 'mark_data': v} for k, v in mark_events.items()]
+            # Filter out synthetic marks (from perpetual sender) that will never be echoed
+            mark_items_list = [{'mark_id': k, 'mark_data': v} for k, v in mark_events.items() if not v.get('synthetic')]
             logger.info(f"current_list: {mark_items_list}")
 
             if not mark_items_list:
@@ -2250,6 +2273,166 @@ class TaskManager(BaseManager):
         """Check if sequence_id is valid. Delegates to InterruptionManager."""
         return self.interruption_manager.is_valid_sequence(sequence_id)
 
+    async def __ambient_perpetual_sender(self):
+        """Perpetual sender: every CHUNK_MS, sends noise (optionally mixed with agent audio) via handle().
+        Replaces __noise_runner when ambient_noise_enabled. Agent audio is pulled from _agent_audio_deque
+        instead of going directly to handle(), so clearAudio is never needed."""
+        CHUNK_MS = 400
+        INTERVAL = CHUNK_MS / 1000.0
+        BYTES_PER_MS = self.sampling_rate / 1000  # 8 bytes/ms for mulaw@8kHz
+        CHUNK_BYTES = int(BYTES_PER_MS * CHUNK_MS)
+
+        # Wait for stream_sid before sending any audio
+        while not self.stream_sid and not self.conversation_ended:
+            await asyncio.sleep(0.05)
+
+        logger.info("Ambient perpetual sender started")
+
+        while not self.conversation_ended:
+            try:
+                audio_format = 'mulaw'
+                noise_chunk = self.ambient_noise_mixer.generate_noise_chunk(
+                    CHUNK_MS, audio_format, self.sampling_rate
+                )
+
+                # Extract up to CHUNK_BYTES of agent audio
+                agent_audio = b''
+                agent_meta_info = None
+                is_last_piece = False
+                budget = CHUNK_BYTES
+
+                while budget > 0:
+                    # Try current drain chunk first
+                    if self._current_drain_chunk is not None:
+                        dc = self._current_drain_chunk
+                        remaining = len(dc['data']) - dc['offset']
+                        take = min(remaining, budget)
+                        agent_audio += dc['data'][dc['offset']:dc['offset'] + take]
+                        dc['offset'] += take
+                        budget -= take
+
+                        if dc['offset'] >= len(dc['data']):
+                            # This chunk is fully consumed
+                            agent_meta_info = dc['meta_info']
+                            is_last_piece = True
+                            # Remove the synthetic mark we registered earlier
+                            synthetic_mark_id = dc.get('synthetic_mark_id')
+                            if synthetic_mark_id and synthetic_mark_id in self.mark_event_meta_data.mark_event_meta_data:
+                                del self.mark_event_meta_data.mark_event_meta_data[synthetic_mark_id]
+                            self._current_drain_chunk = None
+                        else:
+                            agent_meta_info = dc['meta_info']
+                            is_last_piece = False
+                        continue
+
+                    # Try popping from deque
+                    if self._agent_audio_deque:
+                        item_data, item_meta = self._agent_audio_deque.popleft()
+
+                        # First piece of a new chunk: register early synthetic mark and set is_audio_being_played
+                        self.tools["input"].update_is_audio_being_played(True)
+                        synthetic_mark_id = f"synthetic_{uuid.uuid4()}"
+                        synthetic_mark_data = {
+                            'text_synthesized': item_meta.get('text_synthesized', ''),
+                            'type': item_meta.get('message_category', ''),
+                            'is_first_chunk': item_meta.get('is_first_chunk', False),
+                            'is_final_chunk': item_meta.get('end_of_llm_stream', False) and item_meta.get('end_of_synthesizer_stream', False),
+                            'sequence_id': item_meta.get('sequence_id'),
+                            'duration': calculate_audio_duration(len(item_data), self.sampling_rate, format=item_meta.get('format', 'mulaw')),
+                            'sent_ts': time.time(),
+                            'synthetic': True,
+                        }
+                        self.mark_event_meta_data.update_data(synthetic_mark_id, synthetic_mark_data)
+
+                        take = min(len(item_data), budget)
+                        agent_audio += item_data[:take]
+                        budget -= take
+
+                        if take >= len(item_data):
+                            # Fully consumed in one go
+                            agent_meta_info = item_meta
+                            is_last_piece = True
+                            # Remove synthetic mark immediately since we'll send real one
+                            if synthetic_mark_id in self.mark_event_meta_data.mark_event_meta_data:
+                                del self.mark_event_meta_data.mark_event_meta_data[synthetic_mark_id]
+                        else:
+                            # Partially consumed, store remainder
+                            self._current_drain_chunk = {
+                                'data': item_data,
+                                'meta_info': item_meta,
+                                'offset': take,
+                                'synthetic_mark_id': synthetic_mark_id,
+                            }
+                            agent_meta_info = item_meta
+                            is_last_piece = False
+                        continue
+
+                    # No more agent audio available
+                    break
+
+                if agent_audio:
+                    # Mix agent audio onto noise chunk
+                    # Pad or truncate agent audio to match noise chunk length
+                    if len(agent_audio) < len(noise_chunk):
+                        # Agent audio shorter: mix what we have, append remaining noise
+                        mixed_part = self.ambient_noise_mixer.mix(agent_audio, audio_format, self.sampling_rate)
+                        remaining_noise = noise_chunk[len(agent_audio):]
+                        send_data = mixed_part + remaining_noise
+                    elif len(agent_audio) == len(noise_chunk):
+                        send_data = self.ambient_noise_mixer.mix(agent_audio, audio_format, self.sampling_rate)
+                    else:
+                        # Agent audio longer than noise (shouldn't happen with budget=CHUNK_BYTES)
+                        send_data = self.ambient_noise_mixer.mix(agent_audio, audio_format, self.sampling_rate)
+
+                    if is_last_piece:
+                        # Last piece of original chunk: send with real meta_info (marks will be created by handle())
+                        message = create_ws_data_packet(send_data, agent_meta_info)
+                        await self.tools["output"].handle(message)
+
+                        # Record for conversation recording
+                        try:
+                            duration = calculate_audio_duration(len(send_data), self.sampling_rate, format=audio_format)
+                            self.conversation_recording['output'].append({
+                                'data': send_data, "start_time": time.time(), "duration": duration
+                            })
+                        except Exception as e:
+                            logger.info(f"Exception recording perpetual sender output: {e}")
+                    else:
+                        # Intermediate piece: send as ambient_noise category (no marks to Plivo)
+                        noise_meta = {
+                            'is_content_audio': False,
+                            'message_category': 'ambient_noise',
+                            'format': audio_format,
+                            'sequence_id': -1,
+                            'end_of_llm_stream': True,
+                            'end_of_synthesizer_stream': True,
+                            'text_synthesized': '',
+                            'type': 'audio',
+                        }
+                        message = create_ws_data_packet(send_data, noise_meta)
+                        await self.tools["output"].handle(message)
+                else:
+                    # No agent audio: send pure noise
+                    noise_meta = {
+                        'is_content_audio': False,
+                        'message_category': 'ambient_noise',
+                        'format': audio_format,
+                        'sequence_id': -1,
+                        'end_of_llm_stream': True,
+                        'end_of_synthesizer_stream': True,
+                        'text_synthesized': '',
+                        'type': 'audio',
+                    }
+                    message = create_ws_data_packet(noise_chunk, noise_meta)
+                    await self.tools["output"].handle(message)
+
+            except Exception as e:
+                logger.error(f"Ambient perpetual sender error: {e}", exc_info=True)
+
+            await asyncio.sleep(INTERVAL)
+
+        logger.info("Ambient perpetual sender stopped")
+
     async def __noise_runner(self):
         """Continuously feed noise-only frames into buffered_output_queue.
         Pauses when agent or welcome audio is being enqueued."""
@@ -2297,12 +2480,13 @@ class TaskManager(BaseManager):
                     async for message in self.tools["synthesizer"].generate():
                         meta_info = message.get("meta_info", {})
 
-                        # Overlay ambient noise onto outgoing audio
-                        if message.get('data') and message['data'] not in (b'\x00', b'\x00\x00'):
-                            audio_format = meta_info.get('format', 'wav')
-                            message['data'] = self.ambient_noise_mixer.mix(
-                                message['data'], audio_format, self.sampling_rate
-                            )
+                        # Overlay ambient noise onto outgoing audio (only when NOT using perpetual sender)
+                        if not self.ambient_noise_enabled:
+                            if message.get('data') and message['data'] not in (b'\x00', b'\x00\x00'):
+                                audio_format = meta_info.get('format', 'wav')
+                                message['data'] = self.ambient_noise_mixer.mix(
+                                    message['data'], audio_format, self.sampling_rate
+                                )
 
                         current_text = meta_info.get("text", "")
                         write_to_log = False
@@ -2317,8 +2501,8 @@ class TaskManager(BaseManager):
                         if is_first_message or (not self.conversation_ended and self.interruption_manager.is_valid_sequence(sequence_id)):
                             logger.info(f"Processing message with sequence_id: {sequence_id}")
 
-                            # Pause noise runner before enqueuing agent audio
-                            if self.ambient_noise_enabled and meta_info.get("is_first_chunk", False):
+                            # Pause noise runner before enqueuing agent audio (only for legacy noise runner)
+                            if self.ambient_noise_enabled and not self._ambient_sender_task and meta_info.get("is_first_chunk", False):
                                 self._noise_resumed.clear()
                                 await asyncio.sleep(0.05)
 
@@ -2342,8 +2526,8 @@ class TaskManager(BaseManager):
                                 if meta_info.get('end_of_synthesizer_stream', False):
                                     self._turn_audio_flushed.set()
 
-                            # Resume noise runner after last chunk of response is enqueued
-                            if self.ambient_noise_enabled and meta_info.get("end_of_llm_stream") and meta_info.get("end_of_synthesizer_stream"):
+                            # Resume noise runner after last chunk of response is enqueued (only for legacy noise runner)
+                            if self.ambient_noise_enabled and not self._ambient_sender_task and meta_info.get("end_of_llm_stream") and meta_info.get("end_of_synthesizer_stream"):
                                 self._noise_resumed.set()
 
                             if write_to_log:
@@ -2360,8 +2544,8 @@ class TaskManager(BaseManager):
                                 )
                         else:
                             logger.info(f"Skipping message with sequence_id: {sequence_id}")
-                            # Resume noise if we were paused but message was invalidated
-                            if self.ambient_noise_enabled:
+                            # Resume noise if we were paused but message was invalidated (only for legacy noise runner)
+                            if self.ambient_noise_enabled and not self._ambient_sender_task:
                                 self._noise_resumed.set()
 
                         # Give control to other tasks
@@ -2432,8 +2616,8 @@ class TaskManager(BaseManager):
                         else:
                             meta_info['is_first_chunk'] = True
 
-                # Pause noise runner while welcome/filler audio is being enqueued
-                if self.ambient_noise_enabled:
+                # Pause noise runner while welcome/filler audio is being enqueued (only for legacy noise runner)
+                if self.ambient_noise_enabled and not self._ambient_sender_task:
                     self._noise_resumed.clear()
 
                 meta_info["end_of_synthesizer_stream"] = True
@@ -2451,8 +2635,8 @@ class TaskManager(BaseManager):
                     message = create_ws_data_packet(audio_chunk, meta_info)
                     self.buffered_output_queue.put_nowait(message)
 
-                # Resume noise runner after welcome/filler audio is enqueued
-                if self.ambient_noise_enabled:
+                # Resume noise runner after welcome/filler audio is enqueued (only for legacy noise runner)
+                if self.ambient_noise_enabled and not self._ambient_sender_task:
                     self._noise_resumed.set()
 
         except Exception as e:
@@ -2479,7 +2663,8 @@ class TaskManager(BaseManager):
                     else:
                         self.synthesizer_characters += len(text)
                         # [DEBUG] Clearing the channel before pushing the audio
-                        await self.tools["output"].handle_interruption()
+                        if not self._ambient_sender_task:
+                            await self.tools["output"].handle_interruption()
                         await self.tools["synthesizer"].push(message)
                 else:
                     logger.info("other synthesizer models not supported yet")
@@ -2542,6 +2727,7 @@ class TaskManager(BaseManager):
                     await self.__process_end_of_conversation()
 
                 # Ambient noise is non-content audio — always send, never block/wait
+                # (Only relevant for legacy noise runner path; perpetual sender doesn't use this queue for noise)
                 if message['meta_info'].get('message_category') == 'ambient_noise':
                     await self.tools["output"].handle(message)
                     continue
@@ -2558,15 +2744,22 @@ class TaskManager(BaseManager):
 
                     if status == "SEND":
                         # Audio approved - send it
-                        self.tools["input"].update_is_audio_being_played(True)
                         self.response_in_pipeline = False
-                        await self.tools["output"].handle(message)
-                        try:
-                            duration = calculate_audio_duration(len(message["data"]), self.sampling_rate, format=message['meta_info']['format'])
-                            self.conversation_recording['output'].append({'data': message['data'], "start_time": time.time(), "duration": duration})
-                        except Exception as e:
-                            duration = 0.256
-                            logger.info("Exception in __process_output_loop: {}".format(str(e)))
+
+                        if self._ambient_sender_task:
+                            # Perpetual sender mode: enqueue to agent audio deque
+                            # The perpetual sender will mix onto noise and send via handle()
+                            self._agent_audio_deque.append((message['data'], message['meta_info']))
+                        else:
+                            # Standard mode: send directly
+                            self.tools["input"].update_is_audio_being_played(True)
+                            await self.tools["output"].handle(message)
+                            try:
+                                duration = calculate_audio_duration(len(message["data"]), self.sampling_rate, format=message['meta_info']['format'])
+                                self.conversation_recording['output'].append({'data': message['data'], "start_time": time.time(), "duration": duration})
+                            except Exception as e:
+                                duration = 0.256
+                                logger.info("Exception in __process_output_loop: {}".format(str(e)))
                         break  # Exit inner loop, audio sent
 
                     elif status == "BLOCK":
@@ -2577,7 +2770,11 @@ class TaskManager(BaseManager):
                         # created and sent to Plivo. Without this, is_audio_being_played stays
                         # True forever because no final mark echo ever arrives.
                         if message['data'] == b'\x00':
-                            await self.tools["output"].handle(message)
+                            if self._ambient_sender_task:
+                                # In perpetual sender mode, enqueue the sentinel so it gets marks
+                                self._agent_audio_deque.append((message['data'], message['meta_info']))
+                            else:
+                                await self.tools["output"].handle(message)
                         if message['meta_info'].get('end_of_llm_stream', False) or \
                                 message['meta_info'].get('end_of_synthesizer_stream', False):
                             self._turn_audio_flushed.set()
@@ -2849,9 +3046,9 @@ class TaskManager(BaseManager):
 
                 self.output_task = asyncio.create_task(self.__process_output_loop())
 
-                # Start continuous ambient noise runner
+                # Start continuous ambient noise
                 if self.ambient_noise_enabled and not self.turn_based_conversation:
-                    self.noise_runner_task = asyncio.create_task(self.__noise_runner())
+                    self._ambient_sender_task = asyncio.create_task(self.__ambient_perpetual_sender())
 
                 if not self.turn_based_conversation or self.enforce_streaming:
                     self.hangup_task = asyncio.create_task(self.__check_for_completion())
@@ -2983,6 +3180,8 @@ class TaskManager(BaseManager):
                     process_task_cancellation(self.handle_accumulated_message_task, "handle_accumulated_message_task"))
                 tasks_to_cancel.append(
                     process_task_cancellation(self.noise_runner_task, 'noise_runner_task'))
+                tasks_to_cancel.append(
+                    process_task_cancellation(self._ambient_sender_task, 'ambient_sender_task'))
 
                 output['recording_url'] = ""
                 if self.should_record:
