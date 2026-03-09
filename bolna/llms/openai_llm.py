@@ -1,4 +1,5 @@
 import os
+import httpx
 from urllib.parse import urlparse
 from dotenv import load_dotenv
 from openai import AsyncOpenAI, OpenAI, AuthenticationError, PermissionDeniedError, NotFoundError, RateLimitError, APIError, APIConnectionError
@@ -10,7 +11,6 @@ from bolna.helpers.utils import now_ms
 from .openai_base import OpenAICompatibleLLM
 from .tool_call_accumulator import ToolCallAccumulator
 from .types import LLMStreamChunk, LatencyData
-from bolna.helpers.httpx_client_pool import HttpxClientPool
 from bolna.helpers.logger_config import configure_logger
 
 logger = configure_logger(__name__)
@@ -49,15 +49,24 @@ class OpenAiLLM(OpenAICompatibleLLM):
 
         self.model_args["service_tier"] = kwargs.get("service_tier", "default")
 
+        limits = httpx.Limits(
+            max_connections=50,
+            max_keepalive_connections=50,
+            keepalive_expiry=30
+        )
+        http_client = httpx.AsyncClient(
+            limits=limits,
+            timeout=httpx.Timeout(600.0, connect=10.0),
+            http2=True
+        )
+
         if kwargs.get("provider", "openai") == "custom":
             base_url = kwargs.get("base_url")
             api_key = kwargs.get('llm_key', None)
-            http_client = HttpxClientPool.get_client(base_url=base_url, api_key=api_key)
             self.async_client = AsyncOpenAI(base_url=base_url, api_key=api_key, http_client=http_client)
         else:
             llm_key = kwargs.get('llm_key', os.getenv('OPENAI_API_KEY'))
             base_url = kwargs.get('base_url')
-            http_client = HttpxClientPool.get_client(base_url=base_url, api_key=llm_key)
             if base_url:
                 self.async_client = AsyncOpenAI(base_url=base_url, api_key=llm_key, http_client=http_client)
             else:
