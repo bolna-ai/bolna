@@ -96,6 +96,28 @@ LLM_DEFAULT_CONFIGS = {
     }
 }
 
+END_CALL_FUNCTION_PREFIX = "end_call"
+
+END_CALL_TOOL_DEFINITION = {
+    "type": "function",
+    "function": {
+        "name": "end_call",
+        "description": "End the current call. Use this when the conversation is naturally complete, the user has explicitly said goodbye, or you've fulfilled the purpose of the call. Always say your goodbye message before calling this function.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "reason": {
+                    "type": "string",
+                    "description": "Brief reason for ending the call (e.g. 'conversation_complete', 'user_goodbye', 'task_fulfilled')"
+                }
+            },
+            "required": ["reason"],
+            "additionalProperties": False
+        },
+        "strict": True
+    }
+}
+
 SARVAM_MODEL_SAMPLING_RATE_MAPPING = {
     "bulbul:v2": 22050,
     "bulbul:v3": 22050 # NOTE: Documentation claims 24000, but WAV header shows 22050
