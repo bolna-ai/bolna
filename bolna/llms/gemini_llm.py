@@ -69,6 +69,7 @@ class GeminiLLM(BaseLLM):
         self.gemini_tools = [types.Tool(function_declarations=gemini_declarations)] if gemini_declarations else None
         # Keep raw bolna tools list for required-param validation at call time
         self.bolna_tools_raw = bolna_tools if isinstance(bolna_tools, list) else []
+        self.thinking_budget = kwargs.get("thinking_budget", 0)
         self.run_id = kwargs.get("run_id", None)
         self.language = kwargs.get("language", "en")
 
@@ -143,7 +144,7 @@ class GeminiLLM(BaseLLM):
             max_output_tokens=self.max_tokens,
             temperature=self.temperature,
             response_mime_type="application/json" if request_json else "text/plain",
-            thinking_config=types.ThinkingConfig(thinking_budget=0),
+            thinking_config=types.ThinkingConfig(thinking_budget=self.thinking_budget),
         )
         if self.gemini_tools:
             config.tools = self.gemini_tools
