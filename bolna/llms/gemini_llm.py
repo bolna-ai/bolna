@@ -139,13 +139,15 @@ class GeminiLLM(BaseLLM):
         return system_instruction, history
 
     def _build_config(self, system_instruction, request_json=False):
-        config = types.GenerateContentConfig(
+        config_kwargs = dict(
             system_instruction=system_instruction or None,
             max_output_tokens=self.max_tokens,
             temperature=self.temperature,
             response_mime_type="application/json" if request_json else "text/plain",
-            thinking_config=types.ThinkingConfig(thinking_budget=self.thinking_budget),
         )
+        if self.thinking_budget and self.thinking_budget > 0:
+            config_kwargs["thinking_config"] = types.ThinkingConfig(thinking_budget=self.thinking_budget)
+        config = types.GenerateContentConfig(**config_kwargs)
         if self.gemini_tools:
             config.tools = self.gemini_tools
             config.automatic_function_calling = types.AutomaticFunctionCallingConfig(disable=True)
