@@ -2607,6 +2607,9 @@ class TaskManager(BaseManager):
                     detected_lang = self.language_detector.dominant_language
                     user_online_message = select_message_by_language(self.check_user_online_message_config, detected_lang)
 
+                    if self.generate_precise_transcript:
+                        self.tools["input"].reset_response_heard_by_user()
+
                     if self.should_record:
                         meta_info={'io': 'default', "request_id": str(uuid.uuid4()), "cached": False, "sequence_id": -1, 'format': 'wav', "message_category": "is_user_online_message", 'end_of_llm_stream': True}
                         await self._synthesize(create_ws_data_packet(user_online_message, meta_info= meta_info))
