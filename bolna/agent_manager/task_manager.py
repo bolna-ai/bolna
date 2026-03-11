@@ -2341,15 +2341,23 @@ class TaskManager(BaseManager):
                         temp_transcriber_message = ""
 
                     elif message["data"] == "transcriber_connection_closed":
-                        logger.info(f"Transcriber connection has been closed")
                         self.transcriber_duration += message.get("meta_info", {}).get("transcriber_duration", 0) if message["meta_info"] is not None else 0
+                        # In a pool, a standby transcriber closing is expected (e.g. Deepgram
+                        # inactivity timeout). Only end the call if we're NOT using a pool.
+                        if isinstance(self.tools.get("transcriber"), TranscriberPool):
+                            logger.info(f"TranscriberPool: a transcriber connection closed (standby drop), continuing")
+                            continue
+                        logger.info(f"Transcriber connection has been closed")
                         break
 
                 else:
                     logger.info(f"Processing http transcription for message {message}")
                     if message["data"] == "transcriber_connection_closed":
-                        logger.info(f"Transcriber connection has been closed")
                         self.transcriber_duration += message.get("meta_info", {}).get("transcriber_duration", 0) if message["meta_info"] is not None else 0
+                        if isinstance(self.tools.get("transcriber"), TranscriberPool):
+                            logger.info(f"TranscriberPool: a transcriber connection closed (standby drop), continuing")
+                            continue
+                        logger.info(f"Transcriber connection has been closed")
                         break
 
                     await self.__process_http_transcription(message)
@@ -2408,6 +2416,16 @@ class TaskManager(BaseManager):
             await self.tools["transcriber"].switch(label)
         if "synthesizer" in components and isinstance(self.tools.get("synthesizer"), SynthesizerPool):
             await self.tools["synthesizer"].switch(label)
+
+        # Update TaskManager state so silence detection, fillers, and LLM
+        # language stay in sync with the active pools.
+        self.language = label
+        # Reset silence timers to prevent __check_for_completion from
+        # interpreting the switch gap as inactivity and hanging up.
+        self.last_transmitted_timestamp = time.time()
+        self.time_since_last_spoken_human_word = time.time()
+        self.asked_if_user_is_still_there = False
+        logger.info(f"Language switched to '{label}'")
 
         if label in self.multilingual_prompts:
             new_prompt = self.multilingual_prompts[label]
