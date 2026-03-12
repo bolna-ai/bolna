@@ -259,6 +259,9 @@ class TaskManager(BaseManager):
                 if 'reasoning_effort' in self.llm_agent_config:
                     self.llm_config['reasoning_effort'] = self.llm_agent_config['reasoning_effort']
 
+                if 'thinking_budget' in self.llm_agent_config:
+                    self.llm_config['thinking_budget'] = self.llm_agent_config['thinking_budget']
+
                 if self.llm_agent_config.get('use_responses_api'):
                     self.llm_config['use_responses_api'] = True
 
@@ -2801,6 +2804,9 @@ class TaskManager(BaseManager):
                 if self.check_if_user_online:
                     detected_lang = self.language_detector.dominant_language
                     user_online_message = select_message_by_language(self.check_user_online_message_config, detected_lang)
+
+                    if self.generate_precise_transcript:
+                        self.tools["input"].reset_response_heard_by_user()
 
                     if self.should_record:
                         meta_info={'io': 'default', "request_id": str(uuid.uuid4()), "cached": False, "sequence_id": -1, 'format': 'wav', "message_category": "is_user_online_message", 'end_of_llm_stream': True}
