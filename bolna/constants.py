@@ -100,6 +100,24 @@ LLM_DEFAULT_CONFIGS = {
     }
 }
 
+SWITCH_LANGUAGE_TOOL_DEFINITION = {
+    "type": "function",
+    "function": {
+        "name": "switch_language",
+        "description": "Switch the conversation language for speech recognition and synthesis. Call this when the user speaks in or requests a different language.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "language": {
+                    "type": "string",
+                    "description": "The language label to switch to (e.g. 'hi' for Hindi, 'en' for English)"
+                }
+            },
+            "required": ["language"]
+        }
+    }
+}
+
 SARVAM_MODEL_SAMPLING_RATE_MAPPING = {
     "bulbul:v2": 22050,
     "bulbul:v3": 22050 # NOTE: Documentation claims 24000, but WAV header shows 22050
