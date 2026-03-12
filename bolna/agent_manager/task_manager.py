@@ -416,6 +416,9 @@ class TaskManager(BaseManager):
                     self.first_message_task = None
                     self.transcriber_message = ''
 
+                # Discard pre-welcome utterance
+                self.discard_pre_welcome_utterance = self.conversation_config.get("discard_pre_welcome_utterance", False)
+
                 # Ambient noise
                 self.ambient_noise = self.conversation_config.get("ambient_noise", False)
                 self.ambient_noise_task = None
@@ -2169,7 +2172,7 @@ class TaskManager(BaseManager):
         await self.process_call_hangup()
 
     async def _handle_transcriber_output(self, next_task, transcriber_message, meta_info):
-        if not self.tools["input"].welcome_message_played() and len(self.conversation_history) > 2:
+        if not self.tools["input"].welcome_message_played() and (self.discard_pre_welcome_utterance or len(self.conversation_history) > 2):
             logger.info(f"Welcome message is playing while spoken: {transcriber_message}")
             return
 
