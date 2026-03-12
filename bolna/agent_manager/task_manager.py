@@ -418,6 +418,7 @@ class TaskManager(BaseManager):
 
                 # Discard pre-welcome utterance
                 self.discard_pre_welcome_utterance = self.conversation_config.get("discard_pre_welcome_utterance", False)
+                self._speech_started_before_welcome = False
 
                 # Ambient noise
                 self.ambient_noise = self.conversation_config.get("ambient_noise", False)
@@ -2176,6 +2177,11 @@ class TaskManager(BaseManager):
             logger.info(f"Welcome message is playing while spoken: {transcriber_message}")
             return
 
+        if self._speech_started_before_welcome:
+            logger.info(f"Discarding transcript from speech that started before welcome finished: {transcriber_message}")
+            self._speech_started_before_welcome = False
+            return
+
         if self.conversation_history.is_duplicate_user(transcriber_message):
             logger.info(f"Skipping duplicate transcript (same content): {transcriber_message}")
             return
@@ -2248,7 +2254,10 @@ class TaskManager(BaseManager):
 
                     # Handling of transcriber events
                     if message["data"] == "speech_started":
+                        if not self.tools["input"].welcome_message_played() and self.discard_pre_welcome_utterance:
+                            self._speech_started_before_welcome = True
                         if self.tools["input"].welcome_message_played():
+                            self._speech_started_before_welcome = False
                             logger.info(f"User has started speaking")
                             # self.callee_silent = False
 
@@ -2262,6 +2271,8 @@ class TaskManager(BaseManager):
                         temp_transcriber_message = message["data"].get("content")
 
                         if not self.tools["input"].welcome_message_played():
+                            if self.discard_pre_welcome_utterance:
+                                self._speech_started_before_welcome = True
                             continue
 
                         interim_transcript_len += len(message["data"].get("content").strip().split(" "))
@@ -2325,6 +2336,7 @@ class TaskManager(BaseManager):
                         ):
                             logger.info(f"Continuing the loop and ignoring the transcript received ({transcript_content}) in speech final as it is false interruption")
                             self.interruption_manager.on_user_speech_ended(update_utterance_time=False)
+                            self._speech_started_before_welcome = False
                             continue
 
                         self.interruption_manager.on_user_speech_ended()
@@ -2344,6 +2356,7 @@ class TaskManager(BaseManager):
                     elif isinstance(message.get("data"), dict) and message["data"].get("type", "") == "speech_ended":
                         logger.info(f"Received speech_ended notification, resetting callee_speaking state")
                         self.interruption_manager.on_user_speech_ended(update_utterance_time=False)
+                        self._speech_started_before_welcome = False
                         temp_transcriber_message = ""
 
                     elif message["data"] == "transcriber_connection_closed":
