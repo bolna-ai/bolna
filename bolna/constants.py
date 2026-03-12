@@ -93,6 +93,10 @@ LLM_DEFAULT_CONFIGS = {
     "extraction": {
         "model": "gpt-4.1-mini",
         "provider": "openai"
+    },
+    "google": {
+        "model": "gemini-2.5-flash",
+        "provider": "google"
     }
 }
 
