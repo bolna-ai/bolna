@@ -2,7 +2,7 @@ from .synthesizer import PollySynthesizer, ElevenlabsSynthesizer, OPENAISynthesi
 from .transcriber import DeepgramTranscriber, AzureTranscriber, SarvamTranscriber, AssemblyAITranscriber, GoogleTranscriber, PixaTranscriber, GladiaTranscriber, ElevenLabsTranscriber, SmallestTranscriber
 from .input_handlers import DefaultInputHandler, TwilioInputHandler, ExotelInputHandler, PlivoInputHandler, VobizInputHandler, SipTrunkInputHandler
 from .output_handlers import DefaultOutputHandler, TwilioOutputHandler, ExotelOutputHandler, PlivoOutputHandler, VobizOutputHandler, SipTrunkOutputHandler
-from .llms import OpenAiLLM, LiteLLM, AzureLLM
+from .llms import OpenAiLLM, LiteLLM, AzureLLM, GeminiLLM
 from .enums import TelephonyProvider, SynthesizerProvider, TranscriberProvider, LLMProvider
 
 SUPPORTED_SYNTHESIZER_MODELS = {
@@ -52,7 +52,8 @@ SUPPORTED_LLM_PROVIDERS = {
     LLMProvider.ANTHROPIC.value: LiteLLM,
     LLMProvider.DEEPSEEK.value: LiteLLM,
     LLMProvider.OPENROUTER.value: LiteLLM,
-    LLMProvider.AZURE.value: AzureLLM
+    LLMProvider.AZURE.value: AzureLLM,
+    LLMProvider.GOOGLE.value: GeminiLLM
 }
 SUPPORTED_INPUT_HANDLERS = {
     TelephonyProvider.DEFAULT.value: DefaultInputHandler,

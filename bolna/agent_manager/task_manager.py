@@ -14,6 +14,9 @@ import websockets
 import aiohttp
 
 from bolna.constants import ACCIDENTAL_INTERRUPTION_PHRASES, DEFAULT_USER_ONLINE_MESSAGE, DEFAULT_USER_ONLINE_MESSAGE_TRIGGER_DURATION, DEFAULT_LANGUAGE_CODE, DEFAULT_TIMEZONE, LANGUAGE_NAMES, LLM_DEFAULT_CONFIGS
+from bolna.constants import (ACCIDENTAL_INTERRUPTION_PHRASES, DEFAULT_USER_ONLINE_MESSAGE,
+    DEFAULT_USER_ONLINE_MESSAGE_TRIGGER_DURATION, FILLER_DICT, DEFAULT_LANGUAGE_CODE,
+    DEFAULT_TIMEZONE, LANGUAGE_NAMES, LLM_DEFAULT_CONFIGS, SWITCH_LANGUAGE_TOOL_DEFINITION)
 from bolna.helpers.function_calling_helpers import trigger_api, computed_api_response
 from bolna.helpers.conversation_history import ConversationHistory
 from .base_manager import BaseManager
@@ -23,6 +26,8 @@ from bolna.providers import *
 from bolna.enums import TelephonyProvider
 from bolna.prompts import *
 from bolna.helpers.language_detector import LanguageDetector
+from bolna.transcriber.transcriber_pool import TranscriberPool
+from bolna.synthesizer.synthesizer_pool import SynthesizerPool
 from bolna.helpers.utils import structure_system_prompt, compute_function_pre_call_message, select_message_by_language, get_date_time_from_timezone, calculate_audio_duration, create_ws_data_packet, get_file_names_in_directory, get_raw_audio_bytes, is_valid_md5, \
     get_required_input_types, format_messages, get_prompt_responses, resample, save_audio_file_to_s3, update_prompt_with_context, get_md5_hash, clean_json_string, wav_bytes_to_pcm, convert_to_request_log, yield_chunks_from_memory, process_task_cancellation, pcm_to_ulaw
 from bolna.helpers.logger_config import configure_logger
@@ -72,6 +77,7 @@ class TaskManager(BaseManager):
         self.task_id = task_id
         self.assistant_name = assistant_name
         self.tools = {}
+        self.multilingual_prompts = {}
         self.websocket = ws
         self.context_data = context_data
         self.turn_based_conversation = turn_based_conversation
@@ -257,6 +263,9 @@ class TaskManager(BaseManager):
                 if 'reasoning_effort' in self.llm_agent_config:
                     self.llm_config['reasoning_effort'] = self.llm_agent_config['reasoning_effort']
 
+                if 'thinking_budget' in self.llm_agent_config:
+                    self.llm_config['thinking_budget'] = self.llm_agent_config['thinking_budget']
+
                 if self.llm_agent_config.get('use_responses_api'):
                     self.llm_config['use_responses_api'] = True
 
@@ -411,6 +420,10 @@ class TaskManager(BaseManager):
                     self.first_message_task = None
                     self.transcriber_message = ''
 
+                # Discard pre-welcome utterance
+                self.discard_pre_welcome_utterance = self.conversation_config.get("discard_pre_welcome_utterance", False)
+                self._speech_started_before_welcome = False
+
                 # Ambient noise
                 self.ambient_noise = self.conversation_config.get("ambient_noise", False)
                 self.ambient_noise_task = None
@@ -423,6 +436,9 @@ class TaskManager(BaseManager):
         self.__setup_synthesizer(self.llm_config)
         if not self.turn_based_conversation and task_id == 0:
             self.synthesizer_monitor_task = asyncio.create_task(self.tools['synthesizer'].monitor_connection())
+
+        # Auto-inject switch_language tool if multilingual pools are active
+        self.__inject_switch_language_tool()
 
         # # setting llm
         # llm = self.__setup_llm(self.llm_config)
@@ -704,10 +720,87 @@ class TaskManager(BaseManager):
 
         return
 
+    def __inject_switch_language_tool(self):
+        """Auto-inject switch_language tool when multilingual pools are active."""
+        has_pool = (
+            isinstance(self.tools.get("transcriber"), TranscriberPool) or
+            isinstance(self.tools.get("synthesizer"), SynthesizerPool)
+        )
+        if not has_pool:
+            return
+
+        # Collect available labels from pools
+        labels = set()
+        if isinstance(self.tools.get("transcriber"), TranscriberPool):
+            labels.update(self.tools["transcriber"].labels)
+        if isinstance(self.tools.get("synthesizer"), SynthesizerPool):
+            labels.update(self.tools["synthesizer"].labels)
+
+        # Enrich the tool schema with available labels in the description
+        tool_def = copy.deepcopy(SWITCH_LANGUAGE_TOOL_DEFINITION)
+        custom_description = self.task_config.get("tools_config", {}).get("switch_tool_description")
+        if custom_description:
+            tool_def["function"]["description"] = custom_description
+        lang_prop = tool_def["function"]["parameters"]["properties"]["language"]
+        lang_prop["enum"] = sorted(labels)
+        lang_prop["description"] = f"Language to switch to. Available: {sorted(labels)}"
+
+        if self.kwargs.get("api_tools") is None:
+            self.kwargs["api_tools"] = {"tools": [], "tools_params": {}}
+
+        self.kwargs["api_tools"]["tools"].append(tool_def)
+        # Entry must exist in tools_params so ToolCallAccumulator.build_api_payload
+        # doesn't drop the call, but no pre_call_message — the switch is silent.
+        self.kwargs["api_tools"]["tools_params"]["switch_language"] = {}
+
     def __setup_transcriber(self):
         try:
             if self.task_config["tools_config"]["transcriber"] is not None:
-                self.language = self.task_config["tools_config"]["transcriber"].get('language', DEFAULT_LANGUAGE_CODE)
+                transcriber_config = self.task_config["tools_config"]["transcriber"]
+
+                # --- Multilingual pool path ---
+                if "multilingual" in transcriber_config:
+                    multilingual = transcriber_config["multilingual"]
+                    active_label = transcriber_config.get("active", DEFAULT_LANGUAGE_CODE)
+                    self.language = active_label
+
+                    if self.turn_based_conversation:
+                        provider = "playground"
+                    elif self.is_web_based_call:
+                        provider = "web_based_call"
+                    else:
+                        provider = self.task_config["tools_config"]["input"]["provider"]
+
+                    is_sip = provider == TelephonyProvider.SIP_TRUNK.value
+
+                    transcribers = {}
+                    for label, cfg in multilingual.items():
+                        private_queue = asyncio.Queue()
+                        cfg["input_queue"] = private_queue
+                        cfg["output_queue"] = self.transcriber_output_queue
+                        if is_sip:
+                            cfg["encoding"] = "mulaw"
+                            cfg["sampling_rate"] = 8000
+                        if self.turn_based_conversation:
+                            cfg["stream"] = True if self.enforce_streaming else False
+
+                        if "provider" in cfg:
+                            cls = SUPPORTED_TRANSCRIBER_PROVIDERS.get(cfg["provider"])
+                        else:
+                            cls = SUPPORTED_TRANSCRIBER_MODELS.get(cfg["model"])
+                        transcribers[label] = cls(provider, **cfg, **self.kwargs)
+
+                    self.tools["transcriber"] = TranscriberPool(
+                        transcribers=transcribers,
+                        shared_input_queue=self.audio_queue,
+                        output_queue=self.transcriber_output_queue,
+                        active_label=active_label,
+                    )
+                    logger.info(f"TranscriberPool created with labels={list(transcribers.keys())}, active='{active_label}'")
+                    return
+
+                # --- Single transcriber path (unchanged) ---
+                self.language = transcriber_config.get('language', DEFAULT_LANGUAGE_CODE)
                 if self.turn_based_conversation:
                     provider = "playground"
                 elif self.is_web_based_call:
@@ -715,27 +808,25 @@ class TaskManager(BaseManager):
                 else:
                     provider = self.task_config["tools_config"]["input"]["provider"]
 
-                self.task_config["tools_config"]["transcriber"]["input_queue"] = self.audio_queue
-                self.task_config['tools_config']["transcriber"]["output_queue"] = self.transcriber_output_queue
+                transcriber_config["input_queue"] = self.audio_queue
+                transcriber_config["output_queue"] = self.transcriber_output_queue
 
                 # Configure encoding for Asterisk/sip-trunk (uses ulaw like Twilio)
                 if provider == TelephonyProvider.SIP_TRUNK.value:
-                    self.task_config["tools_config"]["transcriber"]["encoding"] = "mulaw"
-                    self.task_config["tools_config"]["transcriber"]["sampling_rate"] = 8000
-                    logger.info("Configured transcriber for Asterisk sip-trunk with mulaw encoding @ 8kHz")
+                    transcriber_config["encoding"] = "mulaw"
+                    transcriber_config["sampling_rate"] = 8000
+                    logger.info(f"Configured transcriber for Asterisk sip-trunk with mulaw encoding @ 8kHz")
 
                 # Checking models for backwards compatibility
-                if self.task_config["tools_config"]["transcriber"]["model"] in SUPPORTED_TRANSCRIBER_MODELS.keys() or self.task_config["tools_config"]["transcriber"]["provider"] in SUPPORTED_TRANSCRIBER_PROVIDERS.keys():
+                if transcriber_config["model"] in SUPPORTED_TRANSCRIBER_MODELS.keys() or transcriber_config["provider"] in SUPPORTED_TRANSCRIBER_PROVIDERS.keys():
                     if self.turn_based_conversation:
-                        self.task_config["tools_config"]["transcriber"]["stream"] = True if self.enforce_streaming else False
-                        logger.info(f'self.task_config["tools_config"]["transcriber"]["stream"] {self.task_config["tools_config"]["transcriber"]["stream"]} self.enforce_streaming {self.enforce_streaming}')
-                    if 'provider' in self.task_config["tools_config"]["transcriber"]:
-                        transcriber_class = SUPPORTED_TRANSCRIBER_PROVIDERS.get(
-                            self.task_config["tools_config"]["transcriber"]["provider"])
+                        transcriber_config["stream"] = True if self.enforce_streaming else False
+                        logger.info(f'transcriber stream={transcriber_config["stream"]} enforce_streaming={self.enforce_streaming}')
+                    if 'provider' in transcriber_config:
+                        transcriber_class = SUPPORTED_TRANSCRIBER_PROVIDERS.get(transcriber_config["provider"])
                     else:
-                        transcriber_class = SUPPORTED_TRANSCRIBER_MODELS.get(
-                            self.task_config["tools_config"]["transcriber"]["model"])
-                    self.tools["transcriber"] = transcriber_class(provider, **self.task_config["tools_config"]["transcriber"], **self.kwargs)
+                        transcriber_class = SUPPORTED_TRANSCRIBER_MODELS.get(transcriber_config["model"])
+                    self.tools["transcriber"] = transcriber_class(provider, **transcriber_config, **self.kwargs)
         except Exception as e:
             logger.error(f"Something went wrong with starting transcriber {e}")
 
@@ -743,30 +834,73 @@ class TaskManager(BaseManager):
         if self._is_conversation_task():
             self.kwargs["use_turbo"] = self.task_config["tools_config"]["transcriber"]["language"] == DEFAULT_LANGUAGE_CODE
         if self.task_config["tools_config"]["synthesizer"] is not None:
-            if "caching" in self.task_config['tools_config']['synthesizer']:
-                caching = self.task_config["tools_config"]["synthesizer"].pop("caching")
+            synth_config = self.task_config["tools_config"]["synthesizer"]
+
+            # --- Multilingual pool path ---
+            if "multilingual" in synth_config:
+                multilingual = synth_config["multilingual"]
+                active_label = synth_config.get("active", DEFAULT_LANGUAGE_CODE)
+
+                is_sip = self.task_config["tools_config"]["output"]["provider"] == TelephonyProvider.SIP_TRUNK.value
+                synthesizer_kwargs = self.kwargs.copy()
+                if is_sip:
+                    synthesizer_kwargs['use_mulaw'] = True
+
+                synthesizers = {}
+                for label, cfg in multilingual.items():
+                    cfg = dict(cfg)  # shallow copy so pops don't mutate original
+                    caching = cfg.pop("caching", True)
+                    provider_name = cfg.pop("provider")
+                    provider_config = cfg.pop("provider_config")
+
+                    if self.turn_based_conversation:
+                        cfg["audio_format"] = "mp3"
+                        cfg["stream"] = True if self.enforce_streaming else False
+
+                    cls = SUPPORTED_SYNTHESIZER_MODELS.get(provider_name)
+                    synthesizers[label] = cls(**cfg, **provider_config, **synthesizer_kwargs, caching=caching)
+
+                # Use first synth's provider/voice for logging metadata
+                first_cfg = next(iter(multilingual.values()))
+                self.synthesizer_provider = first_cfg.get("provider", "unknown")
+                self.synthesizer_voice = first_cfg.get("provider_config", {}).get("voice", "unknown")
+
+                self.tools["synthesizer"] = SynthesizerPool(
+                    synthesizers=synthesizers,
+                    active_label=active_label,
+                )
+                logger.info(f"SynthesizerPool created with labels={list(synthesizers.keys())}, active='{active_label}'")
+
+                if self.task_config["tools_config"]["llm_agent"] is not None and llm_config is not None:
+                    first_synth_cfg = next(iter(multilingual.values()))
+                    llm_config["buffer_size"] = first_synth_cfg.get('buffer_size')
+                return
+
+            # --- Single synthesizer path (apna normal path) ---
+            if "caching" in synth_config:
+                caching = synth_config.pop("caching")
             else:
                 caching = True
 
-            self.synthesizer_provider = self.task_config["tools_config"]["synthesizer"].pop("provider")
+            self.synthesizer_provider = synth_config.pop("provider")
             synthesizer_class = SUPPORTED_SYNTHESIZER_MODELS.get(self.synthesizer_provider)
-            provider_config = self.task_config["tools_config"]["synthesizer"].pop("provider_config")
+            provider_config = synth_config.pop("provider_config")
             self.synthesizer_voice = provider_config["voice"]
             if self.turn_based_conversation:
-                self.task_config["tools_config"]["synthesizer"]["audio_format"] = "mp3" # Hard code mp3 if we're connected through dashboard
-                self.task_config["tools_config"]["synthesizer"]["stream"] = True if self.enforce_streaming else False #Hardcode stream to be False as we don't want to get blocked by a __listen_synthesizer co-routine
+                synth_config["audio_format"] = "mp3" # Hard code mp3 if we're connected through dashboard
+                synth_config["stream"] = True if self.enforce_streaming else False #Hardcode stream to be False as we don't want to get blocked by a __listen_synthesizer co-routine
 
             # Configure use_mulaw for Asterisk/sip-trunk to ensure synthesizer outputs ulaw
             synthesizer_kwargs = self.kwargs.copy()
             if self.task_config["tools_config"]["output"]["provider"] == TelephonyProvider.SIP_TRUNK.value:
                 synthesizer_kwargs['use_mulaw'] = True
-                logger.info("[SIP-TRUNK] Configuring synthesizer with use_mulaw=True for Asterisk sip-trunk")
-            
-            self.tools["synthesizer"] = synthesizer_class(**self.task_config["tools_config"]["synthesizer"], **provider_config, **synthesizer_kwargs, caching=caching)
+                logger.info(f"[SIP-TRUNK] Configuring synthesizer with use_mulaw=True for Asterisk sip-trunk")
+
+            self.tools["synthesizer"] = synthesizer_class(**synth_config, **provider_config, **synthesizer_kwargs, caching=caching)
             # if not self.turn_based_conversation:
             #     self.synthesizer_monitor_task = asyncio.create_task(self.tools['synthesizer'].monitor_connection())
             if self.task_config["tools_config"]["llm_agent"] is not None and llm_config is not None:
-                llm_config["buffer_size"] = self.task_config["tools_config"]["synthesizer"].get('buffer_size')
+                llm_config["buffer_size"] = synth_config.get('buffer_size')
 
     def __setup_llm(self, llm_config, task_id=0):
         if self.task_config["tools_config"]["llm_agent"] is not None:
@@ -1548,6 +1682,27 @@ class TaskManager(BaseManager):
             await self.wait_for_current_message()
             response = await trigger_api(url=url, method=method.lower(), param=param, api_token=api_token, headers_data=headers, meta_info=meta_info, run_id=self.run_id, **resp)
             function_response = str(response)
+        if called_fun == "switch_language":
+            language_label = resp.get("language", "")
+            try:
+                await self.switch_language(language_label)
+                function_response = f"Switched to {language_label}"
+            except ValueError as e:
+                function_response = f"Failed to switch language: {e}"
+
+            textual_response = resp.get("textual_response", None)
+            self.conversation_history.append_assistant(textual_response, tool_calls=resp["model_response"])
+            self.conversation_history.append_tool_result(resp.get("tool_call_id", ""), function_response)
+            convert_to_request_log(function_response, meta_info, None, "function_call", direction="response", run_id=self.run_id)
+
+            messages = self.conversation_history.get_copy()
+            await self.__do_llm_generation(messages, meta_info, next_step, should_bypass_synth=False, should_trigger_function_call=True)
+            self.execute_function_call_task = None
+            return
+
+        await self.wait_for_current_message()
+        response = await trigger_api(url=url, method=method.lower(), param=param, api_token=api_token, headers_data=headers, meta_info=meta_info, run_id=self.run_id, **resp)
+        function_response = str(response)
         get_res_keys, get_res_values = await computed_api_response(function_response)
 
         # Merge API response data into context_data for routing decisions
@@ -2063,8 +2218,13 @@ class TaskManager(BaseManager):
         await self.process_call_hangup()
 
     async def _handle_transcriber_output(self, next_task, transcriber_message, meta_info):
-        if not self.tools["input"].welcome_message_played() and len(self.conversation_history) > 2:
+        if not self.tools["input"].welcome_message_played() and (self.discard_pre_welcome_utterance or len(self.conversation_history) > 2):
             logger.info(f"Welcome message is playing while spoken: {transcriber_message}")
+            return
+
+        if self._speech_started_before_welcome:
+            logger.info(f"Discarding transcript from speech that started before welcome finished: {transcriber_message}")
+            self._speech_started_before_welcome = False
             return
 
         if self.conversation_history.is_duplicate_user(transcriber_message):
@@ -2139,8 +2299,11 @@ class TaskManager(BaseManager):
 
                     # Handling of transcriber events
                     if message["data"] == "speech_started":
+                        if not self.tools["input"].welcome_message_played() and self.discard_pre_welcome_utterance:
+                            self._speech_started_before_welcome = True
                         if self.tools["input"].welcome_message_played():
-                            logger.info("User has started speaking")
+                            self._speech_started_before_welcome = False
+                            logger.info(f"User has started speaking")
                             # self.callee_silent = False
 
                     # Whenever interim results would be received from Deepgram, this condition would get triggered
@@ -2153,6 +2316,8 @@ class TaskManager(BaseManager):
                         temp_transcriber_message = message["data"].get("content")
 
                         if not self.tools["input"].welcome_message_played():
+                            if self.discard_pre_welcome_utterance:
+                                self._speech_started_before_welcome = True
                             continue
 
                         interim_transcript_len += len(message["data"].get("content").strip().split(" "))
@@ -2216,6 +2381,7 @@ class TaskManager(BaseManager):
                         ):
                             logger.info(f"Continuing the loop and ignoring the transcript received ({transcript_content}) in speech final as it is false interruption")
                             self.interruption_manager.on_user_speech_ended(update_utterance_time=False)
+                            self._speech_started_before_welcome = False
                             continue
 
                         self.interruption_manager.on_user_speech_ended()
@@ -2235,11 +2401,17 @@ class TaskManager(BaseManager):
                     elif isinstance(message.get("data"), dict) and message["data"].get("type", "") == "speech_ended":
                         logger.info("Received speech_ended notification, resetting callee_speaking state")
                         self.interruption_manager.on_user_speech_ended(update_utterance_time=False)
+                        self._speech_started_before_welcome = False
                         temp_transcriber_message = ""
 
                     elif message["data"] == "transcriber_connection_closed":
-                        logger.info("Transcriber connection has been closed")
                         self.transcriber_duration += message.get("meta_info", {}).get("transcriber_duration", 0) if message["meta_info"] is not None else 0
+                        # In a pool, a standby transcriber closing is expected (e.g. Deepgram
+                        # inactivity timeout). Only end the call if we're NOT using a pool.
+                        if isinstance(self.tools.get("transcriber"), TranscriberPool):
+                            logger.info(f"TranscriberPool: a transcriber connection closed (standby drop), continuing")
+                            continue
+                        logger.info(f"Transcriber connection has been closed")
                         break
 
                 else:
@@ -2247,6 +2419,10 @@ class TaskManager(BaseManager):
                     if message["data"] == "transcriber_connection_closed":
                         logger.info("Transcriber connection has been closed")
                         self.transcriber_duration += message.get("meta_info", {}).get("transcriber_duration", 0) if message["meta_info"] is not None else 0
+                        if isinstance(self.tools.get("transcriber"), TranscriberPool):
+                            logger.info(f"TranscriberPool: a transcriber connection closed (standby drop), continuing")
+                            continue
+                        logger.info(f"Transcriber connection has been closed")
                         break
 
                     await self.__process_http_transcription(message)
@@ -2292,6 +2468,35 @@ class TaskManager(BaseManager):
     def is_sequence_id_in_current_ids(self, sequence_id):
         """Check if sequence_id is valid. Delegates to InterruptionManager."""
         return self.interruption_manager.is_valid_sequence(sequence_id)
+
+    async def switch_language(self, label, components=None):
+        """Switch the active language for multilingual pools.
+
+        Args:
+            label: language label to switch to (e.g. "hi", "en").
+            components: list of component names to switch. Defaults to both.
+        """
+        components = components or ["transcriber", "synthesizer"]
+        if "transcriber" in components and isinstance(self.tools.get("transcriber"), TranscriberPool):
+            await self.tools["transcriber"].switch(label)
+        if "synthesizer" in components and isinstance(self.tools.get("synthesizer"), SynthesizerPool):
+            await self.tools["synthesizer"].switch(label)
+
+        # Update TaskManager state so silence detection, fillers, and LLM
+        # language stay in sync with the active pools.
+        self.language = label
+        # Reset silence timers to prevent __check_for_completion from
+        # interpreting the switch gap as inactivity and hanging up.
+        self.last_transmitted_timestamp = time.time()
+        self.time_since_last_spoken_human_word = time.time()
+        self.asked_if_user_is_still_there = False
+        logger.info(f"Language switched to '{label}'")
+
+        if label in self.multilingual_prompts:
+            new_prompt = self.multilingual_prompts[label]
+            self.conversation_history.update_system_prompt(new_prompt)
+            self.system_prompt['content'] = new_prompt
+            logger.info(f"Switched system prompt to language '{label}'")
 
     async def __listen_synthesizer(self):
         all_text_to_be_synthesized = []
@@ -2661,6 +2866,9 @@ class TaskManager(BaseManager):
                 if self.check_if_user_online:
                     detected_lang = self.language_detector.dominant_language
                     user_online_message = select_message_by_language(self.check_user_online_message_config, detected_lang)
+
+                    if self.generate_precise_transcript:
+                        self.tools["input"].reset_response_heard_by_user()
 
                     if self.should_record:
                         meta_info={'io': 'default', "request_id": str(uuid.uuid4()), "cached": False, "sequence_id": -1, 'format': 'wav', "message_category": "is_user_online_message", 'end_of_llm_stream': True}

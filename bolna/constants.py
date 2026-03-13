@@ -93,6 +93,28 @@ LLM_DEFAULT_CONFIGS = {
     "extraction": {
         "model": "gpt-4.1-mini",
         "provider": "openai"
+    },
+    "google": {
+        "model": "gemini-2.5-flash",
+        "provider": "google"
+    }
+}
+
+SWITCH_LANGUAGE_TOOL_DEFINITION = {
+    "type": "function",
+    "function": {
+        "name": "switch_language",
+        "description": "Switch the conversation language for speech recognition and synthesis. Call this when the user speaks in or requests a different language.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "language": {
+                    "type": "string",
+                    "description": "The language label to switch to (e.g. 'hi' for Hindi, 'en' for English)"
+                }
+            },
+            "required": ["language"]
+        }
     }
 }
 
