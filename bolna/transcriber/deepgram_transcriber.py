@@ -77,6 +77,7 @@ class DeepgramTranscriber(BaseTranscriber):
         self.last_interim_time = None
         self.interim_timeout = kwargs.get("interim_timeout", 5.0)  # Default 5 seconds
         self.utterance_timeout_task = None
+        self.connection_error = None
 
     def get_deepgram_ws_url(self):
         dg_params = {
@@ -670,6 +671,7 @@ class DeepgramTranscriber(BaseTranscriber):
                 deepgram_ws = await self.deepgram_connect()
             except (ValueError, ConnectionError) as e:
                 logger.error(f"Failed to establish Deepgram connection: {e}")
+                self.connection_error = str(e)
                 await self.toggle_connection()
                 return
 
@@ -697,8 +699,10 @@ class DeepgramTranscriber(BaseTranscriber):
                             break
                 except ConnectionClosedError as e:
                     logger.error(f"Deepgram websocket connection closed during streaming: {e}")
+                    self.connection_error = str(e)
                 except Exception as e:
                     logger.error(f"Error during streaming: {e}")
+                    self.connection_error = str(e)
                     raise
             else:
                 async for message in self.sender():
@@ -706,9 +710,11 @@ class DeepgramTranscriber(BaseTranscriber):
 
         except (ValueError, ConnectionError) as e:
             logger.error(f"Connection error in transcribe: {e}")
+            self.connection_error = str(e)
             await self.toggle_connection()
         except Exception as e:
             logger.error(f"Unexpected error in transcribe: {e}")
+            self.connection_error = str(e)
             await self.toggle_connection()
         finally:
             if deepgram_ws is not None:
@@ -729,9 +735,12 @@ class DeepgramTranscriber(BaseTranscriber):
                 self.utterance_timeout_task.cancel()
 
             # Use Deepgram's actual audio duration for billing
-            if "deepgram_duration" in self.meta_info:
+            if self.meta_info is not None and "deepgram_duration" in self.meta_info:
                 self.meta_info["transcriber_duration"] = self.meta_info["deepgram_duration"]
 
+            meta = dict(getattr(self, 'meta_info', None) or {})
+            if self.connection_error:
+                meta['connection_error'] = self.connection_error
             await self.push_to_transcriber_queue(
-                create_ws_data_packet("transcriber_connection_closed", getattr(self, 'meta_info', {}))
+                create_ws_data_packet("transcriber_connection_closed", meta)
             )

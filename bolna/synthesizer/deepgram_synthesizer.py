@@ -57,6 +57,7 @@ class DeepgramSynthesizer(BaseSynthesizer):
         self.last_text_sent = False
         self.sender_task = None
         self.conversation_ended = False
+        self.connection_error = None
         self.current_turn_start_time = None
         self.current_turn_id = None
         self.current_text = ""
@@ -162,6 +163,7 @@ class DeepgramSynthesizer(BaseSynthesizer):
                     await self.websocket_holder["websocket"].send(json.dumps(speak_message))
                 except Exception as e:
                     logger.error(f"Error sending chunk to Deepgram: {e}")
+                    self.connection_error = str(e)
                     return
 
             # If end_of_llm_stream is True, flush the buffer and mark stream as complete
@@ -174,6 +176,7 @@ class DeepgramSynthesizer(BaseSynthesizer):
                     logger.info("Sent Flush message to Deepgram TTS WebSocket")
                 except Exception as e:
                     logger.error(f"Error sending Flush to Deepgram: {e}")
+                    self.connection_error = str(e)
 
         except asyncio.CancelledError:
             logger.info("Deepgram sender task was cancelled.")
@@ -190,6 +193,8 @@ class DeepgramSynthesizer(BaseSynthesizer):
 
                 if (self.websocket_holder["websocket"] is None or
                         self.websocket_holder["websocket"].state is websockets.protocol.State.CLOSED):
+                    if self.connection_error:
+                        return
                     logger.info("Deepgram WebSocket is not connected, skipping receive.")
                     await asyncio.sleep(0.10)
                     continue
@@ -251,6 +256,8 @@ class DeepgramSynthesizer(BaseSynthesizer):
             if self.stream:
                 # WebSocket streaming mode
                 async for message in self.receiver():
+                    if self.connection_error:
+                        raise Exception(self.connection_error)
                     if len(self.text_queue) > 0:
                         self.meta_info = self.text_queue.popleft()
                         # Compute TTFB on first audio chunk only
@@ -301,6 +308,8 @@ class DeepgramSynthesizer(BaseSynthesizer):
 
                     self.meta_info["mark_id"] = str(uuid.uuid4())
                     yield create_ws_data_packet(audio, self.meta_info)
+                if self.connection_error:
+                    raise Exception(self.connection_error)
             else:
                 # HTTP non-streaming mode
                 while True:
@@ -364,6 +373,7 @@ class DeepgramSynthesizer(BaseSynthesizer):
         except Exception as e:
             traceback.print_exc()
             logger.error(f"Error in Deepgram generate: {e}")
+            raise
 
     async def establish_connection(self):
         """Establish WebSocket connection to Deepgram TTS"""
@@ -390,6 +400,7 @@ class DeepgramSynthesizer(BaseSynthesizer):
                 logger.error(f"Deepgram authentication failed: Access forbidden")
             else:
                 logger.error(f"Deepgram WebSocket connection failed with status {e.status_code}: {e}")
+            self.connection_error = str(e)
             return None
         except Exception as e:
             logger.error(f"Failed to connect to Deepgram TTS WebSocket: {e}")
@@ -409,6 +420,7 @@ class DeepgramSynthesizer(BaseSynthesizer):
                     logger.warning(f"Deepgram TTS connection failed (attempt {consecutive_failures}/{max_failures})")
                     if consecutive_failures >= max_failures:
                         logger.error("Max connection failures reached for Deepgram TTS - stopping reconnection attempts")
+                        self.connection_error = self.connection_error or "Max connection failures reached"
                         break
                 else:
                     self.websocket_holder["websocket"] = result

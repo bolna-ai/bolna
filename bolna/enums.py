@@ -150,3 +150,65 @@ class ResponseItemType(str, Enum):
     @classmethod
     def all_values(cls):
         return [e.value for e in cls]
+
+
+class HangupReason(str, Enum):
+    """Enum for hangup_detail values — why the call ended."""
+    LLM_PROMPTED_HANGUP = "llm_prompted_hangup"
+    VOICEMAIL_DETECTED = "voicemail_detected"
+    WEB_CALL_MAX_DURATION_REACHED = "web_call_max_duration_reached"
+    INACTIVITY_TIMEOUT = "inactivity_timeout"
+    TRANSCRIBER_ERROR = "transcriber_error"
+    TRANSCRIBER_CONNECTION_ERROR = "transcriber_connection_error"
+    SYNTHESIZER_ERROR = "synthesizer_error"
+    LLM_ERROR = "llm_error"
+
+    @classmethod
+    def all_values(cls):
+        return [r.value for r in cls]
+
+
+class LogComponent(str, Enum):
+    """Enum for CSV trace log component types."""
+    ERROR = "error"
+    FUNCTION_CALL = "function_call"
+    GRAPH_ROUTING = "graph_routing"
+    LLM = "llm"
+    LLM_HANGUP = "llm_hangup"
+    LLM_LANGUAGE_DETECTION = "llm_language_detection"
+    LLM_VOICEMAIL = "llm_voicemail"
+    SYNTHESIZER = "synthesizer"
+    TRANSCRIBER = "transcriber"
+    WARNING = "warning"
+
+    @property
+    def display_name(self):
+        return _DISPLAY_NAMES.get(self, self.value)
+
+    @classmethod
+    def all_values(cls):
+        return [c.value for c in cls]
+
+
+_DISPLAY_NAMES = {
+    LogComponent.TRANSCRIBER: "Speech recognition",
+    LogComponent.SYNTHESIZER: "Text-to-speech",
+    LogComponent.LLM: "LLM",
+    LogComponent.LLM_HANGUP: "LLM hangup check",
+    LogComponent.LLM_VOICEMAIL: "LLM voicemail check",
+    LogComponent.LLM_LANGUAGE_DETECTION: "LLM language detection",
+    LogComponent.FUNCTION_CALL: "Function call",
+    LogComponent.GRAPH_ROUTING: "Graph routing",
+}
+
+
+class LogDirection(str, Enum):
+    """Enum for CSV trace log direction types."""
+    ERROR = "error"
+    REQUEST = "request"
+    RESPONSE = "response"
+    WARNING = "warning"
+
+    @classmethod
+    def all_values(cls):
+        return [d.value for d in cls]

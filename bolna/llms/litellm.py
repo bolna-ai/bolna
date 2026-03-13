@@ -7,6 +7,7 @@ from litellm.exceptions import AuthenticationError, RateLimitError, APIError, AP
 from dotenv import load_dotenv
 
 from bolna.constants import DEFAULT_LANGUAGE_CODE
+from bolna.enums import LogComponent, LogDirection
 from bolna.helpers.utils import convert_to_request_log, compute_function_pre_call_message, now_ms
 from .llm import BaseLLM
 from .tool_call_accumulator import ToolCallAccumulator
@@ -90,11 +91,17 @@ class LiteLLM(BaseLLM):
         except ContentPolicyViolationError as e:
             error_message = str(e)
             logger.error(f'Content policy violation in stream: {error_message}')
+
+            # Log to CSV trace as warning (non-call-breaking)
             if meta_info and self.run_id:
                 convert_to_request_log(
                     f"Content Policy Violation: {error_message}",
-                    meta_info, self.model, component="llm",
-                    direction="error", is_cached=False, run_id=self.run_id
+                    meta_info,
+                    self.model,
+                    component=LogComponent.WARNING,
+                    direction=LogDirection.WARNING,
+                    is_cached=False,
+                    run_id=self.run_id
                 )
             return
         except AuthenticationError as e:
@@ -181,14 +188,14 @@ class LiteLLM(BaseLLM):
             error_message = str(e)
             logger.error(f'Content policy violation: {error_message}')
 
-            # Log to CSV trace
+            # Log to CSV trace as warning (non-call-breaking)
             if meta_info and self.run_id:
                 convert_to_request_log(
                     f"Content Policy Violation: {error_message}",
                     meta_info,
                     self.model,
-                    component="llm",
-                    direction="error",
+                    component=LogComponent.WARNING,
+                    direction=LogDirection.WARNING,
                     is_cached=False,
                     run_id=self.run_id
                 )

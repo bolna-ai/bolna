@@ -49,6 +49,7 @@ class PixaSynthesizer(BaseSynthesizer):
         self.sender_task = None
         self.context_ids_to_ignore = set()
         self.conversation_ended = False
+        self.connection_error = None
         self.current_turn_start_time = None
         self.current_turn_id = None
         self.current_text = ""
@@ -129,6 +130,7 @@ class PixaSynthesizer(BaseSynthesizer):
                     await self.websocket_holder["websocket"].send(json.dumps(input_message))
                 except Exception as e:
                     logger.error(f"Error sending chunk: {e}")
+                    self.connection_error = str(e)
                     return
 
             if end_of_llm_stream:
@@ -138,6 +140,7 @@ class PixaSynthesizer(BaseSynthesizer):
                     await self.websocket_holder["websocket"].send(json.dumps(input_message))
                 except Exception as e:
                     logger.error(f"Error sending end-of-stream signal: {e}")
+                    self.connection_error = str(e)
 
         except asyncio.CancelledError:
             logger.info("Sender task was cancelled.")
@@ -151,6 +154,8 @@ class PixaSynthesizer(BaseSynthesizer):
                     return
 
                 if self.websocket_holder["websocket"] is None or self.websocket_holder["websocket"].state != websockets.protocol.State.OPEN:
+                    if self.connection_error:
+                        return
                     logger.info("WebSocket is not connected, skipping receive.")
                     await asyncio.sleep(0.1)
                     continue
@@ -234,6 +239,8 @@ class PixaSynthesizer(BaseSynthesizer):
     async def generate(self):
         try:
             async for message in self.receiver():
+                if self.connection_error:
+                    raise Exception(self.connection_error)
                 if len(self.text_queue) > 0:
                     self.meta_info = self.text_queue.popleft()
                     try:
@@ -280,10 +287,13 @@ class PixaSynthesizer(BaseSynthesizer):
                         pass
 
                 yield create_ws_data_packet(audio, self.meta_info)
+            if self.connection_error:
+                raise Exception(self.connection_error)
 
         except Exception as e:
             traceback.print_exc()
             logger.error(f"Error in pixa generate: {e}")
+            raise
 
     async def establish_connection(self):
         try:
@@ -324,6 +334,7 @@ class PixaSynthesizer(BaseSynthesizer):
                 logger.error(f"Pixa endpoint not found: {e}")
             else:
                 logger.error(f"Pixa handshake failed: {e}")
+            self.connection_error = str(e)
             return None
         except Exception as e:
             logger.error(f"Failed to connect to Pixa: {e}")
@@ -342,6 +353,7 @@ class PixaSynthesizer(BaseSynthesizer):
                     logger.warning(f"Pixa connection failed (attempt {consecutive_failures}/{max_failures})")
                     if consecutive_failures >= max_failures:
                         logger.error("Max connection failures reached for Pixa - stopping reconnection attempts")
+                        self.connection_error = self.connection_error or "Max connection failures reached"
                         break
                 else:
                     self.websocket_holder["websocket"] = result

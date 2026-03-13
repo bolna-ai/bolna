@@ -99,6 +99,7 @@ class OPENAISynthesizer(BaseSynthesizer):
 
         except Exception as e:
                 logger.error(f"Error in openai generate {e}")
+                raise
 
     async def open_connection(self):
         pass

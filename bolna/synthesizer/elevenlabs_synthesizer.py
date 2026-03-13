@@ -49,6 +49,7 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
         self.websocket_holder = {"websocket": None}
         self.sender_task = None
         self.conversation_ended = False
+        self.connection_error = None
         self.current_turn_start_time = None
         self.current_turn_id = None
         self.current_text = ""
@@ -116,6 +117,7 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
                         await self.websocket_holder["websocket"].send(json.dumps({"text": text_chunk}))
                     except Exception as e:
                         logger.info(f"Error sending chunk: {e}")
+                        self.connection_error = str(e)
                         return
 
             # If end_of_llm_stream is True, mark the last chunk and send an empty message
@@ -128,6 +130,7 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
                 await self.websocket_holder["websocket"].send(json.dumps({"text": "", "flush": True}))
             except Exception as e:
                 logger.info(f"Error sending end-of-stream signal: {e}")
+                self.connection_error = str(e)
 
         except asyncio.CancelledError:
             logger.info("Sender task was cancelled.")
@@ -144,6 +147,8 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
 
                 if (self.websocket_holder["websocket"] is None or
                         self.websocket_holder["websocket"].state is websockets.protocol.State.CLOSED):
+                    if self.connection_error:
+                        return
                     logger.info("WebSocket is not connected, skipping receive.")
                     await asyncio.sleep(0.10)
                     continue
@@ -255,6 +260,8 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
         try:
             if self.stream:
                 async for message, text_synthesized in self.receiver():
+                    if self.connection_error:
+                        raise Exception(self.connection_error)
                     gen_loop_start = time.perf_counter()
                     if last_yield_time:
                         loop_gap = (gen_loop_start - last_yield_time) * 1000
@@ -324,6 +331,8 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
                     self.meta_info["mark_id"] = str(uuid.uuid4())
                     last_yield_time = time.perf_counter()
                     yield create_ws_data_packet(audio, self.meta_info)
+                if self.connection_error:
+                    raise Exception(self.connection_error)
             else:
                 while True:
                     message = await self.internal_queue.get()
@@ -368,6 +377,7 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
         except Exception as e:
             traceback.print_exc()
             logger.info(f"Error in eleven labs generate {e}")
+            raise
 
     def supports_websocket(self):
         return True
