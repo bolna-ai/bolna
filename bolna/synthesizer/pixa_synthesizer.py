@@ -394,3 +394,4 @@ class PixaSynthesizer(BaseSynthesizer):
         finally:
             self.websocket_holder["websocket"] = None
         logger.info("Pixa WebSocket connection closed.")
+        await super().cleanup()

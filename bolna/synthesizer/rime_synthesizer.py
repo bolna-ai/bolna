@@ -352,3 +352,4 @@ class RimeSynthesizer(BaseSynthesizer):
             await self.websocket_holder["websocket"].close()
         self.websocket_holder["websocket"] = None
         logger.info("WebSocket connection closed.")
+        await super().cleanup()

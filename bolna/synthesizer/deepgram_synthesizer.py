@@ -469,3 +469,4 @@ class DeepgramSynthesizer(BaseSynthesizer):
         
         self.websocket_holder["websocket"] = None
         logger.info("Deepgram TTS WebSocket connection closed.")
+        await super().cleanup()

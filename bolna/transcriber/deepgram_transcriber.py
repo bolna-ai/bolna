@@ -313,6 +313,11 @@ class DeepgramTranscriber(BaseTranscriber):
                 self.websocket_connection = None
                 self.connection_authenticated = False
 
+        # Free accumulated per-connection data
+        self.audio_frame_timestamps.clear()
+        self.turn_latencies.clear()
+        self.current_turn_interim_details.clear()
+
     async def _get_http_transcription(self, audio_data):
         if self.session is None or self.session.closed:
             self.session = aiohttp.ClientSession()

@@ -28,6 +28,11 @@ class ObservableVariable:
             self._value = new_value
             self._notify_observers(new_value)
 
+    def cleanup(self):
+        """Clear all observers and value to break reference cycles."""
+        self._observers.clear()
+        self._value = None
+
     def _notify_observers(self, new_value):
         """
         Notify each observer about the new value.

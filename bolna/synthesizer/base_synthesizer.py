@@ -43,7 +43,12 @@ class BaseSynthesizer:
         pass
 
     async def cleanup(self):
-        pass
+        """Clean up synthesizer resources. Subclasses should call super().cleanup()."""
+        if hasattr(self, 'cache') and self.cache is not None:
+            if hasattr(self.cache, 'flush_cache'):
+                self.cache.flush_cache()
+        self.task_manager_instance = None
+        self.turn_latencies.clear()
 
     async def handle_interruption(self):
         pass
