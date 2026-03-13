@@ -112,6 +112,40 @@ Deletes an agent from the system.
 ```
 
 
+### Create Batch
+Creates a new batch for an agent to initiate calls to a list of recipients.
+
+**Endpoint:** `POST /batches`
+
+**Headers:**
+- `Authorization` - Bearer token: Your API key
+
+**Request Body (multipart/form-data):**
+- `agent_id` (string, required): Unique identifier of the agent to use for the batch calls
+- `file` (file, required): CSV file containing recipient details
+- `from_phone_numbers` (list of strings, required): List of phone numbers to use as caller IDs. Pass multiple values to use multiple originating numbers.
+
+**Example:**
+
+```bash
+curl --location 'https://api.bolna.ai/batches' \
+--header 'Authorization: Bearer <api_key>' \
+--form 'agent_id="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"' \
+--form 'file=@"/path/to/file"' \
+--form 'from_phone_numbers="+919876543210"' \
+--form 'from_phone_numbers="+919876543211"'
+```
+
+**Response:**
+200 OK
+```json
+{
+  "batch_id": "uuid-string",
+  "state": "created"
+}
+```
+
+### Get All Agents
 Retrieves all agents from the system.
 
 **Endpoint:** `GET /all`
