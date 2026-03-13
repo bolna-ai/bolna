@@ -1,4 +1,3 @@
-import asyncio
 import json
 
 import aiohttp
@@ -72,7 +71,7 @@ async def trigger_api(url, method, param, api_token, headers_data, meta_info, ru
             if isinstance(param, dict) and _contains_var_markers(param):
                 api_params = substitute_var_markers(param, kwargs)
                 request_body = json.dumps(api_params)
-                logger.info(f"Using $var marker substitution for param")
+                logger.info("Using $var marker substitution for param")
             else:
                 # LEGACY FORMAT: String template with %(field)s placeholders
                 if isinstance(param, dict):
@@ -93,6 +92,12 @@ async def trigger_api(url, method, param, api_token, headers_data, meta_info, ru
 
         headers = {'Content-Type': 'application/json'}
         content_type = "json"
+        # KALLABOT - MCP header support for authentication
+        if "mcp" in url:
+            headers['Accept'] = 'application/json, text/event-stream'
+            mcp_auth = kwargs.pop('mcp_auth', None)
+            if mcp_auth and isinstance(mcp_auth, dict):
+                headers.update(mcp_auth)
         if api_token:
             headers['Authorization'] = api_token
 
@@ -131,7 +136,7 @@ async def computed_api_response(response):
     try:
         get_res_keys = list(json.loads(response).keys())
         get_res_values = list(json.loads(response).values())
-    except Exception as e:
+    except Exception:
         pass
 
     return get_res_keys, get_res_values

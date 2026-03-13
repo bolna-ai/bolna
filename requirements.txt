@@ -1,25 +1,52 @@
+# Core framework
+fastapi==0.108.0
+uvicorn>=0.23.1,<0.30
+pydantic>=2.7.2,<3.0.0
+pydantic-settings>=2.5.2,<3.0.0
+python-dotenv==1.0.0
+python-multipart>=0.0.9
+
+# Database
+asyncpg>=0.29
+
+# HTTP clients
+httpx[http2]>=0.27.0,<1.0.0
+aiohttp>=3.9.2,<3.10.0
+requests>=2.31.0,<3
+
+# Redis
+redis==5.0.1
+
+# Cloud / Storage
 aiobotocore==2.9.0
 aiofiles==23.2.1
-aiohttp>=3.9.2,<3.10.0
-fastapi==0.108.0
-httpx[http2]>=0.25.0
+
+# AI / LLM
 litellm==1.65.0
+openai>=1.66.1,<2.0.0
+groq>=0.4.0
+mcp==1.10.1
+
+# Audio / ML
 numpy==1.26.1
 onnxruntime>=1.16.3
-openai>=1.10.0
-pydantic==2.5.3
 pydub==0.25.1
-python-dateutil==2.8.2
-python-dotenv==1.0.0
-pytz>=2024.1
-redis==5.0.1
-requests>=2.31.0,<3
 scipy==1.11.4
-tiktoken>=0.6.0
-uvicorn==0.22.0
-websockets==15.0.1
+
+# Telephony
+twilio==8.9.0
+plivo==4.47.0
+
+# Payments
+stripe>=7.0
+
+# Speech / transcription
 azure-cognitiveservices-speech==1.38.0
 google-cloud-speech==2.25.0
-groq>=0.4.0
-plivo==4.47.0
-twilio==8.9.0
+
+# Utilities
+tiktoken>=0.6.0
+websockets==15.0.1
+python-dateutil==2.8.2
+pytz>=2024.1
+typing_extensions>=4.0

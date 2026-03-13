@@ -1,4 +1,3 @@
-from datetime import datetime
 
 
 EXTRACTION_PROMPT = """

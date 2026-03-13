@@ -4,7 +4,6 @@ import websockets
 import logging
 import base64
 import json
-import wave
 import time
 import argparse
 import sounddevice as sd
@@ -45,7 +44,7 @@ input_queue = asyncio.Queue()
 # Callback function to add audio frames to the queue
 def _callback(input_data, frame_count, time_info, status_flags):
     input_queue.put_nowait(input_data)
-    logging.debug(f"Audio frame added to the queue")
+    logging.debug("Audio frame added to the queue")
     return (input_data, pyaudio.paContinue)
 
 # Coroutine to open microphone stream and start sending audio
@@ -137,7 +136,7 @@ async def receiver(ws):
                 print(response)
 
             if response["type"] == "clear":
-                logging.info(f"Got interrupt message and clearing chunks\n\n\n")
+                logging.info("Got interrupt message and clearing chunks\n\n\n")
                 if len(chunks) > 0:
                     logging.info("Stopping the current frame")
                     chunks.clear()

@@ -189,7 +189,7 @@ async def websocket_endpoint(agent_id: str, websocket: WebSocket, user_agent: st
         logger.info(
             f"Retrieved agent config: {retrieved_agent_config}")
         agent_config = json.loads(retrieved_agent_config)
-    except Exception as e:
+    except Exception:
         traceback.print_exc()
         raise HTTPException(status_code=404, detail="Agent not found")
 

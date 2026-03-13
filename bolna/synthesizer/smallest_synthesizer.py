@@ -87,7 +87,7 @@ class SmallestSynthesizer(BaseSynthesizer):
         try:
             if self.stream:
                 async for message in self.receiver():
-                    logger.info(f"Received message from server")
+                    logger.info("Received message from server")
 
                     if len(self.text_queue) > 0:
                         self.meta_info = self.text_queue.popleft()

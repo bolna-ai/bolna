@@ -1,5 +1,4 @@
 import io
-import wave
 from pydub import AudioSegment
 from bolna.helpers.logger_config import configure_logger
 import asyncio
@@ -18,7 +17,7 @@ class BaseSynthesizer:
         self.turn_latencies = []
 
     def clear_internal_queue(self):
-        logger.info(f"Clearing out internal queue")
+        logger.info("Clearing out internal queue")
         self.internal_queue = asyncio.Queue()
 
     def should_synthesize_response(self, sequence_id):

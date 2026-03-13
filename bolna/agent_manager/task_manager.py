@@ -1,5 +1,4 @@
 import asyncio
-from collections import defaultdict
 import math
 import os
 import random
@@ -14,7 +13,7 @@ import websockets
 
 import aiohttp
 
-from bolna.constants import ACCIDENTAL_INTERRUPTION_PHRASES, DEFAULT_USER_ONLINE_MESSAGE, DEFAULT_USER_ONLINE_MESSAGE_TRIGGER_DURATION, FILLER_DICT, DEFAULT_LANGUAGE_CODE, DEFAULT_TIMEZONE, LANGUAGE_NAMES, LLM_DEFAULT_CONFIGS
+from bolna.constants import ACCIDENTAL_INTERRUPTION_PHRASES, DEFAULT_USER_ONLINE_MESSAGE, DEFAULT_USER_ONLINE_MESSAGE_TRIGGER_DURATION, DEFAULT_LANGUAGE_CODE, DEFAULT_TIMEZONE, LANGUAGE_NAMES, LLM_DEFAULT_CONFIGS
 from bolna.helpers.function_calling_helpers import trigger_api, computed_api_response
 from bolna.helpers.conversation_history import ConversationHistory
 from .base_manager import BaseManager
@@ -39,6 +38,10 @@ class TaskManager(BaseManager):
                  input_queue=None, conversation_history=None, output_queue=None, yield_chunks=True, **kwargs):
         super().__init__()
         self.kwargs = kwargs
+        # KALLABOT: Accept extension kwargs for call context, MCP tools, and conversation storage
+        self.call_context = kwargs.get('call_context', None)  # KALLABOT
+        self.mcp_tools = kwargs.get('mcp_tools', None)  # KALLABOT
+        self.conversation_store = kwargs.get('conversation_store', None)  # KALLABOT
         self.kwargs["task_manager_instance"] = self
 
         self.conversation_start_init_ts = time.time() * 1000
@@ -391,7 +394,7 @@ class TaskManager(BaseManager):
                 self.backchanneling_start_delay = self.conversation_config.get("backchanneling_start_delay", 5)
                 self.backchanneling_message_gap = self.conversation_config.get("backchanneling_message_gap", 2) #Amount of duration co routine will sleep
                 if self.should_backchannel and not turn_based_conversation and task_id == 0:
-                    logger.info(f"Should backchannel")
+                    logger.info("Should backchannel")
                     self.backchanneling_audios = f'{kwargs.get("backchanneling_audio_location", os.getenv("BACKCHANNELING_PRESETS_DIR"))}/{self.synthesizer_voice.lower()}'
                     #self.num_files = list_number_of_wav_files_in_directory(self.backchanneling_audios)
                     try:
@@ -553,12 +556,12 @@ class TaskManager(BaseManager):
 
                 if self.task_config["tools_config"]["output"]["provider"] in SUPPORTED_OUTPUT_TELEPHONY_HANDLERS.keys():
                     output_kwargs['mark_event_meta_data'] = self.mark_event_meta_data
-                    logger.info(f"Making sure that the sampling rate for output handler is 8000")
+                    logger.info("Making sure that the sampling rate for output handler is 8000")
                     self.task_config['tools_config']['synthesizer']['provider_config']['sampling_rate'] = 8000
                     # sip-trunk (Asterisk) uses ulaw; other telephony use pcm (handler converts to mulaw)
                     if self.task_config["tools_config"]["output"]["provider"] == TelephonyProvider.SIP_TRUNK.value:
                         self.task_config['tools_config']['synthesizer']['audio_format'] = 'ulaw'
-                        logger.info(f"Setting synthesizer audio format to ulaw for Asterisk sip-trunk")
+                        logger.info("Setting synthesizer audio format to ulaw for Asterisk sip-trunk")
                         # Pass input handler to output handler so it can simulate mark events
                         input_handler = self.tools.get("input")
                         output_kwargs['input_handler'] = input_handler
@@ -628,7 +631,7 @@ class TaskManager(BaseManager):
             raise "Other input handlers not supported yet"
 
     async def __forced_first_message(self, timeout=10.0):
-        logger.info(f"Executing the first message task")
+        logger.info("Executing the first message task")
         try:
             start_time = asyncio.get_running_loop().time()
             while True:
@@ -719,7 +722,7 @@ class TaskManager(BaseManager):
                 if provider == TelephonyProvider.SIP_TRUNK.value:
                     self.task_config["tools_config"]["transcriber"]["encoding"] = "mulaw"
                     self.task_config["tools_config"]["transcriber"]["sampling_rate"] = 8000
-                    logger.info(f"Configured transcriber for Asterisk sip-trunk with mulaw encoding @ 8kHz")
+                    logger.info("Configured transcriber for Asterisk sip-trunk with mulaw encoding @ 8kHz")
 
                 # Checking models for backwards compatibility
                 if self.task_config["tools_config"]["transcriber"]["model"] in SUPPORTED_TRANSCRIBER_MODELS.keys() or self.task_config["tools_config"]["transcriber"]["provider"] in SUPPORTED_TRANSCRIBER_PROVIDERS.keys():
@@ -757,7 +760,7 @@ class TaskManager(BaseManager):
             synthesizer_kwargs = self.kwargs.copy()
             if self.task_config["tools_config"]["output"]["provider"] == TelephonyProvider.SIP_TRUNK.value:
                 synthesizer_kwargs['use_mulaw'] = True
-                logger.info(f"[SIP-TRUNK] Configuring synthesizer with use_mulaw=True for Asterisk sip-trunk")
+                logger.info("[SIP-TRUNK] Configuring synthesizer with use_mulaw=True for Asterisk sip-trunk")
             
             self.tools["synthesizer"] = synthesizer_class(**self.task_config["tools_config"]["synthesizer"], **provider_config, **synthesizer_kwargs, caching=caching)
             # if not self.turn_based_conversation:
@@ -958,6 +961,18 @@ class TaskManager(BaseManager):
             welcome_msg = self.kwargs['agent_welcome_message']
         self.conversation_history.setup_system_prompt(self.system_prompt, welcome_msg)
 
+        # KALLABOT: Prepend call context to system prompt if provided
+        if self.call_context:  # KALLABOT
+            try:
+                from extensions.call_context import resolve_system_prompt as _resolve_ctx  # KALLABOT: lazy import
+                context_prefix = _resolve_ctx(self.call_context)  # KALLABOT
+                if context_prefix:  # KALLABOT
+                    self.system_prompt['content'] = context_prefix + "\n\n" + self.system_prompt['content']  # KALLABOT
+                    self.conversation_history.update_system_prompt(self.system_prompt['content'])  # KALLABOT
+                    logger.info("KALLABOT: Prepended call context to system prompt")  # KALLABOT
+            except Exception as e:  # KALLABOT
+                logger.warning(f"KALLABOT: Failed to resolve call context: {e}")  # KALLABOT
+
         # If using knowledge_agent, inject the prompt into agent config so agent can read it
         try:
             if self.__is_knowledgebase_agent() and 'llm_agent' in self.task_config['tools_config']:
@@ -1089,7 +1104,7 @@ class TaskManager(BaseManager):
 
     async def __cleanup_downstream_tasks(self):
         current_ts = time.time()
-        logger.info(f"Cleaning up downstream task")
+        logger.info("Cleaning up downstream task")
         start_time = time.time()
         await self.tools["output"].handle_interruption()
         await self.tools["synthesizer"].handle_interruption()
@@ -1104,12 +1119,12 @@ class TaskManager(BaseManager):
 
         #Stop the output loop first so that we do not transmit anything else
         if self.output_task is not None:
-            logger.info(f"Cancelling output task")
+            logger.info("Cancelling output task")
             self.output_task.cancel()
         self.output_task = None
 
         if self.llm_task is not None:
-            logger.info(f"Cancelling LLM Task")
+            logger.info("Cancelling LLM Task")
             self.llm_task.cancel()
             self.llm_task = None
 
@@ -1131,9 +1146,9 @@ class TaskManager(BaseManager):
 
         #self.synthesizer_tasks = []
 
-        logger.info(f"Synth Task cancelled seconds")
+        logger.info("Synth Task cancelled seconds")
         if not self.buffered_output_queue.empty():
-            logger.info(f"Output queue was not empty and hence emptying it")
+            logger.info("Output queue was not empty and hence emptying it")
             self.buffered_output_queue = asyncio.Queue()
 
         self._turn_audio_flushed.set()
@@ -1230,7 +1245,7 @@ class TaskManager(BaseManager):
 
     # This observer works only for messages which have sequence_id != -1
     def final_chunk_played_observer(self, is_final_chunk_played):
-        logger.info(f'Updating last_transmitted_timestamp')
+        logger.info('Updating last_transmitted_timestamp')
         self.last_transmitted_timestamp = time.time()
 
     async def agent_hangup_observer(self, is_agent_hangup):
@@ -1348,7 +1363,7 @@ class TaskManager(BaseManager):
             self.voicemail_check_task = None
 
     def __update_preprocessed_tree_node(self):
-        logger.info(f"It's a preprocessed flow and hence updating current node")
+        logger.info("It's a preprocessed flow and hence updating current node")
         self.tools['llm_agent'].update_current_node()
 
 
@@ -1364,7 +1379,7 @@ class TaskManager(BaseManager):
             meta_info["llm_first_buffer_generation_latency"] = first_buffer_latency
 
         elif is_filler:
-            logger.info(f"It's a filler message and hence adding required metadata")
+            logger.info("It's a filler message and hence adding required metadata")
             meta_info['origin'] = "classifier"
             meta_info['cached'] = True
             meta_info['local'] = True
@@ -1433,10 +1448,25 @@ class TaskManager(BaseManager):
         self.check_if_user_online = False
 
         if called_fun.startswith("transfer_call"):
+            # KALLABOT: Try Kallabot transfer service first if available
+            try:  # KALLABOT
+                from services.transfer_service import execute_transfer  # KALLABOT: lazy import
+                await execute_transfer(  # KALLABOT
+                    call_sid=self.call_sid, stream_sid=self.stream_sid,
+                    provider=self.tools['input'].io_provider,
+                    run_id=self.run_id, param=param, meta_info=meta_info, **resp
+                )  # KALLABOT
+                self.execute_function_call_task = None  # KALLABOT
+                return  # KALLABOT
+            except ImportError:  # KALLABOT
+                pass  # KALLABOT: fall through to default Bolna transfer handler
+            except Exception as e:  # KALLABOT
+                logger.warning(f"KALLABOT: transfer_service failed, using default handler: {e}")  # KALLABOT
+
             await asyncio.sleep(2)
             try:
                 from_number = self.context_data['recipient_data']['from_number']
-            except Exception as e:
+            except Exception:
                 from_number = None
 
             call_sid = None
@@ -1498,9 +1528,26 @@ class TaskManager(BaseManager):
                     convert_to_request_log(str(response_text), meta_info, None, "function_call", direction="response", is_cached=False, run_id=self.run_id)
                     return
 
-        await self.wait_for_current_message()
-        response = await trigger_api(url=url, method=method.lower(), param=param, api_token=api_token, headers_data=headers, meta_info=meta_info, run_id=self.run_id, **resp)
-        function_response = str(response)
+        # KALLABOT: Handle MCP tool calls via extensions.mcp_client
+        if self.mcp_tools and called_fun in self.mcp_tools:  # KALLABOT
+            try:  # KALLABOT
+                from extensions.mcp_client import mcp_pool  # KALLABOT: lazy import
+                mcp_config = self.mcp_tools[called_fun]  # KALLABOT
+                mcp_result = await mcp_pool.execute_tool(called_fun, mcp_config, resp)  # KALLABOT
+                function_response = str(mcp_result) if mcp_result else "{}"  # KALLABOT
+                logger.info(f"KALLABOT: MCP tool {called_fun} response: {function_response}")  # KALLABOT
+                convert_to_request_log(  # KALLABOT
+                    f"MCP:{called_fun}", meta_info, None,
+                    "function_call", direction="request",
+                    is_cached=False, run_id=self.run_id
+                )  # KALLABOT
+            except Exception as e:  # KALLABOT
+                logger.error(f"KALLABOT: MCP tool call failed for {called_fun}: {e}")  # KALLABOT
+                function_response = f'{{"error": "MCP tool call failed: {e}"}}'  # KALLABOT
+        else:  # KALLABOT: regular API tools
+            await self.wait_for_current_message()
+            response = await trigger_api(url=url, method=method.lower(), param=param, api_token=api_token, headers_data=headers, meta_info=meta_info, run_id=self.run_id, **resp)
+            function_response = str(response)
         get_res_keys, get_res_values = await computed_api_response(function_response)
 
         # Merge API response data into context_data for routing decisions
@@ -1531,7 +1578,7 @@ class TaskManager(BaseManager):
         self.conversation_history.append_assistant(textual_response, tool_calls=resp["model_response"])
         self.conversation_history.append_tool_result(resp.get("tool_call_id", ""), function_response)
 
-        logger.info(f"Logging function call parameters ")
+        logger.info("Logging function call parameters ")
         convert_to_request_log(function_response, meta_info , None, "function_call", direction = "response", is_cached= False, run_id = self.run_id)
 
         messages = self.conversation_history.get_copy()
@@ -1548,12 +1595,20 @@ class TaskManager(BaseManager):
         self.llm_response_generated = True
         convert_to_request_log(message=llm_response, meta_info= meta_info, component="llm", direction="response", model=self.llm_config["model"], run_id= self.run_id)
         if should_trigger_function_call:
-            logger.info(f"There was a function call and need to make that work")
+            logger.info("There was a function call and need to make that work")
             self.conversation_history.append_assistant(llm_response)
         else:
             messages.append({"role": "assistant", "content": llm_response})
             self.conversation_history.append_assistant(llm_response)
             self.conversation_history.sync_interim(messages)
+
+        # KALLABOT: Store conversation turn if conversation_store is configured
+        if self.conversation_store:  # KALLABOT
+            try:  # KALLABOT
+                from extensions.conversation_history import store_turn  # KALLABOT: lazy import
+                store_turn(self.conversation_store, self.run_id, "assistant", llm_response)  # KALLABOT
+            except Exception as e:  # KALLABOT
+                logger.debug(f"KALLABOT: Failed to store conversation turn: {e}")  # KALLABOT
 
     async def __do_llm_generation(self, messages, meta_info, next_step, should_bypass_synth=False, should_trigger_function_call=False):
         # Reset response tracking for new turn
@@ -1758,7 +1813,7 @@ class TaskManager(BaseManager):
 
             if should_hangup:
                 if self.hangup_triggered or self.conversation_ended:
-                    logger.info(f"Hangup already triggered or conversation ended, skipping duplicate hangup request")
+                    logger.info("Hangup already triggered or conversation ended, skipping duplicate hangup request")
                     return
                 self.hangup_detail = "llm_prompted_hangup"
                 await self.process_call_hangup()
@@ -1770,7 +1825,7 @@ class TaskManager(BaseManager):
     async def process_call_hangup(self):
         # Guard: Prevent multiple concurrent hangup attempts
         if self.hangup_triggered or self.conversation_ended:
-            logger.info(f"process_call_hangup: Hangup already in progress or conversation ended, skipping")
+            logger.info("process_call_hangup: Hangup already in progress or conversation ended, skipping")
             return
 
         # Set immediately to prevent user interruptions from cancelling hangup
@@ -1843,7 +1898,7 @@ class TaskManager(BaseManager):
         if self.previous_request_id is None:
             is_first_message = True
         elif self.previous_request_id not in self.llm_processed_request_ids:
-            logger.info(f"Adding previous request id to LLM rejected request if")
+            logger.info("Adding previous request id to LLM rejected request if")
             self.llm_rejected_request_ids.add(self.previous_request_id)
         else:
             skip_append_to_data = False
@@ -2003,7 +2058,7 @@ class TaskManager(BaseManager):
         """
         Handle the case when voicemail is detected - say the message and end the call.
         """
-        logger.info(f"Handling voicemail detection - ending call")
+        logger.info("Handling voicemail detection - ending call")
 
         await self.process_call_hangup()
 
@@ -2037,7 +2092,7 @@ class TaskManager(BaseManager):
 
         convert_to_request_log(message=transcriber_message, meta_info=meta_info, model=self.task_config["tools_config"]["transcriber"]["provider"], run_id= self.run_id)
         if next_task == "llm":
-            logger.info(f"Running llm Tasks")
+            logger.info("Running llm Tasks")
             meta_info["origin"] = "transcriber"
             transcriber_package = create_ws_data_packet(transcriber_message, meta_info)
 
@@ -2059,7 +2114,7 @@ class TaskManager(BaseManager):
             self.synthesizer_tasks.append(asyncio.create_task(
                 self._synthesize(create_ws_data_packet(transcriber_message, meta_info))))
         else:
-            logger.info(f"Need to separate out output task")
+            logger.info("Need to separate out output task")
 
     async def _listen_transcriber(self):
         temp_transcriber_message = ""
@@ -2070,7 +2125,7 @@ class TaskManager(BaseManager):
 
                 if self.hangup_triggered:
                     if message["data"] == "transcriber_connection_closed":
-                        logger.info(f"Transcriber connection has been closed")
+                        logger.info("Transcriber connection has been closed")
                         self.transcriber_duration += message.get("meta_info", {}).get("transcriber_duration", 0) if message['meta_info'] is not None else 0
                         break
                     continue
@@ -2085,7 +2140,7 @@ class TaskManager(BaseManager):
                     # Handling of transcriber events
                     if message["data"] == "speech_started":
                         if self.tools["input"].welcome_message_played():
-                            logger.info(f"User has started speaking")
+                            logger.info("User has started speaking")
                             # self.callee_silent = False
 
                     # Whenever interim results would be received from Deepgram, this condition would get triggered
@@ -2109,7 +2164,7 @@ class TaskManager(BaseManager):
                             is_audio_playing=self.tools["input"].is_audio_being_played_to_user() or self.response_in_pipeline,
                             welcome_played=self.tools["input"].welcome_message_played()
                         ):
-                            logger.info(f"Condition for interruption hit")
+                            logger.info("Condition for interruption hit")
                             self.interruption_manager.on_user_speech_started()
                             self.interruption_manager.on_interruption_triggered()
                             self.tools["input"].update_is_audio_being_played(False)
@@ -2149,7 +2204,7 @@ class TaskManager(BaseManager):
 
                     # Whenever speech_final or UtteranceEnd is received from Deepgram, this condition would get triggered
                     elif isinstance(message.get("data"), dict) and message["data"].get("type", "") == "transcript":
-                        logger.info(f"Received transcript, sending for further processing")
+                        logger.info("Received transcript, sending for further processing")
                         transcript_content = message["data"].get("content", "")
                         word_count = len(transcript_content.strip().split(" "))
 
@@ -2167,7 +2222,7 @@ class TaskManager(BaseManager):
                         temp_transcriber_message = ""
 
                         if self.output_task is None:
-                            logger.info(f"Output task was none and hence starting it")
+                            logger.info("Output task was none and hence starting it")
                             self.output_task = asyncio.create_task(self.__process_output_loop())
 
                         self.interruption_manager.reset_delay_for_speech_final(len(self.history))
@@ -2178,19 +2233,19 @@ class TaskManager(BaseManager):
 
                     # Handle speech_ended notification (UtteranceEnd with no new transcript)
                     elif isinstance(message.get("data"), dict) and message["data"].get("type", "") == "speech_ended":
-                        logger.info(f"Received speech_ended notification, resetting callee_speaking state")
+                        logger.info("Received speech_ended notification, resetting callee_speaking state")
                         self.interruption_manager.on_user_speech_ended(update_utterance_time=False)
                         temp_transcriber_message = ""
 
                     elif message["data"] == "transcriber_connection_closed":
-                        logger.info(f"Transcriber connection has been closed")
+                        logger.info("Transcriber connection has been closed")
                         self.transcriber_duration += message.get("meta_info", {}).get("transcriber_duration", 0) if message["meta_info"] is not None else 0
                         break
 
                 else:
                     logger.info(f"Processing http transcription for message {message}")
                     if message["data"] == "transcriber_connection_closed":
-                        logger.info(f"Transcriber connection has been closed")
+                        logger.info("Transcriber connection has been closed")
                         self.transcriber_duration += message.get("meta_info", {}).get("transcriber_duration", 0) if message["meta_info"] is not None else 0
                         break
 
@@ -2224,7 +2279,7 @@ class TaskManager(BaseManager):
             copied_meta_info["is_first_chunk_of_entire_response"] = True
 
         if i == number_of_chunks - 1 and (meta_info['sequence_id'] == -1 or meta_info.get('end_of_synthesizer_stream', False)):
-            logger.info(f"Sending first chunk")
+            logger.info("Sending first chunk")
             copied_meta_info["is_final_chunk_of_entire_response"] = True
             copied_meta_info.pop("is_first_chunk_of_entire_response", None)
 
@@ -2340,7 +2395,7 @@ class TaskManager(BaseManager):
                     audio = await get_raw_audio_bytes(f'{self.filler_preset_directory}/{text}.wav', local= True, is_location=True)
                     yield_in_chunks = False
                     if not self.turn_based_conversation and self.task_config['tools_config']['output'] != "default":
-                        logger.info(f"Got to convert it to pcm")
+                        logger.info("Got to convert it to pcm")
                         audio_chunk = wav_bytes_to_pcm(resample(audio, format = "wav", target_sample_rate = 8000 ))
                         meta_info["format"] = "pcm"
                 else:
@@ -2350,12 +2405,12 @@ class TaskManager(BaseManager):
                         audio_chunk = None
                     logger.info(f"Time to get response from S3 {time.perf_counter() - start_time }")
                     if not self.buffered_output_queue.empty():
-                        logger.info(f"Output queue was not empty and hence emptying it")
+                        logger.info("Output queue was not empty and hence emptying it")
                         self.buffered_output_queue = asyncio.Queue()
                     meta_info["format"] = "pcm"
                     if 'message_category' in meta_info and meta_info['message_category'] == "agent_welcome_message":
                         if audio_chunk is None:
-                            logger.info(f"File doesn't exist in S3. Hence we're synthesizing it from synthesizer")
+                            logger.info("File doesn't exist in S3. Hence we're synthesizing it from synthesizer")
                             meta_info['cached'] = False
                             await self._synthesize(create_ws_data_packet(meta_info['text'], meta_info= meta_info))
                             return
@@ -2394,7 +2449,7 @@ class TaskManager(BaseManager):
                 elif self.synthesizer_provider in SUPPORTED_SYNTHESIZER_MODELS.keys():
                     convert_to_request_log(message = text, meta_info= meta_info, component="synthesizer", direction="request", model = self.synthesizer_provider, engine=self.tools['synthesizer'].get_engine(), run_id= self.run_id)
                     if 'cached' in message['meta_info'] and meta_info['cached'] is True:
-                        logger.info(f"Cached response and hence sending preprocessed text")
+                        logger.info("Cached response and hence sending preprocessed text")
                         convert_to_request_log(message = text, meta_info= meta_info, component="synthesizer", direction="response", model = self.synthesizer_provider, is_cached= True, engine=self.tools['synthesizer'].get_engine(), run_id= self.run_id)
                         await self.__send_preprocessed_audio(meta_info, get_md5_hash(text))
                     else:
@@ -2429,7 +2484,7 @@ class TaskManager(BaseManager):
         logger.info("Setting up __handle_accumulated_message function")
         while True:
             if self.tools["input"].welcome_message_played():
-                logger.info(f"Welcome message has been played")
+                logger.info("Welcome message has been played")
                 self.first_message_passing_time = time.time()
                 if len(self.transcriber_message):
                     logger.info(f"Sending the accumulated transcribed message - {self.transcriber_message}")
@@ -2552,7 +2607,7 @@ class TaskManager(BaseManager):
             logger.error(f'Error in processing message output: {str(e)}')
 
     async def __check_for_completion(self):
-        logger.info(f"Starting task to check for completion")
+        logger.info("Starting task to check for completion")
         while True:
             await asyncio.sleep(2)
 
@@ -2564,12 +2619,12 @@ class TaskManager(BaseManager):
                 break
 
             if self.last_transmitted_timestamp == 0:
-                logger.info(f"Last transmitted timestamp is simply 0 and hence continuing")
+                logger.info("Last transmitted timestamp is simply 0 and hence continuing")
                 continue
 
             if self.hangup_triggered:
                 if self.conversation_ended:
-                    logger.info(f"Call hangup completed successfully")
+                    logger.info("Call hangup completed successfully")
                     break
 
                 if self.hangup_triggered_at:
@@ -2636,7 +2691,7 @@ class TaskManager(BaseManager):
             await asyncio.sleep(self.backchanneling_message_gap)
 
     async def __first_message(self, timeout=10.0):
-        logger.info(f"Executing the first message task")
+        logger.info("Executing the first message task")
         try:
             if self.is_web_based_call:
                 logger.info("Sending agent welcome message for web based call")
@@ -2676,10 +2731,10 @@ class TaskManager(BaseManager):
                             await self._synthesize(create_ws_data_packet(text, meta_info=meta_info))
                         break
                     else:
-                        logger.info(f"Stream id is still None, so not passing it")
+                        logger.info("Stream id is still None, so not passing it")
                         await asyncio.sleep(0.01) #Sleep for half a second to see if stream id goes past None
                 elif self.default_io:
-                    logger.info(f"Shouldn't record")
+                    logger.info("Shouldn't record")
                     # meta_info={'io': 'default', 'is_first_message': True, "request_id": str(uuid.uuid4()), "cached": True, "sequence_id": -1, 'format': 'wav'}
                     # await self._synthesize(create_ws_data_packet(self.kwargs['agent_welcome_message'], meta_info= meta_info))
                     break
@@ -2701,7 +2756,7 @@ class TaskManager(BaseManager):
 
                 meta_info={'io': self.tools["output"].get_provider(), 'message_category': 'ambient_noise', 'stream_sid': self.stream_sid , "request_id": str(uuid.uuid4()), "cached": True, "type":'audio', "sequence_id": -1, 'format': 'pcm'}
             while True:
-                logger.info(f"Before yielding ambient noise")
+                logger.info("Before yielding ambient noise")
                 for chunk in yield_chunks_from_memory(audio, self.output_chunk_size*2):
                     # Only play ambient noise if no content is being transmitted
                     # Check if any real content audio (sequence_id > 0) is being played
@@ -2824,7 +2879,7 @@ class TaskManager(BaseManager):
                     logger.error(f"Could not do llm call: {e}")
                     raise Exception(e)
 
-        except asyncio.CancelledError as e:
+        except asyncio.CancelledError:
             # Cancel all tasks on cancel
             traceback.print_exc()
             self.transcriber_task.cancel()

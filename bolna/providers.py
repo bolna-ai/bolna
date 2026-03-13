@@ -84,3 +84,19 @@ SUPPORTED_OUTPUT_TELEPHONY_HANDLERS = {
     TelephonyProvider.VOBIZ.value: VobizOutputHandler,
     TelephonyProvider.SIP_TRUNK.value: SipTrunkOutputHandler
 }
+
+
+# KALLABOT - Prepare Azure synthesizer config with locale, temperature, personal_voice_id
+def prepare_synthesizer_config(provider, provider_config):
+    """Prepare provider-specific synthesizer configuration, wiring AzureConfig fields."""
+    config = dict(provider_config)
+    if provider == SynthesizerProvider.AZURETTS.value:
+        # Ensure locale is set for Azure TTS (accent/language switching)
+        config.setdefault("locale", "en-US")
+        # Only include temperature if explicitly set (Dragon voices 0.0-1.0)
+        if config.get("temperature") is None:
+            config.pop("temperature", None)
+        # Only include personal_voice_id if explicitly set (speaker profile ID)
+        if config.get("personal_voice_id") is None:
+            config.pop("personal_voice_id", None)
+    return config

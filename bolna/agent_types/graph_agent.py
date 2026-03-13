@@ -10,7 +10,7 @@ from bolna.models import *
 from bolna.agent_types.base_agent import BaseAgent
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.rag_service_client import RAGServiceClientSingleton
-from bolna.helpers.utils import now_ms, format_messages, update_prompt_with_context, DictWithMissing
+from bolna.helpers.utils import now_ms, format_messages, update_prompt_with_context
 from bolna.llms.types import LLMStreamChunk, LatencyData
 from bolna.llms import OpenAiLLM
 from bolna.providers import SUPPORTED_LLM_PROVIDERS

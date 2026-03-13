@@ -46,7 +46,7 @@ class AssemblyAITranscriber(BaseTranscriber):
         
         if not self.stream:
             # For non-streaming HTTP API
-            self.api_url = f"https://api.assemblyai.com/v2/transcript"
+            self.api_url = "https://api.assemblyai.com/v2/transcript"
             self.session = aiohttp.ClientSession()
             
         self.audio_submitted = False

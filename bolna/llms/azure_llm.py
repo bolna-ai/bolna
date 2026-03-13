@@ -7,7 +7,7 @@ from openai import AsyncAzureOpenAI, AsyncOpenAI, AuthenticationError, Permissio
 
 from bolna.constants import DEFAULT_LANGUAGE_CODE, GPT5_MODEL_PREFIX
 from bolna.enums import ReasoningEffort, Verbosity
-from bolna.helpers.utils import convert_to_request_log, compute_function_pre_call_message, now_ms
+from bolna.helpers.utils import now_ms
 from .openai_base import OpenAICompatibleLLM
 from .tool_call_accumulator import ToolCallAccumulator
 from .types import LLMStreamChunk, LatencyData

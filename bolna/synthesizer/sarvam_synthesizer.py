@@ -31,7 +31,7 @@ class SarvamSynthesizer(BaseSynthesizer):
 
         self.sampling_rate = int(sampling_rate)
         self.original_sampling_rate = SARVAM_MODEL_SAMPLING_RATE_MAPPING.get(model, None) # Known for some models, inferred from file in other cases
-        self.api_url = f"https://api.sarvam.ai/text-to-speech"
+        self.api_url = "https://api.sarvam.ai/text-to-speech"
         self.ws_url = f"wss://api.sarvam.ai/text-to-speech/ws?model={model}"
 
         self.language = language
@@ -269,7 +269,7 @@ class SarvamSynthesizer(BaseSynthesizer):
         try:
             if self.stream:
                 async for message in self.receiver():
-                    logger.info(f"Received message from server")
+                    logger.info("Received message from server")
 
                     if len(self.text_queue) > 0:
                         self.meta_info = self.text_queue.popleft()

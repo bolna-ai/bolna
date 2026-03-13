@@ -250,14 +250,14 @@ def format_messages(messages, use_system_prompt=False, include_tools=False):
     for message in messages:
         role = message['role']
         if message['content'] is None:
-            logger.info(f"Continuing the loop as content received is None")
+            logger.info("Continuing the loop as content received is None")
             continue
         content = message['content']
 
         if use_system_prompt and role == 'system':
             try:
                 formatted_string += "system: " + content + "\n"
-            except Exception as e:
+            except Exception:
                 a = 1
         if role == 'assistant':
             formatted_string += "assistant: " + content + "\n"
@@ -274,7 +274,7 @@ def update_prompt_with_context(prompt, context_data):
         if not context_data or not isinstance(context_data.get('recipient_data'), dict):
             return prompt.format_map(DictWithMissing({}))
         return prompt.format_map(DictWithMissing(context_data.get('recipient_data', {})))
-    except Exception as e:
+    except Exception:
         return prompt
 
 
@@ -373,7 +373,7 @@ def convert_audio_to_wav(audio_bytes, source_format = 'flac'):
     logger.info(f"GOT audio wav {audio}")
     buffer = io.BytesIO()
     audio.export(buffer, format="wav")
-    logger.info(f"SENDING BACK WAV")
+    logger.info("SENDING BACK WAV")
     return buffer.getvalue()
 
 
@@ -507,7 +507,7 @@ async def write_request_logs(message, run_id):
 
     header = "Time,Component,Direction,Leg ID,Sequence ID,Model,Data,Input Tokens,Output Tokens,Characters,Latency,Cached,Final Transcript,Engine,Metadata\n"
     log_string = ','.join(['"' + str(item).replace('"', '""') + '"' if item is not None else '' for item in row]) + '\n'
-    log_dir = f"./logs"
+    log_dir = "./logs"
     os.makedirs(log_dir, exist_ok=True)
     log_file_path = f"{log_dir}/{run_id}.csv"
     file_exists = os.path.exists(log_file_path)

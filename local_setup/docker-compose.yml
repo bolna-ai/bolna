@@ -1,69 +1,74 @@
-version: '3'
+# =============================================================================
+# Kallabot v2 — Docker Compose
+#
+# By default the app uses DATABASE_URL from ../.env.
+# The bundled postgres service is optional and only starts when the
+# `local-db` profile is enabled.
+#
+# Start:  docker compose up -d
+# Logs:   docker compose logs -f app
+# =============================================================================
 
 services:
 
-  # main bolna service
-  bolna-app:
-    build:
-      context: .
-      dockerfile: dockerfiles/bolna_server.Dockerfile
-    image: bolna-app:latest  # This will tag the built image
-    ports:
-      - "5001:5001"
-    depends_on:
-      - redis
-    env_file:
-      - .env
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    profiles: ["local-db"]
+    restart: always
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-kallabot}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-kallabot}
+      POSTGRES_DB: ${POSTGRES_DB:-kallabot}
     volumes:
-      - ../agent_data:/app/agent_data
-      - $HOME/.aws/credentials:/root/.aws/credentials:ro
-      - $HOME/.aws/config:/root/.aws/config:ro
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-kallabot} -d ${POSTGRES_DB:-kallabot}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
 
-  # redis service used as a persistent storage
+  # ---------------------------------------------------------------------------
   redis:
-    image: redis:latest
+    image: redis:7-alpine
+    restart: always
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
     ports:
       - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
 
-  # ngrok for local tunneling
-  ngrok:
-    image: ngrok/ngrok:latest
-    restart: unless-stopped
-    command:
-      - "start"
-      - "--all"
-      - "--config"
-      - "/etc/ngrok.yml"
-    volumes:
-      - ./ngrok-config.yml:/etc/ngrok.yml
-    ports:
-      - 4040:4040
-
-  ### Telephony servers ###
-  twilio-app:
+  # ---------------------------------------------------------------------------
+  app:
     build:
-      context: .
-      dockerfile: dockerfiles/twilio_server.Dockerfile
-    image: twilio-app:latest  # This will tag the built image
+      context: ..                               # project root (bolna/)
+      dockerfile: local_setup/dockerfiles/Dockerfile
+    restart: always
+    env_file:
+      - ../.env
+    depends_on:
+      redis:
+        condition: service_healthy
     ports:
       - "8001:8001"
-    depends_on:
-      - redis
-      - ngrok
-      - bolna-app
-    env_file:
-      - .env
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8001/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
 
-  plivo-app:
-    build:
-      context: .
-      dockerfile: dockerfiles/plivo_server.Dockerfile
-    image: plivo-app:latest  # This will tag the built image
-    ports:
-      - "8002:8002"
-    depends_on:
-      - redis
-      - ngrok
-      - bolna-app
-    env_file:
-      - .env
+  # ---------------------------------------------------------------------------
+
+volumes:
+  postgres_data:
+  redis_data:

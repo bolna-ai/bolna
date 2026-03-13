@@ -69,7 +69,7 @@ class DefaultOutputHandler:
             data = {
                 "type": "ack"
             }
-            logger.info(f"Sending ack event")
+            logger.info("Sending ack event")
             await self.websocket.send_text(json.dumps(data))
         except Exception as e:
             logger.info(f"WebSocket closed during init ack: {e}")
@@ -79,7 +79,7 @@ class DefaultOutputHandler:
         if self._closed:
             return
         try:
-            logger.info(f"Packet received:")
+            logger.info("Packet received:")
             # if (self.is_web_based_call and packet["meta_info"].get("message_category", "") == "agent_welcome_message" and
             #         packet["meta_info"].get("is_final_chunk_of_entire_response", True)):
             #     self.is_welcome_message_sent = True
@@ -87,7 +87,7 @@ class DefaultOutputHandler:
             data = None
             if packet["meta_info"]['type'] in ('audio', 'text'):
                 if packet["meta_info"]['type'] == 'audio':
-                    logger.info(f"Sending audio")
+                    logger.info("Sending audio")
                     data = base64.b64encode(packet['data']).decode("utf-8")
                 elif packet["meta_info"]['type'] == 'text':
                     logger.info(f"Sending text response {packet['data']}")

@@ -1,6 +1,5 @@
 import base64
 import json
-import os
 import audioop
 from dotenv import load_dotenv
 from bolna.helpers.logger_config import configure_logger
@@ -34,7 +33,7 @@ class TwilioOutputHandler(TelephonyOutputHandler):
 
     async def form_media_message(self, audio_data, audio_format="wav"):
         if audio_format != "mulaw":
-            logger.info(f"Converting to mulaw")
+            logger.info("Converting to mulaw")
             audio_data = audioop.lin2ulaw(audio_data, 2)
         base64_audio = base64.b64encode(audio_data).decode("utf-8")
         message = {

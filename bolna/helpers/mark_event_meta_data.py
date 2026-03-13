@@ -25,7 +25,7 @@ class MarkEventMetaData:
         return result
 
     def clear_data(self):
-        logger.info(f"Clearing mark meta data dict")
+        logger.info("Clearing mark meta data dict")
         self.counter = 0
         self.previous_mark_event_meta_data = copy.deepcopy(self.mark_event_meta_data)
         self.mark_event_meta_data = {}

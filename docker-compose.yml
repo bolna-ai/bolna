@@ -1,0 +1,101 @@
+# =============================================================================
+# Kallabot v2 — Docker Compose
+# =============================================================================
+#
+# Usage:
+#   cp .env.example .env   # fill in real values
+#   docker compose up -d
+#   docker compose logs -f app
+# =============================================================================
+
+services:
+
+  # --------------------------------------------------------------------------
+  # FastAPI application
+  # --------------------------------------------------------------------------
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: kallabot-app:latest
+    container_name: kallabot-app
+    restart: unless-stopped
+    ports:
+      - "8001:8001"
+    env_file:
+      - .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+    networks:
+      - kallabot-net
+
+  # --------------------------------------------------------------------------
+  # PostgreSQL 15
+  # --------------------------------------------------------------------------
+  postgres:
+    image: postgres:15-alpine
+    container_name: kallabot-postgres
+    restart: unless-stopped
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-kallabot}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-kallabot}
+      POSTGRES_DB: ${POSTGRES_DB:-kallabot}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-kallabot} -d ${POSTGRES_DB:-kallabot}"]
+      interval: 10s
+      timeout: 5s
+      start_period: 10s
+      retries: 5
+    networks:
+      - kallabot-net
+
+  # --------------------------------------------------------------------------
+  # Redis 7
+  # --------------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    container_name: kallabot-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      start_period: 5s
+      retries: 3
+    networks:
+      - kallabot-net
+
+
+# ============================================================================
+# Volumes
+# ============================================================================
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+
+# ============================================================================
+# Networks
+# ============================================================================
+networks:
+  kallabot-net:
+    driver: bridge

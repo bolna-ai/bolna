@@ -96,7 +96,7 @@ class DeepgramSynthesizer(BaseSynthesizer):
                             return b'\x00'
                 else:
                     logger.info("Payload was null")
-        except Exception as e:
+        except Exception:
             logger.error("something went wrong")
 
     def supports_websocket(self):
@@ -157,7 +157,7 @@ class DeepgramSynthesizer(BaseSynthesizer):
                     # Capture WebSocket send time on first send
                     if self.ws_send_time is None:
                         self.ws_send_time = time.perf_counter()
-                        logger.info(f"Deepgram WS send first_text_sent")
+                        logger.info("Deepgram WS send first_text_sent")
                     speak_message = self.form_payload(text)
                     await self.websocket_holder["websocket"].send(json.dumps(speak_message))
                 except Exception as e:
@@ -227,7 +227,7 @@ class DeepgramSynthesizer(BaseSynthesizer):
                         else:
                             logger.info(f"Deepgram TTS response: {data}")
                     except json.JSONDecodeError:
-                        logger.warning(f"Received unexpected non-JSON text response from Deepgram")
+                        logger.warning("Received unexpected non-JSON text response from Deepgram")
 
             except websockets.exceptions.ConnectionClosed:
                 logger.info("Deepgram WebSocket connection closed")
@@ -316,7 +316,7 @@ class DeepgramSynthesizer(BaseSynthesizer):
                         logger.info(f"Not synthesizing text as the sequence_id ({meta_info.get('sequence_id')}) of it is not in the list of sequence_ids present in the task manager.")
                         return
                     if self.caching:
-                        logger.info(f"Caching is on")
+                        logger.info("Caching is on")
                         if self.cache.get(text):
                             logger.info(f"Cache hit and hence returning quickly {text}")
                             audio_message = self.cache.get(text)
@@ -326,7 +326,7 @@ class DeepgramSynthesizer(BaseSynthesizer):
                             audio_message = await self.__generate_http(text)
                             self.cache.set(text, audio_message)
                     else:
-                        logger.info(f"No caching present")
+                        logger.info("No caching present")
                         self.synthesized_characters += len(text)
                         audio_message = await self.__generate_http(text)
 
@@ -385,9 +385,9 @@ class DeepgramSynthesizer(BaseSynthesizer):
             return None
         except websockets.exceptions.InvalidStatusCode as e:
             if e.status_code == 401:
-                logger.error(f"Deepgram authentication failed: Invalid API key")
+                logger.error("Deepgram authentication failed: Invalid API key")
             elif e.status_code == 403:
-                logger.error(f"Deepgram authentication failed: Access forbidden")
+                logger.error("Deepgram authentication failed: Access forbidden")
             else:
                 logger.error(f"Deepgram WebSocket connection failed with status {e.status_code}: {e}")
             return None

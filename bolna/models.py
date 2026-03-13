@@ -1,7 +1,5 @@
-import json
-from typing import Literal, Optional, List, Union, Dict, Callable
-from pydantic import BaseModel, Field, field_validator, ValidationError, Json, model_validator
-from pydantic_core import PydanticCustomError
+from typing import Optional, List, Union, Dict, Callable
+from pydantic import BaseModel, Field, field_validator, model_validator
 from .providers import *
 from .enums import TelephonyProvider, SynthesizerProvider, TranscriberProvider, ReasoningEffort, Verbosity
 from .constants import MODEL_REASONING_EFFORT_MAP
@@ -102,6 +100,9 @@ class AzureConfig(BaseModel):
     model: str
     language: str
     speed: Optional[float] = 1.0
+    locale: Optional[str] = "en-US"  # KALLABOT - Azure locale (e.g., "en-US") or "auto" for automatic accent switching
+    temperature: Optional[float] = None  # KALLABOT - Temperature for Dragon voices (0.0-1.0)
+    personal_voice_id: Optional[str] = None  # KALLABOT - Personal voice speaker profile ID
 
 
 class Transcriber(BaseModel):
@@ -419,9 +420,20 @@ class APIParams(BaseModel):
     headers: Optional[Union[str, dict]] = None
 
 
+# KALLABOT - MCP server configuration for tool integration
+class McpServer(BaseModel):
+    url: str
+    name: Optional[str] = None
+    auth: Optional[dict] = None
+
+
 class ToolModel(BaseModel):
     tools: Optional[Union[str, List[Union[ToolDescription, ToolDescriptionLegacy]]]] = None
     tools_params: Dict[str, APIParams]
+    api_tool_ids: Optional[List[str]] = Field(default_factory=list)  # KALLABOT - references to DB-stored API tools
+    mcp_servers: Optional[List[McpServer]] = Field(default_factory=list)  # KALLABOT - MCP server configs
+    call_transfer_config: Optional[dict] = None  # KALLABOT - transfer number, SIP, warm/cold config
+    call_transfer_description: Optional[str] = None  # KALLABOT - LLM description of when to transfer
 
 
 class ToolsConfig(BaseModel):
@@ -481,3 +493,10 @@ class AgentModel(BaseModel):
     agent_type: str = "other"
     tasks: List[Task]
     agent_welcome_message: Optional[str] = AGENT_WELCOME_MESSAGE
+    call_direction: Optional[str] = None  # KALLABOT - "inbound" or "outbound"
+    inbound_phone_number: Optional[str] = None  # KALLABOT - phone number for inbound calls
+    timezone: Optional[str] = "UTC"  # KALLABOT - agent timezone
+    country: Optional[str] = "US"  # KALLABOT - agent country code
+    agent_image: Optional[str] = None  # KALLABOT - URL or path to agent avatar image
+    webhook_url: Optional[str] = None  # KALLABOT - webhook for call events
+    is_compliant: Optional[bool] = False  # KALLABOT - compliance flag for regulated use

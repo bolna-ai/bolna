@@ -162,7 +162,7 @@ class PixaTranscriber(BaseTranscriber):
                 error_msg = str(e)
                 if '401' in error_msg or '403' in error_msg:
                     logger.error(f"Pixa authentication failed: Invalid or expired API key - {e}")
-                    raise ConnectionError(f"Pixa authentication failed: Invalid or expired API key")
+                    raise ConnectionError("Pixa authentication failed: Invalid or expired API key")
                 else:
                     logger.error(f"Invalid handshake during Pixa websocket connection: {e}")
                     last_err = e

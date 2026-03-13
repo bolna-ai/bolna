@@ -67,7 +67,7 @@ class RimeSynthesizer(BaseSynthesizer):
                 if self.context_id:
                     self.context_id = str(uuid.uuid4())
                     await self.websocket_holder["websocket"].send(json.dumps({"operation": "clear"}))
-            except Exception as e:
+            except Exception:
                 pass
 
     async def __generate_http(self, text):
@@ -99,7 +99,7 @@ class RimeSynthesizer(BaseSynthesizer):
                             return b'\x00'
                 else:
                     logger.info("Payload was null")
-        except Exception as e:
+        except Exception:
             logger.error("something went wrong")
 
     def supports_websocket(self):
@@ -203,7 +203,7 @@ class RimeSynthesizer(BaseSynthesizer):
         try:
             if self.stream:
                 async for message in self.receiver():
-                    logger.info(f"Received message from server")
+                    logger.info("Received message from server")
 
                     if len(self.text_queue) > 0:
                         self.meta_info = self.text_queue.popleft()
@@ -257,7 +257,7 @@ class RimeSynthesizer(BaseSynthesizer):
                             f"Not synthesizing text as the sequence_id ({meta_info.get('sequence_id')}) of it is not in the list of sequence_ids present in the task manager.")
                         return
                     if self.caching:
-                        logger.info(f"Caching is on")
+                        logger.info("Caching is on")
                         if self.cache.get(text):
                             logger.info(f"Cache hit and hence returning quickly {text}")
                             message = self.cache.get(text)
@@ -267,7 +267,7 @@ class RimeSynthesizer(BaseSynthesizer):
                             message = await self.__generate_http(text)
                             self.cache.set(text, message)
                     else:
-                        logger.info(f"No caching present")
+                        logger.info("No caching present")
                         self.synthesized_characters += len(text)
                         message = await self.__generate_http(text)
 

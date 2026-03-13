@@ -559,7 +559,7 @@ class DeepgramTranscriber(BaseTranscriber):
                     else:
                         # Transcript already sent but we still need to notify speech ended
                         # This prevents callee_speaking from staying True indefinitely
-                        logger.info(f"UtteranceEnd received but transcript already processed, yielding speech_ended notification")
+                        logger.info("UtteranceEnd received but transcript already processed, yielding speech_ended notification")
                         self.speech_start_time = None
                         self.speech_end_time = None
                         self.current_turn_interim_details = []
@@ -575,7 +575,7 @@ class DeepgramTranscriber(BaseTranscriber):
                         self.meta_info["deepgram_duration"] = deepgram_duration
                         logger.info(f"Received Deepgram Metadata with duration: {deepgram_duration}s")
 
-            except Exception as e:
+            except Exception:
                 traceback.print_exc()
                 self.interruption_signalled = False
 
@@ -637,7 +637,7 @@ class DeepgramTranscriber(BaseTranscriber):
             self.transcription_cursor = data['start'] + data['duration']
             logger.info(f"Setting transcription cursor at {self.transcription_cursor} (start={data['start']}, duration={data['duration']})")
         else:
-            logger.warning(f"Missing start or duration in Deepgram message, cannot update transcription cursor")
+            logger.warning("Missing start or duration in Deepgram message, cannot update transcription cursor")
         return self.transcription_cursor
 
     def _find_audio_send_timestamp(self, audio_position):

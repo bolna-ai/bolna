@@ -2,8 +2,7 @@ import os
 import sys
 import asyncio
 import time
-import json
-from azure.cognitiveservices.speech import AudioStreamWaveFormat, AudioStreamContainerFormat
+from azure.cognitiveservices.speech import AudioStreamWaveFormat
 from dotenv import load_dotenv
 from .base_transcriber import BaseTranscriber
 import azure.cognitiveservices.speech as speechsdk
@@ -310,7 +309,7 @@ class AzureTranscriber(BaseTranscriber):
     def _sync_cleanup(self):
         """Synchronous cleanup of Azure resources."""
         try:
-            logger.info(f"Cleaning up azure connections")
+            logger.info("Cleaning up azure connections")
             if self.push_stream:
                 self.push_stream.close()
                 self.push_stream = None

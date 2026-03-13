@@ -86,7 +86,7 @@ class OPENAISynthesizer(BaseSynthesizer):
                         yield create_ws_data_packet(b"\x00", meta_info)
 
                 else:
-                    logger.info(f"Generating without a stream")
+                    logger.info("Generating without a stream")
                     audio = await self.__generate_http(text)
                     if not self.first_chunk_generated:
                         meta_info["is_first_chunk"] = True

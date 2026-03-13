@@ -35,7 +35,7 @@ class ExotelOutputHandler(TelephonyOutputHandler):
         # Exotel expects PCM format (16-bit linear)
         # If audio is mulaw, convert it to PCM
         if audio_format == "mulaw":
-            logger.info(f"Converting mulaw to PCM for Exotel")
+            logger.info("Converting mulaw to PCM for Exotel")
             audio_data = audioop.ulaw2lin(audio_data, 2)
 
         base64_audio = base64.b64encode(audio_data).decode("ascii")

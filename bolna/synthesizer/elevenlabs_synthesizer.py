@@ -63,7 +63,7 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
         # pcm_24000, ulaw_8000
         if self.use_mulaw:
             return "ulaw_8000"
-        return f"mp3_44100_128"
+        return "mp3_44100_128"
 
     def get_engine(self):
         return self.model
@@ -78,7 +78,7 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
 
                 self.context_id = str(uuid.uuid4())
                 await self.websocket_holder["websocket"].send(json.dumps(interrupt_message))
-        except Exception as e:
+        except Exception:
             pass
 
     async def sender(self, text, sequence_id, end_of_llm_stream=False):
@@ -170,7 +170,7 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
                     chunk = base64.b64decode(data["audio"])
                     try:
                         text_spoken = ''.join(data.get('alignment', {}).get('chars', []))
-                    except Exception as e:
+                    except Exception:
                         text_spoken = ""
                     yield chunk, text_spoken
 
@@ -260,7 +260,7 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
                         loop_gap = (gen_loop_start - last_yield_time) * 1000
                         if loop_gap > 100:
                             logger.info(f"EL generate loop_gap={loop_gap:.0f}ms trace_id={self.ws_trace_id}")
-                    logger.info(f"Received message from server")
+                    logger.info("Received message from server")
 
                     if len(self.text_queue) > 0:
                         self.meta_info = self.text_queue.popleft()

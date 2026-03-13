@@ -1,10 +1,6 @@
-import base64
 import json
-import os
-import audioop
 import time
 import uuid
-import traceback
 from dotenv import load_dotenv
 from .default import DefaultOutputHandler
 from bolna.helpers.logger_config import configure_logger

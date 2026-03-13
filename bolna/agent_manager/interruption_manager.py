@@ -62,7 +62,7 @@ class InterruptionManager:
         # Check 2: User is speaking - hold audio until they stop
         # Only invalid sequences (from real interruptions) get hard BLOCK above
         if self.callee_speaking:
-            logger.info(f"Audio status=WAIT - user is speaking")
+            logger.info("Audio status=WAIT - user is speaking")
             return "WAIT"
 
         # Check 3: Grace period (only after first 2 turns to avoid latency on welcome)
@@ -116,7 +116,7 @@ class InterruptionManager:
         if not self.callee_speaking:
             self.callee_speaking = True
             self.callee_speaking_start_time = time.time()
-            logger.info(f"User started speaking")
+            logger.info("User started speaking")
 
     def on_interim_transcript_received(self) -> None:
         """Called on each interim transcript to update timing state."""

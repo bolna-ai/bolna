@@ -5,7 +5,6 @@ import time
 import websockets
 from websockets.exceptions import InvalidHandshake
 import aiohttp
-import base64
 import json
 import audioop
 import os

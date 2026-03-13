@@ -135,7 +135,7 @@ class DefaultInputHandler:
                 self.is_welcome_message_played = True
 
             elif message_type == "agent_hangup":
-                logger.info(f"Agent hangup has been triggered")
+                logger.info("Agent hangup has been triggered")
                 self.observable_variables["agent_hangup_observable"].value = True
 
     def __process_mark_event(self, packet):
@@ -175,13 +175,13 @@ class DefaultInputHandler:
         try:
             while self.running:
                 if self.queue is not None:
-                    logger.info(f"self.queue is not None and hence listening to the queue")
+                    logger.info("self.queue is not None and hence listening to the queue")
                     request = await self.queue.get()
                 else:
                     request = await self.websocket.receive_json()                    
                 await self.process_message(request)
 
-        except WebSocketDisconnect as e:
+        except WebSocketDisconnect:
             ws_data_packet = create_ws_data_packet(
                 data=None,
                 meta_info={'io': 'default', 'eos': True}
@@ -217,11 +217,11 @@ class DefaultInputHandler:
             self.__process_text(message['data'])
 
         elif message["type"] == "mark":
-            logger.info(f"Received mark event")
+            logger.info("Received mark event")
             self.__process_mark_event(message)
 
         elif message["type"] == "init":
-            logger.info(f"Received init event")
+            logger.info("Received init event")
             if self.observable_variables.get("init_event_observable") is not None:
                 self.observable_variables.get("init_event_observable").value = message.get("meta_data", None)
 

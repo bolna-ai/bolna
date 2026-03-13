@@ -29,7 +29,7 @@ class Graph:
         self.graph = self._create_graph(conversation_data, context_data)
 
     def _create_graph(self, data, context_data=None):
-        logger.info(f"Creating graph")
+        logger.info("Creating graph")
         node_map = dict()
         for node_id, node_data in data.items():
             prompt_parts = node_data.get("prompt").split('###Examples')
@@ -106,7 +106,7 @@ class GraphBasedConversationAgent(BaseAgent):
         if self.current_node == self.graph.root and not self.conversation_intro_done:
             return self._handle_intro_message()
 
-        logger.info(f"Conversation intro was done and hence moving forward")
+        logger.info("Conversation intro was done and hence moving forward")
         if len(history) > 7:
             # @TODO: Add summary of left out messages
             prev_messages = history[-6:]

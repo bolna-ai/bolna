@@ -115,7 +115,7 @@ class PollySynthesizer(BaseSynthesizer):
                 return
 
             if self.caching:
-                logger.info(f"Caching is on")
+                logger.info("Caching is on")
                 if self.cache.get(text):
                     logger.info(f"Cache hit and hence returning quickly {text}")
                     message = self.cache.get(text)
@@ -125,7 +125,7 @@ class PollySynthesizer(BaseSynthesizer):
                     message = await self.__generate_http(text)
                     self.cache.set(text, message)
             else:
-                logger.info(f"No caching present")
+                logger.info("No caching present")
                 self.synthesized_characters += len(text)
                 message = await self.__generate_http(text)
             if self.format == "mp3":

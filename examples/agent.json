@@ -1,0 +1,102 @@
+{
+    "agent_config": {
+        "agent_name": "kallabot danny landing page",
+        "agent_type": "other",
+        "timezone": "Europe/London",
+        "country": "United Kingdom",
+        "call_direction": "outbound", // or "inbound"
+        "webhook_url": "https://hook.eu2.make.com/d5qbh68qevjidba2tokpjh3g9416t83y",
+        "is_compliant": "false",
+        "agent_welcome_message": "This call is being recorded for quality and training purposes.  Hey!, This is Danny calling from Kallabot AI!",
+        "tasks": [
+            {
+                "task_type": "conversation",
+                "toolchain": {
+                    "execution": "parallel",
+                    "pipelines": [
+                        [
+                            "transcriber",
+                            "llm",
+                            "synthesizer"
+                        ]
+                    ]
+                },
+                "tools_config": {
+                    "input": {
+                        "format": "wav",
+                        "provider": "twilio"
+                    },
+                    "llm_agent": {
+                        "agent_type": "simple_llm_agent",
+                        "agent_flow_type": "streaming",
+                        "routes": null,
+                        "llm_config": {
+                            "provider": "openai",
+                            "model": "gpt-4.1-nano",
+                            "max_tokens": 50,
+                            "temperature": 0.7,
+                            "top_p": 0.5,
+                            "presence_penalty": 0,
+                            "frequency_penalty": 0
+                        }
+                    },
+                    "output": {
+                        "format": "wav",
+                        "provider": "twilio"
+                    },
+                    "synthesizer": {
+                        "provider": "azuretts",
+                        "provider_config": {
+                            "voice": "de-DE-Florian:DragonHDLatestNeural", // **Updated Voice Name**
+                            "locale": "en-US"
+                        },
+                        "stream": true,
+                        "buffer_size": 50,
+                        "caching": true
+                    },
+                    "transcriber": {
+                        "provider": "deepgram",
+                        "model": "nova-3",
+                        "language": "multi",
+                        "stream": true,
+                        "endpointing": 100
+                    }
+                },
+                "task_config": {
+                    "optimize_latency": true,
+                    "ambient_noise": true,
+                    "ambient_noise_track": "call-center",
+                    "incremental_delay": 0, // Reduced from 900ms to 200ms
+                    "interruption_backoff_period": 50, // Reduced from 100ms to 50ms
+                    "backchanneling": true, // Disabled to reduce overhead
+                    "backchanneling_message_gap": "5",
+                    "backchanneling_start_delay": "1",
+                    "use_fillers": false, // Disabled to reduce latency
+                    "number_of_words_for_interruption": 2
+                }
+            }
+        ]
+    },
+    "agent_prompts": {
+        "task_1": {
+            "system_prompt": "You are Danny, a friendly and proactive AI Voice Agent for Kallabot (say 'call-a-bot'). You assist businesses with their calls through real phone conversations. \n\nWhen you receive an inbound call from a user who reached out via our website, greet them warmly: \"Hi, I’m Danny from Kallabot!\" Let them know you’re calling because they contacted us for help. Keep it short and simple.\n\nExplain that Kallabot is an AI voice agent that handles tasks like updating records, scheduling appointments, and answering questions—all in a natural, human-like way. Mention that you speak over 36 languages and integrate smoothly with CRMs, calendars, and custom APIs.\n\nAsk the caller about their industry and quickly share how you can help with their specific needs. Use a witty, humorous tone with short sentences—sometimes just one or two words if that’s enough. Don’t overtalk; keep the call fast and friendly.\n\nIf there's background noise, politely ask them to move somewhere quieter. If you don’t hear something clearly, ask for clarification. If the connection is poor, inform the caller and suggest continuing once it improves.\n\nEnd the conversation by urging them to visit the sign-up page at kallabot.com and start for free today. Always keep your sentences super short—3 to 4 words on average, longer only if needed. You are fun and sassy! talk like grant cardone and jordan belfort, dont repeat yourself and be short and quick and concise tell them how you can integrate into their business to handle various tasks such as sales or surverys or frontdesk or receptionist. be proactive, suggest stuff, take the lead, be the boss of the conversation. use a few fillers in your output and sound super human dont talk like a robot, use ummms and ahhs and also laugh be jolly cheerfull, but remember your audio is going throught azure tts and the you hear the users audio throguth deepgrams speech to text system so dont use emojies. this conversation is not a text to text conversation, it is a audio to audio, its like a phone call and the user thinks you are probably a human on the line."
+        }
+    },
+    "sender_phone_number": "+447700144474",
+    "record": "true",
+    "recipient_phone_number": "+447587475457",
+    "template_variables": {
+        "agent": {
+            "name": "Sarah",
+            "department": "Customer Service"
+        },
+        "company": {
+            "name": "Acme Corp",
+            "product": "Premium Service Package"
+        },
+        "customer": {
+            "name": "Bruce",
+            "account_id": "9a1879c1-6e38-47aa-b287-d71fb228ab49"
+        }
+    }
+}

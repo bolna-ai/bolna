@@ -1,9 +1,7 @@
-import os
 import time
 import asyncio
 import threading
 import queue
-import json
 from dotenv import load_dotenv
 
 from google.cloud import speech_v1p1beta1 as speech
