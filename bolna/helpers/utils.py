@@ -646,7 +646,7 @@ def convert_to_request_log(message, meta_info, model, component=LogComponent.TRA
             log['latency'] = meta_info.get('transcriber_latency', None) if direction == LogDirection.RESPONSE else None
             if 'is_final' in meta_info and meta_info['is_final']:
                 log['is_final'] = True
-        case LogComponent.FUNCTION_CALL | LogComponent.WARNING:
+        case LogComponent.FUNCTION_CALL | LogComponent.WARNING | LogComponent.ERROR:
             log['latency'] = None
         case LogComponent.GRAPH_ROUTING:
             log['latency'] = None
