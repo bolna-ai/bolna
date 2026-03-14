@@ -837,9 +837,15 @@ class TaskManager(BaseManager):
                 multilingual = synth_config["multilingual"]
                 active_label = synth_config.get("active", DEFAULT_LANGUAGE_CODE)
 
-                is_sip = self.task_config["tools_config"]["output"]["provider"] == TelephonyProvider.SIP_TRUNK.value
+                # Telephony providers expect mulaw@8000Hz — force use_mulaw for all synths in the pool
+                output_provider = self.task_config["tools_config"]["output"]["provider"]
+                is_telephony = output_provider in (
+                    TelephonyProvider.PLIVO.value, TelephonyProvider.TWILIO.value,
+                    TelephonyProvider.EXOTEL.value, TelephonyProvider.VOBIZ.value,
+                    TelephonyProvider.SIP_TRUNK.value,
+                )
                 synthesizer_kwargs = self.kwargs.copy()
-                if is_sip:
+                if is_telephony:
                     synthesizer_kwargs['use_mulaw'] = True
 
                 synthesizers = {}
