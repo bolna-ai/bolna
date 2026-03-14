@@ -1483,6 +1483,13 @@ class TaskManager(BaseManager):
         self.conversation_ended = True
         self.ended_by_assistant = True
 
+        # Cancel any running LLM / function-call tasks so they don't add
+        # phantom responses to the transcript after the call has ended.
+        if self.llm_task is not None and not self.llm_task.done():
+            logger.info("__process_end_of_conversation: Cancelling LLM task")
+            self.llm_task.cancel()
+            self.llm_task = None
+
         # Close output handler to prevent sends after websocket close
         if "output" in self.tools and self.tools["output"] is not None:
             self.tools["output"].close()
@@ -1670,6 +1677,11 @@ class TaskManager(BaseManager):
             return
 
         await self.wait_for_current_message()
+
+        if self.hangup_triggered or self.conversation_ended:
+            logger.info(f"__execute_function_call: Aborting before API call — hangup_triggered={self.hangup_triggered}, conversation_ended={self.conversation_ended}")
+            return
+
         response = await trigger_api(url=url, method=method.lower(), param=param, api_token=api_token, headers_data=headers, meta_info=meta_info, run_id=self.run_id, **resp)
         function_response = str(response)
         get_res_keys, get_res_values = await computed_api_response(function_response)
@@ -1727,6 +1739,10 @@ class TaskManager(BaseManager):
             self.conversation_history.sync_interim(messages)
 
     async def __do_llm_generation(self, messages, meta_info, next_step, should_bypass_synth=False, should_trigger_function_call=False):
+        if self.hangup_triggered or self.conversation_ended:
+            logger.info(f"__do_llm_generation: Skipping — hangup_triggered={self.hangup_triggered}, conversation_ended={self.conversation_ended}")
+            return
+
         # Reset response tracking for new turn
         if self.generate_precise_transcript:
             self.tools["input"].reset_response_heard_by_user()
@@ -1831,7 +1847,7 @@ class TaskManager(BaseManager):
 
             if trigger_function_call:
                 logger.info(f"Triggering function call for {data}")
-                self.llm_task = asyncio.create_task(self.__execute_function_call(next_step = next_step, **data.model_dump()))
+                await self.__execute_function_call(next_step = next_step, **data.model_dump())
                 return
 
             if latency:
