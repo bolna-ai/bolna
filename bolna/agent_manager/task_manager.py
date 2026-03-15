@@ -1718,7 +1718,7 @@ class TaskManager(BaseManager):
         convert_to_request_log(function_response, meta_info , None, "function_call", direction = "response", is_cached= False, run_id = self.run_id)
 
         messages = self.conversation_history.get_copy()
-        convert_to_request_log(format_messages(messages, True), meta_info, self.llm_config['model'], "llm", direction = "request", is_cached= False, run_id = self.run_id)
+        convert_to_request_log(format_messages(messages, use_system_prompt=True, include_tools=True), meta_info, self.llm_config['model'], "llm", direction = "request", is_cached= False, run_id = self.run_id)
         self.check_if_user_online = self.conversation_config.get("check_if_user_online", True)
 
         if not called_fun.startswith("transfer_call"):
@@ -1762,7 +1762,7 @@ class TaskManager(BaseManager):
 
         async for llm_message in self.tools['llm_agent'].generate(messages, synthesize=synthesize, meta_info=meta_info):
             if isinstance(llm_message, dict) and 'messages' in llm_message: # custom list of messages before the llm call
-                convert_to_request_log(format_messages(llm_message['messages'], True), meta_info, self.llm_config['model'], "llm", direction="request", is_cached=False, run_id=self.run_id)
+                convert_to_request_log(format_messages(llm_message['messages'], use_system_prompt=True, include_tools=True), meta_info, self.llm_config['model'], "llm", direction="request", is_cached=False, run_id=self.run_id)
                 continue
 
             # Handle graph agent routing info
@@ -1909,7 +1909,7 @@ class TaskManager(BaseManager):
 
         # Request logs converted inside do_llm_generation for knowledgebase agent
         if not self.__is_knowledgebase_agent() and not self.__is_graph_agent():
-            convert_to_request_log(message=format_messages(messages, use_system_prompt=True), meta_info=meta_info, component="llm", direction="request", model=self.llm_config["model"], run_id= self.run_id)
+            convert_to_request_log(message=format_messages(messages, use_system_prompt=True, include_tools=True), meta_info=meta_info, component="llm", direction="request", model=self.llm_config["model"], run_id= self.run_id)
 
         await self.__do_llm_generation(messages, meta_info, next_step, should_bypass_synth)
         # TODO : Write a better check for completion prompt
