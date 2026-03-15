@@ -126,9 +126,13 @@ class OpenAICompatibleLLM(BaseLLM):
             create_kwargs["service_tier"] = service_tier
 
         if self.model.startswith(GPT5_MODEL_PREFIX):
+            create_kwargs["temperature"] = 1
             reasoning_effort = self.model_args.get("reasoning_effort")
             if reasoning_effort:
                 create_kwargs["reasoning"] = {"effort": reasoning_effort}
+            verbosity = self.model_args.get("verbosity")
+            if verbosity:
+                create_kwargs.setdefault("text", {})["verbosity"] = verbosity
 
         if self.previous_response_id:
             create_kwargs["previous_response_id"] = self.previous_response_id
@@ -139,7 +143,7 @@ class OpenAICompatibleLLM(BaseLLM):
             create_kwargs["parallel_tool_calls"] = False
 
         if request_json:
-            create_kwargs["text"] = {"format": {"type": "json_object"}}
+            create_kwargs.setdefault("text", {})["format"] = {"type": "json_object"}
 
         answer, buffer = "", ""
         func_call_args = {}  # item_id -> accumulated arguments
@@ -319,15 +323,19 @@ class OpenAICompatibleLLM(BaseLLM):
             create_kwargs["service_tier"] = service_tier
 
         if self.model.startswith(GPT5_MODEL_PREFIX):
+            create_kwargs["temperature"] = 1
             reasoning_effort = self.model_args.get("reasoning_effort")
             if reasoning_effort:
                 create_kwargs["reasoning"] = {"effort": reasoning_effort}
+            verbosity = self.model_args.get("verbosity")
+            if verbosity:
+                create_kwargs.setdefault("text", {})["verbosity"] = verbosity
 
         if self.previous_response_id:
             create_kwargs["previous_response_id"] = self.previous_response_id
 
         if request_json:
-            create_kwargs["text"] = {"format": {"type": "json_object"}}
+            create_kwargs.setdefault("text", {})["format"] = {"type": "json_object"}
 
         llm_host = getattr(self, "llm_host", None)
 

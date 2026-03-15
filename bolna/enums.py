@@ -91,6 +91,8 @@ class LLMProvider(str, Enum):
     DEEPSEEK = "deepseek"
     OPENROUTER = "openrouter"
     AZURE = "azure"
+    GOOGLE = "google"
+
 
     @classmethod
     def all_values(cls):
@@ -99,10 +101,12 @@ class LLMProvider(str, Enum):
 
 
 class ReasoningEffort(str, Enum):
+    NONE = "none"
     MINIMAL = "minimal"
     LOW = "low"
     MEDIUM = "medium"
     HIGH = "high"
+    XHIGH = "xhigh"
 
     @classmethod
     def all_values(cls):

@@ -21,6 +21,10 @@ load_dotenv()
 
 
 class DeepgramTranscriber(BaseTranscriber):
+    @property
+    def is_english(self):
+        return bool(self.language and self.language.startswith("en"))
+
     def __init__(self, telephony_provider, input_queue=None, model='nova-2', stream=True, language="en", endpointing="400",
                  sampling_rate="16000", encoding="linear16", output_queue=None, keywords=None,
                  process_interim_results="true", **kwargs):
@@ -42,7 +46,9 @@ class DeepgramTranscriber(BaseTranscriber):
         self.transcription_cursor = 0.0
         self.interruption_signalled = False
         if not self.stream:
-            self.api_url = f"https://{self.deepgram_host}/v1/listen?model={self.model}&filler_words=true&language={self.language}"
+            self.api_url = f"https://{self.deepgram_host}/v1/listen?model={self.model}&language={self.language}"
+            if self.is_english:
+                self.api_url += "&filler_words=true"
             self.session = aiohttp.ClientSession()
             if self.keywords is not None:
                 keyword_list = [quote(kw.strip()) for kw in self.keywords.split(",") if kw.strip()]
@@ -81,7 +87,6 @@ class DeepgramTranscriber(BaseTranscriber):
     def get_deepgram_ws_url(self):
         dg_params = {
             'model': self.model,
-            'filler_words': 'true',
             # 'diarize': 'true',
             'language': self.language,
             'vad_events' : 'true',
@@ -125,6 +130,9 @@ class DeepgramTranscriber(BaseTranscriber):
         if self.provider == "playground":
             self.sampling_rate = 8000
             self.audio_frame_duration = 0.0  # There's no streaming from the playground
+
+        if self.is_english:
+            dg_params['filler_words'] = 'true'
 
         if "en" not in self.language:
             dg_params['language'] = self.language
