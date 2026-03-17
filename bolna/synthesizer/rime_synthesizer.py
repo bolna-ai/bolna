@@ -319,11 +319,24 @@ class RimeSynthesizer(BaseSynthesizer):
             return None
 
     async def monitor_connection(self):
-        # Periodically check if the connection is still alive
-        while True:
+        """Periodically check if the connection is still alive and reconnect if needed"""
+        consecutive_failures = 0
+        max_failures = 3
+
+        while consecutive_failures < max_failures:
             if self.websocket_holder["websocket"] is None or self.websocket_holder["websocket"].state is websockets.protocol.State.CLOSED:
                 logger.info("Re-establishing rime connection...")
-                self.websocket_holder["websocket"] = await self.establish_connection()
+                result = await self.establish_connection()
+                if result is None:
+                    consecutive_failures += 1
+                    logger.warning(f"Rime connection failed (attempt {consecutive_failures}/{max_failures})")
+                    if consecutive_failures >= max_failures:
+                        logger.error("Max connection failures reached for Rime - stopping reconnection attempts")
+                        self.connection_error = self.connection_error or "Max connection failures reached"
+                        break
+                else:
+                    self.websocket_holder["websocket"] = result
+                    consecutive_failures = 0
             await asyncio.sleep(1)
 
     async def get_sender_task(self):
