@@ -2459,10 +2459,13 @@ class TaskManager(BaseManager):
                     elif message["data"] == "transcriber_connection_closed":
                         self.transcriber_duration += message.get("meta_info", {}).get("transcriber_duration", 0) if message["meta_info"] is not None else 0
                         # In a pool, a standby transcriber closing is expected (e.g. Deepgram
-                        # inactivity timeout). Only end the call if we're NOT using a pool.
+                        # inactivity timeout). But if the active transcriber closed, the call
+                        # is over (e.g. user hung up via telephony stop event).
                         if isinstance(self.tools.get("transcriber"), TranscriberPool):
-                            logger.info(f"TranscriberPool: a transcriber connection closed (standby drop), continuing")
-                            continue
+                            if self.tools["transcriber"].is_active_transcriber_alive():
+                                logger.info(f"TranscriberPool: standby transcriber closed, continuing")
+                                continue
+                            logger.info(f"TranscriberPool: active transcriber closed, ending call")
                         await self._log_transcriber_connection_error((message.get("meta_info") or {}).get("connection_error"))
                         break
 
@@ -2471,8 +2474,10 @@ class TaskManager(BaseManager):
                     if message["data"] == "transcriber_connection_closed":
                         self.transcriber_duration += message.get("meta_info", {}).get("transcriber_duration", 0) if message["meta_info"] is not None else 0
                         if isinstance(self.tools.get("transcriber"), TranscriberPool):
-                            logger.info(f"TranscriberPool: a transcriber connection closed (standby drop), continuing")
-                            continue
+                            if self.tools["transcriber"].is_active_transcriber_alive():
+                                logger.info(f"TranscriberPool: standby transcriber closed, continuing")
+                                continue
+                            logger.info(f"TranscriberPool: active transcriber closed, ending call")
                         await self._log_transcriber_connection_error((message.get("meta_info") or {}).get("connection_error"))
                         break
 
