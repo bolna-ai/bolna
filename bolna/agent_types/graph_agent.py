@@ -10,7 +10,7 @@ from bolna.models import *
 from bolna.agent_types.base_agent import BaseAgent
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.rag_service_client import RAGServiceClientSingleton
-from bolna.helpers.utils import now_ms, format_messages, update_prompt_with_context, DictWithMissing
+from bolna.helpers.utils import now_ms, format_messages, update_prompt_with_context, enrich_context_with_time_variables, DictWithMissing
 from bolna.llms.types import LLMStreamChunk, LatencyData
 from bolna.llms import OpenAiLLM
 from bolna.providers import SUPPORTED_LLM_PROVIDERS
@@ -434,6 +434,9 @@ class GraphAgent(BaseAgent):
         node_prompt = self._get_prompt_with_example(current_node, detected_lang)
 
         if self.context_data:
+            timezone_str = self.context_data.get('recipient_data', {}).get('timezone')
+            if timezone_str:
+                enrich_context_with_time_variables(self.context_data, timezone_str)
             node_prompt = update_prompt_with_context(node_prompt, self.context_data)
 
         if self.agent_information:
