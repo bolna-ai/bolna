@@ -3140,8 +3140,7 @@ class TaskManager(BaseManager):
                 except Exception as e:
                     traceback.print_exc()
                     logger.error(f"Error: {e}")
-                    self._error_logged = True
-                    if self.run_id:
+                    if self.run_id and not self._error_logged:
                         if isinstance(e, BolnaComponentError):
                             error_msg = format_error_message(e.component, e.provider or e.model or "-", str(e))
                             model = e.model or "-"
@@ -3157,6 +3156,7 @@ class TaskManager(BaseManager):
                             is_cached=False,
                             run_id=self.run_id
                         )
+                    self._error_logged = True
 
                 # Surface component errors from fire-and-forget tasks or stored errors
                 if self._component_error is not None:
