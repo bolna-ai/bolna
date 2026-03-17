@@ -3233,7 +3233,6 @@ class TaskManager(BaseManager):
             # Construct output
             tasks_to_cancel = []
             if "synthesizer" in self.tools and self.synthesizer_task is not None:
-                tasks_to_cancel.append(self.tools["synthesizer"].cleanup())
                 tasks_to_cancel.append(process_task_cancellation(self.synthesizer_task, 'synthesizer_task'))
                 tasks_to_cancel.append(process_task_cancellation(self.synthesizer_monitor_task, 'synthesizer_monitor_task'))
 
