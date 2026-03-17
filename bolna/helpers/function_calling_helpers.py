@@ -92,6 +92,10 @@ async def trigger_api(url, method, param, api_token, headers_data, meta_info, ru
                 request_body = param % json_kwargs
                 api_params = json.loads(request_body)
 
+        llm_generated_run_id = api_params.get('execution_id')
+        if api_params and llm_generated_run_id and llm_generated_run_id != run_id:
+            api_params['execution_id'] = run_id
+
         headers = {'Content-Type': 'application/json'}
         content_type = "json"
         if api_token:
