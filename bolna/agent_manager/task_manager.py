@@ -1606,6 +1606,13 @@ class TaskManager(BaseManager):
     async def __execute_function_call(self, url, method, param, api_token, headers, model_args, meta_info, next_step, called_fun, **resp):
         self.check_if_user_online = False
 
+        if "execution_id" in resp and resp["execution_id"] != self.run_id:
+            logger.warning(
+                f"Correcting LLM-generated execution_id: "
+                f"'{resp['execution_id']}' -> '{self.run_id}'"
+            )
+            resp["execution_id"] = self.run_id
+
         if called_fun.startswith("transfer_call"):
             await asyncio.sleep(2)
             try:
