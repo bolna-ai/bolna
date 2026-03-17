@@ -64,9 +64,20 @@ class AzureTranscriber(BaseTranscriber):
     async def run(self):
         try:
             await self.initialize_connection()
+            if self.connection_error:
+                meta = dict(self.meta_info or {})
+                meta['connection_error'] = self.connection_error
+                await self.transcriber_output_queue.put(
+                    create_ws_data_packet("transcriber_connection_closed", meta))
+                return
             self.send_audio_to_transcriber_task = asyncio.create_task(self.send_audio_to_transcriber())
         except Exception as e:
             logger.error(f"Error received in run method - {e}")
+            self.connection_error = self.connection_error or str(e)
+            meta = dict(self.meta_info or {})
+            meta['connection_error'] = self.connection_error
+            await self.transcriber_output_queue.put(
+                create_ws_data_packet("transcriber_connection_closed", meta))
 
     def _check_and_process_end_of_stream(self, ws_data_packet):
         if 'eos' in ws_data_packet['meta_info'] and ws_data_packet['meta_info']['eos'] is True:
@@ -160,6 +171,7 @@ class AzureTranscriber(BaseTranscriber):
                 self.connection_time = round((time.perf_counter() - start_time) * 1000)
 
         except Exception as e:
+            self.connection_error = str(e)
             logger.error(f"Error in initialize_connection - {e}")
 
     # Synchronous wrapper functions that schedule the async handlers
@@ -282,6 +294,8 @@ class AzureTranscriber(BaseTranscriber):
 
     async def canceled_handler(self, evt):
         logger.info(f"Canceled event received: {evt} | run_id - {self.run_id}")
+        if evt.cancellation_details and evt.cancellation_details.error_details:
+            self.connection_error = evt.cancellation_details.error_details
 
     async def session_started_handler(self, evt):
         logger.info(f"Session start event received: {evt} | run_id - {self.run_id}")
@@ -290,9 +304,13 @@ class AzureTranscriber(BaseTranscriber):
     async def session_stopped_handler(self, evt):
         logger.info(f"Session stop event received: {evt} | run_id - {self.run_id}")
         self.end_time = time.time()
-        self.meta_info["transcriber_duration"] = self.end_time - self.start_time
+        if self.meta_info is not None and self.start_time is not None:
+            self.meta_info["transcriber_duration"] = self.end_time - self.start_time
+        meta = dict(self.meta_info or {})
+        if self.connection_error:
+            meta['connection_error'] = self.connection_error
         await self.transcriber_output_queue.put(
-            create_ws_data_packet("transcriber_connection_closed", self.meta_info))
+            create_ws_data_packet("transcriber_connection_closed", meta))
 
     async def toggle_connection(self):
         self.connection_on = False

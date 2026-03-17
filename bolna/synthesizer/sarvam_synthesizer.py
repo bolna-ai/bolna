@@ -48,6 +48,7 @@ class SarvamSynthesizer(BaseSynthesizer):
         self.websocket_holder = {"websocket": None}
         self.sender_task = None
         self.conversation_ended = False
+        self.connection_error = None
         self.current_turn_start_time = None
         self.current_turn_id = None
         self.text_queue = deque()
@@ -123,6 +124,7 @@ class SarvamSynthesizer(BaseSynthesizer):
                     await self.websocket_holder["websocket"].send(json.dumps({"type": "text", "data": {"text": text}}))
                 except Exception as e:
                     logger.error(f"Error sending chunk: {e}")
+                    self.connection_error = str(e)
                     return
 
             # If end_of_llm_stream is True, mark the last chunk and send an empty message
@@ -133,6 +135,7 @@ class SarvamSynthesizer(BaseSynthesizer):
                 await self.websocket_holder["websocket"].send(json.dumps({"type": "flush"}))
             except Exception as e:
                 logger.info(f"Error sending end-of-stream signal: {e}")
+                self.connection_error = str(e)
         except asyncio.CancelledError:
             logger.info("Sender task was cancelled.")
         except Exception as e:
@@ -164,6 +167,8 @@ class SarvamSynthesizer(BaseSynthesizer):
 
                 if (self.websocket_holder["websocket"] is None or
                         self.websocket_holder["websocket"].state is websockets.protocol.State.CLOSED):
+                    if self.connection_error:
+                        return
                     logger.info("WebSocket is not connected, skipping receive.")
                     await asyncio.sleep(0.1)
                     continue
@@ -225,6 +230,7 @@ class SarvamSynthesizer(BaseSynthesizer):
                 logger.error(f"Sarvam TTS endpoint not found: {e}")
             else:
                 logger.error(f"Sarvam TTS handshake failed: {e}")
+            self.connection_error = str(e)
             return None
         except Exception as e:
             logger.error(f"Failed to connect to Sarvam TTS: {e}")
@@ -244,6 +250,7 @@ class SarvamSynthesizer(BaseSynthesizer):
                     logger.warning(f"Sarvam TTS connection failed (attempt {consecutive_failures}/{max_failures})")
                     if consecutive_failures >= max_failures:
                         logger.error("Max connection failures reached for Sarvam TTS - stopping reconnection attempts")
+                        self.connection_error = self.connection_error or "Max connection failures reached"
                         break
                 else:
                     self.websocket_holder["websocket"] = result
@@ -269,6 +276,8 @@ class SarvamSynthesizer(BaseSynthesizer):
         try:
             if self.stream:
                 async for message in self.receiver():
+                    if self.connection_error:
+                        raise Exception(self.connection_error)
                     logger.info(f"Received message from server")
 
                     if len(self.text_queue) > 0:
@@ -320,10 +329,13 @@ class SarvamSynthesizer(BaseSynthesizer):
 
                     self.meta_info["mark_id"] = str(uuid.uuid4())
                     yield create_ws_data_packet(audio, self.meta_info)
+                if self.connection_error:
+                    raise Exception(self.connection_error)
 
         except Exception as e:
             traceback.print_exc()
             logger.info(f"Error in sarvam generate {e}")
+            raise
 
     async def _process_audio_data(self, audio):
         format = get_synth_audio_format(audio)

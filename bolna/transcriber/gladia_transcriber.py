@@ -706,6 +706,7 @@ class GladiaTranscriber(BaseTranscriber):
     async def transcribe(self):
         """Main transcription method."""
         gladia_ws = None
+        self.connection_error = None
         try:
             start_time = timestamp_ms()
 
@@ -733,8 +734,10 @@ class GladiaTranscriber(BaseTranscriber):
                             await self._close_gladia(gladia_ws)
                             break
                 except ConnectionClosedError as e:
+                    self.connection_error = str(e)
                     logger.error(f"Gladia WebSocket closed during streaming: {e}")
                 except Exception as e:
+                    self.connection_error = str(e)
                     logger.error(f"Error during streaming: {e}")
                     raise
             else:
@@ -768,6 +771,9 @@ class GladiaTranscriber(BaseTranscriber):
                 self.utterance_timeout_task.cancel()
 
             # Send connection closed message
+            meta = dict(getattr(self, 'meta_info', None) or {})
+            if self.connection_error:
+                meta['connection_error'] = self.connection_error
             await self.push_to_transcriber_queue(
-                create_ws_data_packet("transcriber_connection_closed", getattr(self, 'meta_info', {}))
+                create_ws_data_packet("transcriber_connection_closed", meta)
             )
