@@ -271,6 +271,22 @@ def format_messages(messages, use_system_prompt=False, include_tools=False):
     return formatted_string
 
 
+def enrich_context_with_time_variables(context_data, timezone):
+    """Inject current_date, current_time, timezone into context_data['recipient_data']
+    so users can reference {current_date}, {current_time}, {timezone} in prompts."""
+    if context_data is None:
+        return
+    if isinstance(timezone, str):
+        import pytz
+        timezone = pytz.timezone(timezone)
+    current_date, current_time = get_date_time_from_timezone(timezone)
+    recipient_data = context_data.setdefault('recipient_data', {})
+    if isinstance(recipient_data, dict):
+        recipient_data['current_date'] = current_date
+        recipient_data['current_time'] = current_time
+        recipient_data['timezone'] = str(timezone)
+
+
 def update_prompt_with_context(prompt, context_data):
     try:
         if not context_data or not isinstance(context_data.get('recipient_data'), dict):
@@ -743,6 +759,7 @@ def structure_system_prompt(system_prompt, run_id, assistant_id, call_sid, conte
     }
 
     if context_data is not None:
+        enrich_context_with_time_variables(context_data, timezone)
         default_variables["agent_number"] = context_data.get("recipient_data", {}).get("agent_number")
         default_variables["user_number"] = context_data.get("recipient_data", {}).get("user_number")
 

@@ -31,7 +31,7 @@ from bolna.transcriber.transcriber_pool import TranscriberPool
 from bolna.synthesizer.synthesizer_pool import SynthesizerPool
 from bolna.helpers.utils import structure_system_prompt, compute_function_pre_call_message, select_message_by_language, get_date_time_from_timezone, calculate_audio_duration, create_ws_data_packet, get_file_names_in_directory, get_raw_audio_bytes, is_valid_md5, \
     get_required_input_types, format_messages, get_prompt_responses, resample, save_audio_file_to_s3, update_prompt_with_context, get_md5_hash, clean_json_string, wav_bytes_to_pcm, convert_to_request_log, yield_chunks_from_memory, process_task_cancellation, pcm_to_ulaw, \
-    format_error_message
+    format_error_message, enrich_context_with_time_variables
 from bolna.helpers.logger_config import configure_logger
 from ..helpers.mark_event_meta_data import MarkEventMetaData
 from ..helpers.observable_variable import ObservableVariable
@@ -1030,6 +1030,7 @@ class TaskManager(BaseManager):
     def __get_final_prompt(self, prompt, today, current_time, current_timezone):
         enriched_prompt = prompt
         if self.context_data is not None:
+            enrich_context_with_time_variables(self.context_data, current_timezone)
             enriched_prompt = update_prompt_with_context(enriched_prompt, self.context_data)
         notes = "### Note:\n"
         if self._is_conversation_task() and self.use_fillers:
@@ -2459,10 +2460,13 @@ class TaskManager(BaseManager):
                     elif message["data"] == "transcriber_connection_closed":
                         self.transcriber_duration += message.get("meta_info", {}).get("transcriber_duration", 0) if message["meta_info"] is not None else 0
                         # In a pool, a standby transcriber closing is expected (e.g. Deepgram
-                        # inactivity timeout). Only end the call if we're NOT using a pool.
+                        # inactivity timeout). But if the active transcriber closed, the call
+                        # is over (e.g. user hung up via telephony stop event).
                         if isinstance(self.tools.get("transcriber"), TranscriberPool):
-                            logger.info(f"TranscriberPool: a transcriber connection closed (standby drop), continuing")
-                            continue
+                            if self.tools["transcriber"].is_active_transcriber_alive():
+                                logger.info(f"TranscriberPool: standby transcriber closed, continuing")
+                                continue
+                            logger.info(f"TranscriberPool: active transcriber closed, ending call")
                         await self._log_transcriber_connection_error((message.get("meta_info") or {}).get("connection_error"))
                         break
 
@@ -2471,8 +2475,10 @@ class TaskManager(BaseManager):
                     if message["data"] == "transcriber_connection_closed":
                         self.transcriber_duration += message.get("meta_info", {}).get("transcriber_duration", 0) if message["meta_info"] is not None else 0
                         if isinstance(self.tools.get("transcriber"), TranscriberPool):
-                            logger.info(f"TranscriberPool: a transcriber connection closed (standby drop), continuing")
-                            continue
+                            if self.tools["transcriber"].is_active_transcriber_alive():
+                                logger.info(f"TranscriberPool: standby transcriber closed, continuing")
+                                continue
+                            logger.info(f"TranscriberPool: active transcriber closed, ending call")
                         await self._log_transcriber_connection_error((message.get("meta_info") or {}).get("connection_error"))
                         break
 

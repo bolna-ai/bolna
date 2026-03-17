@@ -65,6 +65,12 @@ class TranscriberPool:
     def labels(self):
         return list(self.transcribers.keys())
 
+    def is_active_transcriber_alive(self):
+        """True if the active transcriber's connection task is still running."""
+        active = self.transcribers[self.active_label]
+        task = getattr(active, 'transcription_task', None)
+        return task is not None and not task.done()
+
     # ------------------------------------------------------------------
     # Duck-typed interface
     # ------------------------------------------------------------------
