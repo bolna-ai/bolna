@@ -274,7 +274,8 @@ def format_messages(messages, use_system_prompt=False, include_tools=False):
                 formatted_string += "user: " + content + "\n"
         elif include_tools and role == 'tool':
             if content:
-                formatted_string += "tool_response: " + content + "\n"
+                tool_call_id = message.get('tool_call_id', '')
+                formatted_string += f"tool_response ({tool_call_id}): " + content + "\n"
 
     return formatted_string
 
