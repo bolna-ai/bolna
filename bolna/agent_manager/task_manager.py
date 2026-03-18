@@ -1681,6 +1681,7 @@ class TaskManager(BaseManager):
 
         if called_fun == "switch_language":
             language_label = resp.get("language", "")
+            await self.wait_for_current_message()
             try:
                 await self.switch_language(language_label)
                 function_response = f"Switched to {language_label}"
