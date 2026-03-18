@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 
 from .base_synthesizer import BaseSynthesizer
 from bolna.helpers.logger_config import configure_logger
-from bolna.helpers.utils import convert_audio_to_wav, create_ws_data_packet
+from bolna.helpers.utils import convert_audio_to_wav
 from bolna.memory.cache.inmemory_scalar_cache import InmemoryScalarCache
 
 logger = configure_logger(__name__)
@@ -51,8 +51,13 @@ class PollySynthesizer(BaseSynthesizer):
         return await exit_stack.enter_async_context(session.create_client(service))
 
     # ------------------------------------------------------------------
-    # HTTP synthesis
+    # BaseSynthesizer hooks
     # ------------------------------------------------------------------
+
+    def _process_http_audio(self, audio):
+        if self.format == "mp3":
+            return convert_audio_to_wav(audio, source_format="mp3")
+        return audio
 
     async def _generate_http(self, text):
         session = AioSession()
@@ -80,45 +85,12 @@ class PollySynthesizer(BaseSynthesizer):
             logger.error(f"Could not synthesize {e}")
 
     # ------------------------------------------------------------------
-    # generate / push
+    # generate / push — use base _generate_http_loop
     # ------------------------------------------------------------------
 
     async def generate(self):
-        while True:
-            logger.info("Generating TTS response")
-            message = await self.internal_queue.get()
-            logger.info(f"Generating TTS response for message: {message}")
-            meta_info, text = message.get("meta_info"), message.get("data")
-
-            if not self.should_synthesize_response(meta_info.get("sequence_id")):
-                logger.info(f"Not synthesizing: sequence_id {meta_info.get('sequence_id')} not current")
-                return
-
-            if self.caching:
-                logger.info("Caching is on")
-                if self.cache.get(text):
-                    logger.info(f"Cache hit: {text}")
-                    audio = self.cache.get(text)
-                else:
-                    logger.info(f"Not a cache hit {list(self.cache.data_dict)}")
-                    self.synthesized_characters += len(text)
-                    audio = await self._generate_http(text)
-                    self.cache.set(text, audio)
-            else:
-                self.synthesized_characters += len(text)
-                audio = await self._generate_http(text)
-
-            if self.format == "mp3":
-                audio = convert_audio_to_wav(audio, source_format="mp3")
-
-            self._stamp_first_chunk(meta_info)
-            self._stamp_end_of_stream(meta_info)
-
-            meta_info["text"] = text
-            meta_info["format"] = "wav"
-            meta_info["text_synthesized"] = f"{text} "
-            self._stamp_mark_id(meta_info)
-            yield create_ws_data_packet(audio, meta_info)
+        async for packet in self._generate_http_loop():
+            yield packet
 
     async def push(self, message):
         logger.info("Pushed message to internal queue")

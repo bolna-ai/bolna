@@ -248,38 +248,6 @@ class ElevenlabsSynthesizer(StreamSynthesizer):
             except Exception as e:
                 logger.error(f"Error occurred in receiver - {e}")
 
-    async def _generate_http_loop(self):
-        """HTTP non-streaming generate loop."""
-        while True:
-            message = await self.internal_queue.get()
-            logger.info(f"Generating TTS response for message: {message}, using mulaw {self.use_mulaw}")
-            meta_info, text = message.get("meta_info"), message.get("data")
-            audio = None
-
-            if self.caching:
-                if self.cache.get(text):
-                    logger.info(f"Cache hit: {text}")
-                    audio = self.cache.get(text)
-                    meta_info["is_cached"] = True
-                else:
-                    self.synthesized_characters += len(text)
-                    logger.info(f"Not a cache hit {list(self.cache.data_dict)}")
-                    meta_info["is_cached"] = False
-                    audio = await self._generate_http(text)
-                    self.cache.set(text, audio)
-            else:
-                meta_info["is_cached"] = False
-                audio = await self._generate_http(text)
-
-            meta_info["text"] = text
-            self._stamp_first_chunk(meta_info)
-            self._stamp_end_of_stream(meta_info)
-
-            meta_info["format"] = self._get_audio_format()
-            audio = self._process_audio_chunk(audio)
-
-            yield create_ws_data_packet(audio, meta_info)
-
     # ------------------------------------------------------------------
     # Connection
     # ------------------------------------------------------------------

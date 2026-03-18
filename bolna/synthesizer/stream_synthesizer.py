@@ -82,8 +82,23 @@ class StreamSynthesizer(BaseSynthesizer):
         return "wav"
 
     def _process_audio_chunk(self, chunk):
-        """Optional per-chunk transform (resample, decode, etc). Return bytes."""
+        """Optional per-chunk transform for WS streaming (resample, decode, etc). Return bytes."""
         return chunk
+
+    def _process_http_audio(self, audio):
+        """Audio conversion for HTTP mode. Defaults to _process_audio_chunk.
+
+        Override separately when the HTTP response format differs from the WS
+        wire format (e.g. Rime WS sends mulaw, but HTTP sends mp3/wav).
+        """
+        return self._process_audio_chunk(audio)
+
+    def _get_http_audio_format(self):
+        """Output format string for HTTP mode. Defaults to _get_audio_format.
+
+        Override when HTTP output format differs from WS output format.
+        """
+        return self._get_audio_format()
 
     def _on_stream_end(self):
         """Hook called when end-of-stream (b'\\x00') is received. Override for extra cleanup."""
@@ -101,16 +116,6 @@ class StreamSynthesizer(BaseSynthesizer):
         (audio, text_synthesized) tuples).
         """
         return item, {}
-
-    async def _generate_http_loop(self):
-        """Override this to provide an HTTP (non-streaming) generate loop.
-
-        Only called when self.stream is False. Subclasses that support both
-        WS and HTTP modes should implement this.
-        """
-        raise NotImplementedError(
-            f"{self.provider_name} does not implement HTTP mode (_generate_http_loop)"
-        )
 
     # ------------------------------------------------------------------
     # Shared sender helpers

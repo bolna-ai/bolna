@@ -99,6 +99,68 @@ class BaseSynthesizer:
         meta_info["mark_id"] = str(uuid.uuid4())
 
     # ------------------------------------------------------------------
+    # HTTP generate loop (used by HTTP-only synths and dual-mode synths)
+    # ------------------------------------------------------------------
+
+    async def _generate_http(self, text):
+        """Provider-specific HTTP TTS call. Return raw audio bytes."""
+        raise NotImplementedError
+
+    def _process_http_audio(self, audio):
+        """Audio conversion for HTTP mode. Override per provider."""
+        return audio
+
+    def _get_http_audio_format(self):
+        """Output format string for HTTP mode (e.g. 'wav', 'mulaw')."""
+        return "wav"
+
+    async def _generate_http_loop(self):
+        """Standard HTTP (non-streaming) generate loop with caching support."""
+        while True:
+            message = await self.internal_queue.get()
+            logger.info(f"Generating TTS response for message: {message}")
+            meta_info, text = message.get("meta_info"), message.get("data")
+
+            if not self.should_synthesize_response(meta_info.get("sequence_id")):
+                logger.info(f"Not synthesizing: sequence_id {meta_info.get('sequence_id')} not current")
+                return
+
+            audio = await self._fetch_http_audio(text, meta_info)
+            audio = self._process_http_audio(audio)
+
+            self._stamp_first_chunk(meta_info)
+            self._stamp_end_of_stream(meta_info)
+
+            meta_info["format"] = self._get_http_audio_format()
+            meta_info["text"] = text
+            meta_info["text_synthesized"] = f"{text} "
+            self._stamp_mark_id(meta_info)
+            yield create_ws_data_packet(audio, meta_info)
+
+            
+    async def _fetch_http_audio(self, text, meta_info=None):
+        """Fetch audio via HTTP, with optional caching. Tracks synthesized_characters."""
+        if getattr(self, "caching", False) and hasattr(self, "cache"):
+            cached = self.cache.get(text)
+            if cached:
+                logger.info(f"Cache hit: {text}")
+                if meta_info is not None:
+                    meta_info["is_cached"] = True
+                return cached
+            logger.info("Not a cache hit")
+            if meta_info is not None:
+                meta_info["is_cached"] = False
+            self.synthesized_characters += len(text)
+            audio = await self._generate_http(text)
+            self.cache.set(text, audio)
+            return audio
+        else:
+            if meta_info is not None:
+                meta_info["is_cached"] = False
+            self.synthesized_characters += len(text)
+            return await self._generate_http(text)
+
+    # ------------------------------------------------------------------
     # Text utilities
     # ------------------------------------------------------------------
 

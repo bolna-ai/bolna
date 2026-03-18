@@ -9,7 +9,6 @@ import websockets
 
 from .stream_synthesizer import StreamSynthesizer
 from bolna.helpers.logger_config import configure_logger
-from bolna.helpers.utils import create_ws_data_packet
 
 logger = configure_logger(__name__)
 
@@ -120,29 +119,9 @@ class SmallestSynthesizer(StreamSynthesizer):
             logger.info(f"Failed to connect: {e}")
             return None
 
-    async def _generate_http_loop(self):
-        while True:
-            message = await self.internal_queue.get()
-            logger.info(f"Generating TTS response for message: {message}")
-            meta_info, text = message.get("meta_info"), message.get("data")
-
-            if not self.should_synthesize_response(meta_info.get("sequence_id")):
-                logger.info(f"Not synthesizing: sequence_id {meta_info.get('sequence_id')} not current")
-                return
-
-            meta_info["is_cached"] = False
-            self.synthesized_characters += len(text)
-            audio = await self._generate_http(text)
-            if not audio:
-                audio = b'\x00'
-
-            meta_info["text"] = text
-            self._stamp_first_chunk(meta_info)
-            self._stamp_end_of_stream(meta_info)
-            meta_info["format"] = "wav"
-            meta_info["text_synthesized"] = f"{text} "
-            self._stamp_mark_id(meta_info)
-            yield create_ws_data_packet(audio, meta_info)
+    def _process_http_audio(self, audio):
+        # Guard against null response from API
+        return audio if audio else b'\x00'
 
     # ------------------------------------------------------------------
     # HTTP

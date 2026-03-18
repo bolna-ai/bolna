@@ -294,57 +294,7 @@ class DeepgramSynthesizer(StreamSynthesizer):
         except Exception as e:
             logger.error(f"Could not synthesize {e}")
 
-    async def _generate_http_loop(self):
-        """HTTP non-streaming mode."""
-        while True:
-            message = await self.internal_queue.get()
-            logger.info(f"Generating TTS response for message: {message}")
-            meta_info, text = message.get("meta_info"), message.get("data")
-            try:
-                meta_info["synthesizer_start_time"] = time.perf_counter()
-            except Exception:
-                pass
-
-            if not self.should_synthesize_response(meta_info.get("sequence_id")):
-                logger.info(f"Not synthesizing: sequence_id {meta_info.get('sequence_id')} not current")
-                return
-
-            if self.caching:
-                logger.info("Caching is on")
-                if self.cache.get(text):
-                    logger.info(f"Cache hit: {text}")
-                    audio_message = self.cache.get(text)
-                else:
-                    logger.info(f"Not a cache hit {list(self.cache.data_dict)}")
-                    self.synthesized_characters += len(text)
-                    audio_message = await self._generate_http(text)
-                    self.cache.set(text, audio_message)
-            else:
-                self.synthesized_characters += len(text)
-                audio_message = await self._generate_http(text)
-
-            if self.format == "mp3":
-                audio_message = convert_audio_to_wav(audio_message, source_format="mp3")
-
-            self._stamp_first_chunk(meta_info)
-            self._stamp_end_of_stream(meta_info)
-
-            try:
-                if "synthesizer_start_time" in meta_info and "synthesizer_first_result_latency" not in meta_info:
-                    meta_info["synthesizer_first_result_latency"] = time.perf_counter() - meta_info["synthesizer_start_time"]
-                    meta_info["synthesizer_latency"] = meta_info["synthesizer_first_result_latency"]
-            except Exception:
-                pass
-
-            meta_info["format"] = self._get_audio_format()
-            meta_info["text"] = text
-            meta_info["text_synthesized"] = f"{text} "
-            self._stamp_mark_id(meta_info)
-
-            try:
-                if "synthesizer_start_time" in meta_info:
-                    meta_info["synthesizer_total_stream_duration"] = time.perf_counter() - meta_info["synthesizer_start_time"]
-            except Exception:
-                pass
-
-            yield create_ws_data_packet(audio_message, meta_info)
+    def _process_http_audio(self, audio):
+        if self.format == "mp3":
+            return convert_audio_to_wav(audio, source_format="mp3")
+        return audio
