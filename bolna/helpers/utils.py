@@ -251,22 +251,31 @@ def format_messages(messages, use_system_prompt=False, include_tools=False):
     formatted_string = ""
     for message in messages:
         role = message['role']
-        if message['content'] is None:
-            logger.info(f"Continuing the loop as content received is None")
-            continue
-        content = message['content']
+        content = message.get('content')
+        tool_calls = message.get('tool_calls')
 
         if use_system_prompt and role == 'system':
-            try:
-                formatted_string += "system: " + content + "\n"
-            except Exception as e:
-                a = 1
-        if role == 'assistant':
-            formatted_string += "assistant: " + content + "\n"
+            if content:
+                try:
+                    formatted_string += "system: " + content + "\n"
+                except Exception as e:
+                    pass
+        elif role == 'assistant':
+            if content:
+                formatted_string += "assistant: " + content + "\n"
+            if include_tools and tool_calls:
+                for tc in tool_calls:
+                    try:
+                        formatted_string += "assistant_tool_call: " + str(tc) + "\n"
+                    except Exception as e:
+                        logger.warning(f"Error formatting tool call content: {e}")
         elif role == 'user':
-            formatted_string += "user: " + content + "\n"
+            if content:
+                formatted_string += "user: " + content + "\n"
         elif include_tools and role == 'tool':
-            formatted_string += "tool_response: " + content + "\n"
+            if content:
+                tool_call_id = message.get('tool_call_id', '')
+                formatted_string += f"tool_response: ({tool_call_id}): " + content + "\n"
 
     return formatted_string
 
