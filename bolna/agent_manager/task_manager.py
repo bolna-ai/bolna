@@ -110,7 +110,7 @@ class TaskManager(BaseManager):
         self.hangup_triggered = False
         self.hangup_triggered_at = None
         self.hangup_message_queued = False
-        self.switch_handoff_message = ""
+        self.switch_handoff_messages = {}
         self._end_of_conversation_in_progress = False
         self._turn_audio_flushed = asyncio.Event()
         self._turn_audio_flushed.set()
@@ -738,7 +738,7 @@ class TaskManager(BaseManager):
         # doesn't drop the call, but no pre_call_message — the switch is silent.
         self.kwargs["api_tools"]["tools_params"]["switch_language"] = {}
 
-        self.switch_handoff_message = self.task_config.get("tools_config", {}).get("switch_handoff_message", "")
+        self.switch_handoff_messages = self.task_config.get("tools_config", {}).get("switch_handoff_messages", {})
 
     def __setup_transcriber(self):
         try:
@@ -1663,9 +1663,10 @@ class TaskManager(BaseManager):
             await self.wait_for_current_message()
 
             # Synthesize handoff message with CURRENT voice before switching
-            if self.switch_handoff_message:
+            handoff_template = self.switch_handoff_messages.get(self.language, "")
+            if handoff_template:
                 target_voice = self._get_voice_name_for_label(language_label)
-                handoff_text = self.switch_handoff_message.replace(
+                handoff_text = handoff_template.replace(
                     "{voice_name}", target_voice
                 ).replace(
                     "{language}", language_label
