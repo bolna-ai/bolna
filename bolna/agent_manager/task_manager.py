@@ -1697,9 +1697,7 @@ class TaskManager(BaseManager):
                 function_response = f"Switched to {language_label}"
             except ValueError as e:
                 function_response = f"Failed to switch language: {e}"
-
-            textual_response = resp.get("textual_response", None)
-            self.conversation_history.append_assistant(textual_response, tool_calls=resp["model_response"])
+           
             self.conversation_history.append_tool_result(resp.get("tool_call_id", ""), function_response)
             convert_to_request_log(function_response, meta_info, None, "function_call", direction="response", run_id=self.run_id)
 
@@ -1742,8 +1740,6 @@ class TaskManager(BaseManager):
         else:
             set_response_prompt = function_response
 
-        textual_response = resp.get("textual_response", None)
-        self.conversation_history.append_assistant(textual_response, tool_calls=resp["model_response"])
         self.conversation_history.append_tool_result(resp.get("tool_call_id", ""), function_response)
 
         logger.info(f"Logging function call parameters ")
@@ -1759,15 +1755,15 @@ class TaskManager(BaseManager):
 
         self.execute_function_call_task = None
 
-    def __store_into_history(self, meta_info, messages, llm_response, should_trigger_function_call = False):
+    def __store_into_history(self, meta_info, messages, llm_response, should_trigger_function_call = False, tool_calls = None):
         self.llm_response_generated = True
         convert_to_request_log(message=llm_response, meta_info= meta_info, component=LogComponent.LLM, direction=LogDirection.RESPONSE, model=self.llm_config["model"], run_id= self.run_id)
         if should_trigger_function_call:
             logger.info(f"There was a function call and need to make that work")
-            self.conversation_history.append_assistant(llm_response)
+            self.conversation_history.append_assistant(llm_response, tool_calls=tool_calls)
         else:
             messages.append({"role": "assistant", "content": llm_response})
-            self.conversation_history.append_assistant(llm_response)
+            self.conversation_history.append_assistant(llm_response, tool_calls=tool_calls)
             self.conversation_history.sync_interim(messages)
 
     async def __do_llm_generation(self, messages, meta_info, next_step, should_bypass_synth=False, should_trigger_function_call=False):
@@ -1880,6 +1876,9 @@ class TaskManager(BaseManager):
 
                 if trigger_function_call:
                     logger.info(f"Triggering function call for {data}")
+
+                    textual_response = data.get("textual_response", "") if isinstance(data, dict) else str(data)
+                    self.__store_into_history(meta_info, messages, textual_response, should_trigger_function_call=should_trigger_function_call, tool_calls=data.tool_calls if hasattr(data, 'tool_calls') else None)
                     await self.__execute_function_call(next_step = next_step, **data.model_dump())
                     return
 
