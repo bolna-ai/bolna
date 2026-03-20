@@ -1671,10 +1671,10 @@ class TaskManager(BaseManager):
             # Synthesize handoff message with CURRENT voice before switching
             handoff_template = self.switch_handoff_messages.get(self.language, "")
             if handoff_template:
-                target_voice = self._get_voice_name_for_label(language_label)
+                target_agent_name = self._get_voice_name_for_label(language_label)
                 language_display = LANGUAGE_NAMES.get(language_label, language_label)
                 handoff_text = handoff_template.replace(
-                    "{voice_name}", target_voice
+                    "{agent_name}", target_agent_name
                 ).replace(
                     "{language}", language_display
                 )
@@ -1691,6 +1691,7 @@ class TaskManager(BaseManager):
                 self._turn_audio_flushed.clear()
                 await self._synthesize(create_ws_data_packet(handoff_text, meta_info=meta_info_handoff))
                 await self.wait_for_current_message()
+                self.conversation_history.append_assistant(handoff_text)
 
             try:
                 await self.switch_language(language_label)
