@@ -128,7 +128,8 @@ class TaskManager(BaseManager):
         }
 
         self.welcome_message_audio = self.kwargs.pop('welcome_message_audio', None)
-        self.welcome_message_delay = self.kwargs.pop('welcome_message_delay', 0)
+
+        self.welcome_message_delay = task.get("task_config", {}).get("welcome_message_delay", 0)
         # Pre-decode welcome audio for faster playback
         self.preloaded_welcome_audio = base64.b64decode(self.welcome_message_audio) if self.welcome_message_audio else None
         self.observable_variables = {}
