@@ -1691,6 +1691,7 @@ class TaskManager(BaseManager):
                 self._turn_audio_flushed.clear()
                 await self._synthesize(create_ws_data_packet(handoff_text, meta_info=meta_info_handoff))
                 await self.wait_for_current_message()
+                self.conversation_history.append_assistant(handoff_text)
 
             try:
                 await self.switch_language(language_label)
