@@ -1526,6 +1526,8 @@ class TaskManager(BaseManager):
             meta_info['message_category'] = 'filler'
 
         if next_step == "synthesizer" and not should_bypass_synth:
+            if not text_chunk or not text_chunk.strip():
+                return
             self._turn_audio_flushed.clear()
             task = asyncio.create_task(self._synthesize(create_ws_data_packet(text_chunk, meta_info)))
             self.synthesizer_tasks.append(asyncio.ensure_future(task))
