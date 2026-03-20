@@ -1671,10 +1671,10 @@ class TaskManager(BaseManager):
             # Synthesize handoff message with CURRENT voice before switching
             handoff_template = self.switch_handoff_messages.get(self.language, "")
             if handoff_template:
-                target_voice = self._get_voice_name_for_label(language_label)
+                target_agent_name = self._get_voice_name_for_label(language_label)
                 language_display = LANGUAGE_NAMES.get(language_label, language_label)
                 handoff_text = handoff_template.replace(
-                    "{voice_name}", target_voice
+                    "{agent_name}", target_agent_name
                 ).replace(
                     "{language}", language_display
                 )
