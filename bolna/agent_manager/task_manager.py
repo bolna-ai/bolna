@@ -1688,8 +1688,6 @@ class TaskManager(BaseManager):
                     'end_of_llm_stream': True,
                     'text': handoff_text,
                 }
-                # Flush stale synthesis requests to give handoff a clean pipeline
-                await self.tools["synthesizer"].handle_interruption()
                 self._turn_audio_flushed.clear()
                 await self._synthesize(create_ws_data_packet(handoff_text, meta_info=meta_info_handoff))
                 await self.wait_for_current_message()
