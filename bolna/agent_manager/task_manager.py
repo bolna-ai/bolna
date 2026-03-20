@@ -1668,10 +1668,11 @@ class TaskManager(BaseManager):
             handoff_template = self.switch_handoff_messages.get(self.language, "")
             if handoff_template:
                 target_voice = self._get_voice_name_for_label(language_label)
+                language_display = LANGUAGE_NAMES.get(language_label, language_label)
                 handoff_text = handoff_template.replace(
                     "{voice_name}", target_voice
                 ).replace(
-                    "{language}", language_label
+                    "{language}", language_display
                 )
                 meta_info_handoff = {
                     'io': self.tools["output"].get_provider(),
