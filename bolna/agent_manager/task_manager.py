@@ -631,9 +631,10 @@ class TaskManager(BaseManager):
     async def __forced_first_message(self, timeout=10.0):
         logger.info(f"Executing the first message task")
         try:
-            if self.welcome_message_delay:
-                logger.info(f"Welcome message delay set to {self.welcome_message_delay}")
-                await asyncio.sleep(self.welcome_message_delay)
+            delay_ms = int(self.welcome_message_delay or 0)
+            if delay_ms > 0:
+                logger.info(f"Welcome message delay set to {delay_ms} ms")
+                await asyncio.sleep(delay_ms / 1000)
             start_time = asyncio.get_running_loop().time()
             while True:
                 elapsed_time = asyncio.get_running_loop().time() - start_time

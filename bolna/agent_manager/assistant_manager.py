@@ -51,7 +51,8 @@ class AssistantManager(BaseManager):
                                        assistant_id=self.assistant_id, run_id=self.run_id,
                                        turn_based_conversation=self.turn_based_conversation,
                                        cache=self.cache, input_queue=self.input_queue, output_queue=self.output_queue,
-                                       conversation_history=self.conversation_history, **self.kwargs)
+                                       conversation_history=self.conversation_history,
+                                       welcome_message_delay=self.agent_config.get('welcome_message_delay', 0), **self.kwargs)
             await task_manager.load_prompt(self.agent_config.get("agent_name", self.agent_config.get("assistant_name")),
                                            task_id, local=local, **self.kwargs)
             task_output = await task_manager.run()
