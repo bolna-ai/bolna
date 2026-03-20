@@ -1877,7 +1877,7 @@ class TaskManager(BaseManager):
                 if trigger_function_call:
                     logger.info(f"Triggering function call for {data}")
 
-                    textual_response = data.get("textual_response", "") if isinstance(data, dict) else str(data)
+                    textual_response = data.textual_response if hasattr(data, 'textual_response') else None
                     self.__store_into_history(meta_info, messages, textual_response, should_trigger_function_call=should_trigger_function_call, tool_calls=data.tool_calls if hasattr(data, 'tool_calls') else None)
                     await self.__execute_function_call(next_step = next_step, **data.model_dump())
                     return
