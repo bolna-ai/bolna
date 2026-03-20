@@ -431,6 +431,9 @@ class ToolsConfig(BaseModel):
     input: Optional[IOModel] = None
     output: Optional[IOModel] = None
     api_tools: Optional[ToolModel] = None
+    switch_tool_description: Optional[str] = None
+    switch_handoff_messages: Optional[Dict[str, str]] = None
+    agent_names: Optional[Dict[str, str]] = None
 
 class ToolsChainModel(BaseModel):
     execution: str = Field(..., pattern="^(parallel|sequential)$")

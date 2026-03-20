@@ -110,6 +110,8 @@ class TaskManager(BaseManager):
         self.hangup_triggered = False
         self.hangup_triggered_at = None
         self.hangup_message_queued = False
+        self.switch_handoff_messages = {}
+        self.agent_names = {}
         self._end_of_conversation_in_progress = False
         self._turn_audio_flushed = asyncio.Event()
         self._turn_audio_flushed.set()
@@ -736,6 +738,9 @@ class TaskManager(BaseManager):
         # Entry must exist in tools_params so ToolCallAccumulator.build_api_payload
         # doesn't drop the call, but no pre_call_message — the switch is silent.
         self.kwargs["api_tools"]["tools_params"]["switch_language"] = {}
+
+        self.switch_handoff_messages = self.task_config.get("tools_config", {}).get("switch_handoff_messages", {})
+        self.agent_names = self.task_config.get("tools_config", {}).get("agent_names", {})
 
     def __setup_transcriber(self):
         try:
@@ -1521,6 +1526,8 @@ class TaskManager(BaseManager):
             meta_info['message_category'] = 'filler'
 
         if next_step == "synthesizer" and not should_bypass_synth:
+            if not text_chunk or not text_chunk.strip():
+                return
             self._turn_audio_flushed.clear()
             task = asyncio.create_task(self._synthesize(create_ws_data_packet(text_chunk, meta_info)))
             self.synthesizer_tasks.append(asyncio.ensure_future(task))
@@ -1657,7 +1664,36 @@ class TaskManager(BaseManager):
 
         if called_fun == "switch_language":
             language_label = resp.get("language", "")
-            await self.wait_for_current_message()
+            # Only wait if audio is currently playing
+            if not self._turn_audio_flushed.is_set():
+                await self.wait_for_current_message()
+
+            # Synthesize handoff message with CURRENT voice before switching
+            handoff_template = self.switch_handoff_messages.get(self.language, "")
+            if handoff_template:
+                target_voice = self._get_voice_name_for_label(language_label)
+                language_display = LANGUAGE_NAMES.get(language_label, language_label)
+                handoff_text = handoff_template.replace(
+                    "{voice_name}", target_voice
+                ).replace(
+                    "{language}", language_display
+                )
+                meta_info_handoff = {
+                    'io': self.tools["output"].get_provider(),
+                    "request_id": str(uuid.uuid4()),
+                    "cached": False,
+                    "sequence_id": -1,
+                    'format': 'pcm',
+                    'message_category': 'handoff',
+                    'end_of_llm_stream': True,
+                    'text': handoff_text,
+                }
+                # Flush stale synthesis requests to give handoff a clean pipeline
+                await self.tools["synthesizer"].handle_interruption()
+                self._turn_audio_flushed.clear()
+                await self._synthesize(create_ws_data_packet(handoff_text, meta_info=meta_info_handoff))
+                await self.wait_for_current_message()
+
             try:
                 await self.switch_language(language_label)
                 function_response = f"Switched to {language_label}"
@@ -2363,6 +2399,10 @@ class TaskManager(BaseManager):
     def is_sequence_id_in_current_ids(self, sequence_id):
         """Check if sequence_id is valid. Delegates to InterruptionManager."""
         return self.interruption_manager.is_valid_sequence(sequence_id)
+
+    def _get_voice_name_for_label(self, label):
+        """Get agent name for a language label from configured agent_names."""
+        return self.agent_names.get(label, "")
 
     async def switch_language(self, label, components=None):
         """Switch the active language for multilingual pools.
