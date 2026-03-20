@@ -1662,7 +1662,9 @@ class TaskManager(BaseManager):
 
         if called_fun == "switch_language":
             language_label = resp.get("language", "")
-            await self.wait_for_current_message()
+            # Only wait if audio is currently playing
+            if not self._turn_audio_flushed.is_set():
+                await self.wait_for_current_message()
 
             # Synthesize handoff message with CURRENT voice before switching
             handoff_template = self.switch_handoff_messages.get(self.language, "")
@@ -1684,6 +1686,8 @@ class TaskManager(BaseManager):
                     'end_of_llm_stream': True,
                     'text': handoff_text,
                 }
+                # Flush stale synthesis requests to give handoff a clean pipeline
+                await self.tools["synthesizer"].handle_interruption()
                 self._turn_audio_flushed.clear()
                 await self._synthesize(create_ws_data_packet(handoff_text, meta_info=meta_info_handoff))
                 await self.wait_for_current_message()
