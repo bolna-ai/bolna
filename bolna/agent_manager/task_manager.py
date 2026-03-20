@@ -111,6 +111,7 @@ class TaskManager(BaseManager):
         self.hangup_triggered_at = None
         self.hangup_message_queued = False
         self.switch_handoff_messages = {}
+        self.agent_names = {}
         self._end_of_conversation_in_progress = False
         self._turn_audio_flushed = asyncio.Event()
         self._turn_audio_flushed.set()
@@ -739,6 +740,7 @@ class TaskManager(BaseManager):
         self.kwargs["api_tools"]["tools_params"]["switch_language"] = {}
 
         self.switch_handoff_messages = self.task_config.get("tools_config", {}).get("switch_handoff_messages", {})
+        self.agent_names = self.task_config.get("tools_config", {}).get("agent_names", {})
 
     def __setup_transcriber(self):
         try:
@@ -2392,10 +2394,8 @@ class TaskManager(BaseManager):
         return self.interruption_manager.is_valid_sequence(sequence_id)
 
     def _get_voice_name_for_label(self, label):
-        """Get voice name for a language label from synth multilingual config."""
-        synth_multilingual = self.task_config.get("tools_config", {}).get("synthesizer", {}).get("multilingual", {})
-        lang_cfg = synth_multilingual.get(label, {})
-        return lang_cfg.get("provider_config", {}).get("voice", label)
+        """Get agent name for a language label from configured agent_names."""
+        return self.agent_names.get(label, "")
 
     async def switch_language(self, label, components=None):
         """Switch the active language for multilingual pools.
