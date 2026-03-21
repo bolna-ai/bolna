@@ -282,11 +282,20 @@ class SipTrunkInputHandler(TelephonyInputHandler):
             logger.debug(f"Asterisk control: {event}")
             return
         if event == "QUEUE_DRAINED" or "QUEUE_DRAINED" in event:
-            # Do not use QUEUE_DRAINED to clear is_audio_being_played or process marks.
-            # Asterisk can send QUEUE_DRAINED when it has accepted the bulk, before the
-            # caller has heard it. Rely only on the output handler's duration-based
-            # fallback so completion/hangup logic does not trigger mid-playback.
-            logger.debug(f"QUEUE_DRAINED for channel {self.channel_id} (playback-done handled by fallback)")
+            # Forward to output handler — QUEUE_DRAINED fires when Asterisk has
+            # consumed all buffered audio for RTP transmission. The output handler
+            # adds a small jitter buffer delay, then clears is_audio_being_played
+            # and processes pending marks (same contract as Plivo/Twilio mark echoes).
+            logger.debug(f"QUEUE_DRAINED for channel {self.channel_id}")
+            if hasattr(self, "output_handler_ref") and self.output_handler_ref:
+                task = asyncio.create_task(self.output_handler_ref.on_queue_drained())
+
+                def _on_queue_drained_done(t):
+                    exc = t.exception()
+                    if exc is not None:
+                        logger.exception("sip-trunk on_queue_drained failed: %s", exc)
+
+                task.add_done_callback(_on_queue_drained_done)
             return
         if event or parsed:
             logger.debug(f"Asterisk control: {text} -> event={event}")
