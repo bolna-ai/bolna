@@ -125,7 +125,7 @@ class StreamSynthesizer(BaseSynthesizer):
         ws = self.websocket_holder["websocket"]
         return ws is not None and ws.state is not websockets.protocol.State.CLOSED
 
-    async def _wait_for_ws(self, poll_interval=0.5):
+    async def _wait_for_ws(self, poll_interval=1):
         """Block until the WebSocket is connected."""
         while not self._is_ws_connected():
             logger.info(f"Waiting for {self.provider_name} WebSocket connection...")
