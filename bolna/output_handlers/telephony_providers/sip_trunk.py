@@ -6,7 +6,6 @@ START_MEDIA_BUFFERING once at call start; FLUSH_MEDIA on interrupt.
 Generation counter drops stale frames after interruption.
 
 Ref: https://docs.asterisk.org/Configuration/Channel-Drivers/WebSocket/
-     https://github.com/pipecat-ai/pipecat/pull/3229
 """
 import asyncio
 import os
