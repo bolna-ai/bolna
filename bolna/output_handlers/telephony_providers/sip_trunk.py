@@ -65,6 +65,7 @@ class SipTrunkOutputHandler(TelephonyOutputHandler):
         self._response_audio_duration = 0.0
         self._playback_done_task = None
         self._awaiting_queue_drained: bool = False
+        self._report_queue_drained_sent_at: float = 0.0
 
         # Send loop: frames are enqueued as (bytes, generation) tuples and sent at 1x real-time
         self._send_queue: asyncio.Queue = asyncio.Queue()
@@ -163,7 +164,9 @@ class SipTrunkOutputHandler(TelephonyOutputHandler):
             if self._send_queue.empty() and self._pending_stop_after_drain and not self._local_audio_queue:
                 self._pending_stop_after_drain = False
                 self._awaiting_queue_drained = True
+                self._report_queue_drained_sent_at = time.time()
                 await self._send_control("REPORT_QUEUE_DRAINED")
+                logger.info(f"sip-trunk: send queue drained, REPORT_QUEUE_DRAINED sent (deferred), audio={self._response_audio_duration:.2f}s")
                 if self._playback_done_task:
                     self._playback_done_task.cancel()
                 self._playback_done_task = asyncio.create_task(
@@ -190,7 +193,13 @@ class SipTrunkOutputHandler(TelephonyOutputHandler):
 
     async def handle_interruption(self):
         """FLUSH_MEDIA, clear queues, increment generation to drop stale frames."""
-        logger.info("sip-trunk: handling interruption (FLUSH_MEDIA)")
+        awaiting = self._awaiting_queue_drained
+        elapsed = time.time() - self._report_queue_drained_sent_at if self._report_queue_drained_sent_at and awaiting else 0
+        logger.info(
+            f"sip-trunk: handling interruption (FLUSH_MEDIA), "
+            f"awaiting_queue_drained={awaiting}, audio={self._response_audio_duration:.2f}s"
+            + (f", waited={elapsed:.3f}s" if elapsed else "")
+        )
         try:
             if self._playback_done_task:
                 self._playback_done_task.cancel()
@@ -243,7 +252,9 @@ class SipTrunkOutputHandler(TelephonyOutputHandler):
         if not self._local_audio_queue and self._pending_stop_after_drain:
             self._pending_stop_after_drain = False
             self._awaiting_queue_drained = True
+            self._report_queue_drained_sent_at = time.time()
             await self._send_control("REPORT_QUEUE_DRAINED")
+            logger.info(f"sip-trunk: XON drain complete, REPORT_QUEUE_DRAINED sent, audio={self._response_audio_duration:.2f}s")
             if self._playback_done_task:
                 self._playback_done_task.cancel()
             self._playback_done_task = asyncio.create_task(
@@ -370,6 +381,7 @@ class SipTrunkOutputHandler(TelephonyOutputHandler):
                         logger.debug("sip-trunk: final chunk received, audio still in send queue; deferring fallback")
                     else:
                         self._awaiting_queue_drained = True
+                        self._report_queue_drained_sent_at = time.time()
                         await self._send_control("REPORT_QUEUE_DRAINED")
                         if total_duration > 0 or not self._playback_done_task:
                             if self._playback_done_task:
@@ -377,7 +389,7 @@ class SipTrunkOutputHandler(TelephonyOutputHandler):
                             self._playback_done_task = asyncio.create_task(
                                 self._playback_done_fallback()
                             )
-                        logger.debug(f"sip-trunk: response done ({total_duration:.2f}s audio), safety fallback in {QUEUE_DRAINED_SAFETY_TIMEOUT_S}s")
+                        logger.info(f"sip-trunk: REPORT_QUEUE_DRAINED sent, response audio={total_duration:.2f}s, safety fallback in {QUEUE_DRAINED_SAFETY_TIMEOUT_S}s")
 
         except Exception as e:
             logger.error(f"sip-trunk output error: {e}")
@@ -393,11 +405,12 @@ class SipTrunkOutputHandler(TelephonyOutputHandler):
         """
         if not self.input_handler or not self.input_handler.mark_event_meta_data:
             return
+        total_elapsed = time.time() - self._report_queue_drained_sent_at if self._report_queue_drained_sent_at else 0
         remaining = list(self.input_handler.mark_event_meta_data.mark_event_meta_data.keys())
-        if remaining:
-            logger.info(
-                f"sip-trunk: playback done ({reason}), processing {len(remaining)} mark(s)"
-            )
+        logger.info(
+            f"sip-trunk: _finish_playback reason={reason}, {len(remaining)} mark(s), "
+            f"audio={self._response_audio_duration:.2f}s, elapsed_since_report={total_elapsed:.3f}s"
+        )
         for mid in remaining:
             self.input_handler.process_mark_message({"name": mid})
         # Safety: if process_mark_message didn't clear it (e.g., no final mark
@@ -412,7 +425,13 @@ class SipTrunkOutputHandler(TelephonyOutputHandler):
         buffer for the remaining RTP jitter.
         """
         if not self._awaiting_queue_drained:
-            return  # Spurious or duplicate QUEUE_DRAINED
+            logger.debug("sip-trunk: ignoring spurious/duplicate QUEUE_DRAINED")
+            return
+        queue_drained_latency = time.time() - self._report_queue_drained_sent_at if self._report_queue_drained_sent_at else 0
+        logger.info(
+            f"sip-trunk: QUEUE_DRAINED received {queue_drained_latency:.3f}s after REPORT_QUEUE_DRAINED, "
+            f"audio={self._response_audio_duration:.2f}s, adding {QUEUE_DRAINED_BUFFER_S}s jitter buffer"
+        )
         self._awaiting_queue_drained = False
 
         if self._playback_done_task:
@@ -439,10 +458,10 @@ class SipTrunkOutputHandler(TelephonyOutputHandler):
         if self._closed:
             return
         if self._awaiting_queue_drained:
+            elapsed = time.time() - self._report_queue_drained_sent_at if self._report_queue_drained_sent_at else 0
             logger.warning(
-                f"sip-trunk: QUEUE_DRAINED not received within "
-                f"{QUEUE_DRAINED_SAFETY_TIMEOUT_S}s (audio duration {self._response_audio_duration:.2f}s), "
-                f"using safety fallback"
+                f"sip-trunk: QUEUE_DRAINED not received within {QUEUE_DRAINED_SAFETY_TIMEOUT_S}s, "
+                f"audio={self._response_audio_duration:.2f}s, elapsed={elapsed:.3f}s — using safety fallback"
             )
             self._awaiting_queue_drained = False
         self._finish_playback(reason="safety-timeout")
