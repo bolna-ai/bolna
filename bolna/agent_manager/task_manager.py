@@ -1700,7 +1700,10 @@ class TaskManager(BaseManager):
                 function_response = f"Failed to switch language: {e}"
 
             textual_response = resp.get("textual_response", None)
-            self.conversation_history.append_assistant(textual_response, tool_calls=resp["model_response"])
+            if not textual_response:
+                self.conversation_history.append_assistant(textual_response, tool_calls=resp["model_response"])
+            else:
+                self.conversation_history.attach_tool_calls_to_last_response(resp["model_response"])
             self.conversation_history.append_tool_result(resp.get("tool_call_id", ""), function_response)
             convert_to_request_log(function_response, meta_info, None, "function_call", direction="response", run_id=self.run_id)
 
@@ -1744,7 +1747,10 @@ class TaskManager(BaseManager):
             set_response_prompt = function_response
 
         textual_response = resp.get("textual_response", None)
-        self.conversation_history.append_assistant(textual_response, tool_calls=resp["model_response"])
+        if not textual_response:
+            self.conversation_history.append_assistant(textual_response, tool_calls=resp["model_response"])
+        else:
+            self.conversation_history.attach_tool_calls_to_last_response(resp["model_response"])
         self.conversation_history.append_tool_result(resp.get("tool_call_id", ""), function_response)
 
         logger.info(f"Logging function call parameters ")
@@ -1881,6 +1887,9 @@ class TaskManager(BaseManager):
 
                 if trigger_function_call:
                     logger.info(f"Triggering function call for {data}")
+                    textual_response = data.textual_response if hasattr(data, 'textual_response') else None
+                    if textual_response: #intentionally omitting tool_calls, which will be filled later if the tool_call flow completed (requirement from OpenAI)
+                        self.__store_into_history(meta_info, messages, textual_response, should_trigger_function_call=should_trigger_function_call)
                     await self.__execute_function_call(next_step = next_step, **data.model_dump())
                     return
 
