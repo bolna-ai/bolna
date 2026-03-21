@@ -29,9 +29,6 @@ FRAME_DURATION_S = 0.02
 # Absorbs TTS jitter so the first frames don't have micro-gaps.
 DEFAULT_JITTER_BUFFER_MS = int(os.environ.get("SIP_JITTER_BUFFER_MS", "40"))
 
-# Fallback timer buffer after expected playback duration (seconds).
-DEFAULT_FALLBACK_BUFFER_S = float(os.environ.get("SIP_FALLBACK_BUFFER_S", "0.1"))
-
 # Small delay after QUEUE_DRAINED for Asterisk's remaining RTP jitter buffer (seconds).
 QUEUE_DRAINED_BUFFER_S = float(os.environ.get("SIP_QUEUE_DRAINED_BUFFER_S", "0.1"))
 
@@ -79,8 +76,6 @@ class SipTrunkOutputHandler(TelephonyOutputHandler):
         self._local_audio_queue: deque = deque()
         # If is_final arrived while send queue still has frames, defer fallback
         self._pending_stop_after_drain = False
-        self._pending_stop_duration = 0.0
-        self._pending_stop_category = "agent_response"
 
         output_config = self._get_output_config()
         self._output_format = (
@@ -169,12 +164,10 @@ class SipTrunkOutputHandler(TelephonyOutputHandler):
                 self._pending_stop_after_drain = False
                 self._awaiting_queue_drained = True
                 await self._send_control("REPORT_QUEUE_DRAINED")
-                duration = self._pending_stop_duration
-                category = self._pending_stop_category
                 if self._playback_done_task:
                     self._playback_done_task.cancel()
                 self._playback_done_task = asyncio.create_task(
-                    self._playback_done_fallback(duration, category)
+                    self._playback_done_fallback()
                 )
 
     def _enqueue_audio(self, audio_chunk: bytes):
@@ -251,12 +244,10 @@ class SipTrunkOutputHandler(TelephonyOutputHandler):
             self._pending_stop_after_drain = False
             self._awaiting_queue_drained = True
             await self._send_control("REPORT_QUEUE_DRAINED")
-            duration = self._pending_stop_duration
-            category = self._pending_stop_category
             if self._playback_done_task:
                 self._playback_done_task.cancel()
             self._playback_done_task = asyncio.create_task(
-                self._playback_done_fallback(duration, category)
+                self._playback_done_fallback()
             )
 
     # ------------------------------------------------------------------
@@ -376,8 +367,6 @@ class SipTrunkOutputHandler(TelephonyOutputHandler):
                     if self._send_queue.qsize() > 0 or self._local_audio_queue:
                         # Audio still being sent/queued — defer fallback
                         self._pending_stop_after_drain = True
-                        self._pending_stop_duration = total_duration
-                        self._pending_stop_category = message_category
                         logger.debug("sip-trunk: final chunk received, audio still in send queue; deferring fallback")
                     else:
                         self._awaiting_queue_drained = True
@@ -386,9 +375,9 @@ class SipTrunkOutputHandler(TelephonyOutputHandler):
                             if self._playback_done_task:
                                 self._playback_done_task.cancel()
                             self._playback_done_task = asyncio.create_task(
-                                self._playback_done_fallback(total_duration, message_category)
+                                self._playback_done_fallback()
                             )
-                        logger.debug(f"sip-trunk: response done, safety fallback in {QUEUE_DRAINED_SAFETY_TIMEOUT_S}s")
+                        logger.debug(f"sip-trunk: response done ({total_duration:.2f}s audio), safety fallback in {QUEUE_DRAINED_SAFETY_TIMEOUT_S}s")
 
         except Exception as e:
             logger.error(f"sip-trunk output error: {e}")
@@ -436,19 +425,24 @@ class SipTrunkOutputHandler(TelephonyOutputHandler):
         except asyncio.CancelledError:
             return
 
+        if self._closed:
+            return
         self._finish_playback(reason="QUEUE_DRAINED")
 
-    async def _playback_done_fallback(self, duration: float, message_category: str):
+    async def _playback_done_fallback(self):
         """Safety timeout: clear playback state if QUEUE_DRAINED never arrives."""
         try:
             await asyncio.sleep(QUEUE_DRAINED_SAFETY_TIMEOUT_S)
         except asyncio.CancelledError:
             return
         self._playback_done_task = None
+        if self._closed:
+            return
         if self._awaiting_queue_drained:
             logger.warning(
                 f"sip-trunk: QUEUE_DRAINED not received within "
-                f"{QUEUE_DRAINED_SAFETY_TIMEOUT_S}s, using safety fallback"
+                f"{QUEUE_DRAINED_SAFETY_TIMEOUT_S}s (audio duration {self._response_audio_duration:.2f}s), "
+                f"using safety fallback"
             )
             self._awaiting_queue_drained = False
         self._finish_playback(reason="safety-timeout")
