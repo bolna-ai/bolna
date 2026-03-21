@@ -293,8 +293,8 @@ class GraphAgent(BaseAgent):
             else:
                 llm.append(edge)
 
-        deterministic.sort(key=lambda e: e.get('priority', 0))
-        llm.sort(key=lambda e: e.get('priority', 100))
+        deterministic.sort(key=lambda e: e['priority'] if e.get('priority') is not None else 0)
+        llm.sort(key=lambda e: e['priority'] if e.get('priority') is not None else 100)
         return deterministic, llm
 
     def _evaluate_deterministic_edges(self, edges: list) -> Optional[dict]:
