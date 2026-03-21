@@ -23,7 +23,7 @@ from dotenv import load_dotenv
 from pydantic import create_model
 from .logger_config import configure_logger
 from bolna.constants import PREPROCESS_DIR, PRE_FUNCTION_CALL_MESSAGE, TRANSFERING_CALL_FILLER
-from bolna.enums import LogComponent, LogDirection
+from bolna.enums import LogComponent, LogDirection, UsageSource
 from bolna.prompts import DATE_PROMPT
 from pydub import AudioSegment
 import audioop
@@ -657,7 +657,7 @@ def format_error_message(component, provider, error_str):
     return f"{display} service{provider_str} error: {truncated}"
 
 
-def convert_to_request_log(message, meta_info, model, component=LogComponent.TRANSCRIBER, direction=LogDirection.RESPONSE, is_cached=False, engine=None, run_id=None):
+def convert_to_request_log(message, meta_info, model, component=LogComponent.TRANSCRIBER, direction=LogDirection.RESPONSE, is_cached=False, engine=None, run_id=None, input_tokens=None, output_tokens=None, reasoning_tokens=None, cached_tokens=None):
     log = dict()
     log['direction'] = direction.value if isinstance(direction, Enum) else direction
     log['data'] = message
@@ -672,6 +672,18 @@ def convert_to_request_log(message, meta_info, model, component=LogComponent.TRA
         case LogComponent.LLM:
             log['latency'] = meta_info.get('llm_latency', None) if direction == LogDirection.RESPONSE else None
             log['llm_metadata'] = meta_info.get('llm_metadata', None)
+            if direction == LogDirection.RESPONSE:
+                log['input_tokens'] = input_tokens or 0
+                log['output_tokens'] = output_tokens or 0
+                llm_metadata = log.get('llm_metadata') or {}
+                if not isinstance(llm_metadata, dict):
+                    llm_metadata = {}
+                if reasoning_tokens:
+                    llm_metadata['reasoning_tokens'] = reasoning_tokens
+                if cached_tokens:
+                    llm_metadata['cached_tokens'] = cached_tokens
+                llm_metadata['usage_source'] = UsageSource.API_REPORTED.value if (input_tokens is not None or output_tokens is not None) else UsageSource.ESTIMATED.value
+                log['llm_metadata'] = llm_metadata
         case LogComponent.SYNTHESIZER:
             log['latency'] = meta_info.get('synthesizer_latency', None) if direction == LogDirection.RESPONSE else None
         case LogComponent.TRANSCRIBER:
