@@ -40,6 +40,9 @@ class ConversationHistory:
             "content": content,
         })
 
+    def attach_tool_calls_to_last_response(self, tool_calls: list):
+        self._messages[-1]["tool_calls"] = tool_calls
+
     def update_system_prompt(self, content: str):
         if self._messages and self._messages[0].get("role") == ChatRole.SYSTEM:
             self._messages[0]["content"] = content
