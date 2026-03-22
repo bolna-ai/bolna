@@ -408,9 +408,13 @@ class SipTrunkOutputHandler(TelephonyOutputHandler):
                     },
                 )
 
-                # Only schedule playback finish on the null-byte sentinel
+                # Schedule playback finish on the null-byte sentinel
                 # (has_audio=False, is_final=True) — the TRUE end of response.
-                if is_final and not has_audio and not self._response_sealed:
+                # Exception: the welcome message arrives as a single packet with
+                # has_audio=True + is_final=True and no null-byte sentinel follows
+                # (unlike the normal synthesizer path). Treat it as the sentinel.
+                is_welcome = meta_info.get("message_category") == "agent_welcome_message"
+                if is_final and not self._response_sealed and (not has_audio or is_welcome):
                     self._response_sealed = True
                     if self._local_audio_queue:
                         # XOFF queued audio not yet sent — defer finish
