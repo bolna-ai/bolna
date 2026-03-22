@@ -51,6 +51,9 @@ class BaseSynthesizer:
 
     def should_synthesize_response(self, sequence_id):
         return self.task_manager_instance.is_sequence_id_in_current_ids(sequence_id)
+    
+    async def push(self, message):
+        self.internal_queue.put_nowait(message)
 
     # ------------------------------------------------------------------
     # Stubs for subclass override
@@ -60,9 +63,6 @@ class BaseSynthesizer:
         pass
 
     async def generate(self):
-        pass
-
-    async def push(self, message):
         pass
 
     async def synthesize(self, text):

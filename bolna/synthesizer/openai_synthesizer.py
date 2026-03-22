@@ -54,7 +54,3 @@ class OPENAISynthesizer(BaseSynthesizer):
     async def generate(self):
         async for packet in self._generate_http_loop():
             yield packet
-
-    async def push(self, message):
-        logger.info(f"Pushed message to internal queue {message}")
-        self.internal_queue.put_nowait(message)

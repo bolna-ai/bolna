@@ -91,7 +91,3 @@ class PollySynthesizer(BaseSynthesizer):
     async def generate(self):
         async for packet in self._generate_http_loop():
             yield packet
-
-    async def push(self, message):
-        logger.info("Pushed message to internal queue")
-        self.internal_queue.put_nowait(message)

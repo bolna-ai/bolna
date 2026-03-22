@@ -240,7 +240,3 @@ class AzureSynthesizer(BaseSynthesizer):
         except Exception as e:
             logger.error(f"Error in Azure TTS generate method: {e}")
             raise
-
-    async def push(self, message):
-        logger.info(f"Pushed message to internal queue {message}")
-        self.internal_queue.put_nowait(message)
