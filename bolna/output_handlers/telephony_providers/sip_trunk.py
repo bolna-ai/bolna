@@ -62,6 +62,7 @@ class SipTrunkOutputHandler(TelephonyOutputHandler):
         self._response_audio_duration: float = 0.0  # accumulated seconds of audio
         self._settle_task: asyncio.Task | None = None
         self._pending_finish: bool = False
+        self._current_sequence_id: int | None = None  # track sequence to detect new responses
 
         # Generation counter — incremented on interruption, stale audio is dropped
         self._flush_generation: int = 0
@@ -152,6 +153,7 @@ class SipTrunkOutputHandler(TelephonyOutputHandler):
             self._pending_finish = False
             self._response_audio_duration = 0.0
             self._response_first_send = 0.0
+            self._current_sequence_id = None
             self._local_audio_queue.clear()
 
             await self._send_control("FLUSH_MEDIA")
@@ -271,8 +273,14 @@ class SipTrunkOutputHandler(TelephonyOutputHandler):
                 if meta_info.get("message_category") == "agent_welcome_message" and not self.welcome_message_sent_ts:
                     self.welcome_message_sent_ts = time.time() * 1000
 
-                # New response — reset duration tracking
-                if meta_info.get("is_first_chunk"):
+                # New response — reset duration tracking only when sequence_id
+                # actually changes.  ElevenLabs may spuriously set is_first_chunk
+                # on every chunk after the LLM stream ends, which would repeatedly
+                # reset the audio-duration accumulator and make the server think
+                # playback finishes far earlier than it actually does.
+                seq_id = meta_info.get("sequence_id")
+                if seq_id is not None and seq_id != self._current_sequence_id:
+                    self._current_sequence_id = seq_id
                     self._response_first_send = 0.0
                     self._response_audio_duration = 0.0
                     self._pending_finish = False
