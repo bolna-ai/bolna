@@ -282,11 +282,9 @@ class SipTrunkInputHandler(TelephonyInputHandler):
             logger.debug(f"Asterisk control: {event}")
             return
         if event == "QUEUE_DRAINED" or "QUEUE_DRAINED" in event:
-            # Do not use QUEUE_DRAINED to clear is_audio_being_played or process marks.
-            # Asterisk can send QUEUE_DRAINED when it has accepted the bulk, before the
-            # caller has heard it. Rely only on the output handler's duration-based
-            # fallback so completion/hangup logic does not trigger mid-playback.
-            logger.debug(f"QUEUE_DRAINED for channel {self.channel_id} (playback-done handled by fallback)")
+            # At 1x pacing, playback completion is tracked by the output handler's
+            # send-loop drain detection — QUEUE_DRAINED is informational only.
+            logger.debug(f"QUEUE_DRAINED for channel {self.channel_id} (informational)")
             return
         if event or parsed:
             logger.debug(f"Asterisk control: {text} -> event={event}")
