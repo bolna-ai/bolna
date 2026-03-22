@@ -78,7 +78,6 @@ class SipTrunkOutputHandler(TelephonyOutputHandler):
         self._settle_task: asyncio.Task | None = None
         self._pending_finish: bool = False
         self._current_sequence_id: int | None = None  # track sequence to detect new responses
-        self._response_sealed: bool = False  # True once is_final fires; blocks further audio for this sequence
 
         # Generation counter — incremented on interruption, stale audio is dropped
         self._flush_generation: int = 0
@@ -190,7 +189,6 @@ class SipTrunkOutputHandler(TelephonyOutputHandler):
             self._response_first_send = 0.0
             self._bytes_sent = 0
             self._current_sequence_id = None
-            self._response_sealed = False
             self._local_audio_queue.clear()
 
             await self._send_control("FLUSH_MEDIA")
@@ -337,18 +335,9 @@ class SipTrunkOutputHandler(TelephonyOutputHandler):
                     self._response_audio_duration = 0.0
                     self._bytes_sent = 0
                     self._pending_finish = False
-                    self._response_sealed = False
                     if self._settle_task:
                         self._settle_task.cancel()
                         self._settle_task = None
-
-                # After the null-byte sentinel seals this response, drop any
-                # further audio.  Stale chunks may arrive from the synthesizer
-                # with end_of_synthesizer_stream still True on the shared
-                # meta_info; Plivo/Twilio ignore these (dumb pipe + mark echo),
-                # but Asterisk will buffer and play every byte we send.
-                if self._response_sealed:
-                    return
 
                 # Send START_MEDIA_BUFFERING once per call (or after FLUSH_MEDIA reset)
                 if not self._start_buffering_sent:
@@ -408,14 +397,7 @@ class SipTrunkOutputHandler(TelephonyOutputHandler):
                     },
                 )
 
-                # Schedule playback finish on the null-byte sentinel
-                # (has_audio=False, is_final=True) — the TRUE end of response.
-                # Exception: the welcome message arrives as a single packet with
-                # has_audio=True + is_final=True and no null-byte sentinel follows
-                # (unlike the normal synthesizer path). Treat it as the sentinel.
-                is_welcome = meta_info.get("message_category") == "agent_welcome_message"
-                if is_final and not self._response_sealed and (not has_audio or is_welcome):
-                    self._response_sealed = True
+                if is_final:
                     if self._local_audio_queue:
                         # XOFF queued audio not yet sent — defer finish
                         self._pending_finish = True
