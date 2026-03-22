@@ -31,6 +31,20 @@ MAX_WS_FRAME_BYTES = 60000  # leave headroom below 65,500
 # Accounts for Asterisk's internal retiming and RTP jitter buffer.
 PLAYBACK_SETTLE_S = float(os.environ.get("SIP_PLAYBACK_SETTLE_S", "0.1"))
 
+# ulaw 8 kHz = 8,000 bytes per second.
+ULAW_BYTES_PER_SECOND = 8000
+
+# Maximum send rate as a multiple of real-time playback speed.
+# Asterisk's chan_websocket frame queue holds ~1186 frames (~23.7 s of ulaw audio).
+# When the queue is full Asterisk silently drops every incoming binary frame
+# ("WebSocket queue is full. Ignoring incoming binary message.") instead of
+# sending a second MEDIA_XOFF.
+# At 1.5× real-time the queue fills at 0.5× rate; for responses under ~47 s the
+# queue never reaches capacity.  Longer responses trigger XOFF/XON cycles — the
+# drain is also rate-limited (and re-anchored to exclude the XOFF pause time) so
+# it never re-overflows the queue.  Set SIP_MAX_SEND_RATE_FACTOR=0 to disable.
+MAX_SEND_RATE_FACTOR = float(os.environ.get("SIP_MAX_SEND_RATE_FACTOR", "1.5"))
+
 
 class SipTrunkOutputHandler(TelephonyOutputHandler):
     """
@@ -60,9 +74,11 @@ class SipTrunkOutputHandler(TelephonyOutputHandler):
         # Playback duration tracking
         self._response_first_send: float = 0.0   # monotonic time first chunk was sent
         self._response_audio_duration: float = 0.0  # accumulated seconds of audio
+        self._bytes_sent: int = 0                 # bytes sent this response (rate limiting)
         self._settle_task: asyncio.Task | None = None
         self._pending_finish: bool = False
         self._current_sequence_id: int | None = None  # track sequence to detect new responses
+        self._response_sealed: bool = False  # True once is_final fires; blocks further audio for this sequence
 
         # Generation counter — incremented on interruption, stale audio is dropped
         self._flush_generation: int = 0
@@ -138,6 +154,25 @@ class SipTrunkOutputHandler(TelephonyOutputHandler):
             self.input_handler.update_is_audio_being_played(False)
 
     # ------------------------------------------------------------------
+    # Rate limiting — prevent Asterisk frame-queue overflow
+    # ------------------------------------------------------------------
+
+    async def _rate_limit(self, frame_bytes: int) -> None:
+        """Sleep if needed after sending frame_bytes to stay ≤ MAX_SEND_RATE_FACTOR × real-time.
+
+        Asterisk's internal chan_websocket frame queue holds ~1186 frames (~23.7 s).
+        When the queue is full it silently drops frames without sending a second
+        MEDIA_XOFF.  Capping the send rate prevents the queue from ever filling.
+        """
+        if MAX_SEND_RATE_FACTOR <= 0 or self._response_first_send == 0.0:
+            return
+        self._bytes_sent += frame_bytes
+        min_elapsed = self._bytes_sent / (MAX_SEND_RATE_FACTOR * ULAW_BYTES_PER_SECOND)
+        elapsed = time.monotonic() - self._response_first_send
+        if elapsed < min_elapsed:
+            await asyncio.sleep(min_elapsed - elapsed)
+
+    # ------------------------------------------------------------------
     # Interruption
     # ------------------------------------------------------------------
 
@@ -153,7 +188,9 @@ class SipTrunkOutputHandler(TelephonyOutputHandler):
             self._pending_finish = False
             self._response_audio_duration = 0.0
             self._response_first_send = 0.0
+            self._bytes_sent = 0
             self._current_sequence_id = None
+            self._response_sealed = False
             self._local_audio_queue.clear()
 
             await self._send_control("FLUSH_MEDIA")
@@ -173,6 +210,14 @@ class SipTrunkOutputHandler(TelephonyOutputHandler):
 
     async def drain_local_queue(self):
         """Send XOFF-queued audio to Asterisk (called on MEDIA_XON)."""
+        # Re-anchor the rate-limit budget to exclude the XOFF pause.
+        # During XOFF the wall clock kept running while _bytes_sent was frozen;
+        # without this, elapsed >> min_elapsed at drain start and _rate_limit
+        # returns immediately for every frame — the drain bursts at full TTS speed
+        # and immediately re-overflows Asterisk's frame queue.
+        if self._response_first_send > 0.0 and MAX_SEND_RATE_FACTOR > 0:
+            expected_elapsed = self._bytes_sent / (MAX_SEND_RATE_FACTOR * ULAW_BYTES_PER_SECOND)
+            self._response_first_send = time.monotonic() - expected_elapsed
         gen = self._flush_generation
         while self._local_audio_queue and not self.queue_full:
             # Drop stale audio from before an interruption
@@ -197,9 +242,10 @@ class SipTrunkOutputHandler(TelephonyOutputHandler):
                         self._local_audio_queue.appendleft(chunk[offset:])
                         return
                     end = min(offset + MAX_WS_FRAME_BYTES, len(chunk))
-                    await self.websocket.send_bytes(chunk[offset:end])
                     if self._response_first_send == 0.0:
                         self._response_first_send = time.monotonic()
+                    await self.websocket.send_bytes(chunk[offset:end])
+                    await self._rate_limit(end - offset)
                     offset = end
             except Exception as e:
                 logger.debug(f"sip-trunk drain send_bytes stopped: {e}")
@@ -289,10 +335,20 @@ class SipTrunkOutputHandler(TelephonyOutputHandler):
                     self._current_sequence_id = seq_id
                     self._response_first_send = 0.0
                     self._response_audio_duration = 0.0
+                    self._bytes_sent = 0
                     self._pending_finish = False
+                    self._response_sealed = False
                     if self._settle_task:
                         self._settle_task.cancel()
                         self._settle_task = None
+
+                # After the null-byte sentinel seals this response, drop any
+                # further audio.  Stale chunks may arrive from the synthesizer
+                # with end_of_synthesizer_stream still True on the shared
+                # meta_info; Plivo/Twilio ignore these (dumb pipe + mark echo),
+                # but Asterisk will buffer and play every byte we send.
+                if self._response_sealed:
+                    return
 
                 # Send START_MEDIA_BUFFERING once per call (or after FLUSH_MEDIA reset)
                 if not self._start_buffering_sent:
@@ -321,12 +377,15 @@ class SipTrunkOutputHandler(TelephonyOutputHandler):
                             return
                         offset = 0
                         while offset < len(audio_chunk):
+                            if gen != self._flush_generation:
+                                return
                             if self.queue_full:
                                 # XOFF arrived mid-send — queue remainder at front
                                 self._local_audio_queue.appendleft(audio_chunk[offset:])
                                 break
                             end = min(offset + MAX_WS_FRAME_BYTES, len(audio_chunk))
                             await self.websocket.send_bytes(audio_chunk[offset:end])
+                            await self._rate_limit(end - offset)
                             offset = end
                     except Exception as e:
                         logger.debug(f"sip-trunk send_bytes stopped: {e}")
@@ -349,7 +408,10 @@ class SipTrunkOutputHandler(TelephonyOutputHandler):
                     },
                 )
 
-                if is_final:
+                # Only schedule playback finish on the null-byte sentinel
+                # (has_audio=False, is_final=True) — the TRUE end of response.
+                if is_final and not has_audio and not self._response_sealed:
+                    self._response_sealed = True
                     if self._local_audio_queue:
                         # XOFF queued audio not yet sent — defer finish
                         self._pending_finish = True
