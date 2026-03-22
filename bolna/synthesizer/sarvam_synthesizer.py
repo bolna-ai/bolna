@@ -101,6 +101,8 @@ class SarvamSynthesizer(StreamSynthesizer):
 
             if text != "":
                 try:
+                    if self.ws_send_time is None:
+                        self.ws_send_time = time.perf_counter()
                     await self._send_json({"type": "text", "data": {"text": text}})
                 except Exception as e:
                     logger.error(f"Error sending chunk: {e}")

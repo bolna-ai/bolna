@@ -72,24 +72,8 @@ class RimeSynthesizer(StreamSynthesizer):
         return "wav"
 
     def _on_push(self, meta_info, text):  # noqa: ARG002
-        meta_info["synthesizer_start_time"] = time.perf_counter()
         if not self.context_id:
             self.context_id = str(uuid.uuid4())
-
-    def _compute_first_result_latency(self):
-        try:
-            if self.meta_info and "synthesizer_start_time" in self.meta_info and "synthesizer_first_result_latency" not in self.meta_info:
-                self.meta_info["synthesizer_first_result_latency"] = time.perf_counter() - self.meta_info["synthesizer_start_time"]
-                self.meta_info["synthesizer_latency"] = self.meta_info["synthesizer_first_result_latency"]
-        except Exception:
-            pass
-
-    def _record_turn_latency(self):
-        try:
-            if self.meta_info and "synthesizer_start_time" in self.meta_info:
-                self.meta_info["synthesizer_total_stream_duration"] = time.perf_counter() - self.meta_info["synthesizer_start_time"]
-        except Exception:
-            pass
 
     # ------------------------------------------------------------------
     # Interruption
@@ -126,6 +110,8 @@ class RimeSynthesizer(StreamSynthesizer):
                         await self.flush_synthesizer_stream()
                         return
                     try:
+                        if self.ws_send_time is None:
+                            self.ws_send_time = time.perf_counter()
                         await self._send_json({"text": text_chunk, "contextId": self.context_id})
                     except Exception as e:
                         logger.info(f"Error sending chunk: {e}")

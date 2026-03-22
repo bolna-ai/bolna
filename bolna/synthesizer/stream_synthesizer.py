@@ -59,6 +59,8 @@ class StreamSynthesizer(BaseSynthesizer):
         # Turn-level latency tracking
         self.current_turn_start_time = None
         self.current_turn_id = None
+        self.current_turn_ttfb = None
+        self.ws_send_time = None
 
     # ------------------------------------------------------------------
     # Subclass hooks (override these)
@@ -171,8 +173,12 @@ class StreamSynthesizer(BaseSynthesizer):
         self.text_queue.append(meta_info)
 
     def _stamp_turn_start(self, meta_info):
-        """Record turn start time. Override to change when the timer resets."""
-        self.current_turn_start_time = time.perf_counter()
+        """Only stamp on the first push of a new turn (don't re-stamp on subsequent chunks)."""
+        if self.current_turn_start_time is None:
+            self.current_turn_start_time = time.perf_counter()
+            self.ws_send_time = None
+            self.current_turn_ttfb = None
+            logger.info(f"Push new_turn text_len={len(meta_info.get('text', '') or '')}")
         self.current_turn_id = meta_info.get("turn_id") or meta_info.get("sequence_id")
 
     def _on_push(self, meta_info, text):
@@ -249,9 +255,9 @@ class StreamSynthesizer(BaseSynthesizer):
     def _compute_first_result_latency(self):
         """Compute and stamp synthesizer_latency on first audio chunk of a turn."""
         try:
-            if self.current_turn_start_time is not None:
-                latency = time.perf_counter() - self.current_turn_start_time
-                self.meta_info["synthesizer_latency"] = latency
+            if self.current_turn_ttfb is None and self.ws_send_time is not None:
+                self.current_turn_ttfb = time.perf_counter() - self.ws_send_time
+                self.meta_info["synthesizer_latency"] = self.current_turn_ttfb
         except Exception:
             pass
 
@@ -263,13 +269,13 @@ class StreamSynthesizer(BaseSynthesizer):
                 self.turn_latencies.append({
                     "turn_id": self.current_turn_id,
                     "sequence_id": self.current_turn_id,
-                    "first_result_latency_ms": round(
-                        (self.meta_info.get("synthesizer_latency", 0)) * 1000
-                    ),
+                    "first_result_latency_ms": round((self.current_turn_ttfb or 0) * 1000),
                     "total_stream_duration_ms": round(total_stream_duration * 1000),
                 })
                 self.current_turn_start_time = None
                 self.current_turn_id = None
+                self.ws_send_time = None
+                self.current_turn_ttfb = None
         except Exception:
             pass
 

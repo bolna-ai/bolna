@@ -119,6 +119,8 @@ class CartesiaSynthesizer(StreamSynthesizer):
 
             if text != "":
                 try:
+                    if self.ws_send_time is None:
+                        self.ws_send_time = time.perf_counter()
                     payload = self.form_payload(text)
                     logger.info(f"Cartesia sender context_id={self.context_id} text_len={len(text)} request_id={self.ws_request_id}")
                     await self._send_json(payload)

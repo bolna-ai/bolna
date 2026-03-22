@@ -62,6 +62,8 @@ class SmallestSynthesizer(StreamSynthesizer):
 
             if text != "":
                 try:
+                    if self.ws_send_time is None:
+                        self.ws_send_time = time.perf_counter()
                     await self._send_json(self.form_payload(text))
                 except Exception as e:
                     logger.error(f"Error sending chunk: {e}")
