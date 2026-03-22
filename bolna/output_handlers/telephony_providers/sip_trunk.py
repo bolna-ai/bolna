@@ -31,6 +31,18 @@ MAX_WS_FRAME_BYTES = 60000  # leave headroom below 65,500
 # Accounts for Asterisk's internal retiming and RTP jitter buffer.
 PLAYBACK_SETTLE_S = float(os.environ.get("SIP_PLAYBACK_SETTLE_S", "0.1"))
 
+# ulaw 8 kHz = 8,000 bytes per second.
+ULAW_BYTES_PER_SECOND = 8000
+
+# Maximum send rate as a multiple of real-time playback speed.
+# Asterisk's chan_websocket frame queue holds ~1186 frames (~23.7 s of ulaw audio).
+# When the queue is full Asterisk silently drops every incoming binary frame
+# ("WebSocket queue is full. Ignoring incoming binary message.") instead of
+# sending a second MEDIA_XOFF.
+# At 1.5× real-time the queue fills at 0.5× rate. So no frames
+# are ever dropped.  Set SIP_MAX_SEND_RATE_FACTOR=0 to disable.
+MAX_SEND_RATE_FACTOR = float(os.environ.get("SIP_MAX_SEND_RATE_FACTOR", "1.5"))
+
 
 class SipTrunkOutputHandler(TelephonyOutputHandler):
     """
@@ -60,6 +72,7 @@ class SipTrunkOutputHandler(TelephonyOutputHandler):
         # Playback duration tracking
         self._response_first_send: float = 0.0   # monotonic time first chunk was sent
         self._response_audio_duration: float = 0.0  # accumulated seconds of audio
+        self._bytes_sent: int = 0                 # bytes sent this response (rate limiting)
         self._settle_task: asyncio.Task | None = None
         self._pending_finish: bool = False
         self._current_sequence_id: int | None = None  # track sequence to detect new responses
@@ -139,6 +152,25 @@ class SipTrunkOutputHandler(TelephonyOutputHandler):
             self.input_handler.update_is_audio_being_played(False)
 
     # ------------------------------------------------------------------
+    # Rate limiting — prevent Asterisk frame-queue overflow
+    # ------------------------------------------------------------------
+
+    async def _rate_limit(self, frame_bytes: int) -> None:
+        """Sleep if needed after sending frame_bytes to stay ≤ MAX_SEND_RATE_FACTOR × real-time.
+
+        Asterisk's internal chan_websocket frame queue holds ~1186 frames (~23.7 s).
+        When the queue is full it silently drops frames without sending a second
+        MEDIA_XOFF.  Capping the send rate prevents the queue from ever filling.
+        """
+        if MAX_SEND_RATE_FACTOR <= 0 or self._response_first_send == 0.0:
+            return
+        self._bytes_sent += frame_bytes
+        min_elapsed = self._bytes_sent / (MAX_SEND_RATE_FACTOR * ULAW_BYTES_PER_SECOND)
+        elapsed = time.monotonic() - self._response_first_send
+        if elapsed < min_elapsed:
+            await asyncio.sleep(min_elapsed - elapsed)
+
+    # ------------------------------------------------------------------
     # Interruption
     # ------------------------------------------------------------------
 
@@ -154,6 +186,7 @@ class SipTrunkOutputHandler(TelephonyOutputHandler):
             self._pending_finish = False
             self._response_audio_duration = 0.0
             self._response_first_send = 0.0
+            self._bytes_sent = 0
             self._current_sequence_id = None
             self._response_sealed = False
             self._local_audio_queue.clear()
@@ -199,9 +232,10 @@ class SipTrunkOutputHandler(TelephonyOutputHandler):
                         self._local_audio_queue.appendleft(chunk[offset:])
                         return
                     end = min(offset + MAX_WS_FRAME_BYTES, len(chunk))
-                    await self.websocket.send_bytes(chunk[offset:end])
                     if self._response_first_send == 0.0:
                         self._response_first_send = time.monotonic()
+                    await self.websocket.send_bytes(chunk[offset:end])
+                    await self._rate_limit(end - offset)
                     offset = end
             except Exception as e:
                 logger.debug(f"sip-trunk drain send_bytes stopped: {e}")
@@ -291,6 +325,7 @@ class SipTrunkOutputHandler(TelephonyOutputHandler):
                     self._current_sequence_id = seq_id
                     self._response_first_send = 0.0
                     self._response_audio_duration = 0.0
+                    self._bytes_sent = 0
                     self._pending_finish = False
                     self._response_sealed = False
                     if self._settle_task:
@@ -340,6 +375,7 @@ class SipTrunkOutputHandler(TelephonyOutputHandler):
                                 break
                             end = min(offset + MAX_WS_FRAME_BYTES, len(audio_chunk))
                             await self.websocket.send_bytes(audio_chunk[offset:end])
+                            await self._rate_limit(end - offset)
                             offset = end
                     except Exception as e:
                         logger.debug(f"sip-trunk send_bytes stopped: {e}")

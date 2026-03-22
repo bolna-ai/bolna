@@ -262,7 +262,7 @@ class SipTrunkInputHandler(TelephonyInputHandler):
             self._media_xoff = True
             if hasattr(self, "output_handler_ref") and self.output_handler_ref:
                 self.output_handler_ref.queue_full = True
-            logger.debug(f"MEDIA_XOFF for channel {self.channel_id}")
+            logger.info(f"MEDIA_XOFF for channel {self.channel_id}")
             return
         if event == "MEDIA_XON":
             self._media_xoff = False
@@ -276,7 +276,7 @@ class SipTrunkInputHandler(TelephonyInputHandler):
                         logger.exception("sip-trunk drain_local_queue failed: %s", exc)
 
                 task.add_done_callback(_on_drain_done)
-            logger.debug(f"MEDIA_XON for channel {self.channel_id}")
+            logger.info(f"MEDIA_XON for channel {self.channel_id}")
             return
         if event == "STATUS" or "MEDIA_BUFFERING_COMPLETED" in event:
             logger.debug(f"Asterisk control: {event}")
