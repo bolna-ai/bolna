@@ -39,8 +39,10 @@ ULAW_BYTES_PER_SECOND = 8000
 # When the queue is full Asterisk silently drops every incoming binary frame
 # ("WebSocket queue is full. Ignoring incoming binary message.") instead of
 # sending a second MEDIA_XOFF.
-# At 1.5× real-time the queue fills at 0.5× rate. So no frames
-# are ever dropped.  Set SIP_MAX_SEND_RATE_FACTOR=0 to disable.
+# At 1.5× real-time the queue fills at 0.5× rate; for responses under ~47 s the
+# queue never reaches capacity.  Longer responses trigger XOFF/XON cycles — the
+# drain is also rate-limited (and re-anchored to exclude the XOFF pause time) so
+# it never re-overflows the queue.  Set SIP_MAX_SEND_RATE_FACTOR=0 to disable.
 MAX_SEND_RATE_FACTOR = float(os.environ.get("SIP_MAX_SEND_RATE_FACTOR", "1.5"))
 
 
@@ -208,6 +210,14 @@ class SipTrunkOutputHandler(TelephonyOutputHandler):
 
     async def drain_local_queue(self):
         """Send XOFF-queued audio to Asterisk (called on MEDIA_XON)."""
+        # Re-anchor the rate-limit budget to exclude the XOFF pause.
+        # During XOFF the wall clock kept running while _bytes_sent was frozen;
+        # without this, elapsed >> min_elapsed at drain start and _rate_limit
+        # returns immediately for every frame — the drain bursts at full TTS speed
+        # and immediately re-overflows Asterisk's frame queue.
+        if self._response_first_send > 0.0 and MAX_SEND_RATE_FACTOR > 0:
+            expected_elapsed = self._bytes_sent / (MAX_SEND_RATE_FACTOR * ULAW_BYTES_PER_SECOND)
+            self._response_first_send = time.monotonic() - expected_elapsed
         gen = self._flush_generation
         while self._local_audio_queue and not self.queue_full:
             # Drop stale audio from before an interruption
@@ -400,13 +410,7 @@ class SipTrunkOutputHandler(TelephonyOutputHandler):
 
                 # Only schedule playback finish on the null-byte sentinel
                 # (has_audio=False, is_final=True) — the TRUE end of response.
-                # ElevenLabs may set end_of_synthesizer_stream on many audio
-                # chunks (stale meta_info), making is_final=True repeatedly.
-                # Firing _schedule_finish on those causes premature timers that
-                # clear is_audio_being_played mid-response, truncating audio.
-                # Plivo/Twilio are unaffected because they ignore is_final
-                # entirely (mark echo handles playback tracking).
-                if is_final and not has_audio:
+                if is_final and not has_audio and not self._response_sealed:
                     self._response_sealed = True
                     if self._local_audio_queue:
                         # XOFF queued audio not yet sent — defer finish
