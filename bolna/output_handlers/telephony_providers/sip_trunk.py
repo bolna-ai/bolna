@@ -188,6 +188,10 @@ class SipTrunkOutputHandler(TelephonyOutputHandler):
                     return
                 offset = 0
                 while offset < len(chunk):
+                    if gen != self._flush_generation:
+                        self._local_audio_queue.clear()
+                        self._pending_finish = False
+                        return
                     if self.queue_full:
                         # XOFF arrived mid-drain — put remainder back and stop
                         self._local_audio_queue.appendleft(chunk[offset:])
@@ -304,7 +308,8 @@ class SipTrunkOutputHandler(TelephonyOutputHandler):
 
                 # Send to Asterisk in chunks ≤ MAX_WS_FRAME_BYTES (Asterisk limit: 65,500).
                 # If XOFF arrives mid-send, queue the remainder locally.
-                if self.queue_full:
+                # Also queue if drain is still in-flight to preserve ordering.
+                if self.queue_full or self._local_audio_queue:
                     self._local_audio_queue.append(audio_chunk)
                 else:
                     if self._response_first_send == 0.0:
