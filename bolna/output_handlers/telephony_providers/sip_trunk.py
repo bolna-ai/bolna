@@ -23,6 +23,10 @@ from dotenv import load_dotenv
 logger = configure_logger(__name__)
 load_dotenv()
 
+# Asterisk's max WebSocket frame size is 65,500 bytes. Chunks larger than this
+# cause "Cannot fit huge websocket frame" and kill the connection.
+MAX_WS_FRAME_BYTES = 60000  # leave headroom below 65,500
+
 # Extra buffer after estimated playback end before clearing is_audio_being_played.
 # Accounts for Asterisk's internal retiming and RTP jitter buffer.
 PLAYBACK_SETTLE_S = float(os.environ.get("SIP_PLAYBACK_SETTLE_S", "0.1"))
@@ -180,7 +184,15 @@ class SipTrunkOutputHandler(TelephonyOutputHandler):
             try:
                 if self._closed:
                     return
-                await self.websocket.send_bytes(chunk)
+                offset = 0
+                while offset < len(chunk):
+                    if self.queue_full:
+                        # XOFF arrived mid-drain — put remainder back and stop
+                        self._local_audio_queue.appendleft(chunk[offset:])
+                        return
+                    end = min(offset + MAX_WS_FRAME_BYTES, len(chunk))
+                    await self.websocket.send_bytes(chunk[offset:end])
+                    offset = end
             except Exception as e:
                 logger.debug(f"sip-trunk drain send_bytes stopped: {e}")
                 return
@@ -282,7 +294,8 @@ class SipTrunkOutputHandler(TelephonyOutputHandler):
                 if gen != self._flush_generation:
                     return
 
-                # Send directly to Asterisk (burst, like Plivo/Twilio)
+                # Send to Asterisk in chunks ≤ MAX_WS_FRAME_BYTES (Asterisk limit: 65,500).
+                # If XOFF arrives mid-send, queue the remainder locally.
                 if self.queue_full:
                     self._local_audio_queue.append(audio_chunk)
                 else:
@@ -291,7 +304,15 @@ class SipTrunkOutputHandler(TelephonyOutputHandler):
                     try:
                         if self._closed:
                             return
-                        await self.websocket.send_bytes(audio_chunk)
+                        offset = 0
+                        while offset < len(audio_chunk):
+                            if self.queue_full:
+                                # XOFF arrived mid-send — queue remainder at front
+                                self._local_audio_queue.appendleft(audio_chunk[offset:])
+                                break
+                            end = min(offset + MAX_WS_FRAME_BYTES, len(audio_chunk))
+                            await self.websocket.send_bytes(audio_chunk[offset:end])
+                            offset = end
                     except Exception as e:
                         logger.debug(f"sip-trunk send_bytes stopped: {e}")
                         return
