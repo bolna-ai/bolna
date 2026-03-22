@@ -18,7 +18,6 @@ import copy
 import json
 import time
 import traceback
-import uuid
 from collections import deque
 
 import websockets
