@@ -198,6 +198,8 @@ class SipTrunkOutputHandler(TelephonyOutputHandler):
                         return
                     end = min(offset + MAX_WS_FRAME_BYTES, len(chunk))
                     await self.websocket.send_bytes(chunk[offset:end])
+                    if self._response_first_send == 0.0:
+                        self._response_first_send = time.monotonic()
                     offset = end
             except Exception as e:
                 logger.debug(f"sip-trunk drain send_bytes stopped: {e}")
