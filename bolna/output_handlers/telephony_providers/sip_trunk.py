@@ -1,10 +1,11 @@
 """
 Asterisk WebSocket (chan_websocket) output handler for sip-trunk provider.
 
-Sends ulaw audio at 1x real-time pace (160 bytes / 20ms) via a background send loop.
-START_MEDIA_BUFFERING once at call start lets Asterisk retime any micro-jitter.
-FLUSH_MEDIA on interrupt. Generation counter drops stale frames after interruption.
-Playback completion detected when send queue drains after final chunk + settle delay.
+Sends audio to Asterisk in bursts as it arrives from TTS (like Plivo/Twilio).
+START_MEDIA_BUFFERING once per call lets Asterisk reframe and retime for smooth
+RTP delivery. Server-side duration tracking knows when playback ends without
+relying on QUEUE_DRAINED. FLUSH_MEDIA on interrupt. Generation counter drops
+stale audio after interruption.
 
 Ref: https://docs.asterisk.org/Configuration/Channel-Drivers/WebSocket/
 """
@@ -22,25 +23,16 @@ from dotenv import load_dotenv
 logger = configure_logger(__name__)
 load_dotenv()
 
-# 160 bytes = 20ms of ulaw at 8kHz (one RTP frame)
-FRAME_SIZE = 160
-FRAME_DURATION_S = 0.02
-
-# Pre-buffer: accumulate this many ms of audio before sending first frame of a response.
-# Absorbs TTS jitter so the first frames don't have micro-gaps.
-DEFAULT_JITTER_BUFFER_MS = int(os.environ.get("SIP_JITTER_BUFFER_MS", "40"))
-
-# After audio finishes sending at 1x pace, Asterisk needs a small settle time
-# for its internal retiming buffer before we clear is_audio_being_played.
-# 100ms is sufficient — Asterisk's buffer is at most a few frames deep at 1x pace.
+# Extra buffer after estimated playback end before clearing is_audio_being_played.
+# Accounts for Asterisk's internal retiming and RTP jitter buffer.
 PLAYBACK_SETTLE_S = float(os.environ.get("SIP_PLAYBACK_SETTLE_S", "0.1"))
 
 
 class SipTrunkOutputHandler(TelephonyOutputHandler):
     """
-    Sends ulaw audio to Asterisk at 1x real-time pace via a background send loop.
-    START_MEDIA_BUFFERING sent once per call. FLUSH_MEDIA on interrupt.
-    Playback completion via send-loop drain detection + settle delay.
+    Sends ulaw audio to Asterisk in bursts — Asterisk buffers and retimes.
+    Server-side duration tracking for playback completion.
+    FLUSH_MEDIA on interrupt. XOFF/XON for backpressure safety.
     """
 
     def __init__(
@@ -56,24 +48,25 @@ class SipTrunkOutputHandler(TelephonyOutputHandler):
         super().__init__(io_provider, websocket, mark_event_meta_data, log_dir_name)
         self.asterisk_media_start = asterisk_media_start or {}
         self.agent_config = agent_config or {}
-        self._optimal_frame_size = FRAME_SIZE
         self.input_handler = input_handler
         self.queue_full = False
         if input_handler:
             input_handler.output_handler_ref = self
 
+        # Playback duration tracking
+        self._response_first_send: float = 0.0   # monotonic time first chunk was sent
+        self._response_audio_duration: float = 0.0  # accumulated seconds of audio
         self._settle_task: asyncio.Task | None = None
+        self._pending_finish: bool = False
 
-        # Send loop: frames are enqueued as (bytes, generation) tuples and sent at 1x real-time
-        self._send_queue: asyncio.Queue = asyncio.Queue()
-        self._send_loop_task = None
-        self._flush_generation = 0
-        self._start_buffering_sent = False
+        # Generation counter — incremented on interruption, stale audio is dropped
+        self._flush_generation: int = 0
 
-        # Local queue when Asterisk sends MEDIA_XOFF; drained on MEDIA_XON
+        # Asterisk buffering state
+        self._start_buffering_sent: bool = False
+
+        # XOFF/XON: local queue when Asterisk signals backpressure
         self._local_audio_queue: deque = deque()
-        # If is_final arrived while send queue still has frames, defer fallback
-        self._pending_finish = False
 
         output_config = self._get_output_config()
         self._output_format = (
@@ -81,13 +74,6 @@ class SipTrunkOutputHandler(TelephonyOutputHandler):
         ).lower()
         if self._output_format not in ("ulaw", "mulaw"):
             self._output_format = "ulaw"
-
-        opt = self.asterisk_media_start.get("optimal_frame_size")
-        if opt is not None:
-            try:
-                self._optimal_frame_size = int(opt)
-            except (TypeError, ValueError):
-                pass
 
     def _get_output_config(self):
         try:
@@ -99,129 +85,75 @@ class SipTrunkOutputHandler(TelephonyOutputHandler):
         return {}
 
     # ------------------------------------------------------------------
-    # Send loop — drains _send_queue at 1x real-time (160 bytes / 20ms)
+    # Playback completion — server-side duration tracking
     # ------------------------------------------------------------------
 
-    def _ensure_send_loop(self):
-        """Start the background send loop if not already running."""
-        if self._send_loop_task is None or self._send_loop_task.done():
-            self._send_loop_task = asyncio.create_task(self._send_loop())
+    def _schedule_finish(self, generation: int):
+        """Schedule playback completion based on how much audio was sent and when.
 
-    async def _send_loop(self):
-        """Dequeue frames and send at 1x real-time pace."""
-        jitter_buffer_frames = max(1, DEFAULT_JITTER_BUFFER_MS // 20)
-        next_send = 0.0
-
-        while True:
-            try:
-                frame, generation = await self._send_queue.get()
-            except asyncio.CancelledError:
-                return
-
-            # Discard stale frames from a previous generation (post-interruption)
-            if generation != self._flush_generation:
-                continue
-
-            # Pre-buffer: if this is the first frame after the queue was empty,
-            # wait briefly to accumulate more frames and absorb TTS jitter.
-            if self._send_queue.qsize() < jitter_buffer_frames - 1:
-                try:
-                    await asyncio.sleep(DEFAULT_JITTER_BUFFER_MS / 1000.0)
-                except asyncio.CancelledError:
-                    return
-
-            # Respect XOFF backpressure
-            if self.queue_full:
-                self._local_audio_queue.append(frame)
-                continue
-
-            # Pace: wait until next_send time
-            now = time.monotonic()
-            if next_send > now:
-                try:
-                    await asyncio.sleep(next_send - now)
-                except asyncio.CancelledError:
-                    return
-
-            # Re-check generation after sleep (interruption may have happened)
-            if generation != self._flush_generation:
-                continue
-
-            try:
-                if self._closed:
-                    return
-                await self.websocket.send_bytes(frame)
-            except Exception as e:
-                logger.debug(f"sip-trunk send_bytes stopped: {e}")
-                return
-
-            next_send = time.monotonic() + FRAME_DURATION_S
-
-            # If the send queue just drained and final chunk was received, finish playback
-            if self._send_queue.empty() and self._pending_finish and not self._local_audio_queue:
-                self._pending_finish = False
-                if self._settle_task:
-                    self._settle_task.cancel()
-                self._settle_task = asyncio.create_task(
-                    self._settle_and_finish(self._flush_generation)
-                )
-
-    def _enqueue_audio(self, audio_chunk: bytes):
-        """Split audio_chunk into FRAME_SIZE frames and enqueue with current generation."""
-        gen = self._flush_generation
-        offset = 0
-        n = len(audio_chunk)
-        while offset < n:
-            end = min(offset + FRAME_SIZE, n)
-            frame = audio_chunk[offset:end]
-            # Pad last frame to FRAME_SIZE if short (Asterisk expects uniform frames)
-            if len(frame) < FRAME_SIZE:
-                frame = frame + b"\xff" * (FRAME_SIZE - len(frame))
-            self._send_queue.put_nowait((frame, gen))
-            offset = end
-
-    async def _settle_and_finish(self, generation: int):
-        """Wait for Asterisk's retiming buffer to flush, then clear playback state.
-
-        At 1x pacing the Asterisk buffer is at most a few frames deep, so a
-        short constant delay is sufficient — no need to wait for QUEUE_DRAINED.
-        The generation parameter guards against stale finishes after interruption.
+        Since audio is sent in bursts (faster than real-time), Asterisk buffers
+        it and plays at 1x. Playback ends at approximately:
+            first_send_time + total_audio_duration + settle_buffer
         """
+        if self._settle_task:
+            self._settle_task.cancel()
+
+        elapsed = time.monotonic() - self._response_first_send if self._response_first_send else 0
+        remaining = self._response_audio_duration - elapsed
+        delay = max(remaining, 0) + PLAYBACK_SETTLE_S
+
+        self._settle_task = asyncio.create_task(
+            self._settle_and_finish(generation, delay)
+        )
+        logger.info(
+            f"sip-trunk: playback finish in {delay:.2f}s "
+            f"(audio={self._response_audio_duration:.2f}s, elapsed={elapsed:.2f}s)"
+        )
+
+    async def _settle_and_finish(self, generation: int, delay: float):
+        """Wait for estimated playback to complete, then clear playback state."""
         try:
-            await asyncio.sleep(PLAYBACK_SETTLE_S)
+            await asyncio.sleep(delay)
         except asyncio.CancelledError:
             return
         if self._closed or generation != self._flush_generation:
             return
         self._settle_task = None
-        self._finish_playback(reason="send-complete")
+        self._finish_playback(reason="duration-complete")
+
+    def _finish_playback(self, reason: str = "duration-complete") -> None:
+        """Process all pending marks and clear playback state."""
+        if not self.input_handler or not self.input_handler.mark_event_meta_data:
+            return
+        remaining = list(self.input_handler.mark_event_meta_data.mark_event_meta_data.keys())
+        logger.info(f"sip-trunk: _finish_playback reason={reason}, {len(remaining)} mark(s)")
+        for mid in remaining:
+            self.input_handler.process_mark_message({"name": mid})
+        if self.input_handler.is_audio_being_played_to_user():
+            self.input_handler.update_is_audio_being_played(False)
 
     # ------------------------------------------------------------------
     # Interruption
     # ------------------------------------------------------------------
 
     async def handle_interruption(self):
-        """FLUSH_MEDIA, clear queues, increment generation to drop stale frames."""
+        """FLUSH_MEDIA, clear local queue, increment generation to drop stale audio."""
         logger.info("sip-trunk: handling interruption (FLUSH_MEDIA)")
         try:
-            # Cancel any pending settle task
             if self._settle_task:
                 self._settle_task.cancel()
                 self._settle_task = None
 
-            # Increment generation so send loop discards any in-flight frames
             self._flush_generation += 1
             self._pending_finish = False
-
-            # Clear both queues
-            while not self._send_queue.empty():
-                try:
-                    self._send_queue.get_nowait()
-                except asyncio.QueueEmpty:
-                    break
+            self._response_audio_duration = 0.0
+            self._response_first_send = 0.0
             self._local_audio_queue.clear()
 
             await self._send_control("FLUSH_MEDIA")
+            # FLUSH_MEDIA resets Asterisk's buffering state; re-arm for next response
+            self._start_buffering_sent = False
+
             if self.mark_event_meta_data:
                 self.mark_event_meta_data.clear_data()
             if self.input_handler:
@@ -230,31 +162,32 @@ class SipTrunkOutputHandler(TelephonyOutputHandler):
             logger.error(f"sip-trunk handle_interruption: {e}")
 
     # ------------------------------------------------------------------
-    # XOFF/XON drain
+    # XOFF/XON — backpressure safety for very long responses
     # ------------------------------------------------------------------
 
     async def drain_local_queue(self):
-        """Re-enqueue XOFF-queued audio into the send queue (called on MEDIA_XON)."""
+        """Send XOFF-queued audio to Asterisk (called on MEDIA_XON)."""
         gen = self._flush_generation
         while self._local_audio_queue and not self.queue_full:
+            # Drop stale audio from before an interruption
+            if gen != self._flush_generation:
+                self._local_audio_queue.clear()
+                self._pending_finish = False
+                return
             chunk = self._local_audio_queue.popleft()
             if not chunk:
                 continue
-            # Re-enqueue as individual frames so pacing is maintained
-            offset = 0
-            n = len(chunk)
-            while offset < n:
-                end = min(offset + FRAME_SIZE, n)
-                frame = chunk[offset:end]
-                if len(frame) < FRAME_SIZE:
-                    frame = frame + b"\xff" * (FRAME_SIZE - len(frame))
-                self._send_queue.put_nowait((frame, gen))
-                offset = end
+            try:
+                if self._closed:
+                    return
+                await self.websocket.send_bytes(chunk)
+            except Exception as e:
+                logger.debug(f"sip-trunk drain send_bytes stopped: {e}")
+                return
 
         if not self._local_audio_queue and self._pending_finish:
-            # _pending_finish stays True — the send loop will fire
-            # _settle_and_finish when the re-enqueued frames finish sending.
-            logger.info("sip-trunk: XON drain complete, frames re-enqueued, awaiting send loop drain")
+            self._pending_finish = False
+            self._schedule_finish(self._flush_generation)
 
     # ------------------------------------------------------------------
     # Control helpers
@@ -284,17 +217,15 @@ class SipTrunkOutputHandler(TelephonyOutputHandler):
     async def set_stream_sid(self, stream_id):
         self.stream_sid = stream_id
 
-    def _duration_ulaw(self, num_bytes):
-        return num_bytes / 8000.0
-
     # ------------------------------------------------------------------
-    # Main handle — enqueue audio into the paced send loop
+    # Main handle — send audio directly to Asterisk (burst, like Plivo)
     # ------------------------------------------------------------------
 
     async def handle(self, ws_data_packet):
         """
-        Enqueue audio into the 1x real-time send loop.
-        START_MEDIA_BUFFERING is sent once per call on first audio.
+        Send audio directly to Asterisk in bursts. Asterisk's START_MEDIA_BUFFERING
+        reframes and retimes for smooth RTP. Server-side duration tracking knows
+        when playback ends.
         """
         try:
             audio_chunk = ws_data_packet.get("data")
@@ -314,6 +245,7 @@ class SipTrunkOutputHandler(TelephonyOutputHandler):
 
             audio_format = (meta_info.get("format") or "ulaw").lower()
             audio_duration = 0.0
+            gen = self._flush_generation
 
             if has_audio:
                 if len(audio_chunk) == 1:
@@ -327,20 +259,44 @@ class SipTrunkOutputHandler(TelephonyOutputHandler):
                 if meta_info.get("message_category") == "agent_welcome_message" and not self.welcome_message_sent_ts:
                     self.welcome_message_sent_ts = time.time() * 1000
 
-                # Send START_MEDIA_BUFFERING once per call on first audio
+                # New response — reset duration tracking
+                if meta_info.get("is_first_chunk"):
+                    self._response_first_send = 0.0
+                    self._response_audio_duration = 0.0
+                    self._pending_finish = False
+                    if self._settle_task:
+                        self._settle_task.cancel()
+                        self._settle_task = None
+
+                # Send START_MEDIA_BUFFERING once per call (or after FLUSH_MEDIA reset)
                 if not self._start_buffering_sent:
                     await self._send_control("START_MEDIA_BUFFERING")
                     self._start_buffering_sent = True
-                    logger.info("sip-trunk: START_MEDIA_BUFFERING sent (once per call)")
+                    logger.info("sip-trunk: START_MEDIA_BUFFERING sent")
 
-                # Ensure the background send loop is running
-                self._ensure_send_loop()
+                # Track audio duration
+                audio_duration = len(audio_chunk) / 8000.0
+                self._response_audio_duration += audio_duration
 
-                # Enqueue frames — the send loop handles pacing, XOFF, and generation
-                self._enqueue_audio(audio_chunk)
+                # Drop stale audio from a previous generation
+                if gen != self._flush_generation:
+                    return
 
-                audio_duration = self._duration_ulaw(len(audio_chunk))
+                # Send directly to Asterisk (burst, like Plivo/Twilio)
+                if self.queue_full:
+                    self._local_audio_queue.append(audio_chunk)
+                else:
+                    if self._response_first_send == 0.0:
+                        self._response_first_send = time.monotonic()
+                    try:
+                        if self._closed:
+                            return
+                        await self.websocket.send_bytes(audio_chunk)
+                    except Exception as e:
+                        logger.debug(f"sip-trunk send_bytes stopped: {e}")
+                        return
 
+            # Register mark metadata (same as Plivo/Twilio contract)
             if self.mark_event_meta_data:
                 message_category = meta_info.get("message_category", "agent_response")
                 mark_id = meta_info.get("mark_id") or str(uuid.uuid4())
@@ -358,42 +314,17 @@ class SipTrunkOutputHandler(TelephonyOutputHandler):
                 )
 
                 if is_final:
-                    if self._send_queue.qsize() > 0 or self._local_audio_queue:
-                        # Audio still being sent/queued — defer finish
+                    if self._local_audio_queue:
+                        # XOFF queued audio not yet sent — defer finish
                         self._pending_finish = True
-                        logger.debug("sip-trunk: final chunk, audio still in send queue; deferring finish")
+                        logger.debug("sip-trunk: final chunk, XOFF audio pending; deferring finish")
                     else:
-                        # Send queue already empty — finish directly
                         self._pending_finish = False
-                        if self._settle_task:
-                            self._settle_task.cancel()
-                        self._settle_task = asyncio.create_task(
-                            self._settle_and_finish(self._flush_generation)
-                        )
-                        logger.info("sip-trunk: final chunk, send queue empty, settling")
+                        self._schedule_finish(gen)
 
         except Exception as e:
             logger.error(f"sip-trunk output error: {e}")
             traceback.print_exc()
-
-    def _finish_playback(self, reason: str = "send-complete") -> None:
-        """Process all pending marks and clear playback state."""
-        if not self.input_handler or not self.input_handler.mark_event_meta_data:
-            return
-        remaining = list(self.input_handler.mark_event_meta_data.mark_event_meta_data.keys())
-        logger.info(f"sip-trunk: _finish_playback reason={reason}, {len(remaining)} mark(s)")
-        for mid in remaining:
-            self.input_handler.process_mark_message({"name": mid})
-        if self.input_handler.is_audio_being_played_to_user():
-            self.input_handler.update_is_audio_being_played(False)
-
-    async def on_queue_drained(self) -> None:
-        """No-op — QUEUE_DRAINED is informational only at 1x pacing.
-
-        Kept as a stub so the input handler (which may still forward the event)
-        does not raise AttributeError. Task 2 removes the caller.
-        """
-        logger.debug("sip-trunk: QUEUE_DRAINED received (informational, no action)")
 
     async def send_hangup(self):
         await self._send_control("HANGUP")
