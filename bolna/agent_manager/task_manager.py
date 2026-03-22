@@ -3125,10 +3125,7 @@ class TaskManager(BaseManager):
                     logger.error(f"Could not do llm call: {e}")
                     raise
 
-        except asyncio.CancelledError as e:
-            # Cancel all tasks on cancel
-            traceback.print_exc()
-            self.transcriber_task.cancel()
+        except asyncio.CancelledError:
             await self.handle_cancellation(f"Websocket got cancelled {self.task_id}")
 
         except Exception as e:
@@ -3254,14 +3251,30 @@ class TaskManager(BaseManager):
 
     async def handle_cancellation(self, message):
         try:
-            # Cancel all tasks on cancellation
-            tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
-            logger.info(f"tasks {len(tasks)}")
-            for task in tasks:
-                await process_task_cancellation(task, task.get_name())
-                logger.info(f"Cancelling task {task.get_name()}")
-                task.cancel()
+            # Cancel only this call's tasks (not all tasks in the event loop)
+            call_tasks = [
+                ('transcriber_task', getattr(self, 'transcriber_task', None)),
+                ('synthesizer_task', getattr(self, 'synthesizer_task', None)),
+                ('synthesizer_monitor_task', getattr(self, 'synthesizer_monitor_task', None)),
+                ('output_task', getattr(self, 'output_task', None)),
+                ('hangup_task', getattr(self, 'hangup_task', None)),
+                ('first_message_task', getattr(self, 'first_message_task', None)),
+                ('first_message_task_new', getattr(self, 'first_message_task_new', None)),
+                ('handle_accumulated_message_task', getattr(self, 'handle_accumulated_message_task', None)),
+                ('backchanneling_task', getattr(self, 'backchanneling_task', None)),
+                ('ambient_noise_task', getattr(self, 'ambient_noise_task', None)),
+                ('dtmf_task', getattr(self, 'dtmf_task', None)),
+                ('llm_task', getattr(self, 'llm_task', None)),
+                ('llm_queue_task', getattr(self, 'llm_queue_task', None)),
+                ('execute_function_call_task', getattr(self, 'execute_function_call_task', None)),
+            ]
+            if hasattr(self, 'voicemail_handler') and self.voicemail_handler:
+                call_tasks.append(('voicemail_check_task', getattr(self.voicemail_handler, 'check_task', None)))
+
+            active_tasks = [(name, t) for name, t in call_tasks if t is not None and not t.done()]
+            logger.info(f"Cancelling {len(active_tasks)} call tasks")
+            for name, task in active_tasks:
+                await process_task_cancellation(task, name)
             logger.info(message)
         except Exception as e:
-            traceback.print_exc()
-            logger.info(e)
+            logger.error(f"Error during call task cancellation: {e}")
