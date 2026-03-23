@@ -1,9 +1,9 @@
 import json
-from typing import Literal, Optional, List, Union, Dict, Callable
+from typing import Any, Literal, Optional, List, Union, Dict, Callable
 from pydantic import BaseModel, Field, field_validator, ValidationError, Json, model_validator
 from pydantic_core import PydanticCustomError
 from .providers import *
-from .enums import TelephonyProvider, SynthesizerProvider, TranscriberProvider, ReasoningEffort, Verbosity
+from .enums import TelephonyProvider, SynthesizerProvider, TranscriberProvider, ReasoningEffort, Verbosity, ExpressionOperator, ExpressionLogic, EdgeConditionType
 from .constants import MODEL_REASONING_EFFORT_MAP
 
 AGENT_WELCOME_MESSAGE = "This call is being recorded for quality assurance and training. Please speak now."
@@ -283,6 +283,15 @@ class LlmAgentGraph(BaseModel):
     nodes: List[Node]
     edges: List[Edge]
 
+class ExpressionCondition(BaseModel):
+    variable: str  # dot-notation key, e.g. "detected_language" or "recipient_data.timezone"
+    operator: ExpressionOperator
+    value: Optional[Any] = None
+
+class ExpressionGroup(BaseModel):
+    logic: ExpressionLogic = ExpressionLogic.AND
+    conditions: List[ExpressionCondition] = Field(default_factory=list)
+
 class GraphEdge(BaseModel):
     """Edge definition for graph-based conversation flow.
 
@@ -290,12 +299,15 @@ class GraphEdge(BaseModel):
     The LLM will call the transition function when the condition is met.
     """
     to_node_id: str
-    condition: str  # Human-readable description of when to transition
+    condition: str = ""  # Human-readable description of when to transition
+    condition_type: Optional[EdgeConditionType] = None  # None → "llm" (backward compat)
+    expression: Optional[ExpressionGroup] = None  # required when condition_type == "expression"
     # Function definition for LLM to call (auto-generated if not provided)
     function_name: Optional[str] = None  # e.g., "go_to_city_question"
     function_description: Optional[str] = None  # Detailed description for LLM
     # Optional parameters to collect during transition
     parameters: Optional[Dict[str, str]] = None  # e.g., {"city": "string"}
+    priority: Optional[int] = None         # lower = evaluated first. Defaults: expression/unconditional=0, llm=100
 
 class GraphNodeRAGConfig(BaseModel):
     """RAG configuration for Graph Agent nodes."""

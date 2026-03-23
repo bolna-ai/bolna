@@ -11,6 +11,8 @@ from bolna.agent_types.base_agent import BaseAgent
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.rag_service_client import RAGServiceClientSingleton
 from bolna.helpers.utils import now_ms, format_messages, update_prompt_with_context, enrich_context_with_time_variables, DictWithMissing
+from bolna.helpers.expression_evaluator import evaluate_edge_expression
+from bolna.enums import EdgeConditionType
 from bolna.llms.types import LLMStreamChunk, LatencyData
 from bolna.llms import OpenAiLLM
 from bolna.providers import SUPPORTED_LLM_PROVIDERS
@@ -28,6 +30,8 @@ except ImportError:
 
 load_dotenv()
 logger = configure_logger(__name__)
+
+_DETERMINISTIC_REASONING_PREFIX = "deterministic:"
 
 class GraphAgent(BaseAgent):
     def __init__(self, config: GraphAgentConfig):
@@ -212,16 +216,15 @@ class GraphAgent(BaseAgent):
             logger.error(f'check_for_voicemail exception: {str(e)}')
             return {'is_voicemail': 'No'}, {}
 
-    def _build_transition_tools(self, node: dict) -> List[dict]:
-        """Build and cache function/tool definitions for node edges."""
-        node_id = node.get('id')
-        if node_id and node_id in self._transition_tools_cache:
-            return self._transition_tools_cache[node_id]
+    @staticmethod
+    def _edge_function_name(edge: dict) -> str:
+        return edge.get('function_name') or f"transition_to_{edge['to_node_id']}"
 
+    def _build_transition_tools_for_edges(self, edges: list) -> list:
+        """Build function/tool definitions for a list of edges."""
         tools = []
-        for edge in node.get('edges', []):
-            to_node_id = edge.get('to_node_id')
-            func_name = edge.get('function_name') or f"transition_to_{to_node_id}"
+        for edge in edges:
+            func_name = self._edge_function_name(edge)
             func_description = edge.get('function_description') or f"Call this function when: {edge.get('condition', '')}"
 
             parameters = {"type": "object", "properties": {}, "required": []}
@@ -230,7 +233,6 @@ class GraphAgent(BaseAgent):
                     parameters["properties"][param_name] = {"type": param_type, "description": f"The {param_name} provided by the user"}
                     parameters["required"].append(param_name)
 
-            # Add reasoning and confidence as required parameters on every transition tool
             parameters["properties"]["reasoning"] = {"type": "string", "description": "Brief explanation of why this routing decision was made"}
             parameters["properties"]["confidence"] = {"type": "number", "description": "Confidence score from 0.0 to 1.0 for this routing decision"}
             parameters["required"].extend(["reasoning", "confidence"])
@@ -242,43 +244,76 @@ class GraphAgent(BaseAgent):
 
         tools.append({
             "type": "function",
-            "function": {"name": "stay_on_current_node", "description": "No transition matches. Need more info or clarification.", "parameters": {"type": "object", "properties": {"reasoning": {"type": "string", "description": "Brief explanation of why this routing decision was made"}, "confidence": {"type": "number", "description": "Confidence score from 0.0 to 1.0 for this routing decision"}}, "required": ["reasoning", "confidence"]}}
+            "function": {
+                "name": "stay_on_current_node",
+                "description": "No transition matches. Need more info or clarification.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "reasoning": {"type": "string", "description": "Brief explanation of why this routing decision was made"},
+                        "confidence": {"type": "number", "description": "Confidence score from 0.0 to 1.0 for this routing decision"},
+                    },
+                    "required": ["reasoning", "confidence"],
+                },
+            },
         })
+        return tools
+
+    def _build_transition_tools(self, node: dict) -> List[dict]:
+        """Build and cache function/tool definitions for all node edges."""
+        node_id = node.get('id')
+        if node_id and node_id in self._transition_tools_cache:
+            return self._transition_tools_cache[node_id]
+
+        tools = self._build_transition_tools_for_edges(node.get('edges', []))
 
         if node_id:
             if len(self._transition_tools_cache) >= self._transition_tools_cache_max_size:
-                # Evict oldest entry
                 oldest_key = next(iter(self._transition_tools_cache))
                 del self._transition_tools_cache[oldest_key]
             self._transition_tools_cache[node_id] = tools
         return tools
 
-    def _get_edge_by_function_name(self, node: dict, function_name: str) -> Optional[dict]:
-        """Find the edge that corresponds to a function name."""
-        for edge in node.get('edges', []):
-            expected_name = edge.get('function_name') or f"transition_to_{edge['to_node_id']}"
-            if expected_name == function_name:
+    def _get_edge_by_function_name_from_edges(self, edges: list, function_name: str) -> Optional[dict]:
+        for edge in edges:
+            if self._edge_function_name(edge) == function_name:
                 return edge
         return None
 
-    async def decide_next_node_with_functions(self, history: List[dict]) -> Tuple[Optional[str], Optional[Dict[str, Any]], float, Optional[List[dict]], Optional[List[dict]], Optional[str], Optional[float]]:
-        """Decide next node using LLM function calling.
+    def _get_edge_by_function_name(self, node: dict, function_name: str) -> Optional[dict]:
+        return self._get_edge_by_function_name_from_edges(node.get('edges', []), function_name)
 
-        Returns (next_node_id, extracted_params, latency_ms, routing_messages, routing_tools, reasoning, confidence).
-        """
-        start_time = time.perf_counter()
+    def _classify_edges(self, edges: list) -> tuple:
+        """Split edges into (deterministic_edges, llm_edges), sorted by priority."""
+        deterministic = []
+        llm = []
+        for edge in edges:
+            if edge.get('condition_type') in (EdgeConditionType.EXPRESSION, EdgeConditionType.UNCONDITIONAL):
+                deterministic.append(edge)
+            else:
+                llm.append(edge)
 
-        current_node = self.get_node_by_id(self.current_node_id)
-        if not current_node:
-            logger.error(f"Current node '{self.current_node_id}' not found")
-            return None, None, 0, None, None, None, None
+        deterministic.sort(key=lambda e: e['priority'] if e.get('priority') is not None else 0)
+        llm.sort(key=lambda e: e['priority'] if e.get('priority') is not None else 100)
+        return deterministic, llm
 
-        edges = current_node.get('edges', [])
-        if not edges:
-            logger.debug(f"Node '{self.current_node_id}' has no edges, staying on current node")
-            return None, None, 0, None, None, None, None
+    def _evaluate_deterministic_edges(self, edges: list) -> Optional[dict]:
+        """Return first matching deterministic edge, or None."""
+        for edge in edges:
+            if evaluate_edge_expression(edge, self.context_data):
+                return edge
+        return None
 
-        tools = self._build_transition_tools(current_node)
+    def _compute_turn_counts(self, history: list) -> tuple:
+        """Count (node_turns, total_turns) from history."""
+        total_turns = sum(1 for msg in history if msg.get('role') == 'user')
+        node_history = history[self.current_node_entry_index:] if self.current_node_entry_index < len(history) else history
+        node_turns = sum(1 for msg in node_history if msg.get('role') == 'user')
+        return node_turns, total_turns
+
+    async def _decide_next_node_llm(self, node: dict, llm_edges: list, history: List[dict], start_time: float) -> Tuple[Optional[str], Optional[Dict[str, Any]], float, Optional[List[dict]], Optional[List[dict]], Optional[str], Optional[float]]:
+        """LLM-based routing. Only called when no deterministic edge matched."""
+        tools = self._build_transition_tools_for_edges(llm_edges)
 
         # Build compact context for routing
         context_section = ""
@@ -300,8 +335,8 @@ class GraphAgent(BaseAgent):
             except Exception as e:
                 logger.debug(f"Variable substitution in routing_instructions failed: {e}")
 
-        node_objective = current_node.get('prompt', '')
-        system_prompt = f"""Routing Guidelines: \n {instructions}\n Current Node: {current_node['id']}{context_section} \n Node Objective: {node_objective}\n\n Node Conversation History:\n"""
+        node_objective = node.get('prompt', '')
+        system_prompt = f"""Routing Guidelines: \n {instructions}\n Current Node: {node['id']}{context_section} \n Node Objective: {node_objective}\n\n Node Conversation History:\n"""
 
         logger.debug(f"Routing system prompt:\n{system_prompt}")
         messages = [{"role": "system", "content": system_prompt}]
@@ -363,13 +398,13 @@ class GraphAgent(BaseAgent):
                 reasoning = function_args.pop('reasoning', None)
                 confidence = function_args.pop('confidence', None)
 
-                logger.info(f"Routing decision: {function_name} | confidence: {confidence} | reasoning: {reasoning} (latency: {latency_ms:.1f}ms)")
+                logger.info(f"Routing decision (LLM): {function_name} | confidence: {confidence} | reasoning: {reasoning} (latency: {latency_ms:.1f}ms)")
 
                 if function_name == "stay_on_current_node":
                     return None, None, latency_ms, messages, tools, reasoning, confidence
 
                 # Find the edge for this function
-                edge = self._get_edge_by_function_name(current_node, function_name)
+                edge = self._get_edge_by_function_name_from_edges(llm_edges, function_name)
                 if edge:
                     return edge['to_node_id'], function_args, latency_ms, messages, tools, reasoning, confidence
                 else:
@@ -383,6 +418,47 @@ class GraphAgent(BaseAgent):
             latency_ms = (time.perf_counter() - start_time) * 1000
             logger.error(f"Routing error: {e} (latency: {latency_ms:.1f}ms)")
             return None, None, latency_ms, messages, tools, None, None
+
+    async def decide_next_node_with_functions(self, history: List[dict]) -> Tuple[Optional[str], Optional[Dict[str, Any]], float, Optional[List[dict]], Optional[List[dict]], Optional[str], Optional[float]]:
+        """Two-phase routing: deterministic expressions first, then LLM fallback."""
+        start_time = time.perf_counter()
+
+        current_node = self.get_node_by_id(self.current_node_id)
+        if not current_node:
+            logger.error(f"Current node '{self.current_node_id}' not found")
+            return None, None, 0, None, None, None, None
+
+        edges = current_node.get('edges', [])
+        if not edges:
+            logger.debug(f"Node '{self.current_node_id}' has no edges, staying on current node")
+            return None, None, 0, None, None, None, None
+
+        # Inject time variables and turn counts for expression evaluation
+        timezone_str = self.context_data.get('recipient_data', {}).get('timezone') if isinstance(self.context_data.get('recipient_data'), dict) else None
+        if timezone_str:
+            enrich_context_with_time_variables(self.context_data, timezone_str)
+
+        node_turns, total_turns = self._compute_turn_counts(history)
+        self.context_data['_node_turns'] = node_turns
+        self.context_data['_total_turns'] = total_turns
+
+        deterministic_edges, llm_edges = self._classify_edges(edges)
+
+        # Phase 1: deterministic (0ms)
+        if deterministic_edges:
+            matched_edge = self._evaluate_deterministic_edges(deterministic_edges)
+            if matched_edge:
+                latency_ms = (time.perf_counter() - start_time) * 1000
+                ct = matched_edge.get('condition_type', EdgeConditionType.EXPRESSION)
+                reasoning = f"{_DETERMINISTIC_REASONING_PREFIX}{ct}:{matched_edge.get('condition', ct)}"
+                logger.info(f"Routing decision (deterministic): -> {matched_edge['to_node_id']} | {reasoning} (latency: {latency_ms:.1f}ms)")
+                return matched_edge['to_node_id'], None, latency_ms, None, None, reasoning, 1.0
+
+        # Phase 2: LLM
+        if llm_edges:
+            return await self._decide_next_node_llm(current_node, llm_edges, history, start_time)
+
+        return None, None, 0, None, None, None, None
 
     def get_node_by_id(self, node_id: str) -> Optional[dict]:
         return next((node for node in self.config.get('nodes', []) if node['id'] == node_id), None)
@@ -495,11 +571,14 @@ class GraphAgent(BaseAgent):
             if next_node_id and (not self.node_history or self.node_history[-1] != self.current_node_id):
                 self.node_history.append(self.current_node_id)
 
+            routing_type = "deterministic" if (reasoning and reasoning.startswith(_DETERMINISTIC_REASONING_PREFIX)) else "llm"
+
             yield {
                 'routing_info': {
                     'previous_node': previous_node,
                     'current_node': self.current_node_id,
                     'transitioned': next_node_id is not None,
+                    'routing_type': routing_type,
                     'routing_model': self.routing_model,
                     'routing_provider': getattr(self, 'routing_provider', None),
                     'routing_latency_ms': round(routing_latency_ms, 1),
