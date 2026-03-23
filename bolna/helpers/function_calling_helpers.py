@@ -87,8 +87,6 @@ async def trigger_api(url, method, param, api_token, headers_data, meta_info, ru
                     for k, v in kwargs.items()
                 }
 
-                code = compile(param % json_kwargs, "<string>", "exec")
-                exec(code, globals(), json_kwargs)
                 request_body = param % json_kwargs
                 api_params = json.loads(request_body)
 
