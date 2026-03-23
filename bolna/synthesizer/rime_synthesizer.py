@@ -84,7 +84,7 @@ class RimeSynthesizer(StreamSynthesizer):
             try:
                 if self.context_id:
                     self.context_id = str(uuid.uuid4())
-                    await self.websocket_holder["websocket"].send(json.dumps({"operation": "clear"}))
+                    await self.websocket.send(json.dumps({"operation": "clear"}))
             except Exception:
                 pass
 
@@ -145,7 +145,7 @@ class RimeSynthesizer(StreamSynthesizer):
                     await asyncio.sleep(0.1)
                     continue
 
-                response = await self.websocket_holder["websocket"].recv()
+                response = await self.websocket.recv()
                 data = json.loads(response)
 
                 if data.get("type", "") == "chunk":

@@ -95,7 +95,7 @@ class ElevenlabsSynthesizer(StreamSynthesizer):
             if self.context_id:
                 interrupt_message = {"context_id": self.context_id, "close_context": True}
                 self.context_id = str(uuid.uuid4())
-                await self.websocket_holder["websocket"].send(json.dumps(interrupt_message))
+                await self.websocket.send(json.dumps(interrupt_message))
         except Exception:
             pass
 
@@ -124,7 +124,7 @@ class ElevenlabsSynthesizer(StreamSynthesizer):
                         if self.ws_send_time is None:
                             self.ws_send_time = time.perf_counter()
                             logger.info(f"WS send trace_id={self.ws_trace_id} first_text_sent")
-                        await self.websocket_holder["websocket"].send(json.dumps({"text": text_chunk}))
+                        await self.websocket.send(json.dumps({"text": text_chunk}))
                     except Exception as e:
                         logger.info(f"Error sending chunk: {e}")
                         self.connection_error = str(e)
@@ -135,7 +135,7 @@ class ElevenlabsSynthesizer(StreamSynthesizer):
                 self.context_id = str(uuid.uuid4())
 
             try:
-                await self.websocket_holder["websocket"].send(json.dumps({"text": "", "flush": True}))
+                await self.websocket.send(json.dumps({"text": "", "flush": True}))
             except Exception as e:
                 logger.info(f"Error sending end-of-stream signal: {e}")
                 self.connection_error = str(e)
@@ -161,7 +161,7 @@ class ElevenlabsSynthesizer(StreamSynthesizer):
                     continue
 
                 recv_start = time.perf_counter()
-                response = await self.websocket_holder["websocket"].recv()
+                response = await self.websocket.recv()
                 recv_duration = (time.perf_counter() - recv_start) * 1000
                 data = json.loads(response)
 

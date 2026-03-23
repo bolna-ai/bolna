@@ -80,7 +80,7 @@ class CartesiaSynthesizer(StreamSynthesizer):
                 self.context_ids_to_ignore.add(self.context_id)
                 interrupt_message = {"context_id": self.context_id, "cancel": True}
                 logger.info(f"handle_interruption: {interrupt_message}")
-                await self.websocket_holder["websocket"].send(json.dumps(interrupt_message))
+                await self.websocket.send(json.dumps(interrupt_message))
                 self.context_id = None
         except Exception as e:
             logger.error(f"Error in handle_interruption: {e}")
@@ -155,7 +155,7 @@ class CartesiaSynthesizer(StreamSynthesizer):
                     await asyncio.sleep(0.1)
                     continue
 
-                response = await self.websocket_holder["websocket"].recv()
+                response = await self.websocket.recv()
                 data = json.loads(response)
 
                 if data.get("context_id") in self.context_ids_to_ignore:

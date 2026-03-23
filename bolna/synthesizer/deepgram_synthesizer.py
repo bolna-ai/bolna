@@ -73,7 +73,7 @@ class DeepgramSynthesizer(StreamSynthesizer):
 
     async def handle_interruption(self):
         try:
-            ws = self.websocket_holder["websocket"]
+            ws = self.websocket
             if ws is not None and ws.state is websockets.protocol.State.OPEN:
                 await ws.send(json.dumps({"type": "Clear"}))
                 logger.info("Sent Clear message to Deepgram TTS WebSocket")
@@ -137,7 +137,7 @@ class DeepgramSynthesizer(StreamSynthesizer):
                     await asyncio.sleep(0.10)
                     continue
 
-                response = await self.websocket_holder["websocket"].recv()
+                response = await self.websocket.recv()
 
                 if isinstance(response, bytes):
                     audio_chunk_count += 1
@@ -217,7 +217,7 @@ class DeepgramSynthesizer(StreamSynthesizer):
             except Exception as e:
                 logger.error(f"Error cancelling sender task: {e}")
 
-        ws = self.websocket_holder["websocket"]
+        ws = self.websocket
         if ws:
             try:
                 await ws.send(json.dumps({"type": "Close"}))
@@ -229,7 +229,7 @@ class DeepgramSynthesizer(StreamSynthesizer):
             except Exception as e:
                 logger.error(f"Error closing WebSocket: {e}")
 
-        self.websocket_holder["websocket"] = None
+        self.websocket = None
         logger.info("Deepgram TTS WebSocket connection closed.")
 
     # ------------------------------------------------------------------

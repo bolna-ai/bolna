@@ -135,7 +135,7 @@ class SarvamSynthesizer(StreamSynthesizer):
                     await asyncio.sleep(0.1)
                     continue
 
-                response = await self.websocket_holder["websocket"].recv()
+                response = await self.websocket.recv()
                 data = json.loads(response)
 
                 if data.get("type") == "audio":

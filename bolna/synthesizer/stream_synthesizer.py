@@ -45,7 +45,7 @@ class StreamSynthesizer(BaseSynthesizer):
         self.provider_name = provider_name
 
         # WebSocket state
-        self.websocket_holder = {"websocket": None}
+        self.websocket = None
         self.sender_task = None
         self.conversation_ended = False
         self.connection_error = None
@@ -117,7 +117,7 @@ class StreamSynthesizer(BaseSynthesizer):
     # ------------------------------------------------------------------
 
     def _is_ws_connected(self):
-        ws = self.websocket_holder["websocket"]
+        ws = self.websocket
         return ws is not None and ws.state is not websockets.protocol.State.CLOSED
 
     async def _wait_for_ws(self, poll_interval=1):
@@ -129,7 +129,7 @@ class StreamSynthesizer(BaseSynthesizer):
     async def _send_json(self, payload):
         """Send a JSON payload over the WebSocket. Sets connection_error on failure."""
         try:
-            await self.websocket_holder["websocket"].send(json.dumps(payload))
+            await self.websocket.send(json.dumps(payload))
         except Exception as e:
             logger.error(f"Error sending to {self.provider_name}: {e}")
             self.connection_error = str(e)
@@ -191,8 +191,7 @@ class StreamSynthesizer(BaseSynthesizer):
                 async for packet in self._generate_http_loop():
                     yield packet
         except Exception as e:
-            traceback.print_exc()
-            logger.error(f"Error in {self.provider_name} generate: {e}")
+            logger.error(f"Error in {self.provider_name} generate: {e}", exc_info=True)
             raise
 
     async def _generate_ws_loop(self):
@@ -298,7 +297,7 @@ class StreamSynthesizer(BaseSynthesizer):
                         )
                         break
                 else:
-                    self.websocket_holder["websocket"] = result
+                    self.websocket = result
                     consecutive_failures = 0
             await asyncio.sleep(1)
 
@@ -319,12 +318,12 @@ class StreamSynthesizer(BaseSynthesizer):
             except Exception as e:
                 logger.error(f"Error cancelling {self.provider_name} sender task: {e}")
 
-        ws = self.websocket_holder["websocket"]
+        ws = self.websocket
         if ws:
             try:
                 await ws.close()
             except Exception as e:
                 logger.error(f"Error closing {self.provider_name} WebSocket: {e}")
-        self.websocket_holder["websocket"] = None
+        self.websocket = None
         logger.info(f"{self.provider_name} WebSocket connection closed.")
 
