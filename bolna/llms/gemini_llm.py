@@ -188,33 +188,26 @@ class GeminiLLM(BaseLLM):
 
         # User explicitly set a budget — honour it for 2.5 models
         if self.thinking_budget and self.thinking_budget > 0:
-            logger.info(f"[GeminiLLM] thinking_config=USER_BUDGET budget={self.thinking_budget} model={m}")
             return types.ThinkingConfig(thinking_budget=self.thinking_budget)
 
         # --- Gemini 3.x family: use thinking_level ---
         if m.startswith("gemini-3"):
             if "pro" in m:
                 # Pro cannot disable thinking; "minimal" is not supported — use "low"
-                logger.info(f"[GeminiLLM] thinking_config=level:low (gemini-3 pro, cannot disable) model={m}")
                 return types.ThinkingConfig(thinking_level="low")
             else:
                 # Flash / Flash-Lite: "minimal" is closest to off, avoids thought_signature cost
-                logger.info(f"[GeminiLLM] thinking_config=level:minimal (gemini-3 flash) model={m}")
                 return types.ThinkingConfig(thinking_level="minimal")
 
         # --- Gemini 2.5 family: use thinking_budget ---
         if "2.5" in m:
             if "pro" in m:
                 # Pro cannot disable thinking; minimum budget is 128
-                logger.info(f"[GeminiLLM] thinking_config=budget:128 (2.5 pro, min budget) model={m}")
                 return types.ThinkingConfig(thinking_budget=128)
             else:
                 # Flash / Flash-Lite: disable with 0
-                logger.info(f"[GeminiLLM] thinking_config=budget:0 (2.5 flash, disabled) model={m}")
                 return types.ThinkingConfig(thinking_budget=0)
 
-        # Other models — no thinking config
-        logger.info(f"[GeminiLLM] thinking_config=NONE (model not in 2.5/3.x family) model={m}")
         return None
 
     def _build_config(self, system_instruction, request_json=False):
@@ -276,7 +269,6 @@ class GeminiLLM(BaseLLM):
                             thought_text = getattr(part, 'text', None)
                             if thought_text:
                                 accumulated_thought_parts.append(thought_text)
-                                logger.info(f"[GeminiLLM] thought_part captured len={len(thought_text)} model={self.model}")
                             continue
 
                         # Gemini 3 streaming: thought_signature arrives as a standalone Part
@@ -286,7 +278,6 @@ class GeminiLLM(BaseLLM):
                         standalone_sig = getattr(part, 'thought_signature', None)
                         if standalone_sig and not part.function_call:
                             pending_thought_signature = standalone_sig
-                            logger.info(f"[GeminiLLM] standalone thought_signature captured bytes={len(standalone_sig)} model={self.model}")
                             continue
 
                         if part.function_call:
@@ -343,8 +334,6 @@ class GeminiLLM(BaseLLM):
                             if sig_bytes:
                                 fn_entry["thought_signature"] = base64.b64encode(sig_bytes).decode('utf-8')
                                 logger.info(f"[GeminiLLM] thought_signature stored for fn={fn_name} call_id={call_id} bytes={len(sig_bytes)}")
-                            else:
-                                logger.info(f"[GeminiLLM] no thought_signature for fn={fn_name} call_id={call_id} (thinking disabled or not a thinking model)")
                             model_resp.append(fn_entry)
 
                             payload = FunctionCallPayload(
