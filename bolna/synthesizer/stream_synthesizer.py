@@ -101,13 +101,6 @@ class StreamSynthesizer(BaseSynthesizer):
         """
         return self._get_audio_format()
 
-    def _on_stream_end(self):
-        """Hook called when end-of-stream (b'\\x00') is received. Override for extra cleanup."""
-        pass
-
-    def _enrich_meta_info(self, meta_info, message):
-        """Hook to add provider-specific fields to meta_info per chunk."""
-        pass
 
     def _unpack_receiver_message(self, item):
         """Unpack what receiver() yields into (audio_bytes, extra_meta_dict).
