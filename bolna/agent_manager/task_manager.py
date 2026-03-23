@@ -1219,7 +1219,9 @@ class TaskManager(BaseManager):
 
                     if played_text:
                         response_heard = ''.join(played_text)
+                        logger.info(f"Estimated played text (last 10 chars): {response_heard[-10:]}")
                 else:
+                    logger.info("No pending content marks found to estimate played text")
                     # No pending content marks - response likely completed normally
                     return
 
