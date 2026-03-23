@@ -87,13 +87,13 @@ class AzureSynthesizer(BaseSynthesizer):
             cancellation = result.cancellation_details
             logger.error(f"Azure TTS canceled: {cancellation.reason}")
             if cancellation.reason == speechsdk.CancellationReason.Error:
-                self._log_cancellation_error(cancellation)
+                self._log_cancellation_error(cancellation, raise_exception=True)
             return None
         else:
             logger.error(f"Azure TTS synthesis failed with reason: {result.reason}")
             return None
 
-    def _log_cancellation_error(self, cancellation):
+    def _log_cancellation_error(self, cancellation, raise_exception=False):
         error_code = cancellation.error_code
         error_details = cancellation.error_details
         logger.error(f"Azure TTS error details: {error_details}")
@@ -105,7 +105,8 @@ class AzureSynthesizer(BaseSynthesizer):
         }
         msg = error_map.get(error_code, f"error (code: {error_code})")
         logger.error(f"Azure TTS {msg} - Region: {self.region}")
-        raise Exception(f"Azure TTS {msg}. Details: {error_details}")
+        if raise_exception:
+            raise Exception(f"Azure TTS {msg}. Details: {error_details}")
 
     async def synthesize(self, text):
         return await self._generate_http(text)
