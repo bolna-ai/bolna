@@ -35,11 +35,12 @@ MAX_CONNECTION_FAILURES = 3
 class StreamSynthesizer(BaseSynthesizer):
     """Base class for all WebSocket-streaming synthesizers."""
 
-    def __init__(self, stream=True, provider_name="stream", **kwargs):
+    def __init__(self, stream=True, provider_name="stream",
+                 task_manager_instance=None, buffer_size=400, **kwargs):
         super().__init__(
-            task_manager_instance=kwargs.get("task_manager_instance"),
+            task_manager_instance=task_manager_instance,
             stream=stream,
-            buffer_size=kwargs.get("buffer_size", 400),
+            buffer_size=buffer_size,
         )
         self.provider_name = provider_name
 
