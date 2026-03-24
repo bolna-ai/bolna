@@ -1,5 +1,6 @@
 import asyncio
 from collections import defaultdict
+from datetime import datetime
 import math
 import os
 import random
@@ -17,7 +18,7 @@ import aiohttp
 from bolna.constants import (ACCIDENTAL_INTERRUPTION_PHRASES, DEFAULT_USER_ONLINE_MESSAGE,
     DEFAULT_USER_ONLINE_MESSAGE_TRIGGER_DURATION, FILLER_DICT, DEFAULT_LANGUAGE_CODE,
     DEFAULT_TIMEZONE, LANGUAGE_NAMES, LLM_DEFAULT_CONFIGS, SWITCH_LANGUAGE_TOOL_DEFINITION)
-from bolna.helpers.function_calling_helpers import trigger_api, computed_api_response
+from bolna.helpers.function_calling_helpers import trigger_api, computed_api_response, prepare_api_request
 from bolna.helpers.conversation_history import ConversationHistory
 from .base_manager import BaseManager
 from .interruption_manager import InterruptionManager
@@ -279,8 +280,8 @@ class TaskManager(BaseManager):
         # Initialize InterruptionManager with defaults (will be reconfigured for task_id == 0)
         self.interruption_manager = InterruptionManager()
 
-        #setup request logs
-        self.request_logs = []
+        # Stores structured API call records for dashboard/backend persistence.
+        self.api_call_details = []
         self.hangup_task = None
 
         self.conversation_config = None
@@ -463,6 +464,87 @@ class TaskManager(BaseManager):
                 webhook_url = self.task_config["tools_config"]["api_tools"]["tools_params"]["webhook"]["url"]
             logger.info(f"Webhook URL {webhook_url}")
             self.tools["webhook_agent"] = WebhookAgent(webhook_url=webhook_url)
+
+    @staticmethod
+    def _sanitize_api_call_headers(headers):
+        if not isinstance(headers, dict):
+            return headers
+
+        redacted_headers = {}
+        sensitive_keys = {"authorization", "proxy-authorization", "x-api-key", "api-key"}
+        for key, value in headers.items():
+            if str(key).lower() in sensitive_keys:
+                redacted_headers[key] = "<redacted>"
+            else:
+                redacted_headers[key] = value
+        return redacted_headers
+
+    @staticmethod
+    def _extract_api_call_runtime_args(resp):
+        excluded_keys = {"model_response", "textual_response"}
+        return {
+            key: copy.deepcopy(value)
+            for key, value in resp.items()
+            if key not in excluded_keys
+        }
+
+    def _start_api_call_detail(
+        self,
+        *,
+        called_fun,
+        url,
+        method,
+        param,
+        headers,
+        model_args,
+        meta_info,
+        runtime_args,
+        request_body=None,
+        api_params=None,
+    ):
+        api_call_detail = {
+            "tool_name": called_fun,
+            "tool_call_id": runtime_args.get("tool_call_id", ""),
+            "url": url,
+            "method": method.upper() if isinstance(method, str) else method,
+            "request_template": copy.deepcopy(param),
+            "request_body": copy.deepcopy(request_body),
+            "request_params": copy.deepcopy(api_params if api_params is not None else runtime_args),
+            "runtime_args": copy.deepcopy(runtime_args),
+            "headers": self._sanitize_api_call_headers(copy.deepcopy(headers)),
+            "llm_model_args": copy.deepcopy(model_args),
+            "meta": {
+                "request_id": meta_info.get("request_id"),
+                "sequence_id": meta_info.get("sequence_id"),
+            },
+            "started_at": datetime.now().isoformat(),
+            "status": "pending",
+            "response_status_code": None,
+            "response_content_type": None,
+            "response_body": None,
+            "response_json": None,
+        }
+        self.api_call_details.append(api_call_detail)
+        return api_call_detail
+
+    @staticmethod
+    def _finalize_api_call_detail(api_call_detail, response=None, status_code=None, content_type=None, error=None):
+        if api_call_detail is None:
+            return
+
+        api_call_detail["completed_at"] = datetime.now().isoformat()
+        if error is not None:
+            api_call_detail["status"] = "error"
+            api_call_detail["error"] = str(error)
+        else:
+            api_call_detail["status"] = "completed"
+        api_call_detail["response_status_code"] = status_code
+        api_call_detail["response_content_type"] = content_type
+        api_call_detail["response_body"] = copy.deepcopy(response)
+        try:
+            api_call_detail["response_json"] = json.loads(response) if isinstance(response, str) else copy.deepcopy(response)
+        except (TypeError, json.JSONDecodeError):
+            api_call_detail["response_json"] = None
 
     @property
     def history(self):
@@ -1603,6 +1685,7 @@ class TaskManager(BaseManager):
 
     async def __execute_function_call(self, url, method, param, api_token, headers, model_args, meta_info, next_step, called_fun, **resp):
         self.check_if_user_online = False
+        function_call_log = None
 
         if "execution_id" in resp and resp["execution_id"] != self.run_id:
             logger.warning(
@@ -1655,8 +1738,21 @@ class TaskManager(BaseManager):
 
             if self.tools['input'].io_provider == 'default':
                 mock_response = f"This is a mocked response demonstrating a successful transfer of call to {call_transfer_number}"
+                function_call_log = self._start_api_call_detail(
+                    called_fun=called_fun,
+                    url=url,
+                    method="POST",
+                    param=param,
+                    headers={"Content-Type": "application/json"},
+                    model_args=model_args,
+                    meta_info=meta_info,
+                    runtime_args={**self._extract_api_call_runtime_args(resp), "tool_call_id": resp.get("tool_call_id", "")},
+                    request_body=payload,
+                    api_params=payload,
+                )
                 convert_to_request_log(str(payload), meta_info, None, LogComponent.FUNCTION_CALL, direction=LogDirection.REQUEST, run_id=self.run_id)
                 convert_to_request_log(mock_response, meta_info, None, LogComponent.FUNCTION_CALL, direction=LogDirection.RESPONSE, run_id=self.run_id)
+                self._finalize_api_call_detail(function_call_log, response=mock_response, status_code=200, content_type="text/plain")
 
                 bos_packet = create_ws_data_packet("<beginning_of_stream>", meta_info)
                 await self.tools["output"].handle(bos_packet)
@@ -1669,12 +1765,30 @@ class TaskManager(BaseManager):
                 logger.info(f"Sending the payload to stop the conversation {payload} url {url}")
                 while self.tools["input"].is_audio_being_played_to_user():
                     await asyncio.sleep(1)
+                function_call_log = self._start_api_call_detail(
+                    called_fun=called_fun,
+                    url=url,
+                    method="POST",
+                    param=param,
+                    headers={"Content-Type": "application/json"},
+                    model_args=model_args,
+                    meta_info=meta_info,
+                    runtime_args={**self._extract_api_call_runtime_args(resp), "tool_call_id": resp.get("tool_call_id", "")},
+                    request_body=payload,
+                    api_params=payload,
+                )
                 convert_to_request_log(str(payload), meta_info, None, LogComponent.FUNCTION_CALL, direction=LogDirection.REQUEST, is_cached=False,
                                        run_id=self.run_id)
                 async with session.post(url, json = payload) as response:
                     response_text = await response.text()
                     logger.info(f"Response from the server after call transfer: {response_text}")
                     convert_to_request_log(str(response_text), meta_info, None, LogComponent.FUNCTION_CALL, direction=LogDirection.RESPONSE, is_cached=False, run_id=self.run_id)
+                    self._finalize_api_call_detail(
+                        function_call_log,
+                        response=response_text,
+                        status_code=response.status,
+                        content_type=response.headers.get("Content-Type"),
+                    )
                     return
 
         if called_fun == "switch_language":
@@ -1752,8 +1866,47 @@ class TaskManager(BaseManager):
             logger.info(f"__execute_function_call: Aborting before API call — hangup_triggered={self.hangup_triggered}, conversation_ended={self.conversation_ended}")
             return
 
-        response = await trigger_api(url=url, method=method.lower(), param=param, api_token=api_token, headers_data=headers, meta_info=meta_info, run_id=self.run_id, **resp)
-        function_response = str(response)
+        runtime_args = self._extract_api_call_runtime_args(resp)
+        try:
+            prepared_request = prepare_api_request(param, api_token, headers, **runtime_args)
+        except Exception as exc:
+            logger.warning(f"Could not prepare structured function call request for logging: {exc}")
+            prepared_request = {
+                "request_body": None,
+                "api_params": None,
+                "headers": headers,
+            }
+        function_call_log = self._start_api_call_detail(
+            called_fun=called_fun,
+            url=url,
+            method=method,
+            param=param,
+            headers=prepared_request["headers"],
+            model_args=model_args,
+            meta_info=meta_info,
+            runtime_args=runtime_args,
+            request_body=prepared_request["request_body"],
+            api_params=prepared_request["api_params"],
+        )
+        response = await trigger_api(
+            url=url,
+            method=method.lower(),
+            param=param,
+            api_token=api_token,
+            headers_data=headers,
+            meta_info=meta_info,
+            run_id=self.run_id,
+            return_response_metadata=True,
+            **resp,
+        )
+        self._finalize_api_call_detail(
+            function_call_log,
+            response=response.get("body"),
+            status_code=response.get("status_code"),
+            content_type=response.get("content_type"),
+            error=response.get("error"),
+        )
+        function_response = str(response.get("body"))
         get_res_keys, get_res_values = await computed_api_response(function_response)
 
         # Merge API response data into context_data for routing decisions
@@ -3192,6 +3345,7 @@ class TaskManager(BaseManager):
                     "messages": self.history,
                     "conversation_time": time.time() - self.start_time,
                     "label_flow": self.label_flow,
+                    "api_call_details": copy.deepcopy(self.api_call_details),
                     "call_sid": self.call_sid,
                     "stream_sid": self.stream_sid,
                     "transcriber_duration": self.transcriber_duration,
