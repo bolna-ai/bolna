@@ -22,7 +22,7 @@ class TranscriberPool:
     # heartbeats are being sent.  10s gives a comfortable safety margin.
     _KEEPALIVE_INTERVAL = 10
 
-    def __init__(self, transcribers, shared_input_queue, output_queue, active_label):
+    def __init__(self, transcribers, shared_input_queue, output_queue, active_label, multilingual_config):
         """
         Args:
             transcribers: dict mapping label -> transcriber instance.
@@ -32,6 +32,7 @@ class TranscriberPool:
             output_queue: the shared transcriber_output_queue (all transcribers
                           write to the same one).
             active_label: which transcriber label should receive audio initially.
+            multilingual_config: raw multilingual config dict from task_config
         """
         self.transcribers = transcribers
         self.shared_input_queue = shared_input_queue
@@ -44,6 +45,7 @@ class TranscriberPool:
         self.active_label = active_label
         self._router_task = None
         self._keepalive_task = None
+        self._multilingual_config = multilingual_config
 
     # ------------------------------------------------------------------
     # Properties that delegate to the active transcriber
@@ -171,6 +173,15 @@ class TranscriberPool:
         for label, transcriber in self.transcribers.items():
             logger.info(f"TranscriberPool: toggling connection for '{label}'")
             await transcriber.toggle_connection()
+
+    def get_active_transcriber_info(self):
+        """Return metadata about the active transcriber (e.g. provider)."""
+        active_transcriber_cfg = self._multilingual_config.get(self.active_label, {})
+        info = {
+            "provider": active_transcriber_cfg.get("provider", active_transcriber_cfg.get("model"))
+        }
+
+        return info
 
     async def cleanup(self):
         """Clean up all transcribers and cancel pool tasks."""
