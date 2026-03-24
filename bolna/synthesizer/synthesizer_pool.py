@@ -24,11 +24,12 @@ class SynthesizerPool:
     the new active synth.
     """
 
-    def __init__(self, synthesizers, active_label):
+    def __init__(self, synthesizers, active_label, multilingual_config):
         """
         Args:
             synthesizers: dict mapping label -> synthesizer instance.
             active_label: which synthesizer should be active initially.
+            multilingual_config: raw multilingual config dict from task_config
         """
         self.synthesizers = synthesizers
 
@@ -40,6 +41,7 @@ class SynthesizerPool:
         self._output_queue = asyncio.Queue()
         self._gen_task = None          # current _run_generate task
         self._monitor_tasks = {}       # label -> monitor task
+        self._multilingual_config = multilingual_config
 
     # ------------------------------------------------------------------
     # Properties
@@ -168,6 +170,21 @@ class SynthesizerPool:
         # Push sentinel so the current generate() iteration returns
         self._output_queue.put_nowait(_SWITCH_SENTINEL)
         logger.info(f"SynthesizerPool: switched {old} -> {label}")
+
+    
+    # ------------------------------------------------------------------
+    # Active synth info
+    # ------------------------------------------------------------------
+
+    def get_active_synthesizer_info(self):
+        """Return metadata about the active synthesizer (e.g. provider, voice)."""
+        active_synth = self._multilingual_config.get(self.active_label, {})
+        info = {
+            "provider": active_synth.get("provider"),
+            "voice": active_synth.get("provider_config", {}).get("voice"),
+        }
+
+        return info
 
     # ------------------------------------------------------------------
     # Cleanup

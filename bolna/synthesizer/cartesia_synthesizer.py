@@ -9,7 +9,6 @@ import json
 import aiohttp
 import os
 import traceback
-import time
 from collections import deque
 
 from .base_synthesizer import BaseSynthesizer
