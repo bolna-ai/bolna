@@ -34,7 +34,7 @@ def resolve_variable(context_data: dict, path: str) -> Any:
 
 def _coerce_for_comparison(actual: Any, expected: Any):
     """Coerce actual/expected to comparable types (e.g. string "3" vs int 3)."""
-    if type(actual) == type(expected):
+    if type(actual) is type(expected):
         return actual, expected
     if isinstance(actual, (str, int, float)) and isinstance(expected, (str, int, float)):
         try:

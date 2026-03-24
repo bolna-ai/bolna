@@ -21,13 +21,26 @@ dynamic = ["dependencies"]
 requires-python = ">=3.10"
 
 [project.optional-dependencies]
-dev = ["pip-tools", "pytest", "pytest-asyncio"]
+dev = ["pip-tools", "pytest", "pytest-asyncio", "ruff"]
 
 [tool.setuptools]
 package-dir = {"bolna" = "bolna"}
 
 [tool.setuptools.dynamic]
 dependencies = {file = ["requirements.txt"]}
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+# Start minimal, grow over time. Uncomment rules as the codebase is cleaned up.
+# Roadmap: F541 → UP → F401 → F841 → I (isort) → E (pycodestyle)
+select = [
+    "E721",  # type comparison (use isinstance)
+    "F811",  # redefined unused name
+    "ISC",   # implicit string concatenation bugs
+]
 
 [tool.bumpver]
 current_version = "0.10.1"
