@@ -1170,8 +1170,6 @@ class TaskManager(BaseManager):
         try:
             response_heard = self.tools["input"].response_heard_by_user
             logger.info(f"sync_history: response_heard len={len(response_heard) if response_heard else 0}")
-            if response_heard:
-                logger.info(f"response_heard (last 10 chars): {response_heard[-10:]}")
 
             if not response_heard:
                 pending_marks = [{'mark_id': k, 'mark_data': v} for k, v in mark_events_data]
@@ -1221,9 +1219,7 @@ class TaskManager(BaseManager):
 
                     if played_text:
                         response_heard = ''.join(played_text)
-                        logger.info(f"Estimated played text (last 10 chars): {response_heard[-10:]}, len={len(response_heard)}")
                 else:
-                    logger.info("No pending content marks found to estimate played text")
                     # No pending content marks - response likely completed normally
                     return
 

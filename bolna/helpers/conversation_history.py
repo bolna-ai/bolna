@@ -81,10 +81,8 @@ class ConversationHistory:
                 if original is None:
                     continue
                 updated = update_fn(original, response_heard)
-                logger.info(f"Trimming assistant message. Original (last 10 chars): {original[-10:]} | Updated: {updated[-10:] if updated else "<empty>"}")
                 if not updated or not updated.strip():
                     has_tool_calls = bool(msgs[i].get("tool_calls"))
-                    logger.info(f"Removing assistant message (last 10 chars): {original[-10:]} | has_tool_calls={has_tool_calls} from transcript")
                     msgs.pop(i)
                     # If the removed assistant had tool_calls, also remove its
                     # dependent tool-role messages to keep the history valid.
