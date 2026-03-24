@@ -2880,7 +2880,7 @@ class TaskManager(BaseManager):
                     else:
                         meta_info={'io': self.tools["output"].get_provider(), "request_id": str(uuid.uuid4()), "cached": False, "sequence_id": -1, 'format': 'pcm', "message_category": "is_user_online_message", 'end_of_llm_stream': True}
                         await self._synthesize(create_ws_data_packet(user_online_message, meta_info= meta_info))
-                    self.history.append({'role': 'assistant', 'content': user_online_message, 'exclude_from_llm': True})
+                    self.conversation_history.append_assistant(user_online_message, exclude_from_llm=True)
 
                 # Just in case we need to clear messages sent before
                 await self.tools["output"].handle_interruption()
