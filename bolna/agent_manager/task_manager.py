@@ -1679,6 +1679,25 @@ class TaskManager(BaseManager):
 
         if called_fun == "switch_language":
             language_label = resp.get("language", "")
+
+            # If the requested language is already active, skip handoff and switch entirely
+            if language_label == self.language:
+                logger.info(f"switch_language: '{language_label}' is already the active language, skipping handoff and switch")
+                function_response = f"Already speaking in {language_label}, no switch needed"
+
+                textual_response = resp.get("textual_response", None)
+                if not textual_response:
+                    self.conversation_history.append_assistant(textual_response, tool_calls=resp["model_response"])
+                else:
+                    self.conversation_history.attach_tool_calls_to_last_response(resp["model_response"])
+                self.conversation_history.append_tool_result(resp.get("tool_call_id", ""), function_response)
+                convert_to_request_log(function_response, meta_info, None, "function_call", direction="response", run_id=self.run_id)
+
+                messages = self.conversation_history.get_copy()
+                await self.__do_llm_generation(messages, meta_info, next_step, should_bypass_synth=False, should_trigger_function_call=True)
+                self.execute_function_call_task = None
+                return
+
             # Only wait if audio is currently playing
             if not self._turn_audio_flushed.is_set():
                 await self.wait_for_current_message()
