@@ -1816,6 +1816,10 @@ class TaskManager(BaseManager):
             logger.info(f"__do_llm_generation: Skipping — hangup_triggered={self.hangup_triggered}, conversation_ended={self.conversation_ended}")
             return
 
+        # Clear stale end_of_llm_stream from previous generation so only
+        # the final chunk of THIS generation carries the flag.
+        meta_info.pop("end_of_llm_stream", None)
+
         # Reset response tracking for new turn
         if self.generate_precise_transcript:
             self.tools["input"].reset_response_heard_by_user()
