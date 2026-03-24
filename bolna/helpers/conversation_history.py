@@ -109,7 +109,7 @@ class ConversationHistory:
 
     def get_copy(self) -> list[dict]:
         self._sanitize_tool_messages(self._messages)
-        return copy.deepcopy(self._messages)
+        return copy.deepcopy([m for m in self._messages if not m.get('exclude_from_llm')])
 
     @staticmethod
     def _sanitize_tool_messages(msgs: list[dict]):
