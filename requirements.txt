@@ -24,3 +24,12 @@ tiktoken>=0.6.0
 twilio==8.9.0
 uvicorn==0.22.0
 websockets==15.0.1
+<<<<<<< Updated upstream
+=======
+azure-cognitiveservices-speech==1.38.0
+google-cloud-speech==2.25.0
+google-genai>=1.0.0
+groq>=0.4.0
+plivo==4.47.0
+twilio==8.9.0
+>>>>>>> Stashed changes
