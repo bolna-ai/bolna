@@ -2408,7 +2408,7 @@ class TaskManager(BaseManager):
     async def __process_http_transcription(self, message):
         meta_info = self.__get_updated_meta_info(message["meta_info"])
 
-        sequence = message["meta_info"].get('sequence', meta_info['sequence_id'])
+        sequence = message["meta_info"].get('sequence', 0)
         next_task = self._get_next_step(sequence, "transcriber")
         self.transcriber_duration += message["meta_info"]["transcriber_duration"] if "transcriber_duration" in message["meta_info"] else 0
 
