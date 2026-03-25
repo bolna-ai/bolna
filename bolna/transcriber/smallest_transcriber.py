@@ -95,7 +95,6 @@ class SmallestTranscriber(BaseTranscriber):
 
         # Transcript state management
         self.final_transcript = ""
-        self.is_transcript_sent_for_processing = False
         self.interruption_signalled = False
 
         # Turn tracking
@@ -368,7 +367,7 @@ class SmallestTranscriber(BaseTranscriber):
                 except asyncio.CancelledError:
                     logger.info(f"Smallest {task_name} cancelled")
                 except Exception as e:
-                    logger.error(f"Error cancelling Smallest {task_name}: {e}")
+                    logger.warning(f"Error cancelling Smallest {task_name}: {e}")
 
         # Close websocket
         if self.websocket_connection is not None:

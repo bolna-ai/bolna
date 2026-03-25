@@ -237,3 +237,10 @@ class EdgeConditionType(str, Enum):
     LLM = "llm"
     EXPRESSION = "expression"
     UNCONDITIONAL = "unconditional"
+
+
+class UsageSource(str, Enum):
+    """Indicates whether token counts came from the API or text estimation."""
+    API_REPORTED = "api_reported"
+    ESTIMATED = "estimated"
+    PARTIAL = "partial"  # Mix of api_reported and estimated (e.g., interrupted streams)

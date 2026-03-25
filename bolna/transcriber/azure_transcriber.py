@@ -365,7 +365,7 @@ class AzureTranscriber(BaseTranscriber):
                 except asyncio.CancelledError:
                     logger.info(f"Azure {task_name} cancelled")
                 except Exception as e:
-                    logger.error(f"Error cancelling Azure {task_name}: {e}")
+                    logger.warning(f"Error cancelling Azure {task_name}: {e}")
 
         # Run sync cleanup in executor to not block event loop
         loop = asyncio.get_event_loop()

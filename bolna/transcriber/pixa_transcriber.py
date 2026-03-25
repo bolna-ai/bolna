@@ -88,7 +88,6 @@ class PixaTranscriber(BaseTranscriber):
         self.turn_first_result_latency = None
 
         # Since Pixa has no VAD, use is_final-based turn detection
-        self.is_transcript_sent_for_processing = False
         self.last_interim_time = None
         self.interim_timeout = kwargs.get("interim_timeout", 5.0)  # Default 5 seconds
 
@@ -472,7 +471,7 @@ class PixaTranscriber(BaseTranscriber):
                 except asyncio.CancelledError:
                     logger.info(f"Pixa {task_name} cancelled")
                 except Exception as e:
-                    logger.error(f"Error cancelling Pixa {task_name}: {e}")
+                    logger.warning(f"Error cancelling Pixa {task_name}: {e}")
 
         # Close websocket
         if self.websocket_connection is not None:

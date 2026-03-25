@@ -477,7 +477,7 @@ class GoogleTranscriber(BaseTranscriber):
             except asyncio.CancelledError:
                 logger.info("Google transcription_task cancelled")
             except Exception as e:
-                logger.error(f"Error cancelling Google transcription_task: {e}")
+                logger.warning(f"Error cancelling Google transcription_task: {e}")
 
         # Run sync cleanup in executor to not block event loop
         loop = asyncio.get_event_loop()

@@ -105,6 +105,7 @@ class OpenAiLLM(OpenAICompatibleLLM):
             "response_format": response_format,
             "messages": messages,
             "stream": True,
+            "stream_options": {"include_usage": True},
             "user": f"{self.run_id}#{meta_info['turn_id']}"
         }
 
@@ -128,6 +129,7 @@ class OpenAiLLM(OpenAICompatibleLLM):
         first_token_time = None
         latency_data = None
         service_tier = None
+        stream_usage = None
 
         try:
             completion_stream = await self.async_client.chat.completions.create(**model_args)
@@ -159,6 +161,11 @@ class OpenAiLLM(OpenAICompatibleLLM):
                 service_tier = chunk.service_tier
                 if latency_data:
                     latency_data.service_tier = service_tier
+
+            # Final usage-only chunk (choices=[]) from stream_options
+            if hasattr(chunk, 'usage') and chunk.usage and (not chunk.choices or len(chunk.choices) == 0):
+                stream_usage = chunk.usage
+                continue
 
             if not first_token_time:
                 first_token_time = now
@@ -203,10 +210,22 @@ class OpenAiLLM(OpenAICompatibleLLM):
             if api_call_payload:
                 yield LLMStreamChunk(data=api_call_payload, end_of_stream=False, latency=latency_data, is_function_call=True)
 
+        # Extract actual token counts from stream usage
+        usage_kwargs = {}
+        if stream_usage:
+            usage_kwargs['input_tokens'] = getattr(stream_usage, 'prompt_tokens', None)
+            usage_kwargs['output_tokens'] = getattr(stream_usage, 'completion_tokens', None)
+            details = getattr(stream_usage, 'completion_tokens_details', None)
+            if details:
+                usage_kwargs['reasoning_tokens'] = getattr(details, 'reasoning_tokens', None)
+            prompt_details = getattr(stream_usage, 'prompt_tokens_details', None)
+            if prompt_details:
+                usage_kwargs['cached_tokens'] = getattr(prompt_details, 'cached_tokens', None)
+
         if synthesize:
-            yield LLMStreamChunk(data=buffer, end_of_stream=True, latency=latency_data)
+            yield LLMStreamChunk(data=buffer, end_of_stream=True, latency=latency_data, **usage_kwargs)
         else:
-            yield LLMStreamChunk(data=answer, end_of_stream=True, latency=latency_data)
+            yield LLMStreamChunk(data=answer, end_of_stream=True, latency=latency_data, **usage_kwargs)
 
         self.started_streaming = False
 
@@ -227,6 +246,15 @@ class OpenAiLLM(OpenAICompatibleLLM):
                     "llm_host": self.llm_host,
                     "service_tier": completion.service_tier if hasattr(completion, 'service_tier') else None
                 }
+                if completion.usage:
+                    metadata['input_tokens'] = completion.usage.prompt_tokens
+                    metadata['output_tokens'] = completion.usage.completion_tokens
+                    details = getattr(completion.usage, 'completion_tokens_details', None)
+                    if details:
+                        metadata['reasoning_tokens'] = getattr(details, 'reasoning_tokens', None)
+                    prompt_details = getattr(completion.usage, 'prompt_tokens_details', None)
+                    if prompt_details:
+                        metadata['cached_tokens'] = getattr(prompt_details, 'cached_tokens', None)
                 return res, metadata
             else:
                 return res
