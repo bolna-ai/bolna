@@ -227,7 +227,6 @@ class StreamSynthesizer(BaseSynthesizer):
                 self.meta_info["end_of_synthesizer_stream"] = True
                 self.first_chunk_generated = False
                 self._record_turn_latency()
-                self._on_stream_end()
             else:
                 audio = self._process_audio_chunk(audio)
                 if audio is None:
