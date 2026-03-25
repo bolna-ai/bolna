@@ -1,4 +1,4 @@
-aiobotocore==2.9.0
+!aiobotocore==2.9.0
 aiofiles==23.2.1
 aiohttp>=3.9.2,<3.10.0
 fastapi==0.108.0
@@ -20,7 +20,7 @@ uvicorn==0.22.0
 websockets==15.0.1
 azure-cognitiveservices-speech==1.38.0
 google-cloud-speech==2.25.0
-google-genai>=1.0.0
+google-genai>=1.68.0
 groq>=0.4.0
 plivo==4.47.0
 twilio==8.9.0
