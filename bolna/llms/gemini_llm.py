@@ -186,8 +186,9 @@ class GeminiLLM(BaseLLM):
         """
         m = self.model
 
-        # User explicitly set a budget — honour it for 2.5 models
-        if self.thinking_budget and self.thinking_budget > 0:
+        # User explicitly set a budget — honour it for 2.5 models only.
+        # Gemini 3.x uses thinking_level, not thinking_budget; passing budget to 3.x causes 400s.
+        if self.thinking_budget and self.thinking_budget > 0 and "2.5" in m:
             return types.ThinkingConfig(thinking_budget=self.thinking_budget)
 
         # --- Gemini 3.x family: use thinking_level ---
@@ -283,9 +284,22 @@ class GeminiLLM(BaseLLM):
                         if part.function_call:
                             fn_name = part.function_call.name
                             fn_args = dict(part.function_call.args) if part.function_call.args else {}
-                            call_id = part.function_call.id or ("call_" + str(uuid.uuid4())[:8])
-                            # Cache the original Part so _prepare_history can reuse it
-                            # intact — thought_signature bytes cannot survive serialisation.
+                            raw_id = part.function_call.id
+                            call_id = raw_id or ("call_" + str(uuid.uuid4())[:8])
+                            # If Gemini didn't return a function_call id, rebuild the Part
+                            # with our generated id — otherwise the cached Part would have
+                            # id=None while the tool response carries the synthetic call_id,
+                            # which causes an id-mismatch 400 on the next turn.
+                            if not raw_id:
+                                inline_sig = getattr(part, 'thought_signature', None)
+                                rebuilt_kwargs: dict = dict(
+                                    function_call=types.FunctionCall(name=fn_name, args=fn_args, id=call_id)
+                                )
+                                if inline_sig:
+                                    rebuilt_kwargs['thought_signature'] = inline_sig
+                                part = types.Part(**rebuilt_kwargs)
+                            # Cache the Part so _prepare_history can reuse it intact —
+                            # thought_signature bytes cannot survive serialisation.
                             self._native_function_parts[call_id] = part
                             logger.info(f"[GeminiLLM] function_call detected fn={fn_name} call_id={call_id} args={list(fn_args.keys())} native_part_cached=True")
 
