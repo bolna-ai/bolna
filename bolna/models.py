@@ -33,8 +33,22 @@ class PollyConfig(BaseModel):
     voice: str
     engine: str
     language: str
-    # volume: Optional[str] = '0dB'
-    # rate: Optional[str] = '100%'
+    # Prosody — rate and volume work on all engines; pitch and emphasis are Standard-only
+    speaking_rate: Optional[str] = None        # e.g. "slow", "85%", "120%" (20-200%)
+    volume: Optional[str] = None               # e.g. "loud", "+6dB", "x-soft"
+    pitch: Optional[str] = None                # e.g. "high", "+5%" — Standard engine ONLY
+    emphasis: Optional[str] = None             # "strong" | "moderate" | "reduced" — Standard ONLY
+    auto_breaths: Optional[bool] = False       # automatic breathing sounds — Standard ONLY
+    newscaster: Optional[bool] = False         # Newscaster domain — select Neural voices ONLY
+    # Standard-engine-only voice effects
+    whispered: Optional[bool] = False          # whispered voice effect — Standard ONLY
+    drc: Optional[bool] = False                # dynamic range compression — Standard ONLY
+    vocal_tract_length: Optional[str] = None   # e.g. "+15%", "-10%" — Standard ONLY
+    soft_phonation: Optional[bool] = False     # soft/breathy phonation — Standard ONLY
+    # Neural-voice domain (select voices)
+    conversational: Optional[bool] = False     # conversational speaking style — select Neural ONLY
+    # Language switching
+    lang: Optional[str] = None                 # e.g. "hi-IN" — switch language mid-speech
 
 
 class ElevenLabsConfig(BaseModel):
@@ -101,7 +115,23 @@ class AzureConfig(BaseModel):
     voice: str
     model: str
     language: str
-    speed: Optional[float] = 1.0
+    speed: Optional[float] = None              # prosody rate multiplier e.g. 0.9, 1.2
+    pitch: Optional[str] = None                # e.g. "high", "+10%", "+2st"
+    volume: Optional[str] = None               # e.g. "loud", "+6dB"
+    style: Optional[str] = None                # e.g. "empathetic", "customerservice", "cheerful"
+    style_degree: Optional[float] = None       # 0.01–2.0 (intensity of the style)
+    role: Optional[str] = None                 # e.g. "YoungAdultFemale", "OlderAdultMale"
+    telephony_optimized: Optional[bool] = False  # adds eq_telecomhp8k for Twilio/SIP
+    # Silence insertion
+    sentence_silence_ms: Optional[int] = None  # ms of silence after each sentence boundary
+    leading_silence_ms: Optional[int] = None   # ms of silence before speech starts
+    # Background audio (played behind the voice)
+    background_audio_url: Optional[str] = None    # URL to background audio file
+    background_audio_volume: Optional[float] = None  # 0.0–1.0
+    background_audio_fadein: Optional[int] = None    # fade-in ms
+    background_audio_fadeout: Optional[int] = None   # fade-out ms
+    # Language switching
+    lang: Optional[str] = None                 # e.g. "hi-IN" — switch language mid-speech
 
 
 class Transcriber(BaseModel):

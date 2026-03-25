@@ -16,18 +16,42 @@ load_dotenv()
 
 
 class AzureSynthesizer(BaseSynthesizer):
-    def __init__(self, voice, language, model="neural", stream=False, sampling_rate=8000, buffer_size=150, caching=True, speed=None, **kwargs):
+    def __init__(self, voice, language, model="neural", stream=False, sampling_rate=8000, buffer_size=150, caching=True,
+                 speed=None, pitch=None, volume=None, style=None, style_degree=None, role=None,
+                 telephony_optimized=False, sentence_silence_ms=None, leading_silence_ms=None,
+                 background_audio_url=None, background_audio_volume=None,
+                 background_audio_fadein=None, background_audio_fadeout=None,
+                 lang=None, **kwargs):
         super().__init__(kwargs.get("task_manager_instance", None), stream, buffer_size)
         self.model = model
         self.language = language
-        self.voice = f"{language}-{voice}{model}"
+        self.voice = f"{language}-{voice}{model.capitalize()}"
         logger.info(f"{self.voice} initialized")
         self.sample_rate = str(sampling_rate)
         self.first_chunk_generated = False
         self.stream = stream
         self.synthesized_characters = 0
         self.caching = False
+        # Prosody
         self.speed = speed
+        self.pitch = pitch
+        self.volume = volume
+        # Style / role (Azure neural voices only)
+        self.style = style
+        self.style_degree = style_degree
+        self.role = role
+        # Telephony optimisation — adds eq_telecomhp8k effect for 8kHz phone lines
+        self.telephony_optimized = telephony_optimized
+        # Silence insertion
+        self.sentence_silence_ms = sentence_silence_ms
+        self.leading_silence_ms = leading_silence_ms
+        # Background audio
+        self.background_audio_url = background_audio_url
+        self.background_audio_volume = background_audio_volume
+        self.background_audio_fadein = background_audio_fadein
+        self.background_audio_fadeout = background_audio_fadeout
+        # Language switching
+        self.lang = lang
         if caching:
             self.cache = InmemoryScalarCache()
         self.loop = asyncio.get_event_loop()
@@ -70,22 +94,98 @@ class AzureSynthesizer(BaseSynthesizer):
         return audio
 
     def _build_ssml(self, text: str):
-        body = sax.escape(text)
-        # If nothing to tweak, return None to signal plain-text mode
-        if not any([self.speed]) or self.speed == 1:
-            return None
+        """
+        Build an SSML document from plain text using the agent's config.
 
-        prosody_attrs = []
-        if self.speed is not None:
-            prosody_attrs.append(f'rate="{self.speed}"')
-        prosody_attr_str = " ".join(prosody_attrs)
+        Priority:
+          1. Text is already a full SSML document → use as-is (pass-through).
+          2. Text contains inline SSML tags (<break/>, <say-as>, …) → wrap them
+             inside the configured voice/style/prosody envelope.
+          3. Plain text → auto-generate full SSML from config params.
 
-        # NOTE: avoid <lang xml:lang> with <prosody>; docs state they are incompatible. :contentReference[oaicite:1]{index=1}
-        return f'''<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" xml:lang="{self.language}">
-          <voice name="{self.voice}">
-            <prosody {prosody_attr_str}>{body}</prosody>
-          </voice>
-        </speak>'''
+        Returns None when no SSML config is set, signalling the caller to
+        use plain-text synthesis (speak_text_async).
+        """
+        # --- Pass-through: LLM already produced a complete SSML document ---
+        if self.is_ssml(text):
+            return text
+
+        # --- Determine whether any SSML wrapping is actually needed ---
+        has_prosody = any([
+            self.speed and self.speed != 1,
+            self.pitch,
+            self.volume,
+        ])
+        has_style = bool(self.style or self.role)
+        has_inline = self.has_inline_ssml(text)
+
+        has_silence = bool(self.sentence_silence_ms or self.leading_silence_ms)
+        has_background = bool(self.background_audio_url)
+        has_lang = bool(self.lang and self.lang != self.language)
+
+        if not any([has_prosody, has_style, has_inline, self.telephony_optimized,
+                    has_silence, has_background, has_lang]):
+            return None  # nothing to do — caller will use speak_text_async
+
+        # --- Build body (innermost content) ---
+        # Inline tags are preserved; plain text is XML-escaped.
+        body = text if has_inline else sax.escape(text)
+
+        # --- Layer 1: prosody (rate / pitch / volume) ---
+        if has_prosody:
+            prosody_attrs = {}
+            if self.speed and self.speed != 1:
+                prosody_attrs["rate"] = str(self.speed)
+            if self.pitch:
+                prosody_attrs["pitch"] = self.pitch
+            if self.volume:
+                prosody_attrs["volume"] = self.volume
+            attr_str = " ".join(f'{k}="{v}"' for k, v in prosody_attrs.items())
+            body = f'<prosody {attr_str}>{body}</prosody>'
+
+        # --- Layer 2: speaking style / role (mstts:express-as) ---
+        if self.style:
+            degree_attr = f' styledegree="{self.style_degree}"' if self.style_degree else ""
+            role_attr = f' role="{self.role}"' if self.role else ""
+            body = f'<mstts:express-as style="{self.style}"{degree_attr}{role_attr}>{body}</mstts:express-as>'
+        elif self.role:
+            # role without style is valid (changes age/gender perception)
+            body = f'<mstts:express-as role="{self.role}">{body}</mstts:express-as>'
+
+        # --- Layer 3: language switch ---
+        if self.lang and self.lang != self.language:
+            body = f'<lang xml:lang="{self.lang}">{body}</lang>'
+
+        # --- Layer 4: silence insertion (must be INSIDE <voice>, before content) ---
+        silence_prefix = ""
+        if self.sentence_silence_ms:
+            silence_prefix += f'<mstts:silence type="Sentenceboundary" value="{self.sentence_silence_ms}ms"/>'
+        if self.leading_silence_ms:
+            silence_prefix += f'<mstts:silence type="Leading" value="{self.leading_silence_ms}ms"/>'
+        if silence_prefix:
+            body = silence_prefix + body
+
+        # --- Layer 5: voice (name + optional telephony effect) ---
+        effect_attr = ' effect="eq_telecomhp8k"' if self.telephony_optimized else ""
+        body = f'<voice name="{self.voice}"{effect_attr}>{body}</voice>'
+
+        # --- Root speak element ---
+        speak_open = (
+            f'<speak version="1.0" '
+            f'xmlns="http://www.w3.org/2001/10/synthesis" '
+            f'xmlns:mstts="https://www.w3.org/2001/mstts" '
+            f'xml:lang="{self.language}">'
+        )
+
+        # --- Background audio (wraps around the entire speak content) ---
+        if self.background_audio_url:
+            vol = f' volume="{self.background_audio_volume}"' if self.background_audio_volume is not None else ""
+            fadein = f' fadein="{self.background_audio_fadein}ms"' if self.background_audio_fadein else ""
+            fadeout = f' fadeout="{self.background_audio_fadeout}ms"' if self.background_audio_fadeout else ""
+            bg_tag = f'<mstts:backgroundaudio src="{self.background_audio_url}"{vol}{fadein}{fadeout}/>'
+            return f'{speak_open}{bg_tag}{body}</speak>'
+
+        return f'{speak_open}{body}</speak>'
 
 
     async def __generate_http(self, text):

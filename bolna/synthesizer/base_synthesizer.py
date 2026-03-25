@@ -7,6 +7,12 @@ import re
 
 logger = configure_logger(__name__)
 
+SSML_ROOT_RE = re.compile(r'<speak[\s>]', re.IGNORECASE)
+SSML_INLINE_RE = re.compile(
+    r'<(break|say-as|emphasis|phoneme|sub|prosody|mstts:|amazon:)', re.IGNORECASE
+)
+XML_TAG_RE = re.compile(r'<[^>]+>')
+
 
 class BaseSynthesizer:
     def __init__(self, task_manager_instance=None, stream=True, buffer_size=40, event_loop=None):
@@ -65,6 +71,23 @@ class BaseSynthesizer:
 
     def normalize_text(self, s):
         return re.sub(r'\s+', ' ', s.strip())
+
+    # ------------------------------------------------------------------
+    # SSML helpers — available to all synthesizer subclasses
+    # ------------------------------------------------------------------
+
+    def is_ssml(self, text: str) -> bool:
+        """Return True if text is a complete SSML document (has a <speak> root)."""
+        return bool(SSML_ROOT_RE.search(text.strip()))
+
+    def has_inline_ssml(self, text: str) -> bool:
+        """Return True if text contains inline SSML tags (break, say-as, emphasis …)."""
+        return bool(SSML_INLINE_RE.search(text))
+
+    def strip_ssml(self, text: str) -> str:
+        """Remove all XML/SSML tags and return clean plain text."""
+        cleaned = XML_TAG_RE.sub('', text)
+        return re.sub(r'\s+', ' ', cleaned).strip()
 
     def resample(self, audio_bytes):
         audio = AudioSegment.from_file(io.BytesIO(audio_bytes))
