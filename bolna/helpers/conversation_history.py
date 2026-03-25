@@ -27,8 +27,8 @@ class ConversationHistory:
     def append_user(self, content: str):
         self._messages.append({"role": ChatRole.USER, "content": content})
 
-    def append_assistant(self, content: str, tool_calls: list | None = None):
-        msg = {"role": ChatRole.ASSISTANT, "content": content}
+    def append_assistant(self, content: str, tool_calls: list | None = None, **kwargs):
+        msg = {"role": ChatRole.ASSISTANT, "content": content, **kwargs}
         if tool_calls is not None:
             msg["tool_calls"] = tool_calls
         self._messages.append(msg)
@@ -109,7 +109,7 @@ class ConversationHistory:
 
     def get_copy(self) -> list[dict]:
         self._sanitize_tool_messages(self._messages)
-        return copy.deepcopy(self._messages)
+        return copy.deepcopy([m for m in self._messages if not m.get('exclude_from_llm')])
 
     @staticmethod
     def _sanitize_tool_messages(msgs: list[dict]):

@@ -60,7 +60,6 @@ class AssemblyAITranscriber(BaseTranscriber):
         # Message states for turn management
         self.session_id = None
         self.current_transcript = ""
-        self.is_transcript_sent_for_processing = False
         self.websocket_connection = None
         self.connection_authenticated = False
         self.current_turn_start_time = None
@@ -169,7 +168,7 @@ class AssemblyAITranscriber(BaseTranscriber):
                 except asyncio.CancelledError:
                     logger.info(f"AssemblyAI {task_name} cancelled")
                 except Exception as e:
-                    logger.error(f"Error cancelling AssemblyAI {task_name}: {e}")
+                    logger.warning(f"Error cancelling AssemblyAI {task_name}: {e}")
 
         # Close websocket
         if self.websocket_connection is not None:

@@ -1816,6 +1816,10 @@ class TaskManager(BaseManager):
             logger.info(f"__do_llm_generation: Skipping — hangup_triggered={self.hangup_triggered}, conversation_ended={self.conversation_ended}")
             return
 
+        # Clear stale end_of_llm_stream from previous generation so only
+        # the final chunk of THIS generation carries the flag.
+        meta_info.pop("end_of_llm_stream", None)
+
         # Reset response tracking for new turn
         if self.generate_precise_transcript:
             self.tools["input"].reset_response_heard_by_user()
@@ -1991,7 +1995,7 @@ class TaskManager(BaseManager):
 
         if self.turn_based_conversation:
             self.history.append({"role": "user", "content": message['data']})
-        messages = copy.deepcopy(self.history)
+        messages = self.conversation_history.get_copy()
 
         # Request logs converted inside do_llm_generation for knowledgebase agent
         if not self.__is_knowledgebase_agent() and not self.__is_graph_agent():
@@ -2097,13 +2101,10 @@ class TaskManager(BaseManager):
                 logger.error("unsupported task type: {}".format(self.task_config["task_type"]))
             self.llm_task = None
         except BolnaComponentError as e:
-            logger.error(f"Component error in llm: {e}", exc_info=True)
             self.response_in_pipeline = False
             await self._end_call_on_component_error(e, HangupReason.LLM_ERROR)
             raise
         except Exception as e:
-            traceback.print_exc()
-            logger.error(f"Something went wrong in llm: {e}")
             self.response_in_pipeline = False
             await self._end_call_on_component_error(
                 LLMError(str(e), provider=self.llm_config.get("provider", "unknown"), model=self.llm_config.get("model")),
@@ -2223,7 +2224,6 @@ class TaskManager(BaseManager):
 
         # Trigger graceful shutdown
         if not self.conversation_ended and not self._end_of_conversation_in_progress:
-            logger.error(f"Critical component failure, ending call: {hangup_detail} - {error}")
             self.hangup_detail = hangup_detail
             await self.__process_end_of_conversation()
 
@@ -2395,8 +2395,6 @@ class TaskManager(BaseManager):
             # Normal WebSocket closure (code 1000)
             pass
         except Exception as e:
-            traceback.print_exc()
-            logger.error(f"Error in transcriber {e}")
             provider = self.task_config["tools_config"]["transcriber"].get("provider")
             await self._end_call_on_component_error(
                 TranscriberError(str(e), provider=provider),
@@ -2410,7 +2408,7 @@ class TaskManager(BaseManager):
     async def __process_http_transcription(self, message):
         meta_info = self.__get_updated_meta_info(message["meta_info"])
 
-        sequence = message["meta_info"].get('sequence', meta_info['sequence_id'])
+        sequence = message["meta_info"].get('sequence', 0)
         next_task = self._get_next_step(sequence, "transcriber")
         self.transcriber_duration += message["meta_info"]["transcriber_duration"] if "transcriber_duration" in message["meta_info"] else 0
 
@@ -2553,7 +2551,6 @@ class TaskManager(BaseManager):
                     self._turn_audio_flushed.set()
                     break
                 except Exception as e:
-                    logger.error(f"Error in synthesizer: {e}", exc_info=True)
                     self._turn_audio_flushed.set()
                     await self._end_call_on_component_error(
                         SynthesizerError(str(e), provider=self.synthesizer_provider),
@@ -2567,7 +2564,6 @@ class TaskManager(BaseManager):
             logger.info("Synthesizer task cancelled outside loop.")
             #await self.handle_cancellation("Synthesizer task was cancelled outside loop.")
         except Exception as e:
-            logger.error(f"Unexpected error in __listen_synthesizer: {e}", exc_info=True)
             await self._end_call_on_component_error(
                 SynthesizerError(str(e), provider=self.synthesizer_provider),
                 HangupReason.SYNTHESIZER_ERROR
@@ -2845,7 +2841,7 @@ class TaskManager(BaseManager):
                         logger.info(f"Waiting for hangup mark event ({time_since_hangup:.1f}s / {self.hangup_mark_event_timeout}s)")
                 continue
 
-            if self.tools["input"].is_audio_being_played_to_user():
+            if self.tools["input"].is_audio_being_played_to_user() or self.response_in_pipeline:
                 continue
 
             time_since_last_spoken_ai_word = (time.time() - self.last_transmitted_timestamp)
@@ -2876,7 +2872,7 @@ class TaskManager(BaseManager):
                     else:
                         meta_info={'io': self.tools["output"].get_provider(), "request_id": str(uuid.uuid4()), "cached": False, "sequence_id": -1, 'format': 'pcm', "message_category": "is_user_online_message", 'end_of_llm_stream': True}
                         await self._synthesize(create_ws_data_packet(user_online_message, meta_info= meta_info))
-                    self.history.append({'role': 'assistant', 'content': user_online_message})
+                    self.conversation_history.append_assistant(user_online_message, exclude_from_llm=True)
 
                 # Just in case we need to clear messages sent before
                 await self.tools["output"].handle_interruption()
@@ -3063,12 +3059,11 @@ class TaskManager(BaseManager):
                         self.ambient_noise_task = asyncio.create_task(self.__start_transmitting_ambient_noise())
                 try:
                     await asyncio.gather(*tasks)
-                except asyncio.CancelledError as e:
-                    logger.error(f'task got cancelled {e}')
-                    traceback.print_exc()
+                except asyncio.CancelledError:
+                    pass
                 except Exception as e:
-                    traceback.print_exc()
-                    logger.error(f"Error: {e}")
+                    if not isinstance(e, BolnaComponentError):
+                        logger.error(f"Error: {e}")
                     if self.run_id and not self._error_logged:
                         if isinstance(e, BolnaComponentError):
                             error_msg = format_error_message(e.component, e.provider or e.model or "-", str(e))
@@ -3118,7 +3113,6 @@ class TaskManager(BaseManager):
                 except BolnaComponentError:
                     raise
                 except Exception as e:
-                    logger.error(f"Could not do llm call: {e}")
                     raise
 
         except asyncio.CancelledError as e:
@@ -3130,8 +3124,8 @@ class TaskManager(BaseManager):
         except Exception as e:
             # Cancel all tasks on error
             error_message = str(e)
-            logger.error(f"Exception in task manager run: {error_message}")
-            traceback.print_exc()
+            if not isinstance(e, BolnaComponentError):
+                logger.error(f"Exception in task manager run: {error_message}")
 
             # Log call-breaking exception to CSV trace with component attribution (skip if already logged)
             if self.run_id and not self._error_logged:

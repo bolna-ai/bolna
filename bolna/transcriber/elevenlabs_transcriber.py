@@ -67,7 +67,6 @@ class ElevenLabsTranscriber(BaseTranscriber):
         self.curr_message = ''
         self.finalized_transcript = ""
         self.final_transcript = ""
-        self.is_transcript_sent_for_processing = False
         self.current_turn_start_time = None
         self.current_turn_id = None
         self.websocket_connection = None
@@ -268,7 +267,7 @@ class ElevenLabsTranscriber(BaseTranscriber):
                 except asyncio.CancelledError:
                     logger.info(f"ElevenLabs {task_name} cancelled")
                 except Exception as e:
-                    logger.error(f"Error cancelling ElevenLabs {task_name}: {e}")
+                    logger.warning(f"Error cancelling ElevenLabs {task_name}: {e}")
 
         # Close websocket
         if self.websocket_connection is not None:
