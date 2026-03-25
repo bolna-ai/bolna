@@ -67,7 +67,6 @@ class ElevenLabsTranscriber(BaseTranscriber):
         self.curr_message = ''
         self.finalized_transcript = ""
         self.final_transcript = ""
-        self.is_transcript_sent_for_processing = False
         self.current_turn_start_time = None
         self.current_turn_id = None
         self.websocket_connection = None
