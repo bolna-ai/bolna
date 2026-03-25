@@ -69,7 +69,6 @@ class DeepgramTranscriber(BaseTranscriber):
         self.curr_message = ''
         self.finalized_transcript = ""
         self.final_transcript = ""
-        self.is_transcript_sent_for_processing = False
         self.current_turn_start_time = None
         self.current_turn_id = None
         self.websocket_connection = None
@@ -450,6 +449,7 @@ class DeepgramTranscriber(BaseTranscriber):
                     self.current_turn_id = self.turn_counter
                     self.speech_start_time = timestamp_ms()
                     self.current_turn_interim_details = []
+                    self.is_transcript_sent_for_processing = False
 
                     logger.info(f"Starting new turn with turn_id: {self.current_turn_id}")
                     yield create_ws_data_packet("speech_started", self.meta_info)

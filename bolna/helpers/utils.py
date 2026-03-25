@@ -281,19 +281,26 @@ def format_messages(messages, use_system_prompt=False, include_tools=False):
 
 
 def enrich_context_with_time_variables(context_data, timezone):
-    """Inject current_date, current_time, timezone into context_data['recipient_data']
-    so users can reference {current_date}, {current_time}, {timezone} in prompts."""
+    """Inject time variables into context_data['recipient_data']
+    so users can reference {current_date}, {current_time}, etc. in prompts
+    and use current_hour, current_weekday, etc. in expression routing."""
     if context_data is None:
         return
     if isinstance(timezone, str):
         import pytz
         timezone = pytz.timezone(timezone)
-    current_date, current_time = get_date_time_from_timezone(timezone)
+    now = datetime.now(timezone)
     recipient_data = context_data.setdefault('recipient_data', {})
     if isinstance(recipient_data, dict):
-        recipient_data['current_date'] = current_date
-        recipient_data['current_time'] = current_time
+        recipient_data['current_date'] = now.strftime("%A, %B %d, %Y")
+        recipient_data['current_time'] = now.strftime("%I:%M:%S %p")
         recipient_data['timezone'] = str(timezone)
+        recipient_data['current_hour'] = now.hour
+        recipient_data['current_minute'] = now.minute
+        recipient_data['current_weekday'] = now.strftime('%A').lower()
+        recipient_data['current_day'] = now.day
+        recipient_data['current_month'] = now.month
+        recipient_data['current_year'] = now.year
 
 
 def update_prompt_with_context(prompt, context_data):
@@ -694,9 +701,9 @@ async def process_task_cancellation(asyncio_task, task_name):
 
 
 def get_date_time_from_timezone(timezone):
-    dt = datetime.now(timezone).strftime("%A, %B %d, %Y")
-    ts = datetime.now(timezone).strftime("%I:%M:%S %p")
-
+    now = datetime.now(timezone)
+    dt = now.strftime("%A, %B %d, %Y")
+    ts = now.strftime("%I:%M:%S %p")
     return dt, ts
 
 

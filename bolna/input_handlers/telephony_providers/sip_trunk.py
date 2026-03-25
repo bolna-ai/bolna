@@ -262,7 +262,7 @@ class SipTrunkInputHandler(TelephonyInputHandler):
             self._media_xoff = True
             if hasattr(self, "output_handler_ref") and self.output_handler_ref:
                 self.output_handler_ref.queue_full = True
-            logger.debug(f"MEDIA_XOFF for channel {self.channel_id}")
+            logger.info(f"MEDIA_XOFF for channel {self.channel_id}")
             return
         if event == "MEDIA_XON":
             self._media_xoff = False
@@ -276,17 +276,15 @@ class SipTrunkInputHandler(TelephonyInputHandler):
                         logger.exception("sip-trunk drain_local_queue failed: %s", exc)
 
                 task.add_done_callback(_on_drain_done)
-            logger.debug(f"MEDIA_XON for channel {self.channel_id}")
+            logger.info(f"MEDIA_XON for channel {self.channel_id}")
             return
         if event == "STATUS" or "MEDIA_BUFFERING_COMPLETED" in event:
             logger.debug(f"Asterisk control: {event}")
             return
         if event == "QUEUE_DRAINED" or "QUEUE_DRAINED" in event:
-            # Do not use QUEUE_DRAINED to clear is_audio_being_played or process marks.
-            # Asterisk can send QUEUE_DRAINED when it has accepted the bulk, before the
-            # caller has heard it. Rely only on the output handler's duration-based
-            # fallback so completion/hangup logic does not trigger mid-playback.
-            logger.debug(f"QUEUE_DRAINED for channel {self.channel_id} (playback-done handled by fallback)")
+            # At 1x pacing, playback completion is tracked by the output handler's
+            # send-loop drain detection — QUEUE_DRAINED is informational only.
+            logger.debug(f"QUEUE_DRAINED for channel {self.channel_id} (informational)")
             return
         if event or parsed:
             logger.debug(f"Asterisk control: {text} -> event={event}")

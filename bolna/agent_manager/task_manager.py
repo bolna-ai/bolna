@@ -747,6 +747,8 @@ class TaskManager(BaseManager):
             if self.task_config["tools_config"]["transcriber"] is not None:
                 transcriber_config = self.task_config["tools_config"]["transcriber"]
 
+                self.transcriber_provider = transcriber_config.get("provider", transcriber_config.get("model"))
+
                 # --- Multilingual pool path ---
                 if "multilingual" in transcriber_config:
                     multilingual = transcriber_config["multilingual"]
@@ -779,11 +781,15 @@ class TaskManager(BaseManager):
                             cls = SUPPORTED_TRANSCRIBER_MODELS.get(cfg["model"])
                         transcribers[label] = cls(provider, **cfg, **self.kwargs)
 
+                        if label == active_label:
+                            self.transcriber_provider = cfg.get("provider", cfg.get("model"))
+
                     self.tools["transcriber"] = TranscriberPool(
                         transcribers=transcribers,
                         shared_input_queue=self.audio_queue,
                         output_queue=self.transcriber_output_queue,
                         active_label=active_label,
+                        multilingual_config=multilingual
                     )
                     logger.info(f"TranscriberPool created with labels={list(transcribers.keys())}, active='{active_label}'")
                     return
@@ -855,20 +861,25 @@ class TaskManager(BaseManager):
                     cls = SUPPORTED_SYNTHESIZER_MODELS.get(provider_name)
                     synthesizers[label] = cls(**cfg, **provider_config, **synthesizer_kwargs, caching=caching)
 
-                # Use first synth's provider/voice for logging metadata
-                first_cfg = next(iter(multilingual.values()))
-                self.synthesizer_provider = first_cfg.get("provider", "unknown")
-                self.synthesizer_voice = first_cfg.get("provider_config", {}).get("voice", "unknown")
+                # Use active synth's provider/voice for logging metadata, and buffer_size
+                # Note that in the current state, buffer_size of other synth configs is ignored
+                active_cfg = synth_config
+                if active_label in multilingual:
+                    active_cfg = multilingual[active_label]
+
+                self.synthesizer_provider = active_cfg.get("provider", "unknown")
+                self.synthesizer_voice = active_cfg.get("provider_config", {}).get("voice", "unknown")
 
                 self.tools["synthesizer"] = SynthesizerPool(
                     synthesizers=synthesizers,
                     active_label=active_label,
+                    multilingual_config=multilingual
                 )
+
                 logger.info(f"SynthesizerPool created with labels={list(synthesizers.keys())}, active='{active_label}'")
 
                 if self.task_config["tools_config"]["llm_agent"] is not None and llm_config is not None:
-                    first_synth_cfg = next(iter(multilingual.values()))
-                    llm_config["buffer_size"] = first_synth_cfg.get('buffer_size')
+                    llm_config["buffer_size"] = active_cfg.get('buffer_size')
                 return
 
             # --- Single synthesizer path (apna normal path) ---
@@ -1170,6 +1181,8 @@ class TaskManager(BaseManager):
         try:
             response_heard = self.tools["input"].response_heard_by_user
             logger.info(f"sync_history: response_heard len={len(response_heard) if response_heard else 0}")
+            if response_heard:
+                logger.info(f"response_heard (last 10 chars): {response_heard[-10:]}")
 
             if not response_heard:
                 pending_marks = [{'mark_id': k, 'mark_data': v} for k, v in mark_events_data]
@@ -1219,7 +1232,9 @@ class TaskManager(BaseManager):
 
                     if played_text:
                         response_heard = ''.join(played_text)
+                        logger.info(f"Estimated played text (last 10 chars): {response_heard[-10:]}, len={len(response_heard)}")
                 else:
+                    logger.info("No pending content marks found to estimate played text")
                     # No pending content marks - response likely completed normally
                     return
 
@@ -1664,6 +1679,25 @@ class TaskManager(BaseManager):
 
         if called_fun == "switch_language":
             language_label = resp.get("language", "")
+
+            # If the requested language is already active, skip handoff and switch entirely
+            if language_label == self.language:
+                logger.info(f"switch_language: '{language_label}' is already the active language, skipping handoff and switch")
+                function_response = f"Already speaking in {language_label}, no switch needed"
+
+                textual_response = resp.get("textual_response", None)
+                if not textual_response:
+                    self.conversation_history.append_assistant(textual_response, tool_calls=resp["model_response"])
+                else:
+                    self.conversation_history.attach_tool_calls_to_last_response(resp["model_response"])
+                self.conversation_history.append_tool_result(resp.get("tool_call_id", ""), function_response)
+                convert_to_request_log(function_response, meta_info, None, "function_call", direction="response", run_id=self.run_id)
+
+                messages = self.conversation_history.get_copy()
+                await self.__do_llm_generation(messages, meta_info, next_step, should_bypass_synth=False, should_trigger_function_call=True)
+                self.execute_function_call_task = None
+                return
+
             # Only wait if audio is currently playing
             if not self._turn_audio_flushed.is_set():
                 await self.wait_for_current_message()
@@ -1781,6 +1815,10 @@ class TaskManager(BaseManager):
         if self.hangup_triggered or self.conversation_ended:
             logger.info(f"__do_llm_generation: Skipping — hangup_triggered={self.hangup_triggered}, conversation_ended={self.conversation_ended}")
             return
+
+        # Clear stale end_of_llm_stream from previous generation so only
+        # the final chunk of THIS generation carries the flag.
+        meta_info.pop("end_of_llm_stream", None)
 
         # Reset response tracking for new turn
         if self.generate_precise_transcript:
@@ -1957,7 +1995,7 @@ class TaskManager(BaseManager):
 
         if self.turn_based_conversation:
             self.history.append({"role": "user", "content": message['data']})
-        messages = copy.deepcopy(self.history)
+        messages = self.conversation_history.get_copy()
 
         # Request logs converted inside do_llm_generation for knowledgebase agent
         if not self.__is_knowledgebase_agent() and not self.__is_graph_agent():
@@ -2133,7 +2171,7 @@ class TaskManager(BaseManager):
 
         self.conversation_history.append_user(transcriber_message)
 
-        convert_to_request_log(message=transcriber_message, meta_info=meta_info, model=self.task_config["tools_config"]["transcriber"]["provider"], run_id=self.run_id)
+        convert_to_request_log(message=transcriber_message, meta_info=meta_info, model=self.transcriber_provider, run_id=self.run_id)
         if next_task == "llm":
             logger.info(f"Running llm Tasks")
             meta_info["origin"] = "transcriber"
@@ -2440,6 +2478,18 @@ class TaskManager(BaseManager):
             self.conversation_history.update_system_prompt(new_prompt)
             self.system_prompt['content'] = new_prompt
             logger.info(f"Switched system prompt to language '{label}'")
+
+        active_transcriber_info = self.tools.get("transcriber").get_active_transcriber_info() if isinstance(self.tools.get("transcriber"), TranscriberPool) else None
+        active_synthesizer_info = self.tools.get("synthesizer").get_active_synthesizer_info() if isinstance(self.tools.get("synthesizer"), SynthesizerPool) else None
+        if active_transcriber_info:
+            if "provider" in active_transcriber_info and active_transcriber_info["provider"]:
+                self.transcriber_provider = active_transcriber_info["provider"]
+        
+        if active_synthesizer_info:
+            if "provider" in active_synthesizer_info and active_synthesizer_info["provider"]:
+                self.synthesizer_provider = active_synthesizer_info["provider"]
+            if "voice" in active_synthesizer_info and active_synthesizer_info["voice"]:
+                self.synthesizer_voice = active_synthesizer_info["voice"]
 
     async def __listen_synthesizer(self):
         all_text_to_be_synthesized = []
@@ -2799,7 +2849,7 @@ class TaskManager(BaseManager):
                         logger.info(f"Waiting for hangup mark event ({time_since_hangup:.1f}s / {self.hangup_mark_event_timeout}s)")
                 continue
 
-            if self.tools["input"].is_audio_being_played_to_user():
+            if self.tools["input"].is_audio_being_played_to_user() or self.response_in_pipeline:
                 continue
 
             time_since_last_spoken_ai_word = (time.time() - self.last_transmitted_timestamp)
@@ -2830,7 +2880,7 @@ class TaskManager(BaseManager):
                     else:
                         meta_info={'io': self.tools["output"].get_provider(), "request_id": str(uuid.uuid4()), "cached": False, "sequence_id": -1, 'format': 'pcm', "message_category": "is_user_online_message", 'end_of_llm_stream': True}
                         await self._synthesize(create_ws_data_packet(user_online_message, meta_info= meta_info))
-                    self.history.append({'role': 'assistant', 'content': user_online_message})
+                    self.conversation_history.append_assistant(user_online_message, exclude_from_llm=True)
 
                 # Just in case we need to clear messages sent before
                 await self.tools["output"].handle_interruption()

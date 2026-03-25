@@ -86,7 +86,6 @@ class SarvamTranscriber(BaseTranscriber):
         self.turn_counter = 0
         self.turn_first_result_latency = None
         
-        self.is_transcript_sent_for_processing = False
         self.curr_message = ''
         self.finalized_transcript = ""
         self.interruption_signalled = False

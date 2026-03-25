@@ -212,3 +212,28 @@ class LogDirection(str, Enum):
     @classmethod
     def all_values(cls):
         return [d.value for d in cls]
+
+
+class ExpressionOperator(str, Enum):
+    EQ = "eq"
+    NEQ = "neq"
+    GT = "gt"
+    GTE = "gte"
+    LT = "lt"
+    LTE = "lte"
+    IN = "in"
+    NOT_IN = "not_in"
+    CONTAINS = "contains"
+    EXISTS = "exists"
+    NOT_EXISTS = "not_exists"
+
+
+class ExpressionLogic(str, Enum):
+    AND = "and"
+    OR = "or"
+
+
+class EdgeConditionType(str, Enum):
+    LLM = "llm"
+    EXPRESSION = "expression"
+    UNCONDITIONAL = "unconditional"
