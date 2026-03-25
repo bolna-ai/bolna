@@ -233,7 +233,6 @@ class StreamSynthesizer(BaseSynthesizer):
                 if audio is None:
                     continue
 
-            self._enrich_meta_info(self.meta_info, audio)
             self._stamp_mark_id(self.meta_info)
             yield create_ws_data_packet(audio, self.meta_info)
 
