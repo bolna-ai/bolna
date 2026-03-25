@@ -21,7 +21,7 @@ dynamic = ["dependencies"]
 requires-python = ">=3.10"
 
 [project.optional-dependencies]
-dev = ["pip-tools", "pytest", "pytest-asyncio", "ruff"]
+dev = ["pip-tools", "pre-commit", "pytest", "pytest-asyncio", "ruff"]
 
 [tool.setuptools]
 package-dir = {"bolna" = "bolna"}
