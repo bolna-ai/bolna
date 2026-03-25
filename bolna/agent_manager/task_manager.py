@@ -281,7 +281,7 @@ class TaskManager(BaseManager):
         self.interruption_manager = InterruptionManager()
 
         # Stores structured API call records for dashboard/backend persistence.
-        self.api_call_details = []
+        self.function_tool_api_call_details = []
         self.hangup_task = None
 
         self.conversation_config = None
@@ -524,7 +524,7 @@ class TaskManager(BaseManager):
             "response_body": None,
             "response_json": None,
         }
-        self.api_call_details.append(api_call_detail)
+        self.function_tool_api_call_details.append(api_call_detail)
         return api_call_detail
 
     @staticmethod
@@ -532,7 +532,16 @@ class TaskManager(BaseManager):
         if api_call_detail is None:
             return
 
-        api_call_detail["completed_at"] = datetime.now().isoformat()
+        completed_at = datetime.now()
+        api_call_detail["completed_at"] = completed_at.isoformat()
+        api_call_detail["latency_ms"] = None
+        started_at = api_call_detail.get("started_at")
+        if started_at:
+            try:
+                started_at_dt = datetime.fromisoformat(started_at)
+                api_call_detail["latency_ms"] = round((completed_at - started_at_dt).total_seconds() * 1000, 2)
+            except ValueError:
+                logger.warning(f"Could not compute api call latency from started_at={started_at}")
         if error is not None:
             api_call_detail["status"] = "error"
             api_call_detail["error"] = str(error)
@@ -3345,7 +3354,7 @@ class TaskManager(BaseManager):
                     "messages": self.history,
                     "conversation_time": time.time() - self.start_time,
                     "label_flow": self.label_flow,
-                    "api_call_details": copy.deepcopy(self.api_call_details),
+                    "function_tool_api_call_details": copy.deepcopy(self.function_tool_api_call_details),
                     "call_sid": self.call_sid,
                     "stream_sid": self.stream_sid,
                     "transcriber_duration": self.transcriber_duration,
