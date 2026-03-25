@@ -697,7 +697,7 @@ async def process_task_cancellation(asyncio_task, task_name):
         except asyncio.CancelledError:
             logger.info(f"{task_name} has been successfully cancelled.")
         except Exception as e:
-            logger.error(f"Error cancelling {task_name}: {e}")
+            logger.warning(f"Error cancelling {task_name}: {e}")
 
 
 def get_date_time_from_timezone(timezone):

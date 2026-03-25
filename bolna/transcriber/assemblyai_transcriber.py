@@ -168,7 +168,7 @@ class AssemblyAITranscriber(BaseTranscriber):
                 except asyncio.CancelledError:
                     logger.info(f"AssemblyAI {task_name} cancelled")
                 except Exception as e:
-                    logger.error(f"Error cancelling AssemblyAI {task_name}: {e}")
+                    logger.warning(f"Error cancelling AssemblyAI {task_name}: {e}")
 
         # Close websocket
         if self.websocket_connection is not None:

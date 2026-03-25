@@ -2101,13 +2101,10 @@ class TaskManager(BaseManager):
                 logger.error("unsupported task type: {}".format(self.task_config["task_type"]))
             self.llm_task = None
         except BolnaComponentError as e:
-            logger.error(f"Component error in llm: {e}", exc_info=True)
             self.response_in_pipeline = False
             await self._end_call_on_component_error(e, HangupReason.LLM_ERROR)
             raise
         except Exception as e:
-            traceback.print_exc()
-            logger.error(f"Something went wrong in llm: {e}")
             self.response_in_pipeline = False
             await self._end_call_on_component_error(
                 LLMError(str(e), provider=self.llm_config.get("provider", "unknown"), model=self.llm_config.get("model")),
@@ -2227,7 +2224,6 @@ class TaskManager(BaseManager):
 
         # Trigger graceful shutdown
         if not self.conversation_ended and not self._end_of_conversation_in_progress:
-            logger.error(f"Critical component failure, ending call: {hangup_detail} - {error}")
             self.hangup_detail = hangup_detail
             await self.__process_end_of_conversation()
 
@@ -2399,8 +2395,6 @@ class TaskManager(BaseManager):
             # Normal WebSocket closure (code 1000)
             pass
         except Exception as e:
-            traceback.print_exc()
-            logger.error(f"Error in transcriber {e}")
             provider = self.task_config["tools_config"]["transcriber"].get("provider")
             await self._end_call_on_component_error(
                 TranscriberError(str(e), provider=provider),
@@ -2557,7 +2551,6 @@ class TaskManager(BaseManager):
                     self._turn_audio_flushed.set()
                     break
                 except Exception as e:
-                    logger.error(f"Error in synthesizer: {e}", exc_info=True)
                     self._turn_audio_flushed.set()
                     await self._end_call_on_component_error(
                         SynthesizerError(str(e), provider=self.synthesizer_provider),
@@ -2571,7 +2564,6 @@ class TaskManager(BaseManager):
             logger.info("Synthesizer task cancelled outside loop.")
             #await self.handle_cancellation("Synthesizer task was cancelled outside loop.")
         except Exception as e:
-            logger.error(f"Unexpected error in __listen_synthesizer: {e}", exc_info=True)
             await self._end_call_on_component_error(
                 SynthesizerError(str(e), provider=self.synthesizer_provider),
                 HangupReason.SYNTHESIZER_ERROR
@@ -3067,12 +3059,11 @@ class TaskManager(BaseManager):
                         self.ambient_noise_task = asyncio.create_task(self.__start_transmitting_ambient_noise())
                 try:
                     await asyncio.gather(*tasks)
-                except asyncio.CancelledError as e:
-                    logger.error(f'task got cancelled {e}')
-                    traceback.print_exc()
+                except asyncio.CancelledError:
+                    pass
                 except Exception as e:
-                    traceback.print_exc()
-                    logger.error(f"Error: {e}")
+                    if not isinstance(e, BolnaComponentError):
+                        logger.error(f"Error: {e}")
                     if self.run_id and not self._error_logged:
                         if isinstance(e, BolnaComponentError):
                             error_msg = format_error_message(e.component, e.provider or e.model or "-", str(e))
@@ -3122,7 +3113,6 @@ class TaskManager(BaseManager):
                 except BolnaComponentError:
                     raise
                 except Exception as e:
-                    logger.error(f"Could not do llm call: {e}")
                     raise
 
         except asyncio.CancelledError as e:
@@ -3134,8 +3124,8 @@ class TaskManager(BaseManager):
         except Exception as e:
             # Cancel all tasks on error
             error_message = str(e)
-            logger.error(f"Exception in task manager run: {error_message}")
-            traceback.print_exc()
+            if not isinstance(e, BolnaComponentError):
+                logger.error(f"Exception in task manager run: {error_message}")
 
             # Log call-breaking exception to CSV trace with component attribution (skip if already logged)
             if self.run_id and not self._error_logged:
