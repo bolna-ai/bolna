@@ -95,7 +95,6 @@ class SmallestTranscriber(BaseTranscriber):
 
         # Transcript state management
         self.final_transcript = ""
-        self.is_transcript_sent_for_processing = False
         self.interruption_signalled = False
 
         # Turn tracking

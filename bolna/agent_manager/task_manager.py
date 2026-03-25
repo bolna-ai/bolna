@@ -2849,7 +2849,7 @@ class TaskManager(BaseManager):
                         logger.info(f"Waiting for hangup mark event ({time_since_hangup:.1f}s / {self.hangup_mark_event_timeout}s)")
                 continue
 
-            if self.tools["input"].is_audio_being_played_to_user():
+            if self.tools["input"].is_audio_being_played_to_user() or self.response_in_pipeline:
                 continue
 
             time_since_last_spoken_ai_word = (time.time() - self.last_transmitted_timestamp)

@@ -106,7 +106,6 @@ class GladiaTranscriber(BaseTranscriber):
         # Transcript state management
         self.current_transcript = ""
         self.final_transcript = ""
-        self.is_transcript_sent_for_processing = False
         self.interruption_signalled = False
 
         # Turn tracking

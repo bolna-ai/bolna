@@ -60,7 +60,6 @@ class AssemblyAITranscriber(BaseTranscriber):
         # Message states for turn management
         self.session_id = None
         self.current_transcript = ""
-        self.is_transcript_sent_for_processing = False
         self.websocket_connection = None
         self.connection_authenticated = False
         self.current_turn_start_time = None
