@@ -308,7 +308,7 @@ class DeepgramTranscriber(BaseTranscriber):
                 except asyncio.CancelledError:
                     logger.info(f"Deepgram {task_name} cancelled")
                 except Exception as e:
-                    logger.error(f"Error cancelling Deepgram {task_name}: {e}")
+                    logger.warning(f"Error cancelling Deepgram {task_name}: {e}")
 
         # Close websocket
         if self.websocket_connection is not None:

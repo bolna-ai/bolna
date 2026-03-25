@@ -464,7 +464,7 @@ class DeepgramSynthesizer(BaseSynthesizer):
             except asyncio.CancelledError:
                 logger.info("Deepgram sender task was successfully cancelled during cleanup.")
             except Exception as e:
-                logger.error(f"Error cancelling sender task: {e}")
+                logger.warning(f"Error cancelling sender task: {e}")
 
         if self.websocket_holder["websocket"]:
             try:

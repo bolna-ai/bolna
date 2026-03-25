@@ -267,7 +267,7 @@ class ElevenLabsTranscriber(BaseTranscriber):
                 except asyncio.CancelledError:
                     logger.info(f"ElevenLabs {task_name} cancelled")
                 except Exception as e:
-                    logger.error(f"Error cancelling ElevenLabs {task_name}: {e}")
+                    logger.warning(f"Error cancelling ElevenLabs {task_name}: {e}")
 
         # Close websocket
         if self.websocket_connection is not None:
