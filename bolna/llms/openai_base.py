@@ -157,6 +157,7 @@ class OpenAICompatibleLLM(BaseLLM):
         latency_data = None
         service_tier = None
         llm_host = getattr(self, "llm_host", None)
+        response_usage = None
 
         try:
             stream = await self._responses_client.responses.create(**create_kwargs)
@@ -238,6 +239,8 @@ class OpenAICompatibleLLM(BaseLLM):
                 if hasattr(event.response, 'id'):
                     self.previous_response_id = event.response.id
                 service_tier = service_tier or getattr(event.response, 'service_tier', None)
+                if hasattr(event.response, 'usage') and event.response.usage:
+                    response_usage = event.response.usage
                 break
 
         if latency_data:
@@ -295,10 +298,22 @@ class OpenAICompatibleLLM(BaseLLM):
 
                 yield LLMStreamChunk(data=api_call_payload, end_of_stream=False, latency=latency_data, is_function_call=True)
 
+        # Extract actual token counts from response usage
+        usage_kwargs = {}
+        if response_usage:
+            usage_kwargs['input_tokens'] = getattr(response_usage, 'input_tokens', None)
+            usage_kwargs['output_tokens'] = getattr(response_usage, 'output_tokens', None)
+            output_details = getattr(response_usage, 'output_tokens_details', None)
+            if output_details:
+                usage_kwargs['reasoning_tokens'] = getattr(output_details, 'reasoning_tokens', None)
+            input_details = getattr(response_usage, 'input_tokens_details', None)
+            if input_details:
+                usage_kwargs['cached_tokens'] = getattr(input_details, 'cached_tokens', None)
+
         if synthesize:
-            yield LLMStreamChunk(data=buffer, end_of_stream=True, latency=latency_data)
+            yield LLMStreamChunk(data=buffer, end_of_stream=True, latency=latency_data, **usage_kwargs)
         else:
-            yield LLMStreamChunk(data=answer, end_of_stream=True, latency=latency_data)
+            yield LLMStreamChunk(data=answer, end_of_stream=True, latency=latency_data, **usage_kwargs)
 
         self.started_streaming = False
 
@@ -349,6 +364,15 @@ class OpenAICompatibleLLM(BaseLLM):
                     "llm_host": llm_host,
                     "service_tier": getattr(response, 'service_tier', None),
                 }
+                if hasattr(response, 'usage') and response.usage:
+                    metadata['input_tokens'] = getattr(response.usage, 'input_tokens', None)
+                    metadata['output_tokens'] = getattr(response.usage, 'output_tokens', None)
+                    output_details = getattr(response.usage, 'output_tokens_details', None)
+                    if output_details:
+                        metadata['reasoning_tokens'] = getattr(output_details, 'reasoning_tokens', None)
+                    input_details = getattr(response.usage, 'input_tokens_details', None)
+                    if input_details:
+                        metadata['cached_tokens'] = getattr(input_details, 'cached_tokens', None)
                 return res, metadata
             return res
         except Exception as e:

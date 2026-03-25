@@ -36,3 +36,7 @@ class LLMStreamChunk(BaseModel):
     is_function_call: bool = False
     function_name: Optional[str] = None
     function_message: Optional[Union[str, dict]] = None
+    input_tokens: Optional[int] = None
+    output_tokens: Optional[int] = None
+    reasoning_tokens: Optional[int] = None
+    cached_tokens: Optional[int] = None
