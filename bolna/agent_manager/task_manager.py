@@ -512,7 +512,6 @@ class TaskManager(BaseManager):
             "request_params": copy.deepcopy(api_params if api_params is not None else runtime_args),
             "runtime_args": copy.deepcopy(runtime_args),
             "headers": self._sanitize_api_call_headers(copy.deepcopy(headers)),
-            "llm_model_args": copy.deepcopy(model_args),
             "meta": {
                 "request_id": meta_info.get("request_id"),
                 "sequence_id": meta_info.get("sequence_id"),
