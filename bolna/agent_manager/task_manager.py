@@ -279,6 +279,9 @@ class TaskManager(BaseManager):
 
         # Initialize InterruptionManager with defaults (will be reconfigured for task_id == 0)
         self.interruption_manager = InterruptionManager()
+        
+        # setup request logs
+        self.request_logs = []
 
         # Stores structured API call records for dashboard/backend persistence.
         self.function_tool_api_call_details = []
