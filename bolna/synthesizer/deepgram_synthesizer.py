@@ -142,6 +142,9 @@ class DeepgramSynthesizer(BaseSynthesizer):
             # Wait for WebSocket connection to be established
             ws_wait_start = time.perf_counter()
             while self.websocket_holder["websocket"] is None or self.websocket_holder["websocket"].state is websockets.protocol.State.CLOSED:
+                if self.conversation_ended or self.connection_error:
+                    logger.info(f"Aborting deepgram sender wait: conversation_ended={self.conversation_ended} connection_error={self.connection_error}")
+                    return
                 logger.info("Waiting for Deepgram TTS WebSocket connection to be established...")
                 await asyncio.sleep(0.5)
             ws_wait_time = (time.perf_counter() - ws_wait_start) * 1000
@@ -186,6 +189,7 @@ class DeepgramSynthesizer(BaseSynthesizer):
     async def receiver(self):
         """Receive audio chunks from Deepgram WebSocket"""
         audio_chunk_count = 0
+        not_connected_since = None
         while True:
             try:
                 if self.conversation_ended:
@@ -195,9 +199,18 @@ class DeepgramSynthesizer(BaseSynthesizer):
                         self.websocket_holder["websocket"].state is websockets.protocol.State.CLOSED):
                     if self.connection_error:
                         return
+                    now = time.perf_counter()
+                    if not_connected_since is None:
+                        not_connected_since = now
+                    elif now - not_connected_since > 30:
+                        logger.error("Deepgram receiver: WebSocket never connected after 30s, giving up.")
+                        self.connection_error = self.connection_error or "WebSocket never connected"
+                        return
                     logger.info("Deepgram WebSocket is not connected, skipping receive.")
                     await asyncio.sleep(0.10)
                     continue
+                else:
+                    not_connected_since = None
 
                 recv_start = time.perf_counter()
                 response = await self.websocket_holder["websocket"].recv()
