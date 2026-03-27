@@ -2914,7 +2914,8 @@ class TaskManager(BaseManager):
                              "sequence_id": -1, 'format': self.task_config["tools_config"]["output"]["format"],
                              'text': text, 'end_of_llm_stream': True}
                 self.stream_sid_ts = time.time() * 1000
-                self.conversation_history.append_welcome_message(text)
+                if text and text.strip():
+                    self.conversation_history.append_welcome_message(text)
                 await self._synthesize(create_ws_data_packet(text, meta_info=meta_info))
                 return
 
@@ -2934,7 +2935,8 @@ class TaskManager(BaseManager):
                         self.stream_sid = stream_sid
                         text = self.kwargs.get('agent_welcome_message', None)
                         meta_info = {'io': self.tools["output"].get_provider(), 'message_category': 'agent_welcome_message', 'stream_sid': stream_sid, "request_id": str(uuid.uuid4()), "cached": True, "sequence_id": -1, 'format': self.task_config["tools_config"]["output"]["format"], 'text': text, 'end_of_llm_stream': True}
-                        self.conversation_history.append_welcome_message(text)
+                        if text and text.strip():
+                            self.conversation_history.append_welcome_message(text)
                         if self.turn_based_conversation:
                             meta_info['type'] = 'text'
                             bos_packet = create_ws_data_packet("<beginning_of_stream>", meta_info)
