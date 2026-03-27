@@ -23,7 +23,7 @@ class InterruptionManager:
         self.curr_sequence_id: int = 0
         self.sequence_ids: Set[int] = {-1}
 
-        # Increments only on user barge-in
+        # Turn tracking
         self.turn_id: int = 0
 
         # Timing state
@@ -77,14 +77,17 @@ class InterruptionManager:
         - "BLOCK" - audio should be discarded (invalid/cancelled sequence)
         - "WAIT" - audio should be delayed (grace period active)
         """
+        # Check 1: Invalid sequence - discard
         if sequence_id not in self.sequence_ids:
             return "BLOCK"
 
+        # Check 2: User is speaking - hold audio until they stop
+        # Only invalid sequences (from real interruptions) get hard BLOCK above
         if self.callee_speaking:
             logger.info(f"Audio status=WAIT - user is speaking")
             return "WAIT"
 
-        # Skip grace period for first 2 turns to avoid welcome message latency
+        # Check 3: Grace period (only after first 2 turns to avoid latency on welcome)
         if history_length > 2:
             time_since_utterance_end = self.get_time_since_utterance_end()
             if time_since_utterance_end != -1 and time_since_utterance_end < self.incremental_delay:
