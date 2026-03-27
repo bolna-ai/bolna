@@ -3014,6 +3014,8 @@ class TaskManager(BaseManager):
                     self.call_hangup_message_config = update_prompt_with_context(self.call_hangup_message_config, self.context_data)
 
             agent_welcome_message = self.kwargs.get("agent_welcome_message", "")
+            self.conversation_history.append_welcome_message(agent_welcome_message) # First append then alter if required
+
             agent_welcome_message = update_prompt_with_context(agent_welcome_message, self.context_data)
             logger.info(f"Updated agent welcome message after context data replacement - {agent_welcome_message}")
             self.kwargs["agent_welcome_message"] = agent_welcome_message
