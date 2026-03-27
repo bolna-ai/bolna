@@ -481,9 +481,29 @@ class TaskManager(BaseManager):
         self.conversation_history._interim = value
 
     @property
+    def language(self) -> str:
+        """Active language code.
+
+        Returns the language-detector's result when detection has completed
+        (non-multilingual path only: detection is disabled for multilingual
+        pools, so dominant_language is always None). Falls back to the
+        configured/switched language otherwise.
+        """
+        detector = getattr(self, 'language_detector', None)
+        if detector is not None:
+            detected = detector.dominant_language
+            if detected:
+                return detected
+        return self._language
+
+    @language.setter
+    def language(self, value: str):
+        logger.info(f"Setting base language to {value}")
+        self._language = value
+
+    @property
     def call_hangup_message(self):
-        detected_lang = self.language_detector.dominant_language if hasattr(self, 'language_detector') else None
-        return select_message_by_language(self.call_hangup_message_config, detected_lang)
+        return select_message_by_language(self.call_hangup_message_config, self.language)
 
     def __is_multiagent(self):
         if self.task_config["task_type"] == "webhook":
@@ -754,6 +774,8 @@ class TaskManager(BaseManager):
                     multilingual = transcriber_config["multilingual"]
                     active_label = transcriber_config.get("active", DEFAULT_LANGUAGE_CODE)
                     self.language = active_label
+                    if hasattr(self, 'language_detector'):
+                        self.language_detector.set_enabled_status(False)  # Disable language detection when using multilingual pool
 
                     if self.turn_based_conversation:
                         provider = "playground"
@@ -835,6 +857,8 @@ class TaskManager(BaseManager):
             if "multilingual" in synth_config:
                 multilingual = synth_config["multilingual"]
                 active_label = synth_config.get("active", DEFAULT_LANGUAGE_CODE)
+                if hasattr(self, 'language_detector'):
+                    self.language_detector.set_enabled_status(False)  # Disable language detection when using multilingual pool
 
                 # Telephony providers expect mulaw@8000Hz — force use_mulaw for all synths in the pool
                 output_provider = self.task_config["tools_config"]["output"]["provider"]
@@ -1734,6 +1758,7 @@ class TaskManager(BaseManager):
                 function_response = f"Failed to switch language: {e}"
 
             textual_response = resp.get("textual_response", None)
+            self.check_if_user_online = self.conversation_config.get("check_if_user_online", True)
             if not textual_response:
                 self.conversation_history.append_assistant(textual_response, tool_calls=resp["model_response"])
             else:
@@ -1834,9 +1859,7 @@ class TaskManager(BaseManager):
         messages = self._inject_language_instruction(messages)
 
         # Pass detected language to LLM for pre_call_message selection
-        detected_lang = self.language_detector.dominant_language
-        if detected_lang:
-            meta_info['detected_language'] = detected_lang
+        meta_info['detected_language'] = self.language
 
         try:
             async for llm_message in self.tools['llm_agent'].generate(messages, synthesize=synthesize, meta_info=meta_info):
@@ -1961,8 +1984,7 @@ class TaskManager(BaseManager):
 
                     # A hack as during the 'await' part control passes to llm streaming function parameters
                     # So we have to make sure we've commited the filler message
-                    detected_lang = self.language_detector.dominant_language or self.language
-                    filler_message = compute_function_pre_call_message(detected_lang, function_tool, function_tool_message)
+                    filler_message = compute_function_pre_call_message(self.language, function_tool, function_tool_message)
                     #filler_message = PRE_FUNCTION_CALL_MESSAGE.get(self.language, PRE_FUNCTION_CALL_MESSAGE[DEFAULT_LANGUAGE_CODE])
                     if text_chunk == filler_message:
                         logger.info("Got a pre function call message")
@@ -1981,8 +2003,7 @@ class TaskManager(BaseManager):
                 model=self.llm_config.get("model")
             ) from e
 
-        detected_lang = self.language_detector.dominant_language or self.language
-        filler_message = compute_function_pre_call_message(detected_lang, function_tool, function_tool_message)
+        filler_message = compute_function_pre_call_message(self.language, function_tool, function_tool_message)
         if self.stream and llm_response != filler_message:
             self.__store_into_history(meta_info, messages, llm_response, should_trigger_function_call=should_trigger_function_call, input_tokens=actual_input_tokens, output_tokens=actual_output_tokens, reasoning_tokens=actual_reasoning_tokens, cached_tokens=actual_cached_tokens)
         elif not self.stream:
@@ -2871,8 +2892,7 @@ class TaskManager(BaseManager):
                 self.asked_if_user_is_still_there = True
 
                 if self.check_if_user_online:
-                    detected_lang = self.language_detector.dominant_language
-                    user_online_message = select_message_by_language(self.check_user_online_message_config, detected_lang)
+                    user_online_message = select_message_by_language(self.check_user_online_message_config, self.language)
 
                     if self.generate_precise_transcript:
                         self.tools["input"].reset_response_heard_by_user()
