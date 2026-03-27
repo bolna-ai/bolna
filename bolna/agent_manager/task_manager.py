@@ -685,6 +685,7 @@ class TaskManager(BaseManager):
                         self.tools["input"].is_welcome_message_played = True
                     else:
                         self.tools["input"].update_is_audio_being_played(True)
+                        self.conversation_history.append_welcome_message(text)
                         convert_to_request_log(message=text, meta_info=meta_info, component=LogComponent.SYNTHESIZER, direction=LogDirection.RESPONSE, model=self.synthesizer_provider, is_cached=meta_info.get("is_cached", False), engine=self.tools['synthesizer'].get_engine(), run_id=self.run_id)
                         await self.tools["output"].handle(message)
                         try:
@@ -1097,10 +1098,7 @@ class TaskManager(BaseManager):
                 'content': ""
             }
 
-        welcome_msg = ""
-        if task_id == 0 and self.kwargs.get('agent_welcome_message'):
-            welcome_msg = self.kwargs['agent_welcome_message']
-        self.conversation_history.setup_system_prompt(self.system_prompt, welcome_msg)
+        self.conversation_history.setup_system_prompt(self.system_prompt)
 
         self.multilingual_prompts = {}
         raw_multilingual = prompt_responses.get(current_task, {}).get('multilingual_prompts', {})
