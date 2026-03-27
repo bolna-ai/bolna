@@ -192,6 +192,9 @@ class SmallestSynthesizer(BaseSynthesizer):
 
             # Ensure the WebSocket connection is established
             while self.websocket_holder["websocket"] is None or self.websocket_holder["websocket"].state is websockets.protocol.State.CLOSED:
+                if self.conversation_ended or self.connection_error:
+                    logger.info(f"Aborting smallest sender wait: conversation_ended={self.conversation_ended} connection_error={self.connection_error}")
+                    return
                 logger.info("Waiting for smallest ws connection to be established...")
                 await asyncio.sleep(1)
 
@@ -224,6 +227,7 @@ class SmallestSynthesizer(BaseSynthesizer):
         return payload
 
     async def receiver(self):
+        not_connected_since = None
         while True:
             try:
                 if self.conversation_ended:
@@ -233,9 +237,18 @@ class SmallestSynthesizer(BaseSynthesizer):
                         self.websocket_holder["websocket"].state is websockets.protocol.State.CLOSED):
                     if self.connection_error:
                         return
+                    now = time.perf_counter()
+                    if not_connected_since is None:
+                        not_connected_since = now
+                    elif now - not_connected_since > 30:
+                        logger.error("Smallest receiver: WebSocket never connected after 30s, giving up.")
+                        self.connection_error = self.connection_error or "WebSocket never connected"
+                        return
                     logger.info("WebSocket is not connected, skipping receive.")
                     await asyncio.sleep(0.1)
                     continue
+                else:
+                    not_connected_since = None
 
                 response = await self.websocket_holder["websocket"].recv()
                 data = json.loads(response)
@@ -259,14 +272,20 @@ class SmallestSynthesizer(BaseSynthesizer):
             additional_headers = {
                 'Authorization': 'Token {}'.format(self.api_key)
             }
-            websocket = await websockets.connect(websocket_url, additional_headers=additional_headers)
+            websocket = await asyncio.wait_for(
+                websockets.connect(websocket_url, additional_headers=additional_headers),
+                timeout=10.0
+            )
             if not self.connection_time:
                 self.connection_time = round((time.perf_counter() - start_time) * 1000)
 
             logger.info(f"Connected to {self.ws_url}")
             return websocket
+        except asyncio.TimeoutError:
+            logger.error("Timeout while connecting to Smallest websocket")
+            return None
         except Exception as e:
-            logger.info(f"Failed to connect: {e}")
+            logger.error(f"Failed to connect to Smallest: {e}")
             return None
 
     async def monitor_connection(self):
