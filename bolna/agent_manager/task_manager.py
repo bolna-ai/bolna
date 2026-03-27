@@ -2322,6 +2322,10 @@ class TaskManager(BaseManager):
                             logger.info(f"Condition for interruption hit")
                             self.interruption_manager.on_user_speech_started()
                             self.interruption_manager.on_interruption_triggered()
+                            # Tag the ASR turn that was active at interrupt time so
+                            # we can annotate turn_latencies with was_interrupted=True
+                            _asr_turn_id = getattr(self.tools.get("transcriber"), "current_turn_id", None)
+                            self.interruption_manager.record_interrupted_transcriber_turn(_asr_turn_id)
                             self.tools["input"].update_is_audio_being_played(False)
                             await self.__cleanup_downstream_tasks()
                         # User continuation detection: cancel pending response if user continues within grace period
@@ -2337,6 +2341,9 @@ class TaskManager(BaseManager):
 
                             if has_pending_response and within_grace_period and interim_transcript_len > self.number_of_words_for_interruption:
                                 logger.info(f"User continuation detected ({interim_transcript_len} words within {time_since_utterance_end:.0f}ms), canceling pending response")
+                                # on_agent_interrupted_user MUST come before reset_utterance_end_time
+                                # so it can still read the previous turn's utterance_end_time.
+                                self.interruption_manager.on_agent_interrupted_user()
                                 self.interruption_manager.reset_utterance_end_time()
                                 await self.__cleanup_downstream_tasks()
                         elif (self.tools["input"].is_audio_being_played_to_user() or self.response_in_pipeline) and self.tools["input"].welcome_message_played() and self.number_of_words_for_interruption != 0:
@@ -2761,6 +2768,10 @@ class TaskManager(BaseManager):
                         self.tools["input"].update_is_audio_being_played(True)
                         self.response_in_pipeline = False
                         await self.tools["output"].handle(message)
+                        # Track when agent audio first starts flowing for this sequence.
+                        # Deduplicated inside on_agent_speech_started — safe to call per chunk.
+                        if sequence_id is not None:
+                            self.interruption_manager.on_agent_speech_started(sequence_id)
                         try:
                             duration = calculate_audio_duration(len(message["data"]), self.sampling_rate, format=message['meta_info']['format'])
                             self.conversation_recording['output'].append({'data': message['data'], "start_time": time.time(), "duration": duration})
@@ -2792,9 +2803,13 @@ class TaskManager(BaseManager):
                 if should_continue_outer_loop:
                     continue
 
-                # Signal that the turn's audio has been fully flushed to the output
+                # Signal that the turn's audio has been fully flushed to the output.
+                # This is reached only in the SEND path (BLOCK path breaks before here),
+                # so it is a reliable signal that a complete response was delivered.
                 if message['meta_info'].get("end_of_llm_stream", False) or message['meta_info'].get("end_of_synthesizer_stream", False):
                     self._turn_audio_flushed.set()
+                    self.interruption_manager.on_successful_response_delivered()
+                    self.interruption_manager.on_agent_speech_ended()
                     # Reset asked_if_user_is_still_there flag after any message except is_user_online_message
                     if message['meta_info'].get('message_category', '') != 'is_user_online_message':
                         self.asked_if_user_is_still_there = False
@@ -3206,6 +3221,14 @@ class TaskManager(BaseManager):
                 self.transcriber_latencies.turn_latencies = self.tools["transcriber"].turn_latencies
                 self.synthesizer_latencies.turn_latencies = self.tools["synthesizer"].turn_latencies
 
+                # Annotate each transcriber turn with was_interrupted so callers
+                # can see which ASR turns had a user barge-in without cross-referencing
+                # the separate interruption_events list.
+                _interrupted_ids = self.interruption_manager.interrupted_transcriber_turn_ids
+                for _turn in self.transcriber_latencies.turn_latencies:
+                    _tid = _turn.get("turn_id") or _turn.get("sequence_id")
+                    _turn["was_interrupted"] = _tid in _interrupted_ids if _tid is not None else False
+
                 # Collect language detection latency if available
                 if hasattr(self, 'language_detector') and self.language_detector.latency_data:
                     self.llm_latencies.other_latencies.append(self.language_detector.latency_data)
@@ -3227,7 +3250,10 @@ class TaskManager(BaseManager):
                         "rag_latencies": self.rag_latencies,
                         "routing_latencies": self.routing_latencies,
                         "welcome_message_sent_ts": None,
-                        "stream_sid_ts": None
+                        "stream_sid_ts": None,
+                        "interruption_stats": self.interruption_manager.get_interruption_stats(
+                            self.conversation_start_init_ts
+                        ),
                     },
                     "hangup_detail": self.hangup_detail
                 }
