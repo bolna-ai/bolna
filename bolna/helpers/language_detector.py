@@ -66,7 +66,7 @@ class LanguageDetector:
     def set_enabled_status(self, enabled: bool):
         """Enable or disable language detection."""
         self.enabled = enabled
-        logger.info(f"[DEBUG] Language detection enabled set to {enabled}")
+        logger.info(f"Language detection enabled set to {enabled}")
         if not enabled:
             self._transcripts = []
             self._result = None
