@@ -23,7 +23,7 @@ class InterruptionManager:
         self.curr_sequence_id: int = 0
         self.sequence_ids: Set[int] = {-1}
 
-        # Turn tracking — turn_id increments only on user barge-in
+        # Increments only on user barge-in
         self.turn_id: int = 0
 
         # Timing state
@@ -40,56 +40,24 @@ class InterruptionManager:
         )
         self.minimum_wait_duration: int = minimum_wait_duration
 
-        # ── Live interruption counters ────────────────────────────────────────
-        # Incremented in on_interruption_triggered() — user said N+ words while
-        # agent audio was playing. Equals turn_id at end of call.
+        # Live interruption counters
         self.user_interrupted_agent_count: int = 0
-
-        # Incremented in on_agent_interrupted_user() — agent generated a response
-        # before user finished; cancelled in the grace-period window.
         self.agent_interrupted_user_count: int = 0
-
-        # How many times the agent delivered a full response after an interruption.
-        # barge_in_recovery_rate = barge_in_recovery_count / user_interrupted_agent_count
-        # Hamming benchmark: >90% good, 80–90% warning, <80% critical.
         self.barge_in_recovery_count: int = 0
-
-        # True from any interruption until on_successful_response_delivered() fires.
         self._awaiting_recovery: bool = False
 
-        # Per-event list. Raw epoch-second timestamps; converted to call-relative
-        # ms in get_interruption_stats() using conversation_start_init_ts.
+        # Per-event records; timestamps converted to call-relative ms in get_interruption_stats()
         self.interruption_events: List[Dict] = []
+        self._open_event: Optional[Dict] = None  # latest event awaiting user_end_s
 
-        # Points at the latest open event whose user_end_s is not yet filled.
-        # Closed by on_user_speech_ended() once the utterance finishes.
-        self._open_event: Optional[Dict] = None
-
-        # Transcriber-level turn IDs (from the ASR provider's own counter) that
-        # were active when on_interruption_triggered() fired. Used to annotate
-        # transcriber_latencies.turn_latencies with was_interrupted=True at call end.
+        # ASR turn IDs active at interruption time; used to annotate was_interrupted on turn_latencies
         self.interrupted_transcriber_turn_ids: Set = set()
 
-        # ── Talk-to-listen ratio (Gong benchmark: agent ~43%, user ~57%) ─────
-        # Cumulative user speaking time — accumulated each time on_user_speech_ended()
-        # fires, using callee_speaking_start_time → now.
+        # Speaking time accumulators (talk-to-listen ratio)
         self._total_user_speaking_ms: float = 0.0
-
-        # Cumulative agent speaking time — accumulated from the first SENT audio
-        # chunk of each sequence_id to either end_of_synthesizer_stream (clean end)
-        # or on_interruption_triggered() (cut short by user barge-in).
         self._total_agent_speaking_ms: float = 0.0
-
-        # Wall-clock epoch of when the current agent audio sequence started flowing
-        # through the SEND path. -1 when agent is not speaking.
-        self._agent_speaking_start_time: float = -1
-
-        # Deduplication guard — on_agent_speech_started() is a no-op if the
-        # sequence_id has not changed (called per audio chunk, not once per turn).
-        self._last_sent_sequence_id: Optional[int] = None
-
-        # Longest single agent monologue duration in ms.
-        # Gong: long monologues correlate with lower engagement / more interruptions.
+        self._agent_speaking_start_time: float = -1  # -1 when agent not speaking
+        self._last_sent_sequence_id: Optional[int] = None  # dedup guard for on_agent_speech_started
         self.longest_agent_monologue_ms: float = 0.0
 
         logger.info(
@@ -109,16 +77,14 @@ class InterruptionManager:
         - "BLOCK" - audio should be discarded (invalid/cancelled sequence)
         - "WAIT" - audio should be delayed (grace period active)
         """
-        # Check 1: Invalid sequence - discard
         if sequence_id not in self.sequence_ids:
             return "BLOCK"
 
-        # Check 2: User is speaking - hold audio until they stop
         if self.callee_speaking:
             logger.info(f"Audio status=WAIT - user is speaking")
             return "WAIT"
 
-        # Check 3: Grace period (only after first 2 turns to avoid latency on welcome)
+        # Skip grace period for first 2 turns to avoid welcome message latency
         if history_length > 2:
             time_since_utterance_end = self.get_time_since_utterance_end()
             if time_since_utterance_end != -1 and time_since_utterance_end < self.incremental_delay:
@@ -186,11 +152,8 @@ class InterruptionManager:
     def on_user_speech_ended(self, update_utterance_time: bool = True) -> None:
         """Called when user stops speaking (speech_final / UtteranceEnd).
 
-        Args:
-            update_utterance_time: If True (default), updates utterance_end_time
-                to start a new grace period. Pass False when the speech was ignored
-                (false interruption) or redundant (late UtteranceEnd) so that the
-                grace period stays anchored to the last real user turn.
+        update_utterance_time=False keeps the grace period anchored to the last
+        real turn (use for false interruptions or late UtteranceEnd events).
         """
         self.callee_speaking = False
         self.let_remaining_audio_pass_through = True
@@ -200,14 +163,9 @@ class InterruptionManager:
         if update_utterance_time:
             self.utterance_end_time = now_s * 1000
 
-        # Accumulate user speaking duration regardless of update_utterance_time —
-        # the user was genuinely speaking even if the turn is a false interruption.
         if self.callee_speaking_start_time > 0:
             self._total_user_speaking_ms += (now_s - self.callee_speaking_start_time) * 1000
 
-        # Close any open interruption event that is still waiting for user_end_s.
-        # This covers user_interrupted_agent events (user_end_s not known at
-        # barge-in time) and any agent_interrupted_user continuation events.
         if self._open_event is not None and self._open_event.get("user_end_s") is None:
             self._open_event["user_end_s"] = now_s
             self._open_event = None
@@ -217,49 +175,27 @@ class InterruptionManager:
     # ── Interruption event callbacks ──────────────────────────────────────────
 
     def on_interruption_triggered(self) -> None:
-        """Called when the user barge-in cleanup is triggered.
-
-        - Increments turn_id and user_interrupted_agent_count.
-        - Opens a per-event record with user_start_s from callee_speaking_start_time
-          (already set by on_user_speech_started). user_end_s is filled later by
-          on_user_speech_ended() once the utterance finishes.
-        """
+        """User barged in while agent was speaking. user_end_s filled later by on_user_speech_ended()."""
         self.turn_id += 1
         self.user_interrupted_agent_count += 1
         self._awaiting_recovery = True
-
-        # If agent was mid-speech when the barge-in fired, close out that
-        # monologue segment so we don't double-count it in on_agent_speech_ended().
         self._finalize_agent_speaking_session()
-
         self.invalidate_pending_responses()
 
         event: Dict = {
             "type": "user_interrupted_agent",
             "user_start_s": self.callee_speaking_start_time if self.callee_speaking_start_time > 0 else None,
-            "user_end_s": None,  # filled by on_user_speech_ended()
+            "user_end_s": None,
             "recovery_completed": False,
         }
         self.interruption_events.append(event)
         self._open_event = event
 
-        logger.info(
-            f"Interruption triggered — turn_id={self.turn_id}, "
-            f"user_interrupted_agent_count={self.user_interrupted_agent_count}"
-        )
+        logger.info(f"Interruption triggered — turn_id={self.turn_id}, user_interrupted_agent_count={self.user_interrupted_agent_count}")
 
     def on_agent_interrupted_user(self) -> None:
-        """Called when the agent generated a premature response that was
-        cancelled because the user continued speaking within the grace period.
-
-        IMPORTANT: must be called BEFORE reset_utterance_end_time() in
-        task_manager so that utterance_end_time still holds the previous
-        turn's end — that is the boundary where the agent incorrectly decided
-        to respond.
-
-        Timestamps recorded:
-          user_start_s = callee_speaking_start_time  (user's re-start)
-          user_end_s   = utterance_end_time / 1000   (previous turn end, still valid)
+        """Agent responded prematurely and was cancelled within the grace period.
+        Must be called BEFORE reset_utterance_end_time() so utterance_end_time is still valid.
         """
         self.agent_interrupted_user_count += 1
         self._awaiting_recovery = True
@@ -268,24 +204,16 @@ class InterruptionManager:
         event: Dict = {
             "type": "agent_interrupted_user",
             "user_start_s": self.callee_speaking_start_time if self.callee_speaking_start_time > 0 else None,
-            "user_end_s": prev_end_s,  # already known before reset_utterance_end_time()
+            "user_end_s": prev_end_s,
             "recovery_completed": False,
         }
         self.interruption_events.append(event)
         self._open_event = event
 
-        logger.info(
-            f"Agent interrupted user (premature response cancelled) — "
-            f"agent_interrupted_user_count={self.agent_interrupted_user_count}"
-        )
+        logger.info(f"Agent interrupted user — agent_interrupted_user_count={self.agent_interrupted_user_count}")
 
     def record_interrupted_transcriber_turn(self, turn_id) -> None:
-        """Store the ASR provider's current_turn_id when an interruption fires.
-
-        Called from task_manager immediately after on_interruption_triggered(),
-        using getattr(transcriber, 'current_turn_id', None) so it is safe for
-        all transcriber providers and TranscriberPool.
-        """
+        """Store ASR turn_id at interruption time for was_interrupted annotation at call end."""
         if turn_id is not None:
             self.interrupted_transcriber_turn_ids.add(turn_id)
             logger.info(f"Recorded interrupted transcriber turn_id={turn_id}")
@@ -293,11 +221,7 @@ class InterruptionManager:
     # ── Agent speaking lifecycle ──────────────────────────────────────────────
 
     def on_agent_speech_started(self, sequence_id: int) -> None:
-        """Called when the first audio chunk of a response enters the SEND path.
-
-        Deduplicated by sequence_id — safe to call on every audio chunk because
-        subsequent chunks of the same sequence are no-ops.
-        """
+        """First audio chunk entering SEND path. Deduplicated by sequence_id."""
         if sequence_id == self._last_sent_sequence_id:
             return
         self._last_sent_sequence_id = sequence_id
@@ -305,19 +229,11 @@ class InterruptionManager:
         logger.info(f"Agent speech started (sequence_id={sequence_id})")
 
     def on_agent_speech_ended(self) -> None:
-        """Called when end_of_synthesizer_stream fires in the SEND path (clean end).
-
-        Finalizes the current monologue segment and accumulates agent speaking time.
-        Called alongside on_successful_response_delivered() in task_manager.
-        """
+        """Clean end of agent audio (end_of_synthesizer_stream in SEND path)."""
         self._finalize_agent_speaking_session()
 
     def _finalize_agent_speaking_session(self) -> None:
-        """Internal helper — closes the current agent speaking window.
-
-        Called from both on_agent_speech_ended() (clean end) and
-        on_interruption_triggered() (cut short by user barge-in).
-        """
+        """Close current agent speaking window; called on clean end or barge-in."""
         if self._agent_speaking_start_time <= 0:
             return
         duration_ms = (time.time() - self._agent_speaking_start_time) * 1000
@@ -328,15 +244,7 @@ class InterruptionManager:
         logger.info(f"Agent speaking session closed: {duration_ms:.0f}ms")
 
     def on_successful_response_delivered(self) -> None:
-        """Called when the agent delivers a complete response in the SEND path
-        (end-of-stream chunk reached the output, not blocked/discarded).
-
-        If _awaiting_recovery is True, this counts as a barge-in recovery and
-        marks the most recent unrecovered event as recovered.
-
-        Barge-in Recovery Rate (Hamming target >90%):
-            rate = barge_in_recovery_count / user_interrupted_agent_count × 100
-        """
+        """Agent delivered a full response after an interruption — counts as recovery."""
         if not self._awaiting_recovery:
             return
 
@@ -348,30 +256,13 @@ class InterruptionManager:
                 event["recovery_completed"] = True
                 break
 
-        logger.info(
-            f"Barge-in recovery confirmed — "
-            f"barge_in_recovery_count={self.barge_in_recovery_count}"
-        )
+        logger.info(f"Barge-in recovery confirmed — barge_in_recovery_count={self.barge_in_recovery_count}")
 
     # ── Stats output ──────────────────────────────────────────────────────────
 
     def get_interruption_stats(self, call_start_ms: float) -> Dict:
-        """Return call-level interruption stats for storage in latency_dict.
-
-        Timestamps in each event are converted from raw epoch seconds to
-        milliseconds relative to call start (conversation_start_init_ts).
-
-        Args:
-            call_start_ms: TaskManager.conversation_start_init_ts
-                           (time.time() * 1000 at call start).
-
-        Keys returned:
-            user_interrupted_agent_count  — user barge-in events
-            agent_interrupted_user_count  — premature agent response cancellations
-            total_interruptions           — sum of both
-            barge_in_recovery_count       — full responses delivered post-interruption
-            barge_in_recovery_rate        — % (None when no user interruptions)
-            interruption_events           — per-event list with relative timestamps
+        """Return call-level interruption stats for latency_dict.
+        Timestamps converted from epoch seconds to ms relative to call_start_ms.
         """
         total = self.user_interrupted_agent_count + self.agent_interrupted_user_count
 
@@ -391,15 +282,11 @@ class InterruptionManager:
                 entry["user_start_ms"] = round(e["user_start_s"] * 1000 - call_start_ms, 2)
             if e.get("user_end_s") is not None:
                 entry["user_end_ms"] = round(e["user_end_s"] * 1000 - call_start_ms, 2)
-            # Pipecat TurnTrackingObserver parity: duration of the user's speech
-            # segment associated with this interruption event.
             if "user_start_ms" in entry and "user_end_ms" in entry:
                 entry["user_duration_ms"] = round(entry["user_end_ms"] - entry["user_start_ms"], 2)
             events.append(entry)
 
-        # Talk-to-listen ratio (Gong benchmark: agent ~43%, user ~57%).
-        # agent_speaking_ms may still be accruing if call ends mid-utterance;
-        # snapshot current value by including any open session.
+        # Snapshot agent_ms including any still-open session
         agent_ms = self._total_agent_speaking_ms
         if self._agent_speaking_start_time > 0:
             agent_ms += (time.time() - self._agent_speaking_start_time) * 1000
@@ -416,10 +303,8 @@ class InterruptionManager:
             "agent_interrupted_user_count": self.agent_interrupted_user_count,
             "total_interruptions": total,
             "barge_in_recovery_count": self.barge_in_recovery_count,
-            # Hamming benchmark: >90% good, 80–90% warning, <80% critical.
-            "barge_in_recovery_rate": recovery_rate,
+            "barge_in_recovery_rate": recovery_rate,  # Hamming benchmark: >90% good, <80% critical
             "interruption_events": events,
-            # Gong-style speaking time breakdown
             "agent_speaking_ms": round(agent_ms),
             "user_speaking_ms": round(user_ms),
             "talk_to_listen_ratio": talk_to_listen_ratio,
