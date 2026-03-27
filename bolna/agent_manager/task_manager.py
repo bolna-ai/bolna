@@ -705,6 +705,7 @@ class TaskManager(BaseManager):
                         self.tools["input"].is_welcome_message_played = True
                     else:
                         self.tools["input"].update_is_audio_being_played(True)
+                        self.conversation_history.append_welcome_message(text)
                         convert_to_request_log(message=text, meta_info=meta_info, component=LogComponent.SYNTHESIZER, direction=LogDirection.RESPONSE, model=self.synthesizer_provider, is_cached=meta_info.get("is_cached", False), engine=self.tools['synthesizer'].get_engine(), run_id=self.run_id)
                         await self.tools["output"].handle(message)
                         try:
@@ -1121,10 +1122,7 @@ class TaskManager(BaseManager):
                 'content': ""
             }
 
-        welcome_msg = ""
-        if task_id == 0 and self.kwargs.get('agent_welcome_message'):
-            welcome_msg = self.kwargs['agent_welcome_message']
-        self.conversation_history.setup_system_prompt(self.system_prompt, welcome_msg)
+        self.conversation_history.setup_system_prompt(self.system_prompt)
 
         self.multilingual_prompts = {}
         raw_multilingual = prompt_responses.get(current_task, {}).get('multilingual_prompts', {})
@@ -2936,6 +2934,8 @@ class TaskManager(BaseManager):
                              "sequence_id": -1, 'format': self.task_config["tools_config"]["output"]["format"],
                              'text': text, 'end_of_llm_stream': True}
                 self.stream_sid_ts = time.time() * 1000
+                if text and text.strip():
+                    self.conversation_history.append_welcome_message(text)
                 await self._synthesize(create_ws_data_packet(text, meta_info=meta_info))
                 return
 
@@ -2955,6 +2955,8 @@ class TaskManager(BaseManager):
                         self.stream_sid = stream_sid
                         text = self.kwargs.get('agent_welcome_message', None)
                         meta_info = {'io': self.tools["output"].get_provider(), 'message_category': 'agent_welcome_message', 'stream_sid': stream_sid, "request_id": str(uuid.uuid4()), "cached": True, "sequence_id": -1, 'format': self.task_config["tools_config"]["output"]["format"], 'text': text, 'end_of_llm_stream': True}
+                        if text and text.strip():
+                            self.conversation_history.append_welcome_message(text)
                         if self.turn_based_conversation:
                             meta_info['type'] = 'text'
                             bos_packet = create_ws_data_packet("<beginning_of_stream>", meta_info)
@@ -3036,6 +3038,7 @@ class TaskManager(BaseManager):
                     self.call_hangup_message_config = update_prompt_with_context(self.call_hangup_message_config, self.context_data)
 
             agent_welcome_message = self.kwargs.get("agent_welcome_message", "")
+
             agent_welcome_message = update_prompt_with_context(agent_welcome_message, self.context_data)
             logger.info(f"Updated agent welcome message after context data replacement - {agent_welcome_message}")
             self.kwargs["agent_welcome_message"] = agent_welcome_message
