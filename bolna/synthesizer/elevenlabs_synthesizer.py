@@ -140,6 +140,8 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
     async def receiver(self):
         audio_chunk_count = 0
         last_recv_time = None
+        disconnected_since = None
+        max_disconnected_wait = 30  # seconds before giving up
         while True:
             try:
                 if self.conversation_ended:
@@ -149,9 +151,16 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
                         self.websocket_holder["websocket"].state is websockets.protocol.State.CLOSED):
                     if self.connection_error:
                         return
-                    logger.info("WebSocket is not connected, skipping receive.")
+                    now = time.perf_counter()
+                    if disconnected_since is None:
+                        disconnected_since = now
+                    elif now - disconnected_since > max_disconnected_wait:
+                        logger.warning(f"ElevenLabs receiver: WebSocket disconnected for >{max_disconnected_wait}s, giving up.")
+                        return
                     await asyncio.sleep(0.10)
                     continue
+
+                disconnected_since = None
 
                 recv_start = time.perf_counter()
                 response = await self.websocket_holder["websocket"].recv()
