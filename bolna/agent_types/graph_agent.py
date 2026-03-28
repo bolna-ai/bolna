@@ -16,9 +16,10 @@ from bolna.helpers.utils import (
     update_prompt_with_context,
     enrich_context_with_time_variables,
     DictWithMissing,
+    get_md5_hash,
 )
 from bolna.helpers.expression_evaluator import evaluate_edge_expression
-from bolna.enums import EdgeConditionType
+from bolna.enums import EdgeConditionType, NodeType
 from bolna.llms.types import LLMStreamChunk, LatencyData
 from bolna.llms import OpenAiLLM
 from bolna.providers import SUPPORTED_LLM_PROVIDERS
@@ -62,7 +63,8 @@ class GraphAgent(BaseAgent):
             self.openai = OpenAI(api_key=self.llm_key)
 
         self.node_history = [self.current_node_id]
-        self.current_node_entry_index = 0  # Track message index when we entered current node
+        self.current_node_entry_index = 0
+        self._silence_repeats = 0
         self.rag_configs = self.initialize_rag_configs()
         self.rag_server_url = os.getenv("RAG_SERVER_URL", "http://localhost:8000")
 
@@ -556,6 +558,7 @@ class GraphAgent(BaseAgent):
         node_turns, total_turns = self._compute_turn_counts(history)
         self.context_data["_node_turns"] = node_turns
         self.context_data["_total_turns"] = total_turns
+        self.context_data["_silence_repeats"] = self._silence_repeats
 
         deterministic_edges, llm_edges = self._classify_edges(edges)
 
@@ -675,6 +678,10 @@ class GraphAgent(BaseAgent):
             self.context_data["detected_language"] = detected_language
 
         try:
+            is_silence_trigger = bool(message and message[-1].get('content', '').startswith('[silence]'))
+            if is_silence_trigger:
+                self._silence_repeats += 1
+
             previous_node = self.current_node_id
             (
                 next_node_id,
@@ -691,6 +698,7 @@ class GraphAgent(BaseAgent):
                 logger.info(f"Transitioning: {self.current_node_id} -> {next_node_id} (params: {extracted_params})")
                 self.current_node_id = next_node_id
                 self.current_node_entry_index = len(message)
+                self._silence_repeats = 0
                 if extracted_params:
                     self.context_data.update(extracted_params)
 
@@ -700,6 +708,9 @@ class GraphAgent(BaseAgent):
             routing_type = (
                 "deterministic" if (reasoning and reasoning.startswith(_DETERMINISTIC_REASONING_PREFIX)) else "llm"
             )
+
+            current_node = self.get_node_by_id(self.current_node_id)
+            node_type = current_node.get('node_type', NodeType.LLM) if current_node else NodeType.LLM
 
             yield {
                 "routing_info": {
@@ -717,8 +728,19 @@ class GraphAgent(BaseAgent):
                     "reasoning": reasoning,
                     "confidence": confidence,
                     "routing_usage": routing_usage,
+                    "node_type": node_type,
+                    "is_silence_trigger": is_silence_trigger,
                 }
             }
+
+            if node_type == NodeType.STATIC:
+                static_text = current_node.get('static_message', '') if current_node else ''
+                if static_text:
+                    yield {
+                        'static_message': static_text,
+                        'static_audio_hash': get_md5_hash(static_text),
+                    }
+                return
 
             messages = await self._build_messages(message)
             yield {"messages": messages}

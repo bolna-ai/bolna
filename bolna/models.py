@@ -12,6 +12,7 @@ from .enums import (
     ExpressionOperator,
     ExpressionLogic,
     EdgeConditionType,
+    NodeType,
 )
 from .constants import MODEL_REASONING_EFFORT_MAP
 
@@ -346,7 +347,10 @@ class GraphNodeRAGConfig(BaseModel):
 class GraphNode(BaseModel):
     id: str
     description: Optional[str] = None
-    prompt: str
+    node_type: NodeType = NodeType.LLM
+    prompt: str = ""
+    static_message: Optional[str] = None
+    repeat_after_silence_seconds: Optional[float] = None
     examples: Optional[Dict[str, str]] = None
     edges: List[GraphEdge] = Field(default_factory=list)
     function_call: Optional[str] = None
