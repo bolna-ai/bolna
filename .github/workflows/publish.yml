@@ -2,7 +2,7 @@ name: Publish to PyPI
 
 on:
   release:
-    types: [created]
+    types: [published]
 
 permissions:
   contents: read
@@ -18,7 +18,7 @@ jobs:
         with:
           python-version: '3.10'
 
-      - run: pip install -e ".[dev]"
+      - run: python -m pip install -e ".[dev]"
       - run: pytest
 
   publish:
@@ -26,6 +26,7 @@ jobs:
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
+      contents: read
       id-token: write
     steps:
       - uses: actions/checkout@v4
@@ -38,13 +39,14 @@ jobs:
       - name: Verify tag matches package version
         run: |
           PKG_VERSION=$(python -c "import bolna; print(bolna.__version__)")
-          TAG_VERSION=${GITHUB_REF#refs/tags/}
+          TAG_REF=${GITHUB_REF#refs/tags/}
+          TAG_VERSION=${TAG_REF#bolna-}
           if [ "$PKG_VERSION" != "$TAG_VERSION" ]; then
-            echo "Tag $TAG_VERSION does not match package version $PKG_VERSION"
+            echo "Tag $TAG_REF does not match package version $PKG_VERSION (expected tag bolna-$PKG_VERSION)"
             exit 1
           fi
 
-      - run: pip install build
+      - run: python -m pip install build
       - run: python -m build
 
       - name: Publish to PyPI
