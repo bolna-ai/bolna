@@ -168,6 +168,7 @@ class InterruptionManager:
 
         if self.callee_speaking_start_time > 0:
             self._total_user_speaking_ms += (now_s - self.callee_speaking_start_time) * 1000
+            self.callee_speaking_start_time = -1  # prevent double-count on duplicate speech-ended signals
 
         if self._open_event is not None and self._open_event.get("user_end_s") is None:
             self._open_event["user_end_s"] = now_s
@@ -294,7 +295,11 @@ class InterruptionManager:
         if self._agent_speaking_start_time > 0:
             agent_ms += (time.time() - self._agent_speaking_start_time) * 1000
 
+        # Snapshot user_ms including any still-open session (mid-speech hangup)
         user_ms = self._total_user_speaking_ms
+        if self.callee_speaking and self.callee_speaking_start_time > 0:
+            user_ms += (time.time() - self.callee_speaking_start_time) * 1000
+
         total_speaking_ms = agent_ms + user_ms
 
         talk_to_listen_ratio: Optional[float] = None

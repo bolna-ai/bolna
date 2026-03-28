@@ -2808,8 +2808,9 @@ class TaskManager(BaseManager):
                 # so it is a reliable signal that a complete response was delivered.
                 if message['meta_info'].get("end_of_llm_stream", False) or message['meta_info'].get("end_of_synthesizer_stream", False):
                     self._turn_audio_flushed.set()
-                    self.interruption_manager.on_successful_response_delivered()
-                    self.interruption_manager.on_agent_speech_ended()
+                    if message['meta_info'].get("end_of_synthesizer_stream", False):
+                        self.interruption_manager.on_successful_response_delivered()
+                        self.interruption_manager.on_agent_speech_ended()
                     # Reset asked_if_user_is_still_there flag after any message except is_user_online_message
                     if message['meta_info'].get('message_category', '') != 'is_user_online_message':
                         self.asked_if_user_is_still_there = False
