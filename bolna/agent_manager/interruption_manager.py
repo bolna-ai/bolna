@@ -198,16 +198,16 @@ class InterruptionManager:
 
     def on_agent_interrupted_user(self) -> None:
         """Agent responded prematurely and was cancelled within the grace period.
-        Must be called BEFORE reset_utterance_end_time() so utterance_end_time is still valid.
+        Does NOT set _awaiting_recovery — recovery is only tracked for user barge-ins
+        to keep barge_in_recovery_rate denominator consistent with user_interrupted_agent_count.
+        user_end_s left open; filled by on_user_speech_ended() when user finishes speaking.
         """
         self.agent_interrupted_user_count += 1
-        self._awaiting_recovery = True
 
-        prev_end_s = (self.utterance_end_time / 1000) if self.utterance_end_time != -1 else None
         event: Dict = {
             "type": "agent_interrupted_user",
             "user_start_s": self.callee_speaking_start_time if self.callee_speaking_start_time > 0 else None,
-            "user_end_s": prev_end_s,
+            "user_end_s": None,
             "recovery_completed": False,
         }
         self.interruption_events.append(event)
