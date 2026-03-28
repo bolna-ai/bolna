@@ -2770,7 +2770,7 @@ class TaskManager(BaseManager):
                         await self.tools["output"].handle(message)
                         # Track when agent audio first starts flowing for this sequence.
                         # Deduplicated inside on_agent_speech_started — safe to call per chunk.
-                        if sequence_id is not None:
+                        if sequence_id is not None and sequence_id != -1:
                             self.interruption_manager.on_agent_speech_started(sequence_id)
                         try:
                             duration = calculate_audio_duration(len(message["data"]), self.sampling_rate, format=message['meta_info']['format'])
