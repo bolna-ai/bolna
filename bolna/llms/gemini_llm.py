@@ -1,6 +1,7 @@
 import os
 import json
 import uuid
+import base64
 from typing import AsyncIterable
 from google import genai
 from google.genai import types
@@ -72,6 +73,11 @@ class GeminiLLM(BaseLLM):
         self.thinking_budget = kwargs.get("thinking_budget", 0)
         self.run_id = kwargs.get("run_id", None)
         self.language = kwargs.get("language", "en")
+        # Cache of original types.Part objects keyed by function call id.
+        # Gemini 3 thought_signatures cannot survive bytes serialisation — the only
+        # reliable way to return them is to reuse the exact Part object the SDK gave us.
+        self._native_function_parts: dict[str, types.Part] = {}
+        logger.info(f"[GeminiLLM] Initialized model={self.model} tools={[d.name for d in gemini_declarations] if gemini_declarations else None} thinking_budget={self.thinking_budget}")
 
     def _prepare_history(self, messages):
         """Translate Bolna roles (OpenAI-style) to Gemini-style roles and parts."""
@@ -93,12 +99,34 @@ class GeminiLLM(BaseLLM):
 
             if tool_calls:
                 for tc in tool_calls:
-                    if tc.get('type') == 'function':
+                    if tc.get('type') == '_gemini_thought':
+                        parts.append(types.Part(thought=True, text=tc.get('text', '')))
+                    elif tc.get('type') == 'function':
                         fn = tc['function']
-                        args = json.loads(fn['arguments']) if isinstance(fn['arguments'], str) else fn['arguments']
-                        parts.append(types.Part(
-                            function_call=types.FunctionCall(name=fn['name'], args=args)
-                        ))
+                        call_id = tc.get('id')
+                        # If we have the original SDK Part object cached, reuse it directly.
+                        # This is the only reliable way to preserve thought_signature for
+                        # Gemini 3 models — any byte-level reconstruction corrupts the signature.
+                        native = self._native_function_parts.get(call_id) if call_id else None
+                        if native is not None:
+                            # Best path: reuse the exact SDK Part object — no serialisation risk.
+                            parts.append(native)
+                            logger.info(f"[GeminiLLM] _prepare_history: native Part cache HIT for call_id={call_id} fn={fn['name']}")
+                        else:
+                            # Fallback (e.g. after server restart when cache is empty):
+                            # reconstruct the Part from stored JSON fields.
+                            # SDK >=1.68.0 encodes thought_signature bytes as standard base64
+                            # so this round-trip is now safe.
+                            args = json.loads(fn['arguments']) if isinstance(fn['arguments'], str) else fn['arguments']
+                            fc_kwargs = dict(name=fn['name'], args=args)
+                            if call_id:
+                                fc_kwargs['id'] = call_id
+                            part_kwargs: dict = dict(function_call=types.FunctionCall(**fc_kwargs))
+                            has_sig = bool(tc.get('thought_signature'))
+                            if has_sig:
+                                part_kwargs['thought_signature'] = base64.b64decode(tc['thought_signature'])
+                            parts.append(types.Part(**part_kwargs))
+                            logger.info(f"[GeminiLLM] _prepare_history: native Part cache MISS for call_id={call_id} fn={fn['name']} reconstructed=True thought_signature={has_sig}")
 
             if role == 'assistant':
                 if parts:
@@ -124,11 +152,14 @@ class GeminiLLM(BaseLLM):
                     except Exception:
                         resp_obj = {"result": content}
 
+                    fr_kwargs = dict(name=tool_name, response=resp_obj)
+                    # Docs require matching the exact id from the function_call
+                    tool_call_id = msg.get('tool_call_id')
+                    if tool_call_id:
+                        fr_kwargs['id'] = tool_call_id
                     history.append(types.Content(
                         role="user",
-                        parts=[types.Part(
-                            function_response=types.FunctionResponse(name=tool_name, response=resp_obj)
-                        )]
+                        parts=[types.Part(function_response=types.FunctionResponse(**fr_kwargs))]
                     ))
                 else:
                     history.append(types.Content(
@@ -138,6 +169,48 @@ class GeminiLLM(BaseLLM):
 
         return system_instruction, history
 
+    def _get_thinking_config(self) -> "types.ThinkingConfig | None":
+        """
+        Return the correct ThinkingConfig per model family based on Google docs:
+
+        Gemini 3.x  → use thinking_level (NOT thinking_budget)
+          - Pro    : level="low"     (minimum; "minimal" not supported for Pro)
+          - Flash/Lite: level="minimal" (near-off; avoids thought_signature overhead)
+
+        Gemini 2.5  → use thinking_budget
+          - Pro    : budget=128      (minimum; cannot disable)
+          - Flash  : budget=0        (fully off; range 0-24576)
+          - Flash-Lite: budget=0     (fully off; range 512-24576 but 0 disables)
+
+        If the user explicitly passed a thinking_budget > 0, honour it (2.5 models).
+        """
+        m = self.model
+
+        # User explicitly set a budget — honour it for 2.5 models only.
+        # Gemini 3.x uses thinking_level, not thinking_budget; passing budget to 3.x causes 400s.
+        if self.thinking_budget and self.thinking_budget > 0 and "2.5" in m:
+            return types.ThinkingConfig(thinking_budget=self.thinking_budget)
+
+        # --- Gemini 3.x family: use thinking_level ---
+        if m.startswith("gemini-3"):
+            if "pro" in m:
+                # Pro cannot disable thinking; "minimal" is not supported — use "low"
+                return types.ThinkingConfig(thinking_level="low")
+            else:
+                # Flash / Flash-Lite: "minimal" is closest to off, avoids thought_signature cost
+                return types.ThinkingConfig(thinking_level="minimal")
+
+        # --- Gemini 2.5 family: use thinking_budget ---
+        if "2.5" in m:
+            if "pro" in m:
+                # Pro cannot disable thinking; minimum budget is 128
+                return types.ThinkingConfig(thinking_budget=128)
+            else:
+                # Flash / Flash-Lite: disable with 0
+                return types.ThinkingConfig(thinking_budget=0)
+
+        return None
+
     def _build_config(self, system_instruction, request_json=False):
         config_kwargs = dict(
             system_instruction=system_instruction or None,
@@ -145,8 +218,11 @@ class GeminiLLM(BaseLLM):
             temperature=self.temperature,
             response_mime_type="application/json" if request_json else "text/plain",
         )
-        if self.thinking_budget and self.thinking_budget > 0:
-            config_kwargs["thinking_config"] = types.ThinkingConfig(thinking_budget=self.thinking_budget)
+
+        thinking_config = self._get_thinking_config()
+        if thinking_config is not None:
+            config_kwargs["thinking_config"] = thinking_config
+
         config = types.GenerateContentConfig(**config_kwargs)
         if self.gemini_tools:
             config.tools = self.gemini_tools
@@ -164,6 +240,11 @@ class GeminiLLM(BaseLLM):
         answer, buffer = "", ""
         self.started_streaming = False
         self.gave_out_prefunction_call_message = False
+        # Accumulated thought text parts from the current model turn (thinking models only)
+        accumulated_thought_parts: list[str] = []
+        # Standalone thought_signature bytes received before the function_call Part
+        # (Gemini 3 streaming sends signature as a separate Part ahead of functionCall)
+        pending_thought_signature: bytes | None = None
 
         try:
             response_stream = await self.client.aio.models.generate_content_stream(
@@ -181,14 +262,46 @@ class GeminiLLM(BaseLLM):
                         first_token_latency_ms=first_token_time - start_time,
                     )
 
-                # Check for function calls
+                # Check for function calls, thought parts, and signature parts
                 if chunk.candidates and chunk.candidates[0].content and chunk.candidates[0].content.parts:
                     for part in chunk.candidates[0].content.parts:
+                        # Collect thought parts (thinking models show reasoning before function calls)
+                        if getattr(part, 'thought', False):
+                            thought_text = getattr(part, 'text', None)
+                            if thought_text:
+                                accumulated_thought_parts.append(thought_text)
+                            continue
+
+                        # Gemini 3 streaming: thought_signature arrives as a standalone Part
+                        # (separate from the functionCall Part). Buffer it so we can attach
+                        # it to the next function_call entry — the API requires it on the
+                        # same functionCall Part, not as a separate history Part.
+                        standalone_sig = getattr(part, 'thought_signature', None)
+                        if standalone_sig and not part.function_call:
+                            pending_thought_signature = standalone_sig
+                            continue
+
                         if part.function_call:
                             fn_name = part.function_call.name
                             fn_args = dict(part.function_call.args) if part.function_call.args else {}
-                            # Use Gemini's real call ID if available, else generate one
-                            call_id = part.function_call.id or ("call_" + str(uuid.uuid4())[:8])
+                            raw_id = part.function_call.id
+                            call_id = raw_id or ("call_" + str(uuid.uuid4())[:8])
+                            # If Gemini didn't return a function_call id, rebuild the Part
+                            # with our generated id — otherwise the cached Part would have
+                            # id=None while the tool response carries the synthetic call_id,
+                            # which causes an id-mismatch 400 on the next turn.
+                            if not raw_id:
+                                inline_sig = getattr(part, 'thought_signature', None)
+                                rebuilt_kwargs: dict = dict(
+                                    function_call=types.FunctionCall(name=fn_name, args=fn_args, id=call_id)
+                                )
+                                if inline_sig:
+                                    rebuilt_kwargs['thought_signature'] = inline_sig
+                                part = types.Part(**rebuilt_kwargs)
+                            # Cache the Part so _prepare_history can reuse it intact —
+                            # thought_signature bytes cannot survive serialisation.
+                            self._native_function_parts[call_id] = part
+                            logger.info(f"[GeminiLLM] function_call detected fn={fn_name} call_id={call_id} args={list(fn_args.keys())} native_part_cached=True")
 
                             if not self.gave_out_prefunction_call_message:
                                 pre_msg_config = self.api_params.get(fn_name, {}).get('pre_call_message')
@@ -199,7 +312,6 @@ class GeminiLLM(BaseLLM):
 
                             func_conf = self.api_params.get(fn_name, {})
 
-                            # Validate required params against tool spec (mirrors ToolCallAccumulator)
                             tool_spec = next(
                                 (t for t in self.bolna_tools_raw
                                  if (t.get('type') == 'function' and t['function']['name'] == fn_name)
@@ -217,6 +329,27 @@ class GeminiLLM(BaseLLM):
                                     logger.warning(f"Gemini tool call {fn_name} missing required params: {required_keys}, got: {list(fn_args.keys())}")
                                     continue
 
+                            model_resp: list[dict] = []
+                            for thought_text in accumulated_thought_parts:
+                                model_resp.append({"type": "_gemini_thought", "text": thought_text})
+                            accumulated_thought_parts = []
+
+                            fn_entry: dict = {
+                                "id": call_id,
+                                "function": {"name": fn_name, "arguments": json.dumps(fn_args)},
+                                "type": "function",
+                            }
+                            # Per Google docs: thought_signature must be returned on the
+                            # same functionCall Part. In streaming Gemini 3 emits it as a
+                            # standalone Part just before the functionCall Part; Gemini 2.5
+                            # (when thinking on) puts it inline on the functionCall Part.
+                            sig_bytes = getattr(part, 'thought_signature', None) or pending_thought_signature
+                            pending_thought_signature = None  # consumed
+                            if sig_bytes:
+                                fn_entry["thought_signature"] = base64.b64encode(sig_bytes).decode('utf-8')
+                                logger.info(f"[GeminiLLM] thought_signature stored for fn={fn_name} call_id={call_id} bytes={len(sig_bytes)}")
+                            model_resp.append(fn_entry)
+
                             payload = FunctionCallPayload(
                                 url=func_conf.get('url'),
                                 method=(func_conf.get('method', 'GET') or 'GET').lower(),
@@ -226,7 +359,7 @@ class GeminiLLM(BaseLLM):
                                 model_args={"model": self.model},
                                 meta_info=meta_info or {},
                                 called_fun=fn_name,
-                                model_response=[{"id": call_id, "function": {"name": fn_name, "arguments": json.dumps(fn_args)}, "type": "function"}],
+                                model_response=model_resp,
                                 tool_call_id=call_id,
                                 textual_response=answer.strip() if answer else None
                             )

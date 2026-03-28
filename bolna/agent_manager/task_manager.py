@@ -410,12 +410,6 @@ class TaskManager(BaseManager):
                 self.discard_pre_welcome_utterance = self.conversation_config.get("discard_pre_welcome_utterance", False)
                 self._speech_started_before_welcome = False
 
-                # Ambient noise
-                self.ambient_noise = self.conversation_config.get("ambient_noise", False)
-                self.ambient_noise_task = None
-                if self.ambient_noise:
-                    logger.info(f"Ambient noise is True {self.ambient_noise}")
-                    self.soundtrack = f"{self.conversation_config.get('ambient_noise_track', 'coffee-shop')}.wav"
 
         # setting transcriber and synthesizer in parallel
         self.__setup_transcriber()
@@ -481,9 +475,29 @@ class TaskManager(BaseManager):
         self.conversation_history._interim = value
 
     @property
+    def language(self) -> str:
+        """Active language code.
+
+        Returns the language-detector's result when detection has completed
+        (non-multilingual path only: detection is disabled for multilingual
+        pools, so dominant_language is always None). Falls back to the
+        configured/switched language otherwise.
+        """
+        detector = getattr(self, 'language_detector', None)
+        if detector is not None:
+            detected = detector.dominant_language
+            if detected:
+                return detected
+        return self._language
+
+    @language.setter
+    def language(self, value: str):
+        logger.info(f"Setting base language to {value}")
+        self._language = value
+
+    @property
     def call_hangup_message(self):
-        detected_lang = self.language_detector.dominant_language if hasattr(self, 'language_detector') else None
-        return select_message_by_language(self.call_hangup_message_config, detected_lang)
+        return select_message_by_language(self.call_hangup_message_config, self.language)
 
     def __is_multiagent(self):
         if self.task_config["task_type"] == "webhook":
@@ -685,6 +699,7 @@ class TaskManager(BaseManager):
                         self.tools["input"].is_welcome_message_played = True
                     else:
                         self.tools["input"].update_is_audio_being_played(True)
+                        self.conversation_history.append_welcome_message(text)
                         convert_to_request_log(message=text, meta_info=meta_info, component=LogComponent.SYNTHESIZER, direction=LogDirection.RESPONSE, model=self.synthesizer_provider, is_cached=meta_info.get("is_cached", False), engine=self.tools['synthesizer'].get_engine(), run_id=self.run_id)
                         await self.tools["output"].handle(message)
                         try:
@@ -754,6 +769,8 @@ class TaskManager(BaseManager):
                     multilingual = transcriber_config["multilingual"]
                     active_label = transcriber_config.get("active", DEFAULT_LANGUAGE_CODE)
                     self.language = active_label
+                    if hasattr(self, 'language_detector'):
+                        self.language_detector.set_enabled_status(False)  # Disable language detection when using multilingual pool
 
                     if self.turn_based_conversation:
                         provider = "playground"
@@ -835,6 +852,8 @@ class TaskManager(BaseManager):
             if "multilingual" in synth_config:
                 multilingual = synth_config["multilingual"]
                 active_label = synth_config.get("active", DEFAULT_LANGUAGE_CODE)
+                if hasattr(self, 'language_detector'):
+                    self.language_detector.set_enabled_status(False)  # Disable language detection when using multilingual pool
 
                 # Telephony providers expect mulaw@8000Hz — force use_mulaw for all synths in the pool
                 output_provider = self.task_config["tools_config"]["output"]["provider"]
@@ -1097,10 +1116,7 @@ class TaskManager(BaseManager):
                 'content': ""
             }
 
-        welcome_msg = ""
-        if task_id == 0 and self.kwargs.get('agent_welcome_message'):
-            welcome_msg = self.kwargs['agent_welcome_message']
-        self.conversation_history.setup_system_prompt(self.system_prompt, welcome_msg)
+        self.conversation_history.setup_system_prompt(self.system_prompt)
 
         self.multilingual_prompts = {}
         raw_multilingual = prompt_responses.get(current_task, {}).get('multilingual_prompts', {})
@@ -1191,7 +1207,7 @@ class TaskManager(BaseManager):
                     mark_data = mark.get('mark_data', {})
                     mark_type = mark_data.get('type', '')
                     text = mark_data.get('text_synthesized', '')
-                    if mark_type in ['pre_mark_message', 'ambient_noise', 'backchanneling'] or not text:
+                    if mark_type in ['pre_mark_message', 'backchanneling'] or not text:
                         continue
                     pending_chunks.append({
                         'text': text,
@@ -1734,6 +1750,7 @@ class TaskManager(BaseManager):
                 function_response = f"Failed to switch language: {e}"
 
             textual_response = resp.get("textual_response", None)
+            self.check_if_user_online = self.conversation_config.get("check_if_user_online", True)
             if not textual_response:
                 self.conversation_history.append_assistant(textual_response, tool_calls=resp["model_response"])
             else:
@@ -1800,9 +1817,9 @@ class TaskManager(BaseManager):
 
         self.execute_function_call_task = None
 
-    def __store_into_history(self, meta_info, messages, llm_response, should_trigger_function_call = False):
+    def __store_into_history(self, meta_info, messages, llm_response, should_trigger_function_call=False, input_tokens=None, output_tokens=None, reasoning_tokens=None, cached_tokens=None):
         self.llm_response_generated = True
-        convert_to_request_log(message=llm_response, meta_info= meta_info, component=LogComponent.LLM, direction=LogDirection.RESPONSE, model=self.llm_config["model"], run_id= self.run_id)
+        convert_to_request_log(message=llm_response, meta_info=meta_info, component=LogComponent.LLM, direction=LogDirection.RESPONSE, model=self.llm_config["model"], run_id=self.run_id, input_tokens=input_tokens, output_tokens=output_tokens, reasoning_tokens=reasoning_tokens, cached_tokens=cached_tokens)
         if should_trigger_function_call:
             logger.info(f"There was a function call and need to make that work")
             self.conversation_history.append_assistant(llm_response)
@@ -1825,6 +1842,7 @@ class TaskManager(BaseManager):
             self.tools["input"].reset_response_heard_by_user()
 
         llm_response, function_tool, function_tool_message = '', '', ''
+        actual_input_tokens, actual_output_tokens, actual_reasoning_tokens, actual_cached_tokens = None, None, None, None
         synthesize = True
         if should_bypass_synth:
             synthesize = False
@@ -1833,9 +1851,7 @@ class TaskManager(BaseManager):
         messages = self._inject_language_instruction(messages)
 
         # Pass detected language to LLM for pre_call_message selection
-        detected_lang = self.language_detector.dominant_language
-        if detected_lang:
-            meta_info['detected_language'] = detected_lang
+        meta_info['detected_language'] = self.language
 
         try:
             async for llm_message in self.tools['llm_agent'].generate(messages, synthesize=synthesize, meta_info=meta_info):
@@ -1923,11 +1939,21 @@ class TaskManager(BaseManager):
                 function_tool = llm_message.function_name
                 function_tool_message = llm_message.function_message
 
+                # Capture actual token counts from any chunk that carries them
+                if llm_message.input_tokens is not None:
+                    actual_input_tokens = llm_message.input_tokens
+                if llm_message.output_tokens is not None:
+                    actual_output_tokens = llm_message.output_tokens
+                if llm_message.reasoning_tokens is not None:
+                    actual_reasoning_tokens = llm_message.reasoning_tokens
+                if llm_message.cached_tokens is not None:
+                    actual_cached_tokens = llm_message.cached_tokens
+
                 if trigger_function_call:
                     logger.info(f"Triggering function call for {data}")
                     textual_response = data.textual_response if hasattr(data, 'textual_response') else None
                     if textual_response: #intentionally omitting tool_calls, which will be filled later if the tool_call flow completed (requirement from OpenAI)
-                        self.__store_into_history(meta_info, messages, textual_response, should_trigger_function_call=should_trigger_function_call)
+                        self.__store_into_history(meta_info, messages, textual_response, should_trigger_function_call=should_trigger_function_call, input_tokens=actual_input_tokens, output_tokens=actual_output_tokens, reasoning_tokens=actual_reasoning_tokens, cached_tokens=actual_cached_tokens)
                     await self.__execute_function_call(next_step = next_step, **data.model_dump())
                     return
 
@@ -1950,8 +1976,7 @@ class TaskManager(BaseManager):
 
                     # A hack as during the 'await' part control passes to llm streaming function parameters
                     # So we have to make sure we've commited the filler message
-                    detected_lang = self.language_detector.dominant_language or self.language
-                    filler_message = compute_function_pre_call_message(detected_lang, function_tool, function_tool_message)
+                    filler_message = compute_function_pre_call_message(self.language, function_tool, function_tool_message)
                     #filler_message = PRE_FUNCTION_CALL_MESSAGE.get(self.language, PRE_FUNCTION_CALL_MESSAGE[DEFAULT_LANGUAGE_CODE])
                     if text_chunk == filler_message:
                         logger.info("Got a pre function call message")
@@ -1970,16 +1995,15 @@ class TaskManager(BaseManager):
                 model=self.llm_config.get("model")
             ) from e
 
-        detected_lang = self.language_detector.dominant_language or self.language
-        filler_message = compute_function_pre_call_message(detected_lang, function_tool, function_tool_message)
+        filler_message = compute_function_pre_call_message(self.language, function_tool, function_tool_message)
         if self.stream and llm_response != filler_message:
-            self.__store_into_history(meta_info, messages, llm_response, should_trigger_function_call= should_trigger_function_call)
+            self.__store_into_history(meta_info, messages, llm_response, should_trigger_function_call=should_trigger_function_call, input_tokens=actual_input_tokens, output_tokens=actual_output_tokens, reasoning_tokens=actual_reasoning_tokens, cached_tokens=actual_cached_tokens)
         elif not self.stream:
             llm_response = llm_response.strip()
             if self.turn_based_conversation:
                 self.conversation_history.append_assistant(llm_response)
             await self._handle_llm_output(next_step, llm_response, should_bypass_synth, meta_info, is_function_call=should_trigger_function_call)
-            convert_to_request_log(message=llm_response, meta_info=meta_info, component=LogComponent.LLM, direction=LogDirection.RESPONSE, model=self.llm_config["model"], run_id=self.run_id)
+            convert_to_request_log(message=llm_response, meta_info=meta_info, component=LogComponent.LLM, direction=LogDirection.RESPONSE, model=self.llm_config["model"], run_id=self.run_id, input_tokens=actual_input_tokens, output_tokens=actual_output_tokens, reasoning_tokens=actual_reasoning_tokens, cached_tokens=actual_cached_tokens)
 
         # Collect RAG latency if present (from KnowledgeBaseAgent)
         if meta_info.get('rag_latency'):
@@ -2101,13 +2125,10 @@ class TaskManager(BaseManager):
                 logger.error("unsupported task type: {}".format(self.task_config["task_type"]))
             self.llm_task = None
         except BolnaComponentError as e:
-            logger.error(f"Component error in llm: {e}", exc_info=True)
             self.response_in_pipeline = False
             await self._end_call_on_component_error(e, HangupReason.LLM_ERROR)
             raise
         except Exception as e:
-            traceback.print_exc()
-            logger.error(f"Something went wrong in llm: {e}")
             self.response_in_pipeline = False
             await self._end_call_on_component_error(
                 LLMError(str(e), provider=self.llm_config.get("provider", "unknown"), model=self.llm_config.get("model")),
@@ -2227,7 +2248,6 @@ class TaskManager(BaseManager):
 
         # Trigger graceful shutdown
         if not self.conversation_ended and not self._end_of_conversation_in_progress:
-            logger.error(f"Critical component failure, ending call: {hangup_detail} - {error}")
             self.hangup_detail = hangup_detail
             await self.__process_end_of_conversation()
 
@@ -2399,8 +2419,6 @@ class TaskManager(BaseManager):
             # Normal WebSocket closure (code 1000)
             pass
         except Exception as e:
-            traceback.print_exc()
-            logger.error(f"Error in transcriber {e}")
             provider = self.task_config["tools_config"]["transcriber"].get("provider")
             await self._end_call_on_component_error(
                 TranscriberError(str(e), provider=provider),
@@ -2414,7 +2432,7 @@ class TaskManager(BaseManager):
     async def __process_http_transcription(self, message):
         meta_info = self.__get_updated_meta_info(message["meta_info"])
 
-        sequence = message["meta_info"].get('sequence', meta_info['sequence_id'])
+        sequence = message["meta_info"].get('sequence', 0)
         next_task = self._get_next_step(sequence, "transcriber")
         self.transcriber_duration += message["meta_info"]["transcriber_duration"] if "transcriber_duration" in message["meta_info"] else 0
 
@@ -2557,7 +2575,6 @@ class TaskManager(BaseManager):
                     self._turn_audio_flushed.set()
                     break
                 except Exception as e:
-                    logger.error(f"Error in synthesizer: {e}", exc_info=True)
                     self._turn_audio_flushed.set()
                     await self._end_call_on_component_error(
                         SynthesizerError(str(e), provider=self.synthesizer_provider),
@@ -2571,7 +2588,6 @@ class TaskManager(BaseManager):
             logger.info("Synthesizer task cancelled outside loop.")
             #await self.handle_cancellation("Synthesizer task was cancelled outside loop.")
         except Exception as e:
-            logger.error(f"Unexpected error in __listen_synthesizer: {e}", exc_info=True)
             await self._end_call_on_component_error(
                 SynthesizerError(str(e), provider=self.synthesizer_provider),
                 HangupReason.SYNTHESIZER_ERROR
@@ -2868,8 +2884,7 @@ class TaskManager(BaseManager):
                 self.asked_if_user_is_still_there = True
 
                 if self.check_if_user_online:
-                    detected_lang = self.language_detector.dominant_language
-                    user_online_message = select_message_by_language(self.check_user_online_message_config, detected_lang)
+                    user_online_message = select_message_by_language(self.check_user_online_message_config, self.language)
 
                     if self.generate_precise_transcript:
                         self.tools["input"].reset_response_heard_by_user()
@@ -2913,6 +2928,8 @@ class TaskManager(BaseManager):
                              "sequence_id": -1, 'format': self.task_config["tools_config"]["output"]["format"],
                              'text': text, 'end_of_llm_stream': True}
                 self.stream_sid_ts = time.time() * 1000
+                if text and text.strip():
+                    self.conversation_history.append_welcome_message(text)
                 await self._synthesize(create_ws_data_packet(text, meta_info=meta_info))
                 return
 
@@ -2932,6 +2949,8 @@ class TaskManager(BaseManager):
                         self.stream_sid = stream_sid
                         text = self.kwargs.get('agent_welcome_message', None)
                         meta_info = {'io': self.tools["output"].get_provider(), 'message_category': 'agent_welcome_message', 'stream_sid': stream_sid, "request_id": str(uuid.uuid4()), "cached": True, "sequence_id": -1, 'format': self.task_config["tools_config"]["output"]["format"], 'text': text, 'end_of_llm_stream': True}
+                        if text and text.strip():
+                            self.conversation_history.append_welcome_message(text)
                         if self.turn_based_conversation:
                             meta_info['type'] = 'text'
                             bos_packet = create_ws_data_packet("<beginning_of_stream>", meta_info)
@@ -2954,33 +2973,6 @@ class TaskManager(BaseManager):
         except Exception as e:
             logger.error(f"Exception in __first_message {str(e)}")
 
-    async def __start_transmitting_ambient_noise(self):
-        try:
-            audio = await get_raw_audio_bytes(f'{os.getenv("AMBIENT_NOISE_PRESETS_DIR")}/{self.soundtrack}', local=True, is_location=True)
-            audio = resample(audio, self.sampling_rate, format = "wav")
-            if self.task_config["tools_config"]["output"]["provider"] in SUPPORTED_OUTPUT_TELEPHONY_HANDLERS.keys():
-                audio = wav_bytes_to_pcm(audio)
-            logger.info(f"Length of audio {len(audio)} {self.sampling_rate}")
-            # TODO whenever this feature is redone ensure to have a look at the metadata of other messages which have the sequence_id of -1. Fields such as end_of_synthesizer_stream and end_of_llm_stream would need to be added here
-            if self.should_record:
-                meta_info={'io': 'default', 'message_category': 'ambient_noise', "request_id": str(uuid.uuid4()), "sequence_id": -1, "type":'audio', 'format': 'wav'}
-            else:
-
-                meta_info={'io': self.tools["output"].get_provider(), 'message_category': 'ambient_noise', 'stream_sid': self.stream_sid , "request_id": str(uuid.uuid4()), "cached": True, "type":'audio', "sequence_id": -1, 'format': 'pcm'}
-            while True:
-                logger.info(f"Before yielding ambient noise")
-                for chunk in yield_chunks_from_memory(audio, self.output_chunk_size*2):
-                    # Only play ambient noise if no content is being transmitted
-                    # Check if any real content audio (sequence_id > 0) is being played
-                    is_content_playing = self.tools["input"].is_audio_being_played_to_user()
-                    
-                    if not is_content_playing:
-                        logger.info(f"Transmitting ambient noise {len(chunk)}")
-                        await self.tools["output"].handle(create_ws_data_packet(chunk, meta_info=meta_info))
-                    logger.info("Sleeping for 800 ms")
-                    await asyncio.sleep(0.5)
-        except Exception as e:
-            logger.error(f"Something went wrong while transmitting noise {e}")
 
     async def handle_init_event(self, init_meta_data):
         """
@@ -3013,6 +3005,7 @@ class TaskManager(BaseManager):
                     self.call_hangup_message_config = update_prompt_with_context(self.call_hangup_message_config, self.context_data)
 
             agent_welcome_message = self.kwargs.get("agent_welcome_message", "")
+
             agent_welcome_message = update_prompt_with_context(agent_welcome_message, self.context_data)
             logger.info(f"Updated agent welcome message after context data replacement - {agent_welcome_message}")
             self.kwargs["agent_welcome_message"] = agent_welcome_message
@@ -3063,16 +3056,14 @@ class TaskManager(BaseManager):
 
                     if self.should_backchannel:
                         self.backchanneling_task = asyncio.create_task(self.__check_for_backchanneling())
-                    if self.ambient_noise:
-                        self.ambient_noise_task = asyncio.create_task(self.__start_transmitting_ambient_noise())
+
                 try:
                     await asyncio.gather(*tasks)
-                except asyncio.CancelledError as e:
-                    logger.error(f'task got cancelled {e}')
-                    traceback.print_exc()
+                except asyncio.CancelledError:
+                    pass
                 except Exception as e:
-                    traceback.print_exc()
-                    logger.error(f"Error: {e}")
+                    if not isinstance(e, BolnaComponentError):
+                        logger.error(f"Error: {e}")
                     if self.run_id and not self._error_logged:
                         if isinstance(e, BolnaComponentError):
                             error_msg = format_error_message(e.component, e.provider or e.model or "-", str(e))
@@ -3122,7 +3113,6 @@ class TaskManager(BaseManager):
                 except BolnaComponentError:
                     raise
                 except Exception as e:
-                    logger.error(f"Could not do llm call: {e}")
                     raise
 
         except asyncio.CancelledError as e:
@@ -3134,8 +3124,8 @@ class TaskManager(BaseManager):
         except Exception as e:
             # Cancel all tasks on error
             error_message = str(e)
-            logger.error(f"Exception in task manager run: {error_message}")
-            traceback.print_exc()
+            if not isinstance(e, BolnaComponentError):
+                logger.error(f"Exception in task manager run: {error_message}")
 
             # Log call-breaking exception to CSV trace with component attribution (skip if already logged)
             if self.run_id and not self._error_logged:
@@ -3219,7 +3209,6 @@ class TaskManager(BaseManager):
                 tasks_to_cancel.append(process_task_cancellation(self.output_task,'output_task'))
                 tasks_to_cancel.append(process_task_cancellation(self.hangup_task,'hangup_task'))
                 tasks_to_cancel.append(process_task_cancellation(self.backchanneling_task, 'backchanneling_task'))
-                tasks_to_cancel.append(process_task_cancellation(self.ambient_noise_task, 'ambient_noise_task'))
                 # tasks_to_cancel.append(process_task_cancellation(self.initial_silence_task, 'initial_silence_task'))
                 tasks_to_cancel.append(process_task_cancellation(self.first_message_task, 'first_message_task'))
                 tasks_to_cancel.append(process_task_cancellation(self.dtmf_task, 'dtmf_task'))

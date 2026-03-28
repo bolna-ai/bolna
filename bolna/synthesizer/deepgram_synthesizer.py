@@ -126,6 +126,7 @@ class DeepgramSynthesizer(StreamSynthesizer):
 
     async def receiver(self):
         audio_chunk_count = 0
+        not_connected_since = None
         while True:
             try:
                 if self.conversation_ended:
@@ -133,9 +134,18 @@ class DeepgramSynthesizer(StreamSynthesizer):
                 if not self._is_ws_connected():
                     if self.connection_error:
                         return
+                    now = time.perf_counter()
+                    if not_connected_since is None:
+                        not_connected_since = now
+                    elif now - not_connected_since > 30:
+                        logger.error("Deepgram receiver: WebSocket never connected after 30s, giving up.")
+                        self.connection_error = self.connection_error or "WebSocket never connected"
+                        return
                     logger.info("Deepgram WebSocket is not connected, skipping receive.")
                     await asyncio.sleep(0.10)
                     continue
+                else:
+                    not_connected_since = None
 
                 response = await self.websocket.recv()
 
@@ -215,7 +225,7 @@ class DeepgramSynthesizer(StreamSynthesizer):
             except asyncio.CancelledError:
                 logger.info("Deepgram sender task cancelled during cleanup.")
             except Exception as e:
-                logger.error(f"Error cancelling sender task: {e}")
+                logger.warning(f"Error cancelling sender task: {e}")
 
         ws = self.websocket
         if ws:

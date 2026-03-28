@@ -123,6 +123,9 @@ class StreamSynthesizer(BaseSynthesizer):
     async def _wait_for_ws(self, poll_interval=1):
         """Block until the WebSocket is connected."""
         while not self._is_ws_connected():
+            if self.conversation_ended or self.connection_error:
+                logger.info(f"Aborting {self.provider_name} sender wait: conversation_ended={self.conversation_ended} connection_error={self.connection_error}")
+                return
             logger.info(f"Waiting for {self.provider_name} WebSocket connection...")
             await asyncio.sleep(poll_interval)
 
@@ -314,7 +317,7 @@ class StreamSynthesizer(BaseSynthesizer):
             except asyncio.CancelledError:
                 logger.info(f"{self.provider_name} sender task cancelled during cleanup.")
             except Exception as e:
-                logger.error(f"Error cancelling {self.provider_name} sender task: {e}")
+                logger.warning(f"Error cancelling {self.provider_name} sender task: {e}")
 
         ws = self.websocket
         if ws:

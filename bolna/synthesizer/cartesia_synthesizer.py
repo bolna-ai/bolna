@@ -144,6 +144,7 @@ class CartesiaSynthesizer(StreamSynthesizer):
             logger.error(f"Unexpected error in sender: {e}")
 
     async def receiver(self):
+        not_connected_since = None
         while True:
             try:
                 if self.conversation_ended:
@@ -151,9 +152,18 @@ class CartesiaSynthesizer(StreamSynthesizer):
                 if not self._is_ws_connected():
                     if self.connection_error:
                         return
+                    now = time.perf_counter()
+                    if not_connected_since is None:
+                        not_connected_since = now
+                    elif now - not_connected_since > 30:
+                        logger.error("Cartesia receiver: WebSocket never connected after 30s, giving up.")
+                        self.connection_error = self.connection_error or "WebSocket never connected"
+                        return
                     logger.info("WebSocket is not connected, skipping receive.")
                     await asyncio.sleep(0.1)
                     continue
+                else:
+                    not_connected_since = None
 
                 response = await self.websocket.recv()
                 data = json.loads(response)

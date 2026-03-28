@@ -3,6 +3,7 @@ import json
 import os
 import time
 import uuid
+from websockets.exceptions import InvalidHandshake
 import base64
 
 import aiohttp
@@ -149,6 +150,7 @@ class ElevenlabsSynthesizer(StreamSynthesizer):
         """Yields (audio_chunk, text_spoken) tuples, or (b'\\x00', '') for end-of-stream."""
         audio_chunk_count = 0
         last_recv_time = None
+        not_connected_since = None
         while True:
             try:
                 if self.conversation_ended:
@@ -156,9 +158,18 @@ class ElevenlabsSynthesizer(StreamSynthesizer):
                 if not self._is_ws_connected():
                     if self.connection_error:
                         return
+                    now = time.perf_counter()
+                    if not_connected_since is None:
+                        not_connected_since = now
+                    elif now - not_connected_since > 30:
+                        logger.error("ElevenLabs receiver: WebSocket never connected after 30s, giving up.")
+                        self.connection_error = self.connection_error or "WebSocket never connected"
+                        return
                     logger.info("WebSocket is not connected, skipping receive.")
                     await asyncio.sleep(0.10)
                     continue
+                else:
+                    not_connected_since = None
 
                 recv_start = time.perf_counter()
                 response = await self.websocket.recv()
@@ -223,7 +234,10 @@ class ElevenlabsSynthesizer(StreamSynthesizer):
     async def establish_connection(self):
         try:
             start_time = time.perf_counter()
-            websocket = await websockets.connect(self.ws_url)
+            websocket = await asyncio.wait_for(
+                websockets.connect(self.ws_url),
+                timeout=10.0
+            )
             if hasattr(websocket, "response") and hasattr(websocket.response, "headers"):
                 self.ws_trace_id = websocket.response.headers.get("x-trace-id")
                 logger.info(f"Elevenlabs WebSocket connected trace_id={self.ws_trace_id}")
@@ -245,8 +259,19 @@ class ElevenlabsSynthesizer(StreamSynthesizer):
                 self.connection_time = round((time.perf_counter() - start_time) * 1000)
             logger.info(f"Connected to {self.ws_url}")
             return websocket
+        except asyncio.TimeoutError:
+            logger.error("Timeout while connecting to ElevenLabs websocket")
+            return None
+        except InvalidHandshake as e:
+            error_msg = str(e)
+            if '401' in error_msg or '403' in error_msg:
+                logger.error(f"ElevenLabs authentication failed: Invalid or expired API key - {e}")
+            else:
+                logger.error(f"ElevenLabs handshake failed: {e}")
+            self.connection_error = str(e)
+            return None
         except Exception as e:
-            logger.info(f"Failed to connect: {e}")
+            logger.error(f"Failed to connect to ElevenLabs: {e}")
             return None
 
     # ------------------------------------------------------------------

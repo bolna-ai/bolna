@@ -79,6 +79,7 @@ class SmallestSynthesizer(StreamSynthesizer):
             logger.error(f"Unexpected error in sender: {e}")
 
     async def receiver(self):
+        not_connected_since = None
         while True:
             try:
                 if self.conversation_ended:
@@ -86,9 +87,18 @@ class SmallestSynthesizer(StreamSynthesizer):
                 if not self._is_ws_connected():
                     if self.connection_error:
                         return
+                    now = time.perf_counter()
+                    if not_connected_since is None:
+                        not_connected_since = now
+                    elif now - not_connected_since > 30:
+                        logger.error("Smallest receiver: WebSocket never connected after 30s, giving up.")
+                        self.connection_error = self.connection_error or "WebSocket never connected"
+                        return
                     logger.info("WebSocket is not connected, skipping receive.")
                     await asyncio.sleep(0.1)
                     continue
+                else:
+                    not_connected_since = None
 
                 response = await self.websocket.recv()
                 data = json.loads(response)
@@ -110,15 +120,21 @@ class SmallestSynthesizer(StreamSynthesizer):
     async def establish_connection(self):
         try:
             start_time = time.perf_counter()
-            websocket = await websockets.connect(
+            websocket = await asyncio.wait_for(
+                websockets.connect(
                 self.ws_url, additional_headers={"Authorization": f"Token {self.api_key}"},
+            ),
+                timeout=10.0
             )
             if not self.connection_time:
                 self.connection_time = round((time.perf_counter() - start_time) * 1000)
             logger.info(f"Connected to {self.ws_url}")
             return websocket
+        except asyncio.TimeoutError:
+            logger.error("Timeout while connecting to Smallest websocket")
+            return None
         except Exception as e:
-            logger.info(f"Failed to connect: {e}")
+            logger.error(f"Failed to connect to Smallest: {e}")
             return None
 
     def _process_http_audio(self, audio):
