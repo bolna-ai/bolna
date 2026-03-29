@@ -34,7 +34,7 @@ from .base_manager import BaseManager
 from .interruption_manager import InterruptionManager
 from bolna.agent_types import *
 from bolna.providers import *
-from bolna.enums import TelephonyProvider, LogComponent, LogDirection, HangupReason
+from bolna.enums import TelephonyProvider, LogComponent, LogDirection, HangupReason, NodeType
 from bolna.exceptions import BolnaComponentError, LLMError, SynthesizerError, TranscriberError
 from bolna.prompts import *
 from bolna.helpers.language_detector import LanguageDetector
@@ -140,8 +140,10 @@ class TaskManager(BaseManager):
         self.synthesizer_queue = asyncio.Queue()
         self.transcriber_output_queue = asyncio.Queue()
         self.dtmf_queue = asyncio.Queue()
+        self.event_queue = kwargs.get("event_queue") or asyncio.Queue()
         self.queues = {
             "dtmf": self.dtmf_queue,
+            "events": self.event_queue,
             "transcriber": self.audio_queue,
             "llm": self.llm_queue,
             "synthesizer": self.synthesizer_queue,
@@ -235,6 +237,7 @@ class TaskManager(BaseManager):
         self._error_logged = False
         self.synthesizer_monitor_task = None
         self.dtmf_task = None
+        self.event_listener_task = None
 
         # state of conversation
         self.current_request_id = None
@@ -1770,6 +1773,108 @@ class TaskManager(BaseManager):
                 logger.info(f"DTMF LLM processing triggered with sequence_id={meta_info['sequence_id']}")
             except Exception as e:
                 logger.info(f"DTMF LLM processing triggered with exception {e}")
+
+    async def _listen_events(self):
+        """Listen for external events and process them through the graph agent.
+        Events trigger node transitions and proactive speech without user input."""
+        logger.info("Event listener started for graph agent")
+        while True:
+            try:
+                event = await self.event_queue.get()
+                if self.conversation_ended:
+                    logger.info(f"Event '{event.get('event')}' ignored — conversation ended")
+                    continue
+
+                logger.info(f"Processing external event: {event.get('event')}")
+
+                # Wait for a safe point (no audio playing, no response in pipeline)
+                await self._wait_for_safe_point()
+
+                if self.conversation_ended:
+                    continue
+
+                # Process through graph agent
+                result = self.tools['llm_agent'].process_event(event)
+
+                if result.get('matched'):
+                    # Set node entry index so _node_turns counts from this point
+                    self.tools['llm_agent'].current_node_entry_index = len(self.conversation_history.get_copy())
+                    await self._proactive_generate_for_event(event, result)
+                else:
+                    logger.info(f"Event '{event.get('event')}' — no matching edge, context updated silently")
+
+            except asyncio.CancelledError:
+                logger.info("Event listener cancelled")
+                break
+            except Exception as e:
+                logger.error(f"Error in event listener: {e}")
+                traceback.print_exc()
+
+    async def _wait_for_safe_point(self, timeout=30.0):
+        """Wait until the pipeline is idle: no audio playing, no response in pipeline, no active LLM task."""
+        start = time.time()
+        while time.time() - start < timeout:
+            if self.conversation_ended:
+                return
+            audio_playing = self.tools["input"].is_audio_being_played_to_user() if "input" in self.tools else False
+            llm_busy = self.llm_task is not None and not self.llm_task.done() if self.llm_task else False
+            if not audio_playing and not self.response_in_pipeline and not llm_busy:
+                return
+            await asyncio.sleep(0.1)
+        logger.warning(f"_wait_for_safe_point timed out after {timeout}s")
+
+    async def _proactive_generate_for_event(self, event: dict, result: dict):
+        """Trigger proactive speech generation after an event-driven transition."""
+        node_type = result.get('node_type', NodeType.LLM)
+        target_node = result.get('target_node')
+
+        # Update repeat_after_silence for the new node
+        if target_node:
+            self.repeat_after_silence_seconds = target_node.get('repeat_after_silence_seconds')
+
+        if node_type == NodeType.STATIC:
+            # Static node: play cached audio directly, no LLM cost
+            static_text = target_node.get('static_message', '') if target_node else ''
+            if static_text:
+                if self.context_data:
+                    static_text = update_prompt_with_context(static_text, self.context_data)
+                self.conversation_history.append_assistant(static_text)
+                meta_info = {
+                    'io': self.tools["output"].get_provider(),
+                    "request_id": str(uuid.uuid4()),
+                    "cached": True,
+                    "sequence_id": -1,
+                    'format': self.task_config["tools_config"]["output"].get("format", "pcm"),
+                    "end_of_llm_stream": True,
+                    "text": static_text,
+                    "message_category": "event_proactive",
+                }
+                ws_packet = create_ws_data_packet(get_md5_hash(static_text), meta_info=meta_info, is_md5_hash=True)
+                await self._synthesize(ws_packet)
+        else:
+            # LLM node: set flag and trigger generation without adding a user message
+            self.tools['llm_agent']._event_triggered_generation = True
+            self.tools['llm_agent'].context_data['_event_previous_node'] = result.get('previous_node', '')
+            await self._generate_proactive()
+
+    async def _generate_proactive(self):
+        """Trigger LLM generation proactively (no user message appended to history).
+        Same BOS/EOS structure as _inject_and_run_llm but without conversation_history.append_user()."""
+        meta_info = self.__get_updated_meta_info({
+            'io': self.tools["output"].get_provider(),
+            "request_id": str(uuid.uuid4()),
+            "cached": False,
+            'format': self.task_config["tools_config"]["output"].get("format", "pcm"),
+            "message_category": "event_proactive",
+        })
+        bos_packet = create_ws_data_packet("<beginning_of_stream>", meta_info)
+        await self.tools["output"].handle(bos_packet)
+        self.response_in_pipeline = True
+        task = asyncio.create_task(self._run_llm_task(create_ws_data_packet("", meta_info)))
+        self.llm_task = task
+        await task
+        eos_packet = create_ws_data_packet("<end_of_stream>", meta_info)
+        await self.tools["output"].handle(eos_packet)
 
     async def __process_end_of_conversation(self, web_call_timeout=False):
         if self._end_of_conversation_in_progress or self.conversation_ended:
@@ -3924,6 +4029,9 @@ class TaskManager(BaseManager):
                     if self.should_backchannel:
                         self.backchanneling_task = asyncio.create_task(self.__check_for_backchanneling())
 
+                    if self.__is_graph_agent():
+                        self.event_listener_task = asyncio.create_task(self._listen_events())
+
                 try:
                     await asyncio.gather(*tasks)
                 except asyncio.CancelledError:
@@ -4127,6 +4235,7 @@ class TaskManager(BaseManager):
                 # tasks_to_cancel.append(process_task_cancellation(self.initial_silence_task, 'initial_silence_task'))
                 tasks_to_cancel.append(process_task_cancellation(self.first_message_task, "first_message_task"))
                 tasks_to_cancel.append(process_task_cancellation(self.dtmf_task, "dtmf_task"))
+                tasks_to_cancel.append(process_task_cancellation(self.event_listener_task, "event_listener_task"))
                 tasks_to_cancel.append(
                     process_task_cancellation(self.voicemail_handler.check_task, "voicemail_check_task")
                 )

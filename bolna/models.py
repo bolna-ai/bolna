@@ -315,6 +315,11 @@ class ExpressionGroup(BaseModel):
     logic: ExpressionLogic = ExpressionLogic.AND
     conditions: List[ExpressionCondition] = Field(default_factory=list)
 
+class CallEvent(BaseModel):
+    """Incoming external event payload."""
+    event: str
+    properties: Optional[Dict[str, Any]] = None
+    timestamp: Optional[float] = None
 
 class GraphEdge(BaseModel):
     """Edge definition for graph-based conversation flow.
@@ -327,6 +332,7 @@ class GraphEdge(BaseModel):
     condition: str = ""  # Human-readable description of when to transition
     condition_type: Optional[EdgeConditionType] = None  # None → "llm" (backward compat)
     expression: Optional[ExpressionGroup] = None  # required when condition_type == "expression"
+    event_name: Optional[str] = None  # Matches CallEvent.event when condition_type="event"
     # Function definition for LLM to call (auto-generated if not provided)
     function_name: Optional[str] = None  # e.g., "go_to_city_question"
     function_description: Optional[str] = None  # Detailed description for LLM
