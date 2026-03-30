@@ -240,7 +240,7 @@ def get_required_input_types(task):
     input_types = dict()
     for i, chain in enumerate(task['toolchain']['pipelines']):
         first_model = chain[0]
-        if chain[0] == "transcriber":
+        if chain[0] == "transcriber" or chain[0] == "s2s":
             input_types["audio"] = i
         elif chain[0] == "synthesizer" or chain[0] == "llm":
             input_types["text"] = i
