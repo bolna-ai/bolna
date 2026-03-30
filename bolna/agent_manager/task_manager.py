@@ -579,10 +579,12 @@ class TaskManager(BaseManager):
                 if self.task_config["tools_config"]["output"]["provider"] in SUPPORTED_OUTPUT_TELEPHONY_HANDLERS.keys():
                     output_kwargs['mark_event_meta_data'] = self.mark_event_meta_data
                     logger.info(f"Making sure that the sampling rate for output handler is 8000")
-                    self.task_config['tools_config']['synthesizer']['provider_config']['sampling_rate'] = 8000
+                    if self.task_config['tools_config'].get('synthesizer'):
+                        self.task_config['tools_config']['synthesizer']['provider_config']['sampling_rate'] = 8000
                     # sip-trunk (Asterisk) uses ulaw; other telephony use pcm (handler converts to mulaw)
                     if self.task_config["tools_config"]["output"]["provider"] == TelephonyProvider.SIP_TRUNK.value:
-                        self.task_config['tools_config']['synthesizer']['audio_format'] = 'ulaw'
+                        if self.task_config['tools_config'].get('synthesizer'):
+                            self.task_config['tools_config']['synthesizer']['audio_format'] = 'ulaw'
                         logger.info(f"Setting synthesizer audio format to ulaw for Asterisk sip-trunk")
                         # Pass input handler to output handler so it can simulate mark events
                         input_handler = self.tools.get("input")
@@ -591,11 +593,13 @@ class TaskManager(BaseManager):
                         output_kwargs['agent_config'] = {"tasks": [self.task_config]}
                         logger.info(f"Passing input_handler to sip-trunk output handler for mark event simulation: {input_handler is not None}")
                     else:
-                        self.task_config['tools_config']['synthesizer']['audio_format'] = 'pcm'
+                        if self.task_config['tools_config'].get('synthesizer'):
+                            self.task_config['tools_config']['synthesizer']['audio_format'] = 'pcm'
                 else:
-                    self.task_config['tools_config']['synthesizer']['provider_config']['sampling_rate'] = 24000
+                    if self.task_config['tools_config'].get('synthesizer'):
+                        self.task_config['tools_config']['synthesizer']['provider_config']['sampling_rate'] = 24000
                     output_kwargs['queue'] = output_queue
-                self.sampling_rate = self.task_config['tools_config']['synthesizer']['provider_config']['sampling_rate']
+                self.sampling_rate = self.task_config['tools_config'].get('synthesizer', {}).get('provider_config', {}).get('sampling_rate', 8000) if self.task_config['tools_config'].get('synthesizer') else 8000
 
             if self.task_config["tools_config"]["output"]["provider"] == "default":
                 output_kwargs["is_web_based_call"] = self.is_web_based_call
