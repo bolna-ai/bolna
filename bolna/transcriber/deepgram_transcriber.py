@@ -66,18 +66,14 @@ class DeepgramTranscriber(BaseTranscriber):
         self.audio_frame_duration = 0.0
         self.connected_via_dashboard = kwargs.get("enforce_streaming", True)
         #Message states
-        self.curr_message = ''
-        self.finalized_transcript = ""
         self.final_transcript = ""
         self.current_turn_start_time = None
         self.current_turn_id = None
         self.websocket_connection = None
         self.connection_authenticated = False
-        self.speech_start_time = None
-        self.speech_end_time = None
         self.current_turn_interim_details = []
         self.audio_frame_timestamps = []  # List of (frame_start, frame_end, send_timestamp)
-        self.turn_counter = 0
+        self.turn_counter = 1
         # Timeout tracking for stuck utterances
         self.last_interim_time = None
         self.interim_timeout = kwargs.get("interim_timeout", 5.0)  # Default 5 seconds
@@ -182,8 +178,6 @@ class DeepgramTranscriber(BaseTranscriber):
 
     def _reset_turn_state(self):
         """Reset turn state variables after finalizing a transcript"""
-        self.speech_start_time = None
-        self.speech_end_time = None
         self.last_interim_time = None
         self.current_turn_interim_details = []
         self.current_turn_start_time = None
@@ -206,6 +200,14 @@ class DeepgramTranscriber(BaseTranscriber):
             logger.warning("No transcript available to force-finalize")
             self._reset_turn_state()
             return
+        
+        # Create transcript message (same format as UtteranceEnd)
+        data = {
+            "type": "transcript",
+            "content": transcript_to_send,
+            "force_finalized": True  # For debugging
+        }
+
 
         # Build turn latencies (same as UtteranceEnd logic)
         try:
@@ -222,13 +224,7 @@ class DeepgramTranscriber(BaseTranscriber):
         except Exception as e:
             logger.error(f"Error building turn latencies: {e}")
 
-        # Create transcript message (same format as UtteranceEnd)
-        data = {
-            "type": "transcript",
-            "content": transcript_to_send,
-            "force_finalized": True  # For debugging
-        }
-
+        self._increment_turn()
         logger.info(f"Force-finalized transcript after timeout: {transcript_to_send}")
 
         # Send to queue (unblocks _listen_transcriber)
@@ -348,6 +344,16 @@ class DeepgramTranscriber(BaseTranscriber):
 
     def get_meta_info(self):
         return self.meta_info
+    
+
+    def _increment_turn(self):
+        self.turn_counter += 1
+        self.current_turn_id = self.turn_counter
+        self.current_turn_interim_details = []
+        self.is_transcript_sent_for_processing = False
+
+        logger.info(f"Starting new turn with turn_id: {self.current_turn_id}")
+
 
     async def sender(self, ws=None):
         try:
@@ -445,13 +451,6 @@ class DeepgramTranscriber(BaseTranscriber):
 
                 if msg["type"] == "SpeechStarted":
                     logger.info("Received SpeechStarted event from deepgram")
-                    self.turn_counter += 1
-                    self.current_turn_id = self.turn_counter
-                    self.speech_start_time = timestamp_ms()
-                    self.current_turn_interim_details = []
-                    self.is_transcript_sent_for_processing = False
-
-                    logger.info(f"Starting new turn with turn_id: {self.current_turn_id}")
                     yield create_ws_data_packet("speech_started", self.meta_info)
                     pass
 
@@ -506,6 +505,7 @@ class DeepgramTranscriber(BaseTranscriber):
                                 "content": self.final_transcript
                             }
 
+
                             # Build turn_latencies with new metrics before resetting
                             try:
                                 first_interim_to_final_ms, last_interim_to_final_ms = self.calculate_interim_to_final_latencies(self.current_turn_interim_details)
@@ -519,8 +519,6 @@ class DeepgramTranscriber(BaseTranscriber):
                                 })
 
                                 # Complete turn reset
-                                self.speech_start_time = None
-                                self.speech_end_time = None
                                 self.current_turn_interim_details = []
                                 self.current_turn_start_time = None
                                 self.current_turn_id = None
@@ -529,6 +527,8 @@ class DeepgramTranscriber(BaseTranscriber):
                             except Exception as e:
                                 logger.error(f"Failed to extract transcript from Deepgram response in speech_final: {e}")
                                 pass
+
+                            self._increment_turn()
                             yield create_ws_data_packet(data, self.meta_info)
 
                 elif msg["type"] == "UtteranceEnd":
@@ -540,6 +540,7 @@ class DeepgramTranscriber(BaseTranscriber):
                             "type": "transcript",
                             "content": self.final_transcript
                         }
+
 
                         # Build turn_latencies with new metrics before resetting
                         try:
@@ -554,8 +555,6 @@ class DeepgramTranscriber(BaseTranscriber):
                             })
 
                             # Complete turn reset
-                            self.speech_start_time = None
-                            self.speech_end_time = None
                             self.current_turn_interim_details = []
                             self.current_turn_start_time = None
                             self.current_turn_id = None
@@ -564,13 +563,13 @@ class DeepgramTranscriber(BaseTranscriber):
                         except Exception as e:
                             logger.error(f"Failed to extract transcript from Deepgram response: {e}")
                             pass
+                        
+                        self._increment_turn()
                         yield create_ws_data_packet(data, self.meta_info)
                     else:
                         # Transcript already sent but we still need to notify speech ended
                         # This prevents callee_speaking from staying True indefinitely
                         logger.info(f"UtteranceEnd received but transcript already processed, yielding speech_ended notification")
-                        self.speech_start_time = None
-                        self.speech_end_time = None
                         self.current_turn_interim_details = []
                         self.current_turn_start_time = None
                         self.current_turn_id = None

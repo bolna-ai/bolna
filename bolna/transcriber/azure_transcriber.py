@@ -44,7 +44,6 @@ class AzureTranscriber(BaseTranscriber):
         self.current_turn_interim_details = []
         self.current_turn_start_time = None
         self.current_turn_id = None
-        self.speech_start_time = None
 
         if self.audio_provider in ("twilio", "exotel", "plivo"):
             self.encoding = "mulaw" if self.audio_provider in ("twilio",) else "linear16"

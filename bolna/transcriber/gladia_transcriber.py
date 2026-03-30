@@ -113,8 +113,6 @@ class GladiaTranscriber(BaseTranscriber):
         self.current_turn_start_time = None
         self.current_turn_id = None
         self.current_turn_interim_details = []
-        self.speech_start_time = None
-        self.speech_end_time = None
 
         # Latency tracking
         self.first_result_latency_ms = None
@@ -328,8 +326,6 @@ class GladiaTranscriber(BaseTranscriber):
 
     def _reset_turn_state(self):
         """Reset turn state after finalizing a transcript."""
-        self.speech_start_time = None
-        self.speech_end_time = None
         self.last_interim_time = None
         self.current_turn_interim_details = []
         self.current_turn_start_time = None
@@ -654,7 +650,6 @@ class GladiaTranscriber(BaseTranscriber):
                     logger.info("Received speech_begin event from Gladia")
                     self.turn_counter += 1
                     self.current_turn_id = self.turn_counter
-                    self.speech_start_time = timestamp_ms()
                     self.current_turn_start_time = timestamp_ms()
                     self.current_turn_interim_details = []
                     self.is_transcript_sent_for_processing = False
@@ -664,7 +659,6 @@ class GladiaTranscriber(BaseTranscriber):
                 elif msg_type == "speech_end" or (msg_type == "event" and data.get("data", {}).get("type") == "speech_end"):
                     # Speech ended event
                     logger.info("Received speech_end event from Gladia")
-                    self.speech_end_time = timestamp_ms()
 
                 elif msg_type == "error":
                     error_data = data.get("data", {})

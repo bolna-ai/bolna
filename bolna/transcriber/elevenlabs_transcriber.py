@@ -64,16 +64,12 @@ class ElevenLabsTranscriber(BaseTranscriber):
         self.min_silence_duration_ms = max(50, min(2000, kwargs.get("min_silence_duration_ms", 300)))
 
         # Message states
-        self.curr_message = ''
-        self.finalized_transcript = ""
         self.final_transcript = ""
         self.current_turn_start_time = None
         self.current_turn_id = None
         self.websocket_connection = None
         self.connection_authenticated = False
         self.connection_error = None
-        self.speech_start_time = None
-        self.speech_end_time = None
         self.current_turn_interim_details = []
         self.audio_frame_timestamps = []
         self.turn_counter = 0
@@ -138,8 +134,6 @@ class ElevenLabsTranscriber(BaseTranscriber):
 
     def _reset_turn_state(self):
         """Reset turn state variables after finalizing a transcript"""
-        self.speech_start_time = None
-        self.speech_end_time = None
         self.last_interim_time = None
         self.current_turn_interim_details = []
         self.current_turn_start_time = None
@@ -376,7 +370,6 @@ class ElevenLabsTranscriber(BaseTranscriber):
                         if not self.current_turn_id:
                             self.turn_counter += 1
                             self.current_turn_id = self.turn_counter
-                            self.speech_start_time = timestamp_ms()
                             self.current_turn_interim_details = []
                             logger.info(f"Starting new turn with turn_id: {self.current_turn_id}")
                             yield create_ws_data_packet("speech_started", self.meta_info)
@@ -437,8 +430,6 @@ class ElevenLabsTranscriber(BaseTranscriber):
                             })
 
                             # Complete turn reset - set flag to False to allow next utterance
-                            self.speech_start_time = None
-                            self.speech_end_time = None
                             self.current_turn_interim_details = []
                             self.current_turn_start_time = None
                             self.current_turn_id = None
