@@ -236,6 +236,17 @@ class OpenAIRealtimeS2S(BaseS2SProvider):
             elif event_type == "response.created":
                 self._turn_start_time = time.time()
 
+            elif event_type == "input_audio_buffer.speech_stopped":
+                logger.info("OpenAI VAD: speech_stopped (will auto-respond)")
+
+            elif event_type in ("input_audio_buffer.committed", "conversation.item.created",
+                                "response.content_part.added", "response.content_part.done",
+                                "rate_limits.updated"):
+                pass  # Known events, no action needed
+
+            else:
+                logger.info(f"OpenAI unhandled event: {event_type}")
+
     # ------------------------------------------------------------------
     # Function results
     # ------------------------------------------------------------------

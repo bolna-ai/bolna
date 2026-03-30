@@ -3149,6 +3149,8 @@ class TaskManager(BaseManager):
     async def _s2s_audio_ingest_loop(self):
         """Read audio from audio_queue, convert to PCM@24kHz, send to S2S provider."""
         is_telephony = not self.default_io
+        chunks_sent = 0
+        chunks_discarded = 0
         while not self.conversation_ended:
             try:
                 message = await asyncio.wait_for(self.audio_queue.get(), timeout=1.0)
@@ -3158,11 +3160,13 @@ class TaskManager(BaseManager):
             data = message.get("data")
             if data is None:
                 if message.get("meta_info", {}).get("eos"):
+                    logger.info(f"S2S audio ingest: received EOS, stopping | sent={chunks_sent} discarded={chunks_discarded}")
                     break
                 continue
 
             # Hold back user audio during welcome message to avoid VAD interruption
             if not self._s2s_welcome_done:
+                chunks_discarded += 1
                 continue
 
             if is_telephony:
@@ -3172,6 +3176,11 @@ class TaskManager(BaseManager):
                 pcm_24k = data  # Web calls: already PCM
 
             await self.tools["s2s"].send_audio(pcm_24k)
+            chunks_sent += 1
+            if chunks_sent % 50 == 0:  # Log every 5 seconds (50 * 100ms chunks)
+                logger.info(f"S2S audio ingest: {chunks_sent} chunks sent to OpenAI")
+
+        logger.info(f"S2S audio ingest loop exited | sent={chunks_sent} discarded={chunks_discarded} ended={self.conversation_ended}")
 
     async def _s2s_event_loop(self):
         """Process events from S2S provider, convert audio, manage output queue."""
