@@ -3125,6 +3125,7 @@ class TaskManager(BaseManager):
 
         # Trigger welcome message — model will speak from its instructions
         welcome = self.kwargs.get('agent_welcome_message', '').strip()
+        self._s2s_welcome_done = not bool(welcome)
         if welcome:
             await s2s.trigger_response()
 
@@ -3160,6 +3161,10 @@ class TaskManager(BaseManager):
                     break
                 continue
 
+            # Hold back user audio during welcome message to avoid VAD interruption
+            if not self._s2s_welcome_done:
+                continue
+
             if is_telephony:
                 pcm_8k = ulaw_to_pcm(data)
                 pcm_24k = resample(pcm_8k, 24000, format="pcm", original_sample_rate=8000)
@@ -3189,6 +3194,7 @@ class TaskManager(BaseManager):
                     "io": self.tools["output"].get_provider() if not self.default_io else "default",
                     "sequence_id": -1,
                     "is_preamble": event.is_preamble,
+                    "format": "mulaw" if is_telephony else "pcm",
                 }
                 await self.buffered_output_queue.put({
                     "data": audio_out,
@@ -3212,6 +3218,9 @@ class TaskManager(BaseManager):
                 asyncio.create_task(self._s2s_handle_function_call(event))
 
             elif isinstance(event, Interrupted):
+                if not self._s2s_welcome_done:
+                    logger.info("S2S: ignoring barge-in during welcome message")
+                    continue
                 logger.info("S2S: user barged in, clearing output queue")
                 if "output" in self.tools:
                     await self.tools["output"].handle_interruption()
@@ -3223,10 +3232,13 @@ class TaskManager(BaseManager):
                         break
 
             elif isinstance(event, ResponseDone):
+                if not self._s2s_welcome_done:
+                    self._s2s_welcome_done = True
+                    logger.info("S2S welcome message complete, enabling audio input")
                 # Send end-of-stream marker
                 await self.buffered_output_queue.put({
                     "data": b"\x00",
-                    "meta_info": {"end_of_llm_stream": True},
+                    "meta_info": {"end_of_llm_stream": True, "sequence_id": -1},
                 })
 
             elif isinstance(event, S2SError):
