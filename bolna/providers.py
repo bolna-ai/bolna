@@ -3,7 +3,8 @@ from .transcriber import DeepgramTranscriber, AzureTranscriber, SarvamTranscribe
 from .input_handlers import DefaultInputHandler, TwilioInputHandler, ExotelInputHandler, PlivoInputHandler, VobizInputHandler, SipTrunkInputHandler
 from .output_handlers import DefaultOutputHandler, TwilioOutputHandler, ExotelOutputHandler, PlivoOutputHandler, VobizOutputHandler, SipTrunkOutputHandler
 from .llms import OpenAiLLM, LiteLLM, AzureLLM, GeminiLLM
-from .enums import TelephonyProvider, SynthesizerProvider, TranscriberProvider, LLMProvider
+from .s2s import OpenAIRealtimeS2S
+from .enums import TelephonyProvider, SynthesizerProvider, TranscriberProvider, LLMProvider, S2SProvider
 
 SUPPORTED_SYNTHESIZER_MODELS = {
     SynthesizerProvider.POLLY.value: PollySynthesizer,
@@ -84,4 +85,8 @@ SUPPORTED_OUTPUT_TELEPHONY_HANDLERS = {
     TelephonyProvider.PLIVO.value: PlivoOutputHandler,
     TelephonyProvider.VOBIZ.value: VobizOutputHandler,
     TelephonyProvider.SIP_TRUNK.value: SipTrunkOutputHandler
+}
+
+SUPPORTED_S2S_PROVIDERS = {
+    S2SProvider.OPENAI_REALTIME.value: OpenAIRealtimeS2S,
 }

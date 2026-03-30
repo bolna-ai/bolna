@@ -750,10 +750,15 @@ def pcm_to_ulaw(pcm_bytes):
     Convert PCM audio (16-bit signed linear) to ulaw format.
     PCM is int16 samples, ulaw is 8-bit compressed format.
     """
-    
+
     # audioop.lin2ulaw expects 16-bit PCM and returns 8-bit ulaw
     ulaw_bytes = audioop.lin2ulaw(pcm_bytes, 2)  # 2 = sample width in bytes (16-bit)
     return ulaw_bytes
+
+
+def ulaw_to_pcm(ulaw_bytes):
+    """Convert ulaw (8-bit compressed) to PCM audio (16-bit signed linear)."""
+    return audioop.ulaw2lin(ulaw_bytes, 2)
 
 
 def compute_function_pre_call_message(language, function_name, api_tool_pre_call_message):

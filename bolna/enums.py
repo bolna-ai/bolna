@@ -239,6 +239,15 @@ class EdgeConditionType(str, Enum):
     UNCONDITIONAL = "unconditional"
 
 
+class S2SProvider(str, Enum):
+    """Enum for speech-to-speech providers."""
+    OPENAI_REALTIME = "openai_realtime"
+
+    @classmethod
+    def all_values(cls):
+        return [p.value for p in cls]
+
+
 class UsageSource(str, Enum):
     """Indicates whether token counts came from the API or text estimation."""
     API_REPORTED = "api_reported"
