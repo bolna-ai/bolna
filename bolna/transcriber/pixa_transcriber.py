@@ -77,6 +77,7 @@ class PixaTranscriber(BaseTranscriber):
         self.websocket_connection = None
         self.connection_authenticated = False
         self.meta_info = {}
+        self.connection_error = None
 
         # Turn/latency tracking
         self.current_turn_start_time = None
@@ -87,7 +88,6 @@ class PixaTranscriber(BaseTranscriber):
         self.turn_first_result_latency = None
 
         # Since Pixa has no VAD, use is_final-based turn detection
-        self.is_transcript_sent_for_processing = False
         self.last_interim_time = None
         self.interim_timeout = kwargs.get("interim_timeout", 5.0)  # Default 5 seconds
 
@@ -471,7 +471,7 @@ class PixaTranscriber(BaseTranscriber):
                 except asyncio.CancelledError:
                     logger.info(f"Pixa {task_name} cancelled")
                 except Exception as e:
-                    logger.error(f"Error cancelling Pixa {task_name}: {e}")
+                    logger.warning(f"Error cancelling Pixa {task_name}: {e}")
 
         # Close websocket
         if self.websocket_connection is not None:
@@ -529,14 +529,18 @@ class PixaTranscriber(BaseTranscriber):
                                 pass
                             break
                 except ConnectionClosedError as e:
+                    self.connection_error = str(e)
                     logger.error(f"Pixa websocket connection closed during streaming: {e}")
                 except Exception as e:
+                    self.connection_error = str(e)
                     logger.error(f"Error during Pixa streaming: {e}")
                     traceback.print_exc()
 
         except (ValueError, ConnectionError) as e:
+            self.connection_error = str(e)
             logger.error(f"Connection error in Pixa transcribe: {e}")
         except Exception as e:
+            self.connection_error = str(e)
             logger.error(f"Unexpected error in Pixa transcribe: {e}")
             traceback.print_exc()
         finally:
@@ -556,8 +560,11 @@ class PixaTranscriber(BaseTranscriber):
                     self.connection_authenticated = False
 
             # Send connection closed notification
+            meta = dict(getattr(self, 'meta_info', None) or {})
+            if self.connection_error:
+                meta['connection_error'] = self.connection_error
             await self.push_to_transcriber_queue(
-                create_ws_data_packet("transcriber_connection_closed", getattr(self, 'meta_info', {}))
+                create_ws_data_packet("transcriber_connection_closed", meta)
             )
 
     def get_meta_info(self):

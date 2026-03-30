@@ -1,0 +1,26 @@
+name: Lint
+
+on:
+  pull_request:
+    branches: [master, main]
+  push:
+    branches: [master, main]
+
+jobs:
+  ruff:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10.13'
+
+      - name: Ruff lint
+        uses: astral-sh/ruff-action@v3
+
+      - name: Requirements lint
+        run: |
+          python -m pip install --upgrade pip pre-commit
+          pre-commit run requirements-txt-fixer --files requirements.txt

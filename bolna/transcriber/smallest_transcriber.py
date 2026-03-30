@@ -78,6 +78,7 @@ class SmallestTranscriber(BaseTranscriber):
         self.websocket_connection: Optional[ClientConnection] = None
         self.connection_authenticated = False
         self.smallest_session_id: Optional[str] = None
+        self.connection_error: Optional[str] = None
 
         # Tasks
         self.transcription_task = None
@@ -94,7 +95,6 @@ class SmallestTranscriber(BaseTranscriber):
 
         # Transcript state management
         self.final_transcript = ""
-        self.is_transcript_sent_for_processing = False
         self.interruption_signalled = False
 
         # Turn tracking
@@ -367,7 +367,7 @@ class SmallestTranscriber(BaseTranscriber):
                 except asyncio.CancelledError:
                     logger.info(f"Smallest {task_name} cancelled")
                 except Exception as e:
-                    logger.error(f"Error cancelling Smallest {task_name}: {e}")
+                    logger.warning(f"Error cancelling Smallest {task_name}: {e}")
 
         # Close websocket
         if self.websocket_connection is not None:
@@ -674,8 +674,10 @@ class SmallestTranscriber(BaseTranscriber):
                             break
                 except ConnectionClosedError as e:
                     logger.error(f"Smallest AI WebSocket closed during streaming: {e}")
+                    self.connection_error = str(e)
                 except Exception as e:
                     logger.error(f"Error during streaming: {e}")
+                    self.connection_error = str(e)
                     raise
             else:
                 # Non-streaming mode not supported for Smallest AI
@@ -707,6 +709,9 @@ class SmallestTranscriber(BaseTranscriber):
                 self.utterance_timeout_task.cancel()
 
             # Send connection closed message
+            meta = dict(getattr(self, 'meta_info', None) or {})
+            if self.connection_error:
+                meta['connection_error'] = self.connection_error
             await self.push_to_transcriber_queue(
-                create_ws_data_packet("transcriber_connection_closed", getattr(self, 'meta_info', {}))
+                create_ws_data_packet("transcriber_connection_closed", meta)
             )

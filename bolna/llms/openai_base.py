@@ -3,7 +3,7 @@ import json
 from openai import BadRequestError, APIError
 
 from bolna.constants import GPT5_MODEL_PREFIX
-from bolna.enums import ChatRole, ResponseStreamEvent, ResponseItemType
+from bolna.enums import ChatRole, ResponseStreamEvent, ResponseItemType, LogComponent, LogDirection
 from bolna.helpers.utils import convert_to_request_log, compute_function_pre_call_message, now_ms
 from .llm import BaseLLM
 from .message_models import MessageFormatAdapter
@@ -126,9 +126,13 @@ class OpenAICompatibleLLM(BaseLLM):
             create_kwargs["service_tier"] = service_tier
 
         if self.model.startswith(GPT5_MODEL_PREFIX):
+            create_kwargs["temperature"] = 1
             reasoning_effort = self.model_args.get("reasoning_effort")
             if reasoning_effort:
                 create_kwargs["reasoning"] = {"effort": reasoning_effort}
+            verbosity = self.model_args.get("verbosity")
+            if verbosity:
+                create_kwargs.setdefault("text", {})["verbosity"] = verbosity
 
         if self.previous_response_id:
             create_kwargs["previous_response_id"] = self.previous_response_id
@@ -139,7 +143,7 @@ class OpenAICompatibleLLM(BaseLLM):
             create_kwargs["parallel_tool_calls"] = False
 
         if request_json:
-            create_kwargs["text"] = {"format": {"type": "json_object"}}
+            create_kwargs.setdefault("text", {})["format"] = {"type": "json_object"}
 
         answer, buffer = "", ""
         func_call_args = {}  # item_id -> accumulated arguments
@@ -153,6 +157,7 @@ class OpenAICompatibleLLM(BaseLLM):
         latency_data = None
         service_tier = None
         llm_host = getattr(self, "llm_host", None)
+        response_usage = None
 
         try:
             stream = await self._responses_client.responses.create(**create_kwargs)
@@ -234,6 +239,8 @@ class OpenAICompatibleLLM(BaseLLM):
                 if hasattr(event.response, 'id'):
                     self.previous_response_id = event.response.id
                 service_tier = service_tier or getattr(event.response, 'service_tier', None)
+                if hasattr(event.response, 'usage') and event.response.usage:
+                    response_usage = event.response.usage
                 break
 
         if latency_data:
@@ -277,8 +284,8 @@ class OpenAICompatibleLLM(BaseLLM):
                         parsed_args = json.loads(arguments_str)
                         required_keys = tool_spec.get("parameters", {}).get("required", [])
                         if tool_spec.get("parameters") is not None and all(k in parsed_args for k in required_keys):
-                            convert_to_request_log(arguments_str, meta_info, self.model, "llm",
-                                                   direction="response", is_cached=False, run_id=self.run_id)
+                            convert_to_request_log(arguments_str, meta_info, self.model, LogComponent.LLM,
+                                                   direction=LogDirection.RESPONSE, is_cached=False, run_id=self.run_id)
                             for k, v in parsed_args.items():
                                 setattr(api_call_payload, k, v)
                         else:
@@ -291,10 +298,22 @@ class OpenAICompatibleLLM(BaseLLM):
 
                 yield LLMStreamChunk(data=api_call_payload, end_of_stream=False, latency=latency_data, is_function_call=True)
 
+        # Extract actual token counts from response usage
+        usage_kwargs = {}
+        if response_usage:
+            usage_kwargs['input_tokens'] = getattr(response_usage, 'input_tokens', None)
+            usage_kwargs['output_tokens'] = getattr(response_usage, 'output_tokens', None)
+            output_details = getattr(response_usage, 'output_tokens_details', None)
+            if output_details:
+                usage_kwargs['reasoning_tokens'] = getattr(output_details, 'reasoning_tokens', None)
+            input_details = getattr(response_usage, 'input_tokens_details', None)
+            if input_details:
+                usage_kwargs['cached_tokens'] = getattr(input_details, 'cached_tokens', None)
+
         if synthesize:
-            yield LLMStreamChunk(data=buffer, end_of_stream=True, latency=latency_data)
+            yield LLMStreamChunk(data=buffer, end_of_stream=True, latency=latency_data, **usage_kwargs)
         else:
-            yield LLMStreamChunk(data=answer, end_of_stream=True, latency=latency_data)
+            yield LLMStreamChunk(data=answer, end_of_stream=True, latency=latency_data, **usage_kwargs)
 
         self.started_streaming = False
 
@@ -319,15 +338,19 @@ class OpenAICompatibleLLM(BaseLLM):
             create_kwargs["service_tier"] = service_tier
 
         if self.model.startswith(GPT5_MODEL_PREFIX):
+            create_kwargs["temperature"] = 1
             reasoning_effort = self.model_args.get("reasoning_effort")
             if reasoning_effort:
                 create_kwargs["reasoning"] = {"effort": reasoning_effort}
+            verbosity = self.model_args.get("verbosity")
+            if verbosity:
+                create_kwargs.setdefault("text", {})["verbosity"] = verbosity
 
         if self.previous_response_id:
             create_kwargs["previous_response_id"] = self.previous_response_id
 
         if request_json:
-            create_kwargs["text"] = {"format": {"type": "json_object"}}
+            create_kwargs.setdefault("text", {})["format"] = {"type": "json_object"}
 
         llm_host = getattr(self, "llm_host", None)
 
@@ -341,6 +364,15 @@ class OpenAICompatibleLLM(BaseLLM):
                     "llm_host": llm_host,
                     "service_tier": getattr(response, 'service_tier', None),
                 }
+                if hasattr(response, 'usage') and response.usage:
+                    metadata['input_tokens'] = getattr(response.usage, 'input_tokens', None)
+                    metadata['output_tokens'] = getattr(response.usage, 'output_tokens', None)
+                    output_details = getattr(response.usage, 'output_tokens_details', None)
+                    if output_details:
+                        metadata['reasoning_tokens'] = getattr(output_details, 'reasoning_tokens', None)
+                    input_details = getattr(response.usage, 'input_tokens_details', None)
+                    if input_details:
+                        metadata['cached_tokens'] = getattr(input_details, 'cached_tokens', None)
                 return res, metadata
             return res
         except Exception as e:

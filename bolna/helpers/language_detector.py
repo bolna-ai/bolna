@@ -5,6 +5,7 @@ import asyncio
 import uuid
 from bolna.llms import OpenAiLLM
 from bolna.prompts import LANGUAGE_DETECTION_PROMPT
+from bolna.enums import LogComponent, LogDirection
 from bolna.helpers.utils import convert_to_request_log
 from bolna.helpers.logger_config import configure_logger
 
@@ -14,9 +15,10 @@ logger = configure_logger(__name__)
 class LanguageDetector:
     """Detects dominant language from user transcripts using LLM."""
 
-    def __init__(self, config: dict, run_id: str = None):
+    def __init__(self, config: dict, run_id: str = None, enabled: bool = True):
         self.turns_threshold = config.get('language_detection_turns') or 0
         self.run_id = run_id
+        self.enabled = enabled
 
         self._transcripts = []
         self._result = None
@@ -28,10 +30,6 @@ class LanguageDetector:
 
         if self.turns_threshold > 0:
             self._llm = OpenAiLLM(model=os.getenv('LANGUAGE_DETECTION_LLM', 'gpt-4.1-mini'))
-
-    @property
-    def is_enabled(self) -> bool:
-        return self.turns_threshold > 0
 
     @property
     def dominant_language(self) -> str | None:
@@ -53,7 +51,7 @@ class LanguageDetector:
 
     async def collect_transcript(self, transcript: str):
         """Collect transcript and trigger detection after N turns."""
-        if self._complete or not self.turns_threshold:
+        if self._complete or not self.turns_threshold or not self.enabled:
             return
         if self._in_progress:
             return
@@ -64,6 +62,19 @@ class LanguageDetector:
         if len(self._transcripts) >= self.turns_threshold:
             self._in_progress = True
             self._task = asyncio.create_task(self._run_detection())
+
+    def set_enabled_status(self, enabled: bool):
+        """Enable or disable language detection."""
+        self.enabled = enabled
+        logger.info(f"Language detection enabled set to {enabled}")
+        if not enabled:
+            self._transcripts = []
+            self._result = None
+            self._complete = False
+            self._in_progress = False
+            if self._task and not self._task.done():
+                self._task.cancel()
+                self._task = None
 
     async def _run_detection(self):
         """Background task to detect language via LLM."""
@@ -91,11 +102,11 @@ class LanguageDetector:
         model = self._llm.model if self._llm else 'unknown'
         convert_to_request_log(
             message={'transcripts': self._transcripts},
-            meta_info=meta_info, component="llm_language_detection",
-            direction="request", model=model, run_id=self.run_id
+            meta_info=meta_info, component=LogComponent.LLM_LANGUAGE_DETECTION,
+            direction=LogDirection.REQUEST, model=model, run_id=self.run_id
         )
         convert_to_request_log(
             message=result, meta_info=meta_info,
-            component="llm_language_detection", direction="response",
+            component=LogComponent.LLM_LANGUAGE_DETECTION, direction=LogDirection.RESPONSE,
             model=model, run_id=self.run_id
         )

@@ -75,6 +75,7 @@ class SarvamTranscriber(BaseTranscriber):
         self.websocket_connection = None
         self.connection_authenticated = False
         self.meta_info = {}
+        self.connection_error = None
 
         self.current_turn_start_time = None
         self.current_turn_id = None
@@ -85,7 +86,6 @@ class SarvamTranscriber(BaseTranscriber):
         self.turn_counter = 0
         self.turn_first_result_latency = None
         
-        self.is_transcript_sent_for_processing = False
         self.curr_message = ''
         self.finalized_transcript = ""
         self.interruption_signalled = False
@@ -516,7 +516,7 @@ class SarvamTranscriber(BaseTranscriber):
                 except asyncio.CancelledError:
                     logger.info(f"Sarvam {task_name} cancelled")
                 except Exception as e:
-                    logger.error(f"Error cancelling Sarvam {task_name}: {e}")
+                    logger.warning(f"Error cancelling Sarvam {task_name}: {e}")
 
         # Close websocket
         if self.websocket_connection is not None:
@@ -551,8 +551,15 @@ class SarvamTranscriber(BaseTranscriber):
             start_time = time.perf_counter()
             try:
                 sarvam_ws = await self.sarvam_connect()
-            except (ValueError, ConnectionError):
+            except (ValueError, ConnectionError) as e:
+                self.connection_error = str(e)
                 await self.toggle_connection()
+                try:
+                    meta = dict(self.meta_info or {})
+                    meta['connection_error'] = self.connection_error
+                    await self.push_to_transcriber_queue(create_ws_data_packet("transcriber_connection_closed", meta))
+                except Exception:
+                    traceback.print_exc()
                 return
 
             if not self.connection_time:
@@ -569,7 +576,8 @@ class SarvamTranscriber(BaseTranscriber):
                             else:
                                 await self._close(sarvam_ws, {"type": "CloseStream"})
                                 break
-                except Exception:
+                except Exception as e:
+                    self.connection_error = str(e)
                     traceback.print_exc()
             else:
                 self.sender_task = asyncio.create_task(self.sender())
@@ -583,7 +591,10 @@ class SarvamTranscriber(BaseTranscriber):
                 self.meta_info["total_stream_duration_ms"] = self.total_stream_duration_ms
 
             try:
-                await self.push_to_transcriber_queue(create_ws_data_packet("transcriber_connection_closed", self.meta_info))
+                meta = dict(self.meta_info or {})
+                if self.connection_error:
+                    meta['connection_error'] = self.connection_error
+                await self.push_to_transcriber_queue(create_ws_data_packet("transcriber_connection_closed", meta))
             except Exception:
                 traceback.print_exc()
         finally:

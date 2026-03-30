@@ -1,3 +1,5 @@
+from .base_synthesizer import BaseSynthesizer
+from .stream_synthesizer import StreamSynthesizer
 from .polly_synthesizer import PollySynthesizer
 from .elevenlabs_synthesizer import ElevenlabsSynthesizer
 from .openai_synthesizer import OPENAISynthesizer
@@ -8,3 +10,4 @@ from .rime_synthesizer import RimeSynthesizer
 from .smallest_synthesizer import SmallestSynthesizer
 from .sarvam_synthesizer import SarvamSynthesizer
 from .pixa_synthesizer import PixaSynthesizer
+from .synthesizer_pool import SynthesizerPool

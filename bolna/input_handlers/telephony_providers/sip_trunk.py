@@ -80,6 +80,7 @@ class SipTrunkInputHandler(TelephonyInputHandler):
         self.channel_id = None
         self.connection_id = None
         self.ptime = 20
+        self._pending_stream_sid = None  # promoted to stream_sid on first audio frame
 
         input_config = self._get_input_config()
         self._expected_format = (input_config.get("audio_format") or input_config.get("format") or "ulaw").lower()
@@ -127,12 +128,24 @@ class SipTrunkInputHandler(TelephonyInputHandler):
             logger.info(f"Error closing WebSocket: {e}")
 
     def _initialize_from_media_start(self, media_start_data):
-        """Set channel info from MEDIA_START."""
+        """Set channel info from MEDIA_START.
+
+        NOTE: stream_sid is intentionally NOT set here. It is held in
+        _pending_stream_sid and promoted to stream_sid only when the first
+        binary audio frame arrives from Asterisk.
+
+        Why: the channel is auto-answered by Asterisk when the WebSocket
+        connects, but it is NOT in any bridge yet. The sip-server still needs
+        to call add_channel_to_bridge() after this. __forced_first_message polls
+        stream_sid != None before sending welcome audio, so deferring here
+        guarantees welcome audio is only sent once the bridge is active (proven
+        by Asterisk writing audio frames back to us).
+        """
         self.channel_id = media_start_data.get("channel_id")
         self.connection_id = media_start_data.get("connection_id", self.channel_id)
         self.format = media_start_data.get("format")
         self.ptime = int(media_start_data.get("ptime", 20))
-        self.stream_sid = self.connection_id or self.channel_id
+        self._pending_stream_sid = self.connection_id or self.channel_id
         self.call_sid = self.channel_id.split("_")[0] if (self.channel_id and "_" in self.channel_id) else self.channel_id
 
         opt = media_start_data.get("optimal_frame_size")
@@ -143,7 +156,8 @@ class SipTrunkInputHandler(TelephonyInputHandler):
                 pass
         self.media_started = True
         logger.info(
-            f"Initialized from MEDIA_START - channel_id={self.channel_id}, format={self.format}, ptime={self.ptime}ms"
+            f"Initialized from MEDIA_START - channel_id={self.channel_id}, format={self.format}, ptime={self.ptime}ms "
+            f"(stream_sid deferred until first audio frame from bridge)"
         )
 
     async def call_start(self, packet):
@@ -167,6 +181,15 @@ class SipTrunkInputHandler(TelephonyInputHandler):
                     media_audio = message["bytes"]
                     if not media_audio:
                         continue
+                    # First audio frame from Asterisk proves the channel is now
+                    # in the mixing bridge (Asterisk only writes frames to the
+                    # WebSocket once bridged). Promote pending stream_sid so
+                    # __forced_first_message can unblock and send welcome audio.
+                    if self.stream_sid is None and self._pending_stream_sid:
+                        self.stream_sid = self._pending_stream_sid
+                        logger.info(
+                            f"First audio frame received — bridge active, stream_sid={self.stream_sid}"
+                        )
                     buffer.append(media_audio)
                     message_count += 1
                     if message_count >= chunks_per_batch:
@@ -239,7 +262,7 @@ class SipTrunkInputHandler(TelephonyInputHandler):
             self._media_xoff = True
             if hasattr(self, "output_handler_ref") and self.output_handler_ref:
                 self.output_handler_ref.queue_full = True
-            logger.debug(f"MEDIA_XOFF for channel {self.channel_id}")
+            logger.info(f"MEDIA_XOFF for channel {self.channel_id}")
             return
         if event == "MEDIA_XON":
             self._media_xoff = False
@@ -253,17 +276,15 @@ class SipTrunkInputHandler(TelephonyInputHandler):
                         logger.exception("sip-trunk drain_local_queue failed: %s", exc)
 
                 task.add_done_callback(_on_drain_done)
-            logger.debug(f"MEDIA_XON for channel {self.channel_id}")
+            logger.info(f"MEDIA_XON for channel {self.channel_id}")
             return
         if event == "STATUS" or "MEDIA_BUFFERING_COMPLETED" in event:
             logger.debug(f"Asterisk control: {event}")
             return
         if event == "QUEUE_DRAINED" or "QUEUE_DRAINED" in event:
-            # Do not use QUEUE_DRAINED to clear is_audio_being_played or process marks.
-            # Asterisk can send QUEUE_DRAINED when it has accepted the bulk, before the
-            # caller has heard it. Rely only on the output handler's duration-based
-            # fallback so completion/hangup logic does not trigger mid-playback.
-            logger.debug(f"QUEUE_DRAINED for channel {self.channel_id} (playback-done handled by fallback)")
+            # At 1x pacing, playback completion is tracked by the output handler's
+            # send-loop drain detection — QUEUE_DRAINED is informational only.
+            logger.debug(f"QUEUE_DRAINED for channel {self.channel_id} (informational)")
             return
         if event or parsed:
             logger.debug(f"Asterisk control: {text} -> event={event}")

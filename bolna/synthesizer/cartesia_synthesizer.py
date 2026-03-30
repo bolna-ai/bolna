@@ -1,84 +1,93 @@
 import asyncio
-import copy
-import uuid
+import json
+import os
 import time
+import uuid
+
+import aiohttp
+import base64
 import websockets
 from websockets.exceptions import InvalidHandshake
-import base64
-import json
-import aiohttp
-import os
-import traceback
-import time
-from collections import deque
 
-from .base_synthesizer import BaseSynthesizer
+from .stream_synthesizer import StreamSynthesizer
 from bolna.helpers.logger_config import configure_logger
-from bolna.helpers.utils import convert_audio_to_wav, create_ws_data_packet, resample
+
 
 logger = configure_logger(__name__)
 
 
-class CartesiaSynthesizer(BaseSynthesizer):
-    def __init__(self, voice_id, voice, language="en", model="sonic-english", audio_format="mp3", sampling_rate="16000",
-                 stream=False, buffer_size=400, synthesizer_key=None, caching=True, speed=1.0, **kwargs):
-        super().__init__(kwargs.get("task_manager_instance", None), stream)
+class CartesiaSynthesizer(StreamSynthesizer):
+    def __init__(self, voice_id, voice, language="en", model="sonic-english", audio_format="mp3",
+                 sampling_rate="16000", stream=False, buffer_size=400, synthesizer_key=None,
+                 caching=True, speed=1.0, **kwargs):
+        super().__init__(
+            stream=True,  # Cartesia always streams
+            provider_name="cartesia",
+            buffer_size=buffer_size,
+            **kwargs,
+        )
         self.api_key = os.environ["CARTESIA_API_KEY"] if synthesizer_key is None else synthesizer_key
-        self.version = '2024-06-10'
-        self.language = language
         self.voice_id = voice_id
         self.model = model
-        self.stream = True
-        self.websocket_connection = None
-        self.connection_open = False
+        self.language = language
         self.sampling_rate = sampling_rate
-        self.use_mulaw = True
-        self.first_chunk_generated = False
-        self.last_text_sent = False
-        self.text_queue = deque()
-        self.meta_info = None
-        self.caching = False
-        self.synthesized_characters = 0
-        self.previous_request_ids = []
-        self.websocket_holder = {"websocket": None}
-        self.context_id = None
-        self.ws_request_id = None  # Cartesia x-request-id for request correlation
-        self.sender_task = None
         self.speed = speed
+        self.use_mulaw = True
+        self.stream = True
 
         self.cartesia_host = os.getenv("CARTESIA_API_HOST", "api.cartesia.ai")
         self.ws_url = f"wss://{self.cartesia_host}/tts/websocket?api_key={self.api_key}&cartesia_version=2024-06-10"
         self.api_url = f"https://{self.cartesia_host}/tts/bytes"
+
+        # Context tracking for interruption
+        self.context_id = None
         self.turn_id = 0
         self.sequence_id = 0
         self.context_ids_to_ignore = set()
-        self.conversation_ended = False
-        self.current_turn_start_time = None
-        self.current_turn_id = None
+        self.ws_request_id = None
 
-    def get_engine(self):
-        return self.model
-
-    def supports_websocket(self):
-        return True
-    
     def get_sleep_time(self):
         return 0.01
+
+    # ------------------------------------------------------------------
+    # StreamSynthesizer hooks
+    # ------------------------------------------------------------------
+
+    def _get_audio_format(self):
+        # WS always requests pcm_mulaw@8kHz (see form_payload)
+        return "mulaw"
+
+    def _on_push(self, meta_info, text):
+        """Update context_id when turn or sequence changes."""
+        if not self.context_id:
+            self._update_context(meta_info)
+        elif self.turn_id != meta_info.get("turn_id", 0) or self.sequence_id != meta_info.get("sequence_id", 0):
+            self._update_context(meta_info)
+
+    def _update_context(self, meta_info):
+        self.context_id = str(uuid.uuid4())
+        self.turn_id = meta_info.get("turn_id", 0)
+        self.sequence_id = meta_info.get("sequence_id", 0)
+        logger.info(f"Cartesia new context_id={self.context_id} turn_id={self.turn_id} sequence_id={self.sequence_id} request_id={self.ws_request_id}")
+
+    # ------------------------------------------------------------------
+    # Interruption
+    # ------------------------------------------------------------------
 
     async def handle_interruption(self):
         try:
             if self.context_id:
                 self.context_ids_to_ignore.add(self.context_id)
-                interrupt_message = {
-                    "context_id": self.context_id,
-                    "cancel": True
-                }
-
-                logger.info('handle_interruption: {}'.format(interrupt_message))
-                await self.websocket_holder["websocket"].send(json.dumps(interrupt_message))
+                interrupt_message = {"context_id": self.context_id, "cancel": True}
+                logger.info(f"handle_interruption: {interrupt_message}")
+                await self.websocket.send(json.dumps(interrupt_message))
                 self.context_id = None
         except Exception as e:
             logger.error(f"Error in handle_interruption: {e}")
+
+    # ------------------------------------------------------------------
+    # Payload
+    # ------------------------------------------------------------------
 
     def form_payload(self, text):
         payload = {
@@ -86,212 +95,107 @@ class CartesiaSynthesizer(BaseSynthesizer):
             "model_id": self.model,
             "transcript": text,
             "language": self.language,
-            "voice": {
-                "mode": "id",
-                "id": self.voice_id
-            },
-            "output_format": {
-                "container": "raw",
-                "encoding": "pcm_mulaw",
-                "sample_rate": 8000
-            },
-            "generation_config": {
-                "speed": self.speed
-            }
+            "voice": {"mode": "id", "id": self.voice_id},
+            "output_format": {"container": "raw", "encoding": "pcm_mulaw", "sample_rate": 8000},
+            "generation_config": {"speed": self.speed},
         }
-
         if text:
             payload["continue"] = True
-
         return payload
+
+    # ------------------------------------------------------------------
+    # sender / receiver
+    # ------------------------------------------------------------------
 
     async def sender(self, text, sequence_id, end_of_llm_stream=False):
         try:
             if self.conversation_ended:
                 return
-
             if not self.should_synthesize_response(sequence_id):
-                logger.info(f"Not synthesizing text as the sequence_id ({sequence_id}) of it is not in the list of sequence_ids present in the task manager.")
+                logger.info(f"Not synthesizing: sequence_id {sequence_id} not current")
                 return
 
-            while self.websocket_holder["websocket"] is None or self.websocket_holder["websocket"].state is websockets.protocol.State.CLOSED:
-                logger.info("Waiting for webSocket connection to be established...")
-                await asyncio.sleep(1)
+            await self._wait_for_ws()
 
             if text != "":
                 try:
-                    input_message = self.form_payload(text)
+                    if self.ws_send_time is None:
+                        self.ws_send_time = time.perf_counter()
+                    payload = self.form_payload(text)
                     logger.info(f"Cartesia sender context_id={self.context_id} text_len={len(text)} request_id={self.ws_request_id}")
-                    await self.websocket_holder["websocket"].send(json.dumps(input_message))
+                    await self._send_json(payload)
                 except Exception as e:
                     logger.error(f"Error sending chunk context_id={self.context_id} request_id={self.ws_request_id}: {e}")
+                    self.connection_error = str(e)
                     return
 
-            # If end_of_llm_stream is True, mark the last chunk and send an empty message
             if end_of_llm_stream:
                 self.last_text_sent = True
                 logger.info(f"Cartesia sender end_of_llm_stream context_id={self.context_id} request_id={self.ws_request_id}")
-
-                # Send the end-of-stream signal with an empty string as text
                 try:
-                    input_message = self.form_payload("")
-                    await self.websocket_holder["websocket"].send(json.dumps(input_message))
+                    await self._send_json(self.form_payload(""))
                 except Exception as e:
                     logger.error(f"Error sending end-of-stream signal context_id={self.context_id} request_id={self.ws_request_id}: {e}")
+                    self.connection_error = str(e)
+
         except asyncio.CancelledError:
             logger.info("Sender task was cancelled.")
         except Exception as e:
             logger.error(f"Unexpected error in sender: {e}")
 
     async def receiver(self):
+        not_connected_since = None
         while True:
             try:
                 if self.conversation_ended:
                     return
-
-                if self.websocket_holder["websocket"] is None or self.websocket_holder["websocket"].state is websockets.protocol.State.CLOSED:
+                if not self._is_ws_connected():
+                    if self.connection_error:
+                        return
+                    now = time.perf_counter()
+                    if not_connected_since is None:
+                        not_connected_since = now
+                    elif now - not_connected_since > 30:
+                        logger.error("Cartesia receiver: WebSocket never connected after 30s, giving up.")
+                        self.connection_error = self.connection_error or "WebSocket never connected"
+                        return
                     logger.info("WebSocket is not connected, skipping receive.")
                     await asyncio.sleep(0.1)
                     continue
+                else:
+                    not_connected_since = None
 
-                response = await self.websocket_holder["websocket"].recv()
+                response = await self.websocket.recv()
                 data = json.loads(response)
 
-                # ignore all future generations of audio
-                if data.get('context_id', None) in self.context_ids_to_ignore:
+                if data.get("context_id") in self.context_ids_to_ignore:
                     continue
 
                 if "data" in data and data["data"]:
-                    chunk = base64.b64decode(data["data"])
-                    yield chunk
-
+                    yield base64.b64decode(data["data"])
                 elif "done" in data and data["done"]:
                     logger.info(f"Cartesia recv done context_id={data.get('context_id')} request_id={self.ws_request_id}")
                     yield b'\x00'
                 else:
                     logger.info(f"No audio data in the response context_id={data.get('context_id')} request_id={self.ws_request_id}")
+
             except websockets.exceptions.ConnectionClosed:
                 break
             except Exception as e:
                 logger.error(f"Error occurred in receiver - {e}")
 
-    async def __send_payload(self, payload):
-        headers = {
-            'X-API-Key': self.api_key,
-            'Cartesia-Version': self.version
-        }
-
-        async with aiohttp.ClientSession() as session:
-            if payload is not None:
-                async with session.post(self.api_url, headers=headers, json=payload) as response:
-                    if response.status == 200:
-                        data = await response.read()
-                        return data
-                    else:
-                        logger.error(f"Error: {response.status} - {await response.text()}")
-            else:
-                logger.info("Payload was null")
-
-    async def synthesize(self, text):
-        audio = await self.__generate_http(text)
-        return audio
-
-    async def __generate_http(self, text,):
-        payload = None
-        logger.info(f"text {text}")
-        payload = {
-            "model_id": self.model,
-            "transcript": text,
-            "voice": {
-                "mode": "id",
-                "id": self.voice_id
-            },
-            "output_format": {
-                "container": "mp3",
-                "encoding": "mp3",
-                "sample_rate": 44100
-            },
-            "language": self.language,
-            "generation_config": {
-                "speed": self.speed
-            }
-        }
-        response = await self.__send_payload(payload)
-        return response
-
-    def get_synthesized_characters(self):
-        return self.synthesized_characters
-
-    async def generate(self):
-        try:
-            async for message in self.receiver():
-                if len(self.text_queue) > 0:
-                    self.meta_info = self.text_queue.popleft()
-                    # Compute first-result latency on first audio chunk
-                    try:
-                        if self.current_turn_start_time is not None:
-                            first_result_latency = time.perf_counter() - self.current_turn_start_time
-                            self.meta_info['synthesizer_latency'] = first_result_latency
-                    except Exception:
-                        pass
-                audio = ""
-
-                if self.use_mulaw:
-                    self.meta_info['format'] = 'mulaw'
-                    audio = message
-                else:
-                    self.meta_info['format'] = "wav"
-                    audio = resample(convert_audio_to_wav(message, source_format="mp3"), int(self.sampling_rate),
-                                     format="wav")
-
-                if not self.first_chunk_generated:
-                    self.meta_info["is_first_chunk"] = True
-                    self.first_chunk_generated = True
-                else:
-                    self.meta_info["is_first_chunk"] = False
-
-                if self.last_text_sent:
-                    # Reset the last_text_sent and first_chunk converted to reset synth latency
-                    self.first_chunk_generated = False
-                    self.last_text_sent = True
-
-                if message == b'\x00':
-                    logger.info("received null byte and hence end of stream")
-                    self.meta_info["end_of_synthesizer_stream"] = True
-                    self.first_chunk_generated = False
-                    # Compute total stream duration for this synthesizer turn
-                    try:
-                        if self.current_turn_start_time is not None:
-                            total_stream_duration = time.perf_counter() - self.current_turn_start_time
-                            self.turn_latencies.append({
-                                'turn_id': self.current_turn_id,
-                                'sequence_id': self.current_turn_id,
-                                'first_result_latency_ms': round((self.meta_info.get('synthesizer_latency', 0)) * 1000),
-                                'total_stream_duration_ms': round(total_stream_duration * 1000)
-                            })
-                            self.current_turn_start_time = None
-                            self.current_turn_id = None
-                    except Exception:
-                        pass
-
-                yield create_ws_data_packet(audio, self.meta_info)
-
-        except Exception as e:
-            traceback.print_exc()
-            logger.error(f"Error in cartesia generate {e}")
+    # ------------------------------------------------------------------
+    # Connection
+    # ------------------------------------------------------------------
 
     async def establish_connection(self):
         try:
             start_time = time.perf_counter()
-            websocket = await asyncio.wait_for(
-                websockets.connect(self.ws_url),
-                timeout=10.0
-            )
+            websocket = await asyncio.wait_for(websockets.connect(self.ws_url), timeout=10.0)
             if not self.connection_time:
                 self.connection_time = round((time.perf_counter() - start_time) * 1000)
-            # Extract x-request-id from WebSocket handshake response
-            if hasattr(websocket, 'response') and hasattr(websocket.response, 'headers'):
-                self.ws_request_id = websocket.response.headers.get('x-request-id')
+            if hasattr(websocket, "response") and hasattr(websocket.response, "headers"):
+                self.ws_request_id = websocket.response.headers.get("x-request-id")
                 logger.info(f"Cartesia WebSocket connected request_id={self.ws_request_id} connection_time={self.connection_time}ms")
             else:
                 logger.info(f"Cartesia WebSocket connected connection_time={self.connection_time}ms")
@@ -301,79 +205,39 @@ class CartesiaSynthesizer(BaseSynthesizer):
             return None
         except InvalidHandshake as e:
             error_msg = str(e)
-            if '401' in error_msg or '403' in error_msg:
-                logger.error(f"Cartesia authentication failed: Invalid or expired API key - {e}")
-            elif '404' in error_msg:
+            if "401" in error_msg or "403" in error_msg:
+                logger.error(f"Cartesia authentication failed: {e}")
+            elif "404" in error_msg:
                 logger.error(f"Cartesia endpoint not found: {e}")
             else:
                 logger.error(f"Cartesia handshake failed: {e}")
+            self.connection_error = str(e)
             return None
         except Exception as e:
             logger.error(f"Failed to connect to Cartesia: {e}")
             return None
 
-    async def monitor_connection(self):
-        # Periodically check if the connection is still alive
-        consecutive_failures = 0
-        max_failures = 3
+    # ------------------------------------------------------------------
+    # HTTP fallback (used by synthesize())
+    # ------------------------------------------------------------------
 
-        while consecutive_failures < max_failures:
-            if self.websocket_holder["websocket"] is None or self.websocket_holder["websocket"].state is websockets.protocol.State.CLOSED:
-                logger.info("Re-establishing cartesia connection...")
-                result = await self.establish_connection()
-                if result is None:
-                    consecutive_failures += 1
-                    logger.warning(f"Cartesia connection failed (attempt {consecutive_failures}/{max_failures})")
-                    if consecutive_failures >= max_failures:
-                        logger.error("Max connection failures reached for Cartesia - stopping reconnection attempts")
-                        break
+    async def synthesize(self, text):
+        return await self._generate_http(text)
+
+    async def _generate_http(self, text):
+        payload = {
+            "model_id": self.model,
+            "transcript": text,
+            "voice": {"mode": "id", "id": self.voice_id},
+            "output_format": {"container": "mp3", "encoding": "mp3", "sample_rate": 44100},
+            "language": self.language,
+            "generation_config": {"speed": self.speed},
+        }
+        headers = {"X-API-Key": self.api_key, "Cartesia-Version": "2024-06-10"}
+        async with aiohttp.ClientSession() as session:
+            async with session.post(self.api_url, headers=headers, json=payload) as response:
+                if response.status == 200:
+                    return await response.read()
                 else:
-                    self.websocket_holder["websocket"] = result
-                    consecutive_failures = 0  # Reset on success
-            await asyncio.sleep(1)
-
-    def update_context(self, meta_info):
-        self.context_id = str(uuid.uuid4())
-        self.turn_id = meta_info.get('turn_id', 0)
-        self.sequence_id = meta_info.get('sequence_id', 0)
-        logger.info(f"Cartesia new context_id={self.context_id} turn_id={self.turn_id} sequence_id={self.sequence_id} request_id={self.ws_request_id}")
-
-    async def push(self, message):
-        if self.stream:
-            meta_info, text, self.current_text = message.get("meta_info"), message.get("data"), message.get("data")
-            self.synthesized_characters += len(text) if text is not None else 0
-            end_of_llm_stream = "end_of_llm_stream" in meta_info and meta_info["end_of_llm_stream"]
-            self.meta_info = copy.deepcopy(meta_info)
-            meta_info["text"] = text
-            if not self.context_id:
-                self.update_context(meta_info)
-            else:
-                if self.turn_id != meta_info.get('turn_id', 0) or self.sequence_id != meta_info.get('sequence_id', 0):
-                    self.update_context(meta_info)
-
-            # Stamp synthesizer turn start time
-            try:
-                self.current_turn_start_time = time.perf_counter()
-                self.current_turn_id = meta_info.get('turn_id') or meta_info.get('sequence_id')
-            except Exception:
-                pass
-
-            self.sender_task = asyncio.create_task(self.sender(text, meta_info.get('sequence_id'), end_of_llm_stream))
-            self.text_queue.append(meta_info)
-        else:
-            self.internal_queue.put_nowait(message)
-
-    async def cleanup(self):
-        self.conversation_ended = True
-        logger.info("cleaning cartesia synthesizer tasks")
-        if self.sender_task:
-            try:
-                self.sender_task.cancel()
-                await self.sender_task
-            except asyncio.CancelledError:
-                logger.info("Sender task was successfully cancelled during WebSocket cleanup.")
-
-        if self.websocket_holder["websocket"]:
-            await self.websocket_holder["websocket"].close()
-        self.websocket_holder["websocket"] = None
-        logger.info("WebSocket connection closed.")
+                    logger.error(f"Error: {response.status} - {await response.text()}")
+                    return None

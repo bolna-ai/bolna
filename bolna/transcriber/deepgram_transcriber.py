@@ -21,6 +21,10 @@ load_dotenv()
 
 
 class DeepgramTranscriber(BaseTranscriber):
+    @property
+    def is_english(self):
+        return bool(self.language and self.language.startswith("en"))
+
     def __init__(self, telephony_provider, input_queue=None, model='nova-2', stream=True, language="en", endpointing="400",
                  sampling_rate="16000", encoding="linear16", output_queue=None, keywords=None,
                  process_interim_results="true", **kwargs):
@@ -42,7 +46,9 @@ class DeepgramTranscriber(BaseTranscriber):
         self.transcription_cursor = 0.0
         self.interruption_signalled = False
         if not self.stream:
-            self.api_url = f"https://{self.deepgram_host}/v1/listen?model={self.model}&filler_words=true&language={self.language}"
+            self.api_url = f"https://{self.deepgram_host}/v1/listen?model={self.model}&language={self.language}"
+            if self.is_english:
+                self.api_url += "&filler_words=true"
             self.session = aiohttp.ClientSession()
             if self.keywords is not None:
                 keyword_list = [quote(kw.strip()) for kw in self.keywords.split(",") if kw.strip()]
@@ -63,7 +69,6 @@ class DeepgramTranscriber(BaseTranscriber):
         self.curr_message = ''
         self.finalized_transcript = ""
         self.final_transcript = ""
-        self.is_transcript_sent_for_processing = False
         self.current_turn_start_time = None
         self.current_turn_id = None
         self.websocket_connection = None
@@ -77,11 +82,11 @@ class DeepgramTranscriber(BaseTranscriber):
         self.last_interim_time = None
         self.interim_timeout = kwargs.get("interim_timeout", 5.0)  # Default 5 seconds
         self.utterance_timeout_task = None
+        self.connection_error = None
 
     def get_deepgram_ws_url(self):
         dg_params = {
             'model': self.model,
-            'filler_words': 'true',
             # 'diarize': 'true',
             'language': self.language,
             'vad_events' : 'true',
@@ -125,6 +130,9 @@ class DeepgramTranscriber(BaseTranscriber):
         if self.provider == "playground":
             self.sampling_rate = 8000
             self.audio_frame_duration = 0.0  # There's no streaming from the playground
+
+        if self.is_english:
+            dg_params['filler_words'] = 'true'
 
         if "en" not in self.language:
             dg_params['language'] = self.language
@@ -300,7 +308,7 @@ class DeepgramTranscriber(BaseTranscriber):
                 except asyncio.CancelledError:
                     logger.info(f"Deepgram {task_name} cancelled")
                 except Exception as e:
-                    logger.error(f"Error cancelling Deepgram {task_name}: {e}")
+                    logger.warning(f"Error cancelling Deepgram {task_name}: {e}")
 
         # Close websocket
         if self.websocket_connection is not None:
@@ -441,6 +449,7 @@ class DeepgramTranscriber(BaseTranscriber):
                     self.current_turn_id = self.turn_counter
                     self.speech_start_time = timestamp_ms()
                     self.current_turn_interim_details = []
+                    self.is_transcript_sent_for_processing = False
 
                     logger.info(f"Starting new turn with turn_id: {self.current_turn_id}")
                     yield create_ws_data_packet("speech_started", self.meta_info)
@@ -670,6 +679,7 @@ class DeepgramTranscriber(BaseTranscriber):
                 deepgram_ws = await self.deepgram_connect()
             except (ValueError, ConnectionError) as e:
                 logger.error(f"Failed to establish Deepgram connection: {e}")
+                self.connection_error = str(e)
                 await self.toggle_connection()
                 return
 
@@ -697,8 +707,10 @@ class DeepgramTranscriber(BaseTranscriber):
                             break
                 except ConnectionClosedError as e:
                     logger.error(f"Deepgram websocket connection closed during streaming: {e}")
+                    self.connection_error = str(e)
                 except Exception as e:
                     logger.error(f"Error during streaming: {e}")
+                    self.connection_error = str(e)
                     raise
             else:
                 async for message in self.sender():
@@ -706,9 +718,11 @@ class DeepgramTranscriber(BaseTranscriber):
 
         except (ValueError, ConnectionError) as e:
             logger.error(f"Connection error in transcribe: {e}")
+            self.connection_error = str(e)
             await self.toggle_connection()
         except Exception as e:
             logger.error(f"Unexpected error in transcribe: {e}")
+            self.connection_error = str(e)
             await self.toggle_connection()
         finally:
             if deepgram_ws is not None:
@@ -729,9 +743,12 @@ class DeepgramTranscriber(BaseTranscriber):
                 self.utterance_timeout_task.cancel()
 
             # Use Deepgram's actual audio duration for billing
-            if "deepgram_duration" in self.meta_info:
+            if self.meta_info is not None and "deepgram_duration" in self.meta_info:
                 self.meta_info["transcriber_duration"] = self.meta_info["deepgram_duration"]
 
+            meta = dict(getattr(self, 'meta_info', None) or {})
+            if self.connection_error:
+                meta['connection_error'] = self.connection_error
             await self.push_to_transcriber_queue(
-                create_ws_data_packet("transcriber_connection_closed", getattr(self, 'meta_info', {}))
+                create_ws_data_packet("transcriber_connection_closed", meta)
             )

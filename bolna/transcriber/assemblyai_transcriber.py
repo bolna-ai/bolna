@@ -60,12 +60,12 @@ class AssemblyAITranscriber(BaseTranscriber):
         # Message states for turn management
         self.session_id = None
         self.current_transcript = ""
-        self.is_transcript_sent_for_processing = False
         self.websocket_connection = None
         self.connection_authenticated = False
         self.current_turn_start_time = None
         self.current_turn_id = None
         self.current_turn_interim_details = []
+        self.connection_error = None
 
     def get_assemblyai_ws_url(self):
         """Get the AssemblyAI WebSocket URL with appropriate parameters"""
@@ -168,7 +168,7 @@ class AssemblyAITranscriber(BaseTranscriber):
                 except asyncio.CancelledError:
                     logger.info(f"AssemblyAI {task_name} cancelled")
                 except Exception as e:
-                    logger.error(f"Error cancelling AssemblyAI {task_name}: {e}")
+                    logger.warning(f"Error cancelling AssemblyAI {task_name}: {e}")
 
         # Close websocket
         if self.websocket_connection is not None:
@@ -563,8 +563,10 @@ class AssemblyAITranscriber(BaseTranscriber):
                             break
                 except ConnectionClosedError as e:
                     logger.error(f"AssemblyAI websocket connection closed during streaming: {e}")
+                    self.connection_error = str(e)
                 except Exception as e:
                     logger.error(f"Error during streaming: {e}")
+                    self.connection_error = str(e)
                     raise
             else:
                 async for message in self.sender():
@@ -572,9 +574,11 @@ class AssemblyAITranscriber(BaseTranscriber):
 
         except (ValueError, ConnectionError) as e:
             logger.error(f"Connection error in transcribe: {e}")
+            self.connection_error = str(e)
             await self.toggle_connection()
         except Exception as e:
             logger.error(f"Unexpected error in transcribe: {e}")
+            self.connection_error = str(e)
             await self.toggle_connection()
         finally:
             if assemblyai_ws is not None:
@@ -592,6 +596,9 @@ class AssemblyAITranscriber(BaseTranscriber):
             if hasattr(self, 'heartbeat_task') and self.heartbeat_task is not None:
                 self.heartbeat_task.cancel()
             
+            meta = dict(getattr(self, 'meta_info', None) or {})
+            if self.connection_error:
+                meta['connection_error'] = self.connection_error
             await self.push_to_transcriber_queue(
-                create_ws_data_packet("transcriber_connection_closed", getattr(self, 'meta_info', {}))
+                create_ws_data_packet("transcriber_connection_closed", meta)
             )

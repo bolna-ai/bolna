@@ -18,10 +18,12 @@ from scipy.io import wavfile
 from botocore.exceptions import BotoCoreError, ClientError
 from aiobotocore.session import AioSession
 from contextlib import AsyncExitStack
+from enum import Enum
 from dotenv import load_dotenv
 from pydantic import create_model
 from .logger_config import configure_logger
 from bolna.constants import PREPROCESS_DIR, PRE_FUNCTION_CALL_MESSAGE, TRANSFERING_CALL_FILLER
+from bolna.enums import LogComponent, LogDirection, UsageSource
 from bolna.prompts import DATE_PROMPT
 from pydub import AudioSegment
 import audioop
@@ -249,24 +251,56 @@ def format_messages(messages, use_system_prompt=False, include_tools=False):
     formatted_string = ""
     for message in messages:
         role = message['role']
-        if message['content'] is None:
-            logger.info(f"Continuing the loop as content received is None")
-            continue
-        content = message['content']
+        content = message.get('content')
+        tool_calls = message.get('tool_calls')
 
         if use_system_prompt and role == 'system':
-            try:
-                formatted_string += "system: " + content + "\n"
-            except Exception as e:
-                a = 1
-        if role == 'assistant':
-            formatted_string += "assistant: " + content + "\n"
+            if content:
+                try:
+                    formatted_string += "system: " + content + "\n"
+                except Exception as e:
+                    pass
+        elif role == 'assistant':
+            if content:
+                formatted_string += "assistant: " + content + "\n"
+            if include_tools and tool_calls:
+                for tc in tool_calls:
+                    try:
+                        formatted_string += "assistant_tool_call: " + str(tc) + "\n"
+                    except Exception as e:
+                        logger.warning(f"Error formatting tool call content: {e}")
         elif role == 'user':
-            formatted_string += "user: " + content + "\n"
+            if content:
+                formatted_string += "user: " + content + "\n"
         elif include_tools and role == 'tool':
-            formatted_string += "tool_response: " + content + "\n"
+            if content:
+                tool_call_id = message.get('tool_call_id', '')
+                formatted_string += f"tool_response: ({tool_call_id}): " + content + "\n"
 
     return formatted_string
+
+
+def enrich_context_with_time_variables(context_data, timezone):
+    """Inject time variables into context_data['recipient_data']
+    so users can reference {current_date}, {current_time}, etc. in prompts
+    and use current_hour, current_weekday, etc. in expression routing."""
+    if context_data is None:
+        return
+    if isinstance(timezone, str):
+        import pytz
+        timezone = pytz.timezone(timezone)
+    now = datetime.now(timezone)
+    recipient_data = context_data.setdefault('recipient_data', {})
+    if isinstance(recipient_data, dict):
+        recipient_data['current_date'] = now.strftime("%A, %B %d, %Y")
+        recipient_data['current_time'] = now.strftime("%I:%M:%S %p")
+        recipient_data['timezone'] = str(timezone)
+        recipient_data['current_hour'] = now.hour
+        recipient_data['current_minute'] = now.minute
+        recipient_data['current_weekday'] = now.strftime('%A').lower()
+        recipient_data['current_day'] = now.day
+        recipient_data['current_month'] = now.month
+        recipient_data['current_year'] = now.year
 
 
 def update_prompt_with_context(prompt, context_data):
@@ -478,27 +512,30 @@ async def write_request_logs(message, run_id):
 
     row = [message['time'], message["component"], message["direction"], message["leg_id"], message['sequence_id'], message['model']]
     metadata = {}
-    if message["component"] in ("llm", "llm_hangup", "llm_voicemail"):
+    if message["component"] in (LogComponent.LLM, LogComponent.LLM_HANGUP, LogComponent.LLM_VOICEMAIL, LogComponent.LLM_LANGUAGE_DETECTION):
         # Convert dict to string if necessary
         if isinstance(message_data, dict):
             message_data = json.dumps(message_data)
         component_details = [message_data, message.get('input_tokens', 0), message.get('output_tokens', 0), None, message.get('latency', None), message['cached'], None, None]
         metadata = message.get('llm_metadata', {})
-    elif message["component"] == "transcriber":
+    elif message["component"] == LogComponent.TRANSCRIBER:
         component_details = [message_data, None, None, None, message.get('latency', None), False, message.get('is_final', False), None]
         metadata = message.get('transcriber_metadata', {})
-    elif message["component"] == "synthesizer":
+    elif message["component"] == LogComponent.SYNTHESIZER:
         component_details = [message_data, None, None, len(message_data), message.get('latency', None), message['cached'], None, message['engine']]
         metadata = message.get('synthesizer_metadata', {})
-    elif message["component"] == "function_call":
+    elif message["component"] == LogComponent.FUNCTION_CALL:
         component_details = [message_data, None, None, None, message.get('latency', None), None, None, None]
         metadata = message.get('function_call_metadata', {})
-    elif message["component"] == "graph_routing":
+    elif message["component"] == LogComponent.GRAPH_ROUTING:
         component_details = [message_data, None, None, None, message.get('latency', None), False, None, None]
         metadata = message.get('graph_routing_metadata', {})
-    elif message["component"] == "error":
+    elif message["component"] == LogComponent.ERROR:
         component_details = [message_data, None, None, None, message.get('latency', None), False, None, None]
         metadata = message.get('error_metadata', {})
+    elif message["component"] == LogComponent.WARNING:
+        component_details = [message_data, None, None, None, message.get('latency', None), False, None, None]
+        metadata = message.get('warning_metadata', {})
 
     metadata_str = None
     if metadata:
@@ -589,34 +626,77 @@ def get_file_names_in_directory(directory):
     return os.listdir(directory)
 
 
-def convert_to_request_log(message, meta_info, model, component="transcriber", direction='response', is_cached=False, engine=None, run_id=None):
+def format_error_message(component, provider, error_str):
+    """Map technical error strings to customer-friendly messages for CSV trace data."""
+    try:
+        display = LogComponent(component).display_name
+    except ValueError:
+        display = component
+    provider_str = f" ({provider})" if provider and provider != "-" else ""
+    err_lower = error_str.lower() if error_str else ""
+
+    if "content policy" in err_lower or "content_policy" in err_lower:
+        return "Content policy violation - response blocked by safety filter"
+    if "timeout" in err_lower:
+        return f"{display} service{provider_str} connection timed out"
+    if "auth" in err_lower or "401" in err_lower or "invalid api key" in err_lower or "incorrect api key" in err_lower or "invalid_api_key" in err_lower:
+        return f"{display} service{provider_str} authentication failed - please check API key"
+    if "rate limit" in err_lower or "429" in err_lower or "too many requests" in err_lower:
+        return f"{display} service{provider_str} rate limit exceeded - too many requests"
+    if "permission" in err_lower or "403" in err_lower:
+        return f"{display} service{provider_str} permission denied"
+    if "not found" in err_lower or "404" in err_lower:
+        return f"{display} service{provider_str} resource not found"
+    if "connection closed" in err_lower or "connection reset" in err_lower or "connectionclosed" in err_lower:
+        return f"{display} service{provider_str} disconnected unexpectedly"
+    if "connection" in err_lower:
+        return f"{display} service{provider_str} connection error"
+
+    # Truncate long error messages for readability
+    truncated = error_str[:200] if len(error_str) > 200 else error_str
+    return f"{display} service{provider_str} error: {truncated}"
+
+
+def convert_to_request_log(message, meta_info, model, component=LogComponent.TRANSCRIBER, direction=LogDirection.RESPONSE, is_cached=False, engine=None, run_id=None, input_tokens=None, output_tokens=None, reasoning_tokens=None, cached_tokens=None):
     log = dict()
-    log['direction'] = direction
+    log['direction'] = direction.value if isinstance(direction, Enum) else direction
     log['data'] = message
     log['leg_id'] = meta_info['request_id'] if "request_id" in meta_info else "-"
     log['time'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")
-    log['component'] = component
+    log['component'] = component.value if isinstance(component, Enum) else component
     log['sequence_id'] = meta_info.get('sequence_id', None)
     log['model'] = model
     log['cached'] = is_cached
-    if component == "llm":
-        log['latency'] = meta_info.get('llm_latency', None) if direction == "response" else None
-        log['llm_metadata'] = meta_info.get('llm_metadata', None)
-    if component == "synthesizer":
-        log['latency'] = meta_info.get('synthesizer_latency', None) if direction == "response" else None
-    if component == "transcriber":
-        log['latency'] = meta_info.get('transcriber_latency', None) if direction == "response" else None
-        if 'is_final' in meta_info and meta_info['is_final']:
-            log['is_final'] = True
-    if component == "function_call":
-        log['latency'] = None
-    if component == "graph_routing":
-        log['latency'] = None
-        log['graph_routing_metadata'] = meta_info.get('llm_metadata', {})
-    if component == "llm-hangup":
-        log['latency'] = meta_info.get('llm_latency', None) if direction == "response" else None
-    else:
-        log['is_final'] = False #This is logged only for users to know final transcript from the transcriber
+    log['is_final'] = False
+    match component:
+        case LogComponent.LLM:
+            log['latency'] = meta_info.get('llm_latency', None) if direction == LogDirection.RESPONSE else None
+            log['llm_metadata'] = meta_info.get('llm_metadata', None)
+            if direction == LogDirection.RESPONSE:
+                log['input_tokens'] = input_tokens or 0
+                log['output_tokens'] = output_tokens or 0
+                llm_metadata = log.get('llm_metadata') or {}
+                if not isinstance(llm_metadata, dict):
+                    llm_metadata = {}
+                if reasoning_tokens:
+                    llm_metadata['reasoning_tokens'] = reasoning_tokens
+                if cached_tokens:
+                    llm_metadata['cached_tokens'] = cached_tokens
+                llm_metadata['usage_source'] = UsageSource.API_REPORTED.value if (input_tokens is not None or output_tokens is not None) else UsageSource.ESTIMATED.value
+                log['llm_metadata'] = llm_metadata
+        case LogComponent.SYNTHESIZER:
+            log['latency'] = meta_info.get('synthesizer_latency', None) if direction == LogDirection.RESPONSE else None
+        case LogComponent.TRANSCRIBER:
+            log['latency'] = meta_info.get('transcriber_latency', None) if direction == LogDirection.RESPONSE else None
+            if 'is_final' in meta_info and meta_info['is_final']:
+                log['is_final'] = True
+        case LogComponent.FUNCTION_CALL | LogComponent.WARNING | LogComponent.ERROR:
+            log['latency'] = None
+        case LogComponent.GRAPH_ROUTING:
+            log['latency'] = None
+            log['graph_routing_metadata'] = meta_info.get('llm_metadata', {})
+        case LogComponent.LLM_HANGUP | LogComponent.LLM_VOICEMAIL | LogComponent.LLM_LANGUAGE_DETECTION:
+            log['latency'] = meta_info.get('llm_latency', None) if direction == LogDirection.RESPONSE else None
     log['engine'] = engine
     asyncio.create_task(write_request_logs(log, run_id))
 
@@ -629,13 +709,13 @@ async def process_task_cancellation(asyncio_task, task_name):
         except asyncio.CancelledError:
             logger.info(f"{task_name} has been successfully cancelled.")
         except Exception as e:
-            logger.error(f"Error cancelling {task_name}: {e}")
+            logger.warning(f"Error cancelling {task_name}: {e}")
 
 
 def get_date_time_from_timezone(timezone):
-    dt = datetime.now(timezone).strftime("%A, %B %d, %Y")
-    ts = datetime.now(timezone).strftime("%I:%M:%S %p")
-
+    now = datetime.now(timezone)
+    dt = now.strftime("%A, %B %d, %Y")
+    ts = now.strftime("%I:%M:%S %p")
     return dt, ts
 
 
@@ -678,6 +758,10 @@ def pcm_to_ulaw(pcm_bytes):
 
 def compute_function_pre_call_message(language, function_name, api_tool_pre_call_message):
     """Select pre-function call message with language support."""
+    # Built-in tools that should switch silently — no audible filler.
+    if function_name and function_name == "switch_language":
+        return ""
+
     if function_name and function_name.startswith("transfer_call"):
         default_message = TRANSFERING_CALL_FILLER
     else:
@@ -703,6 +787,7 @@ def structure_system_prompt(system_prompt, run_id, assistant_id, call_sid, conte
     }
 
     if context_data is not None:
+        enrich_context_with_time_variables(context_data, timezone)
         default_variables["agent_number"] = context_data.get("recipient_data", {}).get("agent_number")
         default_variables["user_number"] = context_data.get("recipient_data", {}).get("user_number")
 
