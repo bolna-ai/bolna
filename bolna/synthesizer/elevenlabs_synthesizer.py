@@ -33,8 +33,10 @@ class ElevenlabsSynthesizer(BaseSynthesizer):
         self.style = style
         self.audio_format = "mp3"
         self.use_mulaw = kwargs.get("use_mulaw", True)
+        self.ssml_enabled = kwargs.get("ssml_tags_enabled", False)
         self.elevenlabs_host = os.getenv("ELEVENLABS_API_HOST", "api.elevenlabs.io")
-        self.ws_url = f"wss://{self.elevenlabs_host}/v1/text-to-speech/{self.voice}/multi-stream-input?model_id={self.model}&output_format={'ulaw_8000' if self.use_mulaw else 'mp3_44100_128'}&inactivity_timeout=170&sync_alignment=true&optimize_streaming_latency=4"
+        ssml_qs = "&enable_ssml_parsing=true" if self.ssml_enabled else ""
+        self.ws_url = f"wss://{self.elevenlabs_host}/v1/text-to-speech/{self.voice}/multi-stream-input?model_id={self.model}&output_format={'ulaw_8000' if self.use_mulaw else 'mp3_44100_128'}&inactivity_timeout=170&sync_alignment=true&optimize_streaming_latency=4{ssml_qs}"
         self.api_url = f"https://{self.elevenlabs_host}/v1/text-to-speech/{self.voice}?optimize_streaming_latency=2&output_format="
         self.first_chunk_generated = False
         self.last_text_sent = False

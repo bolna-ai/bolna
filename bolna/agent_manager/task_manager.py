@@ -33,6 +33,7 @@ from bolna.helpers.utils import structure_system_prompt, compute_function_pre_ca
     get_required_input_types, format_messages, get_prompt_responses, resample, save_audio_file_to_s3, update_prompt_with_context, get_md5_hash, clean_json_string, wav_bytes_to_pcm, convert_to_request_log, yield_chunks_from_memory, process_task_cancellation, pcm_to_ulaw, \
     format_error_message, enrich_context_with_time_variables
 from bolna.helpers.logger_config import configure_logger
+from bolna.helpers.ssml_config import build_ssml_prompt_block, convert_markers_to_ssml
 from ..helpers.mark_event_meta_data import MarkEventMetaData
 from ..helpers.observable_variable import ObservableVariable
 from .models import ComponentLatencies
@@ -119,6 +120,8 @@ class TaskManager(BaseManager):
 
         # Prompts
         self.prompts, self.system_prompt = {}, {}
+        self.ssml_tags_enabled = None
+        self._pending_ssml = ""
         self.input_parameters = input_parameters
 
         # Recording
@@ -913,6 +916,8 @@ class TaskManager(BaseManager):
             else:
                 caching = True
 
+            self.ssml_tags_enabled = synth_config.pop("ssml_tags_enabled", None)
+            synth_config["ssml_tags_enabled"] = self.ssml_tags_enabled
             self.synthesizer_provider = synth_config.pop("provider")
             synthesizer_class = SUPPORTED_SYNTHESIZER_MODELS.get(self.synthesizer_provider)
             provider_config = synth_config.pop("provider_config")
@@ -1103,6 +1108,12 @@ class TaskManager(BaseManager):
                 self.call_sid = self.context_data['recipient_data']['call_sid']
 
             enriched_prompt = structure_system_prompt(self.prompts["system_prompt"], self.run_id, self.assistant_id, self.call_sid, self.context_data, self.timezone, self.is_web_based_call)
+
+            if self.ssml_tags_enabled and hasattr(self, 'synthesizer_provider'):
+                ssml_block = build_ssml_prompt_block(self.synthesizer_provider)
+                if ssml_block:
+                    enriched_prompt += "\n\n" + ssml_block
+                    logger.info(f"Injected SSML prompt block for provider: {self.synthesizer_provider}")
 
             notes = ""
             if self._is_conversation_task() and self.use_fillers:
@@ -2684,8 +2695,18 @@ class TaskManager(BaseManager):
                         convert_to_request_log(message = text, meta_info= meta_info, component=LogComponent.SYNTHESIZER, direction=LogDirection.RESPONSE, model = self.synthesizer_provider, is_cached= True, engine=self.tools['synthesizer'].get_engine(), run_id= self.run_id)
                         await self.__send_preprocessed_audio(meta_info, get_md5_hash(text))
                     else:
-                        self.synthesizer_characters += len(text)
-                        await self.tools["synthesizer"].push(message)
+                        if self.ssml_tags_enabled:
+                            text = self._pending_ssml + text
+                            self._pending_ssml = ""
+                            bracket = text.rfind('[')
+                            if bracket >= 0 and ']' not in text[bracket:]:
+                                self._pending_ssml = text[bracket:]
+                                text = text[:bracket]
+                            text = convert_markers_to_ssml(text, self.synthesizer_provider)
+                            message["data"] = text
+                        if text.strip():
+                            self.synthesizer_characters += len(text)
+                            await self.tools["synthesizer"].push(message)
                 else:
                     logger.info("other synthesizer models not supported yet")
             else:

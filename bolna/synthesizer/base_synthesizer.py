@@ -2,10 +2,13 @@ import io
 import wave
 from pydub import AudioSegment
 from bolna.helpers.logger_config import configure_logger
+from bolna.helpers.ssml_config import PROVIDER_ALLOWED_TAGS, convert_markers_to_ssml
 import asyncio
 import re
 
 logger = configure_logger(__name__)
+
+_XML_TAG_RE = re.compile(r'<(/?)(\w[\w:-]*)([^>]*)/?>')
 
 
 class BaseSynthesizer:
@@ -49,13 +52,20 @@ class BaseSynthesizer:
         pass
 
     def text_chunker(self, text):
-        """Split text into chunks, ensuring to not break sentences."""
+        """Split text into chunks, keeping XML/SSML tags as atomic standalone
+        chunks (required for ElevenLabs SSML parsing in streaming mode)."""
         splitters = (".", ",", "?", "!", ";", ":", "—", "-", "(", ")", "[", "]", "}", " ")
 
         buffer = ""
+        inside_tag = False
         for char in text:
             buffer += char
-            if char in splitters:
+            if char == "<":
+                inside_tag = True
+            elif char == ">" and inside_tag:
+                inside_tag = False
+                continue
+            if not inside_tag and char in splitters:
                 if buffer != " ":
                     yield buffer.strip() + " "
                 buffer = ""
@@ -82,3 +92,24 @@ class BaseSynthesizer:
     
     def get_sleep_time(self):
         return 0.2
+
+    @staticmethod
+    def strip_unsupported_tags(text: str, provider: str) -> str:
+        """
+        Remove XML/SSML tags that the given provider does not support.
+        Tags listed in PROVIDER_ALLOWED_TAGS for the provider are kept;
+        everything else is stripped (tag removed, inner text preserved).
+        If the provider has no entry at all, all tags are removed.
+        """
+        allowed = PROVIDER_ALLOWED_TAGS.get(provider, set())
+        if not allowed:
+            return re.sub(r'<[^>]+>', '', text).strip()
+
+        def _replace(match):
+            tag_name = match.group(2)
+            if tag_name in allowed:
+                return match.group(0)
+            return ""
+
+        cleaned = _XML_TAG_RE.sub(_replace, text)
+        return re.sub(r'\s+', ' ', cleaned).strip()
