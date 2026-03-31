@@ -25,6 +25,9 @@ OPENAI_REALTIME_URL = "wss://api.openai.com/v1/realtime"
 # Beta-format models use flat session config + OpenAI-Beta header
 _BETA_MODEL_PREFIXES = ("gpt-4o-realtime-preview",)
 
+# Models that support the reasoning config
+_REASONING_MODEL_PREFIXES = ("gpt-realtime-alpha-dolphin",)
+
 
 class OpenAIRealtimeS2S(BaseS2SProvider):
     """OpenAI Realtime API speech-to-speech provider.
@@ -155,7 +158,7 @@ class OpenAIRealtimeS2S(BaseS2SProvider):
                 },
             },
         }
-        if self.reasoning_effort:
+        if self.reasoning_effort and self.model.startswith(_REASONING_MODEL_PREFIXES):
             config["reasoning"] = {"effort": self.reasoning_effort}
         if self.max_response_output_tokens is not None:
             config["max_response_output_tokens"] = self.max_response_output_tokens
