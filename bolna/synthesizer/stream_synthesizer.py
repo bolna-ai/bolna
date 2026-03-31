@@ -146,7 +146,7 @@ class StreamSynthesizer(BaseSynthesizer):
         if self.stream:
             await self._push_stream(message)
         else:
-            super().push(message)
+            await super().push(copy.deepcopy(message))
 
     async def _push_stream(self, message):
         meta_info = message.get("meta_info")

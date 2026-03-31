@@ -23,6 +23,7 @@ class BaseSynthesizer:
         self.synthesized_characters = 0
         self.model = "default"
         self.current_turn_start_time = None
+        self.current_turn_id = None
 
     # ------------------------------------------------------------------
     # Common accessors
