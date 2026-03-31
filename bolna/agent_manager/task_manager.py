@@ -1306,10 +1306,9 @@ class TaskManager(BaseManager):
 
         # self.synthesizer_task.cancel()
         # self.synthesizer_task = asyncio.create_task(self.__listen_synthesizer())
-        #for task in self.synthesizer_tasks:
-        #    task.cancel()
-
-        #self.synthesizer_tasks = []
+        for task in self.synthesizer_tasks:
+            task.cancel()
+        self.synthesizer_tasks = []
 
         logger.info(f"Synth Task cancelled seconds")
         if not self.buffered_output_queue.empty():
@@ -3164,6 +3163,9 @@ class TaskManager(BaseManager):
             if "synthesizer" in self.tools and self.synthesizer_task is not None:
                 tasks_to_cancel.append(process_task_cancellation(self.synthesizer_task, 'synthesizer_task'))
                 tasks_to_cancel.append(process_task_cancellation(self.synthesizer_monitor_task, 'synthesizer_monitor_task'))
+                for task in self.synthesizer_tasks:
+                    tasks_to_cancel.append(process_task_cancellation(task, 'synthesizer_task_item'))
+                self.synthesizer_tasks = []
 
             # Transcriber cleanup
             if "transcriber" in self.tools:
