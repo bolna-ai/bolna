@@ -3216,10 +3216,12 @@ class TaskManager(BaseManager):
 
             elif isinstance(event, TranscriptDelta):
                 if event.is_final and event.content:
+                    logger.info(f"S2S assistant said: {event.content[:200]}")
                     self.conversation_history.append_assistant(event.content)
 
             elif isinstance(event, InputTranscript):
                 if event.is_final and event.content:
+                    logger.info(f"S2S user said: {event.content[:200]}")
                     self.conversation_history.append_user(event.content)
                     self.time_since_last_spoken_human_word = time.time()
 

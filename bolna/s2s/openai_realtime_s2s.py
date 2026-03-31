@@ -23,12 +23,15 @@ logger = configure_logger(__name__)
 
 OPENAI_REALTIME_URL = "wss://api.openai.com/v1/realtime"
 
+# Beta-format models use flat session config + OpenAI-Beta header
+_BETA_MODEL_PREFIXES = ("gpt-4o-realtime-preview",)
+
 
 class OpenAIRealtimeS2S(BaseS2SProvider):
     """OpenAI Realtime API speech-to-speech provider.
 
     Supports both beta-format models (gpt-4o-realtime-preview) and
-    GA-format models (gpt-realtime-alpha-dolphin-6 with reasoning).
+    GA-format models (gpt-realtime with reasoning).
     """
 
     def __init__(
@@ -69,16 +72,21 @@ class OpenAIRealtimeS2S(BaseS2SProvider):
         self._current_response_transcript = ""
         self._turn_start_time: Optional[float] = None
 
+    @property
+    def _is_beta_model(self) -> bool:
+        """Beta models use flat session config and OpenAI-Beta header."""
+        return self.model.startswith(_BETA_MODEL_PREFIXES)
+
     # ------------------------------------------------------------------
     # Connection
     # ------------------------------------------------------------------
 
     async def connect(self) -> None:
         url = f"{OPENAI_REALTIME_URL}?model={self.model}"
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "OpenAI-Beta": "realtime=v1",
-        }
+        headers = {"Authorization": f"Bearer {self.api_key}"}
+        if self._is_beta_model:
+            headers["OpenAI-Beta"] = "realtime=v1"
+
         t0 = time.time()
         self._ws = await websockets.connect(url, additional_headers=headers, max_size=None)
         self.connection_time = (time.time() - t0) * 1000
@@ -91,17 +99,27 @@ class OpenAIRealtimeS2S(BaseS2SProvider):
             raise ConnectionError(f"OpenAI Realtime handshake failed: {error_msg}")
 
         await self._send_session_update()
-        logger.info(f"OpenAI Realtime connected in {self.connection_time:.0f}ms | model={self.model}")
+        logger.info(
+            f"OpenAI Realtime connected in {self.connection_time:.0f}ms | "
+            f"model={self.model} format={'beta' if self._is_beta_model else 'GA'}"
+        )
 
     async def _send_session_update(self) -> None:
-        """Send session.update with current config.
+        """Send session.update using the correct format for the model."""
+        if self._is_beta_model:
+            session_config = self._build_beta_session_config()
+        else:
+            session_config = self._build_ga_session_config()
 
-        Uses beta format (flat voice/input_audio_format/output_audio_format)
-        which works with all current models including the alpha.
-        NOTE: When OpenAI ships GA format support, switch alpha models to
-        _build_ga_session_config() which uses nested audio objects + reasoning.
-        """
-        session_config: dict = {
+        if self.tools:
+            session_config["tools"] = self._format_tools()
+            session_config["tool_choice"] = "auto"
+
+        await self._send({"type": "session.update", "session": session_config})
+
+    def _build_beta_session_config(self) -> dict:
+        """Beta format: flat fields, used by gpt-4o-realtime-preview."""
+        config: dict = {
             "modalities": ["audio", "text"],
             "instructions": self.system_prompt,
             "voice": self.voice,
@@ -116,15 +134,33 @@ class OpenAIRealtimeS2S(BaseS2SProvider):
             },
             "temperature": self.temperature,
         }
-
         if self.max_response_output_tokens is not None:
-            session_config["max_response_output_tokens"] = self.max_response_output_tokens
+            config["max_response_output_tokens"] = self.max_response_output_tokens
+        return config
 
-        if self.tools:
-            session_config["tools"] = self._format_tools()
-            session_config["tool_choice"] = "auto"
-
-        await self._send({"type": "session.update", "session": session_config})
+    def _build_ga_session_config(self) -> dict:
+        """GA format: nested audio objects, used by gpt-realtime and newer models."""
+        config: dict = {
+            "type": "realtime",
+            "output_modalities": ["audio"],
+            "instructions": self.system_prompt,
+            "audio": {
+                "input": {
+                    "format": {"type": "audio/pcm", "rate": 24000},
+                    "turn_detection": {"type": "semantic_vad"},
+                    "transcription": {"model": "gpt-4o-mini-transcribe"},
+                },
+                "output": {
+                    "format": {"type": "audio/pcm", "rate": 24000},
+                    "voice": self.voice,
+                },
+            },
+        }
+        if self.reasoning_effort:
+            config["reasoning"] = {"effort": self.reasoning_effort}
+        if self.max_response_output_tokens is not None:
+            config["max_response_output_tokens"] = self.max_response_output_tokens
+        return config
 
     # ------------------------------------------------------------------
     # Audio I/O
@@ -153,6 +189,10 @@ class OpenAIRealtimeS2S(BaseS2SProvider):
                 is_preamble = self._current_phase == "commentary"
                 yield AudioDelta(data=audio_bytes, is_preamble=is_preamble)
 
+            # --- Audio output done (beta: response.audio.done, GA: response.output_audio.done) ---
+            elif event_type in ("response.audio.done", "response.output_audio.done"):
+                pass  # Audio content part finished, response.done handles lifecycle
+
             # --- Preamble / phase tracking ---
             elif event_type == "response.output_item.added":
                 item = event.get("item", {})
@@ -174,11 +214,11 @@ class OpenAIRealtimeS2S(BaseS2SProvider):
                         yield AudioDelta(data=silence, is_preamble=True)
 
             # --- Commentary text (reasoning models emit text-only preambles) ---
-            elif event_type == "response.output_text.delta":
+            elif event_type in ("response.text.delta", "response.output_text.delta"):
                 if self._current_phase == "commentary":
                     yield CommentaryText(content=event.get("delta", ""), is_final=False)
 
-            elif event_type == "response.output_text.done":
+            elif event_type in ("response.text.done", "response.output_text.done"):
                 if self._current_phase == "commentary":
                     yield CommentaryText(content=event.get("text", ""), is_final=True)
 
@@ -189,11 +229,17 @@ class OpenAIRealtimeS2S(BaseS2SProvider):
             elif event_type in ("response.audio_transcript.done", "response.output_audio_transcript.done"):
                 transcript = event.get("transcript", "")
                 self._current_response_transcript += transcript + " "
+                logger.info(f"Assistant transcript: {transcript[:200]}")
                 yield TranscriptDelta(content=transcript, is_final=True)
 
             # --- User transcript ---
             elif event_type == "conversation.item.input_audio_transcription.completed":
-                yield InputTranscript(content=event.get("transcript", ""), is_final=True)
+                transcript = event.get("transcript", "")
+                logger.info(f"User transcript: {transcript[:200]}")
+                yield InputTranscript(content=transcript, is_final=True)
+
+            elif event_type == "conversation.item.input_audio_transcription.delta":
+                pass  # Streaming delta — we wait for .completed
 
             # --- Function calling ---
             elif event_type == "response.function_call_arguments.done":
@@ -229,7 +275,7 @@ class OpenAIRealtimeS2S(BaseS2SProvider):
                     code=error.get("code", ""),
                 )
 
-            # --- Session events (log but don't yield) ---
+            # --- Known events that need no action ---
             elif event_type in ("session.created", "session.updated"):
                 logger.info(f"Session event: {event_type}")
 
@@ -239,9 +285,16 @@ class OpenAIRealtimeS2S(BaseS2SProvider):
             elif event_type == "input_audio_buffer.speech_stopped":
                 logger.info("OpenAI VAD: speech_stopped (will auto-respond)")
 
-            elif event_type in ("input_audio_buffer.committed", "conversation.item.created",
-                                "response.content_part.added", "response.content_part.done",
-                                "rate_limits.updated"):
+            elif event_type in (
+                "input_audio_buffer.committed",
+                "conversation.item.created",
+                "conversation.item.added",
+                "conversation.item.done",
+                "response.content_part.added",
+                "response.content_part.done",
+                "response.function_call_arguments.delta",
+                "rate_limits.updated",
+            ):
                 pass  # Known events, no action needed
 
             else:
@@ -276,7 +329,7 @@ class OpenAIRealtimeS2S(BaseS2SProvider):
 
         Args:
             instructions: Per-turn instruction override.
-            reasoning_effort: Per-turn reasoning effort override (alpha models only).
+            reasoning_effort: Per-turn reasoning effort override (GA models only).
         """
         payload: dict = {"type": "response.create"}
         response_config: dict = {}
