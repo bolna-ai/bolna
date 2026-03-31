@@ -140,6 +140,7 @@ class OpenAIRealtimeS2S(BaseS2SProvider):
     def _build_ga_session_config(self) -> dict:
         """GA format: nested audio objects, used by gpt-realtime and newer models."""
         config: dict = {
+            "type": "realtime",
             "output_modalities": ["audio"],
             "instructions": self.system_prompt,
             "audio": {
