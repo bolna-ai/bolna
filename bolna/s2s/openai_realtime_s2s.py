@@ -11,7 +11,6 @@ from .events import (
     AudioDelta,
     CommentaryText,
     FunctionCall,
-    FunctionCallOutputReady,
     InputTranscript,
     Interrupted,
     ResponseDone,
@@ -141,7 +140,6 @@ class OpenAIRealtimeS2S(BaseS2SProvider):
     def _build_ga_session_config(self) -> dict:
         """GA format: nested audio objects, used by gpt-realtime and newer models."""
         config: dict = {
-            "type": "realtime",
             "output_modalities": ["audio"],
             "instructions": self.system_prompt,
             "audio": {
@@ -199,7 +197,7 @@ class OpenAIRealtimeS2S(BaseS2SProvider):
                 phase = item.get("phase")
                 if phase:
                     self._current_phase = phase
-                    logger.info(f"S2S phase: {phase}")
+                    logger.debug(f"S2S phase: {phase}")
                 # Track turn start on first item of a response
                 if self._turn_start_time is None:
                     self._turn_start_time = time.time()
@@ -229,13 +227,11 @@ class OpenAIRealtimeS2S(BaseS2SProvider):
             elif event_type in ("response.audio_transcript.done", "response.output_audio_transcript.done"):
                 transcript = event.get("transcript", "")
                 self._current_response_transcript += transcript + " "
-                logger.info(f"Assistant transcript: {transcript[:200]}")
                 yield TranscriptDelta(content=transcript, is_final=True)
 
             # --- User transcript ---
             elif event_type == "conversation.item.input_audio_transcription.completed":
                 transcript = event.get("transcript", "")
-                logger.info(f"User transcript: {transcript[:200]}")
                 yield InputTranscript(content=transcript, is_final=True)
 
             elif event_type == "conversation.item.input_audio_transcription.delta":
@@ -277,13 +273,13 @@ class OpenAIRealtimeS2S(BaseS2SProvider):
 
             # --- Known events that need no action ---
             elif event_type in ("session.created", "session.updated"):
-                logger.info(f"Session event: {event_type}")
+                logger.debug(f"Session event: {event_type}")
 
             elif event_type == "response.created":
                 self._turn_start_time = time.time()
 
             elif event_type == "input_audio_buffer.speech_stopped":
-                logger.info("OpenAI VAD: speech_stopped (will auto-respond)")
+                logger.debug("OpenAI VAD: speech_stopped")
 
             elif event_type in (
                 "input_audio_buffer.committed",
@@ -298,7 +294,7 @@ class OpenAIRealtimeS2S(BaseS2SProvider):
                 pass  # Known events, no action needed
 
             else:
-                logger.info(f"OpenAI unhandled event: {event_type}")
+                logger.debug(f"OpenAI unhandled event: {event_type}")
 
     # ------------------------------------------------------------------
     # Function results

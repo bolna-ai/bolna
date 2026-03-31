@@ -3188,8 +3188,8 @@ class TaskManager(BaseManager):
 
             await self.tools["s2s"].send_audio(pcm_24k)
             chunks_sent += 1
-            if chunks_sent % 50 == 0:  # Log every 5 seconds (50 * 100ms chunks)
-                logger.info(f"S2S audio ingest: {chunks_sent} chunks sent to OpenAI")
+            if chunks_sent % 50 == 0:
+                logger.debug(f"S2S audio ingest: {chunks_sent} chunks sent")
 
         logger.info(f"S2S audio ingest loop exited | sent={chunks_sent} discarded={chunks_discarded} ended={self.conversation_ended}")
 
