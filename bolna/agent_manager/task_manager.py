@@ -3149,6 +3149,12 @@ class TaskManager(BaseManager):
     async def _s2s_audio_ingest_loop(self):
         """Read audio from audio_queue, convert to PCM@24kHz, send to S2S provider."""
         is_telephony = not self.default_io
+        # Only Twilio sends mulaw; Plivo and others send linear16 PCM
+        io_provider = self.tools["input"].io_provider if "input" in self.tools else ""
+        is_mulaw_input = io_provider == "twilio"
+        if is_telephony:
+            logger.info(f"S2S audio ingest: provider={io_provider} mulaw={is_mulaw_input}")
+
         chunks_sent = 0
         chunks_discarded = 0
         while not self.conversation_ended:
@@ -3170,8 +3176,13 @@ class TaskManager(BaseManager):
                 continue
 
             if is_telephony:
-                pcm_8k = ulaw_to_pcm(data)
-                pcm_24k = resample(pcm_8k, 24000, format="pcm", original_sample_rate=8000)
+                if is_mulaw_input:
+                    # Twilio: mulaw@8kHz → PCM@8kHz → PCM@24kHz
+                    pcm_8k = ulaw_to_pcm(data)
+                    pcm_24k = resample(pcm_8k, 24000, format="pcm", original_sample_rate=8000)
+                else:
+                    # Plivo and others: already linear16 PCM@8kHz → PCM@24kHz
+                    pcm_24k = resample(data, 24000, format="pcm", original_sample_rate=8000)
             else:
                 pcm_24k = data  # Web calls: already PCM
 
