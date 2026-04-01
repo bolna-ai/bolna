@@ -154,9 +154,9 @@ _PROVIDER_PROMPT_CONFIG = {
         },
         {
             "syntax": "[spell]text[/spell]",
-            "usage": "Spell out letter by letter. Use for IDs, course codes, abbreviations, email addresses, and phone numbers. NEVER manually space out characters — always use [spell] instead.",
+            "usage": "Spell out letter by letter. Use for IDs, course codes, emails, phone numbers. Content inside [spell] MUST be raw characters/digits exactly as written — NEVER convert digits to words.",
             "correct": "Email us at [spell]admissions@bit.edu[/spell]. Call [spell]9876543210[/spell].",
-            "wrong": "Email us at A D M I S S I O N S at B I T dot E D U. Call nine eight seven six five four three two one zero.",
+            "wrong": "Call [spell]nine eight seven six five four three two one zero[/spell]. Email A D M I S S I O N S at B I T dot E D U.",
         },
     ],
 }
