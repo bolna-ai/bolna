@@ -2,6 +2,7 @@ import asyncio
 from collections import defaultdict
 import math
 import os
+import re
 import random
 import traceback
 import time
@@ -2698,10 +2699,20 @@ class TaskManager(BaseManager):
                         if self.ssml_tags_enabled:
                             text = self._pending_ssml + text
                             self._pending_ssml = ""
+
                             bracket = text.rfind('[')
                             if bracket >= 0 and ']' not in text[bracket:]:
                                 self._pending_ssml = text[bracket:]
                                 text = text[:bracket]
+
+                            _OPEN_WRAP = re.compile(r'\[(spell|number|ordinal|date|phone|slow|fast|loud|soft)\]')
+                            for m in _OPEN_WRAP.finditer(text):
+                                tag = m.group(1)
+                                if f'[/{tag}]' not in text[m.start():]:
+                                    self._pending_ssml = text[m.start():]
+                                    text = text[:m.start()]
+                                    break
+
                             text = convert_markers_to_ssml(text, self.synthesizer_provider)
                             message["data"] = text
                         if text.strip():
