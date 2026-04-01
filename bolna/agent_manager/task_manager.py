@@ -2705,7 +2705,7 @@ class TaskManager(BaseManager):
                                 self._pending_ssml = text[bracket:]
                                 text = text[:bracket]
 
-                            _OPEN_WRAP = re.compile(r'\[(spell|number|ordinal|date|phone|slow|fast|loud|soft)\]')
+                            _OPEN_WRAP = re.compile(r'\[(slow|fast|loud|soft|spell)\]')
                             for m in _OPEN_WRAP.finditer(text):
                                 tag = m.group(1)
                                 if f'[/{tag}]' not in text[m.start():]:
