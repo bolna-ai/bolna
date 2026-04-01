@@ -1,14 +1,12 @@
 import io
 import wave
-from pydub import AudioSegment
-from bolna.helpers.logger_config import configure_logger
-from bolna.helpers.ssml_config import PROVIDER_ALLOWED_TAGS, convert_markers_to_ssml
 import uuid
 import asyncio
 import re
 
 from pydub import AudioSegment
 from bolna.helpers.logger_config import configure_logger
+from bolna.helpers.ssml_config import PROVIDER_ALLOWED_TAGS
 from bolna.helpers.utils import create_ws_data_packet
 
 logger = configure_logger(__name__)
@@ -210,15 +208,6 @@ class BaseSynthesizer:
         buffer = io.BytesIO()
         audio.export(buffer, format="wav")
         return buffer.getvalue()
-
-    def get_engine(self):
-        return "default"
-
-    def supports_websocket(self):
-        return True
-    
-    def get_sleep_time(self):
-        return 0.2
 
     @staticmethod
     def strip_unsupported_tags(text: str, provider: str) -> str:
