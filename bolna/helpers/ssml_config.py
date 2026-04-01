@@ -110,6 +110,29 @@ PROVIDER_ALLOWED_TAGS = {
 }
 
 
+_INTERPRET_AS_TO_MARKER = {v: k for k, v in _SAY_AS_MAP.items()}
+_RAW_SAY_AS_RE = re.compile(
+    r'<say-as\s+interpret-as="(\w+)">(.*?)<\s*/\s*say-as\s*>',
+    re.DOTALL,
+)
+_RAW_BREAK_RE = re.compile(r'<\s*break\s+time="([^"]+)"\s*/?>')
+
+
+def _normalize_raw_xml(text: str) -> str:
+    """Convert any raw XML tags the LLM outputs back to bracket markers."""
+    def _say_as_to_marker(m):
+        interpret_as = m.group(1)
+        content = m.group(2)
+        marker = _INTERPRET_AS_TO_MARKER.get(interpret_as)
+        if marker:
+            return f'[{marker}]{content}[/{marker}]'
+        return content
+
+    text = _RAW_SAY_AS_RE.sub(_say_as_to_marker, text)
+    text = _RAW_BREAK_RE.sub(lambda m: f'[pause:{m.group(1)}]', text)
+    return text
+
+
 def convert_markers_to_ssml(text: str, provider: str) -> str:
     """
     Convert LLM-generated text markers to provider-specific SSML tags.
@@ -120,6 +143,9 @@ def convert_markers_to_ssml(text: str, provider: str) -> str:
         return text
 
     original = text
+
+    # 0. Catch raw XML the LLM may produce and normalize to markers first
+    text = _normalize_raw_xml(text)
 
     # 1. Convert [pause] / [pause:Xs] markers
     text = _PAUSE_RE.sub(lambda m: _convert_pause(m, provider), text)
@@ -168,10 +194,10 @@ _PROVIDER_PROMPT_CONFIG = {
         "example_wrong": (
             'Your ID is BLN-4829. '
             'Fee is 1100000 for two years. '
-            'Deadline is <say-as interpret-as="date">March 15, 2025</say-as>. '
+            'Deadline is March 15, 2025. '
             'Call 9876543210.'
         ),
-        "wrong_reason": "No markers used, raw XML tags, no pauses between info.",
+        "wrong_reason": "No markers used, no pauses between info — all content runs together.",
     },
     "cartesia": {
         "markers": [
@@ -203,20 +229,18 @@ def build_ssml_prompt_block(provider: str) -> str | None:
 
     marker_lines = "\n".join(f"  {syn} — {desc}" for syn, desc in cfg["markers"])
 
-    parts = [
+    return (
         "### Speech Markers\n"
-        "Your output is spoken aloud. Embed these markers to control delivery.\n\n"
-        "STRICT RULES:\n"
-        "- Use ONLY the [bracket] markers below. NEVER output XML tags like <say-as>, <break>, <prosody>, etc.\n"
-        "- Put content inside markers exactly as-is. Do NOT add spaces between characters or digits.\n"
-        "  WRONG: [number]1 1 0 0 0 0 0[/number]  WRONG: [spell]B L N - 4 8[/spell]\n"
-        "  RIGHT: [number]1100000[/number]  RIGHT: [spell]BLN-4829[/spell]\n"
-        "- No markdown, no double-spaces, no invented markers.\n\n"
+        "Your output is spoken aloud. Use ONLY the [bracket] markers below to control delivery.\n\n"
+        "ABSOLUTE RULES — NEVER BREAK THESE:\n"
+        "- ONLY use [bracket] markers. Your output must contain ZERO XML/HTML tags.\n"
+        "  You must NEVER write <say-as>, <break>, <prosody>, <speak>, or ANY tag with < > angle brackets.\n"
+        "  If you want a pause, write [pause]. If you want to spell, write [spell]text[/spell]. Never XML.\n"
+        "- Content inside markers goes exactly as-is — no extra spaces between characters or digits.\n"
+        "- No markdown (no **, ##, bullets). No double-spaces. No invented markers.\n\n"
         f"Markers:\n{marker_lines}\n\n"
         "Use [pause] between multiple pieces of info. Skip markers for short single-sentence replies.\n\n"
         f"CORRECT: {cfg['example_correct']}\n\n"
         f"WRONG: {cfg['example_wrong']}\n"
         f"Why wrong: {cfg['wrong_reason']}"
-    ]
-
-    return "".join(parts)
+    )
