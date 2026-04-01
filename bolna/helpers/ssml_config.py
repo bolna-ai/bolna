@@ -142,9 +142,9 @@ _PROVIDER_PROMPT_CONFIG = {
         },
         {
             "syntax": "[slow]text[/slow]",
-            "usage": "Slower speech. Use around important numbers, fees, deadlines so they are spoken clearly.",
-            "correct": "Fee is [slow]eleven lakh for two years[/slow].",
-            "wrong": "Fee is eleven lakh for two years.",
+            "usage": "Slower speech. ALWAYS wrap fees, costs, deadlines, and important numbers in [slow] so they are spoken clearly.",
+            "correct": "Fee is [slow]eleven lakh for two years[/slow]. Deadline is [slow]April 30, 2025[/slow].",
+            "wrong": "Fee is eleven lakh for two years. Deadline is April 30, 2025.",
         },
         {
             "syntax": "[fast]text[/fast]",
@@ -154,9 +154,9 @@ _PROVIDER_PROMPT_CONFIG = {
         },
         {
             "syntax": "[spell]text[/spell]",
-            "usage": "Spell out letter by letter. Use for IDs, course codes, abbreviations.",
-            "correct": "Your course code is [spell]CSE-401[/spell].",
-            "wrong": "Your course code is CSE-401.",
+            "usage": "Spell out letter by letter. Use for IDs, course codes, abbreviations, email addresses, and phone numbers. NEVER manually space out characters — always use [spell] instead.",
+            "correct": "Email us at [spell]admissions@bit.edu[/spell]. Call [spell]9876543210[/spell].",
+            "wrong": "Email us at A D M I S S I O N S at B I T dot E D U. Call nine eight seven six five four three two one zero.",
         },
     ],
 }
