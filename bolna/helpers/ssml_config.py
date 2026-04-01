@@ -159,12 +159,19 @@ _PROVIDER_PROMPT_CONFIG = {
             ("[date]text[/date]", "Read as date. Use for deadlines, event dates."),
             ("[phone]digits[/phone]", "Read as phone number. Use for contact/helpline numbers."),
         ],
-        "example": (
+        "example_correct": (
             'Your ID is [spell]BLN-4829[/spell]. [pause:0.5s] '
             'Fee is [number]1100000[/number] for two years. [pause:0.5s] '
             'Deadline is [date]March 15, 2025[/date]. [pause:0.5s] '
             'Call [phone]9876543210[/phone].'
         ),
+        "example_wrong": (
+            'Your ID is BLN-4829. '
+            'Fee is 1100000 for two years. '
+            'Deadline is <say-as interpret-as="date">March 15, 2025</say-as>. '
+            'Call 9876543210.'
+        ),
+        "wrong_reason": "No markers used, raw XML tags, no pauses between info.",
     },
     "cartesia": {
         "markers": [
@@ -173,11 +180,17 @@ _PROVIDER_PROMPT_CONFIG = {
             ("[fast]text[/fast]", "Faster speech. Use for routine transitions."),
             ("[spell]text[/spell]", "Spell out. Use for IDs, codes, abbreviations."),
         ],
-        "example": (
+        "example_correct": (
             'Fee is [slow]eleven lakh for two years[/slow]. [pause:0.5s] '
             'Admission fee is [slow]seventy-six thousand[/slow]. [pause:0.5s] '
             'Would you like to know about scholarships?'
         ),
+        "example_wrong": (
+            'Fee is eleven lakh for two years. '
+            'Admission fee is seventy-six thousand. '
+            'Would you like to know about scholarships?'
+        ),
+        "wrong_reason": "No speed markers on important figures, no pauses between info.",
     },
 }
 
@@ -190,11 +203,20 @@ def build_ssml_prompt_block(provider: str) -> str | None:
 
     marker_lines = "\n".join(f"  {syn} — {desc}" for syn, desc in cfg["markers"])
 
-    return (
+    parts = [
         "### Speech Markers\n"
-        "Your output is spoken aloud. Embed these markers to control delivery. "
-        "No markdown, no double-spaces, no invented markers.\n\n"
+        "Your output is spoken aloud. Embed these markers to control delivery.\n\n"
+        "STRICT RULES:\n"
+        "- Use ONLY the [bracket] markers below. NEVER output XML tags like <say-as>, <break>, <prosody>, etc.\n"
+        "- Put content inside markers exactly as-is. Do NOT add spaces between characters or digits.\n"
+        "  WRONG: [number]1 1 0 0 0 0 0[/number]  WRONG: [spell]B L N - 4 8[/spell]\n"
+        "  RIGHT: [number]1100000[/number]  RIGHT: [spell]BLN-4829[/spell]\n"
+        "- No markdown, no double-spaces, no invented markers.\n\n"
         f"Markers:\n{marker_lines}\n\n"
         "Use [pause] between multiple pieces of info. Skip markers for short single-sentence replies.\n\n"
-        f"Example: {cfg['example']}"
-    )
+        f"CORRECT: {cfg['example_correct']}\n\n"
+        f"WRONG: {cfg['example_wrong']}\n"
+        f"Why wrong: {cfg['wrong_reason']}"
+    ]
+
+    return "".join(parts)
