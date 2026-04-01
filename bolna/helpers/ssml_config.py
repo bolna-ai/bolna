@@ -57,22 +57,16 @@ def _convert_pause(match, provider: str) -> str:
     return f'<break time="{duration}" />'
 
 
-_SAY_AS_MAP = {
-    "spell": "characters",
-    "number": "cardinal",
-    "ordinal": "ordinal",
-    "date": "date",
-    "phone": "telephone",
-}
-
-
 def _convert_wrap_elevenlabs(match) -> str:
-    """ElevenLabs v2: break + say-as types. Speed/volume not supported — stripped."""
+    """ElevenLabs WebSocket: only <break> supported. All other markers handled
+    at application level since <say-as> is NOT parsed in WebSocket streaming."""
     tag = match.group(1)
     content = match.group(2)
-    interpret_as = _SAY_AS_MAP.get(tag)
-    if interpret_as:
-        return f'<say-as interpret-as="{interpret_as}">{content}</say-as>'
+    if tag == "spell":
+        return ' '.join(content.replace('-', ' ').replace('.', ' '))
+    elif tag == "phone":
+        return ' '.join(ch if ch.isdigit() else ch for ch in content)
+    # number, ordinal, date — pass content through as-is, ElevenLabs reads naturally
     return content
 
 
@@ -105,32 +99,9 @@ PROVIDER_SUPPORTED_MARKERS = {
 }
 
 PROVIDER_ALLOWED_TAGS = {
-    "elevenlabs": {"break", "say-as"},
+    "elevenlabs": {"break"},
     "cartesia": {"break", "speed", "volume", "spell", "emotion"},
 }
-
-
-_INTERPRET_AS_TO_MARKER = {v: k for k, v in _SAY_AS_MAP.items()}
-_RAW_SAY_AS_RE = re.compile(
-    r'<say-as\s+interpret-as="(\w+)">(.*?)<\s*/\s*say-as\s*>',
-    re.DOTALL,
-)
-_RAW_BREAK_RE = re.compile(r'<\s*break\s+time="([^"]+)"\s*/?>')
-
-
-def _normalize_raw_xml(text: str) -> str:
-    """Convert any raw XML tags the LLM outputs back to bracket markers."""
-    def _say_as_to_marker(m):
-        interpret_as = m.group(1)
-        content = m.group(2)
-        marker = _INTERPRET_AS_TO_MARKER.get(interpret_as)
-        if marker:
-            return f'[{marker}]{content}[/{marker}]'
-        return content
-
-    text = _RAW_SAY_AS_RE.sub(_say_as_to_marker, text)
-    text = _RAW_BREAK_RE.sub(lambda m: f'[pause:{m.group(1)}]', text)
-    return text
 
 
 def convert_markers_to_ssml(text: str, provider: str) -> str:
@@ -143,9 +114,6 @@ def convert_markers_to_ssml(text: str, provider: str) -> str:
         return text
 
     original = text
-
-    # 0. Catch raw XML the LLM may produce and normalize to markers first
-    text = _normalize_raw_xml(text)
 
     # 1. Convert [pause] / [pause:Xs] markers
     text = _PAUSE_RE.sub(lambda m: _convert_pause(m, provider), text)
@@ -234,8 +202,7 @@ def build_ssml_prompt_block(provider: str) -> str | None:
         "Your output is spoken aloud. Use ONLY the [bracket] markers below to control delivery.\n\n"
         "ABSOLUTE RULES — NEVER BREAK THESE:\n"
         "- ONLY use [bracket] markers. Your output must contain ZERO XML/HTML tags.\n"
-        "  You must NEVER write <say-as>, <break>, <prosody>, <speak>, or ANY tag with < > angle brackets.\n"
-        "  If you want a pause, write [pause]. If you want to spell, write [spell]text[/spell]. Never XML.\n"
+        "  NEVER use angle brackets < >. If you want a pause, write [pause]. To spell, write [spell]text[/spell].\n"
         "- Content inside markers goes exactly as-is — no extra spaces between characters or digits.\n"
         "- No markdown (no **, ##, bullets). No double-spaces. No invented markers.\n\n"
         f"Markers:\n{marker_lines}\n\n"
