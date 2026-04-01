@@ -53,19 +53,26 @@ class BaseSynthesizer:
 
     def text_chunker(self, text):
         """Split text into chunks, keeping XML/SSML tags as atomic standalone
-        chunks (required for ElevenLabs SSML parsing in streaming mode)."""
+        chunks (required for ElevenLabs SSML parsing in streaming mode).
+        Paired tags like <say-as>content</say-as> are kept as single chunks."""
         splitters = (".", ",", "?", "!", ";", ":", "—", "-", "(", ")", "[", "]", "}", " ")
 
         buffer = ""
         inside_tag = False
+        inside_element = False
         for char in text:
             buffer += char
             if char == "<":
                 inside_tag = True
             elif char == ">" and inside_tag:
                 inside_tag = False
+                tag_text = buffer[buffer.rfind("<"):]
+                if tag_text.startswith("</"):
+                    inside_element = False
+                elif not tag_text.rstrip().endswith("/>"):
+                    inside_element = True
                 continue
-            if not inside_tag and char in splitters:
+            if not inside_tag and not inside_element and char in splitters:
                 if buffer != " ":
                     yield buffer.strip() + " "
                 buffer = ""
