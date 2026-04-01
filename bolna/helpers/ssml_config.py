@@ -154,9 +154,9 @@ _PROVIDER_PROMPT_CONFIG = {
         },
         {
             "syntax": "[spell]text[/spell]",
-            "usage": "Spell out letter by letter. Use for IDs, course codes, emails, phone numbers. Content inside [spell] MUST be raw characters/digits exactly as written — NEVER convert digits to words.",
-            "correct": "Email us at [spell]admissions@bit.edu[/spell]. Call [spell]9876543210[/spell].",
-            "wrong": "Call [spell]nine eight seven six five four three two one zero[/spell]. Email A D M I S S I O N S at B I T dot E D U.",
+            "usage": "Spell out letter by letter. Use for IDs, course codes, emails, phone numbers. Content MUST be the raw original text with digits as digits (0-9), NEVER as words. Writing words like 'nine' or 'eight' inside [spell] is a CRITICAL ERROR.",
+            "correct": "Call [spell]9876543210[/spell]. Email [spell]admissions@bit.edu[/spell]. Code [spell]CSE-401[/spell].",
+            "wrong": "Call [spell]nine eight seven six five four three two one zero[/spell].",
         },
     ],
 }
@@ -183,7 +183,9 @@ def build_ssml_prompt_block(provider: str) -> str | None:
         "1. You MUST use ONLY [bracket] markers listed below. Not using them is an error.\n"
         "2. ZERO XML/HTML tags allowed. NEVER write <break>, <speak>, <prosody>, or ANY tag with < >.\n"
         "   Writing <break time=\"0.5s\"/> is WRONG. Writing [pause:0.5s] is RIGHT.\n"
-        "3. No markdown (no **, ##, bullets). No double-spaces. No invented markers.\n"
-        "4. Every response with 2+ facts MUST have [pause] between them. No exceptions.\n\n"
+        "3. Content inside markers MUST be raw original text. Digits stay as digits (0-9).\n"
+        "   [spell]9876543210[/spell] is RIGHT. [spell]nine eight seven six[/spell] is WRONG.\n"
+        "4. No markdown (no **, ##, bullets). No double-spaces. No invented markers.\n"
+        "5. Every response with 2+ facts MUST have [pause] between them. No exceptions.\n\n"
         + "\n\n".join(marker_blocks)
     )
