@@ -28,6 +28,13 @@ _WRAP_RE = re.compile(r'\[(slow|fast|loud|soft|spell)\](.*?)\[/\1\]', re.DOTALL)
 
 _ALL_MARKERS = re.compile(r'\[/?(?:pause|slow|fast|loud|soft|spell)(?::[^\]]+)?\]')
 
+# Safety net: catch raw <break> XML the LLM might generate despite instructions
+_RAW_BREAK_RE = re.compile(r'<\s*break\s+time="([^"]+)"\s*/?>')
+
+def _normalize_raw_breaks(text: str) -> str:
+    """Convert any raw <break> XML back to [pause] markers before conversion."""
+    return _RAW_BREAK_RE.sub(lambda m: f'[pause:{m.group(1)}]', text)
+
 def _make_break_tag(match, default_duration: str) -> str:
     """Build <break> tag from a [pause] regex match."""
     duration_val = match.group(1)
@@ -39,12 +46,14 @@ def _make_break_tag(match, default_duration: str) -> str:
 
 def _convert_elevenlabs(text: str) -> str:
     """ElevenLabs: only <break> is supported via SSML."""
+    text = _normalize_raw_breaks(text)
     text = _PAUSE_RE.sub(lambda m: _make_break_tag(m, "0.5s"), text)
     return text
 
 
 def _convert_cartesia(text: str) -> str:
     """Cartesia: break, speed, volume, spell."""
+    text = _normalize_raw_breaks(text)
     text = _PAUSE_RE.sub(lambda m: _make_break_tag(m, "0.5s"), text)
 
     def _wrap(match) -> str:
@@ -170,10 +179,11 @@ def build_ssml_prompt_block(provider: str) -> str | None:
     return (
         "### Speech Markers — YOU MUST FOLLOW THESE\n"
         "Your output is spoken aloud via TTS. You MUST use the markers below. Failing to use them produces bad audio.\n\n"
-        "ABSOLUTE RULES — NEVER BREAK THESE:\n"
-        "- You MUST use [bracket] markers as described below. Not using them is an error.\n"
-        "- Your output must contain ZERO XML/HTML tags. NEVER use angle brackets < >.\n"
-        "- No markdown (no **, ##, bullets). No double-spaces. No invented markers.\n"
-        "- Every response with 2+ facts MUST have [pause] between them. No exceptions.\n\n"
+        "ABSOLUTE RULES — VIOLATION OF ANY RULE IS A CRITICAL ERROR:\n"
+        "1. You MUST use ONLY [bracket] markers listed below. Not using them is an error.\n"
+        "2. ZERO XML/HTML tags allowed. NEVER write <break>, <speak>, <prosody>, or ANY tag with < >.\n"
+        "   Writing <break time=\"0.5s\"/> is WRONG. Writing [pause:0.5s] is RIGHT.\n"
+        "3. No markdown (no **, ##, bullets). No double-spaces. No invented markers.\n"
+        "4. Every response with 2+ facts MUST have [pause] between them. No exceptions.\n\n"
         + "\n\n".join(marker_blocks)
     )
