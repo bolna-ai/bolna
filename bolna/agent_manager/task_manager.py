@@ -135,6 +135,8 @@ class TaskManager(BaseManager):
         }
 
         self.welcome_message_audio = self.kwargs.pop('welcome_message_audio', None)
+
+        self.welcome_message_delay = task.get("task_config", {}).get("welcome_message_delay", 0)
         # Pre-decode welcome audio for faster playback
         self.preloaded_welcome_audio = base64.b64decode(self.welcome_message_audio) if self.welcome_message_audio else None
         self.observable_variables = {}
@@ -649,6 +651,10 @@ class TaskManager(BaseManager):
     async def __forced_first_message(self, timeout=10.0):
         logger.info(f"Executing the first message task")
         try:
+            delay_ms = int(self.welcome_message_delay or 0)
+            if delay_ms > 0:
+                logger.info(f"Welcome message delay set to {delay_ms} ms")
+                await asyncio.sleep(delay_ms / 1000)
             start_time = asyncio.get_running_loop().time()
             while True:
                 elapsed_time = asyncio.get_running_loop().time() - start_time
@@ -1300,10 +1306,9 @@ class TaskManager(BaseManager):
 
         # self.synthesizer_task.cancel()
         # self.synthesizer_task = asyncio.create_task(self.__listen_synthesizer())
-        #for task in self.synthesizer_tasks:
-        #    task.cancel()
-
-        #self.synthesizer_tasks = []
+        for task in self.synthesizer_tasks:
+            task.cancel()
+        self.synthesizer_tasks = []
 
         logger.info(f"Synth Task cancelled seconds")
         if not self.buffered_output_queue.empty():
@@ -3174,6 +3179,9 @@ class TaskManager(BaseManager):
             if "synthesizer" in self.tools and self.synthesizer_task is not None:
                 tasks_to_cancel.append(process_task_cancellation(self.synthesizer_task, 'synthesizer_task'))
                 tasks_to_cancel.append(process_task_cancellation(self.synthesizer_monitor_task, 'synthesizer_monitor_task'))
+                for task in self.synthesizer_tasks:
+                    tasks_to_cancel.append(process_task_cancellation(task, 'synthesizer_task_item'))
+                self.synthesizer_tasks = []
 
             # Transcriber cleanup
             if "transcriber" in self.tools:
