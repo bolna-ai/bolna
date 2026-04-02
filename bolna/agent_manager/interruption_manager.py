@@ -1,5 +1,5 @@
 import time
-from typing import Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 from bolna.helpers.logger_config import configure_logger
 
 logger = configure_logger(__name__)
@@ -40,11 +40,33 @@ class InterruptionManager:
         )
         self.minimum_wait_duration: int = minimum_wait_duration
 
+        # Live interruption counters
+        self.user_interrupted_agent_count: int = 0
+        self.agent_interrupted_user_count: int = 0
+        self.barge_in_recovery_count: int = 0
+        self._awaiting_recovery: bool = False
+
+        # Per-event records; timestamps converted to call-relative ms in get_interruption_stats()
+        self.interruption_events: List[Dict] = []
+        self._open_event: Optional[Dict] = None  # latest event awaiting user_end_s
+
+        # ASR turn IDs active at interruption time; used to annotate was_interrupted on turn_latencies
+        self.interrupted_transcriber_turn_ids: Set = set()
+
+        # Speaking time accumulators (talk-to-listen ratio)
+        self._total_user_speaking_ms: float = 0.0
+        self._total_agent_speaking_ms: float = 0.0
+        self._agent_speaking_start_time: float = -1  # -1 when agent not speaking
+        self._last_sent_sequence_id: Optional[int] = None  # dedup guard for on_agent_speech_started
+        self.longest_agent_monologue_ms: float = 0.0
+
         logger.info(
             f"InterruptionManager initialized: "
             f"words_for_interruption={number_of_words_for_interruption}, "
             f"incremental_delay={incremental_delay}ms"
         )
+
+    # ── Audio gate ────────────────────────────────────────────────────────────
 
     def get_audio_send_status(self, sequence_id: int, history_length: int = 0) -> str:
         """
@@ -73,6 +95,8 @@ class InterruptionManager:
                 return "WAIT"
 
         return "SEND"
+
+    # ── Interruption gate ─────────────────────────────────────────────────────
 
     def should_trigger_interruption(
         self,
@@ -111,12 +135,14 @@ class InterruptionManager:
             and transcript_stripped not in self.accidental_interruption_phrases
         )
 
+    # ── Speech lifecycle callbacks ────────────────────────────────────────────
+
     def on_user_speech_started(self) -> None:
-        """Called when user starts speaking (interim transcript received)."""
+        """Called when user starts speaking (first interim transcript received)."""
         if not self.callee_speaking:
             self.callee_speaking = True
             self.callee_speaking_start_time = time.time()
-            logger.info(f"User started speaking")
+            logger.info("User started speaking")
 
     def on_interim_transcript_received(self) -> None:
         """Called on each interim transcript to update timing state."""
@@ -127,26 +153,173 @@ class InterruptionManager:
             logger.info(f"First interim at {self.time_since_first_interim_result}")
 
     def on_user_speech_ended(self, update_utterance_time: bool = True) -> None:
-        """Called when user stops speaking (speech_final/UtteranceEnd).
+        """Called when user stops speaking (speech_final / UtteranceEnd).
 
-        Args:
-            update_utterance_time: If True (default), updates utterance_end_time
-                to start a new grace period. Pass False when the speech was ignored
-                (false interruption) or redundant (late UtteranceEnd) so that the
-                grace period stays anchored to the last real user turn.
+        update_utterance_time=False keeps the grace period anchored to the last
+        real turn (use for false interruptions or late UtteranceEnd events).
         """
         self.callee_speaking = False
         self.let_remaining_audio_pass_through = True
         self.time_since_first_interim_result = -1
+
+        now_s = time.time()
         if update_utterance_time:
-            self.utterance_end_time = time.time() * 1000
+            self.utterance_end_time = now_s * 1000
+
+        if self.callee_speaking_start_time > 0:
+            self._total_user_speaking_ms += (now_s - self.callee_speaking_start_time) * 1000
+            self.callee_speaking_start_time = -1  # prevent double-count on duplicate speech-ended signals
+
+        if self._open_event is not None and self._open_event.get("user_end_s") is None:
+            self._open_event["user_end_s"] = now_s
+            self._open_event = None
+
         logger.info("User speech ended")
 
+    # ── Interruption event callbacks ──────────────────────────────────────────
+
     def on_interruption_triggered(self) -> None:
-        """Called when interruption cleanup is triggered."""
+        """User barged in while agent was speaking. user_end_s filled later by on_user_speech_ended()."""
         self.turn_id += 1
+        self.user_interrupted_agent_count += 1
+        self._awaiting_recovery = True
+        self._finalize_agent_speaking_session()
         self.invalidate_pending_responses()
-        logger.info(f"Interruption triggered, turn_id={self.turn_id}")
+
+        event: Dict = {
+            "type": "user_interrupted_agent",
+            "user_start_s": self.callee_speaking_start_time if self.callee_speaking_start_time > 0 else None,
+            "user_end_s": None,
+            "recovery_completed": False,
+        }
+        self.interruption_events.append(event)
+        self._open_event = event
+
+        logger.info(f"Interruption triggered — turn_id={self.turn_id}, user_interrupted_agent_count={self.user_interrupted_agent_count}")
+
+    def on_agent_interrupted_user(self) -> None:
+        """Agent responded prematurely and was cancelled within the grace period.
+        Does NOT set _awaiting_recovery — recovery is only tracked for user barge-ins
+        to keep barge_in_recovery_rate denominator consistent with user_interrupted_agent_count.
+        user_end_s left open; filled by on_user_speech_ended() when user finishes speaking.
+        """
+        self.agent_interrupted_user_count += 1
+
+        event: Dict = {
+            "type": "agent_interrupted_user",
+            "user_start_s": self.callee_speaking_start_time if self.callee_speaking_start_time > 0 else None,
+            "user_end_s": None,
+            "recovery_completed": False,
+        }
+        self.interruption_events.append(event)
+        self._open_event = event
+
+        logger.info(f"Agent interrupted user — agent_interrupted_user_count={self.agent_interrupted_user_count}")
+
+    def record_interrupted_transcriber_turn(self, turn_id) -> None:
+        """Store ASR turn_id at interruption time for was_interrupted annotation at call end."""
+        if turn_id is not None:
+            self.interrupted_transcriber_turn_ids.add(turn_id)
+            logger.info(f"Recorded interrupted transcriber turn_id={turn_id}")
+
+    # ── Agent speaking lifecycle ──────────────────────────────────────────────
+
+    def on_agent_speech_started(self, sequence_id: int) -> None:
+        """First audio chunk entering SEND path. Deduplicated by sequence_id."""
+        if sequence_id == self._last_sent_sequence_id:
+            return
+        self._last_sent_sequence_id = sequence_id
+        self._agent_speaking_start_time = time.time()
+        logger.info(f"Agent speech started (sequence_id={sequence_id})")
+
+    def on_agent_speech_ended(self) -> None:
+        """Clean end of agent audio (end_of_synthesizer_stream in SEND path)."""
+        self._finalize_agent_speaking_session()
+
+    def _finalize_agent_speaking_session(self) -> None:
+        """Close current agent speaking window; called on clean end or barge-in."""
+        if self._agent_speaking_start_time <= 0:
+            return
+        duration_ms = (time.time() - self._agent_speaking_start_time) * 1000
+        self._total_agent_speaking_ms += duration_ms
+        if duration_ms > self.longest_agent_monologue_ms:
+            self.longest_agent_monologue_ms = duration_ms
+        self._agent_speaking_start_time = -1
+        logger.info(f"Agent speaking session closed: {duration_ms:.0f}ms")
+
+    def on_successful_response_delivered(self) -> None:
+        """Agent delivered a full response after an interruption — counts as recovery."""
+        if not self._awaiting_recovery:
+            return
+
+        self.barge_in_recovery_count += 1
+        self._awaiting_recovery = False
+
+        for event in reversed(self.interruption_events):
+            if not event["recovery_completed"]:
+                event["recovery_completed"] = True
+                break
+
+        logger.info(f"Barge-in recovery confirmed — barge_in_recovery_count={self.barge_in_recovery_count}")
+
+    # ── Stats output ──────────────────────────────────────────────────────────
+
+    def get_interruption_stats(self, call_start_ms: float) -> Dict:
+        """Return call-level interruption stats for latency_dict.
+        Timestamps converted from epoch seconds to ms relative to call_start_ms.
+        """
+        total = self.user_interrupted_agent_count + self.agent_interrupted_user_count
+
+        recovery_rate: Optional[float] = None
+        if self.user_interrupted_agent_count > 0:
+            recovery_rate = round(
+                self.barge_in_recovery_count / self.user_interrupted_agent_count * 100, 1
+            )
+
+        events = []
+        for e in self.interruption_events:
+            entry: Dict = {
+                "type": e["type"],
+                "recovery_completed": e["recovery_completed"],
+            }
+            if e.get("user_start_s") is not None:
+                entry["user_start_ms"] = round(e["user_start_s"] * 1000 - call_start_ms, 2)
+            if e.get("user_end_s") is not None:
+                entry["user_end_ms"] = round(e["user_end_s"] * 1000 - call_start_ms, 2)
+            if "user_start_ms" in entry and "user_end_ms" in entry:
+                entry["user_duration_ms"] = round(entry["user_end_ms"] - entry["user_start_ms"], 2)
+            events.append(entry)
+
+        # Snapshot agent_ms including any still-open session
+        agent_ms = self._total_agent_speaking_ms
+        if self._agent_speaking_start_time > 0:
+            agent_ms += (time.time() - self._agent_speaking_start_time) * 1000
+
+        # Snapshot user_ms including any still-open session (mid-speech hangup)
+        user_ms = self._total_user_speaking_ms
+        if self.callee_speaking and self.callee_speaking_start_time > 0:
+            user_ms += (time.time() - self.callee_speaking_start_time) * 1000
+
+        total_speaking_ms = agent_ms + user_ms
+
+        talk_to_listen_ratio: Optional[float] = None
+        if total_speaking_ms > 0:
+            talk_to_listen_ratio = round(agent_ms / total_speaking_ms * 100, 1)
+
+        return {
+            "user_interrupted_agent_count": self.user_interrupted_agent_count,
+            "agent_interrupted_user_count": self.agent_interrupted_user_count,
+            "total_interruptions": total,
+            "barge_in_recovery_count": self.barge_in_recovery_count,
+            "barge_in_recovery_rate": recovery_rate,  # Hamming benchmark: >90% good, <80% critical
+            "interruption_events": events,
+            "agent_speaking_ms": round(agent_ms),
+            "user_speaking_ms": round(user_ms),
+            "talk_to_listen_ratio": talk_to_listen_ratio,
+            "longest_agent_monologue_ms": round(self.longest_agent_monologue_ms),
+        }
+
+    # ── Sequence management ───────────────────────────────────────────────────
 
     def invalidate_pending_responses(self) -> None:
         """Invalidates all pending audio by resetting sequence_ids."""
@@ -165,11 +338,12 @@ class InterruptionManager:
         self.sequence_ids.add(self.curr_sequence_id)
         return self.curr_sequence_id
 
+    # ── Delay logic ───────────────────────────────────────────────────────────
+
     def should_delay_output(self, welcome_message_played: bool) -> Tuple[bool, float]:
         """Returns (should_delay, sleep_duration) for incremental delay logic."""
         if not welcome_message_played:
             return False, 0
-
         return self._check_delay()
 
     def _check_delay(self) -> Tuple[bool, float]:
@@ -199,6 +373,8 @@ class InterruptionManager:
             )
         else:
             self.required_delay_before_speaking = 0
+
+    # ── State queries ─────────────────────────────────────────────────────────
 
     def is_user_speaking(self) -> bool:
         """Returns True if user is currently speaking."""
