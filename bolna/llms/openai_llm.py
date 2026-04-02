@@ -16,7 +16,7 @@ from bolna.helpers.utils import convert_to_request_log, compute_function_pre_cal
 from .openai_base import OpenAICompatibleLLM
 from .message_models import MessageFormatAdapter
 from .tool_call_accumulator import ToolCallAccumulator
-from .types import APIParams, LLMStreamChunk, LatencyData, FunctionCallPayload
+from .types import APIParams, LLMStreamChunk, LatencyData
 from bolna.helpers.logger_config import configure_logger
 
 logger = configure_logger(__name__)
@@ -399,11 +399,12 @@ class OpenAiLLM(OpenAICompatibleLLM):
         if not messages:
             raise ValueError("No messages provided")
 
+        # store=False: WS previous_response_id uses connection-local cache, not server storage
         create_params, responses_tools = self._build_responses_create_kwargs(
             messages, meta_info, request_json, tool_choice, store=False
         )
 
-        # WS endpoint requires integer temperature (float causes silent connection close)
+        # WS endpoint silently closes on float temperature — coerce to int
         temp = create_params.get("temperature")
         if temp is not None:
             create_params["temperature"] = int(round(temp))
@@ -449,12 +450,12 @@ class OpenAiLLM(OpenAICompatibleLLM):
                     resp = evt.get("response", {})
                     error_info = resp.get("error") or resp.get("last_error")
                     logger.error(f"WS Responses API stream failed: {error_info}")
-                    self.previous_response_id = None
+                    self.invalidate_response_chain()
                     raise APIError(message=f"Response failed: {error_info}", request=None, body=None)
 
                 if evt_type == ResponseStreamEvent.INCOMPLETE:
                     logger.warning("WS Responses API stream incomplete")
-                    self.previous_response_id = None
+                    self.invalidate_response_chain()
                     break
 
                 if not first_token_time and evt_type in (ResponseStreamEvent.OUTPUT_TEXT_DELTA, ResponseStreamEvent.FUNCTION_CALL_ARGS_DELTA):
@@ -514,6 +515,8 @@ class OpenAiLLM(OpenAICompatibleLLM):
 
         except APIError:
             raise
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
             logger.error(f"WS streaming error: {e}, falling back to HTTP SSE")
             self.previous_response_id = None
@@ -526,54 +529,13 @@ class OpenAiLLM(OpenAICompatibleLLM):
             if ws_service_tier:
                 latency_data.service_tier = ws_service_tier
 
-        if func_call_args and self.trigger_function_call:
-            first_item_id = next(iter(func_call_args))
-            func_name = func_call_names[first_item_id]
-            call_id = func_call_ids[first_item_id]
-            arguments_str = func_call_args[first_item_id]
-
-            if func_name in self.api_params:
-                func_conf = APIParams.model_validate(self.api_params[func_name])
-                logger.info(f"Payload to send {arguments_str} func_dict {func_conf}")
-
-                api_call_payload = FunctionCallPayload(
-                    url=func_conf.url,
-                    method=func_conf.method.lower() if func_conf.method else None,
-                    param=func_conf.param,
-                    api_token=func_conf.api_token,
-                    headers=func_conf.headers,
-                    model_args=create_params,
-                    meta_info=meta_info,
-                    called_fun=func_name,
-                    model_response=[{
-                        "index": 0,
-                        "id": call_id,
-                        "function": {"name": func_name, "arguments": arguments_str},
-                        "type": "function",
-                    }],
-                    tool_call_id=call_id,
-                    textual_response=answer.strip() if received_textual else None,
-                )
-
-                tool_spec = next((t for t in responses_tools if t["name"] == func_name), None)
-                if tool_spec:
-                    try:
-                        parsed_args = json.loads(arguments_str)
-                        required_keys = tool_spec.get("parameters", {}).get("required", [])
-                        if tool_spec.get("parameters") is not None and all(k in parsed_args for k in required_keys):
-                            convert_to_request_log(arguments_str, meta_info, self.model, LogComponent.LLM,
-                                                   direction=LogDirection.RESPONSE, is_cached=False, run_id=self.run_id)
-                            for k, v in parsed_args.items():
-                                setattr(api_call_payload, k, v)
-                        else:
-                            api_call_payload.resp = None
-                    except (json.JSONDecodeError, KeyError) as e:
-                        logger.error(f"Error parsing function arguments: {e}")
-                        api_call_payload.resp = None
-                else:
-                    api_call_payload.resp = None
-
-                yield LLMStreamChunk(data=api_call_payload, end_of_stream=False, latency=latency_data, is_function_call=True)
+        fc_chunk = self._build_function_call_chunk(
+            func_call_args, func_call_names, func_call_ids,
+            responses_tools, create_params, meta_info,
+            answer, received_textual, latency_data
+        )
+        if fc_chunk:
+            yield fc_chunk
 
         usage_kwargs = {}
         if response_usage and isinstance(response_usage, dict):

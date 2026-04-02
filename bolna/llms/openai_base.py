@@ -105,6 +105,63 @@ class OpenAICompatibleLLM(BaseLLM):
         self.previous_response_id = None
         self._pending_call_ids = set()
 
+    def _build_function_call_chunk(self, func_call_args, func_call_names, func_call_ids,
+                                    responses_tools, create_kwargs, meta_info,
+                                    answer, received_textual, latency_data):
+        """Build LLMStreamChunk with FunctionCallPayload from accumulated function call data, or None."""
+        if not (func_call_args and self.trigger_function_call):
+            return None
+
+        first_item_id = next(iter(func_call_args))
+        func_name = func_call_names[first_item_id]
+        call_id = func_call_ids[first_item_id]
+        arguments_str = func_call_args[first_item_id]
+
+        if func_name not in self.api_params:
+            return None
+
+        func_conf = APIParams.model_validate(self.api_params[func_name])
+        logger.info(f"Payload to send {arguments_str} func_dict {func_conf}")
+
+        api_call_payload = FunctionCallPayload(
+            url=func_conf.url,
+            method=func_conf.method.lower() if func_conf.method else None,
+            param=func_conf.param,
+            api_token=func_conf.api_token,
+            headers=func_conf.headers,
+            model_args=create_kwargs,
+            meta_info=meta_info,
+            called_fun=func_name,
+            model_response=[{
+                "index": 0,
+                "id": call_id,
+                "function": {"name": func_name, "arguments": arguments_str},
+                "type": "function",
+            }],
+            tool_call_id=call_id,
+            textual_response=answer.strip() if received_textual else None,
+        )
+
+        tool_spec = next((t for t in responses_tools if t["name"] == func_name), None)
+        if tool_spec:
+            try:
+                parsed_args = json.loads(arguments_str)
+                required_keys = tool_spec.get("parameters", {}).get("required", [])
+                if tool_spec.get("parameters") is not None and all(k in parsed_args for k in required_keys):
+                    convert_to_request_log(arguments_str, meta_info, self.model, LogComponent.LLM,
+                                           direction=LogDirection.RESPONSE, is_cached=False, run_id=self.run_id)
+                    for k, v in parsed_args.items():
+                        setattr(api_call_payload, k, v)
+                else:
+                    api_call_payload.resp = None
+            except (json.JSONDecodeError, KeyError) as e:
+                logger.error(f"Error parsing function arguments: {e}")
+                api_call_payload.resp = None
+        else:
+            api_call_payload.resp = None
+
+        return LLMStreamChunk(data=api_call_payload, end_of_stream=False, latency=latency_data, is_function_call=True)
+
     def _build_responses_create_kwargs(self, messages, meta_info, request_json, tool_choice, *, store=True, stream=None):
         """Build create kwargs common to both HTTP SSE and WebSocket streaming paths."""
         instructions, input_items = self._build_responses_input(messages)
@@ -198,7 +255,7 @@ class OpenAICompatibleLLM(BaseLLM):
             if event.type == ResponseStreamEvent.FAILED:
                 error_info = getattr(event.response, 'error', None) or getattr(event.response, 'last_error', None)
                 logger.error(f"Responses API stream failed: {error_info}")
-                self.previous_response_id = None
+                self.invalidate_response_chain()
                 raise APIError(
                     message=f"Response failed: {error_info}",
                     request=None, body=None
@@ -206,7 +263,7 @@ class OpenAICompatibleLLM(BaseLLM):
 
             if event.type == ResponseStreamEvent.INCOMPLETE:
                 logger.warning("Responses API stream incomplete, partial response returned")
-                self.previous_response_id = None
+                self.invalidate_response_chain()
                 break
 
             if not first_token_time and event.type in (ResponseStreamEvent.OUTPUT_TEXT_DELTA, ResponseStreamEvent.FUNCTION_CALL_ARGS_DELTA):
@@ -266,54 +323,13 @@ class OpenAICompatibleLLM(BaseLLM):
             if service_tier:
                 latency_data.service_tier = service_tier
 
-        if func_call_args and self.trigger_function_call:
-            first_item_id = next(iter(func_call_args))
-            func_name = func_call_names[first_item_id]
-            call_id = func_call_ids[first_item_id]
-            arguments_str = func_call_args[first_item_id]
-
-            if func_name in self.api_params:
-                func_conf = APIParams.model_validate(self.api_params[func_name])
-                logger.info(f"Payload to send {arguments_str} func_dict {func_conf}")
-
-                api_call_payload = FunctionCallPayload(
-                    url=func_conf.url,
-                    method=func_conf.method.lower() if func_conf.method else None,
-                    param=func_conf.param,
-                    api_token=func_conf.api_token,
-                    headers=func_conf.headers,
-                    model_args=create_kwargs,
-                    meta_info=meta_info,
-                    called_fun=func_name,
-                    model_response=[{
-                        "index": 0,
-                        "id": call_id,
-                        "function": {"name": func_name, "arguments": arguments_str},
-                        "type": "function",
-                    }],
-                    tool_call_id=call_id,
-                    textual_response=answer.strip() if received_textual else None,
-                )
-
-                tool_spec = next((t for t in responses_tools if t["name"] == func_name), None)
-                if tool_spec:
-                    try:
-                        parsed_args = json.loads(arguments_str)
-                        required_keys = tool_spec.get("parameters", {}).get("required", [])
-                        if tool_spec.get("parameters") is not None and all(k in parsed_args for k in required_keys):
-                            convert_to_request_log(arguments_str, meta_info, self.model, LogComponent.LLM,
-                                                   direction=LogDirection.RESPONSE, is_cached=False, run_id=self.run_id)
-                            for k, v in parsed_args.items():
-                                setattr(api_call_payload, k, v)
-                        else:
-                            api_call_payload.resp = None
-                    except (json.JSONDecodeError, KeyError) as e:
-                        logger.error(f"Error parsing function arguments: {e}")
-                        api_call_payload.resp = None
-                else:
-                    api_call_payload.resp = None
-
-                yield LLMStreamChunk(data=api_call_payload, end_of_stream=False, latency=latency_data, is_function_call=True)
+        fc_chunk = self._build_function_call_chunk(
+            func_call_args, func_call_names, func_call_ids,
+            responses_tools, create_kwargs, meta_info,
+            answer, received_textual, latency_data
+        )
+        if fc_chunk:
+            yield fc_chunk
 
         usage_kwargs = {}
         if response_usage:
