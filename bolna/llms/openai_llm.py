@@ -23,7 +23,7 @@ logger = configure_logger(__name__)
 load_dotenv()
 
 
-class OpenAIWSTransport:
+class OpenAIWSConnection:
     """Persistent WebSocket connection to wss://api.openai.com/v1/responses.
 
     - Eager connect at init, ready before first LLM call
@@ -189,7 +189,7 @@ class OpenAiLLM(OpenAICompatibleLLM):
 
         self._ws_transport = None
         if self.use_responses_api and kwargs.get("provider", "openai") != "custom" and not base_url:
-            self._ws_transport = OpenAIWSTransport(api_key=api_key)
+            self._ws_transport = OpenAIWSConnection(api_key=api_key)
             self._ws_transport.start_connect()
 
     async def generate_stream(self, messages, synthesize=True, request_json=False, meta_info=None, tool_choice=None):
