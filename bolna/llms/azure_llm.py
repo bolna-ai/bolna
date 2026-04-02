@@ -70,7 +70,7 @@ class AzureLLM(OpenAICompatibleLLM):
         self.llm_host = urlparse(azure_endpoint).netloc if azure_endpoint else None
 
         # Responses API: uses v1 endpoint with regular AsyncOpenAI client
-        self._init_responses_api(kwargs.get("use_responses_api", False))
+        self._init_responses_api(kwargs.get("use_responses_api", False), compact_threshold=kwargs.get("compact_threshold"))
         if self.use_responses_api:
             v1_base_url = f"{azure_endpoint.rstrip('/')}/openai/v1/"
             self._responses_api_client = AsyncOpenAI(
