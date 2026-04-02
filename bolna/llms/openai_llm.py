@@ -519,7 +519,7 @@ class OpenAiLLM(OpenAICompatibleLLM):
             raise
         except Exception as e:
             logger.error(f"WS streaming error: {e}, falling back to HTTP SSE")
-            self.previous_response_id = None
+            self.invalidate_response_chain()
             async for chunk in self._generate_stream_responses(messages, synthesize, request_json, meta_info, tool_choice):
                 yield chunk
             return
