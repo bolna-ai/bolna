@@ -25,7 +25,7 @@ load_dotenv()
 class OpenAIWSTransport:
     """Persistent WebSocket connection to wss://api.openai.com/v1/responses.
 
-    - Lazy connect on first use
+    - Eager connect at init, ready before first LLM call
     - Auto-reconnect on connection drop or before 60-min server limit
     - Sequential: one in-flight response at a time (API constraint)
     """
@@ -39,8 +39,24 @@ class OpenAIWSTransport:
         self._ws = None
         self._connected_at: float = 0
         self._lock = asyncio.Lock()
+        self._connect_task: asyncio.Task | None = None
+
+    def start_connect(self):
+        """Kick off WS connection eagerly. Must be called from a running event loop."""
+        self._connect_task = asyncio.create_task(self._do_connect())
+
+    async def _do_connect(self):
+        """Background connect with error handling — exceptions surface in ensure_connected."""
+        try:
+            await self._connect()
+        except Exception as e:
+            logger.warning(f"Eager WS connect failed, will retry on first use: {e}")
 
     async def ensure_connected(self):
+        if self._connect_task and not self._connect_task.done():
+            await self._connect_task
+            self._connect_task = None
+
         if self._ws is not None:
             elapsed = time.monotonic() - self._connected_at
             if elapsed < self.RECONNECT_BEFORE_SECS:
@@ -48,6 +64,9 @@ class OpenAIWSTransport:
             logger.info("WebSocket approaching 60-min limit, reconnecting")
             await self._close_ws()
 
+        await self._connect()
+
+    async def _connect(self):
         self._ws = await websockets.connect(
             self.WS_URL,
             additional_headers={"Authorization": f"Bearer {self._api_key}"},
@@ -170,6 +189,7 @@ class OpenAiLLM(OpenAICompatibleLLM):
         self._ws_transport = None
         if self.use_responses_api and kwargs.get("provider", "openai") != "custom" and not base_url:
             self._ws_transport = OpenAIWSTransport(api_key=api_key)
+            self._ws_transport.start_connect()
 
     async def generate_stream(self, messages, synthesize=True, request_json=False, meta_info=None, tool_choice=None):
         if self.use_responses_api:
