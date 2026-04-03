@@ -134,6 +134,8 @@ class ResponseStreamEvent(str, Enum):
     OUTPUT_TEXT_DELTA = "response.output_text.delta"
     OUTPUT_ITEM_ADDED = "response.output_item.added"
     FUNCTION_CALL_ARGS_DELTA = "response.function_call_arguments.delta"
+    REASONING_SUMMARY_TEXT_DELTA = "response.reasoning_summary_text.delta"
+    REASONING_SUMMARY_TEXT_DONE = "response.reasoning_summary_text.done"
 
     @classmethod
     def all_values(cls):

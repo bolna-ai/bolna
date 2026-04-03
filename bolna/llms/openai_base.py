@@ -128,8 +128,11 @@ class OpenAICompatibleLLM(BaseLLM):
         if self.model.startswith(GPT5_MODEL_PREFIX):
             create_kwargs["temperature"] = 1
             reasoning_effort = self.model_args.get("reasoning_effort")
+            reasoning_config = {}
             if reasoning_effort:
-                create_kwargs["reasoning"] = {"effort": reasoning_effort}
+                reasoning_config["effort"] = reasoning_effort
+            reasoning_config["summary"] = "auto"
+            create_kwargs["reasoning"] = reasoning_config
             verbosity = self.model_args.get("verbosity")
             if verbosity:
                 create_kwargs.setdefault("text", {})["verbosity"] = verbosity
@@ -151,6 +154,7 @@ class OpenAICompatibleLLM(BaseLLM):
         func_call_ids = {}  # item_id -> call_id
         gave_pre_call_msg = False
         received_textual = False
+        reasoning_summary_parts = []
 
         start_time = now_ms()
         first_token_time = None
@@ -235,6 +239,9 @@ class OpenAICompatibleLLM(BaseLLM):
             elif event.type == ResponseStreamEvent.FUNCTION_CALL_ARGS_DELTA:
                 func_call_args[event.item_id] = func_call_args.get(event.item_id, "") + event.delta
 
+            elif event.type == ResponseStreamEvent.REASONING_SUMMARY_TEXT_DELTA:
+                reasoning_summary_parts.append(event.delta)
+
             elif event.type == ResponseStreamEvent.COMPLETED:
                 if hasattr(event.response, 'id'):
                     self.previous_response_id = event.response.id
@@ -310,6 +317,10 @@ class OpenAICompatibleLLM(BaseLLM):
             if input_details:
                 usage_kwargs['cached_tokens'] = getattr(input_details, 'cached_tokens', None)
 
+        reasoning_content = "".join(reasoning_summary_parts) if reasoning_summary_parts else None
+        if reasoning_content:
+            usage_kwargs['reasoning_content'] = reasoning_content
+
         if synthesize:
             yield LLMStreamChunk(data=buffer, end_of_stream=True, latency=latency_data, **usage_kwargs)
         else:
@@ -339,9 +350,12 @@ class OpenAICompatibleLLM(BaseLLM):
 
         if self.model.startswith(GPT5_MODEL_PREFIX):
             create_kwargs["temperature"] = 1
+            reasoning_config = {}
             reasoning_effort = self.model_args.get("reasoning_effort")
             if reasoning_effort:
-                create_kwargs["reasoning"] = {"effort": reasoning_effort}
+                reasoning_config["effort"] = reasoning_effort
+            reasoning_config["summary"] = "auto"
+            create_kwargs["reasoning"] = reasoning_config
             verbosity = self.model_args.get("verbosity")
             if verbosity:
                 create_kwargs.setdefault("text", {})["verbosity"] = verbosity
@@ -373,6 +387,17 @@ class OpenAICompatibleLLM(BaseLLM):
                     input_details = getattr(response.usage, 'input_tokens_details', None)
                     if input_details:
                         metadata['cached_tokens'] = getattr(input_details, 'cached_tokens', None)
+
+                reasoning_texts = []
+                if hasattr(response, 'output') and response.output:
+                    for item in response.output:
+                        if getattr(item, 'type', None) == 'reasoning' and hasattr(item, 'summary'):
+                            for part in (item.summary or []):
+                                if getattr(part, 'text', None):
+                                    reasoning_texts.append(part.text)
+                if reasoning_texts:
+                    metadata['reasoning_content'] = "\n".join(reasoning_texts)
+
                 return res, metadata
             return res
         except Exception as e:
