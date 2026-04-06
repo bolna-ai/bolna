@@ -105,8 +105,7 @@ async def trigger_api(url, method, param, api_token, headers_data, meta_info, ru
             content_type = 'form'
         convert_to_request_log(request_body, meta_info , None, LogComponent.FUNCTION_CALL, direction=LogDirection.REQUEST, is_cached=False, run_id=run_id)
 
-        timeout = aiohttp.ClientTimeout(total=5)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=5)) as session:
             if method.lower() == "get":
                 logger.info(f"Sending request {request_body}, {url}, {headers}")
                 async with session.get(url, params=api_params, headers=headers) as response:
