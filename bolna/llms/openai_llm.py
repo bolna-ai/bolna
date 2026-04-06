@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 from openai import AsyncOpenAI, OpenAI, AuthenticationError, PermissionDeniedError, NotFoundError, RateLimitError, APIError, APIConnectionError
 
 import websockets
+from websockets.protocol import State as WSState
 
 from bolna.constants import DEFAULT_LANGUAGE_CODE, GPT5_MODEL_PREFIX
 from bolna.enums import ReasoningEffort, ResponseStreamEvent, ResponseItemType, Verbosity
@@ -58,7 +59,7 @@ class OpenAIWSConnection:
             self._connect_task = None
 
         if self._ws is not None:
-            if not self._ws.open:
+            if self._ws.state is not WSState.OPEN:
                 logger.info("WebSocket closed unexpectedly, reconnecting")
                 await self._close_ws()
             elif time.monotonic() - self._connected_at >= self.RECONNECT_BEFORE_SECS:
