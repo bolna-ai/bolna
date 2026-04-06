@@ -248,6 +248,7 @@ class Llm(BaseModel):
     reasoning_effort: Optional[ReasoningEffort] = None
     verbosity: Optional[Verbosity] = None
     use_responses_api: Optional[bool] = False
+    compact_threshold: Optional[int] = None
 
     @model_validator(mode="after")
     def validate_reasoning_effort_for_model(self):
@@ -423,12 +424,7 @@ class ToolDescriptionLegacy(BaseModel):
     parameters: Dict
 
 
-class APIParams(BaseModel):
-    url: Optional[str] = None
-    method: Optional[str] = "POST"
-    api_token: Optional[str] = None
-    param: Optional[Union[str, dict]] = None
-    headers: Optional[Union[str, dict]] = None
+from bolna.llms.types import APIParams  # noqa: E402 — canonical definition in llms/types.py
 
 
 class ToolModel(BaseModel):

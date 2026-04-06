@@ -54,6 +54,12 @@ class MessageFormatAdapter:
                 })
 
             elif msg.role == ChatRole.ASSISTANT:
+                if msg.content is not None:
+                    input_items.append({
+                        "type": ResponseItemType.MESSAGE,
+                        "role": ChatRole.ASSISTANT,
+                        "content": msg.content,
+                    })
                 if msg.tool_calls:
                     for tc in msg.tool_calls:
                         input_items.append({
@@ -61,13 +67,6 @@ class MessageFormatAdapter:
                             "call_id": tc.id,
                             "name": tc.function.name,
                             "arguments": tc.function.arguments,
-                        })
-                else:
-                    if msg.content is not None:
-                        input_items.append({
-                            "type": ResponseItemType.MESSAGE,
-                            "role": ChatRole.ASSISTANT,
-                            "content": msg.content,
                         })
 
             elif msg.role == ChatRole.TOOL:

@@ -126,14 +126,27 @@ class Verbosity(str, Enum):
 
 
 class ResponseStreamEvent(str, Enum):
-    """Responses API server-sent event types."""
+    """Responses API event types (server-sent and client commands)."""
+    # Server stream events
     CREATED = "response.created"
     COMPLETED = "response.completed"
     FAILED = "response.failed"
     INCOMPLETE = "response.incomplete"
+    IN_PROGRESS = "response.in_progress"
     OUTPUT_TEXT_DELTA = "response.output_text.delta"
     OUTPUT_ITEM_ADDED = "response.output_item.added"
+    OUTPUT_ITEM_DONE = "response.output_item.done"
     FUNCTION_CALL_ARGS_DELTA = "response.function_call_arguments.delta"
+    ERROR = "error"
+
+    # WebSocket client commands
+    CREATE = "response.create"
+    CANCEL = "response.cancel"
+
+    @classmethod
+    def terminal_events(cls):
+        """Events that signal the end of a response stream."""
+        return frozenset({cls.COMPLETED, cls.FAILED, cls.INCOMPLETE, cls.ERROR})
 
     @classmethod
     def all_values(cls):
