@@ -270,7 +270,7 @@ class OpenAICompatibleLLM(BaseLLM):
                 first_token_time = now
                 self.started_streaming = True
                 latency_data = LatencyData(
-                    sequence_id=meta_info.get("sequence_id"),
+                    sequence_id=meta_info.get("sequence_id") if meta_info else None,
                     first_token_latency_ms=first_token_time - start_time,
                     total_stream_duration_ms=None,
                     service_tier=service_tier,

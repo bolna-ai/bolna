@@ -11,10 +11,9 @@ from openai import AsyncOpenAI, OpenAI, AuthenticationError, PermissionDeniedErr
 import websockets
 
 from bolna.constants import DEFAULT_LANGUAGE_CODE, GPT5_MODEL_PREFIX
-from bolna.enums import ChatRole, ReasoningEffort, ResponseStreamEvent, ResponseItemType, Verbosity, LogComponent, LogDirection
-from bolna.helpers.utils import convert_to_request_log, compute_function_pre_call_message, now_ms
+from bolna.enums import ReasoningEffort, ResponseStreamEvent, ResponseItemType, Verbosity
+from bolna.helpers.utils import compute_function_pre_call_message, now_ms
 from .openai_base import OpenAICompatibleLLM
-from .message_models import MessageFormatAdapter
 from .tool_call_accumulator import ToolCallAccumulator
 from .types import APIParams, LLMStreamChunk, LatencyData
 from bolna.helpers.logger_config import configure_logger
