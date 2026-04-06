@@ -58,11 +58,14 @@ class OpenAIWSConnection:
             self._connect_task = None
 
         if self._ws is not None:
-            elapsed = time.monotonic() - self._connected_at
-            if elapsed < self.RECONNECT_BEFORE_SECS:
+            if not self._ws.open:
+                logger.info("WebSocket closed unexpectedly, reconnecting")
+                await self._close_ws()
+            elif time.monotonic() - self._connected_at >= self.RECONNECT_BEFORE_SECS:
+                logger.info("WebSocket approaching 60-min limit, reconnecting")
+                await self._close_ws()
+            else:
                 return
-            logger.info("WebSocket approaching 60-min limit, reconnecting")
-            await self._close_ws()
 
         await self._connect()
 
