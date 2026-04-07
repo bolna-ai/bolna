@@ -12,16 +12,19 @@ class ConversationHistory:
         self._messages: list[dict] = initial_history or []
         self._interim: list[dict] = copy.deepcopy(self._messages)
 
-    def setup_system_prompt(self, system_prompt: dict, welcome_message: str = ""):
+    def setup_system_prompt(self, system_prompt: dict):
         if system_prompt.get("content", ""):
             if not self._messages:
                 self._messages = [system_prompt]
             else:
                 self._messages = [system_prompt] + self._messages
 
-        if welcome_message and len(self._messages) == 1:
-            self._messages.append({"role": ChatRole.ASSISTANT, "content": welcome_message})
+        self._interim = copy.deepcopy(self._messages)
 
+    def append_welcome_message(self, content: str):
+        if content:
+            self._messages.append({"role": ChatRole.ASSISTANT, "content": content})
+        
         self._interim = copy.deepcopy(self._messages)
 
     def append_user(self, content: str):
