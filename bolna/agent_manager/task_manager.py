@@ -3281,6 +3281,8 @@ class TaskManager(BaseManager):
                     
 
             await asyncio.gather(*tasks_to_cancel)
+            self.llm_agent_map.clear()
+            self.llm_config_map.clear()
             return output
 
     async def handle_cancellation(self, message):
