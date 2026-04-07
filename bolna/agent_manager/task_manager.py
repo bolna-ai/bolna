@@ -158,11 +158,10 @@ class TaskManager(BaseManager):
                 self.observable_variables["init_event_observable"] = ObservableVariable(None)
                 self.observable_variables["init_event_observable"].add_observer(self.handle_init_event)
 
-            # TODO revert this temporary change for web based call
             if self.is_web_based_call:
-                self.should_record = False
+                self.should_record = self.task_config["tools_config"]["output"]["provider"] == 'default' and self.enforce_streaming
             else:
-                self.should_record = self.task_config["tools_config"]["output"]["provider"] == 'default' and self.enforce_streaming #In this case, this is a websocket connection and we should record
+                self.should_record = False
 
             self.__setup_input_handlers(turn_based_conversation, input_queue, self.should_record)
         self.__setup_output_handlers(turn_based_conversation, output_queue)
