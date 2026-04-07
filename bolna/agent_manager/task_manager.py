@@ -174,6 +174,7 @@ class TaskManager(BaseManager):
 
         # Setup IO SERVICE, TRANSCRIBER, LLM, SYNTHESIZER
         self.llm_task = None
+        self.llm_queue_task = None
         self.execute_function_call_task = None
         self.synthesizer_tasks = []
         self.synthesizer_task = None
@@ -3183,6 +3184,10 @@ class TaskManager(BaseManager):
         finally:
             # Construct output
             tasks_to_cancel = []
+            tasks_to_cancel.append(process_task_cancellation(self.first_message_task_new, 'first_message_task_new'))
+            tasks_to_cancel.append(process_task_cancellation(self.llm_task, 'llm_task'))
+            tasks_to_cancel.append(process_task_cancellation(self.llm_queue_task, 'llm_queue_task'))
+            tasks_to_cancel.append(process_task_cancellation(self.execute_function_call_task, 'execute_function_call_task'))
             if "synthesizer" in self.tools and self.synthesizer_task is not None:
                 tasks_to_cancel.append(process_task_cancellation(self.synthesizer_task, 'synthesizer_task'))
                 tasks_to_cancel.append(process_task_cancellation(self.synthesizer_monitor_task, 'synthesizer_monitor_task'))
