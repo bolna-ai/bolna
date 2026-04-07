@@ -697,9 +697,7 @@ def convert_to_request_log(message, meta_info, model, component=LogComponent.TRA
             if direction == LogDirection.RESPONSE:
                 log['input_tokens'] = input_tokens or 0
                 log['output_tokens'] = output_tokens or 0
-                graph_routing_metadata = meta_info.get('llm_metadata', {})
-                if not isinstance(graph_routing_metadata, dict):
-                    graph_routing_metadata = {}
+                graph_routing_metadata = dict(meta_info.get('llm_metadata') or {})
                 if reasoning_tokens:
                     graph_routing_metadata['reasoning_tokens'] = reasoning_tokens
                 if cached_tokens:
