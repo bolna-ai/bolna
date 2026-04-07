@@ -3258,7 +3258,7 @@ class TaskManager(BaseManager):
                 tasks_to_cancel.append(
                     process_task_cancellation(self.handle_accumulated_message_task, "handle_accumulated_message_task"))
 
-                output['recording_url'] = ""
+                output['recording_url'] = None
                 if self.should_record:
                     output['recording_url'] = await save_audio_file_to_s3(self.conversation_recording, self.sampling_rate, self.assistant_id, self.run_id)
             else:
