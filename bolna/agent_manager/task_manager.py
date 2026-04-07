@@ -271,6 +271,9 @@ class TaskManager(BaseManager):
                 if self.llm_agent_config.get('use_responses_api'):
                     self.llm_config['use_responses_api'] = True
 
+                if self.llm_agent_config.get('compact_threshold'):
+                    self.llm_config['compact_threshold'] = self.llm_agent_config['compact_threshold']
+
         # Output stuff
         self.output_task = None
         self.buffered_output_queue = asyncio.Queue()
@@ -991,6 +994,8 @@ class TaskManager(BaseManager):
                 injected_cfg['routing_max_tokens'] = self.kwargs['routing_max_tokens']
             if self.llm_config.get('use_responses_api'):
                 injected_cfg['use_responses_api'] = True
+            if self.llm_config.get('compact_threshold'):
+                injected_cfg['compact_threshold'] = self.llm_config['compact_threshold']
             injected_cfg['buffer_size'] = self.task_config["tools_config"]["synthesizer"].get('buffer_size')
             injected_cfg['language'] = self.language
 
@@ -1023,6 +1028,8 @@ class TaskManager(BaseManager):
                 injected_cfg['service_tier'] = self.kwargs['service_tier']
             if self.llm_config.get('use_responses_api'):
                 injected_cfg['use_responses_api'] = True
+            if self.llm_config.get('compact_threshold'):
+                injected_cfg['compact_threshold'] = self.llm_config['compact_threshold']
             injected_cfg['buffer_size'] = self.task_config["tools_config"]["synthesizer"].get('buffer_size')
             injected_cfg['language'] = self.language
 
