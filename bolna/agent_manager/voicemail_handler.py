@@ -132,7 +132,11 @@ class VoicemailHandler:
                 component=LogComponent.LLM_VOICEMAIL,
                 direction=LogDirection.RESPONSE,
                 model=self.llm_model,
-                run_id=self.tm.run_id
+                run_id=self.tm.run_id,
+                input_tokens=metadata.get('input_tokens'),
+                output_tokens=metadata.get('output_tokens'),
+                reasoning_tokens=metadata.get('reasoning_tokens'),
+                cached_tokens=metadata.get('cached_tokens'),
             )
 
             if is_voicemail:

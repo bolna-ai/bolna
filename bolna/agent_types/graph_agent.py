@@ -387,6 +387,16 @@ class GraphAgent(BaseAgent):
             response = await asyncio.to_thread(self.routing_client.chat.completions.create, **routing_kwargs)
             latency_ms = (time.perf_counter() - start_time) * 1000
 
+            # Extract token usage from routing LLM call
+            usage_info = None
+            if response.usage:
+                usage_info = {
+                    'input_tokens': response.usage.prompt_tokens,
+                    'output_tokens': response.usage.completion_tokens,
+                    'reasoning_tokens': response.usage.completion_tokens_details.reasoning_tokens if response.usage.completion_tokens_details else None,
+                    'cached_tokens': response.usage.prompt_tokens_details.cached_tokens if response.usage.prompt_tokens_details else None,
+                }
+
             # Extract the function call
             message = response.choices[0].message
             if message.tool_calls:
@@ -401,37 +411,37 @@ class GraphAgent(BaseAgent):
                 logger.info(f"Routing decision (LLM): {function_name} | confidence: {confidence} | reasoning: {reasoning} (latency: {latency_ms:.1f}ms)")
 
                 if function_name == "stay_on_current_node":
-                    return None, None, latency_ms, messages, tools, reasoning, confidence
+                    return None, None, latency_ms, messages, tools, reasoning, confidence, usage_info
 
                 # Find the edge for this function
                 edge = self._get_edge_by_function_name_from_edges(llm_edges, function_name)
                 if edge:
-                    return edge['to_node_id'], function_args, latency_ms, messages, tools, reasoning, confidence
+                    return edge['to_node_id'], function_args, latency_ms, messages, tools, reasoning, confidence, usage_info
                 else:
                     logger.warning(f"Function {function_name} not found in edges")
-                    return None, None, latency_ms, messages, tools, reasoning, confidence
+                    return None, None, latency_ms, messages, tools, reasoning, confidence, usage_info
             else:
                 logger.warning("No tool call in response")
-                return None, None, latency_ms, messages, tools, None, None
+                return None, None, latency_ms, messages, tools, None, None, usage_info
 
         except Exception as e:
             latency_ms = (time.perf_counter() - start_time) * 1000
             logger.error(f"Routing error: {e} (latency: {latency_ms:.1f}ms)")
-            return None, None, latency_ms, messages, tools, None, None
+            return None, None, latency_ms, messages, tools, None, None, None
 
-    async def decide_next_node_with_functions(self, history: List[dict]) -> Tuple[Optional[str], Optional[Dict[str, Any]], float, Optional[List[dict]], Optional[List[dict]], Optional[str], Optional[float]]:
+    async def decide_next_node_with_functions(self, history: List[dict]) -> Tuple[Optional[str], Optional[Dict[str, Any]], float, Optional[List[dict]], Optional[List[dict]], Optional[str], Optional[float], Optional[dict]]:
         """Two-phase routing: deterministic expressions first, then LLM fallback."""
         start_time = time.perf_counter()
 
         current_node = self.get_node_by_id(self.current_node_id)
         if not current_node:
             logger.error(f"Current node '{self.current_node_id}' not found")
-            return None, None, 0, None, None, None, None
+            return None, None, 0, None, None, None, None, None
 
         edges = current_node.get('edges', [])
         if not edges:
             logger.debug(f"Node '{self.current_node_id}' has no edges, staying on current node")
-            return None, None, 0, None, None, None, None
+            return None, None, 0, None, None, None, None, None
 
         # Inject time variables and turn counts for expression evaluation
         timezone_str = self.context_data.get('recipient_data', {}).get('timezone') if isinstance(self.context_data.get('recipient_data'), dict) else None
@@ -452,13 +462,13 @@ class GraphAgent(BaseAgent):
                 ct = matched_edge.get('condition_type', EdgeConditionType.EXPRESSION)
                 reasoning = f"{_DETERMINISTIC_REASONING_PREFIX}{ct}:{matched_edge.get('condition', ct)}"
                 logger.info(f"Routing decision (deterministic): -> {matched_edge['to_node_id']} | {reasoning} (latency: {latency_ms:.1f}ms)")
-                return matched_edge['to_node_id'], None, latency_ms, None, None, reasoning, 1.0
+                return matched_edge['to_node_id'], None, latency_ms, None, None, reasoning, 1.0, None
 
         # Phase 2: LLM
         if llm_edges:
             return await self._decide_next_node_llm(current_node, llm_edges, history, start_time)
 
-        return None, None, 0, None, None, None, None
+        return None, None, 0, None, None, None, None, None
 
     def get_node_by_id(self, node_id: str) -> Optional[dict]:
         return next((node for node in self.config.get('nodes', []) if node['id'] == node_id), None)
@@ -559,7 +569,7 @@ class GraphAgent(BaseAgent):
 
         try:
             previous_node = self.current_node_id
-            next_node_id, extracted_params, routing_latency_ms, routing_messages, routing_tools, reasoning, confidence = await self.decide_next_node_with_functions(message)
+            next_node_id, extracted_params, routing_latency_ms, routing_messages, routing_tools, reasoning, confidence, routing_usage = await self.decide_next_node_with_functions(message)
 
             if next_node_id:
                 logger.info(f"Transitioning: {self.current_node_id} -> {next_node_id} (params: {extracted_params})")
@@ -588,6 +598,7 @@ class GraphAgent(BaseAgent):
                     'routing_tools': routing_tools,
                     'reasoning': reasoning,
                     'confidence': confidence,
+                    'routing_usage': routing_usage,
                 }
             }
 

@@ -528,7 +528,7 @@ async def write_request_logs(message, run_id):
         component_details = [message_data, None, None, None, message.get('latency', None), None, None, None]
         metadata = message.get('function_call_metadata', {})
     elif message["component"] == LogComponent.GRAPH_ROUTING:
-        component_details = [message_data, None, None, None, message.get('latency', None), False, None, None]
+        component_details = [message_data, message.get('input_tokens', 0), message.get('output_tokens', 0), None, message.get('latency', None), False, None, None]
         metadata = message.get('graph_routing_metadata', {})
     elif message["component"] == LogComponent.ERROR:
         component_details = [message_data, None, None, None, message.get('latency', None), False, None, None]
@@ -694,9 +694,32 @@ def convert_to_request_log(message, meta_info, model, component=LogComponent.TRA
             log['latency'] = None
         case LogComponent.GRAPH_ROUTING:
             log['latency'] = None
-            log['graph_routing_metadata'] = meta_info.get('llm_metadata', {})
+            if direction == LogDirection.RESPONSE:
+                log['input_tokens'] = input_tokens or 0
+                log['output_tokens'] = output_tokens or 0
+                graph_routing_metadata = meta_info.get('llm_metadata', {})
+                if not isinstance(graph_routing_metadata, dict):
+                    graph_routing_metadata = {}
+                if reasoning_tokens:
+                    graph_routing_metadata['reasoning_tokens'] = reasoning_tokens
+                if cached_tokens:
+                    graph_routing_metadata['cached_tokens'] = cached_tokens
+                graph_routing_metadata['usage_source'] = UsageSource.API_REPORTED.value if (input_tokens is not None or output_tokens is not None) else UsageSource.ESTIMATED.value
+                log['graph_routing_metadata'] = graph_routing_metadata
+            else:
+                log['graph_routing_metadata'] = meta_info.get('llm_metadata', {})
         case LogComponent.LLM_HANGUP | LogComponent.LLM_VOICEMAIL | LogComponent.LLM_LANGUAGE_DETECTION:
             log['latency'] = meta_info.get('llm_latency', None) if direction == LogDirection.RESPONSE else None
+            if direction == LogDirection.RESPONSE:
+                log['input_tokens'] = input_tokens or 0
+                log['output_tokens'] = output_tokens or 0
+                llm_metadata = {}
+                if reasoning_tokens:
+                    llm_metadata['reasoning_tokens'] = reasoning_tokens
+                if cached_tokens:
+                    llm_metadata['cached_tokens'] = cached_tokens
+                llm_metadata['usage_source'] = UsageSource.API_REPORTED.value if (input_tokens is not None or output_tokens is not None) else UsageSource.ESTIMATED.value
+                log['llm_metadata'] = llm_metadata
     log['engine'] = engine
     asyncio.create_task(write_request_logs(log, run_id))
 
