@@ -3131,7 +3131,7 @@ class TaskManager(BaseManager):
                     if task and task.done() and not task.cancelled():
                         exc = task.exception()
                         if exc is not None:
-                            raise exc if isinstance(exc, BolnaComponentError) else cls(str(exc), provider=provider)
+                            raise cls(str(exc), provider=provider)
 
                 if self.generate_precise_transcript:
                     has_pending_marks = len(self.mark_event_meta_data.mark_event_meta_data) > 0
