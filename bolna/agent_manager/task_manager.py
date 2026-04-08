@@ -1917,6 +1917,7 @@ class TaskManager(BaseManager):
                     meta_info['llm_metadata'] = meta_info.get('llm_metadata') or {}
                     meta_info['llm_metadata']['graph_routing_info'] = routing_info
 
+                    routing_usage = routing_info.get('routing_usage') or {}
                     if routing_info.get('routing_latency_ms') is not None:
                         self.routing_latencies['turn_latencies'].append({
                             'latency_ms': routing_info['routing_latency_ms'],
@@ -1928,6 +1929,10 @@ class TaskManager(BaseManager):
                             'sequence_id': meta_info.get('sequence_id'),
                             'reasoning': routing_info.get('reasoning'),
                             'confidence': routing_info.get('confidence'),
+                            'input_tokens': routing_usage.get('input_tokens'),
+                            'output_tokens': routing_usage.get('output_tokens'),
+                            'reasoning_tokens': routing_usage.get('reasoning_tokens'),
+                            'cached_tokens': routing_usage.get('cached_tokens'),
                         })
 
                     if routing_info.get('node_history'):
@@ -1940,7 +1945,11 @@ class TaskManager(BaseManager):
                         model=routing_info.get('routing_model', ''),
                         component=LogComponent.GRAPH_ROUTING,
                         direction=LogDirection.RESPONSE,
-                        run_id=self.run_id
+                        run_id=self.run_id,
+                        input_tokens=routing_usage.get('input_tokens'),
+                        output_tokens=routing_usage.get('output_tokens'),
+                        reasoning_tokens=routing_usage.get('reasoning_tokens'),
+                        cached_tokens=routing_usage.get('cached_tokens'),
                     )
                     continue
 
@@ -2066,7 +2075,7 @@ class TaskManager(BaseManager):
             ]
             logger.info(f"##### Answer from the LLM {completion_res}")
             convert_to_request_log(message=format_messages(prompt, use_system_prompt=True), meta_info=meta_info, component=LogComponent.LLM_HANGUP, direction=LogDirection.REQUEST, model=self.check_for_completion_llm, run_id=self.run_id)
-            convert_to_request_log(message=completion_res, meta_info=meta_info, component=LogComponent.LLM_HANGUP, direction=LogDirection.RESPONSE, model=self.check_for_completion_llm, run_id=self.run_id)
+            convert_to_request_log(message=completion_res, meta_info=meta_info, component=LogComponent.LLM_HANGUP, direction=LogDirection.RESPONSE, model=self.check_for_completion_llm, run_id=self.run_id, input_tokens=metadata.get('input_tokens'), output_tokens=metadata.get('output_tokens'), reasoning_tokens=metadata.get('reasoning_tokens'), cached_tokens=metadata.get('cached_tokens'))
 
             if should_hangup:
                 if self.hangup_triggered or self.conversation_ended:
