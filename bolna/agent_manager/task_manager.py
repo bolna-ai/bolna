@@ -1764,6 +1764,9 @@ class TaskManager(BaseManager):
                     call_transfer_number = json_function_call_params['call_transfer_number']
                     if call_transfer_number:
                         payload['call_transfer_number'] = call_transfer_number
+                    transfer_reason = json_function_call_params.get('transfer_reason')
+                    if transfer_reason:
+                        payload['transfer_reason'] = transfer_reason
                 except Exception as e:
                     logger.error(f"Error in __execute_function_call {e}")
 
