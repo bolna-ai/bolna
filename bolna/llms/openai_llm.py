@@ -418,6 +418,7 @@ class OpenAiLLM(OpenAICompatibleLLM):
         func_call_ids = {}
         gave_pre_call_msg = False
         received_textual = False
+        reasoning_summary_parts = []
 
         start_time = now_ms()
         first_token_time = None
@@ -481,6 +482,9 @@ class OpenAiLLM(OpenAICompatibleLLM):
                         split = buffer.rsplit(" ", 1)
                         yield LLMStreamChunk(data=split[0], end_of_stream=False, latency=latency_data)
                         buffer = split[1] if len(split) > 1 else ""
+
+                elif evt_type == ResponseStreamEvent.REASONING_SUMMARY_TEXT_DELTA:
+                    reasoning_summary_parts.append(evt.get("delta", ""))
 
                 elif evt_type == ResponseStreamEvent.OUTPUT_ITEM_ADDED:
                     item = evt.get("item", {})
@@ -550,6 +554,10 @@ class OpenAiLLM(OpenAICompatibleLLM):
             input_details = response_usage.get('input_tokens_details', {}) or {}
             if input_details.get('cached_tokens'):
                 usage_kwargs['cached_tokens'] = input_details['cached_tokens']
+
+        reasoning_content = "".join(reasoning_summary_parts) if reasoning_summary_parts else None
+        if reasoning_content:
+            usage_kwargs['reasoning_content'] = reasoning_content
 
         if synthesize:
             yield LLMStreamChunk(data=buffer, end_of_stream=True, latency=latency_data, **usage_kwargs)
