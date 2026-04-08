@@ -250,7 +250,6 @@ class OpenAICompatibleLLM(BaseLLM):
 
         async for event in stream:
             now = now_ms()
-            logger.info(f"[Responses API] event.type={event.type!r}")
 
             if event.type == ResponseStreamEvent.CREATED:
                 self.previous_response_id = event.response.id
@@ -315,7 +314,6 @@ class OpenAICompatibleLLM(BaseLLM):
                 func_call_args[event.item_id] = func_call_args.get(event.item_id, "") + event.delta
 
             elif event.type == ResponseStreamEvent.REASONING_SUMMARY_TEXT_DELTA:
-                logger.info(f"[Responses API] Reasoning summary delta received: {event.delta!r}")
                 reasoning_summary_parts.append(event.delta)
 
             elif event.type == ResponseStreamEvent.COMPLETED:
