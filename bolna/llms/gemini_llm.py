@@ -189,22 +189,22 @@ class GeminiLLM(BaseLLM):
         # User explicitly set a budget — honour it for 2.5 models only.
         # Gemini 3.x uses thinking_level, not thinking_budget; passing budget to 3.x causes 400s.
         if self.thinking_budget and self.thinking_budget > 0 and "2.5" in m:
-            return types.ThinkingConfig(thinking_budget=self.thinking_budget)
+            return types.ThinkingConfig(thinking_budget=self.thinking_budget, include_thoughts=True)
 
         # --- Gemini 3.x family: use thinking_level ---
         if m.startswith("gemini-3"):
             if "pro" in m:
                 # Pro cannot disable thinking; "minimal" is not supported — use "low"
-                return types.ThinkingConfig(thinking_level="low")
+                return types.ThinkingConfig(thinking_level="low", include_thoughts=True)
             else:
                 # Flash / Flash-Lite: "minimal" is closest to off, avoids thought_signature cost
-                return types.ThinkingConfig(thinking_level="minimal")
+                return types.ThinkingConfig(thinking_level="minimal", include_thoughts=True)
 
         # --- Gemini 2.5 family: use thinking_budget ---
         if "2.5" in m:
             if "pro" in m:
                 # Pro cannot disable thinking; minimum budget is 128
-                return types.ThinkingConfig(thinking_budget=128)
+                return types.ThinkingConfig(thinking_budget=128, include_thoughts=True)
             else:
                 # Flash / Flash-Lite: disable with 0
                 return types.ThinkingConfig(thinking_budget=0)
@@ -395,10 +395,12 @@ class GeminiLLM(BaseLLM):
         if latency_data:
             latency_data.total_stream_duration_ms = now_ms() - start_time
 
+        reasoning_content = "\n".join(accumulated_thought_parts) if accumulated_thought_parts else None
+
         if synthesize and buffer.strip():
-            yield LLMStreamChunk(data=buffer, end_of_stream=True, latency=latency_data)
+            yield LLMStreamChunk(data=buffer, end_of_stream=True, latency=latency_data, reasoning_content=reasoning_content)
         elif not synthesize:
-            yield LLMStreamChunk(data=answer, end_of_stream=True, latency=latency_data)
+            yield LLMStreamChunk(data=answer, end_of_stream=True, latency=latency_data, reasoning_content=reasoning_content)
 
     async def generate(self, messages, request_json=False, ret_metadata=False):
         """Non-streaming — used for voicemail detection and completion checks."""

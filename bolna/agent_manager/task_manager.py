@@ -1829,9 +1829,9 @@ class TaskManager(BaseManager):
 
         self.execute_function_call_task = None
 
-    def __store_into_history(self, meta_info, messages, llm_response, should_trigger_function_call=False, input_tokens=None, output_tokens=None, reasoning_tokens=None, cached_tokens=None):
+    def __store_into_history(self, meta_info, messages, llm_response, should_trigger_function_call=False, input_tokens=None, output_tokens=None, reasoning_tokens=None, cached_tokens=None, reasoning_content=None):
         self.llm_response_generated = True
-        convert_to_request_log(message=llm_response, meta_info=meta_info, component=LogComponent.LLM, direction=LogDirection.RESPONSE, model=self.llm_config["model"], run_id=self.run_id, input_tokens=input_tokens, output_tokens=output_tokens, reasoning_tokens=reasoning_tokens, cached_tokens=cached_tokens)
+        convert_to_request_log(message=llm_response, meta_info=meta_info, component=LogComponent.LLM, direction=LogDirection.RESPONSE, model=self.llm_config["model"], run_id=self.run_id, input_tokens=input_tokens, output_tokens=output_tokens, reasoning_tokens=reasoning_tokens, cached_tokens=cached_tokens, reasoning_content=reasoning_content)
         if should_trigger_function_call:
             logger.info(f"There was a function call and need to make that work")
             self.conversation_history.append_assistant(llm_response)
@@ -1855,6 +1855,7 @@ class TaskManager(BaseManager):
 
         llm_response, function_tool, function_tool_message = '', '', ''
         actual_input_tokens, actual_output_tokens, actual_reasoning_tokens, actual_cached_tokens = None, None, None, None
+        actual_reasoning_content = None
         synthesize = True
         if should_bypass_synth:
             synthesize = False
@@ -1969,12 +1970,14 @@ class TaskManager(BaseManager):
                     actual_reasoning_tokens = llm_message.reasoning_tokens
                 if llm_message.cached_tokens is not None:
                     actual_cached_tokens = llm_message.cached_tokens
+                if llm_message.reasoning_content is not None:
+                    actual_reasoning_content = llm_message.reasoning_content
 
                 if trigger_function_call:
                     logger.info(f"Triggering function call for {data}")
                     textual_response = data.textual_response if hasattr(data, 'textual_response') else None
                     if textual_response: #intentionally omitting tool_calls, which will be filled later if the tool_call flow completed (requirement from OpenAI)
-                        self.__store_into_history(meta_info, messages, textual_response, should_trigger_function_call=should_trigger_function_call, input_tokens=actual_input_tokens, output_tokens=actual_output_tokens, reasoning_tokens=actual_reasoning_tokens, cached_tokens=actual_cached_tokens)
+                        self.__store_into_history(meta_info, messages, textual_response, should_trigger_function_call=should_trigger_function_call, input_tokens=actual_input_tokens, output_tokens=actual_output_tokens, reasoning_tokens=actual_reasoning_tokens, cached_tokens=actual_cached_tokens, reasoning_content=actual_reasoning_content)
                     await self.__execute_function_call(next_step = next_step, **data.model_dump())
                     return
 
@@ -2017,13 +2020,13 @@ class TaskManager(BaseManager):
 
         filler_message = compute_function_pre_call_message(self.language, function_tool, function_tool_message)
         if self.stream and llm_response != filler_message:
-            self.__store_into_history(meta_info, messages, llm_response, should_trigger_function_call=should_trigger_function_call, input_tokens=actual_input_tokens, output_tokens=actual_output_tokens, reasoning_tokens=actual_reasoning_tokens, cached_tokens=actual_cached_tokens)
+            self.__store_into_history(meta_info, messages, llm_response, should_trigger_function_call=should_trigger_function_call, input_tokens=actual_input_tokens, output_tokens=actual_output_tokens, reasoning_tokens=actual_reasoning_tokens, cached_tokens=actual_cached_tokens, reasoning_content=actual_reasoning_content)
         elif not self.stream:
             llm_response = llm_response.strip()
             if self.turn_based_conversation:
                 self.conversation_history.append_assistant(llm_response)
             await self._handle_llm_output(next_step, llm_response, should_bypass_synth, meta_info, is_function_call=should_trigger_function_call)
-            convert_to_request_log(message=llm_response, meta_info=meta_info, component=LogComponent.LLM, direction=LogDirection.RESPONSE, model=self.llm_config["model"], run_id=self.run_id, input_tokens=actual_input_tokens, output_tokens=actual_output_tokens, reasoning_tokens=actual_reasoning_tokens, cached_tokens=actual_cached_tokens)
+            convert_to_request_log(message=llm_response, meta_info=meta_info, component=LogComponent.LLM, direction=LogDirection.RESPONSE, model=self.llm_config["model"], run_id=self.run_id, input_tokens=actual_input_tokens, output_tokens=actual_output_tokens, reasoning_tokens=actual_reasoning_tokens, cached_tokens=actual_cached_tokens, reasoning_content=actual_reasoning_content)
 
         # Collect RAG latency if present (from KnowledgeBaseAgent)
         if meta_info.get('rag_latency'):

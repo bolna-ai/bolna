@@ -137,6 +137,8 @@ class ResponseStreamEvent(str, Enum):
     OUTPUT_ITEM_ADDED = "response.output_item.added"
     OUTPUT_ITEM_DONE = "response.output_item.done"
     FUNCTION_CALL_ARGS_DELTA = "response.function_call_arguments.delta"
+    REASONING_SUMMARY_TEXT_DELTA = "response.reasoning_summary_text.delta"
+    REASONING_SUMMARY_TEXT_DONE = "response.reasoning_summary_text.done"
     ERROR = "error"
 
     # WebSocket client commands
