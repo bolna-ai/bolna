@@ -26,6 +26,7 @@ class PlivoOutputHandler(TelephonyOutputHandler):
             }
             await self.websocket.send_text(json.dumps(message_clear))
             self.mark_event_meta_data.clear_data()
+            await super().handle_interruption()
         except Exception as e:
             logger.info(f"WebSocket closed during interruption: {e}")
             self._closed = True
