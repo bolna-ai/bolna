@@ -1403,7 +1403,7 @@ class TaskManager(BaseManager):
                     model=self.llm_config.get("model")
                 ) from e
             latency_ms = (time.time() - start_time) * 1000
-            
+
             if self.task_config["task_type"] == "summarization":
                 self.summarized_data = json_data["summary"]
                 self.llm_latencies.other_latencies.append({
@@ -2001,7 +2001,6 @@ class TaskManager(BaseManager):
         except BolnaComponentError:
             raise
         except Exception as e:
-            # CSV error logging is handled by the top-level handler in run()
             raise LLMError(
                 str(e),
                 provider=self.llm_config.get("provider"),
@@ -2238,7 +2237,12 @@ class TaskManager(BaseManager):
         __process_end_of_conversation for immediate graceful shutdown.
         """
         if self._component_error is None:
-            self._component_error = error
+            self._component_error = {
+                "cls": type(error),
+                "message": str(error),
+                "provider": getattr(error, "provider", None),
+                "model": getattr(error, "model", None),
+            }
 
         # Log to CSV if not already done
         if self.run_id and not self._error_logged:
@@ -3111,9 +3115,14 @@ class TaskManager(BaseManager):
                         )
                     self._error_logged = True
 
-                # Surface component errors from fire-and-forget tasks or stored errors
-                if self._component_error is not None:
-                    raise self._component_error
+                _stored_err = self._component_error
+                if _stored_err is not None:
+                    self._component_error = None
+                    err_cls = _stored_err["cls"]
+                    if issubclass(err_cls, BolnaComponentError):
+                        raise err_cls(_stored_err["message"], provider=_stored_err["provider"], model=_stored_err["model"])
+                    else:
+                        raise Exception(_stored_err["message"])
                 for attr, cls, provider in [
                     ('synthesizer_task', SynthesizerError, getattr(self, 'synthesizer_provider', None)),
                     ('transcriber_task', TranscriberError, self.task_config.get("tools_config", {}).get("transcriber", {}).get("provider")),
@@ -3122,7 +3131,7 @@ class TaskManager(BaseManager):
                     if task and task.done() and not task.cancelled():
                         exc = task.exception()
                         if exc is not None:
-                            raise exc if isinstance(exc, BolnaComponentError) else cls(str(exc), provider=provider)
+                            raise cls(str(exc), provider=provider)
 
                 if self.generate_precise_transcript:
                     has_pending_marks = len(self.mark_event_meta_data.mark_event_meta_data) > 0
@@ -3182,6 +3191,8 @@ class TaskManager(BaseManager):
             raise
 
         finally:
+            self._component_error = None
+
             # Construct output
             tasks_to_cancel = []
             tasks_to_cancel.append(process_task_cancellation(self.first_message_task_new, 'first_message_task_new'))
