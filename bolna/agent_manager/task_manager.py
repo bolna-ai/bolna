@@ -1401,9 +1401,9 @@ class TaskManager(BaseManager):
                     str(e),
                     provider=self.llm_config.get("provider"),
                     model=self.llm_config.get("model")
-                )
+                ) from e
             latency_ms = (time.time() - start_time) * 1000
-            
+
             if self.task_config["task_type"] == "summarization":
                 self.summarized_data = json_data["summary"]
                 self.llm_latencies.other_latencies.append({
@@ -2005,7 +2005,7 @@ class TaskManager(BaseManager):
                 str(e),
                 provider=self.llm_config.get("provider"),
                 model=self.llm_config.get("model")
-            )
+            ) from e
 
         filler_message = compute_function_pre_call_message(self.language, function_tool, function_tool_message)
         if self.stream and llm_response != filler_message:
@@ -2237,13 +2237,12 @@ class TaskManager(BaseManager):
         __process_end_of_conversation for immediate graceful shutdown.
         """
         if self._component_error is None:
-            if hasattr(error, '__traceback__'):
-                error.__traceback__ = None
-            if hasattr(error, '__cause__') and error.__cause__ is not None:
-                error.__cause__.__traceback__ = None
-            if hasattr(error, '__context__') and error.__context__ is not None:
-                error.__context__.__traceback__ = None
-            self._component_error = error
+            self._component_error = {
+                "cls": type(error),
+                "message": str(error),
+                "provider": getattr(error, "provider", None),
+                "model": getattr(error, "model", None),
+            }
 
         # Log to CSV if not already done
         if self.run_id and not self._error_logged:
@@ -2452,7 +2451,7 @@ class TaskManager(BaseManager):
             raise TranscriberError(
                 str(e),
                 provider=provider
-            )
+            ) from e
 
     async def __process_http_transcription(self, message):
         meta_info = self.__get_updated_meta_info(message["meta_info"])
@@ -2619,7 +2618,7 @@ class TaskManager(BaseManager):
             )
             raise SynthesizerError(
                 str(e), provider=self.synthesizer_provider
-            )
+            ) from e
         finally:
             await self.tools["synthesizer"].cleanup()
 
@@ -3118,11 +3117,12 @@ class TaskManager(BaseManager):
 
                 _stored_err = self._component_error
                 if _stored_err is not None:
-                    self._component_error = None  # detach before raising
-                    if isinstance(_stored_err, BolnaComponentError):
-                        raise type(_stored_err)(str(_stored_err), provider=_stored_err.provider, model=_stored_err.model)
+                    self._component_error = None
+                    err_cls = _stored_err["cls"]
+                    if issubclass(err_cls, BolnaComponentError):
+                        raise err_cls(_stored_err["message"], provider=_stored_err["provider"], model=_stored_err["model"])
                     else:
-                        raise Exception(str(_stored_err))
+                        raise Exception(_stored_err["message"])
                 for attr, cls, provider in [
                     ('synthesizer_task', SynthesizerError, getattr(self, 'synthesizer_provider', None)),
                     ('transcriber_task', TranscriberError, self.task_config.get("tools_config", {}).get("transcriber", {}).get("provider")),
@@ -3131,7 +3131,7 @@ class TaskManager(BaseManager):
                     if task and task.done() and not task.cancelled():
                         exc = task.exception()
                         if exc is not None:
-                            raise cls(str(exc), provider=provider)
+                            raise exc if isinstance(exc, BolnaComponentError) else cls(str(exc), provider=provider)
 
                 if self.generate_precise_transcript:
                     has_pending_marks = len(self.mark_event_meta_data.mark_event_meta_data) > 0
