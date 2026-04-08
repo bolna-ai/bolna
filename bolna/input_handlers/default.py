@@ -121,6 +121,14 @@ class DefaultInputHandler:
         self.audio_chunks_received += 1
         self._calculate_and_update_latency(mark_event_meta_data_obj)
 
+        # Record ack for mark tracking stats
+        sent_ts = mark_event_meta_data_obj.get('sent_ts', 0)
+        duration = mark_event_meta_data_obj.get('duration', 0)
+        if sent_ts > 0:
+            delay = time.time() - sent_ts - duration
+            if delay >= 0:
+                self.mark_event_meta_data.record_ack(delay, mark_event_meta_data_obj.get('sequence_id'))
+
         if is_content_audio:
             self.response_heard_by_user += mark_event_meta_data_obj.get("text_synthesized") or ""
 
