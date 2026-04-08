@@ -1231,13 +1231,12 @@ class TaskManager(BaseManager):
 
                 if pending_chunks:
                     first_sent_ts = pending_chunks[0].get('sent_ts', 0)
-                    plivo_latency = self.tools["input"].get_calculated_plivo_latency()
                     if first_sent_ts > 0:
                         time_since_first_send = interruption_processed_at - first_sent_ts
-                        actual_play_time = max(0, time_since_first_send - plivo_latency)
+                        actual_play_time = max(0, time_since_first_send)
                     else:
                         elapsed_time = interruption_processed_at - self.tools["input"].get_current_mark_started_time()
-                        actual_play_time = max(0, elapsed_time - plivo_latency)
+                        actual_play_time = max(0, elapsed_time)
 
                     played_text = []
                     cumulative_duration = 0
