@@ -105,7 +105,7 @@ async def trigger_api(url, method, param, api_token, headers_data, meta_info, ru
             content_type = 'form'
         convert_to_request_log(request_body, meta_info , None, LogComponent.FUNCTION_CALL, direction=LogDirection.REQUEST, is_cached=False, run_id=run_id)
 
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=5)) as session:
             if method.lower() == "get":
                 logger.info(f"Sending request {request_body}, {url}, {headers}")
                 async with session.get(url, params=api_params, headers=headers) as response:
@@ -121,6 +121,20 @@ async def trigger_api(url, method, param, api_token, headers_data, meta_info, ru
                         response_text = await response.text()
 
             return response_text
+    except asyncio.TimeoutError:
+        message = f"ERROR CALLING API: Request to {url} timed out after 5 seconds"
+        logger.error(message)
+        if run_id:
+            convert_to_request_log(
+                format_error_message("function_call", url, "Timed out after 5 seconds"),
+                meta_info,
+                model=None,
+                component=LogComponent.WARNING,
+                direction=LogDirection.WARNING,
+                is_cached=False,
+                run_id=run_id
+            )
+        return message
     except Exception as e:
         message = f"ERROR CALLING API: Please check your API: {e}"
         logger.error(message)

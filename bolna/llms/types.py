@@ -3,6 +3,15 @@ from typing import Any, Optional, Union
 from pydantic import BaseModel, ConfigDict
 
 
+class APIParams(BaseModel):
+    url: Optional[str] = None
+    method: Optional[str] = "POST"
+    api_token: Optional[str] = None
+    param: Optional[Union[str, dict]] = None
+    headers: Optional[Union[str, dict]] = None
+    pre_call_message: Optional[Union[str, dict]] = None
+
+
 class LatencyData(BaseModel):
     sequence_id: Optional[int] = None
     first_token_latency_ms: Optional[float] = None
