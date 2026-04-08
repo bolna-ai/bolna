@@ -240,7 +240,7 @@ def get_required_input_types(task):
     input_types = dict()
     for i, chain in enumerate(task['toolchain']['pipelines']):
         first_model = chain[0]
-        if chain[0] == "transcriber":
+        if chain[0] == "transcriber" or chain[0] == "s2s":
             input_types["audio"] = i
         elif chain[0] == "synthesizer" or chain[0] == "llm":
             input_types["text"] = i
@@ -773,10 +773,15 @@ def pcm_to_ulaw(pcm_bytes):
     Convert PCM audio (16-bit signed linear) to ulaw format.
     PCM is int16 samples, ulaw is 8-bit compressed format.
     """
-    
+
     # audioop.lin2ulaw expects 16-bit PCM and returns 8-bit ulaw
     ulaw_bytes = audioop.lin2ulaw(pcm_bytes, 2)  # 2 = sample width in bytes (16-bit)
     return ulaw_bytes
+
+
+def ulaw_to_pcm(ulaw_bytes):
+    """Convert ulaw (8-bit compressed) to PCM audio (16-bit signed linear)."""
+    return audioop.ulaw2lin(ulaw_bytes, 2)
 
 
 def compute_function_pre_call_message(language, function_name, api_tool_pre_call_message):
