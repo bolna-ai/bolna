@@ -657,7 +657,7 @@ def format_error_message(component, provider, error_str):
     return f"{display} service{provider_str} error: {truncated}"
 
 
-def convert_to_request_log(message, meta_info, model, component=LogComponent.TRANSCRIBER, direction=LogDirection.RESPONSE, is_cached=False, engine=None, run_id=None, input_tokens=None, output_tokens=None, reasoning_tokens=None, cached_tokens=None):
+def convert_to_request_log(message, meta_info, model, component=LogComponent.TRANSCRIBER, direction=LogDirection.RESPONSE, is_cached=False, engine=None, run_id=None, input_tokens=None, output_tokens=None, reasoning_tokens=None, cached_tokens=None, reasoning_content=None):
     log = dict()
     log['direction'] = direction.value if isinstance(direction, Enum) else direction
     log['data'] = message
@@ -682,6 +682,8 @@ def convert_to_request_log(message, meta_info, model, component=LogComponent.TRA
                     llm_metadata['reasoning_tokens'] = reasoning_tokens
                 if cached_tokens:
                     llm_metadata['cached_tokens'] = cached_tokens
+                if reasoning_content:
+                    llm_metadata['reasoning_content'] = reasoning_content
                 llm_metadata['usage_source'] = UsageSource.API_REPORTED.value if (input_tokens is not None or output_tokens is not None) else UsageSource.ESTIMATED.value
                 log['llm_metadata'] = llm_metadata
         case LogComponent.SYNTHESIZER:

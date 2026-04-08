@@ -49,3 +49,4 @@ class LLMStreamChunk(BaseModel):
     output_tokens: Optional[int] = None
     reasoning_tokens: Optional[int] = None
     cached_tokens: Optional[int] = None
+    reasoning_content: Optional[str] = None
