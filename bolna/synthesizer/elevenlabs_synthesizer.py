@@ -50,7 +50,7 @@ class ElevenlabsSynthesizer(StreamSynthesizer):
             f"?model_id={self.model}&output_format={self.wire_format}"
             f"&inactivity_timeout=170&sync_alignment=true&optimize_streaming_latency=4"
         )
-        self.api_url = f"https://{self.elevenlabs_host}/v1/text-to-speech/{self.voice}?optimize_streaming_latency=2&output_format="
+        self.api_url = f"https://{self.elevenlabs_host}/v1/text-to-speech/{self.voice}?optimize_streaming_latency=4&output_format="
 
         self.context_id = None
         self.ws_send_time = None
@@ -279,7 +279,7 @@ class ElevenlabsSynthesizer(StreamSynthesizer):
     # ------------------------------------------------------------------
 
     async def synthesize(self, text):
-        return await self._generate_http(text, format="mp3")
+        return await self._generate_http(text, format="mp3_44100_128")
 
     async def _generate_http(self, text, format=None):
         payload = {
