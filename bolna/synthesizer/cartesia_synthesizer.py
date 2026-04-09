@@ -17,9 +17,21 @@ logger = configure_logger(__name__)
 
 
 class CartesiaSynthesizer(StreamSynthesizer):
-    def __init__(self, voice_id, voice, language="en", model="sonic-english", audio_format="mp3",
-                 sampling_rate="16000", stream=False, buffer_size=400, synthesizer_key=None,
-                 caching=True, speed=1.0, **kwargs):
+    def __init__(
+        self,
+        voice_id,
+        voice,
+        language="en",
+        model="sonic-english",
+        audio_format="mp3",
+        sampling_rate="16000",
+        stream=False,
+        buffer_size=400,
+        synthesizer_key=None,
+        caching=True,
+        speed=1.0,
+        **kwargs,
+    ):
         super().__init__(
             stream=True,  # Cartesia always streams
             provider_name="cartesia",
@@ -68,7 +80,9 @@ class CartesiaSynthesizer(StreamSynthesizer):
         self.context_id = str(uuid.uuid4())
         self.turn_id = meta_info.get("turn_id", 0)
         self.sequence_id = meta_info.get("sequence_id", 0)
-        logger.info(f"Cartesia new context_id={self.context_id} turn_id={self.turn_id} sequence_id={self.sequence_id} request_id={self.ws_request_id}")
+        logger.info(
+            f"Cartesia new context_id={self.context_id} turn_id={self.turn_id} sequence_id={self.sequence_id} request_id={self.ws_request_id}"
+        )
 
     # ------------------------------------------------------------------
     # Interruption
@@ -122,20 +136,28 @@ class CartesiaSynthesizer(StreamSynthesizer):
                     if self.ws_send_time is None:
                         self.ws_send_time = time.perf_counter()
                     payload = self.form_payload(text)
-                    logger.info(f"Cartesia sender context_id={self.context_id} text_len={len(text)} request_id={self.ws_request_id}")
+                    logger.info(
+                        f"Cartesia sender context_id={self.context_id} text_len={len(text)} request_id={self.ws_request_id}"
+                    )
                     await self._send_json(payload)
                 except Exception as e:
-                    logger.error(f"Error sending chunk context_id={self.context_id} request_id={self.ws_request_id}: {e}")
+                    logger.error(
+                        f"Error sending chunk context_id={self.context_id} request_id={self.ws_request_id}: {e}"
+                    )
                     self.connection_error = str(e)
                     return
 
             if end_of_llm_stream:
                 self.last_text_sent = True
-                logger.info(f"Cartesia sender end_of_llm_stream context_id={self.context_id} request_id={self.ws_request_id}")
+                logger.info(
+                    f"Cartesia sender end_of_llm_stream context_id={self.context_id} request_id={self.ws_request_id}"
+                )
                 try:
                     await self._send_json(self.form_payload(""))
                 except Exception as e:
-                    logger.error(f"Error sending end-of-stream signal context_id={self.context_id} request_id={self.ws_request_id}: {e}")
+                    logger.error(
+                        f"Error sending end-of-stream signal context_id={self.context_id} request_id={self.ws_request_id}: {e}"
+                    )
                     self.connection_error = str(e)
 
         except asyncio.CancelledError:
@@ -174,10 +196,14 @@ class CartesiaSynthesizer(StreamSynthesizer):
                 if "data" in data and data["data"]:
                     yield base64.b64decode(data["data"])
                 elif "done" in data and data["done"]:
-                    logger.info(f"Cartesia recv done context_id={data.get('context_id')} request_id={self.ws_request_id}")
-                    yield b'\x00'
+                    logger.info(
+                        f"Cartesia recv done context_id={data.get('context_id')} request_id={self.ws_request_id}"
+                    )
+                    yield b"\x00"
                 else:
-                    logger.info(f"No audio data in the response context_id={data.get('context_id')} request_id={self.ws_request_id}")
+                    logger.info(
+                        f"No audio data in the response context_id={data.get('context_id')} request_id={self.ws_request_id}"
+                    )
 
             except websockets.exceptions.ConnectionClosed:
                 break
@@ -196,7 +222,9 @@ class CartesiaSynthesizer(StreamSynthesizer):
                 self.connection_time = round((time.perf_counter() - start_time) * 1000)
             if hasattr(websocket, "response") and hasattr(websocket.response, "headers"):
                 self.ws_request_id = websocket.response.headers.get("x-request-id")
-                logger.info(f"Cartesia WebSocket connected request_id={self.ws_request_id} connection_time={self.connection_time}ms")
+                logger.info(
+                    f"Cartesia WebSocket connected request_id={self.ws_request_id} connection_time={self.connection_time}ms"
+                )
             else:
                 logger.info(f"Cartesia WebSocket connected connection_time={self.connection_time}ms")
             return websocket

@@ -25,9 +25,9 @@ class BaseTranscriber:
         self.is_transcript_sent_for_processing = False
 
     def update_meta_info(self):
-        self.meta_info['request_id'] = self.current_request_id if self.current_request_id else None
-        self.meta_info['previous_request_id'] = self.previous_request_id
-        self.meta_info['origin'] = "transcriber"
+        self.meta_info["request_id"] = self.current_request_id if self.current_request_id else None
+        self.meta_info["previous_request_id"] = self.previous_request_id
+        self.meta_info["origin"] = "transcriber"
 
     @staticmethod
     def generate_request_id():
@@ -35,12 +35,12 @@ class BaseTranscriber:
 
     async def signal_transcription_begin(self, msg):
         send_begin_packet = False
-        self.meta_info['request_id'] = self.current_request_id
+        self.meta_info["request_id"] = self.current_request_id
 
         if not self.callee_speaking:
             self.callee_speaking = True
             logger.debug("Making callee speaking true")
-            self.transcription_start_time = time.time() - msg['duration']
+            self.transcription_start_time = time.time() - msg["duration"]
             send_begin_packet = True
 
         return send_begin_packet
@@ -49,10 +49,12 @@ class BaseTranscriber:
         transcription_completion_time = time.time()
         if self.last_vocal_frame_time:
             logger.info(
-                f"################ Time latency: For request {self.meta_info['request_id']}, user started speaking at {self.transcription_start_time}, last audio frame received at {self.last_vocal_frame_time} transcription_completed_at {transcription_completion_time} overall latency {transcription_completion_time - self.last_vocal_frame_time}")
+                f"################ Time latency: For request {self.meta_info['request_id']}, user started speaking at {self.transcription_start_time}, last audio frame received at {self.last_vocal_frame_time} transcription_completed_at {transcription_completion_time} overall latency {transcription_completion_time - self.last_vocal_frame_time}"
+            )
         else:
             logger.info(
-                f"No confidence for the last vocal timeframe. Over transcription time {transcription_completion_time - self.transcription_start_time}")
+                f"No confidence for the last vocal timeframe. Over transcription time {transcription_completion_time - self.transcription_start_time}"
+            )
 
     async def _close(self, ws, data):
         if ws is None:
@@ -73,8 +75,8 @@ class BaseTranscriber:
         if not interim_details:
             return None, None
         now = time.time()
-        first_received_at = interim_details[0].get('received_at')
-        last_received_at = interim_details[-1].get('received_at')
+        first_received_at = interim_details[0].get("received_at")
+        last_received_at = interim_details[-1].get("received_at")
         first_interim_to_final_ms = round((now - first_received_at) * 1000, 2) if first_received_at else None
         last_interim_to_final_ms = round((now - last_received_at) * 1000, 2) if last_received_at else None
         return first_interim_to_final_ms, last_interim_to_final_ms

@@ -30,9 +30,9 @@ class LiteLLM(BaseLLM):
 
         self.language = language
         self.model_args = {"max_tokens": max_tokens, "temperature": temperature, "model": self.model}
-        self.api_key = kwargs.get("llm_key", os.getenv('LITELLM_MODEL_API_KEY'))
-        self.api_base = kwargs.get("base_url", os.getenv('LITELLM_MODEL_API_BASE'))
-        self.api_version = kwargs.get("api_version", os.getenv('LITELLM_MODEL_API_VERSION'))
+        self.api_key = kwargs.get("llm_key", os.getenv("LITELLM_MODEL_API_KEY"))
+        self.api_base = kwargs.get("base_url", os.getenv("LITELLM_MODEL_API_BASE"))
+        self.api_version = kwargs.get("api_version", os.getenv("LITELLM_MODEL_API_VERSION"))
         if self.api_key:
             self.model_args["api_key"] = self.api_key
         if self.api_base:
@@ -52,9 +52,9 @@ class LiteLLM(BaseLLM):
         logger.info(f"API Tools {self.custom_tools}")
         if self.custom_tools is not None:
             self.trigger_function_call = True
-            self.api_params = self.custom_tools['tools_params']
+            self.api_params = self.custom_tools["tools_params"]
             logger.info(f"Function dict {self.api_params}")
-            self.tools = self.custom_tools['tools']
+            self.tools = self.custom_tools["tools"]
         else:
             self.trigger_function_call = False
         self.run_id = kwargs.get("run_id", None)
@@ -90,7 +90,7 @@ class LiteLLM(BaseLLM):
             completion_stream = await acompletion(**model_args)
         except ContentPolicyViolationError as e:
             error_message = str(e)
-            logger.error(f'Content policy violation in stream: {error_message}')
+            logger.error(f"Content policy violation in stream: {error_message}")
 
             # Log to CSV trace as warning (non-call-breaking)
             if meta_info and self.run_id:
@@ -101,7 +101,7 @@ class LiteLLM(BaseLLM):
                     component=LogComponent.WARNING,
                     direction=LogDirection.WARNING,
                     is_cached=False,
-                    run_id=self.run_id
+                    run_id=self.run_id,
                 )
             return
         except AuthenticationError as e:
@@ -142,7 +142,13 @@ class LiteLLM(BaseLLM):
 
                 pre_call = accumulator.get_pre_call_message(meta_info)
                 if pre_call:
-                    yield LLMStreamChunk(data=pre_call[0], end_of_stream=True, latency=latency_data, function_name=pre_call[1], function_message=pre_call[2])
+                    yield LLMStreamChunk(
+                        data=pre_call[0],
+                        end_of_stream=True,
+                        latency=latency_data,
+                        function_name=pre_call[1],
+                        function_message=pre_call[2],
+                    )
 
             elif hasattr(delta, "content") and delta.content:
                 if accumulator:
@@ -160,7 +166,9 @@ class LiteLLM(BaseLLM):
         if accumulator and accumulator.final_tool_calls:
             api_call_payload = accumulator.build_api_payload(model_args, meta_info, answer)
             if api_call_payload:
-                yield LLMStreamChunk(data=api_call_payload, end_of_stream=False, latency=latency_data, is_function_call=True)
+                yield LLMStreamChunk(
+                    data=api_call_payload, end_of_stream=False, latency=latency_data, is_function_call=True
+                )
 
         if synthesize and buffer.strip():
             yield LLMStreamChunk(data=buffer, end_of_stream=True, latency=latency_data)
@@ -169,7 +177,7 @@ class LiteLLM(BaseLLM):
 
         self.started_streaming = False
 
-    async def generate(self, messages, stream=False, request_json=False, meta_info = None, ret_metadata=False):
+    async def generate(self, messages, stream=False, request_json=False, meta_info=None, ret_metadata=False):
         text = ""
         model_args = self.model_args.copy()
         model_args["model"] = self.model
@@ -177,16 +185,14 @@ class LiteLLM(BaseLLM):
         model_args["stream"] = stream
 
         if request_json:
-            model_args['response_format'] = {
-                "type": "json_object"
-            }
-        logger.info(f'Request to litellm {model_args}')
+            model_args["response_format"] = {"type": "json_object"}
+        logger.info(f"Request to litellm {model_args}")
         try:
             completion = await acompletion(**model_args)
             text = completion.choices[0].message.content
         except ContentPolicyViolationError as e:
             error_message = str(e)
-            logger.error(f'Content policy violation: {error_message}')
+            logger.error(f"Content policy violation: {error_message}")
 
             # Log to CSV trace as warning (non-call-breaking)
             if meta_info and self.run_id:
@@ -197,7 +203,7 @@ class LiteLLM(BaseLLM):
                     component=LogComponent.WARNING,
                     direction=LogDirection.WARNING,
                     is_cached=False,
-                    run_id=self.run_id
+                    run_id=self.run_id,
                 )
             # Don't re-raise - allow graceful degradation for content policy violations
         except AuthenticationError as e:
@@ -214,7 +220,7 @@ class LiteLLM(BaseLLM):
             raise
         except Exception as e:
             error_message = str(e)
-            logger.error(f'LiteLLM unexpected error generating response: {error_message}')
+            logger.error(f"LiteLLM unexpected error generating response: {error_message}")
             raise
         if ret_metadata:
             return text, {}

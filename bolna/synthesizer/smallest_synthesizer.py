@@ -14,8 +14,18 @@ logger = configure_logger(__name__)
 
 
 class SmallestSynthesizer(StreamSynthesizer):
-    def __init__(self, voice_id, model="lightning", language="en", audio_format="mp3",
-                 sampling_rate="8000", stream=False, buffer_size=400, synthesizer_key=None, **kwargs):
+    def __init__(
+        self,
+        voice_id,
+        model="lightning",
+        language="en",
+        audio_format="mp3",
+        sampling_rate="8000",
+        stream=False,
+        buffer_size=400,
+        synthesizer_key=None,
+        **kwargs,
+    ):
         super().__init__(
             stream=stream,
             provider_name="smallest",
@@ -106,7 +116,7 @@ class SmallestSynthesizer(StreamSynthesizer):
                 if data.get("status") == "chunk":
                     yield base64.b64decode(data["data"]["audio"])
                 elif data.get("status") == "complete":
-                    yield b'\x00'
+                    yield b"\x00"
 
             except websockets.exceptions.ConnectionClosed:
                 break
@@ -122,9 +132,10 @@ class SmallestSynthesizer(StreamSynthesizer):
             start_time = time.perf_counter()
             websocket = await asyncio.wait_for(
                 websockets.connect(
-                self.ws_url, additional_headers={"Authorization": f"Token {self.api_key}"},
-            ),
-                timeout=10.0
+                    self.ws_url,
+                    additional_headers={"Authorization": f"Token {self.api_key}"},
+                ),
+                timeout=10.0,
             )
             if not self.connection_time:
                 self.connection_time = round((time.perf_counter() - start_time) * 1000)
@@ -139,7 +150,7 @@ class SmallestSynthesizer(StreamSynthesizer):
 
     def _process_http_audio(self, audio):
         # Guard against null response from API
-        return audio if audio else b'\x00'
+        return audio if audio else b"\x00"
 
     # ------------------------------------------------------------------
     # HTTP

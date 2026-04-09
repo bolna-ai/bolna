@@ -35,11 +35,8 @@ class ToolCallAccumulator:
                 self.final_tool_calls[idx] = {
                     "index": tool_call.index,
                     "id": tool_call.id,
-                    "function": {
-                        "name": self.called_fun,
-                        "arguments": tool_call.function.arguments or ""
-                    },
-                    "type": "function"
+                    "function": {"name": self.called_fun, "arguments": tool_call.function.arguments or ""},
+                    "type": "function",
                 }
             else:
                 self.final_tool_calls[idx]["function"]["arguments"] += tool_call.function.arguments or ""
@@ -55,8 +52,8 @@ class ToolCallAccumulator:
         if self.called_fun.startswith(END_CALL_FUNCTION_PREFIX):
             return None
         self._gave_pre_call_msg = True
-        api_tool_pre_call_message = self.api_params.get(self.called_fun, {}).get('pre_call_message', None)
-        detected_lang = meta_info.get('detected_language') if meta_info else None
+        api_tool_pre_call_message = self.api_params.get(self.called_fun, {}).get("pre_call_message", None)
+        detected_lang = meta_info.get("detected_language") if meta_info else None
         active_language = detected_lang or self.language
         pre_msg = compute_function_pre_call_message(active_language, self.called_fun, api_tool_pre_call_message)
         return pre_msg, self.called_fun, api_tool_pre_call_message
@@ -81,13 +78,13 @@ class ToolCallAccumulator:
         logger.info(f"Payload to send {arguments_received} func_dict {func_conf}")
         self._gave_pre_call_msg = False
 
-        method = func_conf.get('method')
+        method = func_conf.get("method")
         api_call_payload = FunctionCallPayload(
-            url=func_conf.get('url'),
+            url=func_conf.get("url"),
             method=method.lower() if method else None,
-            param=func_conf.get('param'),
-            api_token=func_conf.get('api_token'),
-            headers=func_conf.get('headers'),
+            param=func_conf.get("param"),
+            api_token=func_conf.get("api_token"),
+            headers=func_conf.get("headers"),
             model_args=model_args,
             meta_info=meta_info,
             called_fun=first_func_name,
@@ -107,8 +104,15 @@ class ToolCallAccumulator:
             parsed_args = json.loads(arguments_received)
             required_keys = tool_spec["function"].get("parameters", {}).get("required", [])
             if tool_spec["function"].get("parameters") is not None and all(k in parsed_args for k in required_keys):
-                convert_to_request_log(arguments_received, meta_info, self.model, "llm",
-                                       direction="response", is_cached=False, run_id=self.run_id)
+                convert_to_request_log(
+                    arguments_received,
+                    meta_info,
+                    self.model,
+                    "llm",
+                    direction="response",
+                    is_cached=False,
+                    run_id=self.run_id,
+                )
                 for k, v in parsed_args.items():
                     setattr(api_call_payload, k, v)
             else:

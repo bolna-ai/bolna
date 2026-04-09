@@ -4,6 +4,7 @@ from bolna.helpers.logger_config import configure_logger
 
 logger = configure_logger(__name__)
 
+
 class ObservableVariable:
     def __init__(self, value):
         self._value = value

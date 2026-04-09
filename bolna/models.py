@@ -3,13 +3,22 @@ from typing import Any, Literal, Optional, List, Union, Dict, Callable
 from pydantic import BaseModel, Field, field_validator, ValidationError, Json, model_validator
 from pydantic_core import PydanticCustomError
 from .providers import *
-from .enums import TelephonyProvider, SynthesizerProvider, TranscriberProvider, ReasoningEffort, Verbosity, ExpressionOperator, ExpressionLogic, EdgeConditionType
+from .enums import (
+    TelephonyProvider,
+    SynthesizerProvider,
+    TranscriberProvider,
+    ReasoningEffort,
+    Verbosity,
+    ExpressionOperator,
+    ExpressionLogic,
+    EdgeConditionType,
+)
 from .constants import MODEL_REASONING_EFFORT_MAP
 
 AGENT_WELCOME_MESSAGE = "This call is being recorded for quality assurance and training. Please speak now."
 
 
-def validate_attribute(value, allowed_values, value_type='provider'):
+def validate_attribute(value, allowed_values, value_type="provider"):
     if value not in allowed_values:
         raise ValueError(f"Invalid value for {value_type}:'{value}' provided. Supported values: {allowed_values}.")
     return value
@@ -24,9 +33,7 @@ def validate_reasoning_effort_for_model(model: str, reasoning_effort: str) -> No
 
     supported = MODEL_REASONING_EFFORT_MAP.get(model, None)
     if supported is not None and reasoning_effort not in supported:
-        raise ValueError(
-            f"reasoning_effort '{reasoning_effort}' is not supported for model '{model}'."
-        )
+        raise ValueError(f"reasoning_effort '{reasoning_effort}' is not supported for model '{model}'.")
 
 
 class PollyConfig(BaseModel):
@@ -112,7 +119,7 @@ class Transcriber(BaseModel):
     encoding: Optional[str] = "linear16"
     endpointing: Optional[int] = 500
     keywords: Optional[str] = None
-    task:Optional[str] = "transcribe"
+    task: Optional[str] = "transcribe"
     provider: Optional[str] = "deepgram"
 
     @field_validator("provider")
@@ -122,7 +129,18 @@ class Transcriber(BaseModel):
 
 class Synthesizer(BaseModel):
     provider: str
-    provider_config: Union[PollyConfig, ElevenLabsConfig, AzureConfig, RimeConfig, SmallestConfig, SarvamConfig, PixaConfig, CartesiaConfig, DeepgramConfig, OpenAIConfig] = Field(union_mode='smart')
+    provider_config: Union[
+        PollyConfig,
+        ElevenLabsConfig,
+        AzureConfig,
+        RimeConfig,
+        SmallestConfig,
+        SarvamConfig,
+        PixaConfig,
+        CartesiaConfig,
+        DeepgramConfig,
+        OpenAIConfig,
+    ] = Field(union_mode="smart")
     stream: bool = False
     buffer_size: Optional[int] = 40  # 40 characters in a buffer
     audio_format: Optional[str] = "pcm"
@@ -173,7 +191,6 @@ class Synthesizer(BaseModel):
         return validate_attribute(value, SynthesizerProvider.all_values())
 
 
-
 class IOModel(BaseModel):
     provider: str
     format: Optional[str] = "wav"
@@ -195,29 +212,31 @@ class MongoDBProviderConfig(BaseModel):
 
 class RerankerConfig(BaseModel):
     """Configuration for document reranking in RAG systems."""
+
     enabled: bool = False
     model_type: str = "minilm-l6-v2"  # bge-base, bge-large, bge-multilingual, minilm-l6-v2
-    candidate_count: int = 20     # How many candidates to retrieve before reranking
-    final_count: int = 5          # Final number of results to return after reranking
-    
+    candidate_count: int = 20  # How many candidates to retrieve before reranking
+    final_count: int = 5  # Final number of results to return after reranking
+
     @field_validator("model_type")
     def validate_reranker_model(cls, value):
         allowed_models = ["bge-base", "bge-large", "bge-multilingual", "minilm-l6-v2"]
         if value not in allowed_models:
             raise ValueError(f"Invalid reranker model: '{value}'. Supported models: {allowed_models}")
         return value
-    
+
     @field_validator("candidate_count")
     def validate_candidate_count(cls, value):
         if value < 1 or value > 100:
             raise ValueError("candidate_count must be between 1 and 100")
         return value
-    
-    @field_validator("final_count") 
+
+    @field_validator("final_count")
     def validate_final_count(cls, value):
         if value < 1 or value > 50:
             raise ValueError("final_count must be between 1 and 50")
         return value
+
 
 class LanceDBProviderConfig(BaseModel):
     vector_id: str
@@ -259,7 +278,7 @@ class Llm(BaseModel):
 
 
 class SimpleLlmAgent(Llm):
-    agent_flow_type: Optional[str] = "streaming" #It is used for backwards compatibility
+    agent_flow_type: Optional[str] = "streaming"  # It is used for backwards compatibility
     extraction_details: Optional[str] = None
     summarization_details: Optional[str] = None
 
@@ -284,14 +303,17 @@ class LlmAgentGraph(BaseModel):
     nodes: List[Node]
     edges: List[Edge]
 
+
 class ExpressionCondition(BaseModel):
     variable: str  # dot-notation key, e.g. "detected_language" or "recipient_data.timezone"
     operator: ExpressionOperator
     value: Optional[Any] = None
 
+
 class ExpressionGroup(BaseModel):
     logic: ExpressionLogic = ExpressionLogic.AND
     conditions: List[ExpressionCondition] = Field(default_factory=list)
+
 
 class GraphEdge(BaseModel):
     """Edge definition for graph-based conversation flow.
@@ -299,6 +321,7 @@ class GraphEdge(BaseModel):
     Each edge represents a possible transition from the current node.
     The LLM will call the transition function when the condition is met.
     """
+
     to_node_id: str
     condition: str = ""  # Human-readable description of when to transition
     condition_type: Optional[EdgeConditionType] = None  # None → "llm" (backward compat)
@@ -308,14 +331,17 @@ class GraphEdge(BaseModel):
     function_description: Optional[str] = None  # Detailed description for LLM
     # Optional parameters to collect during transition
     parameters: Optional[Dict[str, str]] = None  # e.g., {"city": "string"}
-    priority: Optional[int] = None         # lower = evaluated first. Defaults: expression/unconditional=0, llm=100
+    priority: Optional[int] = None  # lower = evaluated first. Defaults: expression/unconditional=0, llm=100
+
 
 class GraphNodeRAGConfig(BaseModel):
     """RAG configuration for Graph Agent nodes."""
+
     vector_store: VectorStore
     temperature: Optional[float] = 0.7
-    model: Optional[str] = "gpt-4" 
+    model: Optional[str] = "gpt-4"
     max_tokens: Optional[int] = 150
+
 
 class GraphNode(BaseModel):
     id: str
@@ -337,7 +363,9 @@ class GraphAgentConfig(Llm):
     routing_model: Optional[str] = None  # Model for routing decisions (default: same as main model)
     routing_provider: Optional[str] = None  # Provider for routing (e.g., "groq" for fast inference)
     routing_instructions: Optional[str] = None  # Custom instructions for routing LLM
-    routing_reasoning_effort: Optional[ReasoningEffort] = None  # GPT-5 reasoning effort: "minimal", "low", "medium", "high"
+    routing_reasoning_effort: Optional[ReasoningEffort] = (
+        None  # GPT-5 reasoning effort: "minimal", "low", "medium", "high"
+    )
     routing_max_tokens: Optional[int] = None  # Max tokens for routing response
 
     @model_validator(mode="after")
@@ -350,12 +378,14 @@ class GraphAgentConfig(Llm):
                 validate_reasoning_effort_for_model(target_model, effort_value)
         return self
 
+
 class KnowledgeAgentConfig(Llm):
     agent_information: Optional[str] = "Knowledge-based AI assistant"
     prompt: Optional[str] = None
     rag_config: Optional[Dict] = None
     llm_provider: Optional[str] = "openai"
     context_data: Optional[dict] = None
+
 
 class AgentRouteConfig(BaseModel):
     utterances: List[str]
@@ -378,22 +408,24 @@ class KnowledgebaseAgent(Llm):
 class LlmAgent(BaseModel):
     agent_flow_type: str
     agent_type: str
-    llm_config: Union[KnowledgebaseAgent, LlmAgentGraph, MultiAgent, SimpleLlmAgent, GraphAgentConfig, KnowledgeAgentConfig]
+    llm_config: Union[
+        KnowledgebaseAgent, LlmAgentGraph, MultiAgent, SimpleLlmAgent, GraphAgentConfig, KnowledgeAgentConfig
+    ]
 
-    @field_validator('llm_config', mode='before')
+    @field_validator("llm_config", mode="before")
     def validate_llm_config(cls, value, info):
-        agent_type = info.data.get('agent_type')
+        agent_type = info.data.get("agent_type")
 
         valid_config_types = {
-            'knowledgebase_agent': KnowledgeAgentConfig,
-            'graph_agent': GraphAgentConfig,
-            'llm_agent_graph': LlmAgentGraph,
-            'multiagent': MultiAgent,
-            'simple_llm_agent': SimpleLlmAgent,
+            "knowledgebase_agent": KnowledgeAgentConfig,
+            "graph_agent": GraphAgentConfig,
+            "llm_agent_graph": LlmAgentGraph,
+            "multiagent": MultiAgent,
+            "simple_llm_agent": SimpleLlmAgent,
         }
 
         if agent_type not in valid_config_types:
-            raise ValueError(f'Unsupported agent_type: {agent_type}')
+            raise ValueError(f"Unsupported agent_type: {agent_type}")
 
         expected_type = valid_config_types[agent_type]
 
@@ -443,6 +475,7 @@ class ToolsConfig(BaseModel):
     switch_handoff_messages: Optional[Dict[str, str]] = None
     agent_names: Optional[Dict[str, str]] = None
 
+
 class ToolsChainModel(BaseModel):
     execution: str = Field(..., pattern="^(parallel|sequential)$")
     pipelines: List[List[str]]
@@ -452,8 +485,9 @@ class ConversationConfig(BaseModel):
     optimize_latency: Optional[bool] = True  # This will work on in conversation
     hangup_after_silence: Optional[int] = 20
     incremental_delay: Optional[int] = 900  # use this to incrementally delay to handle long pauses
-    number_of_words_for_interruption: Optional[
-        int] = 1  # Maybe send half second of empty noise if needed for a while as soon as we get speaking true in nitro, use that to delay
+    number_of_words_for_interruption: Optional[int] = (
+        1  # Maybe send half second of empty noise if needed for a while as soon as we get speaking true in nitro, use that to delay
+    )
     interruption_backoff_period: Optional[int] = 100
     hangup_after_LLMCall: Optional[bool] = False
     call_cancellation_prompt: Optional[str] = None
@@ -474,7 +508,7 @@ class ConversationConfig(BaseModel):
     voicemail_check_interval: Optional[float] = 7.0  # Min time between interim checks
     voicemail_min_transcript_length: Optional[int] = 7  # Min words for interim check
 
-    @field_validator('hangup_after_silence', mode='before')
+    @field_validator("hangup_after_silence", mode="before")
     def set_hangup_after_silence(cls, v):
         return v if v is not None else 10  # Set default value if None is passed
 

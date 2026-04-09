@@ -23,8 +23,18 @@ DEEPGRAM_TTS_WS_URL = f"wss://{DEEPGRAM_HOST}/v1/speak"
 
 
 class DeepgramSynthesizer(StreamSynthesizer):
-    def __init__(self, voice_id, voice, audio_format="pcm", sampling_rate="8000", stream=False,
-                 buffer_size=400, caching=True, model="aura-zeus-en", **kwargs):
+    def __init__(
+        self,
+        voice_id,
+        voice,
+        audio_format="pcm",
+        sampling_rate="8000",
+        stream=False,
+        buffer_size=400,
+        caching=True,
+        model="aura-zeus-en",
+        **kwargs,
+    ):
         super().__init__(
             stream=stream,
             provider_name="deepgram",
@@ -68,7 +78,6 @@ class DeepgramSynthesizer(StreamSynthesizer):
 
     def _get_audio_format(self):
         return "mulaw" if self.use_mulaw else self.format
-
 
     # ------------------------------------------------------------------
     # Interruption
@@ -167,7 +176,7 @@ class DeepgramSynthesizer(StreamSynthesizer):
                         elif msg_type == "Flushed":
                             logger.info(f"Deepgram TTS Flushed: sequence_id={data.get('sequence_id')}")
                             audio_chunk_count = 0
-                            yield b'\x00'
+                            yield b"\x00"
                         elif msg_type == "Cleared":
                             logger.info(f"Deepgram TTS Cleared: sequence_id={data.get('sequence_id')}")
                             audio_chunk_count = 0
@@ -262,7 +271,7 @@ class DeepgramSynthesizer(StreamSynthesizer):
                         return await response.read()
                     else:
                         logger.info(f"Deepgram request status {response.status}")
-                        return b'\x00'
+                        return b"\x00"
         except Exception as e:
             logger.error(f"Deepgram HTTP error: {e}")
 

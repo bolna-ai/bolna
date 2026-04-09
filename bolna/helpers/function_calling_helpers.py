@@ -81,27 +81,24 @@ def prepare_api_request(param, api_token, headers_data, **kwargs):
             # JSON-serialize complex values (lists, dicts) for proper string substitution
             # Python's % formatting uses repr() which produces single quotes,
             # but JSON requires double quotes for valid JSON output
-            json_kwargs = {
-                k: json.dumps(v) if isinstance(v, (list, dict)) else v
-                for k, v in kwargs.items()
-            }
+            json_kwargs = {k: json.dumps(v) if isinstance(v, (list, dict)) else v for k, v in kwargs.items()}
 
             code = compile(param % json_kwargs, "<string>", "exec")
             exec(code, globals(), json_kwargs)
             request_body = param % json_kwargs
             api_params = json.loads(request_body)
 
-    headers = {'Content-Type': 'application/json'}
+    headers = {"Content-Type": "application/json"}
     content_type = "json"
     if api_token:
-        headers['Authorization'] = api_token
+        headers["Authorization"] = api_token
 
     if headers_data and isinstance(headers_data, dict):
         for k, v in headers_data.items():
             headers[k] = v
 
-    if headers.get('Content-Type').lower().startswith('application/x-www-form-urlencoded'):
-        content_type = 'form'
+    if headers.get("Content-Type").lower().startswith("application/x-www-form-urlencoded"):
+        content_type = "form"
 
     return {
         "request_body": request_body,
@@ -111,14 +108,24 @@ def prepare_api_request(param, api_token, headers_data, **kwargs):
     }
 
 
-async def trigger_api(url, method, param, api_token, headers_data, meta_info, run_id, return_response_metadata=False, **kwargs):
+async def trigger_api(
+    url, method, param, api_token, headers_data, meta_info, run_id, return_response_metadata=False, **kwargs
+):
     try:
         prepared_request = prepare_api_request(param, api_token, headers_data, **kwargs)
         request_body = prepared_request["request_body"]
         api_params = prepared_request["api_params"]
         headers = prepared_request["headers"]
         content_type = prepared_request["content_type"]
-        convert_to_request_log(request_body, meta_info , None, LogComponent.FUNCTION_CALL, direction=LogDirection.REQUEST, is_cached=False, run_id=run_id)
+        convert_to_request_log(
+            request_body,
+            meta_info,
+            None,
+            LogComponent.FUNCTION_CALL,
+            direction=LogDirection.REQUEST,
+            is_cached=False,
+            run_id=run_id,
+        )
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=5)) as session:
             if method.lower() == "get":
                 logger.info(f"Sending request {request_body}, {url}, {headers}")
@@ -153,7 +160,7 @@ async def trigger_api(url, method, param, api_token, headers_data, meta_info, ru
                 component=LogComponent.WARNING,
                 direction=LogDirection.WARNING,
                 is_cached=False,
-                run_id=run_id
+                run_id=run_id,
             )
         return message
     except Exception as e:
@@ -167,7 +174,7 @@ async def trigger_api(url, method, param, api_token, headers_data, meta_info, ru
                 component=LogComponent.WARNING,
                 direction=LogDirection.WARNING,
                 is_cached=False,
-                run_id=run_id
+                run_id=run_id,
             )
         if return_response_metadata:
             return {
@@ -191,7 +198,4 @@ async def computed_api_response(response):
 
 
 def normalize_for_form(data: dict) -> dict:
-    return {
-        k: json.dumps(v) if isinstance(v, (dict, list)) else str(v)
-        for k, v in data.items()
-    }
+    return {k: json.dumps(v) if isinstance(v, (dict, list)) else str(v) for k, v in data.items()}

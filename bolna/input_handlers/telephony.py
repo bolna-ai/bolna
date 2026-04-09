@@ -13,10 +13,25 @@ load_dotenv()
 
 
 class TelephonyInputHandler(DefaultInputHandler):
-    def __init__(self, queues, websocket=None, input_types=None, mark_event_meta_data=None, turn_based_conversation=False,
-                 is_welcome_message_played=False, observable_variables=None):
-        super().__init__(queues, websocket, input_types, mark_event_meta_data, turn_based_conversation,
-                         is_welcome_message_played=is_welcome_message_played, observable_variables=observable_variables)
+    def __init__(
+        self,
+        queues,
+        websocket=None,
+        input_types=None,
+        mark_event_meta_data=None,
+        turn_based_conversation=False,
+        is_welcome_message_played=False,
+        observable_variables=None,
+    ):
+        super().__init__(
+            queues,
+            websocket,
+            input_types,
+            mark_event_meta_data,
+            turn_based_conversation,
+            is_welcome_message_played=is_welcome_message_played,
+            observable_variables=observable_variables,
+        )
         self.stream_sid = None
         self.call_sid = None
         self.buffer = []
@@ -63,14 +78,14 @@ class TelephonyInputHandler(DefaultInputHandler):
 
     async def ingest_audio(self, audio_data, meta_info):
         ws_data_packet = create_ws_data_packet(data=audio_data, meta_info=meta_info)
-        self.queues['transcriber'].put_nowait(ws_data_packet)
+        self.queues["transcriber"].put_nowait(ws_data_packet)
 
     async def _handle_dtmf_digit(self, digit: str) -> bool:
         """Handle digit. Returns True if complete (termination '#')."""
         if not self.is_dtmf_active:
             return False
 
-        termination_key = '#'
+        termination_key = "#"
 
         if digit == termination_key:
             logger.info("DTMF termination key pressed")
@@ -86,44 +101,46 @@ class TelephonyInputHandler(DefaultInputHandler):
                 message = await self.websocket.receive_text()
 
                 packet = json.loads(message)
-                if packet['event'] == 'start':
+                if packet["event"] == "start":
                     await self.call_start(packet)
-                elif packet['event'] == 'media':
-                    media_data = packet['media']
-                    media_audio = base64.b64decode(media_data['payload'])
+                elif packet["event"] == "media":
+                    media_data = packet["media"]
+                    media_audio = base64.b64decode(media_data["payload"])
                     media_ts = int(media_data["timestamp"])
 
-                    if 'chunk' in packet['media'] or ('track' in packet['media'] and packet['media']['track'] == 'inbound'):
+                    if "chunk" in packet["media"] or (
+                        "track" in packet["media"] and packet["media"]["track"] == "inbound"
+                    ):
                         meta_info = {
-                            'io': self.io_provider,
-                            'call_sid': self.call_sid,
-                            'stream_sid': self.stream_sid,
-                            'sequence': self.input_types['audio']
+                            "io": self.io_provider,
+                            "call_sid": self.call_sid,
+                            "stream_sid": self.stream_sid,
+                            "sequence": self.input_types["audio"],
                         }
-                        '''
+                        """
                         if self.last_media_received + 20 < media_ts:
                             bytes_to_fill = 8 * (media_ts - (self.last_media_received + 20))
                             logger.info(f"Filling {bytes_to_fill} bytes of silence")
                             #await self.ingest_audio(b"\xff" * bytes_to_fill, meta_info)
-                        '''
+                        """
                         self.last_media_received = media_ts
                         buffer.append(media_audio)
                         self.message_count += 1
 
                         # Send 100 ms of audio to deepgram
                         if self.message_count == 10:
-                            merged_audio = b''.join(buffer)
+                            merged_audio = b"".join(buffer)
                             buffer = []
                             await self.ingest_audio(merged_audio, meta_info)
                             self.message_count = 0
                     else:
                         logger.info("Getting media elements but not inbound media")
 
-                elif packet['event'] == 'mark' or packet['event'] == 'playedStream':
+                elif packet["event"] == "mark" or packet["event"] == "playedStream":
                     self.process_mark_message(packet)
 
-                elif packet['event'] == 'dtmf':
-                    digit = packet.get('dtmf', {}).get('digit', '')
+                elif packet["event"] == "dtmf":
+                    digit = packet.get("dtmf", {}).get("digit", "")
                     logger.info(f"DTMF key pressed: '{digit}' | Accumulated: '{self.dtmf_digits}'")
                     if not digit:
                         continue
@@ -132,30 +149,27 @@ class TelephonyInputHandler(DefaultInputHandler):
                     if is_complete and self.dtmf_digits:
                         if self.is_dtmf_active:
                             logger.info(f"DTMF complete - Sending: '{self.dtmf_digits}'")
-                            self.queues['dtmf'].put_nowait(self.dtmf_digits)
+                            self.queues["dtmf"].put_nowait(self.dtmf_digits)
                         self.dtmf_digits = ""
 
-                elif packet['event'] == 'stop':
-                    logger.info('call stopping')
-                    ws_data_packet = create_ws_data_packet(data=None, meta_info={'io': 'default', 'eos': True})
-                    self.queues['transcriber'].put_nowait(ws_data_packet)
+                elif packet["event"] == "stop":
+                    logger.info("call stopping")
+                    ws_data_packet = create_ws_data_packet(data=None, meta_info={"io": "default", "eos": True})
+                    self.queues["transcriber"].put_nowait(ws_data_packet)
                     break
 
             except WebSocketDisconnect as e:
                 if e.code in (1000, 1001, 1006):
                     pass
                 else:
-                    logger.error(f"WebSocket disconnected unexpectedly: code={e.code}, reason={getattr(e, 'reason', None)}")
+                    logger.error(
+                        f"WebSocket disconnected unexpectedly: code={e.code}, reason={getattr(e, 'reason', None)}"
+                    )
 
             except Exception as e:
                 traceback.print_exc()
-                ws_data_packet = create_ws_data_packet(
-                    data=None,
-                    meta_info={
-                        'io': 'default',
-                        'eos': True
-                    })
-                self.queues['transcriber'].put_nowait(ws_data_packet)
+                ws_data_packet = create_ws_data_packet(data=None, meta_info={"io": "default", "eos": True})
+                self.queues["transcriber"].put_nowait(ws_data_packet)
                 logger.info(f"Exception in {self.io_provider} receiver reading events: {str(e)}")
                 break
 

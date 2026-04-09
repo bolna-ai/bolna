@@ -16,9 +16,20 @@ load_dotenv()
 
 
 class PollySynthesizer(BaseSynthesizer):
-    def __init__(self, voice, language, audio_format="pcm", sampling_rate=8000, stream=False,
-                 engine="neural", buffer_size=400, speaking_rate="100%", volume="0dB",
-                 caching=True, **kwargs):
+    def __init__(
+        self,
+        voice,
+        language,
+        audio_format="pcm",
+        sampling_rate=8000,
+        stream=False,
+        engine="neural",
+        buffer_size=400,
+        speaking_rate="100%",
+        volume="0dB",
+        caching=True,
+        **kwargs,
+    ):
         super().__init__(kwargs.get("task_manager_instance"), stream, buffer_size)
         self.engine = engine
         self.format = "pcm" if audio_format == "pcm" else "mp3"
@@ -42,12 +53,14 @@ class PollySynthesizer(BaseSynthesizer):
     @staticmethod
     async def _create_client(service, session, exit_stack):
         if os.getenv("AWS_ACCESS_KEY_ID"):
-            return await exit_stack.enter_async_context(session.create_client(
-                service,
-                aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
-                aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
-                region_name=os.getenv("AWS_REGION"),
-            ))
+            return await exit_stack.enter_async_context(
+                session.create_client(
+                    service,
+                    aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
+                    aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
+                    region_name=os.getenv("AWS_REGION"),
+                )
+            )
         return await exit_stack.enter_async_context(session.create_client(service))
 
     # ------------------------------------------------------------------
@@ -66,8 +79,12 @@ class PollySynthesizer(BaseSynthesizer):
             logger.info(f"Generating TTS for text: {text}, SampleRate {self.sample_rate} format {self.format}")
             try:
                 response = await polly.synthesize_speech(
-                    Engine=self.engine, Text=text, OutputFormat=self.format,
-                    VoiceId=self.voice, LanguageCode=self.language, SampleRate=self.sample_rate,
+                    Engine=self.engine,
+                    Text=text,
+                    OutputFormat=self.format,
+                    VoiceId=self.voice,
+                    LanguageCode=self.language,
+                    SampleRate=self.sample_rate,
                 )
             except (BotoCoreError, ClientError) as error:
                 logger.error(error)

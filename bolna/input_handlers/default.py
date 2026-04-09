@@ -13,9 +13,18 @@ load_dotenv()
 
 
 class DefaultInputHandler:
-    def __init__(self, queues=None, websocket=None, input_types=None, mark_event_meta_data=None, queue=None,
-                 turn_based_conversation=False, conversation_recording=None, is_welcome_message_played=False,
-                 observable_variables=None):
+    def __init__(
+        self,
+        queues=None,
+        websocket=None,
+        input_types=None,
+        mark_event_meta_data=None,
+        queue=None,
+        turn_based_conversation=False,
+        conversation_recording=None,
+        is_welcome_message_played=False,
+        observable_variables=None,
+    ):
         self.queues = queues
         self.websocket = websocket
         self.input_types = input_types
@@ -32,7 +41,7 @@ class DefaultInputHandler:
         self.mark_event_meta_data = mark_event_meta_data
         self.audio_chunks_received = 0
         self.update_start_ts = time.time()
-        self.io_provider = 'default'
+        self.io_provider = "default"
         self.is_dtmf_active = False
         self.dtmf_digits = ""
         self.plivo_latency_samples = []
@@ -44,8 +53,8 @@ class DefaultInputHandler:
 
     def _calculate_and_update_latency(self, mark_event_meta_data_obj):
         """Calculate latency from playedStream timing: latency = received_ts - sent_ts - duration"""
-        sent_ts = mark_event_meta_data_obj.get('sent_ts', 0)
-        duration = mark_event_meta_data_obj.get('duration', 0)
+        sent_ts = mark_event_meta_data_obj.get("sent_ts", 0)
+        duration = mark_event_meta_data_obj.get("duration", 0)
 
         if sent_ts <= 0:
             return
@@ -65,7 +74,7 @@ class DefaultInputHandler:
         audio_chunks_received = self.audio_chunks_received
         self.audio_chunks_received = 0
         return audio_chunks_received
-        
+
     def update_is_audio_being_played(self, value):
         logger.info(f"Audio is being updated - {value}")
         if value is True:
@@ -108,11 +117,13 @@ class DefaultInputHandler:
     def process_mark_message(self, packet):
         mark_event_meta_data_obj = self.get_mark_event_meta_data_obj(packet)
         if not mark_event_meta_data_obj:
-            logger.info(f"No object retrieved from global dict of mark_event_meta_data for received mark event - {packet}")
+            logger.info(
+                f"No object retrieved from global dict of mark_event_meta_data for received mark event - {packet}"
+            )
             return
 
         message_type = mark_event_meta_data_obj.get("type")
-        is_content_audio = message_type not in ['backchanneling']
+        is_content_audio = message_type not in ["backchanneling"]
 
         if message_type == "pre_mark_message":
             self.update_is_audio_being_played(True)
@@ -122,19 +133,21 @@ class DefaultInputHandler:
         self._calculate_and_update_latency(mark_event_meta_data_obj)
 
         # Record ack for mark tracking stats
-        sent_ts = mark_event_meta_data_obj.get('sent_ts', 0)
-        duration = mark_event_meta_data_obj.get('duration', 0)
+        sent_ts = mark_event_meta_data_obj.get("sent_ts", 0)
+        duration = mark_event_meta_data_obj.get("duration", 0)
         if sent_ts > 0:
             delay = time.time() - sent_ts - duration
             if delay >= 0:
-                self.mark_event_meta_data.record_ack(delay, mark_event_meta_data_obj.get('sequence_id'))
+                self.mark_event_meta_data.record_ack(delay, mark_event_meta_data_obj.get("sequence_id"))
 
         if is_content_audio:
             self.response_heard_by_user += mark_event_meta_data_obj.get("text_synthesized") or ""
 
         if mark_event_meta_data_obj.get("is_final_chunk"):
             if message_type != "is_user_online_message":
-                self.observable_variables["final_chunk_played_observable"].value = not self.observable_variables["final_chunk_played_observable"].value
+                self.observable_variables["final_chunk_played_observable"].value = not self.observable_variables[
+                    "final_chunk_played_observable"
+                ].value
             self.update_is_audio_being_played(False)
 
             if message_type == "agent_welcome_message":
@@ -152,32 +165,24 @@ class DefaultInputHandler:
     def __process_audio(self, audio):
         data = base64.b64decode(audio)
         ws_data_packet = create_ws_data_packet(
-            data=data,
-            meta_info={
-                'io': 'default',
-                'type': 'audio',
-                'sequence': self.input_types['audio']
-            })
+            data=data, meta_info={"io": "default", "type": "audio", "sequence": self.input_types["audio"]}
+        )
         if self.conversation_recording:
-            if self.conversation_recording["metadata"]["started"] ==0:
+            if self.conversation_recording["metadata"]["started"] == 0:
                 self.conversation_recording["metadata"]["started"] = time.time()
-            self.conversation_recording['input']['data'] += data
+            self.conversation_recording["input"]["data"] += data
 
-        self.queues['transcriber'].put_nowait(ws_data_packet)
-    
+        self.queues["transcriber"].put_nowait(ws_data_packet)
+
     def __process_text(self, text):
         logger.info(f"Sequences {self.input_types}")
         ws_data_packet = create_ws_data_packet(
-            data=text,
-            meta_info={
-                'io': 'default',
-                'type': 'text',
-                'sequence': self.input_types['audio']
-            })
+            data=text, meta_info={"io": "default", "type": "text", "sequence": self.input_types["audio"]}
+        )
 
         if self.turn_based_conversation:
             ws_data_packet["meta_info"]["bypass_synth"] = True
-        self.queues['llm'].put_nowait(ws_data_packet)
+        self.queues["llm"].put_nowait(ws_data_packet)
 
     async def _listen(self):
         try:
@@ -186,28 +191,21 @@ class DefaultInputHandler:
                     logger.info(f"self.queue is not None and hence listening to the queue")
                     request = await self.queue.get()
                 else:
-                    request = await self.websocket.receive_json()                    
+                    request = await self.websocket.receive_json()
                 await self.process_message(request)
 
         except WebSocketDisconnect as e:
-            ws_data_packet = create_ws_data_packet(
-                data=None,
-                meta_info={'io': 'default', 'eos': True}
-            )
-            await self.queues['transcriber'].put(ws_data_packet)
+            ws_data_packet = create_ws_data_packet(data=None, meta_info={"io": "default", "eos": True})
+            await self.queues["transcriber"].put(ws_data_packet)
             self.running = False
 
         except Exception as e:
             # Send EOS message to transcriber to shut the connection
-            ws_data_packet = create_ws_data_packet(
-                data=None,
-                meta_info={
-                    'io': 'default',
-                    'eos': True
-                })
+            ws_data_packet = create_ws_data_packet(data=None, meta_info={"io": "default", "eos": True})
             import traceback
+
             traceback.print_exc()
-            self.queues['transcriber'].put_nowait(ws_data_packet)
+            self.queues["transcriber"].put_nowait(ws_data_packet)
             logger.info(f"Error while handling websocket message: {e}")
             return
 
@@ -217,12 +215,12 @@ class DefaultInputHandler:
         #     logger.info(f"straight away returning")
         #     return {"message": "invalid input type"}
 
-        if message['type'] == 'audio':
-            self.__process_audio(message['data'])
+        if message["type"] == "audio":
+            self.__process_audio(message["data"])
 
         elif message["type"] == "text":
             logger.info(f"Received text: {message['data']}")
-            self.__process_text(message['data'])
+            self.__process_text(message["data"])
 
         elif message["type"] == "mark":
             logger.info(f"Received mark event")
@@ -235,6 +233,6 @@ class DefaultInputHandler:
 
         else:
             return {"message": "Other modalities not implemented yet"}
-            
+
     async def handle(self):
         self.websocket_listen_task = asyncio.create_task(self._listen())

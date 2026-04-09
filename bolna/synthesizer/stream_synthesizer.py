@@ -35,8 +35,7 @@ MAX_CONNECTION_FAILURES = 3
 class StreamSynthesizer(BaseSynthesizer):
     """Base class for all WebSocket-streaming synthesizers."""
 
-    def __init__(self, stream=True, provider_name="stream",
-                 task_manager_instance=None, buffer_size=400, **kwargs):
+    def __init__(self, stream=True, provider_name="stream", task_manager_instance=None, buffer_size=400, **kwargs):
         super().__init__(
             task_manager_instance=task_manager_instance,
             stream=stream,
@@ -102,7 +101,6 @@ class StreamSynthesizer(BaseSynthesizer):
         """
         return self._get_audio_format()
 
-
     def _unpack_receiver_message(self, item):
         """Unpack what receiver() yields into (audio_bytes, extra_meta_dict).
 
@@ -124,7 +122,9 @@ class StreamSynthesizer(BaseSynthesizer):
         """Block until the WebSocket is connected."""
         while not self._is_ws_connected():
             if self.conversation_ended or self.connection_error:
-                logger.info(f"Aborting {self.provider_name} sender wait: conversation_ended={self.conversation_ended} connection_error={self.connection_error}")
+                logger.info(
+                    f"Aborting {self.provider_name} sender wait: conversation_ended={self.conversation_ended} connection_error={self.connection_error}"
+                )
                 return
             logger.info(f"Waiting for {self.provider_name} WebSocket connection...")
             await asyncio.sleep(poll_interval)
@@ -163,9 +163,7 @@ class StreamSynthesizer(BaseSynthesizer):
         # Provider-specific pre-push hook (e.g. update context_id)
         self._on_push(meta_info, text)
 
-        self.sender_task = asyncio.create_task(
-            self.sender(text, meta_info.get("sequence_id"), end_of_llm_stream)
-        )
+        self.sender_task = asyncio.create_task(self.sender(text, meta_info.get("sequence_id"), end_of_llm_stream))
         self.text_queue.append(meta_info)
 
     def _stamp_turn_start(self, meta_info):
@@ -225,7 +223,7 @@ class StreamSynthesizer(BaseSynthesizer):
                 self.last_text_sent = True
 
             # End-of-stream sentinel
-            if audio == b'\x00':
+            if audio == b"\x00":
                 logger.info(f"{self.provider_name}: end of stream")
                 self.meta_info["end_of_synthesizer_stream"] = True
                 self.first_chunk_generated = False
@@ -259,12 +257,14 @@ class StreamSynthesizer(BaseSynthesizer):
         try:
             if self.current_turn_start_time is not None:
                 total_stream_duration = time.perf_counter() - self.current_turn_start_time
-                self.turn_latencies.append({
-                    "turn_id": self.current_turn_id,
-                    "sequence_id": self.current_turn_id,
-                    "first_result_latency_ms": round((self.current_turn_ttfb or 0) * 1000),
-                    "total_stream_duration_ms": round(total_stream_duration * 1000),
-                })
+                self.turn_latencies.append(
+                    {
+                        "turn_id": self.current_turn_id,
+                        "sequence_id": self.current_turn_id,
+                        "first_result_latency_ms": round((self.current_turn_ttfb or 0) * 1000),
+                        "total_stream_duration_ms": round(total_stream_duration * 1000),
+                    }
+                )
                 self.current_turn_start_time = None
                 self.current_turn_id = None
                 self.ws_send_time = None
@@ -290,12 +290,8 @@ class StreamSynthesizer(BaseSynthesizer):
                         f"(attempt {consecutive_failures}/{MAX_CONNECTION_FAILURES})"
                     )
                     if consecutive_failures >= MAX_CONNECTION_FAILURES:
-                        logger.error(
-                            f"Max connection failures reached for {self.provider_name}"
-                        )
-                        self.connection_error = (
-                            self.connection_error or "Max connection failures reached"
-                        )
+                        logger.error(f"Max connection failures reached for {self.provider_name}")
+                        self.connection_error = self.connection_error or "Max connection failures reached"
                         break
                 else:
                     self.websocket = result
@@ -327,4 +323,3 @@ class StreamSynthesizer(BaseSynthesizer):
                 logger.error(f"Error closing {self.provider_name} WebSocket: {e}")
         self.websocket = None
         logger.info(f"{self.provider_name} WebSocket connection closed.")
-

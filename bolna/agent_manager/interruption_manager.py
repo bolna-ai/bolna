@@ -35,9 +35,7 @@ class InterruptionManager:
 
         # Configuration
         self.number_of_words_for_interruption: int = number_of_words_for_interruption
-        self.accidental_interruption_phrases: Set[str] = set(
-            accidental_interruption_phrases or []
-        )
+        self.accidental_interruption_phrases: Set[str] = set(accidental_interruption_phrases or [])
         self.minimum_wait_duration: int = minimum_wait_duration
 
         # Live interruption counters
@@ -91,7 +89,9 @@ class InterruptionManager:
         if history_length > 2:
             time_since_utterance_end = self.get_time_since_utterance_end()
             if time_since_utterance_end != -1 and time_since_utterance_end < self.incremental_delay:
-                logger.info(f"Audio status=WAIT - grace period: {time_since_utterance_end:.0f}ms / {self.incremental_delay}ms")
+                logger.info(
+                    f"Audio status=WAIT - grace period: {time_since_utterance_end:.0f}ms / {self.incremental_delay}ms"
+                )
                 return "WAIT"
 
         return "SEND"
@@ -195,7 +195,9 @@ class InterruptionManager:
         self.interruption_events.append(event)
         self._open_event = event
 
-        logger.info(f"Interruption triggered — turn_id={self.turn_id}, user_interrupted_agent_count={self.user_interrupted_agent_count}")
+        logger.info(
+            f"Interruption triggered — turn_id={self.turn_id}, user_interrupted_agent_count={self.user_interrupted_agent_count}"
+        )
 
     def on_agent_interrupted_user(self) -> None:
         """Agent responded prematurely and was cancelled within the grace period.
@@ -272,9 +274,7 @@ class InterruptionManager:
 
         recovery_rate: Optional[float] = None
         if self.user_interrupted_agent_count > 0:
-            recovery_rate = round(
-                self.barge_in_recovery_count / self.user_interrupted_agent_count * 100, 1
-            )
+            recovery_rate = round(self.barge_in_recovery_count / self.user_interrupted_agent_count * 100, 1)
 
         events = []
         for e in self.interruption_events:
@@ -368,9 +368,7 @@ class InterruptionManager:
         """Resets delay variables when speech_final is received."""
         self.time_since_first_interim_result = -1
         if history_length > 2:
-            self.required_delay_before_speaking = max(
-                self.minimum_wait_duration - self.incremental_delay, 0
-            )
+            self.required_delay_before_speaking = max(self.minimum_wait_duration - self.incremental_delay, 0)
         else:
             self.required_delay_before_speaking = 0
 

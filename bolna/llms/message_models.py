@@ -47,34 +47,42 @@ class MessageFormatAdapter:
                 instructions = msg.content or ""
 
             elif msg.role == ChatRole.USER:
-                input_items.append({
-                    "type": ResponseItemType.MESSAGE,
-                    "role": ChatRole.USER,
-                    "content": msg.content or "",
-                })
+                input_items.append(
+                    {
+                        "type": ResponseItemType.MESSAGE,
+                        "role": ChatRole.USER,
+                        "content": msg.content or "",
+                    }
+                )
 
             elif msg.role == ChatRole.ASSISTANT:
                 if msg.content is not None:
-                    input_items.append({
-                        "type": ResponseItemType.MESSAGE,
-                        "role": ChatRole.ASSISTANT,
-                        "content": msg.content,
-                    })
+                    input_items.append(
+                        {
+                            "type": ResponseItemType.MESSAGE,
+                            "role": ChatRole.ASSISTANT,
+                            "content": msg.content,
+                        }
+                    )
                 if msg.tool_calls:
                     for tc in msg.tool_calls:
-                        input_items.append({
-                            "type": ResponseItemType.FUNCTION_CALL,
-                            "call_id": tc.id,
-                            "name": tc.function.name,
-                            "arguments": tc.function.arguments,
-                        })
+                        input_items.append(
+                            {
+                                "type": ResponseItemType.FUNCTION_CALL,
+                                "call_id": tc.id,
+                                "name": tc.function.name,
+                                "arguments": tc.function.arguments,
+                            }
+                        )
 
             elif msg.role == ChatRole.TOOL:
-                input_items.append({
-                    "type": ResponseItemType.FUNCTION_CALL_OUTPUT,
-                    "call_id": msg.tool_call_id or "",
-                    "output": msg.content or "",
-                })
+                input_items.append(
+                    {
+                        "type": ResponseItemType.FUNCTION_CALL_OUTPUT,
+                        "call_id": msg.tool_call_id or "",
+                        "output": msg.content or "",
+                    }
+                )
 
         return instructions, input_items
 
@@ -88,11 +96,13 @@ class MessageFormatAdapter:
         result = []
         parsed = [ChatToolDefinition(**tool) for tool in chat_tools]
         for tool in parsed:
-            result.append({
-                "type": ResponseItemType.FUNCTION,
-                "name": tool.function.name,
-                "description": tool.function.description,
-                "parameters": tool.function.parameters,
-                "strict": tool.function.strict,
-            })
+            result.append(
+                {
+                    "type": ResponseItemType.FUNCTION,
+                    "name": tool.function.name,
+                    "description": tool.function.description,
+                    "parameters": tool.function.parameters,
+                    "strict": tool.function.strict,
+                }
+            )
         return result

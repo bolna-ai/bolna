@@ -9,6 +9,7 @@ stale audio after interruption.
 
 Ref: https://docs.asterisk.org/Configuration/Channel-Drivers/WebSocket/
 """
+
 import asyncio
 import os
 import time
@@ -72,9 +73,9 @@ class SipTrunkOutputHandler(TelephonyOutputHandler):
             input_handler.output_handler_ref = self
 
         # Playback duration tracking
-        self._response_first_send: float = 0.0   # monotonic time first chunk was sent
+        self._response_first_send: float = 0.0  # monotonic time first chunk was sent
         self._response_audio_duration: float = 0.0  # accumulated seconds of audio
-        self._bytes_sent: int = 0                 # bytes sent this response (rate limiting)
+        self._bytes_sent: int = 0  # bytes sent this response (rate limiting)
         self._settle_task: asyncio.Task | None = None
         self._pending_finish: bool = False
         self._current_sequence_id: int | None = None  # track sequence to detect new responses
@@ -89,9 +90,7 @@ class SipTrunkOutputHandler(TelephonyOutputHandler):
         self._local_audio_queue: deque = deque()
 
         output_config = self._get_output_config()
-        self._output_format = (
-            (output_config.get("audio_format") or output_config.get("format") or "ulaw")
-        ).lower()
+        self._output_format = (output_config.get("audio_format") or output_config.get("format") or "ulaw").lower()
         if self._output_format not in ("ulaw", "mulaw"):
             self._output_format = "ulaw"
 
@@ -122,9 +121,7 @@ class SipTrunkOutputHandler(TelephonyOutputHandler):
         remaining = self._response_audio_duration - elapsed
         delay = max(remaining, 0) + PLAYBACK_SETTLE_S
 
-        self._settle_task = asyncio.create_task(
-            self._settle_and_finish(generation, delay)
-        )
+        self._settle_task = asyncio.create_task(self._settle_and_finish(generation, delay))
         logger.info(
             f"sip-trunk: playback finish in {delay:.2f}s "
             f"(audio={self._response_audio_duration:.2f}s, elapsed={elapsed:.2f}s)"
@@ -387,7 +384,9 @@ class SipTrunkOutputHandler(TelephonyOutputHandler):
                 self.mark_event_meta_data.update_data(
                     mark_id,
                     {
-                        "text_synthesized": meta_info.get("text_synthesized", "") if meta_info.get("sequence_id") != -1 else "",
+                        "text_synthesized": meta_info.get("text_synthesized", "")
+                        if meta_info.get("sequence_id") != -1
+                        else "",
                         "type": message_category,
                         "is_first_chunk": meta_info.get("is_first_chunk", False),
                         "is_final_chunk": is_final,

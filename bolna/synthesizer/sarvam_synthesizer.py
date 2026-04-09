@@ -19,8 +19,18 @@ logger = configure_logger(__name__)
 
 
 class SarvamSynthesizer(StreamSynthesizer):
-    def __init__(self, voice_id, model, language, sampling_rate="8000", stream=False,
-                 buffer_size=400, speed=1.0, synthesizer_key=None, **kwargs):
+    def __init__(
+        self,
+        voice_id,
+        model,
+        language,
+        sampling_rate="8000",
+        stream=False,
+        buffer_size=400,
+        speed=1.0,
+        synthesizer_key=None,
+        **kwargs,
+    ):
         super().__init__(
             stream=stream,
             provider_name="sarvam",
@@ -75,7 +85,10 @@ class SarvamSynthesizer(StreamSynthesizer):
 
         try:
             resampled_audio = resample(
-                audio, int(self.sampling_rate), format=fmt, original_sample_rate=self.original_sampling_rate,
+                audio,
+                int(self.sampling_rate),
+                format=fmt,
+                original_sample_rate=self.original_sampling_rate,
             )
         except Exception as e:
             logger.error(f"Error in resampling audio: {e}")
@@ -153,7 +166,7 @@ class SarvamSynthesizer(StreamSynthesizer):
                     yield chunk
 
                 if self.last_text_sent:
-                    yield b'\x00'
+                    yield b"\x00"
 
             except websockets.exceptions.ConnectionClosed:
                 break

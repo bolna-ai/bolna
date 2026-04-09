@@ -24,7 +24,7 @@ class ConversationHistory:
     def append_welcome_message(self, content: str):
         if content:
             self._messages.append({"role": ChatRole.ASSISTANT, "content": content})
-        
+
         self._interim = copy.deepcopy(self._messages)
 
     def append_user(self, content: str):
@@ -37,11 +37,13 @@ class ConversationHistory:
         self._messages.append(msg)
 
     def append_tool_result(self, tool_call_id: str, content: str):
-        self._messages.append({
-            "role": ChatRole.TOOL,
-            "tool_call_id": tool_call_id,
-            "content": content,
-        })
+        self._messages.append(
+            {
+                "role": ChatRole.TOOL,
+                "tool_call_id": tool_call_id,
+                "content": content,
+            }
+        )
 
     def attach_tool_calls_to_last_response(self, tool_calls: list):
         if self._messages and self._messages[-1].get("role") == ChatRole.ASSISTANT:
@@ -84,10 +86,14 @@ class ConversationHistory:
                 if original is None:
                     continue
                 updated = update_fn(original, response_heard)
-                logger.info(f"Trimming assistant message. Original (last 10 chars): {str(original)[-10:]} | Updated: {updated[-10:] if updated else '<empty>'}")
+                logger.info(
+                    f"Trimming assistant message. Original (last 10 chars): {str(original)[-10:]} | Updated: {updated[-10:] if updated else '<empty>'}"
+                )
                 if not updated or not updated.strip():
                     has_tool_calls = bool(msgs[i].get("tool_calls"))
-                    logger.info(f"Removing assistant message (last 10 chars): {str(original)[-10:]} | has_tool_calls={has_tool_calls} from transcript")
+                    logger.info(
+                        f"Removing assistant message (last 10 chars): {str(original)[-10:]} | has_tool_calls={has_tool_calls} from transcript"
+                    )
                     msgs.pop(i)
                     # If the removed assistant had tool_calls, also remove its
                     # dependent tool-role messages to keep the history valid.
@@ -112,7 +118,7 @@ class ConversationHistory:
 
     def get_copy(self) -> list[dict]:
         self._sanitize_tool_messages(self._messages)
-        return copy.deepcopy([m for m in self._messages if not m.get('exclude_from_llm')])
+        return copy.deepcopy([m for m in self._messages if not m.get("exclude_from_llm")])
 
     @staticmethod
     def _sanitize_tool_messages(msgs: list[dict]):

@@ -46,8 +46,8 @@ class GladiaTranscriber(BaseTranscriber):
         speech_threshold: float = 0.6,
         code_switching: bool = False,
         keywords: str = None,  # Custom vocabulary keywords (comma-separated)
-        model: str = None,     # Optional model for future Gladia models
-        **kwargs
+        model: str = None,  # Optional model for future Gladia models
+        **kwargs,
     ):
         super().__init__(input_queue)
 
@@ -66,8 +66,8 @@ class GladiaTranscriber(BaseTranscriber):
         self.model = model
 
         # API configuration
-        self.api_key = kwargs.get("transcriber_key", os.getenv('GLADIA_API_KEY'))
-        self.gladia_host = os.getenv('GLADIA_HOST', 'api.gladia.io')
+        self.api_key = kwargs.get("transcriber_key", os.getenv("GLADIA_API_KEY"))
+        self.gladia_host = os.getenv("GLADIA_HOST", "api.gladia.io")
         self.session_url = f"https://{self.gladia_host}/v2/live"
 
         # Queues
@@ -166,10 +166,7 @@ class GladiaTranscriber(BaseTranscriber):
         Create a Gladia streaming session via POST request.
         Returns (session_id, websocket_url).
         """
-        headers = {
-            "X-Gladia-Key": self.api_key,
-            "Content-Type": "application/json"
-        }
+        headers = {"X-Gladia-Key": self.api_key, "Content-Type": "application/json"}
 
         # When code_switching is enabled, specify allowed languages to restrict detection
         # This prevents misdetection of other languages (e.g., Chinese instead of Hindi)
@@ -188,21 +185,18 @@ class GladiaTranscriber(BaseTranscriber):
             "sample_rate": self.sample_rate,
             "bit_depth": self.bit_depth,
             "channels": 1,
-            "language_config": {
-                "languages": languages_list,
-                "code_switching": self.code_switching
-            },
+            "language_config": {"languages": languages_list, "code_switching": self.code_switching},
             "endpointing": self.endpointing,
             "maximum_duration_without_endpointing": self.maximum_duration_without_endpointing,
             "pre_processing": {
                 "audio_enhancer": self.provider in ("twilio", "exotel", "plivo"),
-                "speech_threshold": self.speech_threshold
+                "speech_threshold": self.speech_threshold,
             },
             "messages_config": {
                 "receive_partial_transcripts": True,
                 "receive_speech_events": True,
-                "receive_lifecycle_events": False
-            }
+                "receive_lifecycle_events": False,
+            },
         }
 
         # Add model if specified (for future Gladia models)
@@ -215,24 +209,20 @@ class GladiaTranscriber(BaseTranscriber):
             if vocabulary_list:
                 payload["realtime_processing"] = {
                     "custom_vocabulary": True,
-                    "custom_vocabulary_config": {
-                        "vocabulary": vocabulary_list,
-                        "default_intensity": 0.7
-                    }
+                    "custom_vocabulary_config": {"vocabulary": vocabulary_list, "default_intensity": 0.7},
                 }
 
-        logger.info(f"Creating Gladia session: encoding={self.encoding}, "
-                   f"sample_rate={self.sample_rate}, languages={languages_list}, "
-                   f"endpointing={self.endpointing}s, code_switching={self.code_switching}, "
-                   f"audio_enhancer={payload['pre_processing'].get('audio_enhancer', False)}, "
-                   f"keywords={bool(self.keywords)}")
+        logger.info(
+            f"Creating Gladia session: encoding={self.encoding}, "
+            f"sample_rate={self.sample_rate}, languages={languages_list}, "
+            f"endpointing={self.endpointing}s, code_switching={self.code_switching}, "
+            f"audio_enhancer={payload['pre_processing'].get('audio_enhancer', False)}, "
+            f"keywords={bool(self.keywords)}"
+        )
 
         async with aiohttp.ClientSession() as session:
             async with session.post(
-                self.session_url,
-                headers=headers,
-                json=payload,
-                timeout=aiohttp.ClientTimeout(total=10)
+                self.session_url, headers=headers, json=payload, timeout=aiohttp.ClientTimeout(total=10)
             ) as response:
                 if response.status not in (200, 201):
                     error_text = await response.text()
@@ -265,10 +255,7 @@ class GladiaTranscriber(BaseTranscriber):
                 # Step 2: Connect to WebSocket
                 logger.info(f"Connecting to Gladia WebSocket: {self.gladia_ws_url}")
 
-                ws = await asyncio.wait_for(
-                    websockets.connect(self.gladia_ws_url),
-                    timeout=timeout
-                )
+                ws = await asyncio.wait_for(websockets.connect(self.gladia_ws_url), timeout=timeout)
 
                 self.websocket_connection = ws
                 self.connection_authenticated = True
@@ -280,7 +267,7 @@ class GladiaTranscriber(BaseTranscriber):
                 raise ConnectionError("Timeout while connecting to Gladia WebSocket")
             except InvalidHandshake as e:
                 error_msg = str(e)
-                if '401' in error_msg or '403' in error_msg:
+                if "401" in error_msg or "403" in error_msg:
                     logger.error(f"Gladia authentication failed: {e}")
                     raise ConnectionError(f"Gladia authentication failed: Invalid API key - {e}")
                 else:
@@ -288,7 +275,7 @@ class GladiaTranscriber(BaseTranscriber):
                     last_err = e
                     attempt += 1
                     if attempt < retries:
-                        await asyncio.sleep(2 ** attempt)
+                        await asyncio.sleep(2**attempt)
             except ConnectionError:
                 raise
             except Exception as e:
@@ -296,7 +283,7 @@ class GladiaTranscriber(BaseTranscriber):
                 last_err = e
                 attempt += 1
                 if attempt < retries:
-                    await asyncio.sleep(2 ** attempt)
+                    await asyncio.sleep(2**attempt)
 
         raise ConnectionError(f"Failed to connect to Gladia after {retries} attempts: {last_err}")
 
@@ -343,7 +330,7 @@ class GladiaTranscriber(BaseTranscriber):
 
         # Fallback: use last interim if no final results received
         if not transcript_to_send and self.current_turn_interim_details:
-            transcript_to_send = self.current_turn_interim_details[-1]['transcript']
+            transcript_to_send = self.current_turn_interim_details[-1]["transcript"]
             logger.info(f"Using last interim as fallback: {transcript_to_send}")
 
         if not transcript_to_send:
@@ -353,24 +340,24 @@ class GladiaTranscriber(BaseTranscriber):
 
         # Build turn latencies
         try:
-            first_interim_to_final_ms, last_interim_to_final_ms = self.calculate_interim_to_final_latencies(self.current_turn_interim_details)
+            first_interim_to_final_ms, last_interim_to_final_ms = self.calculate_interim_to_final_latencies(
+                self.current_turn_interim_details
+            )
 
-            self.turn_latencies.append({
-                'turn_id': self.current_turn_id,
-                'sequence_id': self.current_turn_id,
-                'interim_details': self.current_turn_interim_details,
-                'first_interim_to_final_ms': first_interim_to_final_ms,
-                'last_interim_to_final_ms': last_interim_to_final_ms,
-                'force_finalized': True
-            })
+            self.turn_latencies.append(
+                {
+                    "turn_id": self.current_turn_id,
+                    "sequence_id": self.current_turn_id,
+                    "interim_details": self.current_turn_interim_details,
+                    "first_interim_to_final_ms": first_interim_to_final_ms,
+                    "last_interim_to_final_ms": last_interim_to_final_ms,
+                    "force_finalized": True,
+                }
+            )
         except Exception as e:
             logger.error(f"Error building turn latencies: {e}")
 
-        data = {
-            "type": "transcript",
-            "content": transcript_to_send,
-            "force_finalized": True
-        }
+        data = {"type": "transcript", "content": transcript_to_send, "force_finalized": True}
 
         logger.info(f"Force-finalized transcript: {transcript_to_send}")
         await self.push_to_transcriber_queue(create_ws_data_packet(data, self.meta_info))
@@ -382,10 +369,11 @@ class GladiaTranscriber(BaseTranscriber):
             while True:
                 await asyncio.sleep(1.0)
 
-                if (self.last_interim_time and
-                    not self.is_transcript_sent_for_processing and
-                    (self.final_transcript.strip() or self.current_turn_interim_details)):
-
+                if (
+                    self.last_interim_time
+                    and not self.is_transcript_sent_for_processing
+                    and (self.final_transcript.strip() or self.current_turn_interim_details)
+                ):
                     elapsed = time.time() - self.last_interim_time
 
                     if elapsed > self.interim_timeout:
@@ -436,10 +424,10 @@ class GladiaTranscriber(BaseTranscriber):
 
         # Cancel tasks properly
         for task_name, task in [
-            ("heartbeat_task", getattr(self, 'heartbeat_task', None)),
-            ("sender_task", getattr(self, 'sender_task', None)),
-            ("utterance_timeout_task", getattr(self, 'utterance_timeout_task', None)),
-            ("transcription_task", getattr(self, 'transcription_task', None))
+            ("heartbeat_task", getattr(self, "heartbeat_task", None)),
+            ("sender_task", getattr(self, "sender_task", None)),
+            ("utterance_timeout_task", getattr(self, "utterance_timeout_task", None)),
+            ("transcription_task", getattr(self, "transcription_task", None)),
         ]:
             if task is not None and not task.done():
                 task.cancel()
@@ -473,7 +461,7 @@ class GladiaTranscriber(BaseTranscriber):
 
     async def _check_and_process_end_of_stream(self, ws_data_packet, ws):
         """Check for end of stream signal."""
-        if ws_data_packet.get('meta_info', {}).get('eos') is True:
+        if ws_data_packet.get("meta_info", {}).get("eos") is True:
             await self._close_gladia(ws)
             return True
         return False
@@ -508,7 +496,7 @@ class GladiaTranscriber(BaseTranscriber):
                     try:
                         if not self.current_turn_start_time:
                             self.current_turn_start_time = timestamp_ms()
-                            self.current_turn_id = self.meta_info.get('turn_id') or self.meta_info.get('request_id')
+                            self.current_turn_id = self.meta_info.get("turn_id") or self.meta_info.get("request_id")
                     except Exception:
                         pass
 
@@ -536,12 +524,7 @@ class GladiaTranscriber(BaseTranscriber):
                         else:
                             audio_b64 = audio_data  # Assume already base64 string
 
-                        message = {
-                            "type": "audio_chunk",
-                            "data": {
-                                "chunk": audio_b64
-                            }
-                        }
+                        message = {"type": "audio_chunk", "data": {"chunk": audio_b64}}
                         await ws.send(json.dumps(message))
 
                     except ConnectionClosedError as e:
@@ -598,11 +581,11 @@ class GladiaTranscriber(BaseTranscriber):
 
                         # Track interim details
                         interim_detail = {
-                            'transcript': text,
-                            'latency_ms': latency_ms,
-                            'is_final': is_final,
-                            'received_at': now_timestamp,
-                            'language': detected_language
+                            "transcript": text,
+                            "latency_ms": latency_ms,
+                            "is_final": is_final,
+                            "received_at": now_timestamp,
+                            "language": detected_language,
                         }
                         self.current_turn_interim_details.append(interim_detail)
                         self.last_interim_time = now_timestamp
@@ -615,27 +598,28 @@ class GladiaTranscriber(BaseTranscriber):
                             # Calculate total duration
                             if self.current_turn_start_time:
                                 total_stream_duration = time.time() - (self.current_turn_start_time / 1000)
-                                self.meta_info['transcriber_total_stream_duration'] = total_stream_duration
-                                self.meta_info['transcriber_latency'] = total_stream_duration
+                                self.meta_info["transcriber_total_stream_duration"] = total_stream_duration
+                                self.meta_info["transcriber_latency"] = total_stream_duration
 
                             # Build turn latencies
                             try:
-                                first_interim_to_final_ms, last_interim_to_final_ms = self.calculate_interim_to_final_latencies(self.current_turn_interim_details)
+                                first_interim_to_final_ms, last_interim_to_final_ms = (
+                                    self.calculate_interim_to_final_latencies(self.current_turn_interim_details)
+                                )
 
-                                self.turn_latencies.append({
-                                    'turn_id': self.current_turn_id,
-                                    'sequence_id': self.current_turn_id,
-                                    'interim_details': self.current_turn_interim_details,
-                                    'first_interim_to_final_ms': first_interim_to_final_ms,
-                                    'last_interim_to_final_ms': last_interim_to_final_ms
-                                })
+                                self.turn_latencies.append(
+                                    {
+                                        "turn_id": self.current_turn_id,
+                                        "sequence_id": self.current_turn_id,
+                                        "interim_details": self.current_turn_interim_details,
+                                        "first_interim_to_final_ms": first_interim_to_final_ms,
+                                        "last_interim_to_final_ms": last_interim_to_final_ms,
+                                    }
+                                )
                             except Exception as e:
                                 logger.error(f"Error building turn latencies: {e}")
 
-                            transcript_packet = {
-                                "type": "transcript",
-                                "content": text
-                            }
+                            transcript_packet = {"type": "transcript", "content": text}
                             yield create_ws_data_packet(transcript_packet, self.meta_info)
 
                             # Reset turn state
@@ -643,13 +627,12 @@ class GladiaTranscriber(BaseTranscriber):
                         else:
                             # Interim transcript
                             logger.debug(f"Received interim transcript: {text}")
-                            interim_packet = {
-                                "type": "interim_transcript_received",
-                                "content": text
-                            }
+                            interim_packet = {"type": "interim_transcript_received", "content": text}
                             yield create_ws_data_packet(interim_packet, self.meta_info)
 
-                elif msg_type == "speech_begin" or (msg_type == "event" and data.get("data", {}).get("type") == "speech_begin"):
+                elif msg_type == "speech_begin" or (
+                    msg_type == "event" and data.get("data", {}).get("type") == "speech_begin"
+                ):
                     # Speech started event (VAD detected voice)
                     logger.info("Received speech_begin event from Gladia")
                     self.turn_counter += 1
@@ -661,7 +644,9 @@ class GladiaTranscriber(BaseTranscriber):
 
                     yield create_ws_data_packet("speech_started", self.meta_info)
 
-                elif msg_type == "speech_end" or (msg_type == "event" and data.get("data", {}).get("type") == "speech_end"):
+                elif msg_type == "speech_end" or (
+                    msg_type == "event" and data.get("data", {}).get("type") == "speech_end"
+                ):
                     # Speech ended event
                     logger.info("Received speech_end event from Gladia")
                     self.speech_end_time = timestamp_ms()
@@ -693,7 +678,7 @@ class GladiaTranscriber(BaseTranscriber):
 
     def get_meta_info(self):
         """Return current meta_info."""
-        return getattr(self, 'meta_info', {})
+        return getattr(self, "meta_info", {})
 
     async def run(self):
         """Start the transcription task."""
@@ -762,17 +747,15 @@ class GladiaTranscriber(BaseTranscriber):
                     self.connection_authenticated = False
 
             # Cancel tasks
-            if hasattr(self, 'sender_task') and self.sender_task:
+            if hasattr(self, "sender_task") and self.sender_task:
                 self.sender_task.cancel()
-            if hasattr(self, 'heartbeat_task') and self.heartbeat_task:
+            if hasattr(self, "heartbeat_task") and self.heartbeat_task:
                 self.heartbeat_task.cancel()
-            if hasattr(self, 'utterance_timeout_task') and self.utterance_timeout_task:
+            if hasattr(self, "utterance_timeout_task") and self.utterance_timeout_task:
                 self.utterance_timeout_task.cancel()
 
             # Send connection closed message
-            meta = dict(getattr(self, 'meta_info', None) or {})
+            meta = dict(getattr(self, "meta_info", None) or {})
             if self.connection_error:
-                meta['connection_error'] = self.connection_error
-            await self.push_to_transcriber_queue(
-                create_ws_data_packet("transcriber_connection_closed", meta)
-            )
+                meta["connection_error"] = self.connection_error
+            await self.push_to_transcriber_queue(create_ws_data_packet("transcriber_connection_closed", meta))
