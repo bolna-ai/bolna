@@ -439,10 +439,10 @@ def resample(audio_bytes, target_sample_rate, format="mp3", pcm_channels=1, orig
 
     # Handle other formats (wav, mp3, etc.) via pydub
     audio = AudioSegment.from_file(io.BytesIO(audio_bytes), format=format)
-    if audio.frame_rate == target_sample_rate:
-        return audio_bytes
-    logger.info(f"Resampling from {audio.frame_rate} to {target_sample_rate}")
-    audio = audio.set_frame_rate(target_sample_rate)
+    if audio.frame_rate != target_sample_rate:
+        logger.info(f"Resampling from {audio.frame_rate} to {target_sample_rate}")
+        audio = audio.set_frame_rate(target_sample_rate)
+    # Always export as WAV regardless of whether resampling was needed
     buffer = io.BytesIO()
     audio.export(buffer, format="wav")
     return buffer.getvalue()
