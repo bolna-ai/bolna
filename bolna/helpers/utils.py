@@ -34,6 +34,10 @@ BUCKET_NAME = os.getenv("BUCKET_NAME")
 RECORDING_BUCKET_NAME = os.getenv("RECORDING_BUCKET_NAME")
 RECORDING_BUCKET_URL = os.getenv("RECORDING_BUCKET_URL")
 
+_LOG_DIR = "./logs"
+os.makedirs(_LOG_DIR, exist_ok=True)
+_log_header_written: set[str] = set()
+
 
 class DictWithMissing(dict):
     def __missing__(self, key):
@@ -593,13 +597,15 @@ async def write_request_logs(message, run_id):
 
     header = "Time,Component,Direction,Leg ID,Sequence ID,Model,Data,Input Tokens,Output Tokens,Characters,Latency,Cached,Final Transcript,Engine,Metadata\n"
     log_string = ",".join(['"' + str(item).replace('"', '""') + '"' if item is not None else "" for item in row]) + "\n"
-    log_dir = f"./logs"
-    os.makedirs(log_dir, exist_ok=True)
-    log_file_path = f"{log_dir}/{run_id}.csv"
-    file_exists = os.path.exists(log_file_path)
+    log_file_path = f"{_LOG_DIR}/{run_id}.csv"
+    if run_id not in _log_header_written:
+        _log_header_written.add(run_id)
+        write_header = not os.path.exists(log_file_path)
+    else:
+        write_header = False
 
     async with aiofiles.open(log_file_path, mode="a") as log_file:
-        if not file_exists:
+        if write_header:
             await log_file.write(header + log_string)
         else:
             await log_file.write(log_string)
