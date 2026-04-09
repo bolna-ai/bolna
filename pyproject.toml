@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "bolna"
-version = "0.10.1"
+version = "0.10.2"
 readme = "README.md"
 authors = [
     { name = "Prateek Sachan", email = "ps@prateeksachan.com" }
@@ -43,7 +43,7 @@ select = [
 ]
 
 [tool.bumpver]
-current_version = "0.10.1"
+current_version = "0.10.2"
 version_pattern = "MAJOR.MINOR.PATCH"
 commit_message = "bump bolna version {old_version} -> {new_version}"
 tag_message = "bolna-{new_version}"
