@@ -50,7 +50,10 @@ class DeepgramSynthesizer(StreamSynthesizer):
         if caching:
             self.cache = InmemoryScalarCache()
 
+        self.run_id = kwargs.get("run_id")
         self.ws_url = f"{DEEPGRAM_TTS_WS_URL}?encoding={self.format}&sample_rate={self.sample_rate}&model={self.model}"
+        if self.run_id:
+            self.ws_url += f"&tag={self.run_id}"
 
         # Extra TTFB tracking for WS mode
         self.ws_send_time = None
@@ -249,6 +252,8 @@ class DeepgramSynthesizer(StreamSynthesizer):
     async def _generate_http(self, text):
         headers = {"Authorization": f"Token {self.api_key}", "Content-Type": "application/json"}
         url = f"{DEEPGRAM_TTS_URL}?container=none&encoding={self.format}&sample_rate={self.sample_rate}&model={self.model}"
+        if self.run_id:
+            url += f"&tag={self.run_id}"
         logger.info(f"Sending deepgram request {url}")
         try:
             async with aiohttp.ClientSession() as session:
