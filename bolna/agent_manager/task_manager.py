@@ -161,6 +161,7 @@ class TaskManager(BaseManager):
         self.mark_event_meta_data = MarkEventMetaData()
         self.sampling_rate = 24000
         self.conversation_ended = False
+        self.has_transfer = False
         self.hangup_triggered = False
         self.hangup_triggered_at = None
         self.hangup_message_queued = False
@@ -1989,6 +1990,7 @@ class TaskManager(BaseManager):
             return
 
         if called_fun.startswith("transfer_call"):
+            self.has_transfer = True
             await asyncio.sleep(2)
             try:
                 from_number = self.context_data["recipient_data"]["from_number"]
@@ -4039,7 +4041,19 @@ class TaskManager(BaseManager):
                         "mark_tracking": self.mark_event_meta_data.get_mark_tracking_summary(),
                     },
                     "hangup_detail": self.hangup_detail,
+                    "has_transfer": self.has_transfer,
                 }
+
+                if self.shadow_end_call_enabled:
+                    end_call_seq = self.shadow_end_call_events[0]["seq"] if self.shadow_end_call_events else None
+                    hangup_detail_str = str(self.hangup_detail) if self.hangup_detail else None
+                    logger.info(
+                        f"Shadow end_call summary: "
+                        f"end_call_count={len(self.shadow_end_call_events)}, "
+                        f"first_end_call_seq={end_call_seq}, "
+                        f"actual_hangup_reason={hangup_detail_str}, "
+                        f"events={json.dumps(self.shadow_end_call_events)}"
+                    )
 
                 if self.shadow_end_call_enabled:
                     end_call_seq = self.shadow_end_call_events[0]["seq"] if self.shadow_end_call_events else None
