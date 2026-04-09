@@ -45,10 +45,13 @@ class DeepgramTranscriber(BaseTranscriber):
         self.keywords = keywords
         self.transcription_cursor = 0.0
         self.interruption_signalled = False
+        self.run_id = kwargs.get("run_id")
         if not self.stream:
             self.api_url = f"https://{self.deepgram_host}/v1/listen?model={self.model}&language={self.language}"
             if self.is_english:
                 self.api_url += "&filler_words=true"
+            if self.run_id:
+                self.api_url += f"&tag={quote(self.run_id)}&extra={quote(f'run_id:{self.run_id}')}"
             self.session = aiohttp.ClientSession()
             if self.keywords is not None:
                 keyword_list = [quote(kw.strip()) for kw in self.keywords.split(",") if kw.strip()]
@@ -136,6 +139,10 @@ class DeepgramTranscriber(BaseTranscriber):
 
         if "en" not in self.language:
             dg_params['language'] = self.language
+
+        if self.run_id:
+            dg_params['tag'] = self.run_id
+            dg_params['extra'] = f'run_id:{self.run_id}'
 
         websocket_api = '{}://{}/v1/listen?'.format(os.getenv('DEEPGRAM_HOST_PROTOCOL', 'wss'), self.deepgram_host)
         websocket_url = websocket_api + urlencode(dg_params)
