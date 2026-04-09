@@ -1,7 +1,42 @@
-from .synthesizer import PollySynthesizer, ElevenlabsSynthesizer, OPENAISynthesizer, DeepgramSynthesizer, AzureSynthesizer, CartesiaSynthesizer, SmallestSynthesizer, SarvamSynthesizer, RimeSynthesizer, PixaSynthesizer
-from .transcriber import DeepgramTranscriber, AzureTranscriber, SarvamTranscriber, AssemblyAITranscriber, GoogleTranscriber, PixaTranscriber, GladiaTranscriber, ElevenLabsTranscriber, SmallestTranscriber
-from .input_handlers import DefaultInputHandler, TwilioInputHandler, ExotelInputHandler, PlivoInputHandler, VobizInputHandler, SipTrunkInputHandler
-from .output_handlers import DefaultOutputHandler, TwilioOutputHandler, ExotelOutputHandler, PlivoOutputHandler, VobizOutputHandler, SipTrunkOutputHandler
+from .synthesizer import (
+    PollySynthesizer,
+    ElevenlabsSynthesizer,
+    OPENAISynthesizer,
+    DeepgramSynthesizer,
+    AzureSynthesizer,
+    CartesiaSynthesizer,
+    SmallestSynthesizer,
+    SarvamSynthesizer,
+    RimeSynthesizer,
+    PixaSynthesizer,
+)
+from .transcriber import (
+    DeepgramTranscriber,
+    AzureTranscriber,
+    SarvamTranscriber,
+    AssemblyAITranscriber,
+    GoogleTranscriber,
+    PixaTranscriber,
+    GladiaTranscriber,
+    ElevenLabsTranscriber,
+    SmallestTranscriber,
+)
+from .input_handlers import (
+    DefaultInputHandler,
+    TwilioInputHandler,
+    ExotelInputHandler,
+    PlivoInputHandler,
+    VobizInputHandler,
+    SipTrunkInputHandler,
+)
+from .output_handlers import (
+    DefaultOutputHandler,
+    TwilioOutputHandler,
+    ExotelOutputHandler,
+    PlivoOutputHandler,
+    VobizOutputHandler,
+    SipTrunkOutputHandler,
+)
 from .llms import OpenAiLLM, LiteLLM, AzureLLM, GeminiLLM
 from .enums import TelephonyProvider, SynthesizerProvider, TranscriberProvider, LLMProvider
 
@@ -15,7 +50,7 @@ SUPPORTED_SYNTHESIZER_MODELS = {
     SynthesizerProvider.SMALLEST.value: SmallestSynthesizer,
     SynthesizerProvider.SARVAM.value: SarvamSynthesizer,
     SynthesizerProvider.RIME.value: RimeSynthesizer,
-    SynthesizerProvider.PIXA.value: PixaSynthesizer
+    SynthesizerProvider.PIXA.value: PixaSynthesizer,
 }
 
 SUPPORTED_TRANSCRIBER_PROVIDERS = {
@@ -27,13 +62,11 @@ SUPPORTED_TRANSCRIBER_PROVIDERS = {
     TranscriberProvider.PIXA.value: PixaTranscriber,
     TranscriberProvider.GLADIA.value: GladiaTranscriber,
     TranscriberProvider.ELEVENLABS.value: ElevenLabsTranscriber,
-    TranscriberProvider.SMALLEST.value: SmallestTranscriber
+    TranscriberProvider.SMALLEST.value: SmallestTranscriber,
 }
 
-#Backwards compatibility
-SUPPORTED_TRANSCRIBER_MODELS = {
-    'deepgram': DeepgramTranscriber
-}
+# Backwards compatibility
+SUPPORTED_TRANSCRIBER_MODELS = {"deepgram": DeepgramTranscriber}
 
 SUPPORTED_LLM_PROVIDERS = {
     LLMProvider.OPENAI.value: OpenAiLLM,
@@ -53,7 +86,7 @@ SUPPORTED_LLM_PROVIDERS = {
     LLMProvider.DEEPSEEK.value: LiteLLM,
     LLMProvider.OPENROUTER.value: LiteLLM,
     LLMProvider.AZURE.value: AzureLLM,
-    LLMProvider.GOOGLE.value: GeminiLLM
+    LLMProvider.GOOGLE.value: GeminiLLM,
 }
 SUPPORTED_INPUT_HANDLERS = {
     TelephonyProvider.DEFAULT.value: DefaultInputHandler,
@@ -61,14 +94,14 @@ SUPPORTED_INPUT_HANDLERS = {
     TelephonyProvider.EXOTEL.value: ExotelInputHandler,
     TelephonyProvider.PLIVO.value: PlivoInputHandler,
     TelephonyProvider.VOBIZ.value: VobizInputHandler,
-    TelephonyProvider.SIP_TRUNK.value: SipTrunkInputHandler
+    TelephonyProvider.SIP_TRUNK.value: SipTrunkInputHandler,
 }
 SUPPORTED_INPUT_TELEPHONY_HANDLERS = {
     TelephonyProvider.TWILIO.value: TwilioInputHandler,
     TelephonyProvider.EXOTEL.value: ExotelInputHandler,
     TelephonyProvider.PLIVO.value: PlivoInputHandler,
     TelephonyProvider.VOBIZ.value: VobizInputHandler,
-    TelephonyProvider.SIP_TRUNK.value: SipTrunkInputHandler
+    TelephonyProvider.SIP_TRUNK.value: SipTrunkInputHandler,
 }
 SUPPORTED_OUTPUT_HANDLERS = {
     TelephonyProvider.DEFAULT.value: DefaultOutputHandler,
@@ -76,12 +109,12 @@ SUPPORTED_OUTPUT_HANDLERS = {
     TelephonyProvider.EXOTEL.value: ExotelOutputHandler,
     TelephonyProvider.PLIVO.value: PlivoOutputHandler,
     TelephonyProvider.VOBIZ.value: VobizOutputHandler,
-    TelephonyProvider.SIP_TRUNK.value: SipTrunkOutputHandler
+    TelephonyProvider.SIP_TRUNK.value: SipTrunkOutputHandler,
 }
 SUPPORTED_OUTPUT_TELEPHONY_HANDLERS = {
     TelephonyProvider.TWILIO.value: TwilioOutputHandler,
     TelephonyProvider.EXOTEL.value: ExotelOutputHandler,
     TelephonyProvider.PLIVO.value: PlivoOutputHandler,
     TelephonyProvider.VOBIZ.value: VobizOutputHandler,
-    TelephonyProvider.SIP_TRUNK.value: SipTrunkOutputHandler
+    TelephonyProvider.SIP_TRUNK.value: SipTrunkOutputHandler,
 }

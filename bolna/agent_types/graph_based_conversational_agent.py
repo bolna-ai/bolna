@@ -10,8 +10,16 @@ logger = configure_logger(__name__)
 
 
 class Node:
-    def __init__(self, node_id, node_label, content, classification_labels: list = None, prompt=None, milestone_check_prompt=None,
-                 children: list = None):
+    def __init__(
+        self,
+        node_id,
+        node_label,
+        content,
+        classification_labels: list = None,
+        prompt=None,
+        milestone_check_prompt=None,
+        children: list = None,
+    ):
         self.node_id = node_id
         self.node_label = node_label
         self.content = content
@@ -32,12 +40,12 @@ class Graph:
         logger.info(f"Creating graph")
         node_map = dict()
         for node_id, node_data in data.items():
-            prompt_parts = node_data.get("prompt").split('###Examples')
-            prompt = node_data.get('prompt')
+            prompt_parts = node_data.get("prompt").split("###Examples")
+            prompt = node_data.get("prompt")
             if len(prompt_parts) == 2:
                 classification_prompt = prompt_parts[0]
                 user_prompt = update_prompt_with_context(prompt_parts[1], context_data)
-                prompt = '###Examples'.join([classification_prompt, user_prompt])
+                prompt = "###Examples".join([classification_prompt, user_prompt])
 
             node = Node(
                 node_id=node_id,
@@ -75,17 +83,17 @@ class GraphBasedConversationAgent(BaseAgent):
         self.conversation_intro_done = False
 
     def load_prompts_and_create_graph(self, prompts):
-        self.graph = Graph(prompts,  context_data=self.context_data)
+        self.graph = Graph(prompts, context_data=self.context_data)
         self.current_node = self.graph.root
-        self.current_node_interim = self.graph.root #Handle interim node because we are dealing with interim results 
+        self.current_node_interim = self.graph.root  # Handle interim node because we are dealing with interim results
 
     def _get_audio_text_pair(self, node):
         ind = random.randint(0, len(node.content) - 1)
         audio_pair = node.content[ind]
-        contextual_text = update_prompt_with_context(audio_pair['text'], self.context_data)
-        if contextual_text != audio_pair['text']:
-            audio_pair['text'] = contextual_text
-            audio_pair['audio'] = get_md5_hash(contextual_text)
+        contextual_text = update_prompt_with_context(audio_pair["text"], self.context_data)
+        if contextual_text != audio_pair["text"]:
+            audio_pair["text"] = contextual_text
+            audio_pair["audio"] = get_md5_hash(contextual_text)
         return audio_pair
 
     async def _get_next_formulaic_agent_next_step(self, history, stream=True, synthesize=False):
@@ -96,13 +104,15 @@ class GraphBasedConversationAgent(BaseAgent):
         self.conversation_intro_done = True
         logger.info("Conversation intro done")
         if self.current_node.prompt is None:
-            #These are convos with two step intros
+            # These are convos with two step intros
             ind = random.randint(0, len(self.current_node.children) - 1)
             self.current_node = self.current_node.children[ind]
         return audio_pair
 
     async def _get_next_preprocessed_step(self, history):
-        logger.info(f"current node {self.current_node.node_label}, self.current_node == self.graph.root {self.current_node == self.graph.root}, and self.conversation_intro_done {self.conversation_intro_done}")
+        logger.info(
+            f"current node {self.current_node.node_label}, self.current_node == self.graph.root {self.current_node == self.graph.root}, and self.conversation_intro_done {self.conversation_intro_done}"
+        )
         if self.current_node == self.graph.root and not self.conversation_intro_done:
             return self._handle_intro_message()
 
@@ -126,7 +136,7 @@ class GraphBasedConversationAgent(BaseAgent):
 
     def update_current_node(self):
         self.current_node = self.current_node_interim
-    
+
     # Label flow is not being used right now as we're logging every request
     async def generate(self, history, label_flow=None):
         try:
@@ -135,13 +145,13 @@ class GraphBasedConversationAgent(BaseAgent):
                 if len(self.current_node.children) == 0:
                     ind = random.randint(0, len(self.current_node.content) - 1)
                     audio_pair = self.current_node.content[ind]
-                    logger.info('Agent: {}'.format(audio_pair.get('text')))
+                    logger.info("Agent: {}".format(audio_pair.get("text")))
                     yield audio_pair
                 else:
                     next_state = await self._get_next_preprocessed_step(history)
-                    logger.info('Agent: {}'.format(next_state))
+                    logger.info("Agent: {}".format(next_state))
                     yield next_state
-                
+
                 if len(self.current_node.children) == 0:
                     await asyncio.sleep(1)
                     yield "<end_of_conversation>"

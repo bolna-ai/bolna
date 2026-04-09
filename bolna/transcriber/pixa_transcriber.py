@@ -137,7 +137,7 @@ class PixaTranscriber(BaseTranscriber):
         """Establish WebSocket connection to Pixa with retry logic."""
         ws_url = self._get_ws_url()
         additional_headers = {
-            'X-Pixa-Key': f'Bearer {self.api_key}',
+            "X-Pixa-Key": f"Bearer {self.api_key}",
         }
 
         attempt = 0
@@ -160,7 +160,7 @@ class PixaTranscriber(BaseTranscriber):
                 raise ConnectionError("Timeout while connecting to Pixa websocket")
             except InvalidHandshake as e:
                 error_msg = str(e)
-                if '401' in error_msg or '403' in error_msg:
+                if "401" in error_msg or "403" in error_msg:
                     logger.error(f"Pixa authentication failed: Invalid or expired API key - {e}")
                     raise ConnectionError(f"Pixa authentication failed: Invalid or expired API key")
                 else:
@@ -168,13 +168,13 @@ class PixaTranscriber(BaseTranscriber):
                     last_err = e
                     attempt += 1
                     if attempt < retries:
-                        await asyncio.sleep(2 ** attempt)
+                        await asyncio.sleep(2**attempt)
             except Exception as e:
                 logger.error(f"Error connecting to Pixa websocket (attempt {attempt + 1}/{retries}): {e}")
                 last_err = e
                 attempt += 1
                 if attempt < retries:
-                    await asyncio.sleep(2 ** attempt)
+                    await asyncio.sleep(2**attempt)
 
         raise ConnectionError(f"Failed to connect to Pixa after {retries} attempts: {last_err}")
 
@@ -363,10 +363,11 @@ class PixaTranscriber(BaseTranscriber):
             while True:
                 await asyncio.sleep(1.0)
 
-                if (self.last_interim_time and
-                    self.final_transcript.strip() and
-                    not self.is_transcript_sent_for_processing):
-
+                if (
+                    self.last_interim_time
+                    and self.final_transcript.strip()
+                    and not self.is_transcript_sent_for_processing
+                ):
                     elapsed = time.time() - self.last_interim_time
 
                     if elapsed > self.interim_timeout:
@@ -459,10 +460,10 @@ class PixaTranscriber(BaseTranscriber):
 
         # Cancel tasks properly
         for task_name, task in [
-            ("heartbeat_task", getattr(self, 'heartbeat_task', None)),
-            ("sender_task", getattr(self, 'sender_task', None)),
-            ("utterance_timeout_task", getattr(self, 'utterance_timeout_task', None)),
-            ("transcription_task", getattr(self, 'transcription_task', None))
+            ("heartbeat_task", getattr(self, "heartbeat_task", None)),
+            ("sender_task", getattr(self, "sender_task", None)),
+            ("utterance_timeout_task", getattr(self, "utterance_timeout_task", None)),
+            ("transcription_task", getattr(self, "transcription_task", None)),
         ]:
             if task is not None and not task.done():
                 task.cancel()
@@ -560,12 +561,10 @@ class PixaTranscriber(BaseTranscriber):
                     self.connection_authenticated = False
 
             # Send connection closed notification
-            meta = dict(getattr(self, 'meta_info', None) or {})
+            meta = dict(getattr(self, "meta_info", None) or {})
             if self.connection_error:
-                meta['connection_error'] = self.connection_error
-            await self.push_to_transcriber_queue(
-                create_ws_data_packet("transcriber_connection_closed", meta)
-            )
+                meta["connection_error"] = self.connection_error
+            await self.push_to_transcriber_queue(create_ws_data_packet("transcriber_connection_closed", meta))
 
     def get_meta_info(self):
         """Return current meta info."""

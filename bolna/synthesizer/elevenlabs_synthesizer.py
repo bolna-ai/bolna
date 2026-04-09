@@ -18,10 +18,23 @@ logger = configure_logger(__name__)
 
 
 class ElevenlabsSynthesizer(StreamSynthesizer):
-    def __init__(self, voice, voice_id, model="eleven_turbo_v2_5", audio_format="mp3",
-                 sampling_rate="16000", stream=False, buffer_size=400, temperature=0.5,
-                 similarity_boost=0.75, speed=1.0, style=0, synthesizer_key=None,
-                 caching=True, **kwargs):
+    def __init__(
+        self,
+        voice,
+        voice_id,
+        model="eleven_turbo_v2_5",
+        audio_format="mp3",
+        sampling_rate="16000",
+        stream=False,
+        buffer_size=400,
+        temperature=0.5,
+        similarity_boost=0.75,
+        speed=1.0,
+        style=0,
+        synthesizer_key=None,
+        caching=True,
+        **kwargs,
+    ):
         super().__init__(
             stream=True,  # ElevenLabs always streams
             provider_name="elevenlabs",
@@ -50,7 +63,9 @@ class ElevenlabsSynthesizer(StreamSynthesizer):
             f"?model_id={self.model}&output_format={self.wire_format}"
             f"&inactivity_timeout=170&sync_alignment=true&optimize_streaming_latency=4"
         )
-        self.api_url = f"https://{self.elevenlabs_host}/v1/text-to-speech/{self.voice}?optimize_streaming_latency=2&output_format="
+        self.api_url = (
+            f"https://{self.elevenlabs_host}/v1/text-to-speech/{self.voice}?optimize_streaming_latency=2&output_format="
+        )
 
         self.context_id = None
         self.ws_send_time = None
@@ -78,7 +93,6 @@ class ElevenlabsSynthesizer(StreamSynthesizer):
     def _on_push(self, meta_info, text):
         if not self.context_id:
             self.context_id = str(uuid.uuid4())
-            
 
     # ------------------------------------------------------------------
     # Format helper
@@ -180,10 +194,14 @@ class ElevenlabsSynthesizer(StreamSynthesizer):
                     audio_chunk_count += 1
                     if audio_chunk_count == 1:
                         time_since_send = (time.perf_counter() - self.ws_send_time) * 1000
-                        logger.info(f"WS recv FIRST trace_id={self.ws_trace_id} recv_wait={recv_duration:.0f}ms time_since_send={time_since_send:.0f}ms")
+                        logger.info(
+                            f"WS recv FIRST trace_id={self.ws_trace_id} recv_wait={recv_duration:.0f}ms time_since_send={time_since_send:.0f}ms"
+                        )
                     elif recv_duration > 200:
                         gap = (recv_start - last_recv_time) * 1000 if last_recv_time else 0
-                        logger.info(f"WS recv SLOW chunk={audio_chunk_count} trace_id={self.ws_trace_id} recv_wait={recv_duration:.0f}ms gap={gap:.0f}ms")
+                        logger.info(
+                            f"WS recv SLOW chunk={audio_chunk_count} trace_id={self.ws_trace_id} recv_wait={recv_duration:.0f}ms gap={gap:.0f}ms"
+                        )
                     last_recv_time = time.perf_counter()
 
                 logger.info("response for isFinal: {}".format(data.get("isFinal", False)))
@@ -200,7 +218,7 @@ class ElevenlabsSynthesizer(StreamSynthesizer):
                     logger.info(f"WS recv isFinal trace_id={self.ws_trace_id}")
                     audio_chunk_count = 0
                     last_recv_time = None
-                    yield b'\x00', ""
+                    yield b"\x00", ""
 
                 elif self.last_text_sent:
                     try:
@@ -208,17 +226,19 @@ class ElevenlabsSynthesizer(StreamSynthesizer):
                         response_text = "".join(response_chars)
                         last_four = " ".join(response_text.split(" ")[-4:]).replace('"', "").strip()
                         current_norm = self.normalize_text(self.current_text.strip()).replace('"', "").strip()
-                        logger.info(f'Last four char - {last_four} | current text - {current_norm}')
+                        logger.info(f"Last four char - {last_four} | current text - {current_norm}")
 
                         if current_norm.endswith(last_four):
                             logger.info("send end_of_synthesizer_stream")
-                            yield b'\x00', ""
-                        elif current_norm.replace('"', "").replace(" ", "").strip().endswith(last_four.replace(" ", "")):
+                            yield b"\x00", ""
+                        elif (
+                            current_norm.replace('"', "").replace(" ", "").strip().endswith(last_four.replace(" ", ""))
+                        ):
                             logger.info("send end_of_synthesizer_stream on fallback")
-                            yield b'\x00', ""
+                            yield b"\x00", ""
                     except Exception as e:
                         logger.error(f"Error getting chars from response - {e}")
-                        yield b'\x00', ""
+                        yield b"\x00", ""
                 else:
                     logger.info("No audio data in the response")
 
@@ -234,10 +254,7 @@ class ElevenlabsSynthesizer(StreamSynthesizer):
     async def establish_connection(self):
         try:
             start_time = time.perf_counter()
-            websocket = await asyncio.wait_for(
-                websockets.connect(self.ws_url),
-                timeout=10.0
-            )
+            websocket = await asyncio.wait_for(websockets.connect(self.ws_url), timeout=10.0)
             if hasattr(websocket, "response") and hasattr(websocket.response, "headers"):
                 self.ws_trace_id = websocket.response.headers.get("x-trace-id")
                 logger.info(f"Elevenlabs WebSocket connected trace_id={self.ws_trace_id}")
@@ -264,7 +281,7 @@ class ElevenlabsSynthesizer(StreamSynthesizer):
             return None
         except InvalidHandshake as e:
             error_msg = str(e)
-            if '401' in error_msg or '403' in error_msg:
+            if "401" in error_msg or "403" in error_msg:
                 logger.error(f"ElevenLabs authentication failed: Invalid or expired API key - {e}")
             else:
                 logger.error(f"ElevenLabs handshake failed: {e}")

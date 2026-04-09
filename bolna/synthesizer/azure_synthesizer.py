@@ -17,8 +17,18 @@ load_dotenv()
 
 
 class AzureSynthesizer(BaseSynthesizer):
-    def __init__(self, voice, language, model="neural", stream=False, sampling_rate=8000,
-                 buffer_size=150, caching=True, speed=None, **kwargs):
+    def __init__(
+        self,
+        voice,
+        language,
+        model="neural",
+        stream=False,
+        sampling_rate=8000,
+        buffer_size=150,
+        caching=True,
+        speed=None,
+        **kwargs,
+    ):
         super().__init__(kwargs.get("task_manager_instance"), stream, buffer_size)
         self.model = model
         self.language = language
@@ -39,8 +49,10 @@ class AzureSynthesizer(BaseSynthesizer):
         self.speech_config.speech_synthesis_voice_name = self.voice
 
         self.latency_stats = {
-            "request_count": 0, "total_first_byte_latency": 0,
-            "min_latency": float("inf"), "max_latency": 0.0,
+            "request_count": 0,
+            "total_first_byte_latency": 0,
+            "min_latency": float("inf"),
+            "max_latency": 0.0,
         }
         self.connection_requested_at = None
 
@@ -206,7 +218,9 @@ class AzureSynthesizer(BaseSynthesizer):
                             self.latency_stats["max_latency"] = max(self.latency_stats["max_latency"], first_chunk_time)
                             try:
                                 if "synthesizer_first_result_latency" not in meta_info:
-                                    meta_info["synthesizer_first_result_latency"] = time.perf_counter() - meta_info.get("synthesizer_start_time", start_time)
+                                    meta_info["synthesizer_first_result_latency"] = time.perf_counter() - meta_info.get(
+                                        "synthesizer_start_time", start_time
+                                    )
                                     meta_info["synthesizer_latency"] = meta_info["synthesizer_first_result_latency"]
                             except Exception:
                                 pass
@@ -231,7 +245,9 @@ class AzureSynthesizer(BaseSynthesizer):
 
                 self.synthesized_characters += len(text)
                 try:
-                    meta_info["synthesizer_total_stream_duration"] = time.perf_counter() - meta_info.get("synthesizer_start_time", start_time)
+                    meta_info["synthesizer_total_stream_duration"] = time.perf_counter() - meta_info.get(
+                        "synthesizer_start_time", start_time
+                    )
                 except Exception:
                     pass
 

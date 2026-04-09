@@ -3,6 +3,7 @@ Asterisk WebSocket (chan_websocket) input handler for sip-trunk provider.
 BINARY = ulaw audio; TEXT = control events (JSON or plain text).
 Ref: https://docs.asterisk.org/Configuration/Channel-Drivers/WebSocket/
 """
+
 import asyncio
 import json
 import traceback
@@ -146,7 +147,9 @@ class SipTrunkInputHandler(TelephonyInputHandler):
         self.format = media_start_data.get("format")
         self.ptime = int(media_start_data.get("ptime", 20))
         self._pending_stream_sid = self.connection_id or self.channel_id
-        self.call_sid = self.channel_id.split("_")[0] if (self.channel_id and "_" in self.channel_id) else self.channel_id
+        self.call_sid = (
+            self.channel_id.split("_")[0] if (self.channel_id and "_" in self.channel_id) else self.channel_id
+        )
 
         opt = media_start_data.get("optimal_frame_size")
         if opt is not None:
@@ -187,9 +190,7 @@ class SipTrunkInputHandler(TelephonyInputHandler):
                     # __forced_first_message can unblock and send welcome audio.
                     if self.stream_sid is None and self._pending_stream_sid:
                         self.stream_sid = self._pending_stream_sid
-                        logger.info(
-                            f"First audio frame received — bridge active, stream_sid={self.stream_sid}"
-                        )
+                        logger.info(f"First audio frame received — bridge active, stream_sid={self.stream_sid}")
                     buffer.append(media_audio)
                     message_count += 1
                     if message_count >= chunks_per_batch:

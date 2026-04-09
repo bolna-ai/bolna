@@ -19,8 +19,19 @@ load_dotenv()
 
 
 class RimeSynthesizer(StreamSynthesizer):
-    def __init__(self, voice_id, voice, audio_format="wav", sampling_rate="8000", stream=False,
-                 buffer_size=400, caching=True, model="arcana", synthesizer_key=None, **kwargs):
+    def __init__(
+        self,
+        voice_id,
+        voice,
+        audio_format="wav",
+        sampling_rate="8000",
+        stream=False,
+        buffer_size=400,
+        caching=True,
+        model="arcana",
+        synthesizer_key=None,
+        **kwargs,
+    ):
         super().__init__(
             stream=stream,
             provider_name="rime",
@@ -167,7 +178,7 @@ class RimeSynthesizer(StreamSynthesizer):
 
                 chunk_context_id = data.get("contextId")
                 if chunk_context_id != self.context_id:
-                    yield b'\x00'
+                    yield b"\x00"
                 else:
                     logger.info("No audio data in the response")
 
@@ -185,9 +196,10 @@ class RimeSynthesizer(StreamSynthesizer):
             start_time = time.perf_counter()
             websocket = await asyncio.wait_for(
                 websockets.connect(
-                self.ws_url, additional_headers={"Authorization": f"Bearer {self.api_key}"},
-            ),
-                timeout=10.0
+                    self.ws_url,
+                    additional_headers={"Authorization": f"Bearer {self.api_key}"},
+                ),
+                timeout=10.0,
             )
             if not self.connection_time:
                 self.connection_time = round((time.perf_counter() - start_time) * 1000)
@@ -211,9 +223,14 @@ class RimeSynthesizer(StreamSynthesizer):
             "Accept": f"audio/{self.format}",
         }
         payload = {
-            "speaker": self.voice_id, "text": text, "modelId": self.model,
-            "repetition_penalty": 1.5, "temperature": 0.5, "top_p": 0.5,
-            "samplingRate": int(self.sample_rate), "max_tokens": 5000,
+            "speaker": self.voice_id,
+            "text": text,
+            "modelId": self.model,
+            "repetition_penalty": 1.5,
+            "temperature": 0.5,
+            "top_p": 0.5,
+            "samplingRate": int(self.sample_rate),
+            "max_tokens": 5000,
         }
         try:
             async with aiohttp.ClientSession() as session:
@@ -221,7 +238,7 @@ class RimeSynthesizer(StreamSynthesizer):
                     if response.status == 200:
                         return await response.read()
                     else:
-                        return b'\x00'
+                        return b"\x00"
         except Exception as e:
             logger.error(f"Rime HTTP error: {e}")
 

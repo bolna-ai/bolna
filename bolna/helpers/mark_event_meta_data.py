@@ -64,7 +64,7 @@ class MarkEventMetaData:
         self._mark_stats = MarkStats()
 
     def update_data(self, mark_id, value):
-        value['counter'] = self.counter
+        value["counter"] = self.counter
         self.counter += 1
         self.mark_event_meta_data[mark_id] = value
 
@@ -136,17 +136,19 @@ class MarkEventMetaData:
                 wall_clock = seq.last_sent_ts - seq.first_sent_ts
             tts_speed_ratio = round(seq.total_audio_duration / wall_clock, 2) if wall_clock > 0 else None
 
-            summary.per_sequence.append(SequenceSummary(
-                seq=seq_id,
-                sent=seq.sent,
-                acked=seq.acked,
-                max_delay=round(max(seq.delays), 3) if seq.delays else 0,
-                avg_delay=round(sum(seq.delays) / len(seq.delays), 3) if seq.delays else 0,
-                interrupted=seq.interrupted,
-                chunk_delays=[round(d, 3) for d in seq.delays],
-                tts_speed_ratio=tts_speed_ratio,
-                audio_duration_s=round(seq.total_audio_duration, 3),
-            ))
+            summary.per_sequence.append(
+                SequenceSummary(
+                    seq=seq_id,
+                    sent=seq.sent,
+                    acked=seq.acked,
+                    max_delay=round(max(seq.delays), 3) if seq.delays else 0,
+                    avg_delay=round(sum(seq.delays) / len(seq.delays), 3) if seq.delays else 0,
+                    interrupted=seq.interrupted,
+                    chunk_delays=[round(d, 3) for d in seq.delays],
+                    tts_speed_ratio=tts_speed_ratio,
+                    audio_duration_s=round(seq.total_audio_duration, 3),
+                )
+            )
 
         return summary.model_dump()
 

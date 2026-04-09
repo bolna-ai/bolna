@@ -25,9 +25,21 @@ class DeepgramTranscriber(BaseTranscriber):
     def is_english(self):
         return bool(self.language and self.language.startswith("en"))
 
-    def __init__(self, telephony_provider, input_queue=None, model='nova-2', stream=True, language="en", endpointing="400",
-                 sampling_rate="16000", encoding="linear16", output_queue=None, keywords=None,
-                 process_interim_results="true", **kwargs):
+    def __init__(
+        self,
+        telephony_provider,
+        input_queue=None,
+        model="nova-2",
+        stream=True,
+        language="en",
+        endpointing="400",
+        sampling_rate="16000",
+        encoding="linear16",
+        output_queue=None,
+        keywords=None,
+        process_interim_results="true",
+        **kwargs,
+    ):
         super().__init__(input_queue)
         self.endpointing = endpointing
         self.language = language
@@ -38,8 +50,8 @@ class DeepgramTranscriber(BaseTranscriber):
         self.model = model
         self.sampling_rate = int(sampling_rate) if isinstance(sampling_rate, (str, int)) else 16000
         self.encoding = encoding
-        self.api_key = kwargs.get("transcriber_key", os.getenv('DEEPGRAM_AUTH_TOKEN'))
-        self.deepgram_host = os.getenv('DEEPGRAM_HOST', 'api.deepgram.com')
+        self.api_key = kwargs.get("transcriber_key", os.getenv("DEEPGRAM_AUTH_TOKEN"))
+        self.deepgram_host = os.getenv("DEEPGRAM_HOST", "api.deepgram.com")
         self.transcriber_output_queue = output_queue
         self.transcription_task = None
         self.keywords = keywords
@@ -56,7 +68,7 @@ class DeepgramTranscriber(BaseTranscriber):
             if self.keywords is not None:
                 keyword_list = [quote(kw.strip()) for kw in self.keywords.split(",") if kw.strip()]
                 if keyword_list:
-                    if self.model.startswith('nova-3'):
+                    if self.model.startswith("nova-3"):
                         keyword_string = "&keyterm=" + "&keyterm=".join(keyword_list)
                     else:
                         keyword_string = "&keywords=" + "&keywords=".join(keyword_list)
@@ -68,8 +80,8 @@ class DeepgramTranscriber(BaseTranscriber):
         self.process_interim_results = process_interim_results
         self.audio_frame_duration = 0.0
         self.connected_via_dashboard = kwargs.get("enforce_streaming", True)
-        #Message states
-        self.curr_message = ''
+        # Message states
+        self.curr_message = ""
         self.finalized_transcript = ""
         self.final_transcript = ""
         self.current_turn_start_time = None
@@ -89,13 +101,13 @@ class DeepgramTranscriber(BaseTranscriber):
 
     def get_deepgram_ws_url(self):
         dg_params = {
-            'model': self.model,
+            "model": self.model,
             # 'diarize': 'true',
-            'language': self.language,
-            'vad_events' : 'true',
-            'endpointing': self.endpointing,
-            'interim_results': 'true',
-            'utterance_end_ms': '1000' if int(self.endpointing) < 1000 else str(self.endpointing)
+            "language": self.language,
+            "vad_events": "true",
+            "endpointing": self.endpointing,
+            "interim_results": "true",
+            "utterance_end_ms": "1000" if int(self.endpointing) < 1000 else str(self.endpointing),
         }
 
         self.audio_frame_duration = 0.5  # We're sending 8k samples with a sample rate of 16k
@@ -104,53 +116,55 @@ class DeepgramTranscriber(BaseTranscriber):
             # For sip-trunk (Asterisk), encoding and sampling_rate are already set in task_manager
             # Don't override them - use what was passed from task_config
             if self.provider != TelephonyProvider.SIP_TRUNK.value:
-                self.encoding = 'mulaw' if self.provider in ("twilio") else "linear16"
+                self.encoding = "mulaw" if self.provider in ("twilio") else "linear16"
                 self.sampling_rate = 8000
             # For sip-trunk, encoding and sampling_rate come from task_config (set in task_manager)
             # They're already set from the __init__ parameters, so we don't override
             self.audio_frame_duration = 0.2  # 200ms chunks for telephony
 
-            dg_params['encoding'] = self.encoding
-            dg_params['sample_rate'] = self.sampling_rate
-            dg_params['channels'] = "1"
+            dg_params["encoding"] = self.encoding
+            dg_params["sample_rate"] = self.sampling_rate
+            dg_params["channels"] = "1"
 
             if self.provider == TelephonyProvider.SIP_TRUNK.value:
-                logger.info(f"[SIP-TRUNK] Deepgram transcriber configured with encoding={self.encoding}, sample_rate={self.sampling_rate}")
+                logger.info(
+                    f"[SIP-TRUNK] Deepgram transcriber configured with encoding={self.encoding}, sample_rate={self.sampling_rate}"
+                )
 
         elif self.provider == "web_based_call":
-            dg_params['encoding'] = "linear16"
-            dg_params['sample_rate'] = 16000
-            dg_params['channels'] = "1"
+            dg_params["encoding"] = "linear16"
+            dg_params["sample_rate"] = 16000
+            dg_params["channels"] = "1"
             self.sampling_rate = 16000
             # TODO what is the purpose of this?
             self.audio_frame_duration = 0.256
 
         elif not self.connected_via_dashboard:
-            dg_params['encoding'] = "linear16"
-            dg_params['sample_rate'] = 16000
-            dg_params['channels'] = "1"
+            dg_params["encoding"] = "linear16"
+            dg_params["sample_rate"] = 16000
+            dg_params["channels"] = "1"
 
         if self.provider == "playground":
             self.sampling_rate = 8000
             self.audio_frame_duration = 0.0  # There's no streaming from the playground
 
         if self.is_english:
-            dg_params['filler_words'] = 'true'
+            dg_params["filler_words"] = "true"
 
         if "en" not in self.language:
-            dg_params['language'] = self.language
+            dg_params["language"] = self.language
 
         if self.run_id:
-            dg_params['tag'] = self.run_id
-            dg_params['extra'] = f'run_id:{self.run_id}'
+            dg_params["tag"] = self.run_id
+            dg_params["extra"] = f"run_id:{self.run_id}"
 
-        websocket_api = '{}://{}/v1/listen?'.format(os.getenv('DEEPGRAM_HOST_PROTOCOL', 'wss'), self.deepgram_host)
+        websocket_api = "{}://{}/v1/listen?".format(os.getenv("DEEPGRAM_HOST_PROTOCOL", "wss"), self.deepgram_host)
         websocket_url = websocket_api + urlencode(dg_params)
 
         if self.keywords:
             keyword_list = [quote(kw.strip()) for kw in self.keywords.split(",") if kw.strip()]
             if keyword_list:
-                if self.model.startswith('nova-3'):
+                if self.model.startswith("nova-3"):
                     websocket_url += "&keyterm=" + "&keyterm=".join(keyword_list)
                 else:
                     websocket_url += "&keywords=" + "&keywords=".join(keyword_list)
@@ -160,7 +174,7 @@ class DeepgramTranscriber(BaseTranscriber):
     async def send_heartbeat(self, ws: ClientConnection):
         try:
             while True:
-                data = {'type': 'KeepAlive'}
+                data = {"type": "KeepAlive"}
                 try:
                     await ws.send(json.dumps(data))
                 except ConnectionClosed as e:
@@ -178,13 +192,13 @@ class DeepgramTranscriber(BaseTranscriber):
                 except Exception as e:
                     logger.error(f"Error sending heartbeat: {e}")
                     break
-                    
+
                 await asyncio.sleep(5)  # Send a heartbeat message every 5 seconds
         except asyncio.CancelledError:
             logger.info("Heartbeat task cancelled")
             raise
         except Exception as e:
-            logger.error('Error in send_heartbeat: ' + str(e))
+            logger.error("Error in send_heartbeat: " + str(e))
             raise
 
     def _reset_turn_state(self):
@@ -206,7 +220,7 @@ class DeepgramTranscriber(BaseTranscriber):
 
         # Fallback: use last interim if no is_final results received
         if not transcript_to_send and self.current_turn_interim_details:
-            transcript_to_send = self.current_turn_interim_details[-1]['transcript']
+            transcript_to_send = self.current_turn_interim_details[-1]["transcript"]
             logger.info(f"Using last interim as fallback: {transcript_to_send}")
 
         if not transcript_to_send:
@@ -216,16 +230,20 @@ class DeepgramTranscriber(BaseTranscriber):
 
         # Build turn latencies (same as UtteranceEnd logic)
         try:
-            first_interim_to_final_ms, last_interim_to_final_ms = self.calculate_interim_to_final_latencies(self.current_turn_interim_details)
+            first_interim_to_final_ms, last_interim_to_final_ms = self.calculate_interim_to_final_latencies(
+                self.current_turn_interim_details
+            )
 
-            self.turn_latencies.append({
-                'turn_id': self.current_turn_id,
-                'sequence_id': self.current_turn_id,
-                'interim_details': self.current_turn_interim_details,
-                'first_interim_to_final_ms': first_interim_to_final_ms,
-                'last_interim_to_final_ms': last_interim_to_final_ms,
-                'force_finalized': True
-            })
+            self.turn_latencies.append(
+                {
+                    "turn_id": self.current_turn_id,
+                    "sequence_id": self.current_turn_id,
+                    "interim_details": self.current_turn_interim_details,
+                    "first_interim_to_final_ms": first_interim_to_final_ms,
+                    "last_interim_to_final_ms": last_interim_to_final_ms,
+                    "force_finalized": True,
+                }
+            )
         except Exception as e:
             logger.error(f"Error building turn latencies: {e}")
 
@@ -233,7 +251,7 @@ class DeepgramTranscriber(BaseTranscriber):
         data = {
             "type": "transcript",
             "content": transcript_to_send,
-            "force_finalized": True  # For debugging
+            "force_finalized": True,  # For debugging
         }
 
         logger.info(f"Force-finalized transcript after timeout: {transcript_to_send}")
@@ -251,10 +269,11 @@ class DeepgramTranscriber(BaseTranscriber):
                 await asyncio.sleep(1.0)
 
                 # Check if we have pending interim results without finalization
-                if (self.last_interim_time and
-                    not self.is_transcript_sent_for_processing and
-                    (self.final_transcript.strip() or self.current_turn_interim_details)):
-
+                if (
+                    self.last_interim_time
+                    and not self.is_transcript_sent_for_processing
+                    and (self.final_transcript.strip() or self.current_turn_interim_details)
+                ):
                     elapsed = time.time() - self.last_interim_time
 
                     if elapsed > self.interim_timeout:
@@ -294,7 +313,7 @@ class DeepgramTranscriber(BaseTranscriber):
         logger.info("Cleaning up Deepgram transcriber resources")
 
         # Close HTTP session (for non-streaming mode)
-        if hasattr(self, 'session') and self.session and not self.session.closed:
+        if hasattr(self, "session") and self.session and not self.session.closed:
             try:
                 await self.session.close()
                 logger.info("Deepgram HTTP session closed")
@@ -303,10 +322,10 @@ class DeepgramTranscriber(BaseTranscriber):
 
         # Cancel tasks properly
         for task_name, task in [
-            ("heartbeat_task", getattr(self, 'heartbeat_task', None)),
-            ("sender_task", getattr(self, 'sender_task', None)),
-            ("utterance_timeout_task", getattr(self, 'utterance_timeout_task', None)),
-            ("transcription_task", getattr(self, 'transcription_task', None))
+            ("heartbeat_task", getattr(self, "heartbeat_task", None)),
+            ("sender_task", getattr(self, "sender_task", None)),
+            ("utterance_timeout_task", getattr(self, "utterance_timeout_task", None)),
+            ("transcription_task", getattr(self, "transcription_task", None)),
         ]:
             if task is not None and not task.done():
                 task.cancel()
@@ -337,21 +356,21 @@ class DeepgramTranscriber(BaseTranscriber):
             self.session = aiohttp.ClientSession()
 
         headers = {
-            'Authorization': 'Token {}'.format(self.api_key),
-            'Content-Type': 'audio/webm'  # Currently we are assuming this is via browser
+            "Authorization": "Token {}".format(self.api_key),
+            "Content-Type": "audio/webm",  # Currently we are assuming this is via browser
         }
 
         self.current_request_id = self.generate_request_id()
-        self.meta_info['request_id'] = self.current_request_id
+        self.meta_info["request_id"] = self.current_request_id
         async with self.session as session:
             async with session.post(self.api_url, data=audio_data, headers=headers) as response:
                 response_data = await response.json()
                 transcript = response_data["results"]["channels"][0]["alternatives"][0]["transcript"]
-                self.meta_info['transcriber_duration'] = response_data["metadata"]["duration"]
+                self.meta_info["transcriber_duration"] = response_data["metadata"]["duration"]
                 return create_ws_data_packet(transcript, self.meta_info)
 
     async def _check_and_process_end_of_stream(self, ws_data_packet, ws):
-        if 'eos' in ws_data_packet['meta_info'] and ws_data_packet['meta_info']['eos'] is True:
+        if "eos" in ws_data_packet["meta_info"] and ws_data_packet["meta_info"]["eos"] is True:
             await self._close(ws, data={"type": "CloseStream"})
             return True  # Indicates end of processing
 
@@ -370,29 +389,29 @@ class DeepgramTranscriber(BaseTranscriber):
                     self.audio_submission_time = time.time()
                     # Mark per-turn start (monotonic)
                     try:
-                        self.meta_info = ws_data_packet.get('meta_info') if self.meta_info is None else self.meta_info
+                        self.meta_info = ws_data_packet.get("meta_info") if self.meta_info is None else self.meta_info
                         if self.meta_info is not None and not self.current_turn_start_time:
                             self.current_turn_start_time = timestamp_ms()
-                            self.current_turn_id = self.meta_info.get('turn_id') or self.meta_info.get('request_id')
+                            self.current_turn_id = self.meta_info.get("turn_id") or self.meta_info.get("request_id")
                     except Exception:
                         pass
                 end_of_stream = await self._check_and_process_end_of_stream(ws_data_packet, ws)
                 if end_of_stream:
                     break
-                self.meta_info = ws_data_packet.get('meta_info')
+                self.meta_info = ws_data_packet.get("meta_info")
                 start_time = timestamp_ms()
-                transcription = await self._get_http_transcription(ws_data_packet.get('data'))
-                transcription['meta_info']["include_latency"] = True
+                transcription = await self._get_http_transcription(ws_data_packet.get("data"))
+                transcription["meta_info"]["include_latency"] = True
                 # HTTP path: first and total are same
                 try:
                     elapsed = timestamp_ms() - start_time
-                    transcription['meta_info']["transcriber_first_result_latency"] = elapsed
-                    transcription['meta_info']["transcriber_total_stream_duration"] = elapsed
-                    transcription['meta_info']["transcriber_latency"] = elapsed
+                    transcription["meta_info"]["transcriber_first_result_latency"] = elapsed
+                    transcription["meta_info"]["transcriber_total_stream_duration"] = elapsed
+                    transcription["meta_info"]["transcriber_latency"] = elapsed
                 except Exception:
                     pass
-                transcription['meta_info']['audio_duration'] = transcription['meta_info']['transcriber_duration']
-                transcription['meta_info']['last_vocal_frame_timestamp'] = time.time()
+                transcription["meta_info"]["audio_duration"] = transcription["meta_info"]["transcriber_duration"]
+                transcription["meta_info"]["last_vocal_frame_timestamp"] = time.time()
                 yield transcription
 
             if self.transcription_task is not None:
@@ -407,15 +426,15 @@ class DeepgramTranscriber(BaseTranscriber):
                 ws_data_packet = await self.input_queue.get()
                 # Initialise new request
                 if not self.audio_submitted:
-                    self.meta_info = ws_data_packet.get('meta_info')
+                    self.meta_info = ws_data_packet.get("meta_info")
                     self.audio_submitted = True
                     self.audio_submission_time = time.time()
                     self.current_request_id = self.generate_request_id()
-                    self.meta_info['request_id'] = self.current_request_id
+                    self.meta_info["request_id"] = self.current_request_id
                     try:
                         if not self.current_turn_start_time:
                             self.current_turn_start_time = timestamp_ms()
-                            self.current_turn_id = self.meta_info.get('turn_id') or self.meta_info.get('request_id')
+                            self.current_turn_id = self.meta_info.get("turn_id") or self.meta_info.get("request_id")
                     except Exception:
                         pass
 
@@ -430,19 +449,19 @@ class DeepgramTranscriber(BaseTranscriber):
                 self.num_frames += 1
 
                 try:
-                    await ws.send(ws_data_packet.get('data'))
+                    await ws.send(ws_data_packet.get("data"))
                 except ConnectionClosedError as e:
                     logger.error(f"Connection closed while sending data: {e}")
                     break
                 except Exception as e:
                     logger.error(f"Error sending data to websocket: {e}")
                     break
-                    
+
         except asyncio.CancelledError:
             logger.info("Sender stream task cancelled")
             raise
         except Exception as e:
-            logger.error('Error in sender_stream: ' + str(e))
+            logger.error("Error in sender_stream: " + str(e))
             raise
 
     async def receiver(self, ws: ClientConnection):
@@ -452,7 +471,7 @@ class DeepgramTranscriber(BaseTranscriber):
 
                 # If connection_start_time is None, it is the durations of frame submitted till now minus current time
                 if self.connection_start_time is None:
-                    self.connection_start_time = (time.time() - (self.num_frames * self.audio_frame_duration))
+                    self.connection_start_time = time.time() - (self.num_frames * self.audio_frame_duration)
 
                 if msg["type"] == "SpeechStarted":
                     logger.info("Received SpeechStarted event from deepgram")
@@ -482,52 +501,54 @@ class DeepgramTranscriber(BaseTranscriber):
                             latency_ms = round(result_received_at - audio_sent_at, 5)
 
                         interim_detail = {
-                            'transcript': transcript,
-                            'latency_ms': latency_ms,
-                            'is_final': msg.get('is_final', False),
-                            'received_at': time.time(),
-                            'request_id': deepgram_request_id
+                            "transcript": transcript,
+                            "latency_ms": latency_ms,
+                            "is_final": msg.get("is_final", False),
+                            "received_at": time.time(),
+                            "request_id": deepgram_request_id,
                         }
 
-                        logger.info(f"Interim result - request_id: {deepgram_request_id}, is_final: {msg.get('is_final', False)}, transcript: {transcript}")
+                        logger.info(
+                            f"Interim result - request_id: {deepgram_request_id}, is_final: {msg.get('is_final', False)}, transcript: {transcript}"
+                        )
 
                         self.current_turn_interim_details.append(interim_detail)
                         # Track time of last interim for timeout monitoring
                         self.last_interim_time = time.time()
 
-                        data = {
-                            "type": "interim_transcript_received",
-                            "content": transcript
-                        }
+                        data = {"type": "interim_transcript_received", "content": transcript}
                         yield create_ws_data_packet(data, self.meta_info)
 
                     if msg["is_final"] and transcript.strip():
                         logger.info(f"Received interim result with is_final set as True - {transcript}")
-                        self.final_transcript += f' {transcript}'
+                        self.final_transcript += f" {transcript}"
 
                         if self.is_transcript_sent_for_processing:
                             self.is_transcript_sent_for_processing = False
 
                     if msg["speech_final"] and self.final_transcript.strip():
                         if not self.is_transcript_sent_for_processing and self.final_transcript.strip():
-                            logger.info(f"Received speech final hence yielding the following transcript - {self.final_transcript}")
+                            logger.info(
+                                f"Received speech final hence yielding the following transcript - {self.final_transcript}"
+                            )
 
-                            data = {
-                                "type": "transcript",
-                                "content": self.final_transcript
-                            }
+                            data = {"type": "transcript", "content": self.final_transcript}
 
                             # Build turn_latencies with new metrics before resetting
                             try:
-                                first_interim_to_final_ms, last_interim_to_final_ms = self.calculate_interim_to_final_latencies(self.current_turn_interim_details)
+                                first_interim_to_final_ms, last_interim_to_final_ms = (
+                                    self.calculate_interim_to_final_latencies(self.current_turn_interim_details)
+                                )
 
-                                self.turn_latencies.append({
-                                    'turn_id': self.current_turn_id,
-                                    'sequence_id': self.current_turn_id,
-                                    'interim_details': self.current_turn_interim_details,
-                                    'first_interim_to_final_ms': first_interim_to_final_ms,
-                                    'last_interim_to_final_ms': last_interim_to_final_ms
-                                })
+                                self.turn_latencies.append(
+                                    {
+                                        "turn_id": self.current_turn_id,
+                                        "sequence_id": self.current_turn_id,
+                                        "interim_details": self.current_turn_interim_details,
+                                        "first_interim_to_final_ms": first_interim_to_final_ms,
+                                        "last_interim_to_final_ms": last_interim_to_final_ms,
+                                    }
+                                )
 
                                 # Complete turn reset
                                 self.speech_start_time = None
@@ -538,31 +559,38 @@ class DeepgramTranscriber(BaseTranscriber):
                                 self.final_transcript = ""
                                 self.is_transcript_sent_for_processing = True
                             except Exception as e:
-                                logger.error(f"Failed to extract transcript from Deepgram response in speech_final: {e}")
+                                logger.error(
+                                    f"Failed to extract transcript from Deepgram response in speech_final: {e}"
+                                )
                                 pass
                             yield create_ws_data_packet(data, self.meta_info)
 
                 elif msg["type"] == "UtteranceEnd":
-                    logger.info(f"Value of is_transcript_sent_for_processing in utterance end - {self.is_transcript_sent_for_processing}")
+                    logger.info(
+                        f"Value of is_transcript_sent_for_processing in utterance end - {self.is_transcript_sent_for_processing}"
+                    )
                     if not self.is_transcript_sent_for_processing and self.final_transcript.strip():
-                        logger.info(f"Received UtteranceEnd hence yielding the following transcript - {self.final_transcript}")
+                        logger.info(
+                            f"Received UtteranceEnd hence yielding the following transcript - {self.final_transcript}"
+                        )
 
-                        data = {
-                            "type": "transcript",
-                            "content": self.final_transcript
-                        }
+                        data = {"type": "transcript", "content": self.final_transcript}
 
                         # Build turn_latencies with new metrics before resetting
                         try:
-                            first_interim_to_final_ms, last_interim_to_final_ms = self.calculate_interim_to_final_latencies(self.current_turn_interim_details)
+                            first_interim_to_final_ms, last_interim_to_final_ms = (
+                                self.calculate_interim_to_final_latencies(self.current_turn_interim_details)
+                            )
 
-                            self.turn_latencies.append({
-                                'turn_id': self.current_turn_id,
-                                'sequence_id': self.current_turn_id,
-                                'interim_details': self.current_turn_interim_details,
-                                'first_interim_to_final_ms': first_interim_to_final_ms,
-                                'last_interim_to_final_ms': last_interim_to_final_ms
-                            })
+                            self.turn_latencies.append(
+                                {
+                                    "turn_id": self.current_turn_id,
+                                    "sequence_id": self.current_turn_id,
+                                    "interim_details": self.current_turn_interim_details,
+                                    "first_interim_to_final_ms": first_interim_to_final_ms,
+                                    "last_interim_to_final_ms": last_interim_to_final_ms,
+                                }
+                            )
 
                             # Complete turn reset
                             self.speech_start_time = None
@@ -579,7 +607,9 @@ class DeepgramTranscriber(BaseTranscriber):
                     else:
                         # Transcript already sent but we still need to notify speech ended
                         # This prevents callee_speaking from staying True indefinitely
-                        logger.info(f"UtteranceEnd received but transcript already processed, yielding speech_ended notification")
+                        logger.info(
+                            f"UtteranceEnd received but transcript already processed, yielding speech_ended notification"
+                        )
                         self.speech_start_time = None
                         self.speech_end_time = None
                         self.current_turn_interim_details = []
@@ -606,23 +636,21 @@ class DeepgramTranscriber(BaseTranscriber):
         """Establish websocket connection to Deepgram with proper error handling"""
         try:
             websocket_url = self.get_deepgram_ws_url()
-            additional_headers = {
-                'Authorization': 'Token {}'.format(self.api_key)
-            }
-            
+            additional_headers = {"Authorization": "Token {}".format(self.api_key)}
+
             logger.info(f"Attempting to connect to Deepgram websocket: {websocket_url}")
-            
+
             deepgram_ws = await asyncio.wait_for(
                 websockets.connect(websocket_url, additional_headers=additional_headers),
-                timeout=10.0  # 10 second timeout
+                timeout=10.0,  # 10 second timeout
             )
-            
+
             self.websocket_connection = deepgram_ws
             self.connection_authenticated = True
             logger.info("Successfully connected to Deepgram websocket")
-            
+
             return deepgram_ws
-            
+
         except asyncio.TimeoutError:
             logger.error("Timeout while connecting to Deepgram websocket")
             raise ConnectionError("Timeout while connecting to Deepgram websocket")
@@ -644,18 +672,20 @@ class DeepgramTranscriber(BaseTranscriber):
 
     def __calculate_utterance_end(self, data):
         utterance_end = None
-        if 'channel' in data and 'alternatives' in data['channel']:
-            for alternative in data['channel']['alternatives']:
-                if 'words' in alternative:
-                    final_word = alternative['words'][-1]
-                    utterance_end = self.connection_start_time + final_word['end']
+        if "channel" in data and "alternatives" in data["channel"]:
+            for alternative in data["channel"]["alternatives"]:
+                if "words" in alternative:
+                    final_word = alternative["words"][-1]
+                    utterance_end = self.connection_start_time + final_word["end"]
                     logger.info(f"Final word ended at {utterance_end}")
         return utterance_end
 
     def __set_transcription_cursor(self, data):
-        if 'start' in data and 'duration' in data:
-            self.transcription_cursor = data['start'] + data['duration']
-            logger.info(f"Setting transcription cursor at {self.transcription_cursor} (start={data['start']}, duration={data['duration']})")
+        if "start" in data and "duration" in data:
+            self.transcription_cursor = data["start"] + data["duration"]
+            logger.info(
+                f"Setting transcription cursor at {self.transcription_cursor} (start={data['start']}, duration={data['duration']})"
+            )
         else:
             logger.warning(f"Missing start or duration in Deepgram message, cannot update transcription cursor")
         return self.transcription_cursor
@@ -745,21 +775,19 @@ class DeepgramTranscriber(BaseTranscriber):
                 finally:
                     self.websocket_connection = None
                     self.connection_authenticated = False
-            
-            if hasattr(self, 'sender_task') and self.sender_task is not None:
+
+            if hasattr(self, "sender_task") and self.sender_task is not None:
                 self.sender_task.cancel()
-            if hasattr(self, 'heartbeat_task') and self.heartbeat_task is not None:
+            if hasattr(self, "heartbeat_task") and self.heartbeat_task is not None:
                 self.heartbeat_task.cancel()
-            if hasattr(self, 'utterance_timeout_task') and self.utterance_timeout_task is not None:
+            if hasattr(self, "utterance_timeout_task") and self.utterance_timeout_task is not None:
                 self.utterance_timeout_task.cancel()
 
             # Use Deepgram's actual audio duration for billing
             if self.meta_info is not None and "deepgram_duration" in self.meta_info:
                 self.meta_info["transcriber_duration"] = self.meta_info["deepgram_duration"]
 
-            meta = dict(getattr(self, 'meta_info', None) or {})
+            meta = dict(getattr(self, "meta_info", None) or {})
             if self.connection_error:
-                meta['connection_error'] = self.connection_error
-            await self.push_to_transcriber_queue(
-                create_ws_data_packet("transcriber_connection_closed", meta)
-            )
+                meta["connection_error"] = self.connection_error
+            await self.push_to_transcriber_queue(create_ws_data_packet("transcriber_connection_closed", meta))

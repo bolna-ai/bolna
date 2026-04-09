@@ -20,9 +20,21 @@ logger = configure_logger(__name__)
 
 
 class PixaSynthesizer(BaseSynthesizer):
-    def __init__(self, voice_id, voice, model="luna-tts", language="hi", sampling_rate="32000",
-                 stream=False, buffer_size=400, top_p=0.95, repetition_penalty=1.3,
-                 synthesizer_key=None, caching=False, **kwargs):
+    def __init__(
+        self,
+        voice_id,
+        voice,
+        model="luna-tts",
+        language="hi",
+        sampling_rate="32000",
+        stream=False,
+        buffer_size=400,
+        top_p=0.95,
+        repetition_penalty=1.3,
+        synthesizer_key=None,
+        caching=False,
+        **kwargs,
+    ):
         super().__init__(kwargs.get("task_manager_instance", None), stream)
         self.api_key = os.environ.get("PIXA_API_KEY") if synthesizer_key is None else synthesizer_key
         self.voice_id = voice_id
@@ -76,7 +88,7 @@ class PixaSynthesizer(BaseSynthesizer):
                 1,  # mono
                 self.native_sampling_rate,
                 self.target_sampling_rate,
-                None
+                None,
             )
             # Convert to mulaw for telephony if enabled
             if self.use_mulaw:
@@ -90,23 +102,19 @@ class PixaSynthesizer(BaseSynthesizer):
         try:
             if self.context_id:
                 self.context_ids_to_ignore.add(self.context_id)
-                interrupt_message = {
-                    "type": "cancel",
-                    "context_id": self.context_id
-                }
-                logger.info(f'handle_interruption: {interrupt_message}')
-                if self.websocket_holder["websocket"] and self.websocket_holder["websocket"].state == websockets.protocol.State.OPEN:
+                interrupt_message = {"type": "cancel", "context_id": self.context_id}
+                logger.info(f"handle_interruption: {interrupt_message}")
+                if (
+                    self.websocket_holder["websocket"]
+                    and self.websocket_holder["websocket"].state == websockets.protocol.State.OPEN
+                ):
                     await self.websocket_holder["websocket"].send(json.dumps(interrupt_message))
                 self.context_id = None
         except Exception as e:
             logger.error(f"Error in handle_interruption: {e}")
 
     def form_payload(self, text, is_final=False):
-        payload = {
-            "type": "text",
-            "content": text,
-            "is_final": is_final
-        }
+        payload = {"type": "text", "content": text, "is_final": is_final}
         if self.context_id:
             payload["context_id"] = self.context_id
         return payload
@@ -117,12 +125,19 @@ class PixaSynthesizer(BaseSynthesizer):
                 return
 
             if not self.should_synthesize_response(sequence_id):
-                logger.info(f"Not synthesizing text as the sequence_id ({sequence_id}) is not in the list of sequence_ids present in the task manager.")
+                logger.info(
+                    f"Not synthesizing text as the sequence_id ({sequence_id}) is not in the list of sequence_ids present in the task manager."
+                )
                 return
 
-            while self.websocket_holder["websocket"] is None or self.websocket_holder["websocket"].state != websockets.protocol.State.OPEN:
+            while (
+                self.websocket_holder["websocket"] is None
+                or self.websocket_holder["websocket"].state != websockets.protocol.State.OPEN
+            ):
                 if self.conversation_ended or self.connection_error:
-                    logger.info(f"Aborting pixa sender wait: conversation_ended={self.conversation_ended} connection_error={self.connection_error}")
+                    logger.info(
+                        f"Aborting pixa sender wait: conversation_ended={self.conversation_ended} connection_error={self.connection_error}"
+                    )
                     return
                 logger.info("Waiting for Pixa WebSocket connection to be established...")
                 await asyncio.sleep(0.5)
@@ -157,7 +172,10 @@ class PixaSynthesizer(BaseSynthesizer):
                 if self.conversation_ended:
                     return
 
-                if self.websocket_holder["websocket"] is None or self.websocket_holder["websocket"].state != websockets.protocol.State.OPEN:
+                if (
+                    self.websocket_holder["websocket"] is None
+                    or self.websocket_holder["websocket"].state != websockets.protocol.State.OPEN
+                ):
                     if self.connection_error:
                         return
                     now = time.perf_counter()
@@ -184,14 +202,14 @@ class PixaSynthesizer(BaseSynthesizer):
                     # Handle JSON status messages
                     try:
                         data = json.loads(response)
-                        context_id = data.get('context_id')
+                        context_id = data.get("context_id")
 
                         if context_id and context_id in self.context_ids_to_ignore:
                             continue
 
-                        if data.get('type') == 'done' or data.get('done'):
-                            yield b'\x00'
-                        elif data.get('type') == 'error':
+                        if data.get("type") == "done" or data.get("done"):
+                            yield b"\x00"
+                        elif data.get("type") == "error":
                             logger.error(f"Pixa error: {data.get('message', 'Unknown error')}")
                         else:
                             logger.info(f"Pixa status message: {data}")
@@ -208,15 +226,12 @@ class PixaSynthesizer(BaseSynthesizer):
         """One-off synthesis using HTTP API. Returns PCM audio for preview."""
         try:
             url = f"https://{self.api_host}/api/v1/synthesize"
-            headers = {
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json"
-            }
+            headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
             payload = {
                 "text": text,
                 "voice": self.voice_id,
                 "top_p": self.top_p,
-                "repetition_penalty": self.repetition_penalty
+                "repetition_penalty": self.repetition_penalty,
             }
 
             async with aiohttp.ClientSession() as session:
@@ -234,10 +249,7 @@ class PixaSynthesizer(BaseSynthesizer):
 
                     # Resample from 32kHz to 8kHz
                     resampled, _ = audioop.ratecv(
-                        pcm_audio, 2, 1,
-                        self.native_sampling_rate,
-                        self.target_sampling_rate,
-                        None
+                        pcm_audio, 2, 1, self.native_sampling_rate, self.target_sampling_rate, None
                     )
                     return resampled
 
@@ -259,7 +271,7 @@ class PixaSynthesizer(BaseSynthesizer):
                     try:
                         if self.current_turn_start_time is not None:
                             first_result_latency = time.perf_counter() - self.current_turn_start_time
-                            self.meta_info['synthesizer_latency'] = first_result_latency
+                            self.meta_info["synthesizer_latency"] = first_result_latency
                     except Exception:
                         pass
 
@@ -267,8 +279,8 @@ class PixaSynthesizer(BaseSynthesizer):
                 if self.meta_info is None:
                     self.meta_info = {}
 
-                self.meta_info['format'] = 'mulaw' if self.use_mulaw else 'pcm'
-                self.meta_info['sample_rate'] = self.target_sampling_rate
+                self.meta_info["format"] = "mulaw" if self.use_mulaw else "pcm"
+                self.meta_info["sample_rate"] = self.target_sampling_rate
                 audio = message
 
                 if not self.first_chunk_generated:
@@ -281,19 +293,23 @@ class PixaSynthesizer(BaseSynthesizer):
                     self.first_chunk_generated = False
                     self.last_text_sent = True
 
-                if message == b'\x00':
+                if message == b"\x00":
                     logger.info("Received end of stream marker")
                     self.meta_info["end_of_synthesizer_stream"] = True
                     self.first_chunk_generated = False
                     try:
                         if self.current_turn_start_time is not None:
                             total_stream_duration = time.perf_counter() - self.current_turn_start_time
-                            self.turn_latencies.append({
-                                'turn_id': self.current_turn_id,
-                                'sequence_id': self.current_turn_id,
-                                'first_result_latency_ms': round((self.meta_info.get('synthesizer_latency', 0)) * 1000),
-                                'total_stream_duration_ms': round(total_stream_duration * 1000)
-                            })
+                            self.turn_latencies.append(
+                                {
+                                    "turn_id": self.current_turn_id,
+                                    "sequence_id": self.current_turn_id,
+                                    "first_result_latency_ms": round(
+                                        (self.meta_info.get("synthesizer_latency", 0)) * 1000
+                                    ),
+                                    "total_stream_duration_ms": round(total_stream_duration * 1000),
+                                }
+                            )
                             self.current_turn_start_time = None
                             self.current_turn_id = None
                     except Exception:
@@ -317,8 +333,7 @@ class PixaSynthesizer(BaseSynthesizer):
                 headers["Authorization"] = f"Bearer {self.api_key}"
 
             websocket = await asyncio.wait_for(
-                websockets.connect(self.ws_url, additional_headers=headers),
-                timeout=10.0
+                websockets.connect(self.ws_url, additional_headers=headers), timeout=10.0
             )
 
             # Send initial configuration
@@ -326,7 +341,7 @@ class PixaSynthesizer(BaseSynthesizer):
                 "type": "config",
                 "voice": self.voice_id,
                 "top_p": self.top_p,
-                "repetition_penalty": self.repetition_penalty
+                "repetition_penalty": self.repetition_penalty,
             }
             await websocket.send(json.dumps(config_message))
 
@@ -341,9 +356,9 @@ class PixaSynthesizer(BaseSynthesizer):
             return None
         except InvalidHandshake as e:
             error_msg = str(e)
-            if '401' in error_msg or '403' in error_msg:
+            if "401" in error_msg or "403" in error_msg:
                 logger.error(f"Pixa authentication failed: Invalid or expired API key - {e}")
-            elif '404' in error_msg:
+            elif "404" in error_msg:
                 logger.error(f"Pixa endpoint not found: {e}")
             else:
                 logger.error(f"Pixa handshake failed: {e}")
@@ -358,7 +373,10 @@ class PixaSynthesizer(BaseSynthesizer):
         max_failures = 3
 
         while consecutive_failures < max_failures:
-            if self.websocket_holder["websocket"] is None or self.websocket_holder["websocket"].state != websockets.protocol.State.OPEN:
+            if (
+                self.websocket_holder["websocket"] is None
+                or self.websocket_holder["websocket"].state != websockets.protocol.State.OPEN
+            ):
                 logger.info("Re-establishing Pixa connection...")
                 result = await self.establish_connection()
                 if result is None:
@@ -389,11 +407,11 @@ class PixaSynthesizer(BaseSynthesizer):
 
             try:
                 self.current_turn_start_time = time.perf_counter()
-                self.current_turn_id = meta_info.get('turn_id') or meta_info.get('sequence_id')
+                self.current_turn_id = meta_info.get("turn_id") or meta_info.get("sequence_id")
             except Exception:
                 pass
 
-            self.sender_task = asyncio.create_task(self.sender(text, meta_info.get('sequence_id'), end_of_llm_stream))
+            self.sender_task = asyncio.create_task(self.sender(text, meta_info.get("sequence_id"), end_of_llm_stream))
             self.text_queue.append(meta_info)
         else:
             self.internal_queue.put_nowait(message)

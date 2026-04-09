@@ -19,23 +19,26 @@ logger = configure_logger(__name__)
 class VoicemailHandler:
     def __init__(self, tm: "TaskManager", config: dict, output_tool_available: bool):
         self.tm = tm
-        self.enabled: bool = config.get('voicemail', False)
+        self.enabled: bool = config.get("voicemail", False)
         if not output_tool_available:
             self.enabled = False
         self.detected: bool = False
         self.check_task: Optional[asyncio.Task] = None
         self.detection_start_time: Optional[float] = None
         self.last_check_time: Optional[float] = None
-        self.check_interval: float = config.get('voicemail_check_interval', 7.0)
-        self.min_transcript_length: int = config.get('voicemail_min_transcript_length', 7)
-        self.detection_duration: float = config.get('voicemail_detection_duration', 30.0)
-        self.detection_prompt: str = VOICEMAIL_DETECTION_PROMPT + """
+        self.check_interval: float = config.get("voicemail_check_interval", 7.0)
+        self.min_transcript_length: int = config.get("voicemail_min_transcript_length", 7)
+        self.detection_duration: float = config.get("voicemail_detection_duration", 30.0)
+        self.detection_prompt: str = (
+            VOICEMAIL_DETECTION_PROMPT
+            + """
                     Respond only in this JSON format:
                         {{
                           "is_voicemail": "Yes" or "No"
                         }}
                 """
-        self.llm_model: str = os.getenv('VOICEMAIL_DETECTION_LLM', 'gpt-4.1-mini')
+        )
+        self.llm_model: str = os.getenv("VOICEMAIL_DETECTION_LLM", "gpt-4.1-mini")
 
     def should_check(self, transcriber_message: str, is_final: bool = True) -> bool:
         if not self.enabled:
@@ -58,14 +61,18 @@ class VoicemailHandler:
             return False
 
         if not is_final:
-            time_since_last_check = (current_time - self.last_check_time) if self.last_check_time else float('inf')
+            time_since_last_check = (current_time - self.last_check_time) if self.last_check_time else float("inf")
             if time_since_last_check < self.check_interval:
-                logger.info(f"Skipping interim voicemail check - only {time_since_last_check:.2f}s since last check (need {self.check_interval}s)")
+                logger.info(
+                    f"Skipping interim voicemail check - only {time_since_last_check:.2f}s since last check (need {self.check_interval}s)"
+                )
                 return False
 
             word_count = len(transcriber_message.strip().split())
             if word_count < self.min_transcript_length:
-                logger.info(f"Skipping interim voicemail check - transcript too short ({word_count} words < {self.min_transcript_length})")
+                logger.info(
+                    f"Skipping interim voicemail check - transcript too short ({word_count} words < {self.min_transcript_length})"
+                )
                 return False
 
         return True
@@ -76,24 +83,24 @@ class VoicemailHandler:
 
         self.last_check_time = time.time()
         time_elapsed = self.last_check_time - self.detection_start_time
-        logger.info(f"Triggering background voicemail check at {time_elapsed:.2f}s into detection window (is_final={is_final}): {transcriber_message}")
+        logger.info(
+            f"Triggering background voicemail check at {time_elapsed:.2f}s into detection window (is_final={is_final}): {transcriber_message}"
+        )
 
         try:
-            self.check_task = asyncio.create_task(
-                self._background_check(transcriber_message, meta_info, is_final)
-            )
+            self.check_task = asyncio.create_task(self._background_check(transcriber_message, meta_info, is_final))
         except Exception as e:
             logger.error(f"Error starting voicemail check background task: {e}")
 
     async def _background_check(self, transcriber_message: str, meta_info: dict, is_final: bool) -> None:
         try:
-            if "llm_agent" not in self.tm.tools or not hasattr(self.tm.tools["llm_agent"], 'check_for_voicemail'):
+            if "llm_agent" not in self.tm.tools or not hasattr(self.tm.tools["llm_agent"], "check_for_voicemail"):
                 logger.warning("Voicemail detection enabled but llm_agent doesn't support check_for_voicemail")
                 return
 
             prompt = [
                 {"role": "system", "content": self.detection_prompt},
-                {"role": "user", "content": f"User message: {transcriber_message}"}
+                {"role": "user", "content": f"User message: {transcriber_message}"},
             ]
 
             convert_to_request_log(
@@ -102,12 +109,11 @@ class VoicemailHandler:
                 component=LogComponent.LLM_VOICEMAIL,
                 direction=LogDirection.REQUEST,
                 model=self.llm_model,
-                run_id=self.tm.run_id
+                run_id=self.tm.run_id,
             )
 
             voicemail_result, metadata = await self.tm.tools["llm_agent"].check_for_voicemail(
-                transcriber_message,
-                self.detection_prompt
+                transcriber_message, self.detection_prompt
             )
 
             is_voicemail = (
@@ -116,15 +122,17 @@ class VoicemailHandler:
                 else False
             )
 
-            self.tm.llm_latencies.other_latencies.append({
-                "type": 'voicemail_check',
-                "latency_ms": metadata.get("latency_ms", None),
-                "model": self.llm_model,
-                "provider": "openai",  # TODO: Make dynamic based on provider used
-                "service_tier": metadata.get("service_tier", None),
-                "llm_host": metadata.get("llm_host", None),
-                "sequence_id": meta_info.get("sequence_id")
-            })
+            self.tm.llm_latencies.other_latencies.append(
+                {
+                    "type": "voicemail_check",
+                    "latency_ms": metadata.get("latency_ms", None),
+                    "model": self.llm_model,
+                    "provider": "openai",  # TODO: Make dynamic based on provider used
+                    "service_tier": metadata.get("service_tier", None),
+                    "llm_host": metadata.get("llm_host", None),
+                    "sequence_id": meta_info.get("sequence_id"),
+                }
+            )
 
             convert_to_request_log(
                 message=voicemail_result,
@@ -133,10 +141,10 @@ class VoicemailHandler:
                 direction=LogDirection.RESPONSE,
                 model=self.llm_model,
                 run_id=self.tm.run_id,
-                input_tokens=metadata.get('input_tokens'),
-                output_tokens=metadata.get('output_tokens'),
-                reasoning_tokens=metadata.get('reasoning_tokens'),
-                cached_tokens=metadata.get('cached_tokens'),
+                input_tokens=metadata.get("input_tokens"),
+                output_tokens=metadata.get("output_tokens"),
+                reasoning_tokens=metadata.get("reasoning_tokens"),
+                cached_tokens=metadata.get("cached_tokens"),
             )
 
             if is_voicemail:

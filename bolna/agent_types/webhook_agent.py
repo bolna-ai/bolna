@@ -19,7 +19,7 @@ class WebhookAgent(BaseAgent):
                     async with session.post(self.webhook_url, json=payload) as response:
                         if response.status == 200:
                             # need to check if the returned response is json or not
-                            #data = await response.json()
+                            # data = await response.json()
                             return True
                         else:
                             logger.error(f"Error: {response.status} - {await response.text()}")

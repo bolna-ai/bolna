@@ -13,8 +13,9 @@ load_dotenv()
 
 
 class OPENAISynthesizer(BaseSynthesizer):
-    def __init__(self, voice, audio_format="mp3", model="tts-1", stream=False, sampling_rate=8000,
-                 buffer_size=400, **kwargs):
+    def __init__(
+        self, voice, audio_format="mp3", model="tts-1", stream=False, sampling_rate=8000, buffer_size=400, **kwargs
+    ):
         super().__init__(kwargs.get("task_manager_instance"), stream, buffer_size)
         self.voice = voice
         self.model = model
@@ -36,7 +37,10 @@ class OPENAISynthesizer(BaseSynthesizer):
 
     async def _generate_http(self, text):
         spoken_response = await self.async_client.audio.speech.create(
-            model=self.model, voice=self.voice, response_format="mp3", input=text,
+            model=self.model,
+            voice=self.voice,
+            response_format="mp3",
+            input=text,
         )
         buffer = io.BytesIO()
         for chunk in spoken_response.iter_bytes(chunk_size=4096):

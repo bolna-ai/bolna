@@ -45,7 +45,7 @@ class SmallestTranscriber(BaseTranscriber):
         keywords: str = None,
         word_timestamps: bool = True,
         process_interim_results: str = "true",
-        **kwargs
+        **kwargs,
     ):
         super().__init__(input_queue)
 
@@ -60,8 +60,8 @@ class SmallestTranscriber(BaseTranscriber):
         self.process_interim_results = process_interim_results
 
         # API configuration
-        self.api_key = kwargs.get("transcriber_key", os.getenv('SMALLEST_API_KEY'))
-        self.smallest_host = os.getenv('SMALLEST_HOST', 'waves-api.smallest.ai')
+        self.api_key = kwargs.get("transcriber_key", os.getenv("SMALLEST_API_KEY"))
+        self.smallest_host = os.getenv("SMALLEST_HOST", "waves-api.smallest.ai")
 
         # Queues
         self.transcriber_output_queue = output_queue
@@ -158,20 +158,22 @@ class SmallestTranscriber(BaseTranscriber):
         - word_timestamps: Enable word-level timing
         """
         params = {
-            'language': self.language,
-            'sample_rate': str(self.sampling_rate),
+            "language": self.language,
+            "sample_rate": str(self.sampling_rate),
         }
 
         # Add encoding if not linear16 (default)
         if self.encoding != "linear16":
-            params['encoding'] = self.encoding
+            params["encoding"] = self.encoding
 
         # Add word timestamps if enabled
         if self.word_timestamps:
-            params['word_timestamps'] = 'true'
+            params["word_timestamps"] = "true"
 
         websocket_url = f"wss://{self.smallest_host}/api/v1/lightning/get_text?{urlencode(params)}"
-        logger.info(f"Smallest WebSocket URL params - language: {self.language}, sample_rate: {self.sampling_rate}, encoding: {self.encoding}, word_timestamps: {self.word_timestamps}")
+        logger.info(
+            f"Smallest WebSocket URL params - language: {self.language}, sample_rate: {self.sampling_rate}, encoding: {self.encoding}, word_timestamps: {self.word_timestamps}"
+        )
         return websocket_url
 
     async def smallest_connect(self, retries: int = 3, timeout: float = 10.0) -> ClientConnection:
@@ -184,15 +186,12 @@ class SmallestTranscriber(BaseTranscriber):
         while attempt < retries:
             try:
                 websocket_url = self.get_smallest_ws_url()
-                additional_headers = {
-                    'Authorization': f'Bearer {self.api_key}'
-                }
+                additional_headers = {"Authorization": f"Bearer {self.api_key}"}
 
                 logger.info(f"Attempting to connect to Smallest AI WebSocket: {websocket_url}")
 
                 ws = await asyncio.wait_for(
-                    websockets.connect(websocket_url, additional_headers=additional_headers),
-                    timeout=timeout
+                    websockets.connect(websocket_url, additional_headers=additional_headers), timeout=timeout
                 )
 
                 self.websocket_connection = ws
@@ -205,7 +204,7 @@ class SmallestTranscriber(BaseTranscriber):
                 raise ConnectionError("Timeout while connecting to Smallest AI WebSocket")
             except InvalidHandshake as e:
                 error_msg = str(e)
-                if '401' in error_msg or '403' in error_msg:
+                if "401" in error_msg or "403" in error_msg:
                     logger.error(f"Smallest AI authentication failed: {e}")
                     raise ConnectionError(f"Smallest AI authentication failed: Invalid API key - {e}")
                 else:
@@ -213,7 +212,7 @@ class SmallestTranscriber(BaseTranscriber):
                     last_err = e
                     attempt += 1
                     if attempt < retries:
-                        await asyncio.sleep(2 ** attempt)
+                        await asyncio.sleep(2**attempt)
             except ConnectionClosedError as e:
                 logger.error(f"Smallest AI WebSocket connection closed unexpectedly: {e}")
                 raise ConnectionError(f"Smallest AI WebSocket connection closed unexpectedly: {e}")
@@ -222,7 +221,7 @@ class SmallestTranscriber(BaseTranscriber):
                 last_err = e
                 attempt += 1
                 if attempt < retries:
-                    await asyncio.sleep(2 ** attempt)
+                    await asyncio.sleep(2**attempt)
 
         raise ConnectionError(f"Failed to connect to Smallest AI after {retries} attempts: {last_err}")
 
@@ -269,7 +268,7 @@ class SmallestTranscriber(BaseTranscriber):
 
         # Fallback: use last interim if no final results received
         if not transcript_to_send and self.current_turn_interim_details:
-            transcript_to_send = self.current_turn_interim_details[-1]['transcript']
+            transcript_to_send = self.current_turn_interim_details[-1]["transcript"]
             logger.info(f"Using last interim as fallback: {transcript_to_send}")
 
         if not transcript_to_send:
@@ -279,24 +278,24 @@ class SmallestTranscriber(BaseTranscriber):
 
         # Build turn latencies
         try:
-            first_interim_to_final_ms, last_interim_to_final_ms = self.calculate_interim_to_final_latencies(self.current_turn_interim_details)
+            first_interim_to_final_ms, last_interim_to_final_ms = self.calculate_interim_to_final_latencies(
+                self.current_turn_interim_details
+            )
 
-            self.turn_latencies.append({
-                'turn_id': self.current_turn_id,
-                'sequence_id': self.current_turn_id,
-                'interim_details': self.current_turn_interim_details,
-                'first_interim_to_final_ms': first_interim_to_final_ms,
-                'last_interim_to_final_ms': last_interim_to_final_ms,
-                'force_finalized': True
-            })
+            self.turn_latencies.append(
+                {
+                    "turn_id": self.current_turn_id,
+                    "sequence_id": self.current_turn_id,
+                    "interim_details": self.current_turn_interim_details,
+                    "first_interim_to_final_ms": first_interim_to_final_ms,
+                    "last_interim_to_final_ms": last_interim_to_final_ms,
+                    "force_finalized": True,
+                }
+            )
         except Exception as e:
             logger.error(f"Error building turn latencies: {e}")
 
-        data = {
-            "type": "transcript",
-            "content": transcript_to_send,
-            "force_finalized": True
-        }
+        data = {"type": "transcript", "content": transcript_to_send, "force_finalized": True}
 
         logger.info(f"Force-finalized transcript: {transcript_to_send}")
         await self.push_to_transcriber_queue(create_ws_data_packet(data, self.meta_info))
@@ -308,10 +307,11 @@ class SmallestTranscriber(BaseTranscriber):
             while True:
                 await asyncio.sleep(1.0)
 
-                if (self.last_interim_time and
-                    not self.is_transcript_sent_for_processing and
-                    (self.final_transcript.strip() or self.current_turn_interim_details)):
-
+                if (
+                    self.last_interim_time
+                    and not self.is_transcript_sent_for_processing
+                    and (self.final_transcript.strip() or self.current_turn_interim_details)
+                ):
                     elapsed = time.time() - self.last_interim_time
 
                     if elapsed > self.interim_timeout:
@@ -355,10 +355,10 @@ class SmallestTranscriber(BaseTranscriber):
 
         # Cancel tasks properly
         for task_name, task in [
-            ("heartbeat_task", getattr(self, 'heartbeat_task', None)),
-            ("sender_task", getattr(self, 'sender_task', None)),
-            ("utterance_timeout_task", getattr(self, 'utterance_timeout_task', None)),
-            ("transcription_task", getattr(self, 'transcription_task', None))
+            ("heartbeat_task", getattr(self, "heartbeat_task", None)),
+            ("sender_task", getattr(self, "sender_task", None)),
+            ("utterance_timeout_task", getattr(self, "utterance_timeout_task", None)),
+            ("transcription_task", getattr(self, "transcription_task", None)),
         ]:
             if task is not None and not task.done():
                 task.cancel()
@@ -392,7 +392,7 @@ class SmallestTranscriber(BaseTranscriber):
 
     async def _check_and_process_end_of_stream(self, ws_data_packet, ws):
         """Check for end of stream signal."""
-        if ws_data_packet.get('meta_info', {}).get('eos') is True:
+        if ws_data_packet.get("meta_info", {}).get("eos") is True:
             await self._close_smallest(ws)
             return True
         return False
@@ -441,7 +441,7 @@ class SmallestTranscriber(BaseTranscriber):
                     try:
                         if not self.current_turn_start_time:
                             self.current_turn_start_time = timestamp_ms()
-                            self.current_turn_id = self.meta_info.get('turn_id') or self.meta_info.get('request_id')
+                            self.current_turn_id = self.meta_info.get("turn_id") or self.meta_info.get("request_id")
                     except Exception:
                         pass
 
@@ -453,9 +453,7 @@ class SmallestTranscriber(BaseTranscriber):
                     self.is_transcript_sent_for_processing = False
 
                     logger.info(f"Starting new turn with turn_id: {self.current_turn_id}")
-                    await self.push_to_transcriber_queue(
-                        create_ws_data_packet("speech_started", self.meta_info)
-                    )
+                    await self.push_to_transcriber_queue(create_ws_data_packet("speech_started", self.meta_info))
 
                 # Check for end of stream
                 end_of_stream = await self._check_and_process_end_of_stream(ws_data_packet, ws)
@@ -516,16 +514,16 @@ class SmallestTranscriber(BaseTranscriber):
                     self.connection_start_time = time.time() - (self.num_frames * self.audio_frame_duration)
 
                 # Extract session ID if present
-                if 'session_id' in data and not self.smallest_session_id:
-                    self.smallest_session_id = data['session_id']
+                if "session_id" in data and not self.smallest_session_id:
+                    self.smallest_session_id = data["session_id"]
                     logger.info(f"Smallest AI session ID: {self.smallest_session_id}")
 
                 # Get transcript text
-                transcript = data.get('transcript', '').strip()
-                full_transcript = data.get('full_transcript', '').strip()
-                is_final = data.get('is_final', False)
-                is_last = data.get('is_last', False)
-                detected_language = data.get('language')
+                transcript = data.get("transcript", "").strip()
+                full_transcript = data.get("full_transcript", "").strip()
+                is_final = data.get("is_final", False)
+                is_last = data.get("is_last", False)
+                detected_language = data.get("language")
 
                 if transcript:
                     now_timestamp = time.time()
@@ -551,17 +549,19 @@ class SmallestTranscriber(BaseTranscriber):
 
                     # Track interim details
                     interim_detail = {
-                        'transcript': transcript,
-                        'latency_ms': latency_ms,
-                        'is_final': is_final,
-                        'received_at': now_timestamp,
-                        'language': detected_language,
-                        'session_id': self.smallest_session_id
+                        "transcript": transcript,
+                        "latency_ms": latency_ms,
+                        "is_final": is_final,
+                        "received_at": now_timestamp,
+                        "language": detected_language,
+                        "session_id": self.smallest_session_id,
                     }
                     self.current_turn_interim_details.append(interim_detail)
                     self.last_interim_time = now_timestamp
 
-                    logger.info(f"Received transcript - is_final: {is_final}, language: {detected_language}, text: {transcript}")
+                    logger.info(
+                        f"Received transcript - is_final: {is_final}, language: {detected_language}, text: {transcript}"
+                    )
 
                     if is_final:
                         # Use only the segment transcript (not cumulative full_transcript)
@@ -578,26 +578,30 @@ class SmallestTranscriber(BaseTranscriber):
                         # Calculate total duration
                         if self.current_turn_start_time:
                             total_stream_duration = time.time() - (self.current_turn_start_time / 1000)
-                            self.meta_info['transcriber_total_stream_duration'] = total_stream_duration
-                            self.meta_info['transcriber_latency'] = total_stream_duration
+                            self.meta_info["transcriber_total_stream_duration"] = total_stream_duration
+                            self.meta_info["transcriber_latency"] = total_stream_duration
 
                         # Build turn latencies
                         try:
-                            first_interim_to_final_ms, last_interim_to_final_ms = self.calculate_interim_to_final_latencies(self.current_turn_interim_details)
+                            first_interim_to_final_ms, last_interim_to_final_ms = (
+                                self.calculate_interim_to_final_latencies(self.current_turn_interim_details)
+                            )
 
-                            self.turn_latencies.append({
-                                'turn_id': self.current_turn_id,
-                                'sequence_id': self.current_turn_id,
-                                'interim_details': self.current_turn_interim_details,
-                                'first_interim_to_final_ms': first_interim_to_final_ms,
-                                'last_interim_to_final_ms': last_interim_to_final_ms
-                            })
+                            self.turn_latencies.append(
+                                {
+                                    "turn_id": self.current_turn_id,
+                                    "sequence_id": self.current_turn_id,
+                                    "interim_details": self.current_turn_interim_details,
+                                    "first_interim_to_final_ms": first_interim_to_final_ms,
+                                    "last_interim_to_final_ms": last_interim_to_final_ms,
+                                }
+                            )
                         except Exception as e:
                             logger.error(f"Error building turn latencies: {e}")
 
                         transcript_packet = {
                             "type": "transcript",
-                            "content": segment_transcript  # Yield just the segment
+                            "content": segment_transcript,  # Yield just the segment
                         }
                         logger.info(f"Yielding final transcript segment: {segment_transcript}")
                         yield create_ws_data_packet(transcript_packet, self.meta_info)
@@ -608,10 +612,7 @@ class SmallestTranscriber(BaseTranscriber):
                         self.current_turn_interim_details = []
                     else:
                         # Interim transcript
-                        interim_packet = {
-                            "type": "interim_transcript_received",
-                            "content": transcript
-                        }
+                        interim_packet = {"type": "interim_transcript_received", "content": transcript}
                         yield create_ws_data_packet(interim_packet, self.meta_info)
 
                 # Check if this is the last message
@@ -634,7 +635,7 @@ class SmallestTranscriber(BaseTranscriber):
 
     def get_meta_info(self):
         """Return current meta_info."""
-        return getattr(self, 'meta_info', {})
+        return getattr(self, "meta_info", {})
 
     async def run(self):
         """Start the transcription task."""
@@ -701,17 +702,15 @@ class SmallestTranscriber(BaseTranscriber):
                     self.connection_authenticated = False
 
             # Cancel tasks
-            if hasattr(self, 'sender_task') and self.sender_task:
+            if hasattr(self, "sender_task") and self.sender_task:
                 self.sender_task.cancel()
-            if hasattr(self, 'heartbeat_task') and self.heartbeat_task:
+            if hasattr(self, "heartbeat_task") and self.heartbeat_task:
                 self.heartbeat_task.cancel()
-            if hasattr(self, 'utterance_timeout_task') and self.utterance_timeout_task:
+            if hasattr(self, "utterance_timeout_task") and self.utterance_timeout_task:
                 self.utterance_timeout_task.cancel()
 
             # Send connection closed message
-            meta = dict(getattr(self, 'meta_info', None) or {})
+            meta = dict(getattr(self, "meta_info", None) or {})
             if self.connection_error:
-                meta['connection_error'] = self.connection_error
-            await self.push_to_transcriber_queue(
-                create_ws_data_packet("transcriber_connection_closed", meta)
-            )
+                meta["connection_error"] = self.connection_error
+            await self.push_to_transcriber_queue(create_ws_data_packet("transcriber_connection_closed", meta))

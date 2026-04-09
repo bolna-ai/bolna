@@ -1,7 +1,8 @@
 __version__ = "0.10.1"
 
-import os 
+import os
 from bolna.helpers.logger_config import configure_logger
+
 logger = configure_logger(__name__)
 
 

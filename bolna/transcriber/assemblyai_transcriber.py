@@ -20,9 +20,19 @@ load_dotenv()
 
 
 class AssemblyAITranscriber(BaseTranscriber):
-    def __init__(self, telephony_provider, input_queue=None, model='universal-streaming', stream=True, language="en",
-                 sampling_rate="16000", encoding="pcm_s16le", output_queue=None, format_turns=True,
-                 **kwargs):
+    def __init__(
+        self,
+        telephony_provider,
+        input_queue=None,
+        model="universal-streaming",
+        stream=True,
+        language="en",
+        sampling_rate="16000",
+        encoding="pcm_s16le",
+        output_queue=None,
+        format_turns=True,
+        **kwargs,
+    ):
         super().__init__(input_queue)
         self.language = language
         self.stream = stream
@@ -33,22 +43,22 @@ class AssemblyAITranscriber(BaseTranscriber):
         self.sampling_rate = int(sampling_rate)
         self.encoding = encoding
         self.format_turns = format_turns
-        
-        self.api_key = kwargs.get("transcriber_key", os.getenv('ASSEMBLY_API_KEY'))
+
+        self.api_key = kwargs.get("transcriber_key", os.getenv("ASSEMBLY_API_KEY"))
         self.assemblyai_host = "streaming.assemblyai.com"
         self.transcriber_output_queue = output_queue
         self.transcription_task = None
-        
+
         # Audio and transcription tracking
         self.audio_cursor = 0.0
         self.transcription_cursor = 0.0
         self.interruption_signalled = False
-        
+
         if not self.stream:
             # For non-streaming HTTP API
             self.api_url = f"https://api.assemblyai.com/v2/transcript"
             self.session = aiohttp.ClientSession()
-            
+
         self.audio_submitted = False
         self.audio_submission_time = None
         self.num_frames = 0
@@ -56,7 +66,7 @@ class AssemblyAITranscriber(BaseTranscriber):
         self.audio_frame_duration = 0.0
         self.audio_frame_timestamps = []  # List of (frame_start, frame_end, send_timestamp)
         self.connected_via_dashboard = kwargs.get("enforce_streaming", True)
-        
+
         # Message states for turn management
         self.session_id = None
         self.current_transcript = ""
@@ -69,26 +79,23 @@ class AssemblyAITranscriber(BaseTranscriber):
 
     def get_assemblyai_ws_url(self):
         """Get the AssemblyAI WebSocket URL with appropriate parameters"""
-        connection_params = {
-            "sample_rate": self.sampling_rate,
-            "format_turns": self.format_turns
-        }
+        connection_params = {"sample_rate": self.sampling_rate, "format_turns": self.format_turns}
 
-        if self.provider in ('twilio', 'exotel', 'plivo', 'vobiz'):
-            self.encoding = 'mulaw' if self.provider in ("twilio") else "linear16"
+        if self.provider in ("twilio", "exotel", "plivo", "vobiz"):
+            self.encoding = "mulaw" if self.provider in ("twilio") else "linear16"
             self.sampling_rate = 8000
             self.audio_frame_duration = 0.2
-            connection_params['sample_rate'] = self.sampling_rate
+            connection_params["sample_rate"] = self.sampling_rate
 
         elif self.provider == "web_based_call":
             self.encoding = "linear16"
             self.sampling_rate = 16000
             self.audio_frame_duration = 0.256
-            connection_params['sample_rate'] = self.sampling_rate
+            connection_params["sample_rate"] = self.sampling_rate
 
         elif not self.connected_via_dashboard:
             self.encoding = "linear16"
-            connection_params['sample_rate'] = 16000
+            connection_params["sample_rate"] = 16000
 
         if self.provider == "playground":
             self.sampling_rate = 8000
@@ -114,12 +121,12 @@ class AssemblyAITranscriber(BaseTranscriber):
                     break
 
                 await asyncio.sleep(5)
-                
+
         except asyncio.CancelledError:
             logger.info("Heartbeat task cancelled")
             raise
         except Exception as e:
-            logger.error(f'Error in send_heartbeat: {e}')
+            logger.error(f"Error in send_heartbeat: {e}")
             raise
 
     async def toggle_connection(self):
@@ -148,7 +155,7 @@ class AssemblyAITranscriber(BaseTranscriber):
         logger.info("Cleaning up AssemblyAI transcriber resources")
 
         # Close HTTP session (for non-streaming mode)
-        if hasattr(self, 'session') and self.session and not self.session.closed:
+        if hasattr(self, "session") and self.session and not self.session.closed:
             try:
                 await self.session.close()
                 logger.info("AssemblyAI HTTP session closed")
@@ -157,9 +164,9 @@ class AssemblyAITranscriber(BaseTranscriber):
 
         # Cancel tasks properly
         for task_name, task in [
-            ("heartbeat_task", getattr(self, 'heartbeat_task', None)),
-            ("sender_task", getattr(self, 'sender_task', None)),
-            ("transcription_task", getattr(self, 'transcription_task', None))
+            ("heartbeat_task", getattr(self, "heartbeat_task", None)),
+            ("sender_task", getattr(self, "sender_task", None)),
+            ("transcription_task", getattr(self, "transcription_task", None)),
         ]:
             if task is not None and not task.done():
                 task.cancel()
@@ -187,11 +194,11 @@ class AssemblyAITranscriber(BaseTranscriber):
             self.session = aiohttp.ClientSession()
 
         headers = {
-            'Authorization': self.api_key,
+            "Authorization": self.api_key,
         }
 
         self.current_request_id = self.generate_request_id()
-        self.meta_info['request_id'] = self.current_request_id
+        self.meta_info["request_id"] = self.current_request_id
         start_time = time.time()
 
         upload_url = "https://api.assemblyai.com/v2/upload"
@@ -199,36 +206,33 @@ class AssemblyAITranscriber(BaseTranscriber):
             if response.status != 200:
                 raise Exception(f"Failed to upload audio: {response.status}")
             upload_response = await response.json()
-            audio_url = upload_response['upload_url']
+            audio_url = upload_response["upload_url"]
 
-        transcript_request = {
-            'audio_url': audio_url,
-            'language_code': self.language if self.language != 'en' else None
-        }
+        transcript_request = {"audio_url": audio_url, "language_code": self.language if self.language != "en" else None}
 
-        headers['Content-Type'] = 'application/json'
+        headers["Content-Type"] = "application/json"
         async with self.session.post(self.api_url, json=transcript_request, headers=headers) as response:
             if response.status != 200:
                 raise Exception(f"Failed to submit transcription: {response.status}")
             transcript_response = await response.json()
-            transcript_id = transcript_response['id']
+            transcript_id = transcript_response["id"]
 
         while True:
             async with self.session.get(f"{self.api_url}/{transcript_id}", headers=headers) as response:
                 result = await response.json()
-                if result['status'] == 'completed':
-                    transcript = result['text'] or ""
+                if result["status"] == "completed":
+                    transcript = result["text"] or ""
                     self.meta_info["start_time"] = start_time
-                    self.meta_info['transcriber_latency'] = time.time() - start_time
-                    self.meta_info['transcriber_duration'] = result.get('audio_duration', 0)
+                    self.meta_info["transcriber_latency"] = time.time() - start_time
+                    self.meta_info["transcriber_duration"] = result.get("audio_duration", 0)
                     return create_ws_data_packet(transcript, self.meta_info)
-                elif result['status'] == 'error':
+                elif result["status"] == "error":
                     raise Exception(f"Transcription failed: {result.get('error')}")
                 await asyncio.sleep(1)
 
     async def _check_and_process_end_of_stream(self, ws_data_packet, ws):
         """Check for end of stream signal"""
-        if 'eos' in ws_data_packet['meta_info'] and ws_data_packet['meta_info']['eos'] is True:
+        if "eos" in ws_data_packet["meta_info"] and ws_data_packet["meta_info"]["eos"] is True:
             termination_msg = {"type": "Terminate"}
             await ws.send(json.dumps(termination_msg))
             return True
@@ -264,32 +268,32 @@ class AssemblyAITranscriber(BaseTranscriber):
         try:
             while True:
                 ws_data_packet = await self.input_queue.get()
-                
+
                 if not self.audio_submitted:
                     self.audio_submitted = True
                     self.audio_submission_time = time.time()
-                    
+
                 end_of_stream = await self._check_and_process_end_of_stream(ws_data_packet, ws)
                 if end_of_stream:
                     break
-                    
+
                 if ws_data_packet is not None:
-                    self.meta_info = ws_data_packet.get('meta_info', {})
+                    self.meta_info = ws_data_packet.get("meta_info", {})
                     start_time = time.perf_counter()
-                    transcription = await self._get_http_transcription(ws_data_packet.get('data'))
-                    transcription['meta_info']["include_latency"] = True
+                    transcription = await self._get_http_transcription(ws_data_packet.get("data"))
+                    transcription["meta_info"]["include_latency"] = True
                     # HTTP path: first result and total duration are the same
                     elapsed = time.perf_counter() - start_time
-                    transcription['meta_info']["transcriber_first_result_latency"] = elapsed
-                    transcription['meta_info']["transcriber_total_stream_duration"] = elapsed
-                    transcription['meta_info']["transcriber_latency"] = elapsed
-                    transcription['meta_info']['audio_duration'] = transcription['meta_info']['transcriber_duration']
-                    transcription['meta_info']['last_vocal_frame_timestamp'] = time.time()
+                    transcription["meta_info"]["transcriber_first_result_latency"] = elapsed
+                    transcription["meta_info"]["transcriber_total_stream_duration"] = elapsed
+                    transcription["meta_info"]["transcriber_latency"] = elapsed
+                    transcription["meta_info"]["audio_duration"] = transcription["meta_info"]["transcriber_duration"]
+                    transcription["meta_info"]["last_vocal_frame_timestamp"] = time.time()
                     yield transcription
 
             if self.transcription_task is not None:
                 self.transcription_task.cancel()
-                
+
         except asyncio.CancelledError:
             logger.info("Cancelled sender task")
             return
@@ -302,16 +306,16 @@ class AssemblyAITranscriber(BaseTranscriber):
 
                 if not self.audio_submitted:
                     if ws_data_packet is not None:
-                        self.meta_info = ws_data_packet.get('meta_info', {}) or {}
+                        self.meta_info = ws_data_packet.get("meta_info", {}) or {}
                         self.audio_submitted = True
                         self.audio_submission_time = time.time()
                         self.current_request_id = self.generate_request_id()
-                        self.meta_info['request_id'] = self.current_request_id
+                        self.meta_info["request_id"] = self.current_request_id
                         try:
                             if not self.current_turn_start_time:
                                 self.current_turn_start_time = time.perf_counter()
                                 meta = self.meta_info or {}
-                                self.current_turn_id = meta.get('turn_id') or meta.get('request_id')
+                                self.current_turn_id = meta.get("turn_id") or meta.get("request_id")
                         except Exception:
                             pass
 
@@ -326,13 +330,13 @@ class AssemblyAITranscriber(BaseTranscriber):
 
                 self.num_frames += 1
                 self.audio_cursor = self.num_frames * self.audio_frame_duration
-                
-                audio_data = ws_data_packet.get('data')
+
+                audio_data = ws_data_packet.get("data")
                 if isinstance(audio_data, bytes):
                     try:
                         if self.provider == "twilio" and self.encoding == "mulaw":
                             audio_data = ulaw2lin(audio_data, 2)
-                        
+
                         await ws.send(audio_data)
                     except ConnectionClosedError as e:
                         logger.error(f"Connection closed while sending data: {e}")
@@ -342,12 +346,12 @@ class AssemblyAITranscriber(BaseTranscriber):
                         break
                 else:
                     logger.warning(f"Expected bytes for audio data, got: {type(audio_data)}")
-                    
+
         except asyncio.CancelledError:
             logger.info("Sender stream task cancelled")
             raise
         except Exception as e:
-            logger.error(f'Error in sender_stream: {e}')
+            logger.error(f"Error in sender_stream: {e}")
             raise
 
     async def receiver(self, ws: ClientConnection):
@@ -393,37 +397,38 @@ class AssemblyAITranscriber(BaseTranscriber):
                                 self.current_turn_start_time = time.perf_counter()
                                 self.current_turn_id = self.generate_request_id()
                                 self.current_turn_interim_details = []
-                                if 'transcriber_first_result_latency' in (self.meta_info or {}):
-                                    del self.meta_info['transcriber_first_result_latency']
+                                if "transcriber_first_result_latency" in (self.meta_info or {}):
+                                    del self.meta_info["transcriber_first_result_latency"]
 
                             interim_detail = {
-                                'transcript': transcript,
-                                'latency_ms': latency_ms,
-                                'is_final': True,
-                                'received_at': time.time()
+                                "transcript": transcript,
+                                "latency_ms": latency_ms,
+                                "is_final": True,
+                                "received_at": time.time(),
                             }
                             self.current_turn_interim_details.append(interim_detail)
 
-                            data = {
-                                "type": "transcript",
-                                "content": transcript
-                            }
+                            data = {"type": "transcript", "content": transcript}
                             try:
                                 if self.current_turn_start_time is not None:
                                     total_stream_duration = time.perf_counter() - self.current_turn_start_time
-                                    self.meta_info['transcriber_total_stream_duration'] = total_stream_duration
-                                    self.meta_info['transcriber_latency'] = total_stream_duration
+                                    self.meta_info["transcriber_total_stream_duration"] = total_stream_duration
+                                    self.meta_info["transcriber_latency"] = total_stream_duration
 
-                                    first_interim_to_final_ms, last_interim_to_final_ms = self.calculate_interim_to_final_latencies(self.current_turn_interim_details)
+                                    first_interim_to_final_ms, last_interim_to_final_ms = (
+                                        self.calculate_interim_to_final_latencies(self.current_turn_interim_details)
+                                    )
 
                                     turn_info = {
-                                        'turn_id': self.current_turn_id,
-                                        'sequence_id': self.current_turn_id,
-                                        'first_result_latency_ms': round(((self.meta_info or {}).get('transcriber_first_result_latency', 0)) * 1000),
-                                        'total_stream_duration_ms': round(total_stream_duration * 1000),
-                                        'interim_details': self.current_turn_interim_details,
-                                        'first_interim_to_final_ms': first_interim_to_final_ms,
-                                        'last_interim_to_final_ms': last_interim_to_final_ms
+                                        "turn_id": self.current_turn_id,
+                                        "sequence_id": self.current_turn_id,
+                                        "first_result_latency_ms": round(
+                                            ((self.meta_info or {}).get("transcriber_first_result_latency", 0)) * 1000
+                                        ),
+                                        "total_stream_duration_ms": round(total_stream_duration * 1000),
+                                        "interim_details": self.current_turn_interim_details,
+                                        "first_interim_to_final_ms": first_interim_to_final_ms,
+                                        "last_interim_to_final_ms": last_interim_to_final_ms,
                                     }
                                     self.turn_latencies.append(turn_info)
 
@@ -440,28 +445,28 @@ class AssemblyAITranscriber(BaseTranscriber):
                                 self.current_turn_start_time = time.perf_counter()
                                 self.current_turn_id = self.generate_request_id()
                                 self.current_turn_interim_details = []
-                                if 'transcriber_first_result_latency' in (self.meta_info or {}):
-                                    del self.meta_info['transcriber_first_result_latency']
+                                if "transcriber_first_result_latency" in (self.meta_info or {}):
+                                    del self.meta_info["transcriber_first_result_latency"]
 
                             interim_detail = {
-                                'transcript': transcript,
-                                'latency_ms': latency_ms,
-                                'is_final': False,
-                                'received_at': time.time()
+                                "transcript": transcript,
+                                "latency_ms": latency_ms,
+                                "is_final": False,
+                                "received_at": time.time(),
                             }
                             self.current_turn_interim_details.append(interim_detail)
 
-                            data = {
-                                "type": "interim_transcript_received",
-                                "content": transcript
-                            }
+                            data = {"type": "interim_transcript_received", "content": transcript}
                             try:
-                                if self.current_turn_start_time is not None and 'transcriber_first_result_latency' not in (self.meta_info or {}):
+                                if (
+                                    self.current_turn_start_time is not None
+                                    and "transcriber_first_result_latency" not in (self.meta_info or {})
+                                ):
                                     first_result_latency = time.perf_counter() - self.current_turn_start_time
                                     if self.meta_info is None:
                                         self.meta_info = {}
-                                    self.meta_info['transcriber_first_result_latency'] = first_result_latency
-                                    self.meta_info['transcriber_latency'] = first_result_latency
+                                    self.meta_info["transcriber_first_result_latency"] = first_result_latency
+                                    self.meta_info["transcriber_latency"] = first_result_latency
                             except Exception:
                                 pass
                             yield create_ws_data_packet(data, self.meta_info)
@@ -497,13 +502,10 @@ class AssemblyAITranscriber(BaseTranscriber):
             websocket_url = self.get_assemblyai_ws_url()
             logger.info(f"Attempting to connect to AssemblyAI websocket: {websocket_url}")
 
-            headers = {
-                'Authorization': self.api_key
-            }
+            headers = {"Authorization": self.api_key}
 
             assemblyai_ws = await asyncio.wait_for(
-                websockets.connect(websocket_url, additional_headers=headers),
-                timeout=10.0
+                websockets.connect(websocket_url, additional_headers=headers), timeout=10.0
             )
 
             self.websocket_connection = assemblyai_ws
@@ -511,7 +513,7 @@ class AssemblyAITranscriber(BaseTranscriber):
             logger.info("Successfully connected to AssemblyAI websocket")
 
             return assemblyai_ws
-            
+
         except asyncio.TimeoutError:
             logger.error("Timeout while connecting to AssemblyAI websocket")
             raise ConnectionError("Timeout while connecting to AssemblyAI websocket")
@@ -537,21 +539,21 @@ class AssemblyAITranscriber(BaseTranscriber):
         assemblyai_ws = None
         try:
             start_time = time.perf_counter()
-            
+
             try:
                 assemblyai_ws = await self.assemblyai_connect()
             except (ValueError, ConnectionError) as e:
                 logger.error(f"Failed to establish AssemblyAI connection: {e}")
                 await self.toggle_connection()
                 return
-            
+
             if not self.connection_time:
                 self.connection_time = round((time.perf_counter() - start_time) * 1000)
 
             if self.stream:
                 self.sender_task = asyncio.create_task(self.sender_stream(assemblyai_ws))
                 self.heartbeat_task = asyncio.create_task(self.send_heartbeat(assemblyai_ws))
-                
+
                 try:
                     async for message in self.receiver(assemblyai_ws):
                         if self.connection_on:
@@ -590,15 +592,13 @@ class AssemblyAITranscriber(BaseTranscriber):
                 finally:
                     self.websocket_connection = None
                     self.connection_authenticated = False
-            
-            if hasattr(self, 'sender_task') and self.sender_task is not None:
+
+            if hasattr(self, "sender_task") and self.sender_task is not None:
                 self.sender_task.cancel()
-            if hasattr(self, 'heartbeat_task') and self.heartbeat_task is not None:
+            if hasattr(self, "heartbeat_task") and self.heartbeat_task is not None:
                 self.heartbeat_task.cancel()
-            
-            meta = dict(getattr(self, 'meta_info', None) or {})
+
+            meta = dict(getattr(self, "meta_info", None) or {})
             if self.connection_error:
-                meta['connection_error'] = self.connection_error
-            await self.push_to_transcriber_queue(
-                create_ws_data_packet("transcriber_connection_closed", meta)
-            )
+                meta["connection_error"] = self.connection_error
+            await self.push_to_transcriber_queue(create_ws_data_packet("transcriber_connection_closed", meta))

@@ -20,10 +20,22 @@ load_dotenv()
 
 
 class ElevenLabsTranscriber(BaseTranscriber):
-    def __init__(self, telephony_provider, input_queue=None, model='scribe_v2_realtime', stream=True,
-                 language="en", endpointing="400", sampling_rate="16000", encoding="linear16", output_queue=None,
-                 commit_strategy="vad", include_timestamps=True,
-                 include_language_detection=True, **kwargs):
+    def __init__(
+        self,
+        telephony_provider,
+        input_queue=None,
+        model="scribe_v2_realtime",
+        stream=True,
+        language="en",
+        endpointing="400",
+        sampling_rate="16000",
+        encoding="linear16",
+        output_queue=None,
+        commit_strategy="vad",
+        include_timestamps=True,
+        include_language_detection=True,
+        **kwargs,
+    ):
         super().__init__(input_queue)
         self.endpointing = endpointing
         # Convert endpointing (ms) to vad_silence_threshold_secs (seconds)
@@ -37,8 +49,8 @@ class ElevenLabsTranscriber(BaseTranscriber):
         self.model = model
         self.sampling_rate = 16000
         self.encoding = encoding
-        self.api_key = kwargs.get("transcriber_key", os.getenv('ELEVENLABS_API_KEY'))
-        self.elevenlabs_host = os.getenv('ELEVENLABS_API_HOST', 'api.elevenlabs.io')
+        self.api_key = kwargs.get("transcriber_key", os.getenv("ELEVENLABS_API_KEY"))
+        self.elevenlabs_host = os.getenv("ELEVENLABS_API_HOST", "api.elevenlabs.io")
         self.transcriber_output_queue = output_queue
         self.transcription_task = None
         self.transcription_cursor = 0.0
@@ -64,7 +76,7 @@ class ElevenLabsTranscriber(BaseTranscriber):
         self.min_silence_duration_ms = max(50, min(2000, kwargs.get("min_silence_duration_ms", 300)))
 
         # Message states
-        self.curr_message = ''
+        self.curr_message = ""
         self.finalized_transcript = ""
         self.final_transcript = ""
         self.current_turn_start_time = None
@@ -89,51 +101,53 @@ class ElevenLabsTranscriber(BaseTranscriber):
     def get_elevenlabs_ws_url(self):
         """Build the ElevenLabs WebSocket URL with query parameters"""
         self.audio_frame_duration = 0.5  # Default for 8k samples at 16kHz
-        audio_format = 'pcm_16000'  # Default
+        audio_format = "pcm_16000"  # Default
 
-        if self.provider in ('twilio', 'exotel', 'plivo', 'vobiz'):
+        if self.provider in ("twilio", "exotel", "plivo", "vobiz"):
             # Twilio uses mulaw at 8kHz, exotel/plivo use linear16 at 8kHz
-            self.encoding = 'mulaw' if self.provider == "twilio" else "linear16"
+            self.encoding = "mulaw" if self.provider == "twilio" else "linear16"
             self.sampling_rate = 8000
             self.audio_frame_duration = 0.2  # 200ms chunks for telephony
-            audio_format = 'ulaw_8000' if self.provider == "twilio" else 'pcm_8000'
+            audio_format = "ulaw_8000" if self.provider == "twilio" else "pcm_8000"
 
         elif self.provider == "web_based_call":
             self.encoding = "linear16"
             self.sampling_rate = 16000
             self.audio_frame_duration = 0.256
-            audio_format = 'pcm_16000'
+            audio_format = "pcm_16000"
 
         elif not self.connected_via_dashboard:
             self.encoding = "linear16"
             self.sampling_rate = 16000
-            audio_format = 'pcm_16000'
+            audio_format = "pcm_16000"
 
         if self.provider == "playground":
             self.sampling_rate = 8000
             self.audio_frame_duration = 0.0  # No streaming from playground
-            audio_format = 'pcm_8000'
+            audio_format = "pcm_8000"
 
         params = {
-            'model_id': self.model,
-            'language_code': self.language,
-            'audio_format': audio_format,
-            'commit_strategy': self.commit_strategy,
-            'vad_silence_threshold_secs': self.vad_silence_threshold_secs,
+            "model_id": self.model,
+            "language_code": self.language,
+            "audio_format": audio_format,
+            "commit_strategy": self.commit_strategy,
+            "vad_silence_threshold_secs": self.vad_silence_threshold_secs,
             # VAD tuning for low latency
-            'vad_threshold': self.vad_threshold,
-            'min_speech_duration_ms': self.min_speech_duration_ms,
-            'min_silence_duration_ms': self.min_silence_duration_ms,
+            "vad_threshold": self.vad_threshold,
+            "min_speech_duration_ms": self.min_speech_duration_ms,
+            "min_silence_duration_ms": self.min_silence_duration_ms,
             # Timestamps and language detection
-            'include_timestamps': 'true' if self.include_timestamps else 'false',
-            'include_language_detection': 'true' if self.include_language_detection else 'false',
+            "include_timestamps": "true" if self.include_timestamps else "false",
+            "include_language_detection": "true" if self.include_language_detection else "false",
         }
 
-        websocket_url = f'wss://{self.elevenlabs_host}/v1/speech-to-text/realtime?{urlencode(params)}'
-        logger.info(f"ElevenLabs WebSocket params - language: {self.language}, audio_format: {audio_format}, "
-                    f"vad_threshold: {self.vad_threshold}, min_speech_ms: {self.min_speech_duration_ms}, "
-                    f"min_silence_ms: {self.min_silence_duration_ms}, vad_silence_secs: {self.vad_silence_threshold_secs}, "
-                    f"lang_detection: {self.include_language_detection}")
+        websocket_url = f"wss://{self.elevenlabs_host}/v1/speech-to-text/realtime?{urlencode(params)}"
+        logger.info(
+            f"ElevenLabs WebSocket params - language: {self.language}, audio_format: {audio_format}, "
+            f"vad_threshold: {self.vad_threshold}, min_speech_ms: {self.min_speech_duration_ms}, "
+            f"min_silence_ms: {self.min_silence_duration_ms}, vad_silence_secs: {self.vad_silence_threshold_secs}, "
+            f"lang_detection: {self.include_language_detection}"
+        )
         return websocket_url
 
     def _reset_turn_state(self):
@@ -175,7 +189,7 @@ class ElevenLabsTranscriber(BaseTranscriber):
 
         # Fallback: use last interim if no final results received
         if not transcript_to_send and self.current_turn_interim_details:
-            transcript_to_send = self.current_turn_interim_details[-1]['transcript']
+            transcript_to_send = self.current_turn_interim_details[-1]["transcript"]
             logger.info(f"Using last interim as fallback: {transcript_to_send}")
 
         if not transcript_to_send:
@@ -184,24 +198,24 @@ class ElevenLabsTranscriber(BaseTranscriber):
             return
 
         try:
-            first_interim_to_final_ms, last_interim_to_final_ms = self.calculate_interim_to_final_latencies(self.current_turn_interim_details)
+            first_interim_to_final_ms, last_interim_to_final_ms = self.calculate_interim_to_final_latencies(
+                self.current_turn_interim_details
+            )
 
-            self.turn_latencies.append({
-                'turn_id': self.current_turn_id,
-                'sequence_id': self.current_turn_id,
-                'interim_details': self.current_turn_interim_details,
-                'first_interim_to_final_ms': first_interim_to_final_ms,
-                'last_interim_to_final_ms': last_interim_to_final_ms,
-                'force_finalized': True
-            })
+            self.turn_latencies.append(
+                {
+                    "turn_id": self.current_turn_id,
+                    "sequence_id": self.current_turn_id,
+                    "interim_details": self.current_turn_interim_details,
+                    "first_interim_to_final_ms": first_interim_to_final_ms,
+                    "last_interim_to_final_ms": last_interim_to_final_ms,
+                    "force_finalized": True,
+                }
+            )
         except Exception as e:
             logger.error(f"Error building turn latencies: {e}")
 
-        data = {
-            "type": "transcript",
-            "content": transcript_to_send,
-            "force_finalized": True
-        }
+        data = {"type": "transcript", "content": transcript_to_send, "force_finalized": True}
 
         logger.info(f"Force-finalized transcript after timeout: {transcript_to_send}")
         await self.push_to_transcriber_queue(create_ws_data_packet(data, self.meta_info))
@@ -213,10 +227,11 @@ class ElevenLabsTranscriber(BaseTranscriber):
             while True:
                 await asyncio.sleep(1.0)
 
-                if (self.last_interim_time and
-                    not self.is_transcript_sent_for_processing and
-                    (self.final_transcript.strip() or self.current_turn_interim_details)):
-
+                if (
+                    self.last_interim_time
+                    and not self.is_transcript_sent_for_processing
+                    and (self.final_transcript.strip() or self.current_turn_interim_details)
+                ):
                     elapsed = time.time() - self.last_interim_time
 
                     if elapsed > self.interim_timeout:
@@ -256,9 +271,9 @@ class ElevenLabsTranscriber(BaseTranscriber):
 
         # Cancel tasks properly
         for task_name, task in [
-            ("sender_task", getattr(self, 'sender_task', None)),
-            ("utterance_timeout_task", getattr(self, 'utterance_timeout_task', None)),
-            ("transcription_task", getattr(self, 'transcription_task', None))
+            ("sender_task", getattr(self, "sender_task", None)),
+            ("utterance_timeout_task", getattr(self, "utterance_timeout_task", None)),
+            ("transcription_task", getattr(self, "transcription_task", None)),
         ]:
             if task is not None and not task.done():
                 task.cancel()
@@ -281,7 +296,7 @@ class ElevenLabsTranscriber(BaseTranscriber):
                 self.connection_authenticated = False
 
     async def _check_and_process_end_of_stream(self, ws_data_packet, ws):
-        if 'eos' in ws_data_packet['meta_info'] and ws_data_packet['meta_info']['eos'] is True:
+        if "eos" in ws_data_packet["meta_info"] and ws_data_packet["meta_info"]["eos"] is True:
             # ElevenLabs doesn't have a close_stream message, just close the websocket
             try:
                 await ws.close()
@@ -301,15 +316,15 @@ class ElevenLabsTranscriber(BaseTranscriber):
 
                 # Initialize new request
                 if not self.audio_submitted:
-                    self.meta_info = ws_data_packet.get('meta_info')
+                    self.meta_info = ws_data_packet.get("meta_info")
                     self.audio_submitted = True
                     self.audio_submission_time = time.time()
                     self.current_request_id = self.generate_request_id()
-                    self.meta_info['request_id'] = self.current_request_id
+                    self.meta_info["request_id"] = self.current_request_id
                     try:
                         if not self.current_turn_start_time:
                             self.current_turn_start_time = timestamp_ms()
-                            self.current_turn_id = self.meta_info.get('turn_id') or self.meta_info.get('request_id')
+                            self.current_turn_id = self.meta_info.get("turn_id") or self.meta_info.get("request_id")
                     except Exception:
                         pass
 
@@ -325,14 +340,14 @@ class ElevenLabsTranscriber(BaseTranscriber):
 
                 try:
                     # Prepare audio message for ElevenLabs
-                    audio_data = ws_data_packet.get('data')
-                    audio_b64 = base64.b64encode(audio_data).decode('utf-8')
+                    audio_data = ws_data_packet.get("data")
+                    audio_b64 = base64.b64encode(audio_data).decode("utf-8")
 
                     message = {
                         "message_type": "input_audio_chunk",
                         "audio_base_64": audio_b64,
                         "sample_rate": self.sampling_rate,
-                        "commit": False  # Let VAD handle commits
+                        "commit": False,  # Let VAD handle commits
                     }
 
                     await ws.send(json.dumps(message))
@@ -349,7 +364,7 @@ class ElevenLabsTranscriber(BaseTranscriber):
             logger.info("Sender stream task cancelled")
             raise
         except Exception as e:
-            logger.error(f'Error in sender_stream: {e}')
+            logger.error(f"Error in sender_stream: {e}")
             raise
 
     async def receiver(self, ws: ClientConnection):
@@ -361,7 +376,7 @@ class ElevenLabsTranscriber(BaseTranscriber):
 
                 # Initialize connection start time
                 if self.connection_start_time is None:
-                    self.connection_start_time = (time.time() - (self.num_frames * self.audio_frame_duration))
+                    self.connection_start_time = time.time() - (self.num_frames * self.audio_frame_duration)
 
                 if msg_type == "session_started":
                     logger.info(f"ElevenLabs session started: {msg.get('session_id')}")
@@ -388,20 +403,17 @@ class ElevenLabsTranscriber(BaseTranscriber):
                             latency_ms = round(result_received_at - self.last_audio_send_time, 5)
 
                         interim_detail = {
-                            'transcript': transcript,
-                            'is_final': False,
-                            'received_at': time.time(),
-                            'latency_ms': latency_ms,
+                            "transcript": transcript,
+                            "is_final": False,
+                            "received_at": time.time(),
+                            "latency_ms": latency_ms,
                         }
 
                         logger.info(f"Partial transcript: {transcript} (latency: {latency_ms}ms)")
                         self.current_turn_interim_details.append(interim_detail)
                         self.last_interim_time = time.time()
 
-                        data = {
-                            "type": "interim_transcript_received",
-                            "content": transcript
-                        }
+                        data = {"type": "interim_transcript_received", "content": transcript}
                         yield create_ws_data_packet(data, self.meta_info)
 
                         # Update final transcript for potential use
@@ -420,21 +432,22 @@ class ElevenLabsTranscriber(BaseTranscriber):
                         continue
 
                     if transcript.strip() and not self.is_transcript_sent_for_processing:
-                        data = {
-                            "type": "transcript",
-                            "content": transcript
-                        }
+                        data = {"type": "transcript", "content": transcript}
 
                         try:
-                            first_interim_to_final_ms, last_interim_to_final_ms = self.calculate_interim_to_final_latencies(self.current_turn_interim_details)
+                            first_interim_to_final_ms, last_interim_to_final_ms = (
+                                self.calculate_interim_to_final_latencies(self.current_turn_interim_details)
+                            )
 
-                            self.turn_latencies.append({
-                                'turn_id': self.current_turn_id,
-                                'sequence_id': self.current_turn_id,
-                                'interim_details': self.current_turn_interim_details,
-                                'first_interim_to_final_ms': first_interim_to_final_ms,
-                                'last_interim_to_final_ms': last_interim_to_final_ms
-                            })
+                            self.turn_latencies.append(
+                                {
+                                    "turn_id": self.current_turn_id,
+                                    "sequence_id": self.current_turn_id,
+                                    "interim_details": self.current_turn_interim_details,
+                                    "first_interim_to_final_ms": first_interim_to_final_ms,
+                                    "last_interim_to_final_ms": last_interim_to_final_ms,
+                                }
+                            )
 
                             # Complete turn reset - set flag to False to allow next utterance
                             self.speech_start_time = None
@@ -456,33 +469,34 @@ class ElevenLabsTranscriber(BaseTranscriber):
                     logger.info(f"Committed transcript with timestamps: {transcript} ({len(words)} words)")
 
                     if transcript.strip() and not self.is_transcript_sent_for_processing:
-                        data = {
-                            "type": "transcript",
-                            "content": transcript
-                        }
+                        data = {"type": "transcript", "content": transcript}
 
                         try:
                             # Calculate per-word latency using timestamps
                             if words and self.audio_frame_timestamps:
                                 for word_obj in words:
-                                    if isinstance(word_obj, dict) and 'end' in word_obj:
-                                        audio_position = word_obj['end']
+                                    if isinstance(word_obj, dict) and "end" in word_obj:
+                                        audio_position = word_obj["end"]
                                         audio_sent_at = self._find_audio_send_timestamp(audio_position)
                                         if audio_sent_at:
                                             word_latency = round(timestamp_ms() - audio_sent_at, 5)
-                                            word_obj['latency_ms'] = word_latency
+                                            word_obj["latency_ms"] = word_latency
 
-                            first_interim_to_final_ms, last_interim_to_final_ms = self.calculate_interim_to_final_latencies(self.current_turn_interim_details)
+                            first_interim_to_final_ms, last_interim_to_final_ms = (
+                                self.calculate_interim_to_final_latencies(self.current_turn_interim_details)
+                            )
 
-                            self.turn_latencies.append({
-                                'turn_id': self.current_turn_id,
-                                'sequence_id': self.current_turn_id,
-                                'interim_details': self.current_turn_interim_details,
-                                'first_interim_to_final_ms': first_interim_to_final_ms,
-                                'last_interim_to_final_ms': last_interim_to_final_ms,
-                                'words': words,
-                                'detected_language': detected_language
-                            })
+                            self.turn_latencies.append(
+                                {
+                                    "turn_id": self.current_turn_id,
+                                    "sequence_id": self.current_turn_id,
+                                    "interim_details": self.current_turn_interim_details,
+                                    "first_interim_to_final_ms": first_interim_to_final_ms,
+                                    "last_interim_to_final_ms": last_interim_to_final_ms,
+                                    "words": words,
+                                    "detected_language": detected_language,
+                                }
+                            )
 
                             self._reset_turn_state()
                         except Exception as e:
@@ -519,15 +533,12 @@ class ElevenLabsTranscriber(BaseTranscriber):
         """Establish websocket connection to ElevenLabs"""
         try:
             websocket_url = self.get_elevenlabs_ws_url()
-            additional_headers = {
-                'xi-api-key': self.api_key
-            }
+            additional_headers = {"xi-api-key": self.api_key}
 
             logger.info(f"Attempting to connect to ElevenLabs websocket: {websocket_url}")
 
             elevenlabs_ws = await asyncio.wait_for(
-                websockets.connect(websocket_url, additional_headers=additional_headers),
-                timeout=10.0
+                websockets.connect(websocket_url, additional_headers=additional_headers), timeout=10.0
             )
 
             self.websocket_connection = elevenlabs_ws
@@ -603,14 +614,12 @@ class ElevenLabsTranscriber(BaseTranscriber):
                     self.websocket_connection = None
                     self.connection_authenticated = False
 
-            if hasattr(self, 'sender_task') and self.sender_task is not None:
+            if hasattr(self, "sender_task") and self.sender_task is not None:
                 self.sender_task.cancel()
-            if hasattr(self, 'utterance_timeout_task') and self.utterance_timeout_task is not None:
+            if hasattr(self, "utterance_timeout_task") and self.utterance_timeout_task is not None:
                 self.utterance_timeout_task.cancel()
 
-            meta = dict(getattr(self, 'meta_info', None) or {})
+            meta = dict(getattr(self, "meta_info", None) or {})
             if self.connection_error:
-                meta['connection_error'] = self.connection_error
-            await self.push_to_transcriber_queue(
-                create_ws_data_packet("transcriber_connection_closed", meta)
-            )
+                meta["connection_error"] = self.connection_error
+            await self.push_to_transcriber_queue(create_ws_data_packet("transcriber_connection_closed", meta))

@@ -3,7 +3,17 @@ import json
 import httpx
 from urllib.parse import urlparse
 from dotenv import load_dotenv
-from openai import AsyncAzureOpenAI, AsyncOpenAI, AuthenticationError, PermissionDeniedError, NotFoundError, RateLimitError, APIError, APIConnectionError, BadRequestError
+from openai import (
+    AsyncAzureOpenAI,
+    AsyncOpenAI,
+    AuthenticationError,
+    PermissionDeniedError,
+    NotFoundError,
+    RateLimitError,
+    APIError,
+    APIConnectionError,
+    BadRequestError,
+)
 
 from bolna.constants import DEFAULT_LANGUAGE_CODE, GPT5_MODEL_PREFIX
 from bolna.enums import ReasoningEffort, Verbosity
@@ -18,7 +28,15 @@ load_dotenv()
 
 
 class AzureLLM(OpenAICompatibleLLM):
-    def __init__(self, max_tokens=100, buffer_size=40, model="gpt-4.1-mini", temperature=0.1, language=DEFAULT_LANGUAGE_CODE, **kwargs):
+    def __init__(
+        self,
+        max_tokens=100,
+        buffer_size=40,
+        model="gpt-4.1-mini",
+        temperature=0.1,
+        language=DEFAULT_LANGUAGE_CODE,
+        **kwargs,
+    ):
         super().__init__(max_tokens, buffer_size)
 
         if model.startswith("azure/"):
@@ -30,8 +48,8 @@ class AzureLLM(OpenAICompatibleLLM):
         self.language = language
         if self.custom_tools is not None:
             self.trigger_function_call = True
-            self.api_params = self.custom_tools['tools_params']
-            self.tools = self.custom_tools['tools']
+            self.api_params = self.custom_tools["tools_params"]
+            self.tools = self.custom_tools["tools"]
         else:
             self.trigger_function_call = False
 
@@ -48,29 +66,24 @@ class AzureLLM(OpenAICompatibleLLM):
         self.model_args.update({max_tokens_key: self.max_tokens, "temperature": self.temperature, "model": self.model})
         self.model_args["service_tier"] = kwargs.get("service_tier", "default")
 
-        azure_endpoint = kwargs.get("base_url", os.getenv('AZURE_OPENAI_ENDPOINT'))
-        api_key = kwargs.get('llm_key', os.getenv('AZURE_OPENAI_API_KEY'))
-        api_version = kwargs.get("api_version", os.getenv('AZURE_OPENAI_API_VERSION', '2024-12-01-preview'))
+        azure_endpoint = kwargs.get("base_url", os.getenv("AZURE_OPENAI_ENDPOINT"))
+        api_key = kwargs.get("llm_key", os.getenv("AZURE_OPENAI_API_KEY"))
+        api_version = kwargs.get("api_version", os.getenv("AZURE_OPENAI_API_VERSION", "2024-12-01-preview"))
 
-        limits = httpx.Limits(
-            max_connections=50,
-            max_keepalive_connections=50,
-            keepalive_expiry=30
-        )
+        limits = httpx.Limits(max_connections=50, max_keepalive_connections=50, keepalive_expiry=30)
         http_client = httpx.AsyncClient(limits=limits, timeout=httpx.Timeout(600.0, connect=10.0))
 
         self.async_client = AsyncAzureOpenAI(
-            azure_endpoint=azure_endpoint,
-            api_key=api_key,
-            api_version=api_version,
-            http_client=http_client
+            azure_endpoint=azure_endpoint, api_key=api_key, api_version=api_version, http_client=http_client
         )
 
         self.run_id = kwargs.get("run_id", None)
         self.llm_host = urlparse(azure_endpoint).netloc if azure_endpoint else None
 
         # Responses API: uses v1 endpoint with regular AsyncOpenAI client
-        self._init_responses_api(kwargs.get("use_responses_api", False), compact_threshold=kwargs.get("compact_threshold"))
+        self._init_responses_api(
+            kwargs.get("use_responses_api", False), compact_threshold=kwargs.get("compact_threshold")
+        )
         if self.use_responses_api:
             v1_base_url = f"{azure_endpoint.rstrip('/')}/openai/v1/"
             self._responses_api_client = AsyncOpenAI(
@@ -81,17 +94,21 @@ class AzureLLM(OpenAICompatibleLLM):
 
     @property
     def _responses_client(self):
-        return getattr(self, '_responses_api_client', self.async_client)
+        return getattr(self, "_responses_api_client", self.async_client)
 
     async def generate_stream(self, messages, synthesize=True, request_json=False, meta_info=None, tool_choice=None):
         if self.use_responses_api:
-            async for chunk in self._generate_stream_responses(messages, synthesize, request_json, meta_info, tool_choice):
+            async for chunk in self._generate_stream_responses(
+                messages, synthesize, request_json, meta_info, tool_choice
+            ):
                 yield chunk
         else:
             async for chunk in self._generate_stream_chat(messages, synthesize, request_json, meta_info, tool_choice):
                 yield chunk
 
-    async def _generate_stream_chat(self, messages, synthesize=True, request_json=False, meta_info=None, tool_choice=None):
+    async def _generate_stream_chat(
+        self, messages, synthesize=True, request_json=False, meta_info=None, tool_choice=None
+    ):
         if not messages or len(messages) == 0:
             raise Exception("No messages provided")
 
@@ -102,7 +119,7 @@ class AzureLLM(OpenAICompatibleLLM):
             "messages": messages,
             "stream": True,
             "stream_options": {"include_usage": True},
-            "user": f"{self.run_id}#{meta_info.get('turn_id', '')}" if meta_info else self.run_id
+            "user": f"{self.run_id}#{meta_info.get('turn_id', '')}" if meta_info else self.run_id,
         }
 
         if not self.model.startswith(GPT5_MODEL_PREFIX):
@@ -154,7 +171,7 @@ class AzureLLM(OpenAICompatibleLLM):
         async for chunk in completion_stream:
             # Final usage-only chunk (choices=[]) from stream_options
             if not chunk.choices or len(chunk.choices) == 0:
-                if hasattr(chunk, 'usage') and chunk.usage:
+                if hasattr(chunk, "usage") and chunk.usage:
                     stream_usage = chunk.usage
                 continue
 
@@ -170,7 +187,7 @@ class AzureLLM(OpenAICompatibleLLM):
 
             delta = choice.delta
 
-            if hasattr(delta, 'tool_calls') and delta.tool_calls and accumulator:
+            if hasattr(delta, "tool_calls") and delta.tool_calls and accumulator:
                 if buffer:
                     yield LLMStreamChunk(data=buffer, end_of_stream=True, latency=latency_data)
                     buffer = ""
@@ -179,9 +196,15 @@ class AzureLLM(OpenAICompatibleLLM):
 
                 pre_call = accumulator.get_pre_call_message(meta_info)
                 if pre_call:
-                    yield LLMStreamChunk(data=pre_call[0], end_of_stream=True, latency=latency_data, function_name=pre_call[1], function_message=pre_call[2])
+                    yield LLMStreamChunk(
+                        data=pre_call[0],
+                        end_of_stream=True,
+                        latency=latency_data,
+                        function_name=pre_call[1],
+                        function_message=pre_call[2],
+                    )
 
-            elif hasattr(delta, 'content') and delta.content is not None:
+            elif hasattr(delta, "content") and delta.content is not None:
                 if accumulator:
                     accumulator.received_textual = True
                 answer += delta.content
@@ -197,19 +220,21 @@ class AzureLLM(OpenAICompatibleLLM):
         if accumulator and accumulator.final_tool_calls:
             api_call_payload = accumulator.build_api_payload(model_args, meta_info, answer)
             if api_call_payload:
-                yield LLMStreamChunk(data=api_call_payload, end_of_stream=False, latency=latency_data, is_function_call=True)
+                yield LLMStreamChunk(
+                    data=api_call_payload, end_of_stream=False, latency=latency_data, is_function_call=True
+                )
 
         # Extract actual token counts from stream usage
         usage_kwargs = {}
         if stream_usage:
-            usage_kwargs['input_tokens'] = getattr(stream_usage, 'prompt_tokens', None)
-            usage_kwargs['output_tokens'] = getattr(stream_usage, 'completion_tokens', None)
-            details = getattr(stream_usage, 'completion_tokens_details', None)
+            usage_kwargs["input_tokens"] = getattr(stream_usage, "prompt_tokens", None)
+            usage_kwargs["output_tokens"] = getattr(stream_usage, "completion_tokens", None)
+            details = getattr(stream_usage, "completion_tokens_details", None)
             if details:
-                usage_kwargs['reasoning_tokens'] = getattr(details, 'reasoning_tokens', None)
-            prompt_details = getattr(stream_usage, 'prompt_tokens_details', None)
+                usage_kwargs["reasoning_tokens"] = getattr(details, "reasoning_tokens", None)
+            prompt_details = getattr(stream_usage, "prompt_tokens_details", None)
             if prompt_details:
-                usage_kwargs['cached_tokens'] = getattr(prompt_details, 'cached_tokens', None)
+                usage_kwargs["cached_tokens"] = getattr(prompt_details, "cached_tokens", None)
 
         if synthesize:
             yield LLMStreamChunk(data=buffer, end_of_stream=True, latency=latency_data, **usage_kwargs)
@@ -228,25 +253,21 @@ class AzureLLM(OpenAICompatibleLLM):
 
         try:
             completion = await self.async_client.chat.completions.create(
-                model=self.model,
-                temperature=0.0,
-                messages=messages,
-                stream=False,
-                response_format=response_format
+                model=self.model, temperature=0.0, messages=messages, stream=False, response_format=response_format
             )
 
             res = completion.choices[0].message.content
             if ret_metadata:
                 metadata = {}
                 if completion.usage:
-                    metadata['input_tokens'] = completion.usage.prompt_tokens
-                    metadata['output_tokens'] = completion.usage.completion_tokens
-                    details = getattr(completion.usage, 'completion_tokens_details', None)
+                    metadata["input_tokens"] = completion.usage.prompt_tokens
+                    metadata["output_tokens"] = completion.usage.completion_tokens
+                    details = getattr(completion.usage, "completion_tokens_details", None)
                     if details:
-                        metadata['reasoning_tokens'] = getattr(details, 'reasoning_tokens', None)
-                    prompt_details = getattr(completion.usage, 'prompt_tokens_details', None)
+                        metadata["reasoning_tokens"] = getattr(details, "reasoning_tokens", None)
+                    prompt_details = getattr(completion.usage, "prompt_tokens_details", None)
                     if prompt_details:
-                        metadata['cached_tokens'] = getattr(prompt_details, 'cached_tokens', None)
+                        metadata["cached_tokens"] = getattr(prompt_details, "cached_tokens", None)
                 return res, metadata
             else:
                 return res
@@ -276,7 +297,7 @@ class AzureLLM(OpenAICompatibleLLM):
             raise
 
     def get_response_format(self, is_json_format: bool):
-        if is_json_format and self.model in ('gpt-4-1106-preview', 'gpt-3.5-turbo-1106', 'gpt-4o-mini', 'gpt-4.1-mini'):
+        if is_json_format and self.model in ("gpt-4-1106-preview", "gpt-3.5-turbo-1106", "gpt-4o-mini", "gpt-4.1-mini"):
             return {"type": "json_object"}
         else:
             return {"type": "text"}
