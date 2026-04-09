@@ -38,7 +38,7 @@ jobs:
 
       - name: Verify tag matches package version
         run: |
-          PKG_VERSION=$(python -c "import bolna; print(bolna.__version__)")
+          PKG_VERSION=$(python -c "import re; m = re.search(r'__version__\s*=\s*\"(.+?)\"', open('bolna/__init__.py').read()); print(m.group(1))")
           TAG_REF=${GITHUB_REF#refs/tags/}
           TAG_VERSION=${TAG_REF#bolna-}
           if [ "$PKG_VERSION" != "$TAG_VERSION" ]; then
