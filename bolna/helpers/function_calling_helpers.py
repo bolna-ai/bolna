@@ -162,6 +162,13 @@ async def trigger_api(
                 is_cached=False,
                 run_id=run_id,
             )
+        if return_response_metadata:
+            return {
+                "status_code": None,
+                "body": message,
+                "content_type": None,
+                "error": "Timed out after 5 seconds",
+            }
         return message
     except Exception as e:
         message = f"ERROR CALLING API: Please check your API: {e}"
