@@ -279,7 +279,7 @@ class ElevenlabsSynthesizer(StreamSynthesizer):
     # ------------------------------------------------------------------
 
     async def synthesize(self, text):
-        return await self._generate_http(text, format="mp3_44100_128")
+        return await self._generate_http(text, format="mp3")
 
     async def _generate_http(self, text, format=None):
         payload = {
@@ -288,7 +288,6 @@ class ElevenlabsSynthesizer(StreamSynthesizer):
             "voice_settings": {
                 "stability": self.temperature,
                 "similarity_boost": self.similarity_boost,
-                "optimize_streaming_latency": 3,
                 "speed": self.speed,
                 "style": self.style,
             },
