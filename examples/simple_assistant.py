@@ -29,9 +29,7 @@ async def main():
     # Configure audio output (TTS)
     synthesizer = Synthesizer(
         provider="elevenlabs",
-        provider_config=ElevenLabsConfig(
-            voice="George", voice_id="JBFqnCBsd6RMkjVDRZzb", model="eleven_turbo_v2_5"
-        ),
+        provider_config=ElevenLabsConfig(voice="George", voice_id="JBFqnCBsd6RMkjVDRZzb", model="eleven_turbo_v2_5"),
         stream=True,
         audio_format="wav",
     )

@@ -22,6 +22,7 @@ import pytest
 # Helpers – thin simulations of the relevant TaskManager code paths
 # ---------------------------------------------------------------------------
 
+
 class FakeSynthesizer:
     """Simulates the synthesizer tool's push/generate interface."""
 
@@ -84,9 +85,17 @@ class FakeInterruptionManager:
         pass
 
 
-def _make_message(data=b"audio", end_of_synth=False, end_of_llm=False,
-                  sequence_id=1, is_first_message=False, is_md5_hash=False,
-                  message_category="", text="hello", **extra):
+def _make_message(
+    data=b"audio",
+    end_of_synth=False,
+    end_of_llm=False,
+    sequence_id=1,
+    is_first_message=False,
+    is_md5_hash=False,
+    message_category="",
+    text="hello",
+    **extra,
+):
     meta = {
         "sequence_id": sequence_id,
         "end_of_synthesizer_stream": end_of_synth,
@@ -104,6 +113,7 @@ def _make_message(data=b"audio", end_of_synth=False, end_of_llm=False,
 # ---------------------------------------------------------------------------
 # 1. Normal non-streaming flow
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_nonstreaming_normal_flow():
@@ -132,6 +142,7 @@ async def test_nonstreaming_normal_flow():
 # 2. Normal streaming flow (through __process_output_loop)
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_streaming_normal_flow_via_output_loop():
     """
@@ -152,8 +163,9 @@ async def test_streaming_normal_flow_via_output_loop():
 
     # Simulates the post-SEND check
     if status == "SEND":
-        if (meta.get("end_of_llm_stream", False) or meta.get("end_of_synthesizer_stream", False)) and \
-                meta.get("message_category", "") != "is_user_online_message":
+        if (meta.get("end_of_llm_stream", False) or meta.get("end_of_synthesizer_stream", False)) and meta.get(
+            "message_category", ""
+        ) != "is_user_online_message":
             event.set()
 
     assert event.is_set()
@@ -170,8 +182,9 @@ async def test_streaming_end_of_llm_stream_also_sets():
     message = _make_message(end_of_llm=True, end_of_synth=False)
     meta = message["meta_info"]
 
-    if (meta.get("end_of_llm_stream", False) or meta.get("end_of_synthesizer_stream", False)) and \
-            meta.get("message_category", "") != "is_user_online_message":
+    if (meta.get("end_of_llm_stream", False) or meta.get("end_of_synthesizer_stream", False)) and meta.get(
+        "message_category", ""
+    ) != "is_user_online_message":
         event.set()
 
     assert event.is_set()
@@ -189,8 +202,9 @@ async def test_is_user_online_message_does_not_set():
     message = _make_message(end_of_synth=True, message_category="is_user_online_message")
     meta = message["meta_info"]
 
-    if (meta.get("end_of_llm_stream", False) or meta.get("end_of_synthesizer_stream", False)) and \
-            meta.get("message_category", "") != "is_user_online_message":
+    if (meta.get("end_of_llm_stream", False) or meta.get("end_of_synthesizer_stream", False)) and meta.get(
+        "message_category", ""
+    ) != "is_user_online_message":
         event.set()
 
     # Should NOT be set for is_user_online_message
@@ -200,6 +214,7 @@ async def test_is_user_online_message_does_not_set():
 # ---------------------------------------------------------------------------
 # 3. BLOCK path — audio discarded, event still set
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_block_path_sets_event():
@@ -243,6 +258,7 @@ async def test_block_path_mid_stream_does_not_set():
 # 4. Cleanup/interruption path
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_cleanup_always_sets_event():
     """
@@ -273,6 +289,7 @@ async def test_cleanup_sets_already_set_event():
 # ---------------------------------------------------------------------------
 # 5. Error in _synthesize — event stays cleared, 3s timeout fires
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_synthesize_error_leaves_event_cleared():
@@ -310,6 +327,7 @@ async def test_synthesize_error_leaves_event_cleared():
 # 6. Error in __listen_synthesizer — event stays cleared
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_listen_synthesizer_error_leaves_event_cleared():
     """
@@ -337,6 +355,7 @@ async def test_listen_synthesizer_error_leaves_event_cleared():
 # ---------------------------------------------------------------------------
 # 7. Full lifecycle: clear → multiple chunks → final chunk sets
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_multiple_chunks_only_final_sets():
@@ -371,6 +390,7 @@ async def test_multiple_chunks_only_final_sets():
 # 8. wait_for_current_message passes immediately when event already set
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_wait_passes_immediately_when_set():
     """
@@ -390,6 +410,7 @@ async def test_wait_passes_immediately_when_set():
 # ---------------------------------------------------------------------------
 # 9. Concurrent: set() from synth thread while wait_for is waiting
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_concurrent_set_unblocks_wait():
@@ -418,6 +439,7 @@ async def test_concurrent_set_unblocks_wait():
 # ---------------------------------------------------------------------------
 # 10. Edge case: clear() called multiple times (multiple chunks to synth)
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_multiple_clears_are_idempotent():
@@ -449,6 +471,7 @@ async def test_multiple_clears_are_idempotent():
 # 11. Edge case: is_user_online_message in BLOCK path (should still set)
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_block_path_sets_regardless_of_message_category():
     """
@@ -462,23 +485,20 @@ async def test_block_path_sets_regardless_of_message_category():
     event = asyncio.Event()
     event.clear()
 
-    message = _make_message(
-        end_of_synth=True,
-        message_category="is_user_online_message"
-    )
+    message = _make_message(end_of_synth=True, message_category="is_user_online_message")
     meta = message["meta_info"]
 
     # BLOCK path check (lines 2471-2473) — no message_category filter
     if meta.get("end_of_llm_stream", False) or meta.get("end_of_synthesizer_stream", False):
         event.set()
 
-    assert event.is_set(), \
-        "BLOCK path should set event regardless of message_category"
+    assert event.is_set(), "BLOCK path should set event regardless of message_category"
 
 
 # ---------------------------------------------------------------------------
 # 12. Behavioral difference: SEND vs BLOCK for is_user_online_message
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_send_vs_block_behavior_for_online_check():
@@ -491,16 +511,14 @@ async def test_send_vs_block_behavior_for_online_check():
     message is the last synth'd message before hangup, the SEND path
     would leave the event cleared, but the BLOCK path wouldn't.
     """
-    meta = _make_message(
-        end_of_synth=True,
-        message_category="is_user_online_message"
-    )["meta_info"]
+    meta = _make_message(end_of_synth=True, message_category="is_user_online_message")["meta_info"]
 
     # SEND path (lines 2486-2489)
     send_event = asyncio.Event()
     send_event.clear()
-    if (meta.get("end_of_llm_stream", False) or meta.get("end_of_synthesizer_stream", False)) and \
-            meta.get("message_category", "") != "is_user_online_message":
+    if (meta.get("end_of_llm_stream", False) or meta.get("end_of_synthesizer_stream", False)) and meta.get(
+        "message_category", ""
+    ) != "is_user_online_message":
         send_event.set()
 
     # BLOCK path (lines 2471-2473)
