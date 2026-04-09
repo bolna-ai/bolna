@@ -6,17 +6,18 @@ on:
 
 permissions:
   contents: write
+  id-token: write
 
 jobs:
-  bump:
+  release:
     runs-on: ubuntu-latest
+    environment: pypi
     # skip bump commits to avoid infinite loop
     if: "!startsWith(github.event.head_commit.message, 'bump bolna version')"
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -39,3 +40,9 @@ jobs:
         run: |
           TAG=$(git describe --tags --abbrev=0)
           gh release create "$TAG" --title "$TAG" --generate-notes
+
+      - run: pip install build
+      - run: python -m build
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
