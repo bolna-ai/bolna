@@ -108,6 +108,7 @@ class TaskManager(BaseManager):
         self.mark_event_meta_data = MarkEventMetaData()
         self.sampling_rate = 24000
         self.conversation_ended = False
+        self.has_transfer = False
         self.hangup_triggered = False
         self.hangup_triggered_at = None
         self.hangup_message_queued = False
@@ -1733,6 +1734,7 @@ class TaskManager(BaseManager):
             resp["execution_id"] = self.run_id
 
         if called_fun.startswith("transfer_call"):
+            self.has_transfer = True
             await asyncio.sleep(2)
             try:
                 from_number = self.context_data['recipient_data']['from_number']
@@ -3426,7 +3428,8 @@ class TaskManager(BaseManager):
                         ),
                         "mark_tracking": self.mark_event_meta_data.get_mark_tracking_summary(),
                     },
-                    "hangup_detail": self.hangup_detail
+                    "hangup_detail": self.hangup_detail,
+                    "has_transfer": self.has_transfer
                 }
 
                 try:
