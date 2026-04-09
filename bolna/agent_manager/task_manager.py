@@ -300,6 +300,8 @@ class TaskManager(BaseManager):
             provider_config = self.task_config["tools_config"]["synthesizer"].get("provider_config")
             self.synthesizer_voice = provider_config["voice"]
             self.hangup_detail = None
+            self.shadow_end_call_enabled = False
+            self.shadow_end_call_events = []
 
             self.handle_accumulated_message_task = None
             # self.initial_silence_task = None
@@ -367,6 +369,32 @@ class TaskManager(BaseManager):
                     else:
                         self.call_hangup_message_config = update_prompt_with_context(self.call_hangup_message_config, self.context_data)
                 self.check_for_completion_llm = os.getenv("CHECK_FOR_COMPLETION_LLM")
+
+                # Shadow end_call tool: inject alongside hangup_after_LLMCall for comparison testing
+                self.shadow_end_call_enabled = False
+                self.shadow_end_call_events = []
+                if os.getenv("SHADOW_END_CALL_TOOL", "").lower() == "true" and self.use_llm_to_determine_hangup:
+                    self.shadow_end_call_enabled = True
+                    api_tools = self.kwargs.get('api_tools')
+                    if api_tools is None:
+                        api_tools = {"tools": [], "tools_params": {}}
+                        self.kwargs['api_tools'] = api_tools
+                    if END_CALL_FUNCTION_PREFIX not in api_tools.get("tools_params", {}):
+                        tool_def = copy.deepcopy(END_CALL_TOOL_DEFINITION)
+                        # Use the agent's hangup criteria so the comparison is apples-to-apples
+                        cancellation_criteria = self.conversation_config.get("call_cancellation_prompt", "")
+                        if cancellation_criteria:
+                            tool_def["function"]["description"] = (
+                                f"End the current call. Always say your goodbye message before calling this function.\n"
+                                f"Criteria for when to end: {cancellation_criteria}"
+                            )
+                        tools_list = api_tools.get("tools", [])
+                        if isinstance(tools_list, str):
+                            tools_list = json.loads(tools_list)
+                        tools_list.append(tool_def)
+                        api_tools["tools"] = tools_list
+                        api_tools["tools_params"][END_CALL_FUNCTION_PREFIX] = {"pre_call_message": None}
+                    logger.info("Shadow end_call tool injected for hangup comparison")
 
                 # Voicemail detection (time-based)
                 output_tool_available = (
@@ -1735,6 +1763,16 @@ class TaskManager(BaseManager):
 
         if called_fun.startswith(END_CALL_FUNCTION_PREFIX):
             reason = resp.get("reason", "")
+
+            if self.shadow_end_call_enabled:
+                logger.info(f"Shadow end_call invoked: reason={reason}, seq={meta_info.get('sequence_id')}")
+                self.shadow_end_call_events.append({
+                    "seq": meta_info.get("sequence_id"),
+                    "reason": reason,
+                    "timestamp": time.time(),
+                })
+                return
+
             logger.info(f"end_call tool invoked, reason: {reason}")
             convert_to_request_log(
                 json.dumps({"called_fun": called_fun, "reason": reason}),
@@ -2267,6 +2305,12 @@ class TaskManager(BaseManager):
             logger.info(f"##### Answer from the LLM {completion_res}")
             convert_to_request_log(message=format_messages(prompt, use_system_prompt=True), meta_info=meta_info, component=LogComponent.LLM_HANGUP, direction=LogDirection.REQUEST, model=self.check_for_completion_llm, run_id=self.run_id)
             convert_to_request_log(message=completion_res, meta_info=meta_info, component=LogComponent.LLM_HANGUP, direction=LogDirection.RESPONSE, model=self.check_for_completion_llm, run_id=self.run_id, input_tokens=metadata.get('input_tokens'), output_tokens=metadata.get('output_tokens'), reasoning_tokens=metadata.get('reasoning_tokens'), cached_tokens=metadata.get('cached_tokens'))
+
+            if self.shadow_end_call_enabled and (should_hangup or self.shadow_end_call_events):
+                logger.info(
+                    f"hangup_after_LLMCall result: hangup={should_hangup}, seq={meta_info.get('sequence_id')}, "
+                    f"shadow_end_call_events={json.dumps(self.shadow_end_call_events)}"
+                )
 
             if should_hangup:
                 if self.hangup_triggered or self.conversation_ended:
@@ -3456,6 +3500,17 @@ class TaskManager(BaseManager):
                     },
                     "hangup_detail": self.hangup_detail
                 }
+
+                if self.shadow_end_call_enabled:
+                    end_call_seq = self.shadow_end_call_events[0]["seq"] if self.shadow_end_call_events else None
+                    hangup_detail_str = str(self.hangup_detail) if self.hangup_detail else None
+                    logger.info(
+                        f"Shadow end_call summary: "
+                        f"end_call_count={len(self.shadow_end_call_events)}, "
+                        f"first_end_call_seq={end_call_seq}, "
+                        f"actual_hangup_reason={hangup_detail_str}, "
+                        f"events={json.dumps(self.shadow_end_call_events)}"
+                    )
 
                 try:
                     if welcome_message_sent_ts:
