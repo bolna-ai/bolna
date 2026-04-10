@@ -60,7 +60,8 @@ def _calcom_prepare(url, method, api_params, headers, api_token):
         p = urlparse(url)
     except Exception:
         return url, api_params, headers
-    if "api.cal.com" not in (p.netloc or "").lower():
+    host = (p.hostname or "").lower()
+    if host != "api.cal.com" and not host.endswith(".api.cal.com"):
         return url, api_params, headers
     qs = parse_qs(p.query, keep_blank_values=True)
     key = None
@@ -239,7 +240,8 @@ async def trigger_api(
                     async with session.post(url, data=normalized_api_params, headers=headers) as response:
                         response_text = await response.text()
 
-            if "api.cal.com" in (url or "").lower():
+            parsed_host = urlparse(url or "").hostname or ""
+            if parsed_host == "api.cal.com" or parsed_host.endswith(".api.cal.com"):
                 response_text = _calcom_unwrap_response(response_text)
 
             if return_response_metadata:
