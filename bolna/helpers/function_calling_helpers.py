@@ -41,8 +41,7 @@ def _calcom_booking_v1_to_v2(body):
     }
     if low == "phone":
         result["location"] = {"type": "phone"}
-    # Omit location for inPerson and all online/integration types (Google Meet, Zoom, etc.)
-    # so Cal.com uses the default location configured on the event type.
+    # Omit location for inPerson and online types so Cal.com uses the event type default.
     return result
 
 
@@ -163,49 +162,68 @@ def substitute_var_markers(obj, values):
         return obj  # Primitives returned as-is
 
 
-async def trigger_api(url, method, param, api_token, headers_data, meta_info, run_id, **kwargs):
+def prepare_api_request(param, api_token, headers_data, **kwargs):
+    request_body, api_params = None, None
+    if param:
+        # NEW FORMAT: Check for $var markers (type-safe JSON substitution)
+        if isinstance(param, dict) and _contains_var_markers(param):
+            api_params = substitute_var_markers(param, kwargs)
+            request_body = json.dumps(api_params)
+            logger.info("Using $var marker substitution for param")
+        else:
+            # LEGACY FORMAT: String template with %(field)s placeholders
+            if isinstance(param, dict):
+                param = json.dumps(param)
+
+            # JSON-serialize complex values (lists, dicts) for proper string substitution
+            # Python's % formatting uses repr() which produces single quotes,
+            # but JSON requires double quotes for valid JSON output
+            json_kwargs = {k: json.dumps(v) if isinstance(v, (list, dict)) else v for k, v in kwargs.items()}
+
+            code = compile(param % json_kwargs, "<string>", "exec")
+            exec(code, globals(), json_kwargs)
+            request_body = param % json_kwargs
+            api_params = json.loads(request_body)
+
+    headers = {"Content-Type": "application/json"}
+    content_type = "json"
+    if api_token:
+        headers["Authorization"] = api_token
+
+    if headers_data and isinstance(headers_data, dict):
+        for k, v in headers_data.items():
+            headers[k] = v
+
+    if headers.get("Content-Type").lower().startswith("application/x-www-form-urlencoded"):
+        content_type = "form"
+
+    return {
+        "request_body": request_body,
+        "api_params": api_params,
+        "headers": headers,
+        "content_type": content_type,
+    }
+
+
+async def trigger_api(
+    url, method, param, api_token, headers_data, meta_info, run_id, return_response_metadata=False, **kwargs
+):
     try:
-        request_body, api_params = None, None
-        if param:
-            # NEW FORMAT: Check for $var markers (type-safe JSON substitution)
-            if isinstance(param, dict) and _contains_var_markers(param):
-                api_params = substitute_var_markers(param, kwargs)
-                request_body = json.dumps(api_params)
-                logger.info(f"Using $var marker substitution for param")
-            else:
-                # LEGACY FORMAT: String template with %(field)s placeholders
-                if isinstance(param, dict):
-                    param = json.dumps(param)
-
-                # JSON-serialize complex values (lists, dicts) for proper string substitution
-                # Python's % formatting uses repr() which produces single quotes,
-                # but JSON requires double quotes for valid JSON output
-                json_kwargs = {
-                    k: json.dumps(v) if isinstance(v, (list, dict)) else v
-                    for k, v in kwargs.items()
-                }
-
-                code = compile(param % json_kwargs, "<string>", "exec")
-                exec(code, globals(), json_kwargs)
-                request_body = param % json_kwargs
-                api_params = json.loads(request_body)
-
-        headers = {'Content-Type': 'application/json'}
-        content_type = "json"
-        if api_token:
-            headers['Authorization'] = api_token
-
-        if headers_data and isinstance(headers_data, dict):
-            for k, v in headers_data.items():
-                headers[k] = v
-
-        if headers.get('Content-Type').lower().startswith('application/x-www-form-urlencoded'):
-            content_type = 'form'
-
+        prepared_request = prepare_api_request(param, api_token, headers_data, **kwargs)
+        request_body = prepared_request["request_body"]
+        api_params = prepared_request["api_params"]
+        headers = prepared_request["headers"]
+        content_type = prepared_request["content_type"]
         url, api_params, headers = _calcom_prepare(url, method, api_params, headers, api_token)
-
-        convert_to_request_log(request_body, meta_info , None, LogComponent.FUNCTION_CALL, direction=LogDirection.REQUEST, is_cached=False, run_id=run_id)
-
+        convert_to_request_log(
+            request_body,
+            meta_info,
+            None,
+            LogComponent.FUNCTION_CALL,
+            direction=LogDirection.REQUEST,
+            is_cached=False,
+            run_id=run_id,
+        )
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=5)) as session:
             if method.lower() == "get":
                 logger.info(f"Sending request {request_body}, {url}, {headers}")
@@ -223,6 +241,14 @@ async def trigger_api(url, method, param, api_token, headers_data, meta_info, ru
 
             if "api.cal.com" in (url or "").lower():
                 response_text = _calcom_unwrap_response(response_text)
+
+            if return_response_metadata:
+                return {
+                    "status_code": response.status if response is not None else None,
+                    "body": response_text,
+                    "content_type": response.headers.get("Content-Type") if response is not None else None,
+                }
+
             return response_text
     except asyncio.TimeoutError:
         message = f"ERROR CALLING API: Request to {url} timed out after 5 seconds"
@@ -235,8 +261,15 @@ async def trigger_api(url, method, param, api_token, headers_data, meta_info, ru
                 component=LogComponent.WARNING,
                 direction=LogDirection.WARNING,
                 is_cached=False,
-                run_id=run_id
+                run_id=run_id,
             )
+        if return_response_metadata:
+            return {
+                "status_code": None,
+                "body": message,
+                "content_type": None,
+                "error": "Timed out after 5 seconds",
+            }
         return message
     except Exception as e:
         message = f"ERROR CALLING API: Please check your API: {e}"
@@ -249,8 +282,15 @@ async def trigger_api(url, method, param, api_token, headers_data, meta_info, ru
                 component=LogComponent.WARNING,
                 direction=LogDirection.WARNING,
                 is_cached=False,
-                run_id=run_id
+                run_id=run_id,
             )
+        if return_response_metadata:
+            return {
+                "status_code": None,
+                "body": message,
+                "content_type": None,
+                "error": str(e),
+            }
         return message
 
 
@@ -266,7 +306,4 @@ async def computed_api_response(response):
 
 
 def normalize_for_form(data: dict) -> dict:
-    return {
-        k: json.dumps(v) if isinstance(v, (dict, list)) else str(v)
-        for k, v in data.items()
-    }
+    return {k: json.dumps(v) if isinstance(v, (dict, list)) else str(v) for k, v in data.items()}
