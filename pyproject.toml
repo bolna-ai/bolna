@@ -42,23 +42,12 @@ select = [
     "ISC",   # implicit string concatenation bugs
 ]
 
-[tool.bumpver]
-current_version = "0.10.2"
-version_pattern = "MAJOR.MINOR.PATCH"
-commit_message = "bump bolna version {old_version} -> {new_version}"
-tag_message = "bolna-{new_version}"
-tag_scope = "default"
-pre_commit_hook = ""
-post_commit_hook = ""
-commit = true
-tag = true
-push = true
-
-[tool.bumpver.file_patterns]
-"pyproject.toml" = [
-    'current_version = "{version}"',
-    'version = "{version}"',
+[tool.commitizen]
+name = "cz_conventional_commits"
+version = "0.10.2"
+tag_format = "$version"
+version_files = [
+    "pyproject.toml:version",
+    "bolna/__init__.py:__version__",
 ]
-"bolna/__init__.py" = [
-    '^__version__ = "{version}"$',
-]
+update_changelog_on_bump = false
