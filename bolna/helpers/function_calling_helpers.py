@@ -1,5 +1,7 @@
 import asyncio
 import json
+import re
+from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 import aiohttp
 from bolna.helpers.logger_config import configure_logger
@@ -7,6 +9,102 @@ from bolna.enums import LogComponent, LogDirection
 from bolna.helpers.utils import convert_to_request_log, format_error_message
 
 logger = configure_logger(__name__)
+
+
+def _calcom_z(s):
+    if s is None:
+        return s
+    s = str(s).strip()
+    if not s:
+        return s
+    if s.endswith("Z") or re.search(r"[+-]\d{2}:\d{2}$", s):
+        return s
+    return s + "Z" if "T" in s else s
+
+
+def _calcom_booking_v1_to_v2(body):
+    if not isinstance(body, dict) or "responses" not in body:
+        return body
+    r = body.get("responses") or {}
+    loc = (r.get("location") or {}).get("value") or ""
+    low = str(loc).lower()
+    result = {
+        "eventTypeId": body.get("eventTypeId"),
+        "start": _calcom_z(body.get("start")),
+        "attendee": {
+            "name": r.get("name"),
+            "email": r.get("email"),
+            "timeZone": body.get("timeZone"),
+            "language": body.get("language") or "en",
+        },
+        "metadata": body.get("metadata") or {},
+    }
+    if low == "phone":
+        result["location"] = {"type": "phone"}
+    # Omit location for inPerson and all online/integration types (Google Meet, Zoom, etc.)
+    # so Cal.com uses the default location configured on the event type.
+    return result
+
+
+def _calcom_slot_params(params):
+    if not isinstance(params, dict):
+        return params
+    out = dict(params)
+    for k in ("startTime", "endTime"):
+        if k in out and out[k] is not None:
+            out[k] = _calcom_z(out[k])
+    return out
+
+
+def _calcom_prepare(url, method, api_params, headers, api_token):
+    try:
+        p = urlparse(url)
+    except Exception:
+        return url, api_params, headers
+    if "api.cal.com" not in (p.netloc or "").lower():
+        return url, api_params, headers
+    qs = parse_qs(p.query, keep_blank_values=True)
+    key = None
+    if "apiKey" in qs:
+        key = (qs["apiKey"][0] or None) if qs["apiKey"] else None
+        del qs["apiKey"]
+    if not key and headers.get("Authorization"):
+        a = str(headers["Authorization"]).strip()
+        key = a[7:].strip() if a.lower().startswith("bearer ") else a
+    if not key and api_token:
+        a = str(api_token).strip()
+        key = a[7:].strip() if a.lower().startswith("bearer ") else a
+    path = p.path or ""
+    if "/v1/slots/available" in path:
+        path = path.replace("/v1/slots/available", "/v2/slots/available", 1)
+    elif "/v1/slots" in path:
+        path = path.replace("/v1/slots", "/v2/slots/available", 1)
+    elif "/v1/bookings" in path:
+        path = path.replace("/v1/bookings", "/v2/bookings", 1)
+    elif "/v1/" in path:
+        path = path.replace("/v1/", "/v2/", 1)
+    new_url = urlunparse((p.scheme, p.netloc, path, p.params, urlencode(qs, doseq=True), p.fragment))
+    h = dict(headers)
+    if key:
+        h["Authorization"] = f"Bearer {key}"
+        h["cal-api-version"] = "2024-08-13"
+    new_params = api_params
+    m = method.lower()
+    if m == "post" and isinstance(api_params, dict) and "bookings" in path and "responses" in api_params:
+        new_params = _calcom_booking_v1_to_v2(api_params)
+    if m == "get" and isinstance(api_params, dict) and "slots" in path:
+        new_params = _calcom_slot_params(api_params)
+    return new_url, new_params, h
+
+
+def _calcom_unwrap_response(text):
+    try:
+        o = json.loads(text)
+        if isinstance(o, dict) and o.get("status") == "success" and "data" in o:
+            return json.dumps(o["data"])
+    except Exception:
+        pass
+    return text
 
 
 def _contains_var_markers(obj):
@@ -103,6 +201,9 @@ async def trigger_api(url, method, param, api_token, headers_data, meta_info, ru
 
         if headers.get('Content-Type').lower().startswith('application/x-www-form-urlencoded'):
             content_type = 'form'
+
+        url, api_params, headers = _calcom_prepare(url, method, api_params, headers, api_token)
+
         convert_to_request_log(request_body, meta_info , None, LogComponent.FUNCTION_CALL, direction=LogDirection.REQUEST, is_cached=False, run_id=run_id)
 
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=5)) as session:
@@ -120,6 +221,8 @@ async def trigger_api(url, method, param, api_token, headers_data, meta_info, ru
                     async with session.post(url, data=normalized_api_params, headers=headers) as response:
                         response_text = await response.text()
 
+            if "api.cal.com" in (url or "").lower():
+                response_text = _calcom_unwrap_response(response_text)
             return response_text
     except asyncio.TimeoutError:
         message = f"ERROR CALLING API: Request to {url} timed out after 5 seconds"
