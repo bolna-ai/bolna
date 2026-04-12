@@ -1868,8 +1868,6 @@ class TaskManager(BaseManager):
             await self._generate_proactive()
 
     async def _generate_proactive(self):
-        """Trigger LLM generation proactively (no user message appended to history).
-        Same BOS/EOS structure as _inject_and_run_llm but without conversation_history.append_user()."""
         meta_info = self.__get_updated_meta_info({
             'io': self.tools["output"].get_provider(),
             "request_id": str(uuid.uuid4()),
@@ -1877,14 +1875,14 @@ class TaskManager(BaseManager):
             'format': self.task_config["tools_config"]["output"].get("format", "pcm"),
             "message_category": "event_proactive",
         })
-        bos_packet = create_ws_data_packet("<beginning_of_stream>", meta_info)
-        await self.tools["output"].handle(bos_packet)
         self.response_in_pipeline = True
         task = asyncio.create_task(self._run_llm_task(create_ws_data_packet("", meta_info)))
         self.llm_task = task
-        await task
-        eos_packet = create_ws_data_packet("<end_of_stream>", meta_info)
-        await self.tools["output"].handle(eos_packet)
+        try:
+            await task
+        except asyncio.CancelledError:
+            logger.info("Proactive generation cancelled by interruption")
+            return
 
     async def __process_end_of_conversation(self, web_call_timeout=False):
         if self._end_of_conversation_in_progress or self.conversation_ended:
