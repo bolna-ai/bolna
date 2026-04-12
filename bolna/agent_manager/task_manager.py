@@ -1799,7 +1799,17 @@ class TaskManager(BaseManager):
                 if result.get('matched'):
                     # Set node entry index so _node_turns counts from this point
                     self.tools['llm_agent'].current_node_entry_index = len(self.conversation_history.get_copy())
-                    await self._proactive_generate_for_event(event, result)
+
+                    if self.interruption_manager and self.interruption_manager.is_user_speaking():
+                        # User is mid-speech — skip proactive generation.
+                        # The node already transitioned, so the user's in-progress
+                        # utterance will be routed + answered on the new node.
+                        target_node = result.get('target_node')
+                        if target_node:
+                            self.repeat_after_silence_seconds = target_node.get('repeat_after_silence_seconds')
+                        logger.info(f"Event '{event.get('event')}' transitioned node but user is speaking — deferring to conversation flow")
+                    else:
+                        await self._proactive_generate_for_event(event, result)
                 else:
                     logger.info(f"Event '{event.get('event')}' — no matching edge, context updated silently")
 
