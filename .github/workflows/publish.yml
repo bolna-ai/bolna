@@ -38,8 +38,8 @@ jobs:
         if: steps.check.outputs.publish == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.check.outputs.version }}
         run: |
-          VERSION=${{ steps.check.outputs.version }}
           git tag "$VERSION"
           git push origin "$VERSION"
           gh release create "$VERSION" --title "$VERSION" --generate-notes
