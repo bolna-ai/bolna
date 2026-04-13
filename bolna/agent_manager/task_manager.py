@@ -4100,15 +4100,18 @@ class TaskManager(BaseManager):
                 elif self.task_config["task_type"] == "webhook":
                     output = {"status": self.webhook_response, "task_type": "webhook"}
 
-            await asyncio.gather(*tasks_to_cancel)
-
-            for tool in self.tools.values():
-                if hasattr(tool, "task_manager_instance"):
-                    tool.task_manager_instance = None
-            self.tools.clear()
-            self.kwargs.pop("task_manager_instance", None)
-            self.conversation_recording = {"input": {"data": b""}, "output": [], "metadata": {}}
-            self.conversation_history = None
+            try:
+                await asyncio.gather(*tasks_to_cancel)
+            except Exception as e:
+                logger.error(f"Error during task cancellation: {e}")
+            finally:
+                for tool in self.tools.values():
+                    if hasattr(tool, "task_manager_instance"):
+                        tool.task_manager_instance = None
+                self.tools.clear()
+                self.kwargs.pop("task_manager_instance", None)
+                self.conversation_recording = {"input": {"data": b""}, "output": [], "metadata": {}}
+                self.conversation_history = None
 
             return output
 
