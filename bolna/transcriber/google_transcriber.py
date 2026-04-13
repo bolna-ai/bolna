@@ -22,16 +22,18 @@ class GoogleTranscriber(BaseTranscriber):
     Uses threading to bridge async input_queue with blocking gRPC streaming.
     """
 
-    def __init__(self,
-                 telephony_provider,
-                 input_queue=None,
-                 output_queue=None,
-                 language="en-US",
-                 encoding=None,
-                 sample_rate_hertz=None,
-                 model="latest_long",
-                 run_id="",
-                 **kwargs):
+    def __init__(
+        self,
+        telephony_provider,
+        input_queue=None,
+        output_queue=None,
+        language="en-US",
+        encoding=None,
+        sample_rate_hertz=None,
+        model="latest_long",
+        run_id="",
+        **kwargs,
+    ):
         super().__init__(input_queue)
         self.provider = telephony_provider or ""
         self.transcriber_output_queue = output_queue  # expected to be asyncio.Queue in TaskManager
@@ -40,9 +42,9 @@ class GoogleTranscriber(BaseTranscriber):
         self.run_id = run_id or kwargs.get("run_id", "")
 
         # Provider-specific audio configuration
-        if self.provider in ('twilio', 'exotel', 'plivo', 'vobiz'):
+        if self.provider in ("twilio", "exotel", "plivo", "vobiz"):
             self.encoding = "MULAW" if self.provider in ("twilio") else "LINEAR16"
-            self.sample_rate_hertz = 8000  
+            self.sample_rate_hertz = 8000
         elif self.provider == "web_based_call":
             self.encoding = "LINEAR16"
             self.sample_rate_hertz = 16000
@@ -60,18 +62,18 @@ class GoogleTranscriber(BaseTranscriber):
         self._audio_q = queue.Queue()
         self._running = False
         self._grpc_thread = None
-        
+
         # Connection state management
         self.connection_start_time = None
         self.connection_time = None
         self.websocket_connection = None
         self.connection_authenticated = False
         self.transcription_task = None
-        
+
         # Audio frame tracking
         self.audio_frame_duration = 0.0
         self.num_frames = 0
-        if self.provider in ('twilio', 'exotel', 'plivo', 'vobiz'):
+        if self.provider in ("twilio", "exotel", "plivo", "vobiz"):
             self.audio_frame_duration = 0.2
         elif self.provider == "web_based_call":
             self.audio_frame_duration = 0.256
@@ -94,6 +96,7 @@ class GoogleTranscriber(BaseTranscriber):
             self.loop = asyncio.get_event_loop()
         except Exception:
             self.loop = None
+
     def _enqueue_output(self, data, meta=None):
         """Thread-safe enqueue to transcriber_output_queue."""
         if self.transcriber_output_queue is None:
@@ -128,17 +131,17 @@ class GoogleTranscriber(BaseTranscriber):
             start_time = time.perf_counter()
             _ = self.client
             self.connection_authenticated = True
-            
+
             if not self.connection_time:
                 self.connection_time = round((time.perf_counter() - start_time) * 1000)
-            
+
             logger.info("Successfully validated Google Speech client")
             return True
-            
+
         except Exception as e:
             logger.error(f"Failed to validate Google Speech client: {e}")
             raise ConnectionError(f"Failed to validate Google Speech client: {e}")
-    
+
     async def run(self):
         """
         Enhanced startup sequence matching Deepgram pattern.
@@ -146,22 +149,20 @@ class GoogleTranscriber(BaseTranscriber):
         try:
             # Connection validation
             await self.google_connect()
-            
+
             self._running = True
-            
+
             # Create transcription task like Deepgram
             self.transcription_task = asyncio.create_task(self._transcribe_wrapper())
-            
+
         except Exception as e:
             logger.exception(f"Error starting GoogleTranscriber: {e}")
             self.connection_error = str(e)
             await self.toggle_connection()
             meta = (self.meta_info or {}).copy()
-            meta['connection_error'] = self.connection_error
-            await self.transcriber_output_queue.put(
-                create_ws_data_packet("transcriber_connection_closed", meta)
-            )
-    
+            meta["connection_error"] = self.connection_error
+            await self.transcriber_output_queue.put(create_ws_data_packet("transcriber_connection_closed", meta))
+
     async def _transcribe_wrapper(self):
         """Wrapper to make gRPC streaming fit async pattern better"""
         try:
@@ -171,13 +172,13 @@ class GoogleTranscriber(BaseTranscriber):
 
             # spawn async sender to read from input_queue
             await self._send_audio_to_transcriber()
-            
+
         except Exception as e:
             logger.error(f"Error in transcription wrapper: {e}")
             await self.toggle_connection()
         finally:
             # Ensure cleanup
-            if hasattr(self, 'transcription_task') and self.transcription_task:
+            if hasattr(self, "transcription_task") and self.transcription_task:
                 try:
                     self.transcription_task.cancel()
                 except Exception:
@@ -194,24 +195,26 @@ class GoogleTranscriber(BaseTranscriber):
                     self.audio_submitted = True
                     self.audio_submission_time = time.time()
                     self._request_id = self.generate_request_id()
-                    self.meta_info = ws_data_packet.get('meta_info', {}) or {}
-                    self.meta_info['request_id'] = self._request_id
+                    self.meta_info = ws_data_packet.get("meta_info", {}) or {}
+                    self.meta_info["request_id"] = self._request_id
                     try:
-                        self.meta_info['transcriber_start_time'] = time.perf_counter()
+                        self.meta_info["transcriber_start_time"] = time.perf_counter()
                         # start turn-level tracking
-                        self.current_turn_start_time = self.meta_info['transcriber_start_time']
-                        self.current_turn_id = self.meta_info.get('turn_id') or self.meta_info.get('request_id') or self._request_id
+                        self.current_turn_start_time = self.meta_info["transcriber_start_time"]
+                        self.current_turn_id = (
+                            self.meta_info.get("turn_id") or self.meta_info.get("request_id") or self._request_id
+                        )
                     except Exception:
                         pass
 
                 # check EOS
-                if ws_data_packet.get('meta_info', {}).get('eos') is True:
+                if ws_data_packet.get("meta_info", {}).get("eos") is True:
                     # put sentinel so blocking generator ends gracefully
                     self._audio_q.put(None)
                     break
 
                 # get raw audio bytes from packet and track frames
-                data = ws_data_packet.get('data')
+                data = ws_data_packet.get("data")
                 if data:
                     self.num_frames += 1
                     # if data is base64 string, try to decode if needed
@@ -219,11 +222,12 @@ class GoogleTranscriber(BaseTranscriber):
                         try:
                             # if base64 encoded, decode (guardy)
                             import base64 as _b64
+
                             d = _b64.b64decode(data)
                             self._audio_q.put(d)
                         except Exception:
                             # fallback: push raw str bytes
-                            self._audio_q.put(data.encode('utf-8'))
+                            self._audio_q.put(data.encode("utf-8"))
                     else:
                         # assume bytes-like
                         self._audio_q.put(data)
@@ -257,17 +261,19 @@ class GoogleTranscriber(BaseTranscriber):
         """
         try:
             if self.current_turn_id and self.current_turn_start_time:
-                first_ms = int(round((self.meta_info.get('transcriber_first_result_latency', 0)) * 1000))
+                first_ms = int(round((self.meta_info.get("transcriber_first_result_latency", 0)) * 1000))
                 total_s = (time.perf_counter() - self.current_turn_start_time) if self.current_turn_start_time else 0
-                self.turn_latencies.append({
-                    'turn_id': self.current_turn_id,
-                    'sequence_id': self.current_turn_id,
-                    'first_result_latency_ms': first_ms,
-                    'total_stream_duration_ms': int(round(total_s * 1000))
-                })
+                self.turn_latencies.append(
+                    {
+                        "turn_id": self.current_turn_id,
+                        "sequence_id": self.current_turn_id,
+                        "first_result_latency_ms": first_ms,
+                        "total_stream_duration_ms": int(round(total_s * 1000)),
+                    }
+                )
                 # also expose on meta_info for immediate consumption
                 try:
-                    self.meta_info['turn_latencies'] = self.turn_latencies
+                    self.meta_info["turn_latencies"] = self.turn_latencies
                 except Exception:
                     pass
                 # reset turn tracking
@@ -290,9 +296,9 @@ class GoogleTranscriber(BaseTranscriber):
             # map string encodings to enum (google cloud)
             encoding_enum = speech.RecognitionConfig.AudioEncoding.LINEAR16
             enc = (self.encoding or "").upper()
-            if 'MULAW' in enc or 'ULAW' in enc:
+            if "MULAW" in enc or "ULAW" in enc:
                 encoding_enum = speech.RecognitionConfig.AudioEncoding.MULAW
-            elif 'LINEAR' in enc or 'PCM' in enc:
+            elif "LINEAR" in enc or "PCM" in enc:
                 encoding_enum = speech.RecognitionConfig.AudioEncoding.LINEAR16
             else:
                 # fallback: leave as unspecified (google will attempt sampling inference)
@@ -317,18 +323,18 @@ class GoogleTranscriber(BaseTranscriber):
             )
 
             requests = self._audio_generator()
-            
+
             try:
                 responses = self.client.streaming_recognize(streaming_config, requests)
                 self.connection_authenticated = True
-                
+
                 # iterate responses synchronously
                 for response in responses:
                     if not self._running:
                         break
                     if not response.results:
                         continue
-                    
+
                     result = response.results[0]
                     is_final = result.is_final
                     transcript = ""
@@ -338,8 +344,14 @@ class GoogleTranscriber(BaseTranscriber):
                     if transcript:
                         # set first-result latency if not already set
                         try:
-                            if self.meta_info and 'transcriber_start_time' in self.meta_info and 'transcriber_first_result_latency' not in self.meta_info:
-                                self.meta_info['transcriber_first_result_latency'] = time.perf_counter() - self.meta_info['transcriber_start_time']
+                            if (
+                                self.meta_info
+                                and "transcriber_start_time" in self.meta_info
+                                and "transcriber_first_result_latency" not in self.meta_info
+                            ):
+                                self.meta_info["transcriber_first_result_latency"] = (
+                                    time.perf_counter() - self.meta_info["transcriber_start_time"]
+                                )
                         except Exception:
                             pass
 
@@ -347,8 +359,10 @@ class GoogleTranscriber(BaseTranscriber):
                         if is_final:
                             # populate total durations and append turn latencies
                             try:
-                                if self.meta_info and 'transcriber_start_time' in self.meta_info:
-                                    self.meta_info['transcriber_total_stream_duration'] = time.perf_counter() - self.meta_info['transcriber_start_time']
+                                if self.meta_info and "transcriber_start_time" in self.meta_info:
+                                    self.meta_info["transcriber_total_stream_duration"] = (
+                                        time.perf_counter() - self.meta_info["transcriber_start_time"]
+                                    )
                             except Exception:
                                 pass
 
@@ -363,43 +377,45 @@ class GoogleTranscriber(BaseTranscriber):
 
                 # After streaming ends on Google side, send transcriber_connection_closed sentinel
                 closed_meta = (self.meta_info or {}).copy()
-                if 'transcriber_total_stream_duration' not in closed_meta and 'transcriber_start_time' in closed_meta:
+                if "transcriber_total_stream_duration" not in closed_meta and "transcriber_start_time" in closed_meta:
                     try:
-                        closed_meta['transcriber_total_stream_duration'] = time.perf_counter() - closed_meta['transcriber_start_time']
+                        closed_meta["transcriber_total_stream_duration"] = (
+                            time.perf_counter() - closed_meta["transcriber_start_time"]
+                        )
                     except Exception:
                         pass
                 if self.connection_error:
-                    closed_meta['connection_error'] = self.connection_error
+                    closed_meta["connection_error"] = self.connection_error
                 self._enqueue_output("transcriber_connection_closed", meta=closed_meta)
 
             except Exception as stream_error:
                 # Specific gRPC error handling
                 error_msg = f"Google streaming error: {stream_error}"
                 logger.error(error_msg)
-                
+
                 # Determine if error is retryable
                 if "deadline exceeded" in str(stream_error).lower():
                     logger.info("Deadline exceeded - this may be normal for long streams")
                 elif "unavailable" in str(stream_error).lower():
                     logger.warning("Service unavailable - connection issue")
-                
+
                 # Send error to output
                 self.connection_error = str(stream_error)
                 err_meta = (self.meta_info or {}).copy()
-                err_meta['error'] = str(stream_error)
-                err_meta['error_type'] = 'streaming_error'
-                err_meta['connection_error'] = self.connection_error
+                err_meta["error"] = str(stream_error)
+                err_meta["error_type"] = "streaming_error"
+                err_meta["connection_error"] = self.connection_error
                 self._enqueue_output("transcriber_connection_closed", meta=err_meta)
                 return
-                
+
         except Exception as e:
             # Configuration or setup error
             logger.exception(f"Google transcriber setup error: {e}")
             self.connection_error = str(e)
             err_meta = (self.meta_info or {}).copy()
-            err_meta['error'] = str(e)
-            err_meta['error_type'] = 'setup_error'
-            err_meta['connection_error'] = self.connection_error
+            err_meta["error"] = str(e)
+            err_meta["error_type"] = "setup_error"
+            err_meta["connection_error"] = self.connection_error
             self._enqueue_output("transcriber_connection_closed", meta=err_meta)
         finally:
             self.connection_authenticated = False
@@ -412,29 +428,29 @@ class GoogleTranscriber(BaseTranscriber):
         logger.info("toggle_connection called on GoogleTranscriber")
         self._running = False
         self.connection_authenticated = False
-        
+
         # Cancel transcription task if running
-        if hasattr(self, 'transcription_task') and self.transcription_task:
+        if hasattr(self, "transcription_task") and self.transcription_task:
             try:
                 self.transcription_task.cancel()
             except Exception:
                 pass
-        
+
         # Signal thread to stop
         try:
             self._audio_q.put(None)
         except Exception:
             pass
-        
+
         # Wait for thread cleanup with timeout
-        if hasattr(self, '_grpc_thread') and self._grpc_thread and self._grpc_thread.is_alive():
+        if hasattr(self, "_grpc_thread") and self._grpc_thread and self._grpc_thread.is_alive():
             try:
                 self._grpc_thread.join(timeout=2.0)
                 if self._grpc_thread.is_alive():
                     logger.warning("gRPC thread did not terminate within timeout")
             except Exception as e:
                 logger.error(f"Error joining gRPC thread: {e}")
-        
+
         logger.info("GoogleTranscriber connection toggled off")
 
     def _sync_cleanup(self):
@@ -470,7 +486,11 @@ class GoogleTranscriber(BaseTranscriber):
         logger.info("Cleaning up Google transcriber resources")
 
         # Cancel transcription task properly
-        if hasattr(self, 'transcription_task') and self.transcription_task is not None and not self.transcription_task.done():
+        if (
+            hasattr(self, "transcription_task")
+            and self.transcription_task is not None
+            and not self.transcription_task.done()
+        ):
             self.transcription_task.cancel()
             try:
                 await self.transcription_task

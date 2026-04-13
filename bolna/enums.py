@@ -3,6 +3,7 @@ from enum import Enum
 
 class ChatRole(str, Enum):
     """Chat message roles."""
+
     SYSTEM = "system"
     USER = "user"
     ASSISTANT = "assistant"
@@ -11,6 +12,7 @@ class ChatRole(str, Enum):
 
 class TelephonyProvider(str, Enum):
     """Enum for telephony/IO providers (input/output handlers)."""
+
     TWILIO = "twilio"
     EXOTEL = "exotel"
     PLIVO = "plivo"
@@ -37,6 +39,7 @@ class TelephonyProvider(str, Enum):
 
 class SynthesizerProvider(str, Enum):
     """Enum for synthesizer (TTS) providers."""
+
     POLLY = "polly"
     ELEVENLABS = "elevenlabs"
     OPENAI = "openai"
@@ -56,6 +59,7 @@ class SynthesizerProvider(str, Enum):
 
 class TranscriberProvider(str, Enum):
     """Enum for transcriber (STT) providers."""
+
     DEEPGRAM = "deepgram"
     AZURE = "azure"
     SARVAM = "sarvam"
@@ -74,6 +78,7 @@ class TranscriberProvider(str, Enum):
 
 class LLMProvider(str, Enum):
     """Enum for LLM providers."""
+
     OPENAI = "openai"
     COHERE = "cohere"
     OLLAMA = "ollama"
@@ -92,7 +97,6 @@ class LLMProvider(str, Enum):
     OPENROUTER = "openrouter"
     AZURE = "azure"
     GOOGLE = "google"
-
 
     @classmethod
     def all_values(cls):
@@ -127,6 +131,7 @@ class Verbosity(str, Enum):
 
 class ResponseStreamEvent(str, Enum):
     """Responses API event types (server-sent and client commands)."""
+
     # Server stream events
     CREATED = "response.created"
     COMPLETED = "response.completed"
@@ -157,6 +162,7 @@ class ResponseStreamEvent(str, Enum):
 
 class ResponseItemType(str, Enum):
     """Responses API input item types."""
+
     MESSAGE = "message"
     FUNCTION_CALL = "function_call"
     FUNCTION_CALL_OUTPUT = "function_call_output"
@@ -169,6 +175,7 @@ class ResponseItemType(str, Enum):
 
 class HangupReason(str, Enum):
     """Enum for hangup_detail values — why the call ended."""
+
     LLM_PROMPTED_HANGUP = "llm_prompted_hangup"
     VOICEMAIL_DETECTED = "voicemail_detected"
     WEB_CALL_MAX_DURATION_REACHED = "web_call_max_duration_reached"
@@ -185,6 +192,7 @@ class HangupReason(str, Enum):
 
 class LogComponent(str, Enum):
     """Enum for CSV trace log component types."""
+
     ERROR = "error"
     FUNCTION_CALL = "function_call"
     GRAPH_ROUTING = "graph_routing"
@@ -219,6 +227,7 @@ _DISPLAY_NAMES = {
 
 class LogDirection(str, Enum):
     """Enum for CSV trace log direction types."""
+
     ERROR = "error"
     REQUEST = "request"
     RESPONSE = "response"
@@ -256,6 +265,7 @@ class EdgeConditionType(str, Enum):
 
 class UsageSource(str, Enum):
     """Indicates whether token counts came from the API or text estimation."""
+
     API_REPORTED = "api_reported"
     ESTIMATED = "estimated"
     PARTIAL = "partial"  # Mix of api_reported and estimated (e.g., interrupted streams)

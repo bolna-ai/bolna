@@ -16,7 +16,7 @@ class LanguageDetector:
     """Detects dominant language from user transcripts using LLM."""
 
     def __init__(self, config: dict, run_id: str = None, enabled: bool = True):
-        self.turns_threshold = config.get('language_detection_turns') or 0
+        self.turns_threshold = config.get("language_detection_turns") or 0
         self.run_id = run_id
         self.enabled = enabled
 
@@ -29,12 +29,12 @@ class LanguageDetector:
         self._latency_ms = None
 
         if self.turns_threshold > 0:
-            self._llm = OpenAiLLM(model=os.getenv('LANGUAGE_DETECTION_LLM', 'gpt-4.1-mini'))
+            self._llm = OpenAiLLM(model=os.getenv("LANGUAGE_DETECTION_LLM", "gpt-4.1-mini"))
 
     @property
     def dominant_language(self) -> str | None:
         if self._complete and self._result:
-            return self._result.get('dominant_language')
+            return self._result.get("dominant_language")
         return None
 
     @property
@@ -42,10 +42,10 @@ class LanguageDetector:
         """Return latency data for other_latencies tracking."""
         if self._complete and self._latency_ms is not None:
             return {
-                'type': 'language_detection',
-                'latency_ms': self._latency_ms,
-                'model': self._llm.model if self._llm else None,
-                'provider': 'openai'
+                "type": "language_detection",
+                "latency_ms": self._latency_ms,
+                "model": self._llm.model if self._llm else None,
+                "provider": "openai",
             }
         return None
 
@@ -82,7 +82,7 @@ class LanguageDetector:
             formatted = "\n".join([f"- {t}" for t in self._transcripts])
             prompt = LANGUAGE_DETECTION_PROMPT.format(transcripts=formatted)
             start_time = time.time()
-            response = await self._llm.generate([{'role': 'system', 'content': prompt}], request_json=True)
+            response = await self._llm.generate([{"role": "system", "content": prompt}], request_json=True)
             self._latency_ms = (time.time() - start_time) * 1000
             self._result = json.loads(response)
             self._complete = True
@@ -98,15 +98,21 @@ class LanguageDetector:
 
     def _log_detection(self, result: dict):
         """Log for analytics."""
-        meta_info = {'request_id': str(uuid.uuid4())}
-        model = self._llm.model if self._llm else 'unknown'
+        meta_info = {"request_id": str(uuid.uuid4())}
+        model = self._llm.model if self._llm else "unknown"
         convert_to_request_log(
-            message={'transcripts': self._transcripts},
-            meta_info=meta_info, component=LogComponent.LLM_LANGUAGE_DETECTION,
-            direction=LogDirection.REQUEST, model=model, run_id=self.run_id
+            message={"transcripts": self._transcripts},
+            meta_info=meta_info,
+            component=LogComponent.LLM_LANGUAGE_DETECTION,
+            direction=LogDirection.REQUEST,
+            model=model,
+            run_id=self.run_id,
         )
         convert_to_request_log(
-            message=result, meta_info=meta_info,
-            component=LogComponent.LLM_LANGUAGE_DETECTION, direction=LogDirection.RESPONSE,
-            model=model, run_id=self.run_id
+            message=result,
+            meta_info=meta_info,
+            component=LogComponent.LLM_LANGUAGE_DETECTION,
+            direction=LogDirection.RESPONSE,
+            model=model,
+            run_id=self.run_id,
         )

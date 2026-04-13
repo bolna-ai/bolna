@@ -8,6 +8,7 @@ import traceback
 from dotenv import load_dotenv
 from .default import DefaultOutputHandler
 from bolna.helpers.logger_config import configure_logger
+
 logger = configure_logger(__name__)
 load_dotenv()
 
@@ -37,10 +38,10 @@ class TelephonyOutputHandler(DefaultOutputHandler):
         if self._closed:
             return
         try:
-            audio_chunk = ws_data_packet.get('data')
-            meta_info = ws_data_packet.get('meta_info')
+            audio_chunk = ws_data_packet.get("data")
+            meta_info = ws_data_packet.get("meta_info")
             if self.stream_sid is None:
-                self.stream_sid = meta_info.get('stream_sid', None)
+                self.stream_sid = meta_info.get("stream_sid", None)
 
             if audio_chunk is None:
                 logger.info("No audio data in packet, skipping send")
@@ -48,10 +49,10 @@ class TelephonyOutputHandler(DefaultOutputHandler):
 
             try:
                 if len(audio_chunk) == 1:
-                    audio_chunk += b'\x00'
+                    audio_chunk += b"\x00"
 
                 if audio_chunk and self.stream_sid and len(audio_chunk) != 1:
-                    if audio_chunk != b'\x00\x00':
+                    if audio_chunk != b"\x00\x00":
                         audio_format = meta_info.get("format", "wav")
 
                         # sending of pre-mark message
@@ -64,25 +65,42 @@ class TelephonyOutputHandler(DefaultOutputHandler):
                         await self.websocket.send_text(json.dumps(mark_message))
 
                         # sending of audio chunk
-                        if audio_format == 'pcm' and meta_info.get('message_category', '') == 'agent_welcome_message' and self.io_provider in ('plivo', 'vobiz') and meta_info['cached'] is True:
-                            audio_format = 'wav'
+                        if (
+                            audio_format == "pcm"
+                            and meta_info.get("message_category", "") == "agent_welcome_message"
+                            and self.io_provider in ("plivo", "vobiz")
+                            and meta_info["cached"] is True
+                        ):
+                            audio_format = "wav"
                         media_message = await self.form_media_message(audio_chunk, audio_format)
                         await self.websocket.send_text(json.dumps(media_message))
-                        if meta_info.get('message_category', '') == 'agent_welcome_message' and not self.welcome_message_sent_ts:
+                        if (
+                            meta_info.get("message_category", "") == "agent_welcome_message"
+                            and not self.welcome_message_sent_ts
+                        ):
                             self.welcome_message_sent_ts = time.time() * 1000
                         logger.info(f"Sending media event - {meta_info.get('mark_id')}")
 
                     # sending of post-mark message
                     mark_event_meta_data = {
-                        "text_synthesized": "" if meta_info["sequence_id"] == -1 else meta_info.get("text_synthesized", ""),
-                        "type": meta_info.get('message_category', ''),
+                        "text_synthesized": ""
+                        if meta_info["sequence_id"] == -1
+                        else meta_info.get("text_synthesized", ""),
+                        "type": meta_info.get("message_category", ""),
                         "is_first_chunk": meta_info.get("is_first_chunk", False),
-                        "is_final_chunk": meta_info.get("end_of_llm_stream", False) and meta_info.get("end_of_synthesizer_stream", False),
+                        "is_final_chunk": meta_info.get("end_of_llm_stream", False)
+                        and meta_info.get("end_of_synthesizer_stream", False),
                         "sequence_id": meta_info["sequence_id"],
-                        "duration": len(audio_chunk) / 8000 if meta_info.get('format', 'mulaw') == 'mulaw' else len(audio_chunk) / 16000,
-                        "sent_ts": time.time()  # Track when audio was actually sent to telephony provider
+                        "duration": len(audio_chunk) / 8000
+                        if meta_info.get("format", "mulaw") == "mulaw"
+                        else len(audio_chunk) / 16000,
+                        "sent_ts": time.time(),  # Track when audio was actually sent to telephony provider
                     }
-                    mark_id = meta_info.get("mark_id") if (meta_info.get("mark_id") and meta_info.get("mark_id") != "") else str(uuid.uuid4())
+                    mark_id = (
+                        meta_info.get("mark_id")
+                        if (meta_info.get("mark_id") and meta_info.get("mark_id") != "")
+                        else str(uuid.uuid4())
+                    )
 
                     self.mark_event_meta_data.update_data(mark_id, mark_event_meta_data)
                     mark_message = await self.form_mark_message(mark_id)
@@ -91,8 +109,8 @@ class TelephonyOutputHandler(DefaultOutputHandler):
                     logger.info("Not sending")
             except Exception as e:
                 self._closed = True  # Prevent further send attempts
-                logger.debug(f'WebSocket send failed (client disconnected): {e}')
+                logger.debug(f"WebSocket send failed (client disconnected): {e}")
 
         except Exception as e:
             self._closed = True
-            logger.debug(f'WebSocket handling failed (client disconnected): {e}')
+            logger.debug(f"WebSocket handling failed (client disconnected): {e}")

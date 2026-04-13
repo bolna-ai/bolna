@@ -20,7 +20,7 @@ def dynamic_log_record_factory(*args, **kwargs):
 logging.setLogRecordFactory(dynamic_log_record_factory)
 
 
-def configure_logger(file_name, logging_level='INFO'):
+def configure_logger(file_name, logging_level="INFO"):
     if logging_level not in VALID_LOGGING_LEVELS:
         logging_level = "INFO"
 

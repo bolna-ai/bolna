@@ -21,7 +21,7 @@ class LatencyData(BaseModel):
 
 
 class FunctionCallPayload(BaseModel):
-    model_config = ConfigDict(extra='allow', protected_namespaces=())
+    model_config = ConfigDict(extra="allow", protected_namespaces=())
 
     url: Optional[str] = None
     method: Optional[str] = None
@@ -39,6 +39,7 @@ class FunctionCallPayload(BaseModel):
 
 class LLMStreamChunk(BaseModel):
     """Single chunk yielded from LLM generate_stream methods."""
+
     data: Any = None
     end_of_stream: bool = False
     latency: Optional[LatencyData] = None

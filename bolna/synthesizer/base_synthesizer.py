@@ -48,7 +48,7 @@ class BaseSynthesizer:
 
     def should_synthesize_response(self, sequence_id):
         return self.task_manager_instance.is_sequence_id_in_current_ids(sequence_id)
-    
+
     async def push(self, message):
         self.internal_queue.put_nowait(message)
 
@@ -134,7 +134,6 @@ class BaseSynthesizer:
             self._stamp_mark_id(meta_info)
             yield create_ws_data_packet(audio, meta_info)
 
-            
     async def _fetch_http_audio(self, text, meta_info=None):
         """Fetch audio via HTTP, with optional caching. Tracks synthesized_characters."""
         if getattr(self, "caching", False) and hasattr(self, "cache"):
@@ -177,7 +176,7 @@ class BaseSynthesizer:
             yield buffer.strip() + " "
 
     def normalize_text(self, s):
-        return re.sub(r'\s+', ' ', s.strip())
+        return re.sub(r"\s+", " ", s.strip())
 
     # ------------------------------------------------------------------
     # Audio utilities

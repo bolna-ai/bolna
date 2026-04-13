@@ -15,11 +15,13 @@ load_dotenv()
 
 
 class AzureTranscriber(BaseTranscriber):
-    def __init__(self, telephony_provider, input_queue=None, output_queue=None, language="en-US", encoding="linear16", **kwargs):
+    def __init__(
+        self, telephony_provider, input_queue=None, output_queue=None, language="en-US", encoding="linear16", **kwargs
+    ):
         super().__init__(input_queue)
         self.transcription_task = None
-        self.subscription_key = os.getenv('AZURE_SPEECH_KEY')
-        self.service_region = os.getenv('AZURE_SPEECH_REGION')
+        self.subscription_key = os.getenv("AZURE_SPEECH_KEY")
+        self.service_region = os.getenv("AZURE_SPEECH_REGION")
         self.push_stream = None
         self.recognizer = None
         self.transcriber_output_queue = output_queue
@@ -66,21 +68,19 @@ class AzureTranscriber(BaseTranscriber):
             await self.initialize_connection()
             if self.connection_error:
                 meta = dict(self.meta_info or {})
-                meta['connection_error'] = self.connection_error
-                await self.transcriber_output_queue.put(
-                    create_ws_data_packet("transcriber_connection_closed", meta))
+                meta["connection_error"] = self.connection_error
+                await self.transcriber_output_queue.put(create_ws_data_packet("transcriber_connection_closed", meta))
                 return
             self.send_audio_to_transcriber_task = asyncio.create_task(self.send_audio_to_transcriber())
         except Exception as e:
             logger.error(f"Error received in run method - {e}")
             self.connection_error = self.connection_error or str(e)
             meta = dict(self.meta_info or {})
-            meta['connection_error'] = self.connection_error
-            await self.transcriber_output_queue.put(
-                create_ws_data_packet("transcriber_connection_closed", meta))
+            meta["connection_error"] = self.connection_error
+            await self.transcriber_output_queue.put(create_ws_data_packet("transcriber_connection_closed", meta))
 
     def _check_and_process_end_of_stream(self, ws_data_packet):
-        if 'eos' in ws_data_packet['meta_info'] and ws_data_packet['meta_info']['eos'] is True:
+        if "eos" in ws_data_packet["meta_info"] and ws_data_packet["meta_info"]["eos"] is True:
             logger.info("End of stream detected")
             self._sync_cleanup()
             return True
@@ -113,13 +113,13 @@ class AzureTranscriber(BaseTranscriber):
             while True:
                 ws_data_packet = await self.input_queue.get()
                 if not self.audio_submitted:
-                    self.meta_info = ws_data_packet.get('meta_info')
+                    self.meta_info = ws_data_packet.get("meta_info")
                     self.audio_submitted = True
                     self.audio_submission_time = time.time()
                     self.current_request_id = self.generate_request_id()
-                    self.meta_info['request_id'] = self.current_request_id
+                    self.meta_info["request_id"] = self.current_request_id
                     try:
-                        self.meta_info['transcriber_start_time'] = time.perf_counter()
+                        self.meta_info["transcriber_start_time"] = time.perf_counter()
                     except Exception:
                         pass
 
@@ -127,14 +127,14 @@ class AzureTranscriber(BaseTranscriber):
                 if end_of_stream:
                     break
 
-                if ws_data_packet.get('data'):
+                if ws_data_packet.get("data"):
                     frame_start = self.num_frames * self.audio_frame_duration
                     frame_end = (self.num_frames + 1) * self.audio_frame_duration
                     send_timestamp = timestamp_ms()
                     self.audio_frame_timestamps.append((frame_start, frame_end, send_timestamp))
                     self.num_frames += 1
 
-                    self.push_stream.write(ws_data_packet.get('data'))
+                    self.push_stream.write(ws_data_packet.get("data"))
         except Exception as e:
             exc_type, exc_obj, exc_tb = sys.exc_info()
             logger.error(f"Error occurred in send_audio_to_transcriber - {e} at {exc_tb.tb_lineno}")
@@ -149,7 +149,9 @@ class AzureTranscriber(BaseTranscriber):
                 bits_per_sample=self.bits_per_sample,
                 channels=self.channels,
                 compressed_stream_format=None,
-                wave_stream_format=AudioStreamWaveFormat.MULAW if self.encoding == "mulaw" else AudioStreamWaveFormat.PCM
+                wave_stream_format=AudioStreamWaveFormat.MULAW
+                if self.encoding == "mulaw"
+                else AudioStreamWaveFormat.PCM,
             )
 
             # Create a PushAudioInputStream to push audio packets to the recognizer
@@ -208,24 +210,26 @@ class AzureTranscriber(BaseTranscriber):
                 latency_ms = round(result_received_at - audio_sent_at, 5)
 
             interim_detail = {
-                'transcript': evt.result.text.strip(),
-                'latency_ms': latency_ms,
-                'is_final': False,
-                'received_at': time.time(),
-                'offset_seconds': offset_seconds,
-                'duration_seconds': duration_seconds
+                "transcript": evt.result.text.strip(),
+                "latency_ms": latency_ms,
+                "is_final": False,
+                "received_at": time.time(),
+                "offset_seconds": offset_seconds,
+                "duration_seconds": duration_seconds,
             }
             self.current_turn_interim_details.append(interim_detail)
 
-            data = {
-                "type": "interim_transcript_received",
-                "content": evt.result.text.strip()
-            }
+            data = {"type": "interim_transcript_received", "content": evt.result.text.strip()}
             try:
-                if 'transcriber_start_time' in self.meta_info and 'transcriber_first_result_latency' not in self.meta_info:
-                    self.meta_info['transcriber_first_result_latency'] = time.perf_counter() - self.meta_info['transcriber_start_time']
+                if (
+                    "transcriber_start_time" in self.meta_info
+                    and "transcriber_first_result_latency" not in self.meta_info
+                ):
+                    self.meta_info["transcriber_first_result_latency"] = (
+                        time.perf_counter() - self.meta_info["transcriber_start_time"]
+                    )
                     if latency_ms is not None:
-                        self.meta_info['transcriber_latency'] = latency_ms / 1000
+                        self.meta_info["transcriber_latency"] = latency_ms / 1000
             except Exception:
                 pass
             await self.transcriber_output_queue.put(create_ws_data_packet(data, self.meta_info))
@@ -248,27 +252,29 @@ class AzureTranscriber(BaseTranscriber):
                 latency_ms = round(result_received_at - audio_sent_at, 5)
 
             interim_detail = {
-                'transcript': evt.result.text.strip(),
-                'latency_ms': latency_ms,
-                'is_final': True,
-                'received_at': time.time(),
-                'offset_seconds': offset_seconds,
-                'duration_seconds': duration_seconds
+                "transcript": evt.result.text.strip(),
+                "latency_ms": latency_ms,
+                "is_final": True,
+                "received_at": time.time(),
+                "offset_seconds": offset_seconds,
+                "duration_seconds": duration_seconds,
             }
             self.current_turn_interim_details.append(interim_detail)
 
             try:
                 if not self.current_turn_id:
-                    self.current_turn_id = self.meta_info.get('turn_id') or self.meta_info.get('request_id')
+                    self.current_turn_id = self.meta_info.get("turn_id") or self.meta_info.get("request_id")
 
-                first_interim_to_final_ms, last_interim_to_final_ms = self.calculate_interim_to_final_latencies(self.current_turn_interim_details)
+                first_interim_to_final_ms, last_interim_to_final_ms = self.calculate_interim_to_final_latencies(
+                    self.current_turn_interim_details
+                )
 
                 turn_info = {
-                    'turn_id': self.current_turn_id,
-                    'sequence_id': self.current_turn_id,
-                    'interim_details': self.current_turn_interim_details,
-                    'first_interim_to_final_ms': first_interim_to_final_ms,
-                    'last_interim_to_final_ms': last_interim_to_final_ms
+                    "turn_id": self.current_turn_id,
+                    "sequence_id": self.current_turn_id,
+                    "interim_details": self.current_turn_interim_details,
+                    "first_interim_to_final_ms": first_interim_to_final_ms,
+                    "last_interim_to_final_ms": last_interim_to_final_ms,
                 }
                 self.turn_latencies.append(turn_info)
 
@@ -278,15 +284,14 @@ class AzureTranscriber(BaseTranscriber):
             except Exception as e:
                 logger.error(f"Error tracking turn latencies: {e}")
 
-            data = {
-                "type": "transcript",
-                "content": evt.result.text.strip()
-            }
+            data = {"type": "transcript", "content": evt.result.text.strip()}
             try:
-                if 'transcriber_start_time' in self.meta_info:
-                    self.meta_info['transcriber_total_stream_duration'] = time.perf_counter() - self.meta_info['transcriber_start_time']
+                if "transcriber_start_time" in self.meta_info:
+                    self.meta_info["transcriber_total_stream_duration"] = (
+                        time.perf_counter() - self.meta_info["transcriber_start_time"]
+                    )
                     if latency_ms is not None:
-                        self.meta_info['transcriber_latency'] = latency_ms / 1000
+                        self.meta_info["transcriber_latency"] = latency_ms / 1000
             except Exception:
                 pass
             await self.transcriber_output_queue.put(create_ws_data_packet(data, self.meta_info))
@@ -308,9 +313,8 @@ class AzureTranscriber(BaseTranscriber):
             self.meta_info["transcriber_duration"] = self.end_time - self.start_time
         meta = dict(self.meta_info or {})
         if self.connection_error:
-            meta['connection_error'] = self.connection_error
-        await self.transcriber_output_queue.put(
-            create_ws_data_packet("transcriber_connection_closed", meta))
+            meta["connection_error"] = self.connection_error
+        await self.transcriber_output_queue.put(create_ws_data_packet("transcriber_connection_closed", meta))
 
     async def toggle_connection(self):
         self.connection_on = False
@@ -345,7 +349,9 @@ class AzureTranscriber(BaseTranscriber):
             if not self.end_time:
                 self.end_time = time.time()
             logger.info("Connections to azure have been successfully closed")
-            logger.info(f"Time duration as per azure - {self.duration} | Time duration as per self calculation - {self.end_time - self.start_time}" )
+            logger.info(
+                f"Time duration as per azure - {self.duration} | Time duration as per self calculation - {self.end_time - self.start_time}"
+            )
         except Exception as e:
             logger.error(f"Error occurred while cleaning up - {e}")
 
@@ -355,8 +361,8 @@ class AzureTranscriber(BaseTranscriber):
 
         # Cancel tasks properly
         for task_name, task in [
-            ("send_audio_to_transcriber_task", getattr(self, 'send_audio_to_transcriber_task', None)),
-            ("transcription_task", getattr(self, 'transcription_task', None))
+            ("send_audio_to_transcriber_task", getattr(self, "send_audio_to_transcriber_task", None)),
+            ("transcription_task", getattr(self, "transcription_task", None)),
         ]:
             if task is not None and not task.done():
                 task.cancel()

@@ -7,11 +7,13 @@ import uuid
 from typing import List, Dict, Any, Optional
 from dataclasses import dataclass, field
 
+
 @dataclass
 class RAGContext:
     text: str
     score: float
     metadata: Dict[str, Any] = field(default_factory=dict)
+
 
 @dataclass
 class RAGResponse:
@@ -21,12 +23,13 @@ class RAGResponse:
     total_query_time_ms: float = 0.0
     server_processing_time_ms: float = 0.0
 
+
 class RAGServiceClient:
     """
     Client for communicating with rag-proxy-server.
     This replaces all local RAG functionality in bolna agents.
     """
-    
+
     def __init__(self, rag_server_url: str, timeout: int = 5):
         """
         Initialize the RAG service client.
@@ -35,7 +38,7 @@ class RAGServiceClient:
             rag_server_url: Base URL of the rag-proxy-server
             timeout: Request timeout in seconds
         """
-        self.base_url = rag_server_url.rstrip('/')
+        self.base_url = rag_server_url.rstrip("/")
         self.timeout = aiohttp.ClientTimeout(total=timeout)
         self.session: Optional[aiohttp.ClientSession] = None
         self.logger = logging.getLogger(__name__)
@@ -45,17 +48,17 @@ class RAGServiceClient:
         self._failure_threshold = 3
         self._last_failure_time = 0.0
         self._cooldown_seconds = 30.0
-        
+
     async def __aenter__(self):
         """Async context manager entry."""
         self.session = aiohttp.ClientSession(timeout=self.timeout)
         return self
-        
+
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         """Async context manager exit."""
         if self.session:
             await self.session.close()
-    
+
     async def _ensure_session(self):
         """Ensure session exists."""
         if not self.session:
@@ -70,16 +73,16 @@ class RAGServiceClient:
             self._last_failure_time = time.time()
             return True
         return False
-    
+
     async def health_check(self) -> Dict[str, Any]:
         """
         Check if the RAG service is healthy.
-        
+
         Returns:
             Dict containing health status
         """
         await self._ensure_session()
-        
+
         try:
             session = self.session
             assert session is not None
@@ -91,41 +94,30 @@ class RAGServiceClient:
         except Exception as e:
             self.logger.error(f"Health check failed: {e}")
             return {"status": "error", "error": str(e)}
-    
+
     async def check_collection_health(self, collection_id: str) -> Dict[str, Any]:
         """
         Check if a specific collection is accessible.
-        
+
         Args:
             collection_id: ID of the collection to check
-            
+
         Returns:
             Dict containing collection health status
         """
         await self._ensure_session()
-        
+
         try:
             session = self.session
             assert session is not None
-            async with session.get(
-                f"{self.base_url}/collections/{collection_id}/health"
-            ) as response:
+            async with session.get(f"{self.base_url}/collections/{collection_id}/health") as response:
                 return await response.json()
         except Exception as e:
             self.logger.error(f"Collection health check failed: {e}")
-            return {
-                "collection_id": collection_id,
-                "status": "error", 
-                "accessible": False,
-                "error": str(e)
-            }
-    
+            return {"collection_id": collection_id, "status": "error", "accessible": False, "error": str(e)}
+
     async def query_for_conversation(
-        self,
-        query: str,
-        collections: List[str],
-        max_results: int = 15,
-        similarity_threshold: float = 0.0
+        self, query: str, collections: List[str], max_results: int = 15, similarity_threshold: float = 0.0
     ) -> RAGResponse:
         """
         Query multiple collections for conversation context.
@@ -145,10 +137,14 @@ class RAGServiceClient:
         query_preview = query[:100] + "..." if len(query) > 100 else query
 
         if not self._is_available():
-            self.logger.warning(f"RAG query SKIPPED (service down) | query_id: {query_id} | consecutive_failures: {self._consecutive_failures}")
+            self.logger.warning(
+                f"RAG query SKIPPED (service down) | query_id: {query_id} | consecutive_failures: {self._consecutive_failures}"
+            )
             return RAGResponse(contexts=[], total_results=0, processing_time=0.0)
 
-        self.logger.info(f"RAG query started | query_id: {query_id} | collections: {collections} | query: '{query_preview}' | max_results: {max_results}")
+        self.logger.info(
+            f"RAG query started | query_id: {query_id} | collections: {collections} | query: '{query_preview}' | max_results: {max_results}"
+        )
 
         # Track client-side timing (includes network latency)
         start_time = time.time()
@@ -157,7 +153,7 @@ class RAGServiceClient:
             "query": query,
             "collections": collections,
             "max_results": max_results,
-            "similarity_threshold": similarity_threshold
+            "similarity_threshold": similarity_threshold,
         }
 
         try:
@@ -166,37 +162,33 @@ class RAGServiceClient:
             async with session.post(
                 f"{self.base_url}/conversation/query",
                 json=payload,
-                headers={
-                    "Content-Type": "application/json",
-                    "X-Query-ID": query_id
-                }
+                headers={"Content-Type": "application/json", "X-Query-ID": query_id},
             ) as response:
-                
                 if response.status != 200:
                     error_text = await response.text()
-                    self.logger.error(f"RAG query failed | query_id: {query_id} | status: {response.status} | error: {error_text}")
+                    self.logger.error(
+                        f"RAG query failed | query_id: {query_id} | status: {response.status} | error: {error_text}"
+                    )
                     self._consecutive_failures += 1
                     self._last_failure_time = time.time()
                     return RAGResponse(contexts=[], total_results=0, processing_time=0.0)
-                
+
                 data = await response.json()
                 total_query_time_ms = (time.time() - start_time) * 1000
 
                 # rag-proxy-server returns { documents, total_retrieved, query_time_ms, ... }
                 documents = data.get("documents", [])
                 contexts = [
-                    RAGContext(
-                        text=doc.get("text", ""),
-                        score=doc.get("score", 0.0),
-                        metadata=doc.get("metadata", {})
-                    )
+                    RAGContext(text=doc.get("text", ""), score=doc.get("score", 0.0), metadata=doc.get("metadata", {}))
                     for doc in documents
                 ]
 
                 total_results = data.get("total_retrieved", len(contexts))
                 server_processing_time_ms = float(data.get("query_time_ms", 0.0))
                 processing_time = server_processing_time_ms / 1000.0
-                self.logger.info(f"RAG query completed | query_id: {query_id} | results: {total_results} | server_time: {processing_time:.3f}s | total_time: {total_query_time_ms:.1f}ms")
+                self.logger.info(
+                    f"RAG query completed | query_id: {query_id} | results: {total_results} | server_time: {processing_time:.3f}s | total_time: {total_query_time_ms:.1f}ms"
+                )
 
                 if self._consecutive_failures > 0:
                     self.logger.info(f"RAG service recovered after {self._consecutive_failures} failures")
@@ -207,9 +199,9 @@ class RAGServiceClient:
                     total_results=total_results,
                     processing_time=processing_time,
                     total_query_time_ms=total_query_time_ms,
-                    server_processing_time_ms=server_processing_time_ms
+                    server_processing_time_ms=server_processing_time_ms,
                 )
-            
+
         except asyncio.TimeoutError:
             self.logger.error(f"RAG query timeout | query_id: {query_id} | collections: {collections}")
             self._consecutive_failures += 1
@@ -220,60 +212,54 @@ class RAGServiceClient:
             self._consecutive_failures += 1
             self._last_failure_time = time.time()
             return RAGResponse(contexts=[], total_results=0, processing_time=0.0)
-    
+
     async def format_context_for_prompt(self, contexts: List[RAGContext]) -> str:
         """
         Format RAG contexts into a string suitable for LLM prompts.
-        
+
         Args:
             contexts: List of RAG contexts
-            
+
         Returns:
             Formatted context string
         """
         if not contexts:
             return ""
-        
+
         context_parts = []
         for i, ctx in enumerate(contexts, 1):
             context_parts.append(f"Context {i} (relevance: {ctx.score:.3f}):")
             context_parts.append(ctx.text)
             context_parts.append("")  # Empty line for separation
-            
+
         return "\n".join(context_parts)
-    
+
     async def get_enhanced_prompt(
-        self, 
-        original_prompt: str, 
-        user_query: str,
-        collections: List[str],
-        max_results: int = 5
+        self, original_prompt: str, user_query: str, collections: List[str], max_results: int = 5
     ) -> str:
         """
         Get an enhanced prompt with RAG context integrated.
-        
+
         Args:
             original_prompt: The original system prompt
             user_query: The user's query
             collections: Collections to search
             max_results: Maximum contexts to include
-            
+
         Returns:
             Enhanced prompt with RAG context
         """
         # Query RAG for context
         rag_response = await self.query_for_conversation(
-            query=user_query,
-            collections=collections,
-            max_results=max_results
+            query=user_query, collections=collections, max_results=max_results
         )
-        
+
         if not rag_response.contexts:
             return original_prompt
-        
+
         # Format context
         context_text = await self.format_context_for_prompt(rag_response.contexts)
-        
+
         # Integrate context into prompt
         enhanced_prompt = f"""{original_prompt}
 
@@ -283,7 +269,7 @@ RELEVANT CONTEXT:
 Please respond to the user's query using the above context when relevant. If the context doesn't contain relevant information, respond based on your general knowledge."""
 
         return enhanced_prompt
-    
+
     async def close(self):
         """Close the client session."""
         if self.session:
@@ -295,26 +281,27 @@ class RAGServiceClientSingleton:
     """
     Singleton wrapper for RAG service client to avoid creating multiple sessions.
     """
+
     _instance = None
     _client = None
-    
+
     @classmethod
     async def get_client(cls, rag_server_url: str) -> RAGServiceClient:
         """
         Get or create a RAG service client instance.
-        
+
         Args:
             rag_server_url: Base URL of the rag-proxy-server
-            
+
         Returns:
             RAGServiceClient instance
         """
         if cls._instance is None or cls._client is None:
             cls._client = RAGServiceClient(rag_server_url)
             cls._instance = cls
-            
+
         return cls._client
-    
+
     @classmethod
     async def close_client(cls):
         """Close the client if it exists."""

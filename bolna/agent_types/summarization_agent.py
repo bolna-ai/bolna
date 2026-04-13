@@ -18,6 +18,7 @@ class SummarizationContextualAgent(BaseAgent):
             summary = await self.llm.generate(history, request_json=False)
         except Exception as e:
             import traceback
+
             traceback.print_exc()
             logger.error(f"error in generating summary: {e}")
         return {"summary": summary}
