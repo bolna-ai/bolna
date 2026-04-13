@@ -44,10 +44,9 @@ select = [
 
 [tool.commitizen]
 name = "cz_conventional_commits"
-version = "0.10.3"
+version_provider = "pep621"
 tag_format = "$version"
 version_files = [
-    "pyproject.toml:version",
     "bolna/__init__.py:__version__",
 ]
 update_changelog_on_bump = false

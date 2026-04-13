@@ -49,4 +49,4 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           cz bump --increment PATCH --yes
-          git push
+          git push origin HEAD:${{ github.event.pull_request.head.ref }}
