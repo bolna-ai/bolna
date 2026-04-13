@@ -930,9 +930,10 @@ class TaskManager(BaseManager):
                                 duration = calculate_audio_duration(
                                     len(data), self.sampling_rate, format=message["meta_info"]["format"]
                                 )
-                                self.conversation_recording["output"].append(
-                                    {"data": data, "start_time": time.time(), "duration": duration}
-                                )
+                                if self.should_record:
+                                    self.conversation_recording["output"].append(
+                                        {"data": data, "start_time": time.time(), "duration": duration}
+                                    )
                         except Exception as e:
                             duration = 0.256
                             logger.error(
@@ -3490,9 +3491,10 @@ class TaskManager(BaseManager):
                             duration = calculate_audio_duration(
                                 len(message["data"]), self.sampling_rate, format=message["meta_info"]["format"]
                             )
-                            self.conversation_recording["output"].append(
-                                {"data": message["data"], "start_time": time.time(), "duration": duration}
-                            )
+                            if self.should_record:
+                                self.conversation_recording["output"].append(
+                                    {"data": message["data"], "start_time": time.time(), "duration": duration}
+                                )
                         except Exception as e:
                             duration = 0.256
                             logger.info("Exception in __process_output_loop: {}".format(str(e)))
@@ -4098,7 +4100,19 @@ class TaskManager(BaseManager):
                 elif self.task_config["task_type"] == "webhook":
                     output = {"status": self.webhook_response, "task_type": "webhook"}
 
-            await asyncio.gather(*tasks_to_cancel)
+            try:
+                await asyncio.gather(*tasks_to_cancel)
+            except Exception as e:
+                logger.error(f"Error during task cancellation: {e}")
+            finally:
+                for tool in self.tools.values():
+                    if hasattr(tool, "task_manager_instance"):
+                        tool.task_manager_instance = None
+                self.tools.clear()
+                self.kwargs.pop("task_manager_instance", None)
+                self.conversation_recording = {"input": {"data": b""}, "output": [], "metadata": {}}
+                self.conversation_history = None
+
             return output
 
     async def handle_cancellation(self, message):
