@@ -23,3 +23,10 @@ class BaseLLM:
         conversation state (e.g., OpenAI Responses API).
         """
         pass
+
+    async def close(self):
+        """Release resources (HTTP clients, WebSocket connections, etc.).
+
+        No-op by default. Override in subclasses that hold closeable resources.
+        """
+        pass

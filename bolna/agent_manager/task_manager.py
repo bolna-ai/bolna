@@ -4105,6 +4105,19 @@ class TaskManager(BaseManager):
             except Exception as e:
                 logger.error(f"Error during task cancellation: {e}")
             finally:
+                llm_agents_to_close = set()
+                llm_agent = self.tools.get("llm_agent")
+                if llm_agent is not None:
+                    llm_agents_to_close.add(llm_agent)
+                for agent in getattr(self, "llm_agent_map", {}).values():
+                    if agent is not None:
+                        llm_agents_to_close.add(agent)
+                for agent in llm_agents_to_close:
+                    if hasattr(agent, "llm") and hasattr(agent.llm, "close"):
+                        try:
+                            await agent.llm.close()
+                        except Exception as e:
+                            logger.error(f"Error closing LLM: {e}")
                 for tool in self.tools.values():
                     if hasattr(tool, "task_manager_instance"):
                         tool.task_manager_instance = None

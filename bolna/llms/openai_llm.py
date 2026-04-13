@@ -628,3 +628,5 @@ class OpenAiLLM(OpenAICompatibleLLM):
     async def close(self):
         if self._ws_transport:
             await self._ws_transport.disconnect()
+        if self.async_client:
+            await self.async_client.close()
