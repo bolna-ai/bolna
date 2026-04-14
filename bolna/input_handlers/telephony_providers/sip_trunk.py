@@ -123,13 +123,6 @@ class SipTrunkInputHandler(TelephonyInputHandler):
         self.running = False
         await self.disconnect_stream()
         await asyncio.sleep(0.5)
-        if self.websocket_listen_task and not self.websocket_listen_task.done():
-            self.websocket_listen_task.cancel()
-            try:
-                await self.websocket_listen_task
-            except asyncio.CancelledError:
-                pass
-            logger.info("WebSocket listener task cancelled")
         try:
             await self.websocket.close()
         except Exception as e:
