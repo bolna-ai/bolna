@@ -70,14 +70,6 @@ class TelephonyInputHandler(DefaultInputHandler):
         asyncio.create_task(self._safe_disconnect_stream())
         logger.info("sleeping for 2 seconds so that whatever needs to pass is passed")
         await asyncio.sleep(2)
-        # Cancel the listener task before closing the WebSocket to prevent zombie SSL reads
-        if self.websocket_listen_task and not self.websocket_listen_task.done():
-            self.websocket_listen_task.cancel()
-            try:
-                await self.websocket_listen_task
-            except asyncio.CancelledError:
-                pass
-            logger.info("WebSocket listener task cancelled")
         try:
             await self.websocket.close()
             logger.info("WebSocket connection closed")
@@ -167,11 +159,12 @@ class TelephonyInputHandler(DefaultInputHandler):
                     break
 
             except WebSocketDisconnect as e:
-                if e.code not in (1000, 1001, 1006):
+                if e.code in (1000, 1001, 1006):
+                    pass
+                else:
                     logger.error(
                         f"WebSocket disconnected unexpectedly: code={e.code}, reason={getattr(e, 'reason', None)}"
                     )
-                break
 
             except Exception as e:
                 traceback.print_exc()
