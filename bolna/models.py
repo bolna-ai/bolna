@@ -315,11 +315,14 @@ class ExpressionGroup(BaseModel):
     logic: ExpressionLogic = ExpressionLogic.AND
     conditions: List[ExpressionCondition] = Field(default_factory=list)
 
+
 class CallEvent(BaseModel):
     """Incoming external event payload."""
+
     event: str
     properties: Optional[Dict[str, Any]] = None
     timestamp: Optional[float] = None
+
 
 class GraphEdge(BaseModel):
     """Edge definition for graph-based conversation flow.

@@ -12,6 +12,7 @@ from bolna.helpers.utils import get_md5_hash
 # Model tests
 # ---------------------------------------------------------------------------
 
+
 class TestNodeType:
     def test_llm_equals_string(self):
         assert NodeType.LLM == "llm"
@@ -72,54 +73,56 @@ class TestGraphNodeModel:
 # Graph Agent - Static Node Dispatch
 # ---------------------------------------------------------------------------
 
+
 def _async_iter(items):
     async def _gen():
         for item in items:
             yield item
+
     return _gen()
 
 
 def _make_config(**overrides):
     defaults = {
-        'agent_information': 'Test agent',
-        'model': 'gpt-4o-mini',
-        'provider': 'openai',
-        'temperature': 0.7,
-        'max_tokens': 150,
-        'current_node_id': 'greeting',
-        'nodes': [
+        "agent_information": "Test agent",
+        "model": "gpt-4o-mini",
+        "provider": "openai",
+        "temperature": 0.7,
+        "max_tokens": 150,
+        "current_node_id": "greeting",
+        "nodes": [
             {
-                'id': 'greeting',
-                'node_type': 'static',
-                'static_message': 'Hello! Welcome to Acme Corp.',
-                'repeat_after_silence_seconds': 8,
-                'edges': [
+                "id": "greeting",
+                "node_type": "static",
+                "static_message": "Hello! Welcome to Acme Corp.",
+                "repeat_after_silence_seconds": 8,
+                "edges": [
                     {
-                        'to_node_id': 'sales',
-                        'condition': 'wants to buy',
-                        'function_name': 'go_to_sales',
+                        "to_node_id": "sales",
+                        "condition": "wants to buy",
+                        "function_name": "go_to_sales",
                     },
                     {
-                        'to_node_id': 'goodbye',
-                        'condition_type': 'expression',
-                        'expression': {
-                            'conditions': [
-                                {'variable': '_silence_repeats', 'operator': 'gte', 'value': 3},
+                        "to_node_id": "goodbye",
+                        "condition_type": "expression",
+                        "expression": {
+                            "conditions": [
+                                {"variable": "_silence_repeats", "operator": "gte", "value": 3},
                             ],
                         },
                     },
                 ],
             },
             {
-                'id': 'sales',
-                'prompt': 'Help the user with purchasing.',
-                'edges': [],
+                "id": "sales",
+                "prompt": "Help the user with purchasing.",
+                "edges": [],
             },
             {
-                'id': 'goodbye',
-                'node_type': 'static',
-                'static_message': 'Goodbye!',
-                'edges': [],
+                "id": "goodbye",
+                "node_type": "static",
+                "static_message": "Goodbye!",
+                "edges": [],
             },
         ],
     }
@@ -135,9 +138,11 @@ def _make_agent(config_overrides=None):
     mock_openai_client = MagicMock()
     mock_openai_llm_cls = MagicMock(return_value=mock_llm)
 
-    with patch('bolna.agent_types.graph_agent.OpenAI', return_value=mock_openai_client), \
-         patch('bolna.agent_types.graph_agent.SUPPORTED_LLM_PROVIDERS', {'openai': mock_openai_llm_cls}), \
-         patch('bolna.agent_types.graph_agent.OpenAiLLM', return_value=MagicMock()):
+    with (
+        patch("bolna.agent_types.graph_agent.OpenAI", return_value=mock_openai_client),
+        patch("bolna.agent_types.graph_agent.SUPPORTED_LLM_PROVIDERS", {"openai": mock_openai_llm_cls}),
+        patch("bolna.agent_types.graph_agent.OpenAiLLM", return_value=MagicMock()),
+    ):
         agent = GraphAgent(cfg)
 
     agent._mock_llm = mock_llm
@@ -148,76 +153,78 @@ class TestStaticNodeDispatch:
     @pytest.mark.asyncio
     async def test_static_node_yields_static_message_and_hash(self):
         agent = _make_agent()
-        assert agent.current_node_id == 'greeting'
+        assert agent.current_node_id == "greeting"
 
-        history = [{'role': 'user', 'content': 'hello'}]
+        history = [{"role": "user", "content": "hello"}]
         chunks = []
         async for chunk in agent.generate(history):
             chunks.append(chunk)
 
         routing_chunk = chunks[0]
-        assert 'routing_info' in routing_chunk
-        assert routing_chunk['routing_info']['node_type'] == NodeType.STATIC
+        assert "routing_info" in routing_chunk
+        assert routing_chunk["routing_info"]["node_type"] == NodeType.STATIC
 
         static_chunk = chunks[1]
-        assert 'static_message' in static_chunk
-        assert static_chunk['static_message'] == 'Hello! Welcome to Acme Corp.'
-        expected_hash = get_md5_hash('Hello! Welcome to Acme Corp.')
-        assert static_chunk['static_audio_hash'] == expected_hash
+        assert "static_message" in static_chunk
+        assert static_chunk["static_message"] == "Hello! Welcome to Acme Corp."
+        expected_hash = get_md5_hash("Hello! Welcome to Acme Corp.")
+        assert static_chunk["static_audio_hash"] == expected_hash
 
         assert len(chunks) == 2
 
     @pytest.mark.asyncio
     async def test_static_node_routing_info_includes_node_type(self):
         agent = _make_agent()
-        history = [{'role': 'user', 'content': 'hello'}]
+        history = [{"role": "user", "content": "hello"}]
 
         async for chunk in agent.generate(history):
-            if 'routing_info' in chunk:
-                assert chunk['routing_info']['node_type'] == NodeType.STATIC
+            if "routing_info" in chunk:
+                assert chunk["routing_info"]["node_type"] == NodeType.STATIC
                 break
 
     @pytest.mark.asyncio
     async def test_llm_node_routing_info_has_llm_type(self):
-        agent = _make_agent({'current_node_id': 'sales'})
-        history = [{'role': 'user', 'content': 'I want to buy'}]
+        agent = _make_agent({"current_node_id": "sales"})
+        history = [{"role": "user", "content": "I want to buy"}]
 
         async for chunk in agent.generate(history):
-            if 'routing_info' in chunk:
-                assert chunk['routing_info']['node_type'] == NodeType.LLM
+            if "routing_info" in chunk:
+                assert chunk["routing_info"]["node_type"] == NodeType.LLM
                 break
 
     @pytest.mark.asyncio
     async def test_static_node_empty_message_yields_nothing(self):
-        agent = _make_agent({
-            'current_node_id': 'empty_static',
-            'nodes': [
-                {
-                    'id': 'empty_static',
-                    'node_type': 'static',
-                    'static_message': '',
-                    'edges': [],
-                },
-            ],
-        })
-        history = [{'role': 'user', 'content': 'hello'}]
+        agent = _make_agent(
+            {
+                "current_node_id": "empty_static",
+                "nodes": [
+                    {
+                        "id": "empty_static",
+                        "node_type": "static",
+                        "static_message": "",
+                        "edges": [],
+                    },
+                ],
+            }
+        )
+        history = [{"role": "user", "content": "hello"}]
         chunks = []
         async for chunk in agent.generate(history):
             chunks.append(chunk)
 
         assert len(chunks) == 1
-        assert 'routing_info' in chunks[0]
+        assert "routing_info" in chunks[0]
 
     @pytest.mark.asyncio
     async def test_static_node_with_transition(self):
         agent = _make_agent()
-        history = [{'role': 'user', 'content': 'hello'}]
+        history = [{"role": "user", "content": "hello"}]
         chunks = []
         async for chunk in agent.generate(history):
             chunks.append(chunk)
 
-        routing = chunks[0]['routing_info']
-        assert routing['current_node'] == 'greeting'
+        routing = chunks[0]["routing_info"]
+        assert routing["current_node"] == "greeting"
 
 
 class TestSilenceRepeats:
@@ -226,7 +233,7 @@ class TestSilenceRepeats:
         agent = _make_agent()
         assert agent._silence_repeats == 0
 
-        history = [{'role': 'user', 'content': '[silence] User was silent for 8 seconds'}]
+        history = [{"role": "user", "content": "[silence] User was silent for 8 seconds"}]
         async for _ in agent.generate(history):
             pass
 
@@ -234,13 +241,13 @@ class TestSilenceRepeats:
 
     @pytest.mark.asyncio
     async def test_silence_counter_resets_on_transition(self):
-        agent = _make_agent({'current_node_id': 'sales'})
+        agent = _make_agent({"current_node_id": "sales"})
         agent._silence_repeats = 5
 
-        history = [{'role': 'user', 'content': 'hello'}]
+        history = [{"role": "user", "content": "hello"}]
         transitioned = False
         async for chunk in agent.generate(history):
-            if 'routing_info' in chunk and chunk['routing_info'].get('transitioned'):
+            if "routing_info" in chunk and chunk["routing_info"].get("transitioned"):
                 transitioned = True
 
         if not transitioned:
@@ -253,43 +260,43 @@ class TestSilenceRepeats:
         agent = _make_agent()
         agent._silence_repeats = 3
 
-        history = [{'role': 'user', 'content': 'hello'}]
+        history = [{"role": "user", "content": "hello"}]
         async for _ in agent.generate(history):
             pass
 
-        assert agent.context_data.get('_silence_repeats') == 3
+        assert agent.context_data.get("_silence_repeats") == 3
 
     @pytest.mark.asyncio
     async def test_silence_trigger_on_static_node_replays_message(self):
         agent = _make_agent()
-        history = [{'role': 'user', 'content': '[silence] User was silent for 8 seconds'}]
+        history = [{"role": "user", "content": "[silence] User was silent for 8 seconds"}]
 
         chunks = []
         async for chunk in agent.generate(history):
             chunks.append(chunk)
 
-        assert any('static_message' in c for c in chunks)
-        static_chunk = next(c for c in chunks if 'static_message' in c)
-        assert static_chunk['static_message'] == 'Hello! Welcome to Acme Corp.'
+        assert any("static_message" in c for c in chunks)
+        static_chunk = next(c for c in chunks if "static_message" in c)
+        assert static_chunk["static_message"] == "Hello! Welcome to Acme Corp."
 
     @pytest.mark.asyncio
     async def test_routing_info_has_is_silence_trigger(self):
         agent = _make_agent()
 
-        history = [{'role': 'user', 'content': '[silence] User was silent'}]
+        history = [{"role": "user", "content": "[silence] User was silent"}]
         async for chunk in agent.generate(history):
-            if 'routing_info' in chunk:
-                assert chunk['routing_info']['is_silence_trigger'] is True
+            if "routing_info" in chunk:
+                assert chunk["routing_info"]["is_silence_trigger"] is True
                 break
 
     @pytest.mark.asyncio
     async def test_normal_message_not_silence_trigger(self):
         agent = _make_agent()
 
-        history = [{'role': 'user', 'content': 'hello'}]
+        history = [{"role": "user", "content": "hello"}]
         async for chunk in agent.generate(history):
-            if 'routing_info' in chunk:
-                assert chunk['routing_info']['is_silence_trigger'] is False
+            if "routing_info" in chunk:
+                assert chunk["routing_info"]["is_silence_trigger"] is False
                 break
 
     @pytest.mark.asyncio
@@ -297,14 +304,14 @@ class TestSilenceRepeats:
         agent = _make_agent()
         agent._silence_repeats = 2
 
-        history = [{'role': 'user', 'content': '[silence] User was silent for 8 seconds'}]
+        history = [{"role": "user", "content": "[silence] User was silent for 8 seconds"}]
         chunks = []
         async for chunk in agent.generate(history):
             chunks.append(chunk)
 
-        routing = chunks[0]['routing_info']
-        assert routing['transitioned'] is True
-        assert routing['current_node'] == 'goodbye'
+        routing = chunks[0]["routing_info"]
+        assert routing["transitioned"] is True
+        assert routing["current_node"] == "goodbye"
         assert agent._silence_repeats == 0
 
     @pytest.mark.asyncio
@@ -312,14 +319,14 @@ class TestSilenceRepeats:
         agent = _make_agent()
         agent._silence_repeats = 1
 
-        history = [{'role': 'user', 'content': '[silence] User was silent for 8 seconds'}]
+        history = [{"role": "user", "content": "[silence] User was silent for 8 seconds"}]
         chunks = []
         async for chunk in agent.generate(history):
             chunks.append(chunk)
 
-        routing = chunks[0]['routing_info']
-        assert routing['transitioned'] is False
-        assert routing['current_node'] == 'greeting'
+        routing = chunks[0]["routing_info"]
+        assert routing["transitioned"] is False
+        assert routing["current_node"] == "greeting"
         assert agent._silence_repeats == 2
 
 

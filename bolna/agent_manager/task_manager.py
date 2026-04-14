@@ -1796,20 +1796,22 @@ class TaskManager(BaseManager):
                     continue
 
                 # Process through graph agent
-                result = self.tools['llm_agent'].process_event(event)
+                result = self.tools["llm_agent"].process_event(event)
 
-                if result.get('matched'):
+                if result.get("matched"):
                     # Set node entry index so _node_turns counts from this point
-                    self.tools['llm_agent'].current_node_entry_index = len(self.conversation_history.get_copy())
+                    self.tools["llm_agent"].current_node_entry_index = len(self.conversation_history.get_copy())
 
                     if self.interruption_manager and self.interruption_manager.is_user_speaking():
                         # User is mid-speech — skip proactive generation.
                         # The node already transitioned, so the user's in-progress
                         # utterance will be routed + answered on the new node.
-                        target_node = result.get('target_node')
+                        target_node = result.get("target_node")
                         if target_node:
-                            self.repeat_after_silence_seconds = target_node.get('repeat_after_silence_seconds')
-                        logger.info(f"Event '{event.get('event')}' transitioned node but user is speaking — deferring to conversation flow")
+                            self.repeat_after_silence_seconds = target_node.get("repeat_after_silence_seconds")
+                        logger.info(
+                            f"Event '{event.get('event')}' transitioned node but user is speaking — deferring to conversation flow"
+                        )
                     else:
                         await self._proactive_generate_for_event(event, result)
                 else:
@@ -1837,26 +1839,26 @@ class TaskManager(BaseManager):
 
     async def _proactive_generate_for_event(self, event: dict, result: dict):
         """Trigger proactive speech generation after an event-driven transition."""
-        node_type = result.get('node_type', NodeType.LLM)
-        target_node = result.get('target_node')
+        node_type = result.get("node_type", NodeType.LLM)
+        target_node = result.get("target_node")
 
         # Update repeat_after_silence for the new node
         if target_node:
-            self.repeat_after_silence_seconds = target_node.get('repeat_after_silence_seconds')
+            self.repeat_after_silence_seconds = target_node.get("repeat_after_silence_seconds")
 
         if node_type == NodeType.STATIC:
             # Static node: play cached audio directly, no LLM cost
-            static_text = target_node.get('static_message', '') if target_node else ''
+            static_text = target_node.get("static_message", "") if target_node else ""
             if static_text:
                 if self.context_data:
                     static_text = update_prompt_with_context(static_text, self.context_data)
                 self.conversation_history.append_assistant(static_text)
                 meta_info = {
-                    'io': self.tools["output"].get_provider(),
+                    "io": self.tools["output"].get_provider(),
                     "request_id": str(uuid.uuid4()),
                     "cached": True,
                     "sequence_id": -1,
-                    'format': self.task_config["tools_config"]["output"].get("format", "pcm"),
+                    "format": self.task_config["tools_config"]["output"].get("format", "pcm"),
                     "end_of_llm_stream": True,
                     "text": static_text,
                     "message_category": "event_proactive",
@@ -1865,18 +1867,20 @@ class TaskManager(BaseManager):
                 await self._synthesize(ws_packet)
         else:
             # LLM node: set flag and trigger generation without adding a user message
-            self.tools['llm_agent']._event_triggered_generation = True
-            self.tools['llm_agent'].context_data['_event_previous_node'] = result.get('previous_node', '')
+            self.tools["llm_agent"]._event_triggered_generation = True
+            self.tools["llm_agent"].context_data["_event_previous_node"] = result.get("previous_node", "")
             await self._generate_proactive()
 
     async def _generate_proactive(self):
-        meta_info = self.__get_updated_meta_info({
-            'io': self.tools["output"].get_provider(),
-            "request_id": str(uuid.uuid4()),
-            "cached": False,
-            'format': self.task_config["tools_config"]["output"].get("format", "pcm"),
-            "message_category": "event_proactive",
-        })
+        meta_info = self.__get_updated_meta_info(
+            {
+                "io": self.tools["output"].get_provider(),
+                "request_id": str(uuid.uuid4()),
+                "cached": False,
+                "format": self.task_config["tools_config"]["output"].get("format", "pcm"),
+                "message_category": "event_proactive",
+            }
+        )
         self.response_in_pipeline = True
         task = asyncio.create_task(self._run_llm_task(create_ws_data_packet("", meta_info)))
         self.llm_task = task
@@ -2609,27 +2613,31 @@ class TaskManager(BaseManager):
                         cached_tokens=routing_usage.get("cached_tokens"),
                     )
 
-                    is_silence_trigger = routing_info.get('is_silence_trigger', False)
+                    is_silence_trigger = routing_info.get("is_silence_trigger", False)
 
-                    current_node = self.tools['llm_agent'].get_node_by_id(routing_info['current_node'])
+                    current_node = self.tools["llm_agent"].get_node_by_id(routing_info["current_node"])
                     if current_node:
-                        self.repeat_after_silence_seconds = current_node.get('repeat_after_silence_seconds')
+                        self.repeat_after_silence_seconds = current_node.get("repeat_after_silence_seconds")
 
                     continue
 
-                if isinstance(llm_message, dict) and 'static_message' in llm_message:
-                    static_text = llm_message['static_message']
-                    static_hash = llm_message['static_audio_hash']
+                if isinstance(llm_message, dict) and "static_message" in llm_message:
+                    static_text = llm_message["static_message"]
+                    static_hash = llm_message["static_audio_hash"]
 
                     if not is_silence_trigger:
                         self.conversation_history.append_assistant(static_text)
-                        messages.append({'role': 'assistant', 'content': static_text})
+                        messages.append({"role": "assistant", "content": static_text})
                         self.conversation_history.sync_interim(messages)
 
                     convert_to_request_log(
-                        message=static_text, meta_info=meta_info,
-                        component=LogComponent.LLM, direction=LogDirection.RESPONSE,
-                        model="static_node", is_cached=True, run_id=self.run_id
+                        message=static_text,
+                        meta_info=meta_info,
+                        component=LogComponent.LLM,
+                        direction=LogDirection.RESPONSE,
+                        model="static_node",
+                        is_cached=True,
+                        run_id=self.run_id,
                     )
 
                     meta_info["end_of_llm_stream"] = True
@@ -3731,12 +3739,14 @@ class TaskManager(BaseManager):
 
     async def _inject_and_run_llm(self, injected_message: str):
         self.conversation_history.append_user(injected_message)
-        meta_info = self.__get_updated_meta_info({
-            'io': self.tools["output"].get_provider(),
-            "request_id": str(uuid.uuid4()),
-            "cached": False,
-            'format': self.task_config["tools_config"]["output"].get("format", "pcm"),
-        })
+        meta_info = self.__get_updated_meta_info(
+            {
+                "io": self.tools["output"].get_provider(),
+                "request_id": str(uuid.uuid4()),
+                "cached": False,
+                "format": self.task_config["tools_config"]["output"].get("format", "pcm"),
+            }
+        )
         self.response_in_pipeline = True
         task = asyncio.create_task(self._run_llm_task(create_ws_data_packet(injected_message, meta_info)))
         self.llm_task = task

@@ -388,36 +388,35 @@ class GraphAgent(BaseAgent):
             return {"matched": False, "event": event_name}
 
         # Collect event edges, sorted by priority
-        event_edges = [
-            e for e in current_node.get('edges', [])
-            if e.get('condition_type') == EdgeConditionType.EVENT
-        ]
-        event_edges.sort(key=lambda e: e.get('priority') or 0)
+        event_edges = [e for e in current_node.get("edges", []) if e.get("condition_type") == EdgeConditionType.EVENT]
+        event_edges.sort(key=lambda e: e.get("priority") or 0)
 
         for edge in event_edges:
-            if edge.get('event_name') == event_name:
+            if edge.get("event_name") == event_name:
                 previous_node = self.current_node_id
-                self.current_node_id = edge['to_node_id']
+                self.current_node_id = edge["to_node_id"]
                 self.current_node_entry_index = 0  # caller should set to len(history)
                 self._silence_repeats = 0
 
                 if self.current_node_id not in self.node_history or self.node_history[-1] != self.current_node_id:
                     self.node_history.append(self.current_node_id)
 
-                target_node = self.get_node_by_id(edge['to_node_id'])
-                node_type = target_node.get('node_type', NodeType.LLM) if target_node else NodeType.LLM
+                target_node = self.get_node_by_id(edge["to_node_id"])
+                node_type = target_node.get("node_type", NodeType.LLM) if target_node else NodeType.LLM
 
                 logger.info(f"Event '{event_name}' matched edge: {previous_node} -> {self.current_node_id}")
                 return {
                     "matched": True,
                     "event": event_name,
                     "previous_node": previous_node,
-                    "new_node_id": edge['to_node_id'],
+                    "new_node_id": edge["to_node_id"],
                     "node_type": node_type,
                     "target_node": target_node,
                 }
 
-        logger.info(f"Event '{event_name}' did not match any event edge on node '{self.current_node_id}' — context updated silently")
+        logger.info(
+            f"Event '{event_name}' did not match any event edge on node '{self.current_node_id}' — context updated silently"
+        )
         return {"matched": False, "event": event_name}
 
     def _compute_turn_counts(self, history: list) -> tuple:
@@ -741,51 +740,58 @@ class GraphAgent(BaseAgent):
             if is_event:
                 self._event_triggered_generation = False
                 current_node = self.get_node_by_id(self.current_node_id)
-                node_type = current_node.get('node_type', NodeType.LLM) if current_node else NodeType.LLM
+                node_type = current_node.get("node_type", NodeType.LLM) if current_node else NodeType.LLM
 
                 yield {
-                    'routing_info': {
-                        'previous_node': self.context_data.get('_event_previous_node', self.current_node_id),
-                        'current_node': self.current_node_id,
-                        'transitioned': True,
-                        'routing_type': 'event',
-                        'routing_model': None,
-                        'routing_provider': None,
-                        'routing_latency_ms': 0,
-                        'extracted_params': {},
-                        'node_history': list(self.node_history),
-                        'routing_messages': None,
-                        'routing_tools': None,
-                        'reasoning': f"event:{self.context_data.get('_last_event', '')}",
-                        'confidence': 1.0,
-                        'node_type': node_type,
-                        'is_silence_trigger': False,
-                        'event_triggered': True,
+                    "routing_info": {
+                        "previous_node": self.context_data.get("_event_previous_node", self.current_node_id),
+                        "current_node": self.current_node_id,
+                        "transitioned": True,
+                        "routing_type": "event",
+                        "routing_model": None,
+                        "routing_provider": None,
+                        "routing_latency_ms": 0,
+                        "extracted_params": {},
+                        "node_history": list(self.node_history),
+                        "routing_messages": None,
+                        "routing_tools": None,
+                        "reasoning": f"event:{self.context_data.get('_last_event', '')}",
+                        "confidence": 1.0,
+                        "node_type": node_type,
+                        "is_silence_trigger": False,
+                        "event_triggered": True,
                     }
                 }
 
                 if node_type == NodeType.STATIC:
-                    static_text = current_node.get('static_message', '') if current_node else ''
+                    static_text = current_node.get("static_message", "") if current_node else ""
                     if static_text:
                         if self.context_data:
                             static_text = update_prompt_with_context(static_text, self.context_data)
                         yield {
-                            'static_message': static_text,
-                            'static_audio_hash': get_md5_hash(static_text),
+                            "static_message": static_text,
+                            "static_audio_hash": get_md5_hash(static_text),
                         }
                     return
 
                 messages = await self._build_messages(message)
                 # Inject ephemeral event hint (NOT persisted in conversation_history)
-                event_name = self.context_data.get('_last_event', '')
-                messages.append({"role": "system", "content": f"[Event: {event_name}. Respond proactively — speak first, do not wait for the user.]"})
-                yield {'messages': messages}
+                event_name = self.context_data.get("_last_event", "")
+                messages.append(
+                    {
+                        "role": "system",
+                        "content": f"[Event: {event_name}. Respond proactively — speak first, do not wait for the user.]",
+                    }
+                )
+                yield {"messages": messages}
                 tool_choice = self._get_tool_choice_for_node()
-                async for chunk in self.llm.generate_stream(messages, synthesize=synthesize, meta_info=meta_info, tool_choice=tool_choice):
+                async for chunk in self.llm.generate_stream(
+                    messages, synthesize=synthesize, meta_info=meta_info, tool_choice=tool_choice
+                ):
                     yield chunk
                 return
 
-            is_silence_trigger = bool(message and message[-1].get('content', '').startswith('[silence]'))
+            is_silence_trigger = bool(message and message[-1].get("content", "").startswith("[silence]"))
             if is_silence_trigger:
                 self._silence_repeats += 1
 
@@ -817,7 +823,7 @@ class GraphAgent(BaseAgent):
             )
 
             current_node = self.get_node_by_id(self.current_node_id)
-            node_type = current_node.get('node_type', NodeType.LLM) if current_node else NodeType.LLM
+            node_type = current_node.get("node_type", NodeType.LLM) if current_node else NodeType.LLM
 
             yield {
                 "routing_info": {
@@ -841,13 +847,13 @@ class GraphAgent(BaseAgent):
             }
 
             if node_type == NodeType.STATIC:
-                static_text = current_node.get('static_message', '') if current_node else ''
+                static_text = current_node.get("static_message", "") if current_node else ""
                 if static_text:
                     if self.context_data:
                         static_text = update_prompt_with_context(static_text, self.context_data)
                     yield {
-                        'static_message': static_text,
-                        'static_audio_hash': get_md5_hash(static_text),
+                        "static_message": static_text,
+                        "static_audio_hash": get_md5_hash(static_text),
                     }
                 return
 
