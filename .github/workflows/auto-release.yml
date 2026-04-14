@@ -1,0 +1,52 @@
+name: Auto Version Bump
+
+on:
+  pull_request:
+    branches: [master]
+    types: [opened, synchronize]
+
+permissions:
+  contents: write
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    # skip if last push was from the bot (avoids re-trigger after bump commit)
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check if already bumped
+        id: check
+        run: |
+          LAST_AUTHOR=$(git log -1 --format='%an')
+          if [ "$LAST_AUTHOR" = "github-actions[bot]" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          CURRENT=$(python3 -c "import re; m = re.search(r'__version__\s*=\s*\"(.+?)\"', open('bolna/__init__.py').read()); print(m.group(1))")
+          LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "0.0.0")
+          if [ "$CURRENT" != "$LATEST_TAG" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up Python
+        if: steps.check.outputs.skip == 'false'
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.10'
+
+      - name: Bump patch version
+        if: steps.check.outputs.skip == 'false'
+        run: |
+          pip install commitizen
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          cz bump --increment PATCH --yes
+          git push origin HEAD:${{ github.event.pull_request.head.ref }}
