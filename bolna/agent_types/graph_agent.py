@@ -65,6 +65,7 @@ class GraphAgent(BaseAgent):
         self.node_history = [self.current_node_id]
         self.current_node_entry_index = 0
         self._silence_repeats = 0
+        self._event_triggered_generation = False
         self.rag_configs = self.initialize_rag_configs()
         self.rag_server_url = os.getenv("RAG_SERVER_URL", "http://localhost:8000")
 
@@ -736,7 +737,7 @@ class GraphAgent(BaseAgent):
 
         try:
             # Event-triggered generation: process_event() already handled routing
-            is_event = getattr(self, '_event_triggered_generation', False)
+            is_event = self._event_triggered_generation
             if is_event:
                 self._event_triggered_generation = False
                 current_node = self.get_node_by_id(self.current_node_id)
