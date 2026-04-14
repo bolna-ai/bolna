@@ -3737,14 +3737,14 @@ class TaskManager(BaseManager):
             "cached": False,
             'format': self.task_config["tools_config"]["output"].get("format", "pcm"),
         })
-        bos_packet = create_ws_data_packet("<beginning_of_stream>", meta_info)
-        await self.tools["output"].handle(bos_packet)
         self.response_in_pipeline = True
         task = asyncio.create_task(self._run_llm_task(create_ws_data_packet(injected_message, meta_info)))
         self.llm_task = task
-        await task
-        eos_packet = create_ws_data_packet("<end_of_stream>", meta_info)
-        await self.tools["output"].handle(eos_packet)
+        try:
+            await task
+        except asyncio.CancelledError:
+            logger.info("Silence repeat generation cancelled by interruption")
+            return
 
     async def __check_for_completion(self):
         logger.info(f"Starting task to check for completion")

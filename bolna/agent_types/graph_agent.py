@@ -843,6 +843,8 @@ class GraphAgent(BaseAgent):
             if node_type == NodeType.STATIC:
                 static_text = current_node.get('static_message', '') if current_node else ''
                 if static_text:
+                    if self.context_data:
+                        static_text = update_prompt_with_context(static_text, self.context_data)
                     yield {
                         'static_message': static_text,
                         'static_audio_hash': get_md5_hash(static_text),
