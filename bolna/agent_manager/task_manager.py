@@ -4118,6 +4118,21 @@ class TaskManager(BaseManager):
                             await agent.llm.close()
                         except Exception as e:
                             logger.error(f"Error closing LLM: {e}")
+                    for attr in ("conversation_completion_llm", "voicemail_llm"):
+                        aux = getattr(agent, attr, None)
+                        if aux and hasattr(aux, "close"):
+                            try:
+                                await aux.close()
+                            except Exception as e:
+                                logger.error(f"Error closing {attr}: {e}")
+                lang_det = getattr(self, "language_detector", None)
+                if lang_det:
+                    aux_llm = getattr(lang_det, "_llm", None)
+                    if aux_llm and hasattr(aux_llm, "close"):
+                        try:
+                            await aux_llm.close()
+                        except Exception as e:
+                            logger.error(f"Error closing language detector LLM: {e}")
                 for tool in self.tools.values():
                     if hasattr(tool, "task_manager_instance"):
                         tool.task_manager_instance = None
