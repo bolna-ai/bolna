@@ -3937,10 +3937,8 @@ class TaskManager(BaseManager):
                     raise
 
         except asyncio.CancelledError as e:
-            # Cancel all tasks on cancel
             traceback.print_exc()
-            self.transcriber_task.cancel()
-            await self.handle_cancellation(f"Websocket got cancelled {self.task_id}")
+            logger.info(f"Websocket got cancelled {self.task_id}")
 
         except Exception as e:
             # Cancel all tasks on error
@@ -3967,7 +3965,7 @@ class TaskManager(BaseManager):
                     run_id=self.run_id,
                 )
 
-            await self.handle_cancellation(f"Exception occurred {e}")
+            logger.info(f"Exception occurred {e}")
             raise
 
         finally:
