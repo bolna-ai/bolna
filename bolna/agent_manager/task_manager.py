@@ -3937,10 +3937,8 @@ class TaskManager(BaseManager):
                     raise
 
         except asyncio.CancelledError as e:
-            # Cancel all tasks on cancel
             traceback.print_exc()
-            self.transcriber_task.cancel()
-            await self.handle_cancellation(f"Websocket got cancelled {self.task_id}")
+            logger.info(f"Websocket got cancelled {self.task_id}")
 
         except Exception as e:
             # Cancel all tasks on error
@@ -3967,7 +3965,7 @@ class TaskManager(BaseManager):
                     run_id=self.run_id,
                 )
 
-            await self.handle_cancellation(f"Exception occurred {e}")
+            logger.info(f"Exception occurred {e}")
             raise
 
         finally:
@@ -4118,6 +4116,24 @@ class TaskManager(BaseManager):
                             await agent.llm.close()
                         except Exception as e:
                             logger.error(f"Error closing LLM: {e}")
+                    for attr in ("conversation_completion_llm", "voicemail_llm"):
+                        aux = getattr(agent, attr, None)
+                        if aux and hasattr(aux, "close"):
+                            try:
+                                await aux.close()
+                            except Exception as e:
+                                logger.error(f"Error closing {attr}: {e}")
+                lang_det = getattr(self, "language_detector", None)
+                if lang_det:
+                    aux_llm = getattr(lang_det, "_llm", None)
+                    if aux_llm and hasattr(aux_llm, "close"):
+                        try:
+                            await aux_llm.close()
+                        except Exception as e:
+                            logger.error(f"Error closing language detector LLM: {e}")
+                for obs in self.observable_variables.values():
+                    obs._observers.clear()
+                self.observable_variables.clear()
                 for tool in self.tools.values():
                     if hasattr(tool, "task_manager_instance"):
                         tool.task_manager_instance = None
@@ -4125,6 +4141,8 @@ class TaskManager(BaseManager):
                 self.kwargs.pop("task_manager_instance", None)
                 self.conversation_recording = {"input": {"data": b""}, "output": [], "metadata": {}}
                 self.conversation_history = None
+                self.request_logs.clear()
+                self.function_tool_api_call_details.clear()
 
             return output
 
