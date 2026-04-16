@@ -160,11 +160,14 @@ class TelephonyInputHandler(DefaultInputHandler):
 
             except WebSocketDisconnect as e:
                 if e.code in (1000, 1001, 1006):
-                    pass
+                    logger.info(f"WebSocket disconnected normally: code={e.code}")
                 else:
                     logger.error(
                         f"WebSocket disconnected unexpectedly: code={e.code}, reason={getattr(e, 'reason', None)}"
                     )
+                ws_data_packet = create_ws_data_packet(data=None, meta_info={"io": "default", "eos": True})
+                self.queues["transcriber"].put_nowait(ws_data_packet)
+                break
 
             except Exception as e:
                 traceback.print_exc()
