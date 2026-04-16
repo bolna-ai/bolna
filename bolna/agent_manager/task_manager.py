@@ -4131,6 +4131,9 @@ class TaskManager(BaseManager):
                             await aux_llm.close()
                         except Exception as e:
                             logger.error(f"Error closing language detector LLM: {e}")
+                for obs in self.observable_variables.values():
+                    obs._observers.clear()
+                self.observable_variables.clear()
                 for tool in self.tools.values():
                     if hasattr(tool, "task_manager_instance"):
                         tool.task_manager_instance = None
