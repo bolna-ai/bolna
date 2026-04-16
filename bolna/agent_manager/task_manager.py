@@ -4141,6 +4141,8 @@ class TaskManager(BaseManager):
                 self.kwargs.pop("task_manager_instance", None)
                 self.conversation_recording = {"input": {"data": b""}, "output": [], "metadata": {}}
                 self.conversation_history = None
+                self.request_logs.clear()
+                self.function_tool_api_call_details.clear()
 
             return output
 
