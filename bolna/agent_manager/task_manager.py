@@ -4055,17 +4055,6 @@ class TaskManager(BaseManager):
                         f"events={json.dumps(self.shadow_end_call_events)}"
                     )
 
-                if self.shadow_end_call_enabled:
-                    end_call_seq = self.shadow_end_call_events[0]["seq"] if self.shadow_end_call_events else None
-                    hangup_detail_str = str(self.hangup_detail) if self.hangup_detail else None
-                    logger.info(
-                        f"Shadow end_call summary: "
-                        f"end_call_count={len(self.shadow_end_call_events)}, "
-                        f"first_end_call_seq={end_call_seq}, "
-                        f"actual_hangup_reason={hangup_detail_str}, "
-                        f"events={json.dumps(self.shadow_end_call_events)}"
-                    )
-
                 try:
                     if welcome_message_sent_ts:
                         output["latency_dict"]["welcome_message_sent_ts"] = (
