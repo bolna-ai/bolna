@@ -178,3 +178,20 @@ scripts/
 docs/
 GRAPH_AGENT_GUIDE.md
 .env.example
+
+# Node.js
+node_modules/
+apps/*/node_modules/
+apps/*/dist/
+apps/*/.next/
+apps/*/out/
+apps/frontend/.next/
+apps/frontend/out/
+apps/backend/dist/
+
+# Local env files
+apps/**/.env
+apps/**/.env.local
+apps/**/.env.development.local
+apps/**/.env.test.local
+apps/**/.env.production.local
