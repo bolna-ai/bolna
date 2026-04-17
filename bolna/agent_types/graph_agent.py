@@ -121,6 +121,7 @@ class GraphAgent(BaseAgent):
                 "service_tier",
                 "use_responses_api",
                 "compact_threshold",
+                "agent_id",
             ]:
                 if self.config.get(key, None):
                     llm_kwargs[key] = self.config[key]

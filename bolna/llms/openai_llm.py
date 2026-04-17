@@ -199,6 +199,7 @@ class OpenAiLLM(OpenAICompatibleLLM):
                 self.tools = [i for i in my_assistant.tools if i.type == "function"]
             # logger.info(f'thread id : {self.thread_id}')
         self.run_id = kwargs.get("run_id", None)
+        self.agent_id = kwargs.get("agent_id", None)
 
         self._init_responses_api(
             kwargs.get("use_responses_api", False), compact_threshold=kwargs.get("compact_threshold")
@@ -261,8 +262,8 @@ class OpenAiLLM(OpenAICompatibleLLM):
         service_tier = None
         stream_usage = None
 
-        if self.assistant_id:
-            model_args["extra_body"] = {"prompt_cache_key": self.assistant_id}
+        if self.agent_id:
+            model_args["extra_body"] = {"prompt_cache_key": self.agent_id}
 
         try:
             completion_stream = await self.async_client.chat.completions.create(**model_args)
@@ -384,7 +385,7 @@ class OpenAiLLM(OpenAICompatibleLLM):
                 messages=messages,
                 stream=False,
                 response_format=response_format,
-                extra_body={"prompt_cache_key": self.assistant_id} if self.assistant_id else None,
+                extra_body={"prompt_cache_key": self.agent_id} if self.agent_id else None,
             )
             res = completion.choices[0].message.content
             if ret_metadata:

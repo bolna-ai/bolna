@@ -231,9 +231,9 @@ class OpenAICompatibleLLM(BaseLLM):
         if request_json:
             create_kwargs.setdefault("text", {})["format"] = {"type": "json_object"}
 
-        assistant_id = getattr(self, "assistant_id", None)
-        if assistant_id:
-            create_kwargs["extra_body"] = {"prompt_cache_key": assistant_id}
+        agent_id = getattr(self, "agent_id", None)
+        if agent_id:
+            create_kwargs["extra_body"] = {"prompt_cache_key": agent_id}
 
         return create_kwargs, responses_tools
 
@@ -442,9 +442,9 @@ class OpenAICompatibleLLM(BaseLLM):
         if request_json:
             create_kwargs.setdefault("text", {})["format"] = {"type": "json_object"}
 
-        assistant_id = getattr(self, "assistant_id", None)
-        if assistant_id:
-            create_kwargs["extra_body"] = {"prompt_cache_key": assistant_id}
+        agent_id = getattr(self, "agent_id", None)
+        if agent_id:
+            create_kwargs["extra_body"] = {"prompt_cache_key": agent_id}
 
         llm_host = getattr(self, "llm_host", None)
 

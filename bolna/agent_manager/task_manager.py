@@ -157,6 +157,8 @@ class TaskManager(BaseManager):
         # Assistant persistance stuff
         self.assistant_id = assistant_id
         self.run_id = kwargs.get("run_id")
+        if assistant_id:
+            self.kwargs["agent_id"] = assistant_id
 
         self.mark_event_meta_data = MarkEventMetaData()
         self.sampling_rate = 24000
@@ -1233,6 +1235,8 @@ class TaskManager(BaseManager):
                 injected_cfg["use_responses_api"] = True
             if self.llm_config.get("compact_threshold"):
                 injected_cfg["compact_threshold"] = self.llm_config["compact_threshold"]
+            if "agent_id" in self.kwargs:
+                injected_cfg["agent_id"] = self.kwargs["agent_id"]
             injected_cfg["buffer_size"] = self.task_config["tools_config"]["synthesizer"].get("buffer_size")
             injected_cfg["language"] = self.language
 
@@ -1267,6 +1271,8 @@ class TaskManager(BaseManager):
                 injected_cfg["use_responses_api"] = True
             if self.llm_config.get("compact_threshold"):
                 injected_cfg["compact_threshold"] = self.llm_config["compact_threshold"]
+            if "agent_id" in self.kwargs:
+                injected_cfg["agent_id"] = self.kwargs["agent_id"]
             injected_cfg["buffer_size"] = self.task_config["tools_config"]["synthesizer"].get("buffer_size")
             injected_cfg["language"] = self.language
 
