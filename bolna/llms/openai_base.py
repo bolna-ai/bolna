@@ -231,6 +231,10 @@ class OpenAICompatibleLLM(BaseLLM):
         if request_json:
             create_kwargs.setdefault("text", {})["format"] = {"type": "json_object"}
 
+        assistant_id = getattr(self, "assistant_id", None)
+        if assistant_id:
+            create_kwargs["extra_body"] = {"prompt_cache_key": assistant_id}
+
         return create_kwargs, responses_tools
 
     async def _generate_stream_responses(
@@ -437,6 +441,10 @@ class OpenAICompatibleLLM(BaseLLM):
 
         if request_json:
             create_kwargs.setdefault("text", {})["format"] = {"type": "json_object"}
+
+        assistant_id = getattr(self, "assistant_id", None)
+        if assistant_id:
+            create_kwargs["extra_body"] = {"prompt_cache_key": assistant_id}
 
         llm_host = getattr(self, "llm_host", None)
 

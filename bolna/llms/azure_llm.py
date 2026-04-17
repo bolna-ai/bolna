@@ -77,6 +77,7 @@ class AzureLLM(OpenAICompatibleLLM):
         )
 
         self.run_id = kwargs.get("run_id", None)
+        self.assistant_id = kwargs.get("assistant_id", None)
         self.llm_host = urlparse(azure_endpoint).netloc if azure_endpoint else None
 
         # Responses API: uses v1 endpoint with regular AsyncOpenAI client
@@ -139,6 +140,9 @@ class AzureLLM(OpenAICompatibleLLM):
         first_token_time = None
         latency_data = None
         stream_usage = None
+
+        if self.assistant_id:
+            model_args["extra_body"] = {"prompt_cache_key": self.assistant_id}
 
         try:
             completion_stream = await self.async_client.chat.completions.create(**model_args)
@@ -252,7 +256,8 @@ class AzureLLM(OpenAICompatibleLLM):
 
         try:
             completion = await self.async_client.chat.completions.create(
-                model=self.model, temperature=0.0, messages=messages, stream=False, response_format=response_format
+                model=self.model, temperature=0.0, messages=messages, stream=False, response_format=response_format,
+                extra_body={"prompt_cache_key": self.assistant_id} if self.assistant_id else None,
             )
 
             res = completion.choices[0].message.content
