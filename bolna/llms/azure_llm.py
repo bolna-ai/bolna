@@ -256,7 +256,11 @@ class AzureLLM(OpenAICompatibleLLM):
 
         try:
             completion = await self.async_client.chat.completions.create(
-                model=self.model, temperature=0.0, messages=messages, stream=False, response_format=response_format,
+                model=self.model,
+                temperature=0.0,
+                messages=messages,
+                stream=False,
+                response_format=response_format,
                 extra_body={"prompt_cache_key": self.assistant_id} if self.assistant_id else None,
             )
 
