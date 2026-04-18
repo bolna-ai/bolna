@@ -4142,10 +4142,33 @@ class TaskManager(BaseManager):
                         tool.task_manager_instance = None
                 self.tools.clear()
                 self.kwargs.pop("task_manager_instance", None)
+                self.kwargs.clear()
                 self.conversation_recording = {"input": {"data": b""}, "output": [], "metadata": {}}
                 self.conversation_history = None
                 self.request_logs.clear()
                 self.function_tool_api_call_details.clear()
+                if hasattr(self, "voicemail_handler"):
+                    self.voicemail_handler.tm = None
+                if hasattr(self, "language_detector"):
+                    self.language_detector._transcripts.clear()
+                    self.language_detector._llm = None
+
+                # Null out heavy instance attributes so that even if a stale asyncio
+                # task keeps the TaskManager alive, the data it points to is freed.
+                self.task_config = None
+                self.mark_event_meta_data = None
+                self.interruption_manager = None
+                self.context_data = None
+                self.buffers = None
+                self.queues = None
+                self.synthesizer_tasks = None
+                self.prompts = None
+                self.system_prompt = None
+                self.input_parameters = None
+                self.label_flow = None
+                self.llm_config_map = None
+                self.llm_agent_map = None
+                self.conversation_config = None
 
             return output
 
