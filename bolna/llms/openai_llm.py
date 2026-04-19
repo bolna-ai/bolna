@@ -3,8 +3,8 @@ import asyncio
 import json
 import time
 from typing import Optional
-import httpx
 from urllib.parse import urlparse
+from bolna.llms.http_client_pool import get_shared_http_client
 from dotenv import load_dotenv
 from openai import (
     AsyncOpenAI,
@@ -173,8 +173,7 @@ class OpenAiLLM(OpenAICompatibleLLM):
 
         self.model_args["service_tier"] = kwargs.get("service_tier", "default")
 
-        limits = httpx.Limits(max_connections=50, max_keepalive_connections=50, keepalive_expiry=30)
-        http_client = httpx.AsyncClient(limits=limits, timeout=httpx.Timeout(600.0, connect=10.0), http2=True)
+        http_client = get_shared_http_client(base_url=kwargs.get("base_url"), http2=True)
 
         if kwargs.get("provider", "openai") == "custom":
             base_url = kwargs.get("base_url")
@@ -628,5 +627,3 @@ class OpenAiLLM(OpenAICompatibleLLM):
     async def close(self):
         if self._ws_transport:
             await self._ws_transport.disconnect()
-        if self.async_client:
-            await self.async_client.close()
