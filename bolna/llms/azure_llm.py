@@ -296,7 +296,7 @@ class AzureLLM(OpenAICompatibleLLM):
             raise
 
     async def close(self):
-        pass
+        pass  # httpx client is shared via pool, don't close it here
 
     def get_response_format(self, is_json_format: bool):
         if is_json_format and self.model in ("gpt-4-1106-preview", "gpt-3.5-turbo-1106", "gpt-4o-mini", "gpt-4.1-mini"):

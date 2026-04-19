@@ -625,5 +625,6 @@ class OpenAiLLM(OpenAICompatibleLLM):
             asyncio.ensure_future(self._ws_transport.cancel_response(response_id))
 
     async def close(self):
+        # httpx client is shared via pool, don't close it here
         if self._ws_transport:
             await self._ws_transport.disconnect()
