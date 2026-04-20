@@ -1,7 +1,7 @@
 import os
 import json
-import httpx
 from urllib.parse import urlparse
+from bolna.llms.http_client_pool import get_shared_http_client
 from dotenv import load_dotenv
 from openai import (
     AsyncAzureOpenAI,
@@ -70,8 +70,7 @@ class AzureLLM(OpenAICompatibleLLM):
         api_key = kwargs.get("llm_key", os.getenv("AZURE_OPENAI_API_KEY"))
         api_version = kwargs.get("api_version", os.getenv("AZURE_OPENAI_API_VERSION", "2024-12-01-preview"))
 
-        limits = httpx.Limits(max_connections=50, max_keepalive_connections=50, keepalive_expiry=30)
-        http_client = httpx.AsyncClient(limits=limits, timeout=httpx.Timeout(600.0, connect=10.0))
+        http_client = get_shared_http_client(base_url=azure_endpoint, http2=False)
 
         self.async_client = AsyncAzureOpenAI(
             azure_endpoint=azure_endpoint, api_key=api_key, api_version=api_version, http_client=http_client
@@ -297,8 +296,7 @@ class AzureLLM(OpenAICompatibleLLM):
             raise
 
     async def close(self):
-        if self.async_client:
-            await self.async_client.close()
+        pass  # httpx client is shared via pool, don't close it here
 
     def get_response_format(self, is_json_format: bool):
         if is_json_format and self.model in ("gpt-4-1106-preview", "gpt-3.5-turbo-1106", "gpt-4o-mini", "gpt-4.1-mini"):
