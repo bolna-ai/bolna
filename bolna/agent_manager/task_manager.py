@@ -157,8 +157,6 @@ class TaskManager(BaseManager):
         # Assistant persistance stuff
         self.assistant_id = assistant_id
         self.run_id = kwargs.get("run_id")
-        if assistant_id:
-            self.kwargs["agent_id"] = assistant_id
 
         self.mark_event_meta_data = MarkEventMetaData()
         self.sampling_rate = 24000
