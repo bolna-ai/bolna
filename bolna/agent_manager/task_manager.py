@@ -1233,6 +1233,8 @@ class TaskManager(BaseManager):
                 injected_cfg["use_responses_api"] = True
             if self.llm_config.get("compact_threshold"):
                 injected_cfg["compact_threshold"] = self.llm_config["compact_threshold"]
+            if "prompt_cache_key" in self.kwargs:
+                injected_cfg["prompt_cache_key"] = self.kwargs["prompt_cache_key"]
             injected_cfg["buffer_size"] = self.task_config["tools_config"]["synthesizer"].get("buffer_size")
             injected_cfg["language"] = self.language
 
@@ -1267,6 +1269,8 @@ class TaskManager(BaseManager):
                 injected_cfg["use_responses_api"] = True
             if self.llm_config.get("compact_threshold"):
                 injected_cfg["compact_threshold"] = self.llm_config["compact_threshold"]
+            if "prompt_cache_key" in self.kwargs:
+                injected_cfg["prompt_cache_key"] = self.kwargs["prompt_cache_key"]
             injected_cfg["buffer_size"] = self.task_config["tools_config"]["synthesizer"].get("buffer_size")
             injected_cfg["language"] = self.language
 

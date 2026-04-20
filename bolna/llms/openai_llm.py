@@ -199,6 +199,7 @@ class OpenAiLLM(OpenAICompatibleLLM):
                 self.tools = [i for i in my_assistant.tools if i.type == "function"]
             # logger.info(f'thread id : {self.thread_id}')
         self.run_id = kwargs.get("run_id", None)
+        self.prompt_cache_key = kwargs.get("prompt_cache_key", None)
 
         self._init_responses_api(
             kwargs.get("use_responses_api", False), compact_threshold=kwargs.get("compact_threshold")
@@ -260,6 +261,9 @@ class OpenAiLLM(OpenAICompatibleLLM):
         latency_data = None
         service_tier = None
         stream_usage = None
+
+        if self.prompt_cache_key:
+            model_args["extra_body"] = {"prompt_cache_key": self.prompt_cache_key}
 
         try:
             completion_stream = await self.async_client.chat.completions.create(**model_args)
@@ -376,7 +380,12 @@ class OpenAiLLM(OpenAICompatibleLLM):
 
         try:
             completion = await self.async_client.chat.completions.create(
-                model=self.model, temperature=0.0, messages=messages, stream=False, response_format=response_format
+                model=self.model,
+                temperature=0.0,
+                messages=messages,
+                stream=False,
+                response_format=response_format,
+                extra_body={"prompt_cache_key": self.prompt_cache_key} if self.prompt_cache_key else None,
             )
             res = completion.choices[0].message.content
             if ret_metadata:
@@ -435,6 +444,11 @@ class OpenAiLLM(OpenAICompatibleLLM):
         create_params, responses_tools = self._build_responses_create_kwargs(
             messages, meta_info, request_json, tool_choice, store=False
         )
+
+        # extra_body is an SDK concept; WS sends raw JSON, so merge its contents at top level
+        extra_body = create_params.pop("extra_body", None)
+        if extra_body:
+            create_params.update(extra_body)
 
         # WS endpoint silently closes on float temperature — coerce to int
         temp = create_params.get("temperature")
