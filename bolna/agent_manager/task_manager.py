@@ -2963,6 +2963,9 @@ class TaskManager(BaseManager):
                                 self._speech_started_before_welcome = True
                             continue
 
+                        # Post-welcome interim → clear stale flag set by pre-welcome SpeechStarted (welcome-audio bleed).
+                        self._speech_started_before_welcome = False
+
                         interim_transcript_len += len(message["data"].get("content").strip().split(" "))
                         transcript_content = message["data"].get("content", "")
 
