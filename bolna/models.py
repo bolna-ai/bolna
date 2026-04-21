@@ -12,6 +12,7 @@ from .enums import (
     ExpressionOperator,
     ExpressionLogic,
     EdgeConditionType,
+    IntegrationProvider,
 )
 from .constants import MODEL_REASONING_EFFORT_MAP
 
@@ -464,6 +465,30 @@ class ToolModel(BaseModel):
     tools_params: Dict[str, APIParams]
 
 
+class SlackIntegrationConfig(BaseModel):
+    webhook_url: Optional[str] = None
+
+
+class IntegrationConfig(BaseModel):
+    provider: str
+    provider_config: SlackIntegrationConfig
+
+    @model_validator(mode="before")
+    def preprocess(cls, values):
+        provider = values.get("provider")
+        config = values.get("provider_config", {})
+
+        if provider == IntegrationProvider.SLACK.value:
+            if isinstance(config, dict):
+                values["provider_config"] = SlackIntegrationConfig(**config)
+
+        return values
+
+    @field_validator("provider")
+    def validate_model(cls, value):
+        return validate_attribute(value, IntegrationProvider.all_values(), "integration provider")
+
+
 class ToolsConfig(BaseModel):
     llm_agent: Optional[Union[LlmAgent, SimpleLlmAgent]] = None
     synthesizer: Optional[Synthesizer] = None
@@ -471,6 +496,7 @@ class ToolsConfig(BaseModel):
     input: Optional[IOModel] = None
     output: Optional[IOModel] = None
     api_tools: Optional[ToolModel] = None
+    integrations: Optional[List[IntegrationConfig]] = None
     switch_tool_description: Optional[str] = None
     switch_handoff_messages: Optional[Dict[str, str]] = None
     agent_names: Optional[Dict[str, str]] = None

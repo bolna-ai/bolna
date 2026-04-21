@@ -38,7 +38,8 @@ from .output_handlers import (
     SipTrunkOutputHandler,
 )
 from .llms import OpenAiLLM, LiteLLM, AzureLLM, GeminiLLM
-from .enums import TelephonyProvider, SynthesizerProvider, TranscriberProvider, LLMProvider
+from .integrations.slack import SlackIntegration
+from .enums import TelephonyProvider, SynthesizerProvider, TranscriberProvider, LLMProvider, IntegrationProvider
 
 SUPPORTED_SYNTHESIZER_MODELS = {
     SynthesizerProvider.POLLY.value: PollySynthesizer,
@@ -117,4 +118,7 @@ SUPPORTED_OUTPUT_TELEPHONY_HANDLERS = {
     TelephonyProvider.PLIVO.value: PlivoOutputHandler,
     TelephonyProvider.VOBIZ.value: VobizOutputHandler,
     TelephonyProvider.SIP_TRUNK.value: SipTrunkOutputHandler,
+}
+SUPPORTED_INTEGRATIONS = {
+    IntegrationProvider.SLACK.value: SlackIntegration,
 }
