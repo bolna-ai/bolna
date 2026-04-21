@@ -63,7 +63,18 @@ class SipTrunkInputHandler(TelephonyInputHandler):
         asterisk_media_start=None,
         agent_config=None,
         ws_context_data=None,
+        vad_config=None,
+        speech_events_queue=None,
     ):
+        # SipTrunk implements its own _listen() and does not yet route audio
+        # through TelephonyInputHandler's VAD-gated path. Accept the kwargs
+        # so task_manager construction does not blow up, but warn loudly so
+        # operators know the local VAD is silently no-op for SIP trunks.
+        if vad_config:
+            logger.warning(
+                "vad_config supplied to SipTrunkInputHandler but SIP trunk path "
+                "does not route through the local VAD layer yet -- ignoring."
+            )
         super().__init__(
             queues,
             websocket,

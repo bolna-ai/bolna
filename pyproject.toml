@@ -22,6 +22,7 @@ requires-python = ">=3.10"
 
 [project.optional-dependencies]
 dev = ["pip-tools", "pre-commit", "pytest", "pytest-asyncio", "ruff"]
+vad = ["silero-vad>=5.1"]
 
 [tool.setuptools]
 package-dir = {"bolna" = "bolna"}

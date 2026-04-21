@@ -191,9 +191,18 @@ class Synthesizer(BaseModel):
         return validate_attribute(value, SynthesizerProvider.all_values())
 
 
+class VadConfig(BaseModel):
+    sample_rate: Literal[8000, 16000] = 8000
+    threshold: float = Field(default=0.5, ge=0.0, le=1.0)
+    min_silence_ms: int = Field(default=100, ge=0, le=5000)
+    speech_pad_ms: int = Field(default=30, ge=0, le=500)
+    pre_speech_ms: int = Field(default=500, ge=0, le=2000)
+
+
 class IOModel(BaseModel):
     provider: str
     format: Optional[str] = "wav"
+    vad_config: Optional[VadConfig] = None
 
     @field_validator("provider")
     def validate_provider(cls, value):
