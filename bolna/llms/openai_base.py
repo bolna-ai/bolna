@@ -253,6 +253,8 @@ class OpenAICompatibleLLM(BaseLLM):
 
         start_time = now_ms()
         first_token_time = None
+        mid_stream_flush_count = 0
+        first_yield_time = None
         latency_data = None
         service_tier = None
         llm_host = getattr(self, "llm_host", None)
@@ -297,6 +299,7 @@ class OpenAICompatibleLLM(BaseLLM):
             ):
                 first_token_time = now
                 self.started_streaming = True
+                logger.info(f"llm_first_token elapsed_ms={first_token_time - start_time} buffer_size={self.buffer_size}")
                 latency_data = LatencyData(
                     sequence_id=meta_info.get("sequence_id") if meta_info else None,
                     first_token_latency_ms=first_token_time - start_time,
@@ -311,6 +314,10 @@ class OpenAICompatibleLLM(BaseLLM):
                 buffer += event.delta
                 if synthesize and len(buffer) >= self.buffer_size:
                     split = buffer.rsplit(" ", 1)
+                    mid_stream_flush_count += 1
+                    if first_yield_time is None:
+                        first_yield_time = now_ms()
+                    logger.info(f"buffer_flush mid_stream chunk={mid_stream_flush_count} chars={len(split[0])} elapsed_ms={now_ms() - (first_token_time or start_time)} buffer_size={self.buffer_size}")
                     yield LLMStreamChunk(data=split[0], end_of_stream=False, latency=latency_data)
                     buffer = split[1] if len(split) > 1 else ""
 
@@ -394,6 +401,7 @@ class OpenAICompatibleLLM(BaseLLM):
             usage_kwargs["reasoning_content"] = reasoning_content
 
         if synthesize:
+            logger.info(f"buffer_flush end_of_stream chars={len(buffer)} elapsed_ms={now_ms() - (first_token_time or start_time)} mid_stream_flushes={mid_stream_flush_count} buffer_size={self.buffer_size}")
             yield LLMStreamChunk(data=buffer, end_of_stream=True, latency=latency_data, **usage_kwargs)
         else:
             yield LLMStreamChunk(data=answer, end_of_stream=True, latency=latency_data, **usage_kwargs)
