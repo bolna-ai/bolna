@@ -565,11 +565,10 @@ class DeepgramTranscriber(BaseTranscriber):
                                     f"Failed to extract transcript from Deepgram response in speech_final: {e}"
                                 )
                                 pass
-                            if self.meta_info is not None:
-                                self.meta_info["user_stop_offset_ms"] = self.endpointing_ms
-                                last_word_end_wall = self._compute_last_word_end_wall(msg)
-                                if last_word_end_wall is not None:
-                                    self.meta_info["user_stop_ts_wall"] = last_word_end_wall
+                            self.meta_info["user_stop_offset_ms"] = self.endpointing_ms
+                            last_word_end_wall = self._compute_last_word_end_wall(msg)
+                            if last_word_end_wall is not None:
+                                self.meta_info["user_stop_ts_wall"] = last_word_end_wall
                             yield create_ws_data_packet(data, self.meta_info)
 
                 elif msg["type"] == "UtteranceEnd":
@@ -610,13 +609,12 @@ class DeepgramTranscriber(BaseTranscriber):
                         except Exception as e:
                             logger.error(f"Failed to extract transcript from Deepgram response: {e}")
                             pass
-                        if self.meta_info is not None:
-                            self.meta_info["user_stop_offset_ms"] = self.utterance_end_ms
-                            last_word_end_audio = msg.get("last_word_end")
-                            if last_word_end_audio is not None and self.connection_start_time is not None:
-                                self.meta_info["user_stop_ts_wall"] = (
-                                    self.connection_start_time + last_word_end_audio
-                                )
+                        self.meta_info["user_stop_offset_ms"] = self.utterance_end_ms
+                        last_word_end_audio = msg.get("last_word_end")
+                        if last_word_end_audio is not None:
+                            self.meta_info["user_stop_ts_wall"] = (
+                                self.connection_start_time + last_word_end_audio
+                            )
                         yield create_ws_data_packet(data, self.meta_info)
                     else:
                         # Transcript already sent but we still need to notify speech ended
@@ -687,8 +685,6 @@ class DeepgramTranscriber(BaseTranscriber):
     def _compute_last_word_end_wall(self, data):
         """Wall-clock seconds when the last transcribed word ended, or None."""
         try:
-            if self.connection_start_time is None:
-                return None
             alternatives = (data.get("channel") or {}).get("alternatives") or []
             for alternative in alternatives:
                 words = alternative.get("words") or []
