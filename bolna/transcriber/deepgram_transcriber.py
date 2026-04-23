@@ -612,9 +612,7 @@ class DeepgramTranscriber(BaseTranscriber):
                         self.meta_info["user_stop_offset_ms"] = self.utterance_end_ms
                         last_word_end_audio = msg.get("last_word_end")
                         if last_word_end_audio is not None:
-                            self.meta_info["user_stop_ts_wall"] = (
-                                self.connection_start_time + last_word_end_audio
-                            )
+                            self.meta_info["user_stop_ts_wall"] = self.connection_start_time + last_word_end_audio
                         yield create_ws_data_packet(data, self.meta_info)
                     else:
                         # Transcript already sent but we still need to notify speech ended
