@@ -4024,14 +4024,14 @@ class TaskManager(BaseManager):
                 # Real-time perceived latency: convert absolute seconds to call-relative ms
                 # (conversation_start_init_ts is already in ms — see line 100).
                 _call_start_ms = self.conversation_start_init_ts
-                _realtime_perceived = [
+                _user_bot_latencies = [
                     {
                         "sequence_id": e["sequence_id"],
                         "user_end_ms": round(e["user_end_s"] * 1000 - _call_start_ms, 2),
                         "agent_start_ms": round(e["agent_start_s"] * 1000 - _call_start_ms, 2),
                         "latency_ms": e["latency_ms"],
                     }
-                    for e in self.interruption_manager.realtime_perceived_latencies
+                    for e in self.interruption_manager.user_bot_latencies
                 ]
 
                 output = {
@@ -4055,7 +4055,7 @@ class TaskManager(BaseManager):
                         "interruption_stats": self.interruption_manager.get_interruption_stats(
                             self.conversation_start_init_ts
                         ),
-                        "realtime_perceived_latencies": _realtime_perceived,
+                        "user_bot_latencies": _user_bot_latencies,
                         "mark_tracking": self.mark_event_meta_data.get_mark_tracking_summary(),
                     },
                     "hangup_detail": self.hangup_detail,

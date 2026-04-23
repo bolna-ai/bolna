@@ -62,7 +62,7 @@ class InterruptionManager:
         # _adjusted_user_stop_ts holds wall-clock seconds with vendor endpointing backed out,
         # consumed by the next on_agent_speech_started so it cannot straddle turns.
         self._adjusted_user_stop_ts: Optional[float] = None
-        self.realtime_perceived_latencies: List[Dict] = []
+        self.user_bot_latencies: List[Dict] = []
 
         logger.info(
             f"InterruptionManager initialized: "
@@ -169,7 +169,7 @@ class InterruptionManager:
         update_utterance_time=False keeps the grace period anchored to the last
         real turn (use for false interruptions or late UtteranceEnd events).
 
-        For realtime_perceived_latencies, the adjusted user-stop timestamp is
+        For user_bot_latencies, the adjusted user-stop timestamp is
         resolved in priority order:
           1. user_stop_ts_wall (wall-clock seconds) — when transcriber exposes
              an audio-time end-of-last-word (Deepgram words[-1].end); most
@@ -261,7 +261,7 @@ class InterruptionManager:
             latency_ms = (now_s - self._adjusted_user_stop_ts) * 1000
             # Sanity bound: drop obvious garbage (negative or multi-call-level delays)
             if 0 < latency_ms < 30_000:
-                self.realtime_perceived_latencies.append(
+                self.user_bot_latencies.append(
                     {
                         "sequence_id": sequence_id,
                         "user_end_s": self._adjusted_user_stop_ts,
