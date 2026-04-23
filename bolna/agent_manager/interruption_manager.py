@@ -251,15 +251,14 @@ class InterruptionManager:
 
         if self._adjusted_user_stop_ts is not None:
             latency_ms = (now_s - self._adjusted_user_stop_ts) * 1000
-            if 0 < latency_ms < 30_000:
-                self.user_bot_latencies.append(
-                    {
-                        "sequence_id": sequence_id,
-                        "user_end_s": self._adjusted_user_stop_ts,
-                        "agent_start_s": now_s,
-                        "latency_ms": round(latency_ms, 2),
-                    }
-                )
+            self.user_bot_latencies.append(
+                {
+                    "sequence_id": sequence_id,
+                    "user_end_s": self._adjusted_user_stop_ts,
+                    "agent_start_s": now_s,
+                    "latency_ms": round(latency_ms, 2),
+                }
+            )
             self._adjusted_user_stop_ts = None
 
         logger.info(f"Agent speech started (sequence_id={sequence_id})")
