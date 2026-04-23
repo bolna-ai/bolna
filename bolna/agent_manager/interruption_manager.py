@@ -58,6 +58,9 @@ class InterruptionManager:
         self._last_sent_sequence_id: Optional[int] = None  # dedup guard for on_agent_speech_started
         self.longest_agent_monologue_ms: float = 0.0
 
+        self._adjusted_user_stop_ts: Optional[float] = None
+        self.user_bot_latencies: List[Dict] = []
+
         logger.info(
             f"InterruptionManager initialized: "
             f"words_for_interruption={number_of_words_for_interruption}, "
@@ -152,11 +155,19 @@ class InterruptionManager:
             self.time_since_first_interim_result = time.time() * 1000
             logger.info(f"First interim at {self.time_since_first_interim_result}")
 
-    def on_user_speech_ended(self, update_utterance_time: bool = True) -> None:
+    def on_user_speech_ended(
+        self,
+        update_utterance_time: bool = True,
+        stop_offset_ms: int = 0,
+        user_stop_ts_wall: Optional[float] = None,
+    ) -> None:
         """Called when user stops speaking (speech_final / UtteranceEnd).
 
         update_utterance_time=False keeps the grace period anchored to the last
         real turn (use for false interruptions or late UtteranceEnd events).
+
+        user_stop_ts_wall (if present) is preferred over now - stop_offset_ms
+        for user_bot_latencies; the former avoids vendor endpointing lag.
         """
         self.callee_speaking = False
         self.let_remaining_audio_pass_through = True
@@ -165,6 +176,10 @@ class InterruptionManager:
         now_s = time.time()
         if update_utterance_time:
             self.utterance_end_time = now_s * 1000
+            if user_stop_ts_wall is not None:
+                self._adjusted_user_stop_ts = user_stop_ts_wall
+            else:
+                self._adjusted_user_stop_ts = now_s - (stop_offset_ms / 1000.0)
 
         if self.callee_speaking_start_time > 0:
             self._total_user_speaking_ms += (now_s - self.callee_speaking_start_time) * 1000
@@ -231,7 +246,21 @@ class InterruptionManager:
         if sequence_id == self._last_sent_sequence_id:
             return
         self._last_sent_sequence_id = sequence_id
-        self._agent_speaking_start_time = time.time()
+        now_s = time.time()
+        self._agent_speaking_start_time = now_s
+
+        if self._adjusted_user_stop_ts is not None:
+            latency_ms = (now_s - self._adjusted_user_stop_ts) * 1000
+            self.user_bot_latencies.append(
+                {
+                    "sequence_id": sequence_id,
+                    "user_end_s": self._adjusted_user_stop_ts,
+                    "agent_start_s": now_s,
+                    "latency_ms": round(latency_ms, 2),
+                }
+            )
+            self._adjusted_user_stop_ts = None
+
         logger.info(f"Agent speech started (sequence_id={sequence_id})")
 
     def on_agent_speech_ended(self) -> None:

@@ -42,6 +42,8 @@ class DeepgramTranscriber(BaseTranscriber):
     ):
         super().__init__(input_queue)
         self.endpointing = endpointing
+        self.endpointing_ms = int(endpointing)
+        self.utterance_end_ms = 1000 if self.endpointing_ms < 1000 else self.endpointing_ms
         self.language = language
         self.stream = stream
         self.provider = telephony_provider
@@ -107,7 +109,7 @@ class DeepgramTranscriber(BaseTranscriber):
             "vad_events": "true",
             "endpointing": self.endpointing,
             "interim_results": "true",
-            "utterance_end_ms": "1000" if int(self.endpointing) < 1000 else str(self.endpointing),
+            "utterance_end_ms": str(self.utterance_end_ms),
         }
 
         self.audio_frame_duration = 0.5  # We're sending 8k samples with a sample rate of 16k
@@ -563,6 +565,10 @@ class DeepgramTranscriber(BaseTranscriber):
                                     f"Failed to extract transcript from Deepgram response in speech_final: {e}"
                                 )
                                 pass
+                            self.meta_info["user_stop_offset_ms"] = self.endpointing_ms
+                            last_word_end_wall = self._compute_last_word_end_wall(msg)
+                            if last_word_end_wall is not None:
+                                self.meta_info["user_stop_ts_wall"] = last_word_end_wall
                             yield create_ws_data_packet(data, self.meta_info)
 
                 elif msg["type"] == "UtteranceEnd":
@@ -603,6 +609,10 @@ class DeepgramTranscriber(BaseTranscriber):
                         except Exception as e:
                             logger.error(f"Failed to extract transcript from Deepgram response: {e}")
                             pass
+                        self.meta_info["user_stop_offset_ms"] = self.utterance_end_ms
+                        last_word_end_audio = msg.get("last_word_end")
+                        if last_word_end_audio is not None:
+                            self.meta_info["user_stop_ts_wall"] = self.connection_start_time + last_word_end_audio
                         yield create_ws_data_packet(data, self.meta_info)
                     else:
                         # Transcript already sent but we still need to notify speech ended
@@ -670,15 +680,17 @@ class DeepgramTranscriber(BaseTranscriber):
         except Exception as e:
             logger.error(f"not working {e}")
 
-    def __calculate_utterance_end(self, data):
-        utterance_end = None
-        if "channel" in data and "alternatives" in data["channel"]:
-            for alternative in data["channel"]["alternatives"]:
-                if "words" in alternative:
-                    final_word = alternative["words"][-1]
-                    utterance_end = self.connection_start_time + final_word["end"]
-                    logger.info(f"Final word ended at {utterance_end}")
-        return utterance_end
+    def _compute_last_word_end_wall(self, data):
+        """Wall-clock seconds when the last transcribed word ended, or None."""
+        try:
+            alternatives = (data.get("channel") or {}).get("alternatives") or []
+            for alternative in alternatives:
+                words = alternative.get("words") or []
+                if words:
+                    return self.connection_start_time + words[-1]["end"]
+        except Exception:
+            pass
+        return None
 
     def __set_transcription_cursor(self, data):
         if "start" in data and "duration" in data:
