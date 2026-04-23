@@ -612,7 +612,6 @@ class DeepgramTranscriber(BaseTranscriber):
                             pass
                         if self.meta_info is not None:
                             self.meta_info["user_stop_offset_ms"] = self.utterance_end_ms
-                            # Deepgram's UtteranceEnd message carries last_word_end (audio-time).
                             last_word_end_audio = msg.get("last_word_end")
                             if last_word_end_audio is not None and self.connection_start_time is not None:
                                 self.meta_info["user_stop_ts_wall"] = (
@@ -686,13 +685,7 @@ class DeepgramTranscriber(BaseTranscriber):
             logger.error(f"not working {e}")
 
     def _compute_last_word_end_wall(self, data):
-        """Return wall-clock seconds when the last transcribed word ended, or None.
-
-        Uses Deepgram's per-word audio-time stamps plus connection_start_time
-        (anchored on first receiver message to wall = now - frames_sent * frame_duration).
-        Accurate to Deepgram's word-boundary precision (~50-100ms typical on TTS audio)
-        and avoids the remote-processing tail that endpointing-based subtraction includes.
-        """
+        """Wall-clock seconds when the last transcribed word ended, or None."""
         try:
             if self.connection_start_time is None:
                 return None

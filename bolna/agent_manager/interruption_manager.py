@@ -58,9 +58,6 @@ class InterruptionManager:
         self._last_sent_sequence_id: Optional[int] = None  # dedup guard for on_agent_speech_started
         self.longest_agent_monologue_ms: float = 0.0
 
-        # Real-time perceived latency (user-stopped → first-agent-audio), per turn.
-        # _adjusted_user_stop_ts holds wall-clock seconds with vendor endpointing backed out,
-        # consumed by the next on_agent_speech_started so it cannot straddle turns.
         self._adjusted_user_stop_ts: Optional[float] = None
         self.user_bot_latencies: List[Dict] = []
 
@@ -169,13 +166,8 @@ class InterruptionManager:
         update_utterance_time=False keeps the grace period anchored to the last
         real turn (use for false interruptions or late UtteranceEnd events).
 
-        For user_bot_latencies, the adjusted user-stop timestamp is
-        resolved in priority order:
-          1. user_stop_ts_wall (wall-clock seconds) — when transcriber exposes
-             an audio-time end-of-last-word (Deepgram words[-1].end); most
-             accurate, free of remote-processing tail.
-          2. now - stop_offset_ms — fallback using vendor silence-window config;
-             inherits Deepgram's endpointing processing lag (~100-300ms).
+        user_stop_ts_wall (if present) is preferred over now - stop_offset_ms
+        for user_bot_latencies; the former avoids vendor endpointing lag.
         """
         self.callee_speaking = False
         self.let_remaining_audio_pass_through = True
@@ -259,7 +251,6 @@ class InterruptionManager:
 
         if self._adjusted_user_stop_ts is not None:
             latency_ms = (now_s - self._adjusted_user_stop_ts) * 1000
-            # Sanity bound: drop obvious garbage (negative or multi-call-level delays)
             if 0 < latency_ms < 30_000:
                 self.user_bot_latencies.append(
                     {
@@ -269,7 +260,7 @@ class InterruptionManager:
                         "latency_ms": round(latency_ms, 2),
                     }
                 )
-            self._adjusted_user_stop_ts = None  # consume — prevents cross-turn pairing
+            self._adjusted_user_stop_ts = None
 
         logger.info(f"Agent speech started (sequence_id={sequence_id})")
 

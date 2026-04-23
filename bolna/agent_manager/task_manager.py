@@ -4021,8 +4021,6 @@ class TaskManager(BaseManager):
 
                 welcome_message_sent_ts = self.tools["output"].get_welcome_message_sent_ts()
 
-                # Real-time perceived latency: convert absolute seconds to call-relative ms
-                # (conversation_start_init_ts is already in ms — see line 100).
                 _call_start_ms = self.conversation_start_init_ts
                 _user_bot_latencies = [
                     {
