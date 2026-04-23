@@ -158,16 +158,24 @@ class InterruptionManager:
             self.time_since_first_interim_result = time.time() * 1000
             logger.info(f"First interim at {self.time_since_first_interim_result}")
 
-    def on_user_speech_ended(self, update_utterance_time: bool = True, stop_offset_ms: int = 0) -> None:
+    def on_user_speech_ended(
+        self,
+        update_utterance_time: bool = True,
+        stop_offset_ms: int = 0,
+        user_stop_ts_wall: Optional[float] = None,
+    ) -> None:
         """Called when user stops speaking (speech_final / UtteranceEnd).
 
         update_utterance_time=False keeps the grace period anchored to the last
         real turn (use for false interruptions or late UtteranceEnd events).
 
-        stop_offset_ms is the vendor-reported silence window (e.g. Deepgram's
-        endpointing or utterance_end_ms) that elapsed between the user's actual
-        end-of-speech and this callback firing. Subtracted to recover wall-clock
-        time of true end-of-speech for realtime_perceived_latencies.
+        For realtime_perceived_latencies, the adjusted user-stop timestamp is
+        resolved in priority order:
+          1. user_stop_ts_wall (wall-clock seconds) — when transcriber exposes
+             an audio-time end-of-last-word (Deepgram words[-1].end); most
+             accurate, free of remote-processing tail.
+          2. now - stop_offset_ms — fallback using vendor silence-window config;
+             inherits Deepgram's endpointing processing lag (~100-300ms).
         """
         self.callee_speaking = False
         self.let_remaining_audio_pass_through = True
@@ -176,7 +184,10 @@ class InterruptionManager:
         now_s = time.time()
         if update_utterance_time:
             self.utterance_end_time = now_s * 1000
-            self._adjusted_user_stop_ts = now_s - (stop_offset_ms / 1000.0)
+            if user_stop_ts_wall is not None:
+                self._adjusted_user_stop_ts = user_stop_ts_wall
+            else:
+                self._adjusted_user_stop_ts = now_s - (stop_offset_ms / 1000.0)
 
         if self.callee_speaking_start_time > 0:
             self._total_user_speaking_ms += (now_s - self.callee_speaking_start_time) * 1000

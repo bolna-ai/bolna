@@ -3051,8 +3051,11 @@ class TaskManager(BaseManager):
                             self._speech_started_before_welcome = False
                             continue
 
-                        stop_offset_ms = (message.get("meta_info") or {}).get("user_stop_offset_ms", 0)
-                        self.interruption_manager.on_user_speech_ended(stop_offset_ms=stop_offset_ms)
+                        _meta = message.get("meta_info") or {}
+                        self.interruption_manager.on_user_speech_ended(
+                            stop_offset_ms=_meta.get("user_stop_offset_ms", 0),
+                            user_stop_ts_wall=_meta.get("user_stop_ts_wall"),
+                        )
                         temp_transcriber_message = ""
 
                         if self.output_task is None:

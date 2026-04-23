@@ -567,6 +567,9 @@ class DeepgramTranscriber(BaseTranscriber):
                                 pass
                             if self.meta_info is not None:
                                 self.meta_info["user_stop_offset_ms"] = self.endpointing_ms
+                                last_word_end_wall = self._compute_last_word_end_wall(msg)
+                                if last_word_end_wall is not None:
+                                    self.meta_info["user_stop_ts_wall"] = last_word_end_wall
                             yield create_ws_data_packet(data, self.meta_info)
 
                 elif msg["type"] == "UtteranceEnd":
@@ -609,6 +612,12 @@ class DeepgramTranscriber(BaseTranscriber):
                             pass
                         if self.meta_info is not None:
                             self.meta_info["user_stop_offset_ms"] = self.utterance_end_ms
+                            # Deepgram's UtteranceEnd message carries last_word_end (audio-time).
+                            last_word_end_audio = msg.get("last_word_end")
+                            if last_word_end_audio is not None and self.connection_start_time is not None:
+                                self.meta_info["user_stop_ts_wall"] = (
+                                    self.connection_start_time + last_word_end_audio
+                                )
                         yield create_ws_data_packet(data, self.meta_info)
                     else:
                         # Transcript already sent but we still need to notify speech ended
@@ -676,15 +685,25 @@ class DeepgramTranscriber(BaseTranscriber):
         except Exception as e:
             logger.error(f"not working {e}")
 
-    def __calculate_utterance_end(self, data):
-        utterance_end = None
-        if "channel" in data and "alternatives" in data["channel"]:
-            for alternative in data["channel"]["alternatives"]:
-                if "words" in alternative:
-                    final_word = alternative["words"][-1]
-                    utterance_end = self.connection_start_time + final_word["end"]
-                    logger.info(f"Final word ended at {utterance_end}")
-        return utterance_end
+    def _compute_last_word_end_wall(self, data):
+        """Return wall-clock seconds when the last transcribed word ended, or None.
+
+        Uses Deepgram's per-word audio-time stamps plus connection_start_time
+        (anchored on first receiver message to wall = now - frames_sent * frame_duration).
+        Accurate to Deepgram's word-boundary precision (~50-100ms typical on TTS audio)
+        and avoids the remote-processing tail that endpointing-based subtraction includes.
+        """
+        try:
+            if self.connection_start_time is None:
+                return None
+            alternatives = (data.get("channel") or {}).get("alternatives") or []
+            for alternative in alternatives:
+                words = alternative.get("words") or []
+                if words:
+                    return self.connection_start_time + words[-1]["end"]
+        except Exception:
+            pass
+        return None
 
     def __set_transcription_cursor(self, data):
         if "start" in data and "duration" in data:
