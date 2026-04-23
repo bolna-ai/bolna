@@ -3051,7 +3051,8 @@ class TaskManager(BaseManager):
                             self._speech_started_before_welcome = False
                             continue
 
-                        self.interruption_manager.on_user_speech_ended()
+                        stop_offset_ms = (message.get("meta_info") or {}).get("user_stop_offset_ms", 0)
+                        self.interruption_manager.on_user_speech_ended(stop_offset_ms=stop_offset_ms)
                         temp_transcriber_message = ""
 
                         if self.output_task is None:
@@ -4017,6 +4018,19 @@ class TaskManager(BaseManager):
 
                 welcome_message_sent_ts = self.tools["output"].get_welcome_message_sent_ts()
 
+                # Real-time perceived latency: convert absolute seconds to call-relative ms
+                # (conversation_start_init_ts is already in ms — see line 100).
+                _call_start_ms = self.conversation_start_init_ts
+                _realtime_perceived = [
+                    {
+                        "sequence_id": e["sequence_id"],
+                        "user_end_ms": round(e["user_end_s"] * 1000 - _call_start_ms, 2),
+                        "agent_start_ms": round(e["agent_start_s"] * 1000 - _call_start_ms, 2),
+                        "latency_ms": e["latency_ms"],
+                    }
+                    for e in self.interruption_manager.realtime_perceived_latencies
+                ]
+
                 output = {
                     "messages": self.history,
                     "conversation_time": time.time() - self.start_time,
@@ -4038,6 +4052,7 @@ class TaskManager(BaseManager):
                         "interruption_stats": self.interruption_manager.get_interruption_stats(
                             self.conversation_start_init_ts
                         ),
+                        "realtime_perceived_latencies": _realtime_perceived,
                         "mark_tracking": self.mark_event_meta_data.get_mark_tracking_summary(),
                     },
                     "hangup_detail": self.hangup_detail,

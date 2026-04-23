@@ -42,6 +42,8 @@ class DeepgramTranscriber(BaseTranscriber):
     ):
         super().__init__(input_queue)
         self.endpointing = endpointing
+        self.endpointing_ms = int(endpointing)
+        self.utterance_end_ms = 1000 if self.endpointing_ms < 1000 else self.endpointing_ms
         self.language = language
         self.stream = stream
         self.provider = telephony_provider
@@ -107,7 +109,7 @@ class DeepgramTranscriber(BaseTranscriber):
             "vad_events": "true",
             "endpointing": self.endpointing,
             "interim_results": "true",
-            "utterance_end_ms": "1000" if int(self.endpointing) < 1000 else str(self.endpointing),
+            "utterance_end_ms": str(self.utterance_end_ms),
         }
 
         self.audio_frame_duration = 0.5  # We're sending 8k samples with a sample rate of 16k
@@ -563,6 +565,8 @@ class DeepgramTranscriber(BaseTranscriber):
                                     f"Failed to extract transcript from Deepgram response in speech_final: {e}"
                                 )
                                 pass
+                            if self.meta_info is not None:
+                                self.meta_info["user_stop_offset_ms"] = self.endpointing_ms
                             yield create_ws_data_packet(data, self.meta_info)
 
                 elif msg["type"] == "UtteranceEnd":
@@ -603,6 +607,8 @@ class DeepgramTranscriber(BaseTranscriber):
                         except Exception as e:
                             logger.error(f"Failed to extract transcript from Deepgram response: {e}")
                             pass
+                        if self.meta_info is not None:
+                            self.meta_info["user_stop_offset_ms"] = self.utterance_end_ms
                         yield create_ws_data_packet(data, self.meta_info)
                     else:
                         # Transcript already sent but we still need to notify speech ended

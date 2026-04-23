@@ -58,6 +58,12 @@ class InterruptionManager:
         self._last_sent_sequence_id: Optional[int] = None  # dedup guard for on_agent_speech_started
         self.longest_agent_monologue_ms: float = 0.0
 
+        # Real-time perceived latency (user-stopped → first-agent-audio), per turn.
+        # _adjusted_user_stop_ts holds wall-clock seconds with vendor endpointing backed out,
+        # consumed by the next on_agent_speech_started so it cannot straddle turns.
+        self._adjusted_user_stop_ts: Optional[float] = None
+        self.realtime_perceived_latencies: List[Dict] = []
+
         logger.info(
             f"InterruptionManager initialized: "
             f"words_for_interruption={number_of_words_for_interruption}, "
@@ -152,11 +158,16 @@ class InterruptionManager:
             self.time_since_first_interim_result = time.time() * 1000
             logger.info(f"First interim at {self.time_since_first_interim_result}")
 
-    def on_user_speech_ended(self, update_utterance_time: bool = True) -> None:
+    def on_user_speech_ended(self, update_utterance_time: bool = True, stop_offset_ms: int = 0) -> None:
         """Called when user stops speaking (speech_final / UtteranceEnd).
 
         update_utterance_time=False keeps the grace period anchored to the last
         real turn (use for false interruptions or late UtteranceEnd events).
+
+        stop_offset_ms is the vendor-reported silence window (e.g. Deepgram's
+        endpointing or utterance_end_ms) that elapsed between the user's actual
+        end-of-speech and this callback firing. Subtracted to recover wall-clock
+        time of true end-of-speech for realtime_perceived_latencies.
         """
         self.callee_speaking = False
         self.let_remaining_audio_pass_through = True
@@ -165,6 +176,7 @@ class InterruptionManager:
         now_s = time.time()
         if update_utterance_time:
             self.utterance_end_time = now_s * 1000
+            self._adjusted_user_stop_ts = now_s - (stop_offset_ms / 1000.0)
 
         if self.callee_speaking_start_time > 0:
             self._total_user_speaking_ms += (now_s - self.callee_speaking_start_time) * 1000
@@ -231,7 +243,23 @@ class InterruptionManager:
         if sequence_id == self._last_sent_sequence_id:
             return
         self._last_sent_sequence_id = sequence_id
-        self._agent_speaking_start_time = time.time()
+        now_s = time.time()
+        self._agent_speaking_start_time = now_s
+
+        if self._adjusted_user_stop_ts is not None:
+            latency_ms = (now_s - self._adjusted_user_stop_ts) * 1000
+            # Sanity bound: drop obvious garbage (negative or multi-call-level delays)
+            if 0 < latency_ms < 30_000:
+                self.realtime_perceived_latencies.append(
+                    {
+                        "sequence_id": sequence_id,
+                        "user_end_s": self._adjusted_user_stop_ts,
+                        "agent_start_s": now_s,
+                        "latency_ms": round(latency_ms, 2),
+                    }
+                )
+            self._adjusted_user_stop_ts = None  # consume — prevents cross-turn pairing
+
         logger.info(f"Agent speech started (sequence_id={sequence_id})")
 
     def on_agent_speech_ended(self) -> None:
