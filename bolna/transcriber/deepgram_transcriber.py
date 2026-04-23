@@ -95,7 +95,7 @@ class DeepgramTranscriber(BaseTranscriber):
         self.turn_counter = 0
         # Timeout tracking for stuck utterances
         self.last_interim_time = None
-        self.interim_timeout = kwargs.get("interim_timeout", 5.0)  # Default 5 seconds
+        self.interim_timeout = kwargs.get("interim_timeout", 1.2)
         self.utterance_timeout_task = None
         self.connection_error = None
 
