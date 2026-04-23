@@ -173,6 +173,16 @@ class ResponseItemType(str, Enum):
         return [e.value for e in cls]
 
 
+class IntegrationProvider(str, Enum):
+    """Enum for post-call integration providers."""
+
+    SLACK = "slack"
+
+    @classmethod
+    def all_values(cls):
+        return [p.value for p in cls]
+
+
 class HangupReason(str, Enum):
     """Enum for hangup_detail values — why the call ended."""
 
