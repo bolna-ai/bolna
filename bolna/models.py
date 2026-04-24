@@ -1,6 +1,6 @@
 import json
 from typing import Any, Literal, Optional, List, Union, Dict, Callable
-from pydantic import BaseModel, Field, field_validator, ValidationError, Json, model_validator
+from pydantic import BaseModel, Field, field_validator, ValidationError, Json, model_validator, ConfigDict
 from pydantic_core import PydanticCustomError
 from .providers import *
 from .enums import (
@@ -379,12 +379,57 @@ class GraphAgentConfig(Llm):
         return self
 
 
+class KnowledgeBaseSource(BaseModel):
+    vector_id: Optional[str] = None
+    rag_id: Optional[str] = None
+    source: Optional[str] = None
+    name: Optional[str] = None
+
+    # Keep this permissive so unexpected source metadata is preserved.
+    model_config = ConfigDict(extra="allow")
+
+
+def normalize_knowledge_base_sources(rag_config: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Lightweight normalization for used_sources when present, without enforcing a global schema."""
+    if not isinstance(rag_config, dict):
+        return rag_config
+
+    used_sources = rag_config.get("used_sources")
+    if not isinstance(used_sources, list):
+        return rag_config
+
+    normalized_rag_config = dict(rag_config)
+    normalized_sources = []
+
+    for source in used_sources:
+        if not isinstance(source, dict):
+            normalized_sources.append(source)
+            continue
+
+        try:
+            normalized_source = KnowledgeBaseSource(**source).model_dump()
+        except ValidationError:
+            normalized_source = dict(source)
+
+        if normalized_source.get("name") is None:
+            # Default name to source for backward compatibility and usability.
+            normalized_source["name"] = normalized_source.get("source")
+        normalized_sources.append(normalized_source)
+
+    normalized_rag_config["used_sources"] = normalized_sources
+    return normalized_rag_config
+
+
 class KnowledgeAgentConfig(Llm):
     agent_information: Optional[str] = "Knowledge-based AI assistant"
     prompt: Optional[str] = None
     rag_config: Optional[Dict] = None
     llm_provider: Optional[str] = "openai"
     context_data: Optional[dict] = None
+
+    @field_validator("rag_config", mode="before")
+    def validate_rag_config(cls, value):
+        return normalize_knowledge_base_sources(value)
 
 
 class AgentRouteConfig(BaseModel):
