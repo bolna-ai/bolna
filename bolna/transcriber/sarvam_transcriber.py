@@ -18,6 +18,7 @@ from scipy.signal import resample_poly
 from typing import Optional
 
 from .base_transcriber import BaseTranscriber
+from bolna.helpers.aiohttp_session import get_shared_aiohttp_session
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.utils import create_ws_data_packet
 
@@ -96,8 +97,6 @@ class SarvamTranscriber(BaseTranscriber):
 
         self._configure_audio_params()
         self.session: Optional[aiohttp.ClientSession] = None
-        if not self.stream:
-            self.session = aiohttp.ClientSession()
 
     def _configure_audio_params(self):
         if self.telephony_provider == "plivo":
@@ -145,8 +144,7 @@ class SarvamTranscriber(BaseTranscriber):
         self.ws_url = f"{ws_url}?{query_string}"
 
     async def _get_http_transcription(self, audio_data):
-        if self.session is None or self.session.closed:
-            self.session = aiohttp.ClientSession()
+        self.session = await get_shared_aiohttp_session()
 
         wav_data = self._convert_audio_to_wav(audio_data)
         if wav_data is None:
@@ -494,13 +492,7 @@ class SarvamTranscriber(BaseTranscriber):
         """Clean up all resources including HTTP session and websocket."""
         logger.info("Cleaning up Sarvam transcriber resources")
 
-        # Close HTTP session (for non-streaming mode)
-        if hasattr(self, "session") and self.session and not self.session.closed:
-            try:
-                await self.session.close()
-                logger.info("Sarvam HTTP session closed")
-            except Exception as e:
-                logger.error(f"Error closing Sarvam HTTP session: {e}")
+        # HTTP session is shared via aiohttp_session pool, do not close here.
 
         # Cancel tasks properly
         for task_name, task in [
@@ -601,8 +593,6 @@ class SarvamTranscriber(BaseTranscriber):
                 self.sender_task.cancel()
             if self.heartbeat_task:
                 self.heartbeat_task.cancel()
-            if self.session and not self.session.closed:
-                await self.session.close()
             if self.websocket_connection:
                 try:
                     await self.websocket_connection.close()

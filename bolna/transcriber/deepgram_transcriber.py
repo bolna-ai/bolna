@@ -11,6 +11,7 @@ from websockets.asyncio.client import ClientConnection
 from websockets.exceptions import ConnectionClosedError, InvalidHandshake, ConnectionClosed
 
 from .base_transcriber import BaseTranscriber
+from bolna.helpers.aiohttp_session import get_shared_aiohttp_session
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.utils import create_ws_data_packet, timestamp_ms
 from bolna.enums import TelephonyProvider
@@ -66,7 +67,7 @@ class DeepgramTranscriber(BaseTranscriber):
                 self.api_url += "&filler_words=true"
             if self.run_id:
                 self.api_url += f"&tag={quote(self.run_id)}&extra={quote(f'run_id:{self.run_id}')}"
-            self.session = aiohttp.ClientSession()
+            self.session = None
             if self.keywords is not None:
                 keyword_list = [quote(kw.strip()) for kw in self.keywords.split(",") if kw.strip()]
                 if keyword_list:
@@ -314,13 +315,7 @@ class DeepgramTranscriber(BaseTranscriber):
         """Clean up all resources including HTTP session and websocket."""
         logger.info("Cleaning up Deepgram transcriber resources")
 
-        # Close HTTP session (for non-streaming mode)
-        if hasattr(self, "session") and self.session and not self.session.closed:
-            try:
-                await self.session.close()
-                logger.info("Deepgram HTTP session closed")
-            except Exception as e:
-                logger.error(f"Error closing Deepgram HTTP session: {e}")
+        # HTTP session is shared via aiohttp_session pool, do not close here.
 
         # Cancel tasks properly
         for task_name, task in [
@@ -354,8 +349,7 @@ class DeepgramTranscriber(BaseTranscriber):
         self.current_turn_interim_details = []
 
     async def _get_http_transcription(self, audio_data):
-        if self.session is None or self.session.closed:
-            self.session = aiohttp.ClientSession()
+        self.session = await get_shared_aiohttp_session()
 
         headers = {
             "Authorization": "Token {}".format(self.api_key),
@@ -364,12 +358,11 @@ class DeepgramTranscriber(BaseTranscriber):
 
         self.current_request_id = self.generate_request_id()
         self.meta_info["request_id"] = self.current_request_id
-        async with self.session as session:
-            async with session.post(self.api_url, data=audio_data, headers=headers) as response:
-                response_data = await response.json()
-                transcript = response_data["results"]["channels"][0]["alternatives"][0]["transcript"]
-                self.meta_info["transcriber_duration"] = response_data["metadata"]["duration"]
-                return create_ws_data_packet(transcript, self.meta_info)
+        async with self.session.post(self.api_url, data=audio_data, headers=headers) as response:
+            response_data = await response.json()
+            transcript = response_data["results"]["channels"][0]["alternatives"][0]["transcript"]
+            self.meta_info["transcriber_duration"] = response_data["metadata"]["duration"]
+            return create_ws_data_packet(transcript, self.meta_info)
 
     async def _check_and_process_end_of_stream(self, ws_data_packet, ws):
         if "eos" in ws_data_packet["meta_info"] and ws_data_packet["meta_info"]["eos"] is True:

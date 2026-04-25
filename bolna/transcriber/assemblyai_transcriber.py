@@ -12,6 +12,7 @@ from websockets.asyncio.client import ClientConnection
 from websockets.exceptions import ConnectionClosedError, InvalidHandshake
 
 from .base_transcriber import BaseTranscriber
+from bolna.helpers.aiohttp_session import get_shared_aiohttp_session
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.utils import create_ws_data_packet, timestamp_ms
 
@@ -57,7 +58,7 @@ class AssemblyAITranscriber(BaseTranscriber):
         if not self.stream:
             # For non-streaming HTTP API
             self.api_url = f"https://api.assemblyai.com/v2/transcript"
-            self.session = aiohttp.ClientSession()
+            self.session = None
 
         self.audio_submitted = False
         self.audio_submission_time = None
@@ -154,13 +155,7 @@ class AssemblyAITranscriber(BaseTranscriber):
         """Clean up all resources including HTTP session and websocket."""
         logger.info("Cleaning up AssemblyAI transcriber resources")
 
-        # Close HTTP session (for non-streaming mode)
-        if hasattr(self, "session") and self.session and not self.session.closed:
-            try:
-                await self.session.close()
-                logger.info("AssemblyAI HTTP session closed")
-            except Exception as e:
-                logger.error(f"Error closing AssemblyAI HTTP session: {e}")
+        # HTTP session is shared via aiohttp_session pool, do not close here.
 
         # Cancel tasks properly
         for task_name, task in [
@@ -190,8 +185,7 @@ class AssemblyAITranscriber(BaseTranscriber):
 
     async def _get_http_transcription(self, audio_data):
         """Handle non-streaming HTTP transcription"""
-        if self.session is None or self.session.closed:
-            self.session = aiohttp.ClientSession()
+        self.session = await get_shared_aiohttp_session()
 
         headers = {
             "Authorization": self.api_key,

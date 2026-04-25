@@ -11,5 +11,5 @@ async def get_shared_aiohttp_session() -> aiohttp.ClientSession:
         async with _lock:
             if _session is None or _session.closed:
                 connector = aiohttp.TCPConnector(limit=200, limit_per_host=100, keepalive_timeout=30)
-                _session = aiohttp.ClientSession(connector=connector)
+                _session = aiohttp.ClientSession(connector=connector, cookie_jar=aiohttp.DummyCookieJar())
     return _session
