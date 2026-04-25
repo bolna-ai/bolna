@@ -12,6 +12,7 @@ import os
 import traceback
 from collections import deque
 
+from bolna.helpers.ssl_context import get_ssl_context
 from .base_synthesizer import BaseSynthesizer
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.utils import create_ws_data_packet
@@ -333,7 +334,7 @@ class PixaSynthesizer(BaseSynthesizer):
                 headers["Authorization"] = f"Bearer {self.api_key}"
 
             websocket = await asyncio.wait_for(
-                websockets.connect(self.ws_url, additional_headers=headers), timeout=10.0
+                websockets.connect(self.ws_url, additional_headers=headers, ssl=get_ssl_context()), timeout=10.0
             )
 
             # Send initial configuration

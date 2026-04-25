@@ -12,6 +12,7 @@ from dotenv import load_dotenv
 
 from .stream_synthesizer import StreamSynthesizer
 from bolna.helpers.logger_config import configure_logger
+from bolna.helpers.ssl_context import get_ssl_context
 from bolna.helpers.utils import convert_audio_to_wav, create_ws_data_packet
 from bolna.memory.cache.inmemory_scalar_cache import InmemoryScalarCache
 
@@ -202,7 +203,7 @@ class DeepgramSynthesizer(StreamSynthesizer):
         try:
             start_time = time.perf_counter()
             websocket = await asyncio.wait_for(
-                websockets.connect(self.ws_url, additional_headers={"Authorization": f"Token {self.api_key}"}),
+                websockets.connect(self.ws_url, additional_headers={"Authorization": f"Token {self.api_key}"}, ssl=get_ssl_context()),
                 timeout=10.0,
             )
             if not self.connection_time:

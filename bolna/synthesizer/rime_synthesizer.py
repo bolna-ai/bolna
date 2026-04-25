@@ -11,6 +11,7 @@ from dotenv import load_dotenv
 
 from .stream_synthesizer import StreamSynthesizer
 from bolna.helpers.logger_config import configure_logger
+from bolna.helpers.ssl_context import get_ssl_context
 from bolna.helpers.utils import convert_audio_to_wav
 from bolna.memory.cache.inmemory_scalar_cache import InmemoryScalarCache
 
@@ -198,6 +199,7 @@ class RimeSynthesizer(StreamSynthesizer):
                 websockets.connect(
                     self.ws_url,
                     additional_headers={"Authorization": f"Bearer {self.api_key}"},
+                    ssl=get_ssl_context(),
                 ),
                 timeout=10.0,
             )

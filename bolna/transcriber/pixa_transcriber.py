@@ -10,6 +10,7 @@ from websockets.exceptions import ConnectionClosedError, InvalidHandshake, Conne
 
 from .base_transcriber import BaseTranscriber
 from bolna.helpers.logger_config import configure_logger
+from bolna.helpers.ssl_context import get_ssl_context
 from bolna.helpers.utils import create_ws_data_packet, timestamp_ms
 
 load_dotenv()
@@ -148,7 +149,7 @@ class PixaTranscriber(BaseTranscriber):
         while attempt < retries:
             try:
                 ws = await asyncio.wait_for(
-                    websockets.connect(ws_url, additional_headers=additional_headers),
+                    websockets.connect(ws_url, additional_headers=additional_headers, ssl=get_ssl_context()),
                     timeout=timeout,
                 )
                 self.websocket_connection = ws
