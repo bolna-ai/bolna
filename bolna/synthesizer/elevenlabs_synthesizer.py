@@ -10,6 +10,7 @@ import aiohttp
 import websockets
 
 from .stream_synthesizer import StreamSynthesizer
+from bolna.helpers.aiohttp_session import get_shared_aiohttp_session
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.utils import convert_audio_to_wav, create_ws_data_packet, resample
 from bolna.memory.cache.inmemory_scalar_cache import InmemoryScalarCache
@@ -311,10 +312,10 @@ class ElevenlabsSynthesizer(StreamSynthesizer):
         headers = {"xi-api-key": self.api_key}
         fmt = format or self._get_output_format()
         url = f"{self.api_url}{fmt}"
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, headers=headers, json=payload) as response:
-                if response.status == 200:
-                    return await response.read()
-                else:
-                    logger.error(f"Error: {response.status} - {await response.text()}")
-                    return None
+        session = await get_shared_aiohttp_session()
+        async with session.post(url, headers=headers, json=payload) as response:
+            if response.status == 200:
+                return await response.read()
+            else:
+                logger.error(f"Error: {response.status} - {await response.text()}")
+                return None

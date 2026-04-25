@@ -12,6 +12,7 @@ import os
 import traceback
 from collections import deque
 
+from bolna.helpers.aiohttp_session import get_shared_aiohttp_session
 from .base_synthesizer import BaseSynthesizer
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.utils import create_ws_data_packet
@@ -234,24 +235,24 @@ class PixaSynthesizer(BaseSynthesizer):
                 "repetition_penalty": self.repetition_penalty,
             }
 
-            async with aiohttp.ClientSession() as session:
-                async with session.post(url, headers=headers, json=payload) as response:
-                    if response.status != 200:
-                        error_text = await response.text()
-                        logger.error(f"Pixa HTTP API error: {response.status} - {error_text}")
-                        return None
+            session = await get_shared_aiohttp_session()
+            async with session.post(url, headers=headers, json=payload) as response:
+                if response.status != 200:
+                    error_text = await response.text()
+                    logger.error(f"Pixa HTTP API error: {response.status} - {error_text}")
+                    return None
 
-                    # Response is WAV audio (PCM16 at 32kHz)
-                    wav_audio = await response.read()
+                # Response is WAV audio (PCM16 at 32kHz)
+                wav_audio = await response.read()
 
-                    # Skip WAV header (44 bytes) to get raw PCM
-                    pcm_audio = wav_audio[44:] if len(wav_audio) > 44 else wav_audio
+                # Skip WAV header (44 bytes) to get raw PCM
+                pcm_audio = wav_audio[44:] if len(wav_audio) > 44 else wav_audio
 
-                    # Resample from 32kHz to 8kHz
-                    resampled, _ = audioop.ratecv(
-                        pcm_audio, 2, 1, self.native_sampling_rate, self.target_sampling_rate, None
-                    )
-                    return resampled
+                # Resample from 32kHz to 8kHz
+                resampled, _ = audioop.ratecv(
+                    pcm_audio, 2, 1, self.native_sampling_rate, self.target_sampling_rate, None
+                )
+                return resampled
 
         except Exception as e:
             logger.error(f"Error in synthesize: {e}")

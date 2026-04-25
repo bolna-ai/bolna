@@ -28,6 +28,7 @@ from bolna.constants import (
     END_CALL_FUNCTION_PREFIX,
     END_CALL_TOOL_DEFINITION,
 )
+from bolna.helpers.aiohttp_session import get_shared_aiohttp_session
 from bolna.helpers.function_calling_helpers import trigger_api, computed_api_response, prepare_api_request
 from bolna.helpers.conversation_history import ConversationHistory
 from .base_manager import BaseManager
@@ -2077,52 +2078,52 @@ class TaskManager(BaseManager):
                 await self.tools["output"].handle(eos_packet)
                 return
 
-            async with aiohttp.ClientSession() as session:
-                logger.info(f"Sending the payload to stop the conversation {payload} url {url}")
-                while self.tools["input"].is_audio_being_played_to_user():
-                    await asyncio.sleep(1)
-                function_call_log = self._start_api_call_detail(
-                    called_fun=called_fun,
-                    url=url,
-                    method="POST",
-                    param=param,
-                    headers={"Content-Type": "application/json"},
-                    meta_info=meta_info,
-                    runtime_args={
-                        **self._extract_api_call_runtime_args(resp),
-                        "tool_call_id": resp.get("tool_call_id", ""),
-                    },
-                    request_body=payload,
-                    api_params=payload,
-                )
+            session = await get_shared_aiohttp_session()
+            logger.info(f"Sending the payload to stop the conversation {payload} url {url}")
+            while self.tools["input"].is_audio_being_played_to_user():
+                await asyncio.sleep(1)
+            function_call_log = self._start_api_call_detail(
+                called_fun=called_fun,
+                url=url,
+                method="POST",
+                param=param,
+                headers={"Content-Type": "application/json"},
+                meta_info=meta_info,
+                runtime_args={
+                    **self._extract_api_call_runtime_args(resp),
+                    "tool_call_id": resp.get("tool_call_id", ""),
+                },
+                request_body=payload,
+                api_params=payload,
+            )
+            convert_to_request_log(
+                str(payload),
+                meta_info,
+                None,
+                LogComponent.FUNCTION_CALL,
+                direction=LogDirection.REQUEST,
+                is_cached=False,
+                run_id=self.run_id,
+            )
+            async with session.post(url, json=payload) as response:
+                response_text = await response.text()
+                logger.info(f"Response from the server after call transfer: {response_text}")
                 convert_to_request_log(
-                    str(payload),
+                    str(response_text),
                     meta_info,
                     None,
                     LogComponent.FUNCTION_CALL,
-                    direction=LogDirection.REQUEST,
+                    direction=LogDirection.RESPONSE,
                     is_cached=False,
                     run_id=self.run_id,
                 )
-                async with session.post(url, json=payload) as response:
-                    response_text = await response.text()
-                    logger.info(f"Response from the server after call transfer: {response_text}")
-                    convert_to_request_log(
-                        str(response_text),
-                        meta_info,
-                        None,
-                        LogComponent.FUNCTION_CALL,
-                        direction=LogDirection.RESPONSE,
-                        is_cached=False,
-                        run_id=self.run_id,
-                    )
-                    self._finalize_api_call_detail(
-                        function_call_log,
-                        response=response_text,
-                        status_code=response.status,
-                        content_type=response.headers.get("Content-Type"),
-                    )
-                    return
+                self._finalize_api_call_detail(
+                    function_call_log,
+                    response=response_text,
+                    status_code=response.status,
+                    content_type=response.headers.get("Content-Type"),
+                )
+                return
 
         if called_fun == "switch_language":
             language_label = resp.get("language", "")

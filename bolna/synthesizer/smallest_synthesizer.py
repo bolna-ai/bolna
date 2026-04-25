@@ -8,6 +8,7 @@ import aiohttp
 import websockets
 
 from .stream_synthesizer import StreamSynthesizer
+from bolna.helpers.aiohttp_session import get_shared_aiohttp_session
 from bolna.helpers.logger_config import configure_logger
 
 logger = configure_logger(__name__)
@@ -165,13 +166,13 @@ class SmallestSynthesizer(StreamSynthesizer):
             "add_wav_header": False,
         }
         headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
-        async with aiohttp.ClientSession() as session:
-            async with session.post(self.api_url, headers=headers, json=payload) as response:
-                if response.status == 200:
-                    return await response.read()
-                else:
-                    logger.error(f"Error: {response.status} - {await response.text()}")
-                    return None
+        session = await get_shared_aiohttp_session()
+        async with session.post(self.api_url, headers=headers, json=payload) as response:
+            if response.status == 200:
+                return await response.read()
+            else:
+                logger.error(f"Error: {response.status} - {await response.text()}")
+                return None
 
     async def synthesize(self, text):
         return await self._generate_http(text)

@@ -11,6 +11,7 @@ import websockets
 from dotenv import load_dotenv
 
 from .stream_synthesizer import StreamSynthesizer
+from bolna.helpers.aiohttp_session import get_shared_aiohttp_session
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.utils import convert_audio_to_wav, create_ws_data_packet
 from bolna.memory.cache.inmemory_scalar_cache import InmemoryScalarCache
@@ -265,13 +266,13 @@ class DeepgramSynthesizer(StreamSynthesizer):
             url += f"&tag={self.run_id}"
         logger.info(f"Sending deepgram request {url}")
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(url, headers=headers, json={"text": text}) as response:
-                    if response.status == 200:
-                        return await response.read()
-                    else:
-                        logger.info(f"Deepgram request status {response.status}")
-                        return b"\x00"
+            session = await get_shared_aiohttp_session()
+            async with session.post(url, headers=headers, json={"text": text}) as response:
+                if response.status == 200:
+                    return await response.read()
+                else:
+                    logger.info(f"Deepgram request status {response.status}")
+                    return b"\x00"
         except Exception as e:
             logger.error(f"Deepgram HTTP error: {e}")
 

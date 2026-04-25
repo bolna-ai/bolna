@@ -13,6 +13,7 @@ from websockets.exceptions import ConnectionClosedError, InvalidHandshake, Conne
 from dotenv import load_dotenv
 
 from .base_transcriber import BaseTranscriber
+from bolna.helpers.aiohttp_session import get_shared_aiohttp_session
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.utils import create_ws_data_packet, timestamp_ms
 
@@ -220,24 +221,24 @@ class GladiaTranscriber(BaseTranscriber):
             f"keywords={bool(self.keywords)}"
         )
 
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                self.session_url, headers=headers, json=payload, timeout=aiohttp.ClientTimeout(total=10)
-            ) as response:
-                if response.status not in (200, 201):
-                    error_text = await response.text()
-                    logger.error(f"Failed to create Gladia session: {response.status} - {error_text}")
-                    raise ConnectionError(f"Failed to create Gladia session: {response.status} - {error_text}")
+        session = await get_shared_aiohttp_session()
+        async with session.post(
+            self.session_url, headers=headers, json=payload, timeout=aiohttp.ClientTimeout(total=10)
+        ) as response:
+            if response.status not in (200, 201):
+                error_text = await response.text()
+                logger.error(f"Failed to create Gladia session: {response.status} - {error_text}")
+                raise ConnectionError(f"Failed to create Gladia session: {response.status} - {error_text}")
 
-                data = await response.json()
-                session_id = data.get("id")
-                ws_url = data.get("url")
+            data = await response.json()
+            session_id = data.get("id")
+            ws_url = data.get("url")
 
-                if not ws_url:
-                    raise ConnectionError("Gladia session response missing WebSocket URL")
+            if not ws_url:
+                raise ConnectionError("Gladia session response missing WebSocket URL")
 
-                logger.info(f"Created Gladia session: {session_id}")
-                return session_id, ws_url
+            logger.info(f"Created Gladia session: {session_id}")
+            return session_id, ws_url
 
     async def gladia_connect(self, retries: int = 3, timeout: float = 10.0) -> ClientConnection:
         """

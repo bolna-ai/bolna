@@ -10,6 +10,7 @@ import websockets
 from dotenv import load_dotenv
 
 from .stream_synthesizer import StreamSynthesizer
+from bolna.helpers.aiohttp_session import get_shared_aiohttp_session
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.utils import convert_audio_to_wav
 from bolna.memory.cache.inmemory_scalar_cache import InmemoryScalarCache
@@ -233,12 +234,12 @@ class RimeSynthesizer(StreamSynthesizer):
             "max_tokens": 5000,
         }
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(self.api_url, headers=headers, json=payload) as response:
-                    if response.status == 200:
-                        return await response.read()
-                    else:
-                        return b"\x00"
+            session = await get_shared_aiohttp_session()
+            async with session.post(self.api_url, headers=headers, json=payload) as response:
+                if response.status == 200:
+                    return await response.read()
+                else:
+                    return b"\x00"
         except Exception as e:
             logger.error(f"Rime HTTP error: {e}")
 

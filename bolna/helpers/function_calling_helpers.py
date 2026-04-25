@@ -2,6 +2,7 @@ import asyncio
 import json
 
 import aiohttp
+from bolna.helpers.aiohttp_session import get_shared_aiohttp_session
 from bolna.helpers.logger_config import configure_logger
 from bolna.enums import LogComponent, LogDirection
 from bolna.helpers.utils import convert_to_request_log, format_error_message
@@ -126,29 +127,30 @@ async def trigger_api(
             is_cached=False,
             run_id=run_id,
         )
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
-            if method.lower() == "get":
-                logger.info(f"Sending request {request_body}, {url}, {headers}")
-                async with session.get(url, params=api_params, headers=headers) as response:
+        session = await get_shared_aiohttp_session()
+        timeout = aiohttp.ClientTimeout(total=10)
+        if method.lower() == "get":
+            logger.info(f"Sending request {request_body}, {url}, {headers}")
+            async with session.get(url, params=api_params, headers=headers, timeout=timeout) as response:
+                response_text = await response.text()
+        elif method.lower() == "post":
+            logger.info(f"Sending request {api_params}, {url}, {headers}")
+            if content_type == "json":
+                async with session.post(url, json=api_params, headers=headers, timeout=timeout) as response:
                     response_text = await response.text()
-            elif method.lower() == "post":
-                logger.info(f"Sending request {api_params}, {url}, {headers}")
-                if content_type == "json":
-                    async with session.post(url, json=api_params, headers=headers) as response:
-                        response_text = await response.text()
-                elif content_type == "form":
-                    normalized_api_params = normalize_for_form(api_params)
-                    async with session.post(url, data=normalized_api_params, headers=headers) as response:
-                        response_text = await response.text()
+            elif content_type == "form":
+                normalized_api_params = normalize_for_form(api_params)
+                async with session.post(url, data=normalized_api_params, headers=headers, timeout=timeout) as response:
+                    response_text = await response.text()
 
-            if return_response_metadata:
-                return {
-                    "status_code": response.status if response is not None else None,
-                    "body": response_text,
-                    "content_type": response.headers.get("Content-Type") if response is not None else None,
-                }
+        if return_response_metadata:
+            return {
+                "status_code": response.status if response is not None else None,
+                "body": response_text,
+                "content_type": response.headers.get("Content-Type") if response is not None else None,
+            }
 
-            return response_text
+        return response_text
     except asyncio.TimeoutError:
         message = f"ERROR CALLING API: Request to {url} timed out after 5 seconds"
         logger.debug(message)
