@@ -539,7 +539,7 @@ class ElevenLabsTranscriber(BaseTranscriber):
             logger.info(f"Attempting to connect to ElevenLabs websocket: {websocket_url}")
 
             elevenlabs_ws = await asyncio.wait_for(
-                websockets.connect(websocket_url, additional_headers=additional_headers, ssl=get_ssl_context()), timeout=10.0
+                websockets.connect(websocket_url, additional_headers=additional_headers, ssl=get_ssl_context(websocket_url)), timeout=10.0
             )
 
             self.websocket_connection = elevenlabs_ws

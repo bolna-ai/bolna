@@ -182,7 +182,7 @@ class SarvamSynthesizer(StreamSynthesizer):
         try:
             start_time = time.perf_counter()
             websocket = await asyncio.wait_for(
-                websockets.connect(self.ws_url, additional_headers={"api-subscription-key": self.api_key}, ssl=get_ssl_context()),
+                websockets.connect(self.ws_url, additional_headers={"api-subscription-key": self.api_key}, ssl=get_ssl_context(self.ws_url)),
                 timeout=10.0,
             )
             bos_message = {
