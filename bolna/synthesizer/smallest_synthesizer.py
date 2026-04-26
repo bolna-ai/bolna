@@ -9,6 +9,7 @@ import websockets
 
 from .stream_synthesizer import StreamSynthesizer
 from bolna.helpers.logger_config import configure_logger
+from bolna.helpers.ssl_context import get_ssl_context
 
 logger = configure_logger(__name__)
 
@@ -134,6 +135,7 @@ class SmallestSynthesizer(StreamSynthesizer):
                 websockets.connect(
                     self.ws_url,
                     additional_headers={"Authorization": f"Token {self.api_key}"},
+                    ssl=get_ssl_context(),
                 ),
                 timeout=10.0,
             )

@@ -11,6 +11,7 @@ import websockets
 
 from .stream_synthesizer import StreamSynthesizer
 from bolna.helpers.logger_config import configure_logger
+from bolna.helpers.ssl_context import get_ssl_context
 from bolna.helpers.utils import convert_audio_to_wav, create_ws_data_packet, resample
 from bolna.memory.cache.inmemory_scalar_cache import InmemoryScalarCache
 
@@ -252,7 +253,7 @@ class ElevenlabsSynthesizer(StreamSynthesizer):
     async def establish_connection(self):
         try:
             start_time = time.perf_counter()
-            websocket = await asyncio.wait_for(websockets.connect(self.ws_url), timeout=10.0)
+            websocket = await asyncio.wait_for(websockets.connect(self.ws_url, ssl=get_ssl_context()), timeout=10.0)
             if hasattr(websocket, "response") and hasattr(websocket.response, "headers"):
                 self.ws_trace_id = websocket.response.headers.get("x-trace-id")
                 logger.info(f"Elevenlabs WebSocket connected trace_id={self.ws_trace_id}")

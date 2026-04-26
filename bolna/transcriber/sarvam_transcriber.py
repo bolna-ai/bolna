@@ -19,6 +19,7 @@ from typing import Optional
 
 from .base_transcriber import BaseTranscriber
 from bolna.helpers.logger_config import configure_logger
+from bolna.helpers.ssl_context import get_ssl_context
 from bolna.helpers.utils import create_ws_data_packet
 
 load_dotenv()
@@ -439,7 +440,7 @@ class SarvamTranscriber(BaseTranscriber):
             try:
                 logger.info(f"Attempting to connect to Sarvam websocket: {self.ws_url}")
                 ws = await asyncio.wait_for(
-                    websockets.connect(self.ws_url, additional_headers=additional_headers),
+                    websockets.connect(self.ws_url, additional_headers=additional_headers, ssl=get_ssl_context()),
                     timeout=timeout,
                 )
                 self.websocket_connection = ws

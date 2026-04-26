@@ -11,6 +11,7 @@ from websockets.exceptions import InvalidHandshake
 
 from .stream_synthesizer import StreamSynthesizer
 from bolna.helpers.logger_config import configure_logger
+from bolna.helpers.ssl_context import get_ssl_context
 
 
 logger = configure_logger(__name__)
@@ -217,7 +218,7 @@ class CartesiaSynthesizer(StreamSynthesizer):
     async def establish_connection(self):
         try:
             start_time = time.perf_counter()
-            websocket = await asyncio.wait_for(websockets.connect(self.ws_url), timeout=10.0)
+            websocket = await asyncio.wait_for(websockets.connect(self.ws_url, ssl=get_ssl_context()), timeout=10.0)
             if not self.connection_time:
                 self.connection_time = round((time.perf_counter() - start_time) * 1000)
             if hasattr(websocket, "response") and hasattr(websocket.response, "headers"):

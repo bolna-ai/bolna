@@ -13,6 +13,7 @@ from websockets.exceptions import ConnectionClosedError, InvalidHandshake
 
 from .base_transcriber import BaseTranscriber
 from bolna.helpers.logger_config import configure_logger
+from bolna.helpers.ssl_context import get_ssl_context
 from bolna.helpers.utils import create_ws_data_packet, timestamp_ms
 
 logger = configure_logger(__name__)
@@ -505,7 +506,7 @@ class AssemblyAITranscriber(BaseTranscriber):
             headers = {"Authorization": self.api_key}
 
             assemblyai_ws = await asyncio.wait_for(
-                websockets.connect(websocket_url, additional_headers=headers), timeout=10.0
+                websockets.connect(websocket_url, additional_headers=headers, ssl=get_ssl_context()), timeout=10.0
             )
 
             self.websocket_connection = assemblyai_ws

@@ -22,6 +22,7 @@ from websockets.protocol import State as WSState
 
 from bolna.constants import DEFAULT_LANGUAGE_CODE, GPT5_MODEL_PREFIX
 from bolna.enums import ReasoningEffort, ResponseStreamEvent, ResponseItemType, Verbosity
+from bolna.helpers.ssl_context import get_ssl_context
 from bolna.helpers.utils import compute_function_pre_call_message, now_ms
 from .openai_base import OpenAICompatibleLLM
 from .tool_call_accumulator import ToolCallAccumulator
@@ -85,6 +86,7 @@ class OpenAIWSConnection:
             additional_headers={"Authorization": f"Bearer {self._api_key}"},
             max_size=None,
             close_timeout=5,
+            ssl=get_ssl_context(),
         )
         self._connected_at = time.monotonic()
         logger.info("WebSocket connected to OpenAI Responses API")
