@@ -199,7 +199,7 @@ class RimeSynthesizer(StreamSynthesizer):
                 websockets.connect(
                     self.ws_url,
                     additional_headers={"Authorization": f"Bearer {self.api_key}"},
-                    ssl=get_ssl_context(),
+                    ssl=get_ssl_context(self.ws_url),
                 ),
                 timeout=10.0,
             )

@@ -652,7 +652,7 @@ class DeepgramTranscriber(BaseTranscriber):
             logger.info(f"Attempting to connect to Deepgram websocket: {websocket_url}")
 
             deepgram_ws = await asyncio.wait_for(
-                websockets.connect(websocket_url, additional_headers=additional_headers, ssl=get_ssl_context()),
+                websockets.connect(websocket_url, additional_headers=additional_headers, ssl=get_ssl_context(websocket_url)),
                 timeout=10.0,  # 10 second timeout
             )
 

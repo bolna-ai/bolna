@@ -256,7 +256,7 @@ class GladiaTranscriber(BaseTranscriber):
                 # Step 2: Connect to WebSocket
                 logger.info(f"Connecting to Gladia WebSocket: {self.gladia_ws_url}")
 
-                ws = await asyncio.wait_for(websockets.connect(self.gladia_ws_url, ssl=get_ssl_context()), timeout=timeout)
+                ws = await asyncio.wait_for(websockets.connect(self.gladia_ws_url, ssl=get_ssl_context(self.gladia_ws_url)), timeout=timeout)
 
                 self.websocket_connection = ws
                 self.connection_authenticated = True

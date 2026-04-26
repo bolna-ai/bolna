@@ -86,7 +86,7 @@ class OpenAIWSConnection:
             additional_headers={"Authorization": f"Bearer {self._api_key}"},
             max_size=None,
             close_timeout=5,
-            ssl=get_ssl_context(),
+            ssl=get_ssl_context(self.WS_URL),
         )
         self._connected_at = time.monotonic()
         logger.info("WebSocket connected to OpenAI Responses API")

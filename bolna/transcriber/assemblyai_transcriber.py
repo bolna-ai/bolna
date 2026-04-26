@@ -506,7 +506,7 @@ class AssemblyAITranscriber(BaseTranscriber):
             headers = {"Authorization": self.api_key}
 
             assemblyai_ws = await asyncio.wait_for(
-                websockets.connect(websocket_url, additional_headers=headers, ssl=get_ssl_context()), timeout=10.0
+                websockets.connect(websocket_url, additional_headers=headers, ssl=get_ssl_context(websocket_url)), timeout=10.0
             )
 
             self.websocket_connection = assemblyai_ws

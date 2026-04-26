@@ -149,7 +149,7 @@ class PixaTranscriber(BaseTranscriber):
         while attempt < retries:
             try:
                 ws = await asyncio.wait_for(
-                    websockets.connect(ws_url, additional_headers=additional_headers, ssl=get_ssl_context()),
+                    websockets.connect(ws_url, additional_headers=additional_headers, ssl=get_ssl_context(ws_url)),
                     timeout=timeout,
                 )
                 self.websocket_connection = ws
