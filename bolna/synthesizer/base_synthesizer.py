@@ -1,13 +1,17 @@
 import io
+import wave
 import uuid
 import asyncio
 import re
 
 from pydub import AudioSegment
 from bolna.helpers.logger_config import configure_logger
+from bolna.helpers.ssml_config import PROVIDER_ALLOWED_TAGS
 from bolna.helpers.utils import create_ws_data_packet
 
 logger = configure_logger(__name__)
+
+_XML_TAG_RE = re.compile(r'<(/?)(\w[\w:-]*)([^>]*)/?>')
 
 
 class BaseSynthesizer:
@@ -161,13 +165,27 @@ class BaseSynthesizer:
     # ------------------------------------------------------------------
 
     def text_chunker(self, text):
-        """Split text into chunks, ensuring to not break sentences."""
+        """Split text into chunks, keeping XML/SSML tags as atomic standalone
+        chunks (required for ElevenLabs SSML parsing in streaming mode).
+        Paired tags like <say-as>content</say-as> are kept as single chunks."""
         splitters = (".", ",", "?", "!", ";", ":", "—", "-", "(", ")", "[", "]", "}", " ")
 
         buffer = ""
+        inside_tag = False
+        inside_element = False
         for char in text:
             buffer += char
-            if char in splitters:
+            if char == "<":
+                inside_tag = True
+            elif char == ">" and inside_tag:
+                inside_tag = False
+                tag_text = buffer[buffer.rfind("<"):]
+                if tag_text.startswith("</"):
+                    inside_element = False
+                elif not tag_text.rstrip().endswith("/>"):
+                    inside_element = True
+                continue
+            if not inside_tag and not inside_element and char in splitters:
                 if buffer != " ":
                     yield buffer.strip() + " "
                 buffer = ""
@@ -189,3 +207,24 @@ class BaseSynthesizer:
         buffer = io.BytesIO()
         audio.export(buffer, format="wav")
         return buffer.getvalue()
+
+    @staticmethod
+    def strip_unsupported_tags(text: str, provider: str) -> str:
+        """
+        Remove XML/SSML tags that the given provider does not support.
+        Tags listed in PROVIDER_ALLOWED_TAGS for the provider are kept;
+        everything else is stripped (tag removed, inner text preserved).
+        If the provider has no entry at all, all tags are removed.
+        """
+        allowed = PROVIDER_ALLOWED_TAGS.get(provider, set())
+        if not allowed:
+            return re.sub(r'<[^>]+>', '', text).strip()
+
+        def _replace(match):
+            tag_name = match.group(2)
+            if tag_name in allowed:
+                return match.group(0)
+            return ""
+
+        cleaned = _XML_TAG_RE.sub(_replace, text)
+        return re.sub(r'\s+', ' ', cleaned).strip()
