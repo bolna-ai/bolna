@@ -96,13 +96,27 @@ class KnowledgeBaseAgent(BaseAgent):
 
         collections = []
         used_sources = rag_config.get("used_sources", None)
+        normalized_used_sources = []
 
         if "vector_store" in rag_config:
             provider_config = rag_config["vector_store"].get("provider_config", {})
 
             if used_sources:
                 for source in used_sources:
-                    vector_id = source.get("vector_id")
+                    if not isinstance(source, dict):
+                        continue
+
+                    try:
+                        normalized_source = KnowledgeBaseSource(**source).model_dump()
+                    except ValidationError:
+                        normalized_source = dict(source)
+
+                    if normalized_source.get("name") is None:
+                        # Default name to source for backward compatibility and usability.
+                        normalized_source["name"] = normalized_source.get("source")
+
+                    normalized_used_sources.append(normalized_source)
+                    vector_id = normalized_source.get("vector_id")
                     if vector_id:
                         collections.append(vector_id)
 
@@ -121,7 +135,7 @@ class KnowledgeBaseAgent(BaseAgent):
         return {
             "collections": collections,
             "similarity_top_k": rag_config.get("similarity_top_k", 10),
-            "used_sources": used_sources,
+            "used_sources": normalized_used_sources or used_sources,
         }
 
     async def check_for_completion(self, messages, check_for_completion_prompt):
@@ -245,6 +259,7 @@ class KnowledgeBaseAgent(BaseAgent):
                 context_entry = {
                     "text": context.text,
                     "score": context.score,
+                    "name": source_info.get("name"),
                     "vector_id": source_info.get("vector_id"),
                     "rag_id": source_info.get("rag_id"),
                     "source": source_info.get("source"),
