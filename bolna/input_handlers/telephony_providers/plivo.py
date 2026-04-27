@@ -18,6 +18,8 @@ class PlivoInputHandler(TelephonyInputHandler):
         turn_based_conversation=False,
         is_welcome_message_played=False,
         observable_variables=None,
+        vad_config=None,
+        speech_events_queue=None,
     ):
         super().__init__(
             queues,
@@ -27,6 +29,8 @@ class PlivoInputHandler(TelephonyInputHandler):
             turn_based_conversation,
             is_welcome_message_played=is_welcome_message_played,
             observable_variables=observable_variables,
+            vad_config=vad_config,
+            speech_events_queue=speech_events_queue,
         )
         self.io_provider = "plivo"
         self.client = plivosdk.RestClient(os.getenv("PLIVO_AUTH_ID"), os.getenv("PLIVO_AUTH_TOKEN"))

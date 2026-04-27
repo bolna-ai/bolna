@@ -140,6 +140,8 @@ class TaskManager(BaseManager):
         self.synthesizer_queue = asyncio.Queue()
         self.transcriber_output_queue = asyncio.Queue()
         self.dtmf_queue = asyncio.Queue()
+        # Populated in __setup_input_handlers when vad_config is set.
+        self.speech_events_queue: asyncio.Queue | None = None
         self.queues = {
             "dtmf": self.dtmf_queue,
             "transcriber": self.audio_queue,
@@ -831,6 +833,12 @@ class TaskManager(BaseManager):
 
                 if self.task_config["tools_config"]["input"]["provider"] == "default":
                     input_kwargs["queue"] = input_queue
+                else:
+                    vad_config = self.task_config["tools_config"]["input"].get("vad_config")
+                    if vad_config:
+                        self.speech_events_queue = asyncio.Queue()
+                        input_kwargs["vad_config"] = vad_config
+                        input_kwargs["speech_events_queue"] = self.speech_events_queue
 
                 input_kwargs["observable_variables"] = self.observable_variables
 
@@ -2909,6 +2917,38 @@ class TaskManager(BaseManager):
                 TranscriberError(connection_error, provider=provider), HangupReason.TRANSCRIBER_CONNECTION_ERROR
             )
 
+    async def _listen_speech_events(self):
+        # Local-VAD pause signal. Word-count interruption gating still happens
+        # in _listen_transcriber, so coughs don't tear down the agent.
+        if self.speech_events_queue is None:
+            return
+        try:
+            while True:
+                if self.hangup_triggered:
+                    break
+                try:
+                    event = await asyncio.wait_for(self.speech_events_queue.get(), timeout=0.5)
+                except asyncio.TimeoutError:
+                    continue
+
+                if not self.tools["input"].welcome_message_played():
+                    continue
+
+                event_type = event.get("type")
+                if event_type == "speech_started":
+                    logger.info(
+                        f"local vad speech_started media_ts={event.get('media_ts_ms')}ms "
+                        f"pre_speech_bytes={event.get('pre_speech_bytes')}"
+                    )
+                    self.interruption_manager.on_user_speech_started()
+                elif event_type == "speech_ended":
+                    logger.info(f"local vad speech_ended media_ts={event.get('media_ts_ms')}ms")
+                    self.interruption_manager.on_user_speech_ended()
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.error(f"error in _listen_speech_events: {e}")
+
     async def _listen_transcriber(self):
         temp_transcriber_message = ""
         try:
@@ -3855,6 +3895,9 @@ class TaskManager(BaseManager):
                 if "transcriber" in self.tools:
                     tasks.append(asyncio.create_task(self._listen_transcriber()))
                     self.transcriber_task = asyncio.create_task(self.tools["transcriber"].run())
+
+                if self.speech_events_queue is not None:
+                    tasks.append(asyncio.create_task(self._listen_speech_events()))
 
                 if self.turn_based_conversation and self._is_conversation_task():
                     logger.info(

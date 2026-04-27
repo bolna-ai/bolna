@@ -1,8 +1,10 @@
 import traceback
 from .default import DefaultInputHandler
 import asyncio
+import audioop
 import base64
 import json
+import time
 from starlette.websockets import WebSocketDisconnect
 from dotenv import load_dotenv
 from bolna.helpers.utils import create_ws_data_packet
@@ -22,6 +24,8 @@ class TelephonyInputHandler(DefaultInputHandler):
         turn_based_conversation=False,
         is_welcome_message_played=False,
         observable_variables=None,
+        vad_config=None,
+        speech_events_queue=None,
     ):
         super().__init__(
             queues,
@@ -34,12 +38,111 @@ class TelephonyInputHandler(DefaultInputHandler):
         )
         self.stream_sid = None
         self.call_sid = None
-        self.buffer = []
+        # On the instance so the local-VAD path can clear it on speech_started
+        # without re-sending audio already covered by the pre-speech flush.
+        self.media_buffer: list[bytes] = []
         self.message_count = 0
         # self.mark_event_meta_data = mark_event_meta_data
         self.last_media_received = 0
         self.io_provider = None
         self.websocket_listen_task = None
+
+        self._vad_config = vad_config
+        self._speech_events_queue = speech_events_queue
+        self._turn_detector = self._build_turn_detector(vad_config)
+
+    @staticmethod
+    def _build_turn_detector(vad_config):
+        if not vad_config:
+            return None
+        # Deferred so installations that don't enable local VAD skip the
+        # torch / onnxruntime import cost.
+        from bolna.vad import PreSpeechRingBuffer, SileroVAD, TurnDetector
+
+        sample_rate = vad_config.get("sample_rate", 8000)
+        vad = SileroVAD(
+            sample_rate=sample_rate,
+            threshold=vad_config.get("threshold", 0.5),
+            min_silence_duration_ms=vad_config.get("min_silence_ms", 100),
+            speech_pad_ms=vad_config.get("speech_pad_ms", 30),
+        )
+        # 1 byte/sample because we hold raw mulaw for replay; VAD gets the
+        # decoded int16 copy separately.
+        ring = PreSpeechRingBuffer.from_duration(
+            duration_ms=vad_config.get("pre_speech_ms", 500),
+            sample_rate_hz=sample_rate,
+            bytes_per_sample=1,
+        )
+        return TurnDetector(vad=vad, pre_speech_buffer=ring)
+
+    async def _handle_vad_gated_frame(self, mulaw_bytes, media_ts_ms, meta_info):
+        try:
+            pcm_int16 = audioop.ulaw2lin(mulaw_bytes, 2)
+        except Exception as e:
+            logger.info(f"mulaw decode failed, skipping VAD for frame: {e}")
+            return
+
+        events = list(self._turn_detector.feed(pcm_int16, raw_audio=mulaw_bytes))
+        now_monotonic = time.monotonic()
+
+        if self._speech_events_queue is not None:
+            for ev in events:
+                self._speech_events_queue.put_nowait({
+                    "type": ev.type.value,
+                    "source": "local_silero",
+                    "media_ts_ms": media_ts_ms,
+                    "wall_clock_monotonic": now_monotonic,
+                    "sample_offset": ev.sample_offset,
+                    "pre_speech_bytes": len(ev.pre_speech_audio),
+                    "call_sid": self.call_sid,
+                    "stream_sid": self.stream_sid,
+                })
+
+        # If both events fired for this frame, last-state-wins: speech_started
+        # carries all the audio in its pre-speech flush.
+        last_started = next(
+            (e for e in reversed(events) if e.type.value == "speech_started"),
+            None,
+        )
+        last_ended = next(
+            (e for e in reversed(events) if e.type.value == "speech_ended"),
+            None,
+        )
+
+        if last_started is not None and (
+            last_ended is None
+            or last_started.sample_offset >= last_ended.sample_offset
+        ):
+            if last_started.pre_speech_audio:
+                await self._flush_pre_speech_to_transcriber(
+                    last_started.pre_speech_audio, meta_info
+                )
+            self.media_buffer = []
+            self.message_count = 0
+            return
+        if last_ended is not None:
+            if self.media_buffer:
+                await self.ingest_audio(b"".join(self.media_buffer), meta_info)
+            self.media_buffer = []
+            self.message_count = 0
+            return
+
+        if not self._turn_detector.is_in_speech:
+            return
+
+        self.media_buffer.append(mulaw_bytes)
+        self.message_count += 1
+        if self.message_count == 10:
+            await self.ingest_audio(b"".join(self.media_buffer), meta_info)
+            self.media_buffer = []
+            self.message_count = 0
+
+    async def _flush_pre_speech_to_transcriber(self, mulaw_bytes, template_meta_info):
+        meta_info = dict(template_meta_info)
+        meta_info["is_pre_speech_flush"] = True
+        self.queues["transcriber"].put_nowait(
+            create_ws_data_packet(data=mulaw_bytes, meta_info=meta_info)
+        )
 
     def get_stream_sid(self):
         return self.stream_sid
@@ -95,7 +198,7 @@ class TelephonyInputHandler(DefaultInputHandler):
         return False
 
     async def _listen(self):
-        buffer = []
+        self.media_buffer = []
         while True:
             try:
                 message = await self.websocket.receive_text()
@@ -124,15 +227,20 @@ class TelephonyInputHandler(DefaultInputHandler):
                             #await self.ingest_audio(b"\xff" * bytes_to_fill, meta_info)
                         """
                         self.last_media_received = media_ts
-                        buffer.append(media_audio)
-                        self.message_count += 1
+                        if self._turn_detector is not None:
+                            await self._handle_vad_gated_frame(
+                                media_audio, media_ts, meta_info
+                            )
+                        else:
+                            self.media_buffer.append(media_audio)
+                            self.message_count += 1
 
-                        # Send 100 ms of audio to deepgram
-                        if self.message_count == 10:
-                            merged_audio = b"".join(buffer)
-                            buffer = []
-                            await self.ingest_audio(merged_audio, meta_info)
-                            self.message_count = 0
+                            # Flush every ~200ms of audio to the transcriber.
+                            if self.message_count == 10:
+                                merged_audio = b"".join(self.media_buffer)
+                                self.media_buffer = []
+                                await self.ingest_audio(merged_audio, meta_info)
+                                self.message_count = 0
                     else:
                         logger.info("Getting media elements but not inbound media")
 
