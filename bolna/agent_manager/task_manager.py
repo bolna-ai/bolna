@@ -4192,6 +4192,19 @@ class TaskManager(BaseManager):
                 self.transcriber_latencies.connection_latency_ms = self.tools["transcriber"].connection_time
                 self.synthesizer_latencies.connection_latency_ms = self.tools["synthesizer"].connection_time
 
+                # Ensure fire-and-forget/background tasks spawned during the call
+                # are cancelled and awaited to avoid pending-task warnings at shutdown.
+                background_tasks = [
+                    ("first_message_task_new", getattr(self, "first_message_task_new", None)),
+                    ("llm_queue_task", getattr(self, "llm_queue_task", None)),
+                    ("execute_function_call_task", getattr(self, "execute_function_call_task", None)),
+                ]
+                for task_name, task in background_tasks:
+                    tasks_to_cancel.append(process_task_cancellation(task, task_name))
+
+                for index, task in enumerate(getattr(self, "synthesizer_tasks", [])):
+                    tasks_to_cancel.append(process_task_cancellation(task, f"synthesizer_tasks[{index}]"))
+
                 self.transcriber_latencies.turn_latencies = self.tools["transcriber"].turn_latencies
                 self.synthesizer_latencies.turn_latencies = self.tools["synthesizer"].turn_latencies
 
