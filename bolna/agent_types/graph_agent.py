@@ -16,9 +16,10 @@ from bolna.helpers.utils import (
     update_prompt_with_context,
     enrich_context_with_time_variables,
     DictWithMissing,
+    get_md5_hash,
 )
 from bolna.helpers.expression_evaluator import evaluate_edge_expression
-from bolna.enums import EdgeConditionType
+from bolna.enums import EdgeConditionType, NodeType
 from bolna.llms.types import LLMStreamChunk, LatencyData
 from bolna.llms import OpenAiLLM
 from bolna.providers import SUPPORTED_LLM_PROVIDERS
@@ -62,7 +63,9 @@ class GraphAgent(BaseAgent):
             self.openai = OpenAI(api_key=self.llm_key)
 
         self.node_history = [self.current_node_id]
-        self.current_node_entry_index = 0  # Track message index when we entered current node
+        self.current_node_entry_index = 0
+        self._silence_repeats = 0
+        self._event_triggered_generation = False
         self.rag_configs = self.initialize_rag_configs()
         self.rag_server_url = os.getenv("RAG_SERVER_URL", "http://localhost:8000")
 
@@ -340,11 +343,15 @@ class GraphAgent(BaseAgent):
         return self._get_edge_by_function_name_from_edges(node.get("edges", []), function_name)
 
     def _classify_edges(self, edges: list) -> tuple:
-        """Split edges into (deterministic_edges, llm_edges), sorted by priority."""
+        """Split edges into (deterministic_edges, llm_edges), sorted by priority.
+        Event edges are excluded — they only fire via process_event()."""
         deterministic = []
         llm = []
         for edge in edges:
-            if edge.get("condition_type") in (EdgeConditionType.EXPRESSION, EdgeConditionType.UNCONDITIONAL):
+            ct = edge.get("condition_type")
+            if ct == EdgeConditionType.EVENT:
+                continue  # event edges only fire via process_event()
+            elif ct in (EdgeConditionType.EXPRESSION, EdgeConditionType.UNCONDITIONAL):
                 deterministic.append(edge)
             else:
                 llm.append(edge)
@@ -359,6 +366,58 @@ class GraphAgent(BaseAgent):
             if evaluate_edge_expression(edge, self.context_data):
                 return edge
         return None
+
+    def process_event(self, event: dict) -> dict:
+        """Process an external event. Merges properties into context_data
+        and checks current node's event edges for a matching transition.
+
+        Returns dict with: matched, event, new_node_id, node_type, etc.
+        """
+        parsed = CallEvent(**event) if not isinstance(event, CallEvent) else event
+        event_name = parsed.event
+        properties = parsed.properties or {}
+
+        # Always merge properties into context_data
+        if properties:
+            self.context_data.update(properties)
+        self.context_data["_last_event"] = event_name
+
+        current_node = self.get_node_by_id(self.current_node_id)
+        if not current_node:
+            logger.warning(f"process_event: current node '{self.current_node_id}' not found")
+            return {"matched": False, "event": event_name}
+
+        # Collect event edges, sorted by priority
+        event_edges = [e for e in current_node.get("edges", []) if e.get("condition_type") == EdgeConditionType.EVENT]
+        event_edges.sort(key=lambda e: e.get("priority") or 0)
+
+        for edge in event_edges:
+            if edge.get("event_name") == event_name:
+                previous_node = self.current_node_id
+                self.current_node_id = edge["to_node_id"]
+                self.current_node_entry_index = 0  # caller should set to len(history)
+                self._silence_repeats = 0
+
+                if self.current_node_id not in self.node_history or self.node_history[-1] != self.current_node_id:
+                    self.node_history.append(self.current_node_id)
+
+                target_node = self.get_node_by_id(edge["to_node_id"])
+                node_type = target_node.get("node_type", NodeType.LLM) if target_node else NodeType.LLM
+
+                logger.info(f"Event '{event_name}' matched edge: {previous_node} -> {self.current_node_id}")
+                return {
+                    "matched": True,
+                    "event": event_name,
+                    "previous_node": previous_node,
+                    "new_node_id": edge["to_node_id"],
+                    "node_type": node_type,
+                    "target_node": target_node,
+                }
+
+        logger.info(
+            f"Event '{event_name}' did not match any event edge on node '{self.current_node_id}' — context updated silently"
+        )
+        return {"matched": False, "event": event_name}
 
     def _compute_turn_counts(self, history: list) -> tuple:
         """Count (node_turns, total_turns) from history."""
@@ -556,6 +615,7 @@ class GraphAgent(BaseAgent):
         node_turns, total_turns = self._compute_turn_counts(history)
         self.context_data["_node_turns"] = node_turns
         self.context_data["_total_turns"] = total_turns
+        self.context_data["_silence_repeats"] = self._silence_repeats
 
         deterministic_edges, llm_edges = self._classify_edges(edges)
 
@@ -675,6 +735,66 @@ class GraphAgent(BaseAgent):
             self.context_data["detected_language"] = detected_language
 
         try:
+            # Event-triggered generation: process_event() already handled routing
+            is_event = self._event_triggered_generation
+            if is_event:
+                self._event_triggered_generation = False
+                current_node = self.get_node_by_id(self.current_node_id)
+                node_type = current_node.get("node_type", NodeType.LLM) if current_node else NodeType.LLM
+
+                yield {
+                    "routing_info": {
+                        "previous_node": self.context_data.get("_event_previous_node", self.current_node_id),
+                        "current_node": self.current_node_id,
+                        "transitioned": True,
+                        "routing_type": "event",
+                        "routing_model": None,
+                        "routing_provider": None,
+                        "routing_latency_ms": 0,
+                        "extracted_params": {},
+                        "node_history": list(self.node_history),
+                        "routing_messages": None,
+                        "routing_tools": None,
+                        "reasoning": f"event:{self.context_data.get('_last_event', '')}",
+                        "confidence": 1.0,
+                        "node_type": node_type,
+                        "is_silence_trigger": False,
+                        "event_triggered": True,
+                    }
+                }
+
+                if node_type == NodeType.STATIC:
+                    static_text = current_node.get("static_message", "") if current_node else ""
+                    if static_text:
+                        if self.context_data:
+                            static_text = update_prompt_with_context(static_text, self.context_data)
+                        yield {
+                            "static_message": static_text,
+                            "static_audio_hash": get_md5_hash(static_text),
+                        }
+                    return
+
+                messages = await self._build_messages(message)
+                # Inject ephemeral event hint (NOT persisted in conversation_history)
+                event_name = self.context_data.get("_last_event", "")
+                messages.append(
+                    {
+                        "role": "system",
+                        "content": f"[Event: {event_name}. Respond proactively — speak first, do not wait for the user.]",
+                    }
+                )
+                yield {"messages": messages}
+                tool_choice = self._get_tool_choice_for_node()
+                async for chunk in self.llm.generate_stream(
+                    messages, synthesize=synthesize, meta_info=meta_info, tool_choice=tool_choice
+                ):
+                    yield chunk
+                return
+
+            is_silence_trigger = bool(message and message[-1].get("content", "").startswith("[silence]"))
+            if is_silence_trigger:
+                self._silence_repeats += 1
+
             previous_node = self.current_node_id
             (
                 next_node_id,
@@ -691,6 +811,7 @@ class GraphAgent(BaseAgent):
                 logger.info(f"Transitioning: {self.current_node_id} -> {next_node_id} (params: {extracted_params})")
                 self.current_node_id = next_node_id
                 self.current_node_entry_index = len(message)
+                self._silence_repeats = 0
                 if extracted_params:
                     self.context_data.update(extracted_params)
 
@@ -700,6 +821,9 @@ class GraphAgent(BaseAgent):
             routing_type = (
                 "deterministic" if (reasoning and reasoning.startswith(_DETERMINISTIC_REASONING_PREFIX)) else "llm"
             )
+
+            current_node = self.get_node_by_id(self.current_node_id)
+            node_type = current_node.get("node_type", NodeType.LLM) if current_node else NodeType.LLM
 
             yield {
                 "routing_info": {
@@ -717,8 +841,21 @@ class GraphAgent(BaseAgent):
                     "reasoning": reasoning,
                     "confidence": confidence,
                     "routing_usage": routing_usage,
+                    "node_type": node_type,
+                    "is_silence_trigger": is_silence_trigger,
                 }
             }
+
+            if node_type == NodeType.STATIC:
+                static_text = current_node.get("static_message", "") if current_node else ""
+                if static_text:
+                    if self.context_data:
+                        static_text = update_prompt_with_context(static_text, self.context_data)
+                    yield {
+                        "static_message": static_text,
+                        "static_audio_hash": get_md5_hash(static_text),
+                    }
+                return
 
             messages = await self._build_messages(message)
             yield {"messages": messages}

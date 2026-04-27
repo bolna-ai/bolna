@@ -261,6 +261,12 @@ class EdgeConditionType(str, Enum):
     LLM = "llm"
     EXPRESSION = "expression"
     UNCONDITIONAL = "unconditional"
+    EVENT = "event"
+
+
+class NodeType(str, Enum):
+    LLM = "llm"
+    STATIC = "static"
 
 
 class UsageSource(str, Enum):

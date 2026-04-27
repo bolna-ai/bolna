@@ -12,6 +12,7 @@ from .enums import (
     ExpressionOperator,
     ExpressionLogic,
     EdgeConditionType,
+    NodeType,
 )
 from .constants import MODEL_REASONING_EFFORT_MAP
 
@@ -315,6 +316,14 @@ class ExpressionGroup(BaseModel):
     conditions: List[ExpressionCondition] = Field(default_factory=list)
 
 
+class CallEvent(BaseModel):
+    """Incoming external event payload."""
+
+    event: str
+    properties: Optional[Dict[str, Any]] = None
+    timestamp: Optional[float] = None
+
+
 class GraphEdge(BaseModel):
     """Edge definition for graph-based conversation flow.
 
@@ -326,6 +335,7 @@ class GraphEdge(BaseModel):
     condition: str = ""  # Human-readable description of when to transition
     condition_type: Optional[EdgeConditionType] = None  # None → "llm" (backward compat)
     expression: Optional[ExpressionGroup] = None  # required when condition_type == "expression"
+    event_name: Optional[str] = None  # Matches CallEvent.event when condition_type="event"
     # Function definition for LLM to call (auto-generated if not provided)
     function_name: Optional[str] = None  # e.g., "go_to_city_question"
     function_description: Optional[str] = None  # Detailed description for LLM
@@ -346,7 +356,10 @@ class GraphNodeRAGConfig(BaseModel):
 class GraphNode(BaseModel):
     id: str
     description: Optional[str] = None
-    prompt: str
+    node_type: NodeType = NodeType.LLM
+    prompt: str = ""
+    static_message: Optional[str] = None
+    repeat_after_silence_seconds: Optional[float] = None
     examples: Optional[Dict[str, str]] = None
     edges: List[GraphEdge] = Field(default_factory=list)
     function_call: Optional[str] = None
