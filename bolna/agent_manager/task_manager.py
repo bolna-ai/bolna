@@ -1484,11 +1484,21 @@ class TaskManager(BaseManager):
                 latest_turn_id = turn_id
         return latest_turn_id
 
+    def _get_latest_assistant_turn_id(self):
+        for msg in reversed(self.conversation_history.messages):
+            if msg.get("role") == ChatRole.ASSISTANT and msg.get("turn_id") is not None:
+                return msg.get("turn_id")
+        return None
+
     async def sync_history(self, mark_events_data, interruption_processed_at):
         """Sync history to reflect only what was actually spoken. Uses confirmed text or falls back to pending marks."""
         try:
             mark_events_data = list(mark_events_data)
             target_turn_id = self._get_latest_turn_id_from_marks(mark_events_data)
+            if target_turn_id is None:
+                target_turn_id = getattr(self.tools.get("input"), "last_heard_turn_id", None)
+            if target_turn_id is None:
+                target_turn_id = self._get_latest_assistant_turn_id()
             logger.info(
                 f"sync_history: target_turn_id={target_turn_id} marks={len(mark_events_data)} "
                 f"mark_ids={[mid for mid, _ in mark_events_data]}"
@@ -1571,47 +1581,51 @@ class TaskManager(BaseManager):
                         entry["pending_dur"] += mark_data.get("duration", 0.0)
 
                     if not pending_by_turn:
-                        logger.info("No pending marks with turn_id to estimate played text")
-                        return
-
-                    # Use the most recently interrupted turn
-                    t_id = target_turn_id if target_turn_id in pending_by_turn else max(pending_by_turn.keys())
-                    target_turn_id = t_id
-                    info = pending_by_turn[t_id]
-                    msg = self._turn_msg_map.get(t_id)
-                    full_text = (msg.get("content") or "") if msg else ""
-
-                    total_dur = sum(
-                        self.mark_event_meta_data._mark_stats.per_sequence[s].total_audio_duration
-                        for s in info["seq_ids"]
-                        if s in self.mark_event_meta_data._mark_stats.per_sequence
-                    )
-
-                    if total_dur <= 0:
-                        logger.info(f"turn_id={t_id}: no duration stats, skipping")
-                        return
-
-                    heard_dur = max(0.0, total_dur - info["pending_dur"])
-                    proportion = min(1.0, heard_dur / total_dur)
-                    logger.info(
-                        f"turn_id={t_id}: total={total_dur:.3f}s pending={info['pending_dur']:.3f}s proportion={proportion:.2f}"
-                    )
-
-                    if proportion >= 1.0:
-                        # Fully played — nothing to trim
-                        return
-
-                    if proportion > 0 and full_text.strip():
-                        char_count = int(len(full_text.strip()) * proportion)
-                        if char_count < len(full_text.strip()):
-                            last_space = full_text.strip()[:char_count].rfind(" ")
-                            if last_space > 0:
-                                char_count = last_space
-                        response_heard = full_text.strip()[:char_count]
-                        logger.info(f"turn_id={t_id}: partial, heard (last 20): {response_heard[-20:]!r}")
-                    else:
+                        logger.info(
+                            "No pending marks with turn_id to estimate played text; "
+                            f"will trim target_turn_id={target_turn_id} as unheard"
+                        )
                         response_heard = ""
-                        logger.info(f"turn_id={t_id}: nothing heard")
+
+                    else:
+                        # Use the most recently interrupted turn
+                        t_id = target_turn_id if target_turn_id in pending_by_turn else max(pending_by_turn.keys())
+                        target_turn_id = t_id
+                        info = pending_by_turn[t_id]
+                        msg = self._turn_msg_map.get(t_id)
+                        full_text = (msg.get("content") or "") if msg else ""
+
+                        total_dur = sum(
+                            self.mark_event_meta_data._mark_stats.per_sequence[s].total_audio_duration
+                            for s in info["seq_ids"]
+                            if s in self.mark_event_meta_data._mark_stats.per_sequence
+                        )
+
+                        if total_dur <= 0:
+                            logger.info(f"turn_id={t_id}: no duration stats, skipping")
+                            return
+
+                        heard_dur = max(0.0, total_dur - info["pending_dur"])
+                        proportion = min(1.0, heard_dur / total_dur)
+                        logger.info(
+                            f"turn_id={t_id}: total={total_dur:.3f}s pending={info['pending_dur']:.3f}s proportion={proportion:.2f}"
+                        )
+
+                        if proportion >= 1.0:
+                            # Fully played — nothing to trim
+                            return
+
+                        if proportion > 0 and full_text.strip():
+                            char_count = int(len(full_text.strip()) * proportion)
+                            if char_count < len(full_text.strip()):
+                                last_space = full_text.strip()[:char_count].rfind(" ")
+                                if last_space > 0:
+                                    char_count = last_space
+                            response_heard = full_text.strip()[:char_count]
+                            logger.info(f"turn_id={t_id}: partial, heard (last 20): {response_heard[-20:]!r}")
+                        else:
+                            response_heard = ""
+                            logger.info(f"turn_id={t_id}: nothing heard")
 
             if target_turn_id is not None and response_heard and target_turn_id not in self._turn_msg_map:
                 logger.info(
@@ -2873,11 +2887,12 @@ class TaskManager(BaseManager):
                     # filler_message = PRE_FUNCTION_CALL_MESSAGE.get(self.language, PRE_FUNCTION_CALL_MESSAGE[DEFAULT_LANGUAGE_CODE])
                     if text_chunk == filler_message:
                         logger.info("Got a pre function call message")
-                        # Do not eagerly commit filler to durable transcript/history.
-                        # In some tool-call flows the filler text is generated but
-                        # never actually synthesized or heard by the user, and
-                        # storing it here makes it leak into later LLM requests
-                        # and final transcript output.
+                        turn_id = meta_info.get("turn_id")
+                        messages.append({"role": "assistant", "content": filler_message, "turn_id": turn_id})
+                        self.conversation_history.append_assistant(filler_message, turn_id=turn_id)
+                        self.conversation_history.sync_interim(messages)
+                        if turn_id is not None:
+                            self._turn_msg_map[turn_id] = self.conversation_history.messages[-1]
 
                     await self._handle_llm_output(next_step, text_chunk, should_bypass_synth, meta_info)
         except BolnaComponentError:
