@@ -67,6 +67,7 @@ class MarkEventMetaData:
         value["counter"] = self.counter
         self.counter += 1
         self.mark_event_meta_data[mark_id] = value
+        self.mark_changed.set()
 
         if value.get("type") != "pre_mark_message":
             self._mark_stats.total_sent += 1
