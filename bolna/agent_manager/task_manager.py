@@ -34,7 +34,7 @@ from .base_manager import BaseManager
 from .interruption_manager import InterruptionManager
 from bolna.agent_types import *
 from bolna.providers import *
-from bolna.enums import TelephonyProvider, LogComponent, LogDirection, HangupReason, NodeType
+from bolna.enums import TelephonyProvider, LogComponent, LogDirection, HangupReason, NodeType, ChatRole
 from bolna.exceptions import BolnaComponentError, LLMError, SynthesizerError, TranscriberError
 from bolna.prompts import *
 from bolna.helpers.language_detector import LanguageDetector
