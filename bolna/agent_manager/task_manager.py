@@ -2855,12 +2855,11 @@ class TaskManager(BaseManager):
                     # filler_message = PRE_FUNCTION_CALL_MESSAGE.get(self.language, PRE_FUNCTION_CALL_MESSAGE[DEFAULT_LANGUAGE_CODE])
                     if text_chunk == filler_message:
                         logger.info("Got a pre function call message")
-                        turn_id = meta_info.get("turn_id")
-                        messages.append({"role": "assistant", "content": filler_message, "turn_id": turn_id})
-                        self.conversation_history.append_assistant(filler_message, turn_id=turn_id)
-                        self.conversation_history.sync_interim(messages)
-                        if turn_id is not None:
-                            self._turn_msg_map[turn_id] = self.conversation_history.messages[-1]
+                        # Do not eagerly commit filler to durable transcript/history.
+                        # In some tool-call flows the filler text is generated but
+                        # never actually synthesized or heard by the user, and
+                        # storing it here makes it leak into later LLM requests
+                        # and final transcript output.
 
                     await self._handle_llm_output(next_step, text_chunk, should_bypass_synth, meta_info)
         except BolnaComponentError:
