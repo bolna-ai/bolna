@@ -1715,16 +1715,8 @@ class TaskManager(BaseManager):
         except asyncio.TimeoutError:
             logger.warning("wait_for_current_message: synth pipeline flush timed out after 3s")
 
-        start_time = time.time()
+        entry_time = time.time()
         while not self.conversation_ended:
-            elapsed = time.time() - start_time
-            if elapsed > self.hangup_mark_event_timeout:
-                mark_events = self.mark_event_meta_data.mark_event_meta_data
-                logger.warning(
-                    f"wait_for_current_message timed out after {self.hangup_mark_event_timeout}s with {len(mark_events)} remaining marks"
-                )
-                break
-
             mark_events = self.mark_event_meta_data.mark_event_meta_data
             mark_items_list = [{"mark_id": k, "mark_data": v} for k, v in mark_events.items()]
             logger.info(f"current_list: {mark_items_list}")
@@ -1749,12 +1741,28 @@ class TaskManager(BaseManager):
             if first_item.get("text_synthesized") and first_item.get("is_final_chunk") is True:
                 break
 
-            remaining = self.hangup_mark_event_timeout - elapsed
+            pending_ends = [
+                v.get("sent_ts", 0) + v.get("duration", 0)
+                for v in mark_events.values()
+                if v.get("type") != "pre_mark_message" and v.get("sent_ts")
+            ]
+            expected_play_end = max(pending_ends) if pending_ends else time.time()
+            deadline = expected_play_end + self.hangup_mark_event_timeout
+
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                logger.warning(
+                    f"wait_for_current_message timed out: {len(mark_events)} marks unflushed, "
+                    f"expected_play_end was {expected_play_end - entry_time:.1f}s after entry, "
+                    f"grace {self.hangup_mark_event_timeout}s exceeded"
+                )
+                break
+
             self.mark_event_meta_data.mark_changed.clear()
             try:
                 await asyncio.wait_for(self.mark_event_meta_data.mark_changed.wait(), timeout=remaining)
             except asyncio.TimeoutError:
-                pass  # re-enters loop, hits timeout check at top
+                pass
         return
 
     async def inject_digits_to_conversation(self) -> None:
