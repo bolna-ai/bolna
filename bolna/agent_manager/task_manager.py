@@ -3122,8 +3122,14 @@ class TaskManager(BaseManager):
 
         await self.language_detector.collect_transcript(transcriber_message)
 
-        if self.response_in_pipeline and next_task == "llm":
-            self.conversation_history.pop_unheard_responses()
+        has_live_assistant_audio = self.tools["input"].is_audio_being_played_to_user()
+        has_pending_marks = bool(self.mark_event_meta_data.mark_event_meta_data)
+        if next_task == "llm" and (self.response_in_pipeline or has_live_assistant_audio or has_pending_marks):
+            # Once audio starts sending, response_in_pipeline flips to False even
+            # though the assistant turn may still be actively playing to the user.
+            # For precise transcripting we need to reconcile that in-flight turn
+            # before appending the next user utterance, otherwise the full stored
+            # assistant text can leak into history even when only part of it was heard.
             self._invalidate_response_chain()
             original_message = transcriber_message
             transcriber_message = self.conversation_history.pop_and_merge_user(transcriber_message)
