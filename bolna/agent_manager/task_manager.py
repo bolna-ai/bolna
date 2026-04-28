@@ -1693,6 +1693,21 @@ class TaskManager(BaseManager):
 
         return meta_info_copy
 
+    def _spawn_followup_meta_info(self, meta_info):
+        followup_meta_info = self.__get_updated_meta_info(meta_info)
+        for key in (
+            "chunk_id",
+            "mark_id",
+            "is_first_chunk",
+            "is_first_chunk_of_entire_response",
+            "is_final_chunk_of_entire_response",
+            "end_of_synthesizer_stream",
+            "end_of_llm_stream",
+            "text_synthesized",
+        ):
+            followup_meta_info.pop(key, None)
+        return followup_meta_info
+
     def _extract_sequence_and_meta(self, message):
         sequence, meta_info = None, None
         if isinstance(message, dict) and "meta_info" in message:
@@ -2192,7 +2207,10 @@ class TaskManager(BaseManager):
             )
 
             # Generate goodbye with should_trigger_function_call=False to prevent recursion
-            await self.__do_llm_generation(messages, meta_info, next_step, should_trigger_function_call=False)
+            followup_meta_info = self._spawn_followup_meta_info(meta_info)
+            await self.__do_llm_generation(
+                messages, followup_meta_info, next_step, should_trigger_function_call=False
+            )
             await self.wait_for_current_message()
 
             self.hangup_detail = "end_call_tool"
@@ -2360,8 +2378,13 @@ class TaskManager(BaseManager):
                 )
 
                 messages = self.conversation_history.get_copy()
+                followup_meta_info = self._spawn_followup_meta_info(meta_info)
                 await self.__do_llm_generation(
-                    messages, meta_info, next_step, should_bypass_synth=False, should_trigger_function_call=True
+                    messages,
+                    followup_meta_info,
+                    next_step,
+                    should_bypass_synth=False,
+                    should_trigger_function_call=True,
                 )
                 self.execute_function_call_task = None
                 return
@@ -2417,8 +2440,9 @@ class TaskManager(BaseManager):
             )
 
             messages = self.conversation_history.get_copy()
+            followup_meta_info = self._spawn_followup_meta_info(meta_info)
             await self.__do_llm_generation(
-                messages, meta_info, next_step, should_bypass_synth=False, should_trigger_function_call=True
+                messages, followup_meta_info, next_step, should_bypass_synth=False, should_trigger_function_call=True
             )
             self.execute_function_call_task = None
             return
@@ -2537,13 +2561,14 @@ class TaskManager(BaseManager):
 
         if not called_fun.startswith("transfer_call"):
             should_bypass_synth = meta_info.get("bypass_synth", False)
-            await self.__do_llm_generation(
-                messages,
-                meta_info,
-                next_step,
-                should_bypass_synth=should_bypass_synth,
-                should_trigger_function_call=True,
-            )
+        followup_meta_info = self._spawn_followup_meta_info(meta_info)
+        await self.__do_llm_generation(
+            messages,
+            followup_meta_info,
+            next_step,
+            should_bypass_synth=should_bypass_synth,
+            should_trigger_function_call=True,
+        )
 
         self.execute_function_call_task = None
 
