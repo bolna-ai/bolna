@@ -1490,6 +1490,17 @@ class TaskManager(BaseManager):
                 return msg.get("turn_id")
         return None
 
+    def _has_interruptible_mark_activity(self):
+        for mark_data in self.mark_event_meta_data.mark_event_meta_data.values():
+            if mark_data.get("type") == "pre_mark_message":
+                continue
+            if mark_data.get("turn_id") is not None:
+                return True
+            sequence_id = mark_data.get("sequence_id")
+            if sequence_id is not None and sequence_id != -1:
+                return True
+        return False
+
     async def sync_history(self, mark_events_data, interruption_processed_at):
         """Sync history to reflect only what was actually spoken. Uses confirmed text or falls back to pending marks."""
         try:
@@ -1581,6 +1592,12 @@ class TaskManager(BaseManager):
                         entry["pending_dur"] += mark_data.get("duration", 0.0)
 
                     if not pending_by_turn:
+                        if target_turn_id is None:
+                            logger.info(
+                                "No pending marks with turn_id and no target_turn_id; "
+                                "skipping trim to avoid removing non-turn assistant messages like welcome"
+                            )
+                            return
                         logger.info(
                             "No pending marks with turn_id to estimate played text; "
                             f"will trim target_turn_id={target_turn_id} as unheard"
@@ -3155,7 +3172,7 @@ class TaskManager(BaseManager):
         await self.language_detector.collect_transcript(transcriber_message)
 
         has_live_assistant_audio = self.tools["input"].is_audio_being_played_to_user()
-        has_pending_marks = bool(self.mark_event_meta_data.mark_event_meta_data)
+        has_pending_marks = self._has_interruptible_mark_activity()
         if next_task == "llm" and (self.response_in_pipeline or has_live_assistant_audio or has_pending_marks):
             # Once audio starts sending, response_in_pipeline flips to False even
             # though the assistant turn may still be actively playing to the user.
