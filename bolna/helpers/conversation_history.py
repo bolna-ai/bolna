@@ -52,6 +52,21 @@ class ConversationHistory:
             logger.warning("attach_tool_calls_to_last_response: last message is not assistant, appending new")
             self.append_assistant(None, tool_calls=tool_calls)
 
+    def attach_tool_calls_to_turn(self, turn_id: int | None, tool_calls: list):
+        if turn_id is None:
+            self.attach_tool_calls_to_last_response(tool_calls)
+            return
+
+        for i in range(len(self._messages) - 1, -1, -1):
+            if self._messages[i].get("role") == ChatRole.ASSISTANT and self._messages[i].get("turn_id") == turn_id:
+                self._messages[i]["tool_calls"] = tool_calls
+                return
+
+        logger.warning(
+            f"attach_tool_calls_to_turn: no assistant found for turn_id={turn_id}, appending placeholder assistant"
+        )
+        self.append_assistant(None, tool_calls=tool_calls, turn_id=turn_id)
+
     def update_system_prompt(self, content: str):
         if self._messages and self._messages[0].get("role") == ChatRole.SYSTEM:
             self._messages[0]["content"] = content

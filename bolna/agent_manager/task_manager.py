@@ -251,6 +251,7 @@ class TaskManager(BaseManager):
         self.consider_next_transcript_after = time.time()
         self.llm_response_generated = False
         self.response_in_pipeline = False
+        self._response_turn_id = 0
         self._turn_msg_map = {}  # turn_id → assistant message dict ref in _messages
 
         # Language detection
@@ -1683,7 +1684,12 @@ class TaskManager(BaseManager):
 
         new_sequence_id = self.interruption_manager.get_next_sequence_id()
         meta_info_copy["sequence_id"] = new_sequence_id
-        meta_info_copy["turn_id"] = self.interruption_manager.get_turn_id()
+        # Transcript/tool-call grouping needs a response-turn id that is stable
+        # across all chunks and sub-steps of one response chain, but independent
+        # from audio sequencing. sequence_id is for interruption/audio gating;
+        # chunk_id is for chunking; turn_id is for transcript/history grouping.
+        self._response_turn_id += 1
+        meta_info_copy["turn_id"] = self._response_turn_id
 
         return meta_info_copy
 
@@ -2130,6 +2136,7 @@ class TaskManager(BaseManager):
     ):
         self.check_if_user_online = False
         function_call_log = None
+        turn_id = meta_info.get("turn_id")
 
         if "execution_id" in resp and resp["execution_id"] != self.run_id:
             logger.warning(f"Correcting LLM-generated execution_id: '{resp['execution_id']}' -> '{self.run_id}'")
@@ -2164,7 +2171,11 @@ class TaskManager(BaseManager):
             tool_result = json.dumps(
                 {"status": "success", "message": "Call is ending now. Say a brief goodbye to the user."}
             )
-            self.conversation_history.append_assistant(textual_response, tool_calls=resp["model_response"])
+            self.conversation_history.append_assistant(
+                textual_response, tool_calls=resp["model_response"], turn_id=turn_id
+            )
+            if turn_id is not None:
+                self._turn_msg_map[turn_id] = self.conversation_history.messages[-1]
             self.conversation_history.append_tool_result(resp.get("tool_call_id", ""), tool_result)
             convert_to_request_log(
                 tool_result, meta_info, None, "function_call", direction="response", run_id=self.run_id
@@ -2336,9 +2347,13 @@ class TaskManager(BaseManager):
 
                 textual_response = resp.get("textual_response", None)
                 if not textual_response:
-                    self.conversation_history.append_assistant(textual_response, tool_calls=resp["model_response"])
+                    self.conversation_history.append_assistant(
+                        textual_response, tool_calls=resp["model_response"], turn_id=turn_id
+                    )
+                    if turn_id is not None:
+                        self._turn_msg_map[turn_id] = self.conversation_history.messages[-1]
                 else:
-                    self.conversation_history.attach_tool_calls_to_last_response(resp["model_response"])
+                    self.conversation_history.attach_tool_calls_to_turn(turn_id, resp["model_response"])
                 self.conversation_history.append_tool_result(resp.get("tool_call_id", ""), function_response)
                 convert_to_request_log(
                     function_response, meta_info, None, "function_call", direction="response", run_id=self.run_id
@@ -2376,7 +2391,9 @@ class TaskManager(BaseManager):
                 self._turn_audio_flushed.clear()
                 await self._synthesize(create_ws_data_packet(handoff_text, meta_info=meta_info_handoff))
                 await self.wait_for_current_message()
-                self.conversation_history.append_assistant(handoff_text)
+                self.conversation_history.append_assistant(handoff_text, turn_id=turn_id)
+                if turn_id is not None:
+                    self._turn_msg_map[turn_id] = self.conversation_history.messages[-1]
 
             try:
                 await self.switch_language(language_label)
@@ -2387,9 +2404,13 @@ class TaskManager(BaseManager):
             textual_response = resp.get("textual_response", None)
             self.check_if_user_online = self.conversation_config.get("check_if_user_online", True)
             if not textual_response:
-                self.conversation_history.append_assistant(textual_response, tool_calls=resp["model_response"])
+                self.conversation_history.append_assistant(
+                    textual_response, tool_calls=resp["model_response"], turn_id=turn_id
+                )
+                if turn_id is not None:
+                    self._turn_msg_map[turn_id] = self.conversation_history.messages[-1]
             else:
-                self.conversation_history.attach_tool_calls_to_last_response(resp["model_response"])
+                self.conversation_history.attach_tool_calls_to_turn(turn_id, resp["model_response"])
             self.conversation_history.append_tool_result(resp.get("tool_call_id", ""), function_response)
             convert_to_request_log(
                 function_response, meta_info, None, "function_call", direction="response", run_id=self.run_id
@@ -2482,9 +2503,13 @@ class TaskManager(BaseManager):
 
         textual_response = resp.get("textual_response", None)
         if not textual_response:
-            self.conversation_history.append_assistant(textual_response, tool_calls=resp["model_response"])
+            self.conversation_history.append_assistant(
+                textual_response, tool_calls=resp["model_response"], turn_id=turn_id
+            )
+            if turn_id is not None:
+                self._turn_msg_map[turn_id] = self.conversation_history.messages[-1]
         else:
-            self.conversation_history.attach_tool_calls_to_last_response(resp["model_response"])
+            self.conversation_history.attach_tool_calls_to_turn(turn_id, resp["model_response"])
         self.conversation_history.append_tool_result(resp.get("tool_call_id", ""), function_response)
 
         logger.info(f"Logging function call parameters ")
