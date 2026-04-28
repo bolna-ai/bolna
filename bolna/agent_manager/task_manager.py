@@ -1469,10 +1469,31 @@ class TaskManager(BaseManager):
 
         return heard_text
 
+    @staticmethod
+    def _get_latest_turn_id_from_marks(mark_events_data):
+        latest_turn_id = None
+        latest_counter = -1
+        for _, mark_data in mark_events_data:
+            turn_id = mark_data.get("turn_id")
+            if turn_id is None:
+                continue
+            counter = mark_data.get("counter", -1)
+            if counter >= latest_counter:
+                latest_counter = counter
+                latest_turn_id = turn_id
+        return latest_turn_id
+
     async def sync_history(self, mark_events_data, interruption_processed_at):
         """Sync history to reflect only what was actually spoken. Uses confirmed text or falls back to pending marks."""
         try:
-            response_heard = self.tools["input"].response_heard_by_user
+            mark_events_data = list(mark_events_data)
+            target_turn_id = self._get_latest_turn_id_from_marks(mark_events_data)
+            input_handler = self.tools["input"]
+            response_heard = input_handler.get_response_heard_for_turn(target_turn_id)
+            if not response_heard:
+                response_heard = input_handler.response_heard_by_user
+                if target_turn_id is None:
+                    target_turn_id = getattr(input_handler, "last_heard_turn_id", None)
             logger.info(f"sync_history: response_heard len={len(response_heard) if response_heard else 0}")
             if response_heard:
                 logger.info(f"response_heard (last 10 chars): {response_heard[-10:]}")
@@ -1484,6 +1505,8 @@ class TaskManager(BaseManager):
                     mark_data = mark.get("mark_data", {})
                     mark_type = mark_data.get("type", "")
                     text = mark_data.get("text_synthesized", "")
+                    if target_turn_id is not None and mark_data.get("turn_id") != target_turn_id:
+                        continue
                     if mark_type in ["pre_mark_message", "backchanneling"] or not text:
                         continue
                     pending_chunks.append(
@@ -1547,7 +1570,8 @@ class TaskManager(BaseManager):
                         return
 
                     # Use the most recently interrupted turn
-                    t_id = max(pending_by_turn.keys())
+                    t_id = target_turn_id if target_turn_id in pending_by_turn else max(pending_by_turn.keys())
+                    target_turn_id = t_id
                     info = pending_by_turn[t_id]
                     msg = self._turn_msg_map.get(t_id)
                     full_text = (msg.get("content") or "") if msg else ""
@@ -1584,9 +1608,11 @@ class TaskManager(BaseManager):
                         response_heard = ""
                         logger.info(f"turn_id={t_id}: nothing heard")
 
-            self.conversation_history.sync_after_interruption(response_heard, self.update_transcript_for_interruption)
-            self.conversation_history.sync_interim_after_interruption(
-                response_heard, self.update_transcript_for_interruption
+            self.conversation_history.sync_turn_after_interruption(
+                target_turn_id, response_heard, self.update_transcript_for_interruption
+            )
+            self.conversation_history.sync_interim_turn_after_interruption(
+                target_turn_id, response_heard, self.update_transcript_for_interruption
             )
             self._invalidate_response_chain()
 
@@ -2525,15 +2551,15 @@ class TaskManager(BaseManager):
         turn_id = meta_info.get("turn_id")
         if should_trigger_function_call:
             logger.info(f"There was a function call and need to make that work")
-            self.conversation_history.append_assistant(llm_response)
+            self.conversation_history.append_assistant(llm_response, turn_id=turn_id)
             # Track pre-tool textual response so sync_history can find it if the
             # user interrupts before the tool call completes. The final post-tool
             # response will overwrite this entry when it is stored.
             if turn_id is not None:
                 self._turn_msg_map[turn_id] = self.conversation_history.messages[-1]
         else:
-            messages.append({"role": "assistant", "content": llm_response})
-            self.conversation_history.append_assistant(llm_response)
+            messages.append({"role": "assistant", "content": llm_response, "turn_id": turn_id})
+            self.conversation_history.append_assistant(llm_response, turn_id=turn_id)
             self.conversation_history.sync_interim(messages)
             if turn_id is not None:
                 self._turn_msg_map[turn_id] = self.conversation_history.messages[-1]
@@ -2687,11 +2713,14 @@ class TaskManager(BaseManager):
                 if isinstance(llm_message, dict) and "static_message" in llm_message:
                     static_text = llm_message["static_message"]
                     static_hash = llm_message["static_audio_hash"]
+                    turn_id = meta_info.get("turn_id")
 
                     if not is_silence_trigger:
-                        self.conversation_history.append_assistant(static_text)
-                        messages.append({"role": "assistant", "content": static_text})
+                        self.conversation_history.append_assistant(static_text, turn_id=turn_id)
+                        messages.append({"role": "assistant", "content": static_text, "turn_id": turn_id})
                         self.conversation_history.sync_interim(messages)
+                        if turn_id is not None:
+                            self._turn_msg_map[turn_id] = self.conversation_history.messages[-1]
 
                     convert_to_request_log(
                         message=static_text,
@@ -2776,9 +2805,12 @@ class TaskManager(BaseManager):
                     # filler_message = PRE_FUNCTION_CALL_MESSAGE.get(self.language, PRE_FUNCTION_CALL_MESSAGE[DEFAULT_LANGUAGE_CODE])
                     if text_chunk == filler_message:
                         logger.info("Got a pre function call message")
-                        messages.append({"role": "assistant", "content": filler_message})
-                        self.conversation_history.append_assistant(filler_message)
+                        turn_id = meta_info.get("turn_id")
+                        messages.append({"role": "assistant", "content": filler_message, "turn_id": turn_id})
+                        self.conversation_history.append_assistant(filler_message, turn_id=turn_id)
                         self.conversation_history.sync_interim(messages)
+                        if turn_id is not None:
+                            self._turn_msg_map[turn_id] = self.conversation_history.messages[-1]
 
                     await self._handle_llm_output(next_step, text_chunk, should_bypass_synth, meta_info)
         except BolnaComponentError:

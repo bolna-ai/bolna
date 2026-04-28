@@ -78,37 +78,56 @@ class ConversationHistory:
     def sync_interim_after_interruption(self, response_heard: str | None, update_fn):
         self._trim_last_assistant(self._interim, response_heard, update_fn)
 
+    def sync_turn_after_interruption(self, turn_id: int | None, response_heard: str | None, update_fn):
+        self._trim_assistant_for_turn(self._messages, turn_id, response_heard, update_fn)
+
+    def sync_interim_turn_after_interruption(self, turn_id: int | None, response_heard: str | None, update_fn):
+        self._trim_assistant_for_turn(self._interim, turn_id, response_heard, update_fn)
+
     @staticmethod
     def _trim_last_assistant(msgs: list[dict], response_heard: str | None, update_fn):
         for i in range(len(msgs) - 1, -1, -1):
             if msgs[i]["role"] == ChatRole.ASSISTANT:
-                original = msgs[i]["content"]
-                if original is None:
-                    continue
-                updated = update_fn(original, response_heard)
-                logger.info(
-                    f"Trimming assistant message. Original (last 10 chars): {str(original)[-10:]} | Updated: {updated[-10:] if updated else '<empty>'}"
-                )
-                if not updated or not updated.strip():
-                    has_tool_calls = bool(msgs[i].get("tool_calls"))
-                    logger.info(
-                        f"Removing assistant message (last 10 chars): {str(original)[-10:]} | has_tool_calls={has_tool_calls} from transcript"
-                    )
-                    msgs.pop(i)
-                    if has_tool_calls:
-                        # Remove subsequent dependent tool-role messages.
-                        while i < len(msgs) and msgs[i].get("role") == ChatRole.TOOL:
-                            msgs.pop(i)
-                    else:
-                        # Nothing from this turn was played. Remove all trailing
-                        # assistant/tool entries back to the user message — covers
-                        # pre-tool fillers, tool calls, tool results, and any other
-                        # unheard assistant content from the same turn.
-                        while msgs and msgs[-1].get("role") in _UNHEARD_ROLES:
-                            msgs.pop()
-                else:
-                    msgs[i]["content"] = updated
+                ConversationHistory._trim_assistant_at_index(msgs, i, response_heard, update_fn)
                 break
+
+    @staticmethod
+    def _trim_assistant_for_turn(msgs: list[dict], turn_id: int | None, response_heard: str | None, update_fn):
+        if turn_id is None:
+            ConversationHistory._trim_last_assistant(msgs, response_heard, update_fn)
+            return
+
+        for i in range(len(msgs) - 1, -1, -1):
+            if msgs[i]["role"] == ChatRole.ASSISTANT and msgs[i].get("turn_id") == turn_id:
+                ConversationHistory._trim_assistant_at_index(msgs, i, response_heard, update_fn)
+                return
+
+        logger.info(f"No assistant message found for turn_id={turn_id}; falling back to last assistant trim")
+        ConversationHistory._trim_last_assistant(msgs, response_heard, update_fn)
+
+    @staticmethod
+    def _trim_assistant_at_index(msgs: list[dict], index: int, response_heard: str | None, update_fn):
+        original = msgs[index]["content"]
+        if original is None:
+            return
+        updated = update_fn(original, response_heard)
+        logger.info(
+            f"Trimming assistant message. Original (last 10 chars): {str(original)[-10:]} | Updated: {updated[-10:] if updated else '<empty>'}"
+        )
+        if not updated or not updated.strip():
+            has_tool_calls = bool(msgs[index].get("tool_calls"))
+            logger.info(
+                f"Removing assistant message (last 10 chars): {str(original)[-10:]} | has_tool_calls={has_tool_calls} from transcript"
+            )
+            msgs.pop(index)
+            if has_tool_calls:
+                while index < len(msgs) and msgs[index].get("role") == ChatRole.TOOL:
+                    msgs.pop(index)
+            else:
+                while msgs and msgs[-1].get("role") in _UNHEARD_ROLES:
+                    msgs.pop()
+        else:
+            msgs[index]["content"] = updated
 
     @property
     def messages(self) -> list[dict]:

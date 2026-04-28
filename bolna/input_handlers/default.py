@@ -36,6 +36,8 @@ class DefaultInputHandler:
         self.is_welcome_message_played = is_welcome_message_played
         # This variable stores the response which has been heard by the user
         self.response_heard_by_user = ""
+        self.response_heard_by_turn = {}
+        self.last_heard_turn_id = None
         self._is_audio_being_played_to_user = False
         self.observable_variables = observable_variables
         self.mark_event_meta_data = mark_event_meta_data
@@ -92,6 +94,15 @@ class DefaultInputHandler:
 
     def reset_response_heard_by_user(self):
         self.response_heard_by_user = ""
+        self.response_heard_by_turn = {}
+        self.last_heard_turn_id = None
+
+    def get_response_heard_for_turn(self, turn_id=None):
+        if turn_id is None:
+            turn_id = self.last_heard_turn_id
+        if turn_id is None:
+            return ""
+        return (self.response_heard_by_turn.get(turn_id) or "").strip()
 
     async def stop_handler(self):
         self.running = False
@@ -141,7 +152,12 @@ class DefaultInputHandler:
                 self.mark_event_meta_data.record_ack(delay, mark_event_meta_data_obj.get("sequence_id"))
 
         if is_content_audio:
-            self.response_heard_by_user += mark_event_meta_data_obj.get("text_synthesized") or ""
+            heard_text = mark_event_meta_data_obj.get("text_synthesized") or ""
+            self.response_heard_by_user += heard_text
+            turn_id = mark_event_meta_data_obj.get("turn_id")
+            if turn_id is not None and heard_text:
+                self.last_heard_turn_id = turn_id
+                self.response_heard_by_turn[turn_id] = self.response_heard_by_turn.get(turn_id, "") + heard_text
 
         if mark_event_meta_data_obj.get("is_final_chunk"):
             if message_type != "is_user_online_message":
