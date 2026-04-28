@@ -251,6 +251,7 @@ class TaskManager(BaseManager):
         self.consider_next_transcript_after = time.time()
         self.llm_response_generated = False
         self.response_in_pipeline = False
+        self._turn_msg_map = {}  # turn_id → assistant message dict ref in _messages
 
         # Language detection
         self.language_detector = LanguageDetector(self.task_config["task_config"], run_id=self.run_id)
@@ -1525,9 +1526,63 @@ class TaskManager(BaseManager):
                             f"Estimated played text (last 10 chars): {response_heard[-10:]}, len={len(response_heard)}"
                         )
                 else:
-                    logger.info("No pending content marks found to estimate played text")
-                    # No pending content marks - response likely completed normally
-                    return
+                    # No text_synthesized on marks (streaming synths). Group pending
+                    # marks by turn_id and use audio duration to determine play state.
+                    pending_by_turn = {}  # turn_id → {seq_ids: set, pending_dur: float}
+                    for mark in pending_marks:
+                        mark_data = mark.get("mark_data", {})
+                        if mark_data.get("type") == "pre_mark_message":
+                            continue
+                        t_id = mark_data.get("turn_id")
+                        s_id = mark_data.get("sequence_id")
+                        if t_id is None:
+                            continue
+                        entry = pending_by_turn.setdefault(t_id, {"seq_ids": set(), "pending_dur": 0.0})
+                        if s_id is not None and s_id != -1:
+                            entry["seq_ids"].add(s_id)
+                        entry["pending_dur"] += mark_data.get("duration", 0.0)
+
+                    if not pending_by_turn:
+                        logger.info("No pending marks with turn_id to estimate played text")
+                        return
+
+                    # Use the most recently interrupted turn
+                    t_id = max(pending_by_turn.keys())
+                    info = pending_by_turn[t_id]
+                    msg = self._turn_msg_map.get(t_id)
+                    full_text = (msg.get("content") or "") if msg else ""
+
+                    total_dur = sum(
+                        self.mark_event_meta_data._mark_stats.per_sequence[s].total_audio_duration
+                        for s in info["seq_ids"]
+                        if s in self.mark_event_meta_data._mark_stats.per_sequence
+                    )
+
+                    if total_dur <= 0:
+                        logger.info(f"turn_id={t_id}: no duration stats, skipping")
+                        return
+
+                    heard_dur = max(0.0, total_dur - info["pending_dur"])
+                    proportion = min(1.0, heard_dur / total_dur)
+                    logger.info(
+                        f"turn_id={t_id}: total={total_dur:.3f}s pending={info['pending_dur']:.3f}s proportion={proportion:.2f}"
+                    )
+
+                    if proportion >= 1.0:
+                        # Fully played — nothing to trim
+                        return
+
+                    if proportion > 0 and full_text.strip():
+                        char_count = int(len(full_text.strip()) * proportion)
+                        if char_count < len(full_text.strip()):
+                            last_space = full_text.strip()[:char_count].rfind(" ")
+                            if last_space > 0:
+                                char_count = last_space
+                        response_heard = full_text.strip()[:char_count]
+                        logger.info(f"turn_id={t_id}: partial, heard (last 20): {response_heard[-20:]!r}")
+                    else:
+                        response_heard = ""
+                        logger.info(f"turn_id={t_id}: nothing heard")
 
             self.conversation_history.sync_after_interruption(response_heard, self.update_transcript_for_interruption)
             self.conversation_history.sync_interim_after_interruption(
@@ -2467,13 +2522,21 @@ class TaskManager(BaseManager):
             cached_tokens=cached_tokens,
             reasoning_content=reasoning_content,
         )
+        turn_id = meta_info.get("turn_id")
         if should_trigger_function_call:
             logger.info(f"There was a function call and need to make that work")
             self.conversation_history.append_assistant(llm_response)
+            # Track pre-tool textual response so sync_history can find it if the
+            # user interrupts before the tool call completes. The final post-tool
+            # response will overwrite this entry when it is stored.
+            if turn_id is not None:
+                self._turn_msg_map[turn_id] = self.conversation_history.messages[-1]
         else:
             messages.append({"role": "assistant", "content": llm_response})
             self.conversation_history.append_assistant(llm_response)
             self.conversation_history.sync_interim(messages)
+            if turn_id is not None:
+                self._turn_msg_map[turn_id] = self.conversation_history.messages[-1]
 
     async def __do_llm_generation(
         self, messages, meta_info, next_step, should_bypass_synth=False, should_trigger_function_call=False

@@ -95,11 +95,18 @@ class ConversationHistory:
                         f"Removing assistant message (last 10 chars): {str(original)[-10:]} | has_tool_calls={has_tool_calls} from transcript"
                     )
                     msgs.pop(i)
-                    # If the removed assistant had tool_calls, also remove its
-                    # dependent tool-role messages to keep the history valid.
                     if has_tool_calls:
+                        # Remove subsequent dependent tool-role messages.
                         while i < len(msgs) and msgs[i].get("role") == ChatRole.TOOL:
                             msgs.pop(i)
+                    else:
+                        # This response may follow a tool-call chain the user never
+                        # heard; remove orphaned tool results and their paired
+                        # assistant(tool_calls) entries so they don't enter the transcript.
+                        while msgs and msgs[-1].get("role") == ChatRole.TOOL:
+                            msgs.pop()
+                            if msgs and msgs[-1].get("role") == ChatRole.ASSISTANT and msgs[-1].get("tool_calls"):
+                                msgs.pop()
                 else:
                     msgs[i]["content"] = updated
                 break

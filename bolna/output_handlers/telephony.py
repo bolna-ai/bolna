@@ -81,7 +81,6 @@ class TelephonyOutputHandler(DefaultOutputHandler):
                             self.welcome_message_sent_ts = time.time() * 1000
                         logger.info(f"Sending media event - {meta_info.get('mark_id')}")
 
-                    # sending of post-mark message
                     mark_event_meta_data = {
                         "text_synthesized": ""
                         if meta_info["sequence_id"] == -1
@@ -91,6 +90,7 @@ class TelephonyOutputHandler(DefaultOutputHandler):
                         "is_final_chunk": meta_info.get("end_of_llm_stream", False)
                         and meta_info.get("end_of_synthesizer_stream", False),
                         "sequence_id": meta_info["sequence_id"],
+                        "turn_id": meta_info.get("turn_id"),
                         "duration": len(audio_chunk) / 8000
                         if meta_info.get("format", "mulaw") == "mulaw"
                         else len(audio_chunk) / 16000,
@@ -101,7 +101,7 @@ class TelephonyOutputHandler(DefaultOutputHandler):
                         if (meta_info.get("mark_id") and meta_info.get("mark_id") != "")
                         else str(uuid.uuid4())
                     )
-
+                    # sending of post-mark message
                     self.mark_event_meta_data.update_data(mark_id, mark_event_meta_data)
                     mark_message = await self.form_mark_message(mark_id)
                     await self.websocket.send_text(json.dumps(mark_message))
