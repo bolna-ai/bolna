@@ -1489,6 +1489,10 @@ class TaskManager(BaseManager):
         try:
             mark_events_data = list(mark_events_data)
             target_turn_id = self._get_latest_turn_id_from_marks(mark_events_data)
+            logger.info(
+                f"sync_history: target_turn_id={target_turn_id} marks={len(mark_events_data)} "
+                f"mark_ids={[mid for mid, _ in mark_events_data]}"
+            )
             input_handler = self.tools["input"]
             response_heard = input_handler.get_response_heard_for_turn(target_turn_id)
             if not response_heard:
@@ -1608,6 +1612,20 @@ class TaskManager(BaseManager):
                     else:
                         response_heard = ""
                         logger.info(f"turn_id={t_id}: nothing heard")
+
+            if target_turn_id is not None and response_heard and target_turn_id not in self._turn_msg_map:
+                logger.info(
+                    f"sync_history: materializing assistant turn from heard audio | turn_id={target_turn_id} "
+                    f"text={response_heard!r}"
+                )
+                self.conversation_history.upsert_assistant_for_turn(target_turn_id, response_heard, interim=False)
+                self.conversation_history.upsert_assistant_for_turn(target_turn_id, response_heard, interim=True)
+                for i in range(len(self.conversation_history.messages) - 1, -1, -1):
+                    msg = self.conversation_history.messages[i]
+                    if msg.get("role") == "assistant" or str(msg.get("role")).lower() == "assistant":
+                        if msg.get("turn_id") == target_turn_id:
+                            self._turn_msg_map[target_turn_id] = msg
+                            break
 
             self.conversation_history.sync_turn_after_interruption(
                 target_turn_id, response_heard, self.update_transcript_for_interruption

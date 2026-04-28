@@ -36,6 +36,15 @@ class ConversationHistory:
             msg["tool_calls"] = tool_calls
         self._messages.append(msg)
 
+    def upsert_assistant_for_turn(self, turn_id: int | None, content: str, interim: bool = False):
+        msgs = self._interim if interim else self._messages
+        if turn_id is not None:
+            for i in range(len(msgs) - 1, -1, -1):
+                if msgs[i].get("role") == ChatRole.ASSISTANT and msgs[i].get("turn_id") == turn_id:
+                    msgs[i]["content"] = content
+                    return
+        msgs.append({"role": ChatRole.ASSISTANT, "content": content, "turn_id": turn_id})
+
     def append_tool_result(self, tool_call_id: str, content: str):
         self._messages.append(
             {
