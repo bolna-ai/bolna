@@ -100,13 +100,12 @@ class ConversationHistory:
                         while i < len(msgs) and msgs[i].get("role") == ChatRole.TOOL:
                             msgs.pop(i)
                     else:
-                        # This response may follow a tool-call chain the user never
-                        # heard; remove orphaned tool results and their paired
-                        # assistant(tool_calls) entries so they don't enter the transcript.
-                        while msgs and msgs[-1].get("role") == ChatRole.TOOL:
+                        # Nothing from this turn was played. Remove all trailing
+                        # assistant/tool entries back to the user message — covers
+                        # pre-tool fillers, tool calls, tool results, and any other
+                        # unheard assistant content from the same turn.
+                        while msgs and msgs[-1].get("role") in _UNHEARD_ROLES:
                             msgs.pop()
-                            if msgs and msgs[-1].get("role") == ChatRole.ASSISTANT and msgs[-1].get("tool_calls"):
-                                msgs.pop()
                 else:
                     msgs[i]["content"] = updated
                 break
