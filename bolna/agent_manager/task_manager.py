@@ -1041,9 +1041,9 @@ class TaskManager(BaseManager):
                         if label == active_label:
                             self.transcriber_provider = cfg.get("provider", cfg.get("model"))
 
-                    # Audio LID tap — always Sarvam for multilingual pools.
-                    # To switch provider, change LID_PROVIDER below; agents have no control over this.
-                    LID_PROVIDER = "sarvam"
+                    # Audio LID tap — configurable via LID_PROVIDER env var.
+                    # Supported: "sarvam" (default), "voxlingua". Agents have no control over this.
+                    LID_PROVIDER = os.getenv("LID_PROVIDER", "voxlingua")
                     _lid_config = {"telephony_provider": provider}
 
                     self.tools["transcriber"] = TranscriberPool(
