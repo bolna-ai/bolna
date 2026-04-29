@@ -211,7 +211,9 @@ class TranscriberPool:
         and cooldown (no switching within X seconds of the last switch) before
         calling switch() and notifying the task manager via on_lid_switch.
         """
-        if confidence < self._LID_CONFIDENCE_THRESHOLD:
+        # Skip confidence check for Sarvam — it doesn't return language_probability
+        # in unknown-language mode; the language_code itself is the signal.
+        if self._lid_provider_name != "sarvam" and confidence < self._LID_CONFIDENCE_THRESHOLD:
             logger.debug(f"TranscriberPool LID: {lang} conf={confidence:.2f} below threshold, ignoring")
             return
 
