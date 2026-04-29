@@ -45,7 +45,7 @@ class TranscriberPool:
                           write to the same one).
             active_label: which transcriber label should receive audio initially.
             multilingual_config: raw multilingual config dict from task_config
-            lid_provider: "sarvam" | "voxlingua" | None (disables LID tap)
+            lid_provider: "sarvam" | None (disables LID tap)
             lid_config: extra config forwarded to the LID backend
             on_lid_switch: async callback(label) invoked when LID triggers a switch.
                            Typically wired to TaskManager.switch_language().
