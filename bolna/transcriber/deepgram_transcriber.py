@@ -74,10 +74,12 @@ class DeepgramTranscriber(BaseTranscriber):
 
         # Flux model support
         self.is_flux_model = model.startswith('flux-')
+        self.is_flux_multi = model == 'flux-general-multi'
         self.eot_threshold = kwargs.get("eot_threshold") or 0.7
         self.eager_eot_threshold = kwargs.get("eager_eot_threshold")
         self.eot_timeout_ms = kwargs.get("eot_timeout_ms") or 5000
         self.eager_transcript_pending = None
+        self.language_hints = kwargs.get("language_hints")
 
     def get_deepgram_ws_url(self):
         if self.is_flux_model:
@@ -175,9 +177,28 @@ class DeepgramTranscriber(BaseTranscriber):
         if self.keywords and len(self.keywords.split(",")) > 0:
             dg_params['keyterm'] = self.keywords.split(",")
 
+        if self.is_flux_multi:
+            hints = self._resolve_language_hints()
+            if hints:
+                dg_params['language_hint'] = hints
+
         websocket_api = 'wss://{}/v2/listen?'.format(self.deepgram_host)
         websocket_url = websocket_api + urlencode(dg_params, doseq=True)
         return websocket_url
+
+    def _resolve_language_hints(self):
+        """Resolve language_hint values for flux-general-multi.
+
+        Precedence: explicit language_hints kwarg > derived from self.language.
+        Returns None for auto-detect (no hint param sent).
+        """
+        if self.language_hints:
+            return [h for h in self.language_hints if h]
+        if not self.language or self.language == 'multi':
+            return None
+        if self.language.startswith('multi-'):
+            return [self.language.split('-', 1)[1]]
+        return [self.language]
 
     async def send_heartbeat(self, ws: ClientConnection):
         try:
