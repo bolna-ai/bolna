@@ -178,7 +178,10 @@ class SarvamLID(LIDProvider):
                     if data.get("type") == "data":
                         payload = data.get("data", {})
                         lang = payload.get("language_code", "")
-                        conf = float(payload.get("language_probability") or 0.0)
+                        # Sarvam returns language_probability=None when using
+                        # language-code=unknown mode — treat absence as full confidence
+                        raw_prob = payload.get("language_probability")
+                        conf = float(raw_prob) if raw_prob is not None else 1.0
                         logger.info(f"SarvamLID detected: lang={lang!r} conf={conf:.2f}")
                         if lang and lang != "unknown":
                             # Normalise to 2-letter ISO code (hi-IN → hi)
