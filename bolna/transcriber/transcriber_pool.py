@@ -1,4 +1,6 @@
 import asyncio
+import time
+from typing import Callable, Awaitable, Optional
 from bolna.helpers.logger_config import configure_logger
 
 logger = configure_logger(__name__)
@@ -22,7 +24,17 @@ class TranscriberPool:
     # heartbeats are being sent.  10s gives a comfortable safety margin.
     _KEEPALIVE_INTERVAL = 10
 
-    def __init__(self, transcribers, shared_input_queue, output_queue, active_label, multilingual_config):
+    # ── LID defaults ──────────────────────────────────────────────────────
+    # Require this many consecutive same-language detections before switching.
+    _LID_DEBOUNCE_COUNT = 2
+    # Minimum confidence score to accept a LID detection.
+    _LID_CONFIDENCE_THRESHOLD = 0.70
+    # Seconds to wait after a switch before accepting new LID signals.
+    _LID_COOLDOWN_S = 10.0
+
+    def __init__(self, transcribers, shared_input_queue, output_queue, active_label, multilingual_config,
+                 lid_provider: str = None, lid_config: dict = None,
+                 on_lid_switch: Optional[Callable[[str], Awaitable[None]]] = None):
         """
         Args:
             transcribers: dict mapping label -> transcriber instance.
@@ -33,6 +45,10 @@ class TranscriberPool:
                           write to the same one).
             active_label: which transcriber label should receive audio initially.
             multilingual_config: raw multilingual config dict from task_config
+            lid_provider: "sarvam" | "voxlingua" | None (disables LID tap)
+            lid_config: extra config forwarded to the LID backend
+            on_lid_switch: async callback(label) invoked when LID triggers a switch.
+                           Typically wired to TaskManager.switch_language().
         """
         self.transcribers = transcribers
         self.shared_input_queue = shared_input_queue
@@ -44,6 +60,28 @@ class TranscriberPool:
         self._router_task = None
         self._keepalive_task = None
         self._multilingual_config = multilingual_config
+
+        # ── LID tap state ──────────────────────────────────────────────────
+        self._lid_provider_name = lid_provider
+        self._lid_config = lid_config or {}
+        self._lid: Optional[object] = None          # LIDProvider instance
+        self._lid_task: Optional[asyncio.Task] = None
+        self._on_lid_switch = on_lid_switch
+
+        # Debounce state
+        self._lid_pending_lang: Optional[str] = None
+        self._lid_pending_count: int = 0
+        self._lid_last_switch_time: float = 0.0
+
+        # Map language ISO codes → transcriber labels (built from multilingual_config)
+        # e.g. {"hi": "hindi", "en": "english"}
+        self._lang_to_label: dict[str, str] = {}
+        if multilingual_config:
+            for label, cfg in multilingual_config.items():
+                lang = (cfg.get("language_code") or cfg.get("language") or "").lower()
+                short = lang.split("-")[0]
+                if short:
+                    self._lang_to_label[short] = label
 
     # ------------------------------------------------------------------
     # Properties that delegate to the active transcriber
@@ -79,7 +117,7 @@ class TranscriberPool:
         return self.transcribers[self.active_label].get_meta_info()
 
     async def run(self):
-        """Start all transcribers, the audio router, and the standby keepalive."""
+        """Start all transcribers, the audio router, standby keepalive, and LID tap."""
         for label, transcriber in self.transcribers.items():
             logger.info(f"TranscriberPool: starting transcriber '{label}'")
             await transcriber.run()
@@ -87,6 +125,10 @@ class TranscriberPool:
         self._router_task = asyncio.create_task(self._audio_router())
         self._keepalive_task = asyncio.create_task(self._standby_keepalive())
         logger.info(f"TranscriberPool: audio router started, active='{self.active_label}'")
+
+        # Start LID tap if configured
+        if self._lid_provider_name:
+            await self._start_lid_tap()
 
     @staticmethod
     def _silence_frame(encoding):
@@ -97,12 +139,21 @@ class TranscriberPool:
         return b"\x00" * 320
 
     async def _audio_router(self):
-        """Read from the shared input queue and forward to the active transcriber's private queue."""
+        """Read from the shared input queue, forward to active transcriber, and feed LID tap."""
         try:
             while True:
                 packet = await self.shared_input_queue.get()
                 active = self.active_label
                 self.transcribers[active].input_queue.put_nowait(packet)
+
+                # Feed raw audio to LID tap (if running)
+                if self._lid is not None:
+                    audio_data = packet.get("data") if isinstance(packet, dict) else None
+                    if audio_data and isinstance(audio_data, bytes):
+                        try:
+                            self._lid.feed(audio_data)
+                        except Exception as e:
+                            logger.debug(f"TranscriberPool: LID feed error: {e}")
         except asyncio.CancelledError:
             logger.info("TranscriberPool: audio router cancelled")
 
@@ -136,6 +187,83 @@ class TranscriberPool:
                     )
         except asyncio.CancelledError:
             logger.info("TranscriberPool: standby keepalive cancelled")
+
+    async def _start_lid_tap(self) -> None:
+        """Instantiate and connect the configured LID provider."""
+        try:
+            from bolna.transcriber.lid_provider import LIDProvider
+            self._lid = LIDProvider.create(
+                provider=self._lid_provider_name,
+                on_language=self._handle_lid_signal,
+                config=self._lid_config,
+            )
+            await self._lid.start()
+            logger.info(f"TranscriberPool: LID tap started (provider={self._lid_provider_name})")
+        except Exception as e:
+            logger.error(f"TranscriberPool: failed to start LID tap: {e}")
+            self._lid = None
+
+    async def _handle_lid_signal(self, lang: str, confidence: float) -> None:
+        """
+        Called by the LID provider every time it detects a language.
+
+        Applies debounce (N consecutive same-language detections above threshold)
+        and cooldown (no switching within X seconds of the last switch) before
+        calling switch() and notifying the task manager via on_lid_switch.
+        """
+        if confidence < self._LID_CONFIDENCE_THRESHOLD:
+            logger.debug(f"TranscriberPool LID: {lang} conf={confidence:.2f} below threshold, ignoring")
+            return
+
+        # Already on this language — reset debounce and do nothing
+        active_lang = (self._multilingual_config.get(self.active_label, {})
+                       .get("language_code", "")).split("-")[0].lower()
+        if lang == active_lang:
+            self._lid_pending_lang = None
+            self._lid_pending_count = 0
+            return
+
+        # Cooldown check
+        now = time.monotonic()
+        if now - self._lid_last_switch_time < self._LID_COOLDOWN_S:
+            logger.debug(f"TranscriberPool LID: cooldown active, ignoring {lang}")
+            return
+
+        # Debounce accumulation
+        if lang == self._lid_pending_lang:
+            self._lid_pending_count += 1
+        else:
+            self._lid_pending_lang = lang
+            self._lid_pending_count = 1
+
+        logger.debug(
+            f"TranscriberPool LID: {lang} conf={confidence:.2f} "
+            f"count={self._lid_pending_count}/{self._LID_DEBOUNCE_COUNT}"
+        )
+
+        if self._lid_pending_count >= self._LID_DEBOUNCE_COUNT:
+            # Find the transcriber label for this language
+            target_label = self._lang_to_label.get(lang)
+            if target_label and target_label != self.active_label:
+                logger.info(
+                    f"TranscriberPool LID: switching {self.active_label} → {target_label} "
+                    f"(lang={lang}, conf={confidence:.2f})"
+                )
+                self._lid_last_switch_time = now
+                self._lid_pending_lang = None
+                self._lid_pending_count = 0
+                await self.switch(target_label)
+                if self._on_lid_switch:
+                    try:
+                        await self._on_lid_switch(target_label)
+                    except Exception as e:
+                        logger.error(f"TranscriberPool: on_lid_switch callback error: {e}")
+            else:
+                if not target_label:
+                    logger.warning(
+                        f"TranscriberPool LID: detected lang '{lang}' has no matching transcriber. "
+                        f"Available: {self._lang_to_label}"
+                    )
 
     async def switch(self, label):
         """Switch which transcriber receives audio.
@@ -180,7 +308,7 @@ class TranscriberPool:
         return info
 
     async def cleanup(self):
-        """Clean up all transcribers and cancel pool tasks."""
+        """Clean up all transcribers, cancel pool tasks, and stop LID tap."""
         for task_name, task in [("router", self._router_task), ("keepalive", self._keepalive_task)]:
             if task and not task.done():
                 task.cancel()
@@ -189,6 +317,14 @@ class TranscriberPool:
                 except asyncio.CancelledError:
                     pass
                 logger.info(f"TranscriberPool: {task_name} task cancelled")
+
+        # Stop LID tap
+        if self._lid is not None:
+            try:
+                await self._lid.stop()
+                logger.info("TranscriberPool: LID tap stopped")
+            except Exception as e:
+                logger.warning(f"TranscriberPool: error stopping LID tap: {e}")
 
         for label, transcriber in self.transcribers.items():
             logger.info(f"TranscriberPool: cleaning up '{label}'")
