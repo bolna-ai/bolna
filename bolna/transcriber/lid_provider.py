@@ -174,16 +174,19 @@ class SarvamLID(LIDProvider):
             async for raw in self._ws:
                 try:
                     data = json.loads(raw) if isinstance(raw, str) else {}
+                    logger.info(f"SarvamLID raw response: {data}")
                     if data.get("type") == "data":
                         payload = data.get("data", {})
                         lang = payload.get("language_code", "")
                         conf = float(payload.get("language_probability") or 0.0)
+                        logger.info(f"SarvamLID detected: lang={lang!r} conf={conf:.2f}")
                         if lang and lang != "unknown":
                             # Normalise to 2-letter ISO code (hi-IN → hi)
                             short = lang.split("-")[0].lower()
+                            logger.info(f"SarvamLID emitting: short={short!r} conf={conf:.2f}")
                             await self.on_language(short, conf)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.error(f"SarvamLID receiver parse error: {e} raw={raw!r}")
         except asyncio.CancelledError:
             pass
         except Exception as e:
