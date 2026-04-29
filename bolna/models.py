@@ -122,6 +122,11 @@ class Transcriber(BaseModel):
     keywords: Optional[str] = None
     task: Optional[str] = "transcribe"
     provider: Optional[str] = "deepgram"
+    # Flux model parameters
+    eot_threshold: Optional[float] = None
+    eager_eot_threshold: Optional[float] = None
+    eot_timeout_ms: Optional[int] = None
+    language_hints: Optional[List[str]] = None
 
     @field_validator("provider")
     def validate_model(cls, value):
