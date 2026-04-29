@@ -340,15 +340,6 @@ class SarvamTranscriber(BaseTranscriber):
                         transcript = payload.get("transcript", "")
                         metrics = payload.get("metrics", {})
 
-                        # Emit language detection event when running in auto-LID mode
-                        detected_lang = payload.get("language_code", "")
-                        if detected_lang and detected_lang != "unknown" and self.language in ("unknown", None, ""):
-                            lang_prob = float(payload.get("language_probability") or 0.0)
-                            yield create_ws_data_packet(
-                                {"type": "language_detected", "language_code": detected_lang, "confidence": lang_prob},
-                                self.meta_info,
-                            )
-
                         if transcript and transcript.strip():
                             logger.debug(f"Sarvam transcript received: {transcript.strip()[:50]}...")
                             now_timestamp = time.time()

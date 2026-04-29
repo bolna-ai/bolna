@@ -20,9 +20,6 @@ pytz>=2024.1
 redis==5.0.1
 requests>=2.31.0,<3
 scipy==1.11.4
-speechbrain>=1.0.0
-torch>=2.0.0
-torchaudio>=2.0.0
 tiktoken>=0.6.0
 twilio==8.9.0
 uvicorn==0.22.0
