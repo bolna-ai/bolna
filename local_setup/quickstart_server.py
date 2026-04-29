@@ -2,7 +2,7 @@ import os
 import asyncio
 import uuid
 import traceback
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Query,Body
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Query, Body
 from fastapi.middleware.cors import CORSMiddleware
 import redis.asyncio as redis
 from dotenv import load_dotenv
@@ -16,18 +16,14 @@ from bolna.agent_manager.assistant_manager import AssistantManager
 load_dotenv()
 logger = configure_logger(__name__)
 
-redis_pool = redis.ConnectionPool.from_url(os.getenv('REDIS_URL'), decode_responses=True)
+redis_pool = redis.ConnectionPool.from_url(os.getenv("REDIS_URL"), decode_responses=True)
 redis_client = redis.Redis.from_pool(redis_pool)
 active_websockets: List[WebSocket] = []
 
 app = FastAPI()
 
 app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"]
+    CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"]
 )
 
 
@@ -51,32 +47,35 @@ async def get_agent(agent_id: str):
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
-
 @app.post("/agent")
 async def create_agent(agent_data: CreateAgentPayload):
     agent_uuid = str(uuid.uuid4())
     data_for_db = agent_data.agent_config.model_dump()
     data_for_db["assistant_status"] = "seeding"
     agent_prompts = agent_data.agent_prompts
-    logger.info(f'Data for DB {data_for_db}')
+    logger.info(f"Data for DB {data_for_db}")
 
-    if len(data_for_db['tasks']) > 0:
+    if len(data_for_db["tasks"]) > 0:
         logger.info("Setting up follow up tasks")
-        for index, task in enumerate(data_for_db['tasks']):
-            if task['task_type'] == "extraction":
+        for index, task in enumerate(data_for_db["tasks"]):
+            if task["task_type"] == "extraction":
                 extraction_prompt_llm = os.getenv("EXTRACTION_PROMPT_GENERATION_MODEL")
                 extraction_prompt_generation_llm = LiteLLM(model=extraction_prompt_llm, max_tokens=2000)
                 extraction_prompt = await extraction_prompt_generation_llm.generate(
                     messages=[
-                        {'role': 'system', 'content': EXTRACTION_PROMPT_GENERATION_PROMPT},
-                        {'role': 'user', 'content': data_for_db["tasks"][index]['tools_config']["llm_agent"]['extraction_details']}
-                    ])
-                data_for_db["tasks"][index]["tools_config"]["llm_agent"]['extraction_json'] = extraction_prompt
+                        {"role": "system", "content": EXTRACTION_PROMPT_GENERATION_PROMPT},
+                        {
+                            "role": "user",
+                            "content": data_for_db["tasks"][index]["tools_config"]["llm_agent"]["extraction_details"],
+                        },
+                    ]
+                )
+                data_for_db["tasks"][index]["tools_config"]["llm_agent"]["extraction_json"] = extraction_prompt
 
     stored_prompt_file_path = f"{agent_uuid}/conversation_details.json"
     await asyncio.gather(
         redis_client.set(agent_uuid, json.dumps(data_for_db)),
-        store_file(file_key=stored_prompt_file_path, file_data=agent_prompts, local=True)
+        store_file(file_key=stored_prompt_file_path, file_data=agent_prompts, local=True),
     )
 
     return {"agent_id": agent_uuid, "state": "created"}
@@ -86,20 +85,17 @@ async def create_agent(agent_data: CreateAgentPayload):
 async def edit_agent(agent_id: str, agent_data: CreateAgentPayload = Body(...)):
     """Edits an existing agent based on the provided agent_id."""
     try:
-
         existing_data = await redis_client.get(agent_id)
         if not existing_data:
             raise HTTPException(status_code=404, detail="Agent not found")
 
         existing_data = json.loads(existing_data)
 
-
         new_data = agent_data.agent_config.model_dump()
         new_data["assistant_status"] = "updated"
         agent_prompts = agent_data.agent_prompts
 
         logger.info(f"Updating Agent {agent_id}: {new_data}")
-
 
         for index, task in enumerate(new_data.get("tasks", [])):
             if task.get("task_type") == "extraction":
@@ -113,17 +109,16 @@ async def edit_agent(agent_id: str, agent_data: CreateAgentPayload = Body(...)):
                 extraction_prompt = await extraction_prompt_generation_llm.generate(
                     messages=[
                         {"role": "system", "content": EXTRACTION_PROMPT_GENERATION_PROMPT},
-                        {"role": "user", "content": extraction_details}
+                        {"role": "user", "content": extraction_details},
                     ]
                 )
 
                 new_data["tasks"][index]["tools_config"]["llm_agent"]["extraction_json"] = extraction_prompt
 
-
         stored_prompt_file_path = f"{agent_id}/conversation_details.json"
         await asyncio.gather(
             redis_client.set(agent_id, json.dumps(new_data)),
-            store_file(file_key=stored_prompt_file_path, file_data=agent_prompts, local=True)
+            store_file(file_key=stored_prompt_file_path, file_data=agent_prompts, local=True),
         )
 
         return {"agent_id": agent_id, "state": "updated"}
@@ -132,6 +127,7 @@ async def edit_agent(agent_id: str, agent_data: CreateAgentPayload = Body(...)):
         logger.error(f"Error updating agent {agent_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Internal server error")
 
+
 @app.delete("/agent/{agent_id}")
 async def delete_agent(agent_id: str):
     """Deletes an agent by ID."""
@@ -139,7 +135,7 @@ async def delete_agent(agent_id: str):
         agent_exists = await redis_client.exists(agent_id)
         if not agent_exists:
             raise HTTPException(status_code=404, detail="Agent not found")
-            
+
         await redis_client.delete(agent_id)
         return {"agent_id": agent_id, "state": "deleted"}
 
@@ -152,11 +148,10 @@ async def delete_agent(agent_id: str):
 async def get_all_agents():
     """Fetches all agents stored in Redis."""
     try:
+        agent_keys = await redis_client.keys("*")
 
-        agent_keys = await redis_client.keys("*")  
-        
         if not agent_keys:
-            return {"agents": []}  
+            return {"agents": []}
         agents_data = []
         for key in agent_keys:
             try:
@@ -165,8 +160,7 @@ async def get_all_agents():
             except Exception as e:
                 logger.error(f"An error occurred with key {key}: {e}")
 
-
-        agents = [{ "agent_id": key, "data": json.loads(data) } for key, data in zip(agent_keys, agents_data) if data]
+        agents = [{"agent_id": key, "data": json.loads(data)} for key, data in zip(agent_keys, agents_data) if data]
 
         return {"agents": agents}
 
@@ -175,8 +169,8 @@ async def get_all_agents():
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
-############################################################################################# 
-# Websocket 
+#############################################################################################
+# Websocket
 #############################################################################################
 @app.websocket("/chat/v1/{agent_id}")
 async def websocket_endpoint(agent_id: str, websocket: WebSocket, user_agent: str = Query(None)):
@@ -186,8 +180,7 @@ async def websocket_endpoint(agent_id: str, websocket: WebSocket, user_agent: st
     agent_config, context_data = None, None
     try:
         retrieved_agent_config = await redis_client.get(agent_id)
-        logger.info(
-            f"Retrieved agent config: {retrieved_agent_config}")
+        logger.info(f"Retrieved agent config: {retrieved_agent_config}")
         agent_config = json.loads(retrieved_agent_config)
     except Exception as e:
         traceback.print_exc()

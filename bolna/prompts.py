@@ -48,6 +48,40 @@ If none of these apply, the conversation is not complete.
 
 """
 
+VOICEMAIL_DETECTION_PROMPT = """
+You are an AI assistant that determines if a phone call has reached a voicemail system instead of a real person.
+
+Analyze the user's message and determine if it sounds like a voicemail greeting or automated message system. Signs of voicemail include:
+
+1. Standard voicemail greetings (e.g., "You have reached...", "Please leave a message after the beep", "The person you are trying to reach is unavailable")
+2. Automated system prompts (e.g., "Press 1 to leave a message", "Your call has been forwarded to an automated voice message system")
+3. Generic carrier voicemail messages (e.g., "The mailbox is full", "At the tone, please record your message")
+4. Pre-recorded personal greetings asking callers to leave a message
+5. Beep sounds or tone indicators mentioned in the transcript
+
+If the message appears to be from a voicemail system, respond with "Yes". If it appears to be a real person speaking, respond with "No".
+"""
+
+LANGUAGE_DETECTION_PROMPT = """
+You are a language detection assistant. Analyze the following user transcripts from a conversation and determine the dominant language the user intends to communicate in.
+
+Consider:
+1. The primary language used across all transcripts
+2. Code-switching patterns (e.g., user mixing Hindi and English) - focus on which language carries the main content
+3. The language used for substantive content vs. filler words or greetings
+4. If the user uses multiple languages, identify which one they predominantly use for expressing their main thoughts
+
+Transcripts:
+{transcripts}
+
+Respond ONLY in this JSON format:
+{{
+  "dominant_language": "<ISO 639-1 code: en, hi, bn, ta, te, mr, gu, kn, ml, pa, fr, es, etc.>",
+  "confidence": <0.0-1.0>,
+  "reasoning": "<brief one-line explanation>"
+}}
+"""
+
 EXTRACTION_PROMPT_GENERATION_PROMPT = """
 You are a parsing assistant. Your job is to convert a structured set of extraction instructions into a JSON object where:
 
@@ -81,6 +115,6 @@ If there were any proper nouns, or number or date or time involved explicitly ma
 
 FILLER_PROMPT = "Please, do not start your response with fillers like Got it, Noted.\nAbstain from using any greetings like hey, hello at the start of your conversation"
 
-DATE_PROMPT = '''### Today Current Date and Time:\n {} at {} local time in the {} timezone. Use this information to ensure all time-related responses are accurate and contextually relevant based on the user's location.'''
+DATE_PROMPT = """### Today Current Date and Time:\n {} at {} local time in the {} timezone. Use this information to ensure all time-related responses are accurate and contextually relevant based on the user's location."""
 
 FUNCTION_CALL_PROMPT = "We made a function calling for user. We hit the function : {} and send a {} request and it returned us the response as given below: {} \n\n . Understand the above response and convey this response in a context to user. ### Important\n1. If there was an issue with the API call, kindly respond with - Hey, I'm not able to use the system right now, can you please try later? \n2. IF YOU CALLED THE FUNCTION BEFORE, PLEASE DO NOT CALL THE SAME FUNCTION AGAIN!"

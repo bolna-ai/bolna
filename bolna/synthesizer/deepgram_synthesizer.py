@@ -1,149 +1,291 @@
+import asyncio
 import copy
-import time
-import aiohttp
+import json
 import os
-import uuid
+import time
+import traceback
+from collections import deque
+
+import aiohttp
+import websockets
 from dotenv import load_dotenv
+
+from .stream_synthesizer import StreamSynthesizer
 from bolna.helpers.logger_config import configure_logger
+from bolna.helpers.ssl_context import get_ssl_context
 from bolna.helpers.utils import convert_audio_to_wav, create_ws_data_packet
 from bolna.memory.cache.inmemory_scalar_cache import InmemoryScalarCache
-from .base_synthesizer import BaseSynthesizer
 
 logger = configure_logger(__name__)
 load_dotenv()
-DEEPGRAM_HOST = os.getenv('DEEPGRAM_HOST', 'api.deepgram.com')
-DEEPGRAM_TTS_URL = "https://{}/v1/speak".format(DEEPGRAM_HOST)
+DEEPGRAM_HOST = os.getenv("DEEPGRAM_HOST", "api.deepgram.com")
+DEEPGRAM_TTS_URL = f"https://{DEEPGRAM_HOST}/v1/speak"
+DEEPGRAM_TTS_WS_URL = f"wss://{DEEPGRAM_HOST}/v1/speak"
 
 
-class DeepgramSynthesizer(BaseSynthesizer):
-    def __init__(self, voice_id, voice, audio_format="pcm", sampling_rate="8000", stream=False, buffer_size=400, caching=True,
-                 model="aura-zeus-en", **kwargs):
-        super().__init__(kwargs.get("task_manager_instance", None), stream, buffer_size)
-        self.format = "mulaw" if audio_format in ["pcm", 'wav'] else audio_format
+class DeepgramSynthesizer(StreamSynthesizer):
+    def __init__(
+        self,
+        voice_id,
+        voice,
+        audio_format="pcm",
+        sampling_rate="8000",
+        stream=False,
+        buffer_size=400,
+        caching=True,
+        model="aura-zeus-en",
+        **kwargs,
+    ):
+        super().__init__(
+            stream=stream,
+            provider_name="deepgram",
+            buffer_size=buffer_size,
+            **kwargs,
+        )
         self.voice = voice
         self.voice_id = voice_id
         self.sample_rate = str(sampling_rate)
         self.model = model
-        self.first_chunk_generated = False
-        self.api_key = kwargs.get("transcriber_key", os.getenv('DEEPGRAM_AUTH_TOKEN'))
+        self.api_key = kwargs.get("transcriber_key", os.getenv("DEEPGRAM_AUTH_TOKEN"))
 
-        if len(self.model.split('-')) == 2:
+        self.use_mulaw = kwargs.get("use_mulaw", False)
+        if self.use_mulaw or audio_format in ("pcm", "wav"):
+            self.format = "mulaw"
+        else:
+            self.format = audio_format
+
+        if len(self.model.split("-")) == 2:
             self.model = f"{self.model}-{self.voice_id}"
-        
-        self.synthesized_characters = 0
+
         self.caching = caching
         if caching:
             self.cache = InmemoryScalarCache()
 
-    def get_synthesized_characters(self):
-        return self.synthesized_characters
-    
-    def get_engine(self):
-        return self.model
+        self.run_id = kwargs.get("run_id")
+        self.ws_url = f"{DEEPGRAM_TTS_WS_URL}?encoding={self.format}&sample_rate={self.sample_rate}&model={self.model}"
+        if self.run_id:
+            self.ws_url += f"&tag={self.run_id}"
 
-    async def __generate_http(self, text):
-        headers = {
-            "Authorization": "Token {}".format(self.api_key),
-            "Content-Type": "application/json"
-        }
-        url = DEEPGRAM_TTS_URL + "?container=none&encoding={}&sample_rate={}&model={}".format(
-            self.format, self.sample_rate, self.model
-        )
+        # Extra TTFB tracking for WS mode
+        self.ws_send_time = None
+        self.current_turn_ttfb = None
 
+    def get_sleep_time(self):
+        return 0.01 if self.stream else super().get_sleep_time()
+
+    # ------------------------------------------------------------------
+    # StreamSynthesizer hooks
+    # ------------------------------------------------------------------
+
+    def _get_audio_format(self):
+        return "mulaw" if self.use_mulaw else self.format
+
+    # ------------------------------------------------------------------
+    # Interruption
+    # ------------------------------------------------------------------
+
+    async def handle_interruption(self):
+        try:
+            ws = self.websocket
+            if ws is not None and ws.state is websockets.protocol.State.OPEN:
+                await ws.send(json.dumps({"type": "Clear"}))
+                logger.info("Sent Clear message to Deepgram TTS WebSocket")
+        except Exception as e:
+            logger.error(f"Error handling interruption: {e}")
+
+    # ------------------------------------------------------------------
+    # sender / receiver
+    # ------------------------------------------------------------------
+
+    async def sender(self, text, sequence_id, end_of_llm_stream=False):
+        try:
+            if self.conversation_ended:
+                return
+            if not self.should_synthesize_response(sequence_id):
+                logger.info(f"Not synthesizing: sequence_id {sequence_id} not current")
+                await self.flush_synthesizer_stream()
+                return
+
+            await self._wait_for_ws()
+
+            if text != "":
+                if not self.should_synthesize_response(sequence_id):
+                    logger.info(f"Not synthesizing (inner): sequence_id {sequence_id} not current")
+                    await self.flush_synthesizer_stream()
+                    return
+                try:
+                    if self.ws_send_time is None:
+                        self.ws_send_time = time.perf_counter()
+                        logger.info("Deepgram WS send first_text_sent")
+                    await self._send_json({"type": "Speak", "text": text})
+                except Exception as e:
+                    logger.error(f"Error sending chunk to Deepgram: {e}")
+                    self.connection_error = str(e)
+                    return
+
+            if end_of_llm_stream:
+                self.last_text_sent = True
+                try:
+                    await self._send_json({"type": "Flush"})
+                    logger.info("Sent Flush message to Deepgram TTS WebSocket")
+                except Exception as e:
+                    logger.error(f"Error sending Flush to Deepgram: {e}")
+                    self.connection_error = str(e)
+
+        except asyncio.CancelledError:
+            logger.info("Deepgram sender task was cancelled.")
+        except Exception as e:
+            logger.error(f"Unexpected error in Deepgram sender: {e}")
+
+    async def receiver(self):
+        audio_chunk_count = 0
+        not_connected_since = None
+        while True:
+            try:
+                if self.conversation_ended:
+                    return
+                if not self._is_ws_connected():
+                    if self.connection_error:
+                        return
+                    now = time.perf_counter()
+                    if not_connected_since is None:
+                        not_connected_since = now
+                    elif now - not_connected_since > 30:
+                        logger.error("Deepgram receiver: WebSocket never connected after 30s, giving up.")
+                        self.connection_error = self.connection_error or "WebSocket never connected"
+                        return
+                    logger.info("Deepgram WebSocket is not connected, skipping receive.")
+                    await asyncio.sleep(0.10)
+                    continue
+                else:
+                    not_connected_since = None
+
+                response = await self.websocket.recv()
+
+                if isinstance(response, bytes):
+                    audio_chunk_count += 1
+                    if audio_chunk_count == 1 and self.ws_send_time is not None:
+                        time_since_send = (time.perf_counter() - self.ws_send_time) * 1000
+                        logger.info(f"Deepgram WS recv FIRST audio chunk time_since_send={time_since_send:.0f}ms")
+                    yield response
+                else:
+                    try:
+                        data = json.loads(response)
+                        msg_type = data.get("type", "")
+                        if msg_type == "Metadata":
+                            logger.info(f"Deepgram TTS Metadata: request_id={data.get('request_id')}")
+                        elif msg_type == "Flushed":
+                            logger.info(f"Deepgram TTS Flushed: sequence_id={data.get('sequence_id')}")
+                            audio_chunk_count = 0
+                            yield b"\x00"
+                        elif msg_type == "Cleared":
+                            logger.info(f"Deepgram TTS Cleared: sequence_id={data.get('sequence_id')}")
+                            audio_chunk_count = 0
+                        elif msg_type == "Warning":
+                            logger.info(f"Deepgram TTS Warning: {data.get('description')}")
+                        else:
+                            logger.info(f"Deepgram TTS response: {data}")
+                    except json.JSONDecodeError:
+                        logger.warning("Received unexpected non-JSON text response from Deepgram")
+
+            except websockets.exceptions.ConnectionClosed:
+                logger.info("Deepgram WebSocket connection closed")
+                break
+            except Exception as e:
+                logger.error(f"Error in Deepgram receiver: {e}")
+                traceback.print_exc()
+
+    # ------------------------------------------------------------------
+    # Connection
+    # ------------------------------------------------------------------
+
+    async def establish_connection(self):
+        try:
+            start_time = time.perf_counter()
+            websocket = await asyncio.wait_for(
+                websockets.connect(self.ws_url, additional_headers={"Authorization": f"Token {self.api_key}"}, ssl=get_ssl_context(self.ws_url)),
+                timeout=10.0,
+            )
+            if not self.connection_time:
+                self.connection_time = round((time.perf_counter() - start_time) * 1000)
+            logger.info(f"Connected to Deepgram TTS WebSocket: {self.ws_url}")
+            return websocket
+        except asyncio.TimeoutError:
+            logger.error("Timeout while connecting to Deepgram TTS WebSocket")
+            return None
+        except websockets.exceptions.InvalidStatusCode as e:
+            if e.status_code == 401:
+                logger.error("Deepgram authentication failed: Invalid API key")
+            elif e.status_code == 403:
+                logger.error("Deepgram authentication failed: Access forbidden")
+            else:
+                logger.error(f"Deepgram WebSocket connection failed with status {e.status_code}: {e}")
+            self.connection_error = str(e)
+            return None
+        except Exception as e:
+            logger.error(f"Failed to connect to Deepgram TTS WebSocket: {e}")
+            return None
+
+    async def cleanup(self):
+        """Send graceful Close before standard cleanup."""
+        self.conversation_ended = True
+        logger.info("Cleaning up Deepgram synthesizer tasks")
+
+        if self.sender_task:
+            try:
+                self.sender_task.cancel()
+                await self.sender_task
+            except asyncio.CancelledError:
+                logger.info("Deepgram sender task cancelled during cleanup.")
+            except Exception as e:
+                logger.warning(f"Error cancelling sender task: {e}")
+
+        ws = self.websocket
+        if ws:
+            try:
+                await ws.send(json.dumps({"type": "Close"}))
+                logger.info("Sent Close message to Deepgram TTS WebSocket")
+            except Exception as e:
+                logger.error(f"Error sending Close message: {e}")
+            try:
+                await ws.close()
+            except Exception as e:
+                logger.error(f"Error closing WebSocket: {e}")
+
+        self.websocket = None
+        logger.info("Deepgram TTS WebSocket connection closed.")
+
+    # ------------------------------------------------------------------
+    # HTTP mode (non-streaming)
+    # ------------------------------------------------------------------
+
+    async def _generate_http(self, text):
+        headers = {"Authorization": f"Token {self.api_key}", "Content-Type": "application/json"}
+        url = f"{DEEPGRAM_TTS_URL}?container=none&encoding={self.format}&sample_rate={self.sample_rate}&model={self.model}"
+        if self.run_id:
+            url += f"&tag={self.run_id}"
         logger.info(f"Sending deepgram request {url}")
-
-        payload = {
-            "text": text
-        }
         try:
             async with aiohttp.ClientSession() as session:
-                if payload is not None:
-                    async with session.post(url, headers=headers, json=payload) as response:
-                        if response.status == 200:
-                            chunk = await response.read()
-                            logger.info(f"status for deepgram request {response.status} response {len(await response.read())}")
-                            return chunk
-                        else:
-                            logger.info(f"status for deepgram reques {response.status} response {await response.read()}")
-                            return b'\x00'
-                else:
-                    logger.info("Payload was null")
+                async with session.post(url, headers=headers, json={"text": text}) as response:
+                    if response.status == 200:
+                        return await response.read()
+                    else:
+                        logger.info(f"Deepgram request status {response.status}")
+                        return b"\x00"
         except Exception as e:
-            logger.error("something went wrong")
-
-    def supports_websocket(self):
-        return False
-
-    async def open_connection(self):
-        pass    
+            logger.error(f"Deepgram HTTP error: {e}")
 
     async def synthesize(self, text):
-        # This is used for one off synthesis mainly for use cases like voice lab and IVR
         try:
-            audio = await self.__generate_http(text)
+            audio = await self._generate_http(text)
             if self.format == "mp3":
                 audio = convert_audio_to_wav(audio, source_format="mp3")
             return audio
         except Exception as e:
             logger.error(f"Could not synthesize {e}")
 
-    async def generate(self):
-        while True:
-            message = await self.internal_queue.get()
-            logger.info(f"Generating TTS response for message: {message}")
-            meta_info, text = message.get("meta_info"), message.get("data")
-            # Stamp synthesizer turn start time for HTTP flow
-            try:
-                meta_info['synthesizer_start_time'] = time.perf_counter()
-            except Exception:
-                pass
-            if not self.should_synthesize_response(meta_info.get('sequence_id')):
-                logger.info(f"Not synthesizing text as the sequence_id ({meta_info.get('sequence_id')}) of it is not in the list of sequence_ids present in the task manager.")
-                return
-            if self.caching:
-                logger.info(f"Caching is on")
-                if self.cache.get(text):
-                    logger.info(f"Cache hit and hence returning quickly {text}")
-                    message = self.cache.get(text)
-                else:
-                    logger.info(f"Not a cache hit {list(self.cache.data_dict)}")
-                    self.synthesized_characters += len(text)
-                    message = await self.__generate_http(text)
-                    self.cache.set(text, message)
-            else:
-                logger.info(f"No caching present")
-                self.synthesized_characters += len(text)
-                message = await self.__generate_http(text)
-
-            if self.format == "mp3":
-                message = convert_audio_to_wav(message, source_format="mp3")
-            if not self.first_chunk_generated:
-                meta_info["is_first_chunk"] = True
-                self.first_chunk_generated = True
-            else:
-                meta_info["is_first_chunk"] = False
-            if "end_of_llm_stream" in meta_info and meta_info["end_of_llm_stream"]:
-                meta_info["end_of_synthesizer_stream"] = True
-                self.first_chunk_generated = False
-            meta_info['text'] = text
-            # Compute first-result latency for HTTP (first and only audio message)
-            try:
-                if 'synthesizer_start_time' in meta_info and 'synthesizer_first_result_latency' not in meta_info:
-                    meta_info['synthesizer_first_result_latency'] = time.perf_counter() - meta_info['synthesizer_start_time']
-                    meta_info['synthesizer_latency'] = meta_info['synthesizer_first_result_latency']
-            except Exception:
-                pass
-            meta_info['format'] = 'mulaw'
-            meta_info["text_synthesized"] = f"{text} "
-            meta_info["mark_id"] = str(uuid.uuid4())
-            # Compute total stream duration (HTTP single-shot)
-            try:
-                if 'synthesizer_start_time' in meta_info:
-                    meta_info['synthesizer_total_stream_duration'] = time.perf_counter() - meta_info['synthesizer_start_time']
-            except Exception:
-                pass
-            yield create_ws_data_packet(message, meta_info)
-
-    async def push(self, message):
-        logger.info(f"Pushed message to internal queue {message}")
-        self.internal_queue.put_nowait(copy.deepcopy(message))
+    def _process_http_audio(self, audio):
+        if self.format == "mp3":
+            return convert_audio_to_wav(audio, source_format="mp3")
+        return audio

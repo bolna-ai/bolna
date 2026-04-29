@@ -1,0 +1,277 @@
+from enum import Enum
+
+
+class ChatRole(str, Enum):
+    """Chat message roles."""
+
+    SYSTEM = "system"
+    USER = "user"
+    ASSISTANT = "assistant"
+    TOOL = "tool"
+
+
+class TelephonyProvider(str, Enum):
+    """Enum for telephony/IO providers (input/output handlers)."""
+
+    TWILIO = "twilio"
+    EXOTEL = "exotel"
+    PLIVO = "plivo"
+    VOBIZ = "vobiz"
+    SIP_TRUNK = "sip-trunk"
+    DEFAULT = "default"
+    DATABASE = "database"
+
+    @classmethod
+    def telephony_providers(cls):
+        """Return only telephony providers (excluding default and database)."""
+        return [cls.TWILIO, cls.EXOTEL, cls.PLIVO, cls.VOBIZ, cls.SIP_TRUNK]
+
+    @classmethod
+    def all_values(cls):
+        """Return all provider values as a list of strings."""
+        return [provider.value for provider in cls]
+
+    @classmethod
+    def telephony_values(cls):
+        """Return telephony provider values as a list of strings."""
+        return [provider.value for provider in cls.telephony_providers()]
+
+
+class SynthesizerProvider(str, Enum):
+    """Enum for synthesizer (TTS) providers."""
+
+    POLLY = "polly"
+    ELEVENLABS = "elevenlabs"
+    OPENAI = "openai"
+    DEEPGRAM = "deepgram"
+    AZURETTS = "azuretts"
+    CARTESIA = "cartesia"
+    SMALLEST = "smallest"
+    SARVAM = "sarvam"
+    RIME = "rime"
+    PIXA = "pixa"
+
+    @classmethod
+    def all_values(cls):
+        """Return all provider values as a list of strings."""
+        return [provider.value for provider in cls]
+
+
+class TranscriberProvider(str, Enum):
+    """Enum for transcriber (STT) providers."""
+
+    DEEPGRAM = "deepgram"
+    AZURE = "azure"
+    SARVAM = "sarvam"
+    ASSEMBLY = "assembly"
+    GOOGLE = "google"
+    PIXA = "pixa"
+    GLADIA = "gladia"
+    ELEVENLABS = "elevenlabs"
+    SMALLEST = "smallest"
+
+    @classmethod
+    def all_values(cls):
+        """Return all provider values as a list of strings."""
+        return [provider.value for provider in cls]
+
+
+class LLMProvider(str, Enum):
+    """Enum for LLM providers."""
+
+    OPENAI = "openai"
+    COHERE = "cohere"
+    OLLAMA = "ollama"
+    DEEPINFRA = "deepinfra"
+    TOGETHER = "together"
+    FIREWORKS = "fireworks"
+    AZURE_OPENAI = "azure-openai"
+    PERPLEXITY = "perplexity"
+    VLLM = "vllm"
+    ANYSCALE = "anyscale"
+    CUSTOM = "custom"
+    OLA = "ola"
+    GROQ = "groq"
+    ANTHROPIC = "anthropic"
+    DEEPSEEK = "deepseek"
+    OPENROUTER = "openrouter"
+    AZURE = "azure"
+    GOOGLE = "google"
+
+    @classmethod
+    def all_values(cls):
+        """Return all provider values as a list of strings."""
+        return [provider.value for provider in cls]
+
+
+class ReasoningEffort(str, Enum):
+    NONE = "none"
+    MINIMAL = "minimal"
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+    XHIGH = "xhigh"
+
+    @classmethod
+    def all_values(cls):
+        """Return all reasoning effort values as a list of strings."""
+        return [effort.value for effort in cls]
+
+
+class Verbosity(str, Enum):
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+
+    @classmethod
+    def all_values(cls):
+        """Return all verbosity values as a list of strings."""
+        return [verbosity.value for verbosity in cls]
+
+
+class ResponseStreamEvent(str, Enum):
+    """Responses API event types (server-sent and client commands)."""
+
+    # Server stream events
+    CREATED = "response.created"
+    COMPLETED = "response.completed"
+    FAILED = "response.failed"
+    INCOMPLETE = "response.incomplete"
+    IN_PROGRESS = "response.in_progress"
+    OUTPUT_TEXT_DELTA = "response.output_text.delta"
+    OUTPUT_ITEM_ADDED = "response.output_item.added"
+    OUTPUT_ITEM_DONE = "response.output_item.done"
+    FUNCTION_CALL_ARGS_DELTA = "response.function_call_arguments.delta"
+    REASONING_SUMMARY_TEXT_DELTA = "response.reasoning_summary_text.delta"
+    REASONING_SUMMARY_TEXT_DONE = "response.reasoning_summary_text.done"
+    ERROR = "error"
+
+    # WebSocket client commands
+    CREATE = "response.create"
+    CANCEL = "response.cancel"
+
+    @classmethod
+    def terminal_events(cls):
+        """Events that signal the end of a response stream."""
+        return frozenset({cls.COMPLETED, cls.FAILED, cls.INCOMPLETE, cls.ERROR})
+
+    @classmethod
+    def all_values(cls):
+        return [e.value for e in cls]
+
+
+class ResponseItemType(str, Enum):
+    """Responses API input item types."""
+
+    MESSAGE = "message"
+    FUNCTION_CALL = "function_call"
+    FUNCTION_CALL_OUTPUT = "function_call_output"
+    FUNCTION = "function"
+
+    @classmethod
+    def all_values(cls):
+        return [e.value for e in cls]
+
+
+class HangupReason(str, Enum):
+    """Enum for hangup_detail values — why the call ended."""
+
+    LLM_PROMPTED_HANGUP = "llm_prompted_hangup"
+    VOICEMAIL_DETECTED = "voicemail_detected"
+    WEB_CALL_MAX_DURATION_REACHED = "web_call_max_duration_reached"
+    INACTIVITY_TIMEOUT = "inactivity_timeout"
+    TRANSCRIBER_ERROR = "transcriber_error"
+    TRANSCRIBER_CONNECTION_ERROR = "transcriber_connection_error"
+    SYNTHESIZER_ERROR = "synthesizer_error"
+    LLM_ERROR = "llm_error"
+
+    @classmethod
+    def all_values(cls):
+        return [r.value for r in cls]
+
+
+class LogComponent(str, Enum):
+    """Enum for CSV trace log component types."""
+
+    ERROR = "error"
+    FUNCTION_CALL = "function_call"
+    GRAPH_ROUTING = "graph_routing"
+    LLM = "llm"
+    LLM_HANGUP = "llm_hangup"
+    LLM_LANGUAGE_DETECTION = "llm_language_detection"
+    LLM_VOICEMAIL = "llm_voicemail"
+    SYNTHESIZER = "synthesizer"
+    TRANSCRIBER = "transcriber"
+    WARNING = "warning"
+
+    @property
+    def display_name(self):
+        return _DISPLAY_NAMES.get(self, self.value)
+
+    @classmethod
+    def all_values(cls):
+        return [c.value for c in cls]
+
+
+_DISPLAY_NAMES = {
+    LogComponent.TRANSCRIBER: "Speech recognition",
+    LogComponent.SYNTHESIZER: "Text-to-speech",
+    LogComponent.LLM: "LLM",
+    LogComponent.LLM_HANGUP: "LLM hangup check",
+    LogComponent.LLM_VOICEMAIL: "LLM voicemail check",
+    LogComponent.LLM_LANGUAGE_DETECTION: "LLM language detection",
+    LogComponent.FUNCTION_CALL: "Function call",
+    LogComponent.GRAPH_ROUTING: "Graph routing",
+}
+
+
+class LogDirection(str, Enum):
+    """Enum for CSV trace log direction types."""
+
+    ERROR = "error"
+    REQUEST = "request"
+    RESPONSE = "response"
+    WARNING = "warning"
+
+    @classmethod
+    def all_values(cls):
+        return [d.value for d in cls]
+
+
+class ExpressionOperator(str, Enum):
+    EQ = "eq"
+    NEQ = "neq"
+    GT = "gt"
+    GTE = "gte"
+    LT = "lt"
+    LTE = "lte"
+    IN = "in"
+    NOT_IN = "not_in"
+    CONTAINS = "contains"
+    EXISTS = "exists"
+    NOT_EXISTS = "not_exists"
+
+
+class ExpressionLogic(str, Enum):
+    AND = "and"
+    OR = "or"
+
+
+class EdgeConditionType(str, Enum):
+    LLM = "llm"
+    EXPRESSION = "expression"
+    UNCONDITIONAL = "unconditional"
+    EVENT = "event"
+
+
+class NodeType(str, Enum):
+    LLM = "llm"
+    STATIC = "static"
+
+
+class UsageSource(str, Enum):
+    """Indicates whether token counts came from the API or text estimation."""
+
+    API_REPORTED = "api_reported"
+    ESTIMATED = "estimated"
+    PARTIAL = "partial"  # Mix of api_reported and estimated (e.g., interrupted streams)

@@ -1,0 +1,59 @@
+name: Publish to PyPI
+
+on:
+  push:
+    branches: [master]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: pypi
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.10'
+
+      - name: Check if version needs publishing
+        id: check
+        run: |
+          VERSION=$(python -c "import re; m = re.search(r'__version__\s*=\s*\"(.+?)\"', open('bolna/__init__.py').read()); print(m.group(1))")
+          LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "0.0.0")
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          if [ "$VERSION" != "$LATEST_TAG" ]; then
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create tag and GitHub Release
+        if: steps.check.outputs.publish == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.check.outputs.version }}
+        run: |
+          git tag "$VERSION"
+          git push origin "$VERSION"
+          gh release create "$VERSION" --title "$VERSION" --generate-notes
+
+      - name: Build
+        if: steps.check.outputs.publish == 'true'
+        run: |
+          pip install build
+          python -m build
+
+      - name: Publish to PyPI
+        if: steps.check.outputs.publish == 'true'
+        uses: pypa/gh-action-pypi-publish@release/v1

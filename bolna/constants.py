@@ -1,71 +1,203 @@
 from datetime import datetime, timezone
-PREPROCESS_DIR = 'agent_data'
+from bolna.enums import ReasoningEffort as RE
+
+PREPROCESS_DIR = "agent_data"
+PCM16_SCALE = 32768.0
+
+# Model prefixes
+GPT5_MODEL_PREFIX = "gpt-5"
 
 HIGH_LEVEL_ASSISTANT_ANALYTICS_DATA = {
-        "extraction_details":{}, 
-        "cost_details": {
-            "average_transcriber_cost_per_conversation": 0, 
-            "average_llm_cost_per_conversation": 0,
-            "average_synthesizer_cost_per_conversation": 1.0
-        },
-        "historical_spread": {
-            "number_of_conversations_in_past_5_days": [], 
-            "cost_past_5_days": [],
-            "average_duration_past_5_days": []
-        },
-        "conversation_details": { 
-            "total_conversations": 0,
-            "finished_conversations": 0, 
-            "rejected_conversations": 0
-        },
-        "execution_details": {
-            "total_conversations": 0, 
-            "total_cost": 0,
-            "average_duration_of_conversation": 0
-        },
-        "last_updated_at": datetime.now(timezone.utc).isoformat()
-    }
+    "extraction_details": {},
+    "cost_details": {
+        "average_transcriber_cost_per_conversation": 0,
+        "average_llm_cost_per_conversation": 0,
+        "average_synthesizer_cost_per_conversation": 1.0,
+    },
+    "historical_spread": {
+        "number_of_conversations_in_past_5_days": [],
+        "cost_past_5_days": [],
+        "average_duration_past_5_days": [],
+    },
+    "conversation_details": {"total_conversations": 0, "finished_conversations": 0, "rejected_conversations": 0},
+    "execution_details": {"total_conversations": 0, "total_cost": 0, "average_duration_of_conversation": 0},
+    "last_updated_at": datetime.now(timezone.utc).isoformat(),
+}
 
 ACCIDENTAL_INTERRUPTION_PHRASES = [
-    "stop", "quit", "bye", "wait", "no", "wrong", "incorrect", "hold", "pause", "break",
-    "cease", "halt", "silence", "enough", "excuse", "hold on", "hang on", "cut it", 
-    "that's enough", "shush", "listen", "excuse me", "hold up", "not now", "stop there", "stop speaking"
+    "stop",
+    "quit",
+    "bye",
+    "wait",
+    "no",
+    "wrong",
+    "incorrect",
+    "hold",
+    "pause",
+    "break",
+    "cease",
+    "halt",
+    "silence",
+    "enough",
+    "excuse",
+    "hold on",
+    "hang on",
+    "cut it",
+    "that's enough",
+    "shush",
+    "listen",
+    "excuse me",
+    "hold up",
+    "not now",
+    "stop there",
+    "stop speaking",
 ]
 
 PRE_FUNCTION_CALL_MESSAGE = {
     "en": "Just give me a moment, I'll be back with you.",
-    "ge": "Geben Sie mir einen Moment Zeit, ich bin gleich wieder bei Ihnen."
+    "ge": "Geben Sie mir einen Moment Zeit, ich bin gleich wieder bei Ihnen.",
 }
 
 FILLER_PHRASES = [
-    "No worries.", "It's fine.", "I'm here.", "No rush.", "Take your time.",
-    "Great!", "Awesome!", "Fantastic!", "Wonderful!", "Perfect!", "Excellent!",
-    "I get it.", "Noted.", "Alright.", "I understand.", "Understood.", "Got it.",
-    "Sure.", "Okay.", "Right.", "Absolutely.", "Sure thing.",
-    "I see.", "Gotcha.", "Makes sense."
+    "No worries.",
+    "It's fine.",
+    "I'm here.",
+    "No rush.",
+    "Take your time.",
+    "Great!",
+    "Awesome!",
+    "Fantastic!",
+    "Wonderful!",
+    "Perfect!",
+    "Excellent!",
+    "I get it.",
+    "Noted.",
+    "Alright.",
+    "I understand.",
+    "Understood.",
+    "Got it.",
+    "Sure.",
+    "Okay.",
+    "Right.",
+    "Absolutely.",
+    "Sure thing.",
+    "I see.",
+    "Gotcha.",
+    "Makes sense.",
 ]
 
 FILLER_DICT = {
-  "Unsure": ["No worries.", "It's fine.", "I'm here.", "No rush.", "Take your time."],
-  "Positive": ["Great!", "Awesome!", "Fantastic!", "Wonderful!", "Perfect!", "Excellent!"],
-  "Negative": ["I get it.", "Noted.", "Alright.", "I understand.", "Understood.", "Got it."],
-  "Neutral": ["Sure.", "Okay.", "Right.", "Absolutely.", "Sure thing."],
-  "Explaining": ["I see.", "Gotcha.", "Makes sense."],
-  "Greeting": ["Hello!", "Hi there!", "Hi!", "Hey!"],
-  "Farewell": ["Goodbye!", "Thank you!", "Take care!", "Bye!"],
-  "Thanking": ["Welcome!", "No worries!"],
-  "Apology": ["I'm sorry.", "My apologies.", "I apologize.", "Sorry."],
-  "Clarification": ["Please clarify.", "Can you explain?", "More details?", "Can you elaborate?"],
-  "Confirmation": ["Got it.", "Okay.", "Understood."]
+    "Unsure": ["No worries.", "It's fine.", "I'm here.", "No rush.", "Take your time."],
+    "Positive": ["Great!", "Awesome!", "Fantastic!", "Wonderful!", "Perfect!", "Excellent!"],
+    "Negative": ["I get it.", "Noted.", "Alright.", "I understand.", "Understood.", "Got it."],
+    "Neutral": ["Sure.", "Okay.", "Right.", "Absolutely.", "Sure thing."],
+    "Explaining": ["I see.", "Gotcha.", "Makes sense."],
+    "Greeting": ["Hello!", "Hi there!", "Hi!", "Hey!"],
+    "Farewell": ["Goodbye!", "Thank you!", "Take care!", "Bye!"],
+    "Thanking": ["Welcome!", "No worries!"],
+    "Apology": ["I'm sorry.", "My apologies.", "I apologize.", "Sorry."],
+    "Clarification": ["Please clarify.", "Can you explain?", "More details?", "Can you elaborate?"],
+    "Confirmation": ["Got it.", "Okay.", "Understood."],
 }
 
 CHECKING_THE_DOCUMENTS_FILLER = "Umm, just a moment, getting details..."
 TRANSFERING_CALL_FILLER = {
     "en": "Sure, I'll transfer the call for you. Please wait a moment...",
-    "fr": "D'accord, je transfère l'appel. Un instant, s'il vous plaît."
+    "fr": "D'accord, je transfère l'appel. Un instant, s'il vous plaît.",
 }
 
 DEFAULT_USER_ONLINE_MESSAGE = "Hey, are you still there?"
 DEFAULT_USER_ONLINE_MESSAGE_TRIGGER_DURATION = 6
-DEFAULT_LANGUAGE_CODE = 'en'
-DEFAULT_TIMEZONE = 'America/Los_Angeles'
+DEFAULT_LANGUAGE_CODE = "en"
+DEFAULT_TIMEZONE = "America/Los_Angeles"
+
+LANGUAGE_NAMES = {
+    "en": "English",
+    "hi": "Hindi",
+    "bn": "Bengali",
+    "ta": "Tamil",
+    "te": "Telugu",
+    "mr": "Marathi",
+    "gu": "Gujarati",
+    "kn": "Kannada",
+    "ml": "Malayalam",
+    "pa": "Punjabi",
+    "fr": "French",
+    "es": "Spanish",
+    "pt": "Portuguese",
+    "de": "German",
+    "it": "Italian",
+    "nl": "Dutch",
+    "id": "Indonesian",
+    "ms": "Malay",
+    "th": "Thai",
+    "vi": "Vietnamese",
+    "od": "Odia",
+}
+
+LLM_DEFAULT_CONFIGS = {
+    "summarization": {"model": "gpt-4.1-mini", "provider": "openai"},
+    "extraction": {"model": "gpt-4.1-mini", "provider": "openai"},
+    "google": {"model": "gemini-2.5-flash", "provider": "google"},
+}
+
+SWITCH_LANGUAGE_TOOL_DEFINITION = {
+    "type": "function",
+    "function": {
+        "name": "switch_language",
+        "description": "Switch the conversation language for speech recognition and synthesis. Call this when the user speaks in or requests a different language.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "language": {
+                    "type": "string",
+                    "description": "The language label to switch to (e.g. 'hi' for Hindi, 'en' for English)",
+                }
+            },
+            "required": ["language"],
+        },
+    },
+}
+
+END_CALL_FUNCTION_PREFIX = "end_call"
+
+END_CALL_TOOL_DEFINITION = {
+    "type": "function",
+    "function": {
+        "name": "end_call",
+        "description": "End the current call. Use this when the conversation is naturally complete, the user has explicitly said goodbye, or you've fulfilled the purpose of the call. Always say your goodbye message before calling this function.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "reason": {
+                    "type": "string",
+                    "description": "Brief reason for ending the call (e.g. 'conversation_complete', 'user_goodbye', 'task_fulfilled')",
+                }
+            },
+            "required": ["reason"],
+            "additionalProperties": False,
+        },
+        "strict": True,
+    },
+}
+
+SARVAM_MODEL_SAMPLING_RATE_MAPPING = {
+    "bulbul:v2": 22050,
+    "bulbul:v3": 22050,  # NOTE: Documentation claims 24000, but WAV header shows 22050
+}
+
+MODEL_REASONING_EFFORT_MAP = {
+    "gpt-5": [RE.MINIMAL, RE.LOW, RE.MEDIUM, RE.HIGH],
+    "gpt-5-mini": [RE.MINIMAL, RE.LOW, RE.MEDIUM, RE.HIGH],
+    "gpt-5-nano": [RE.MINIMAL, RE.LOW, RE.MEDIUM, RE.HIGH],
+    "gpt-5-codex": [RE.LOW, RE.MEDIUM, RE.HIGH],
+    "gpt-5-pro": [RE.HIGH],
+    "gpt-5.1": [RE.NONE, RE.LOW, RE.MEDIUM, RE.HIGH],
+    "gpt-5.1-codex": [RE.LOW, RE.MEDIUM, RE.HIGH],
+    "gpt-5.1-codex-max": [RE.LOW, RE.MEDIUM, RE.HIGH, RE.XHIGH],
+    "gpt-5.1-codex-mini": [RE.LOW, RE.MEDIUM, RE.HIGH],
+    "gpt-5.2": [RE.NONE, RE.LOW, RE.MEDIUM, RE.HIGH, RE.XHIGH],
+    "gpt-5.4": [RE.NONE, RE.LOW, RE.MEDIUM, RE.HIGH, RE.XHIGH],
+    "gpt-5.4-mini": [RE.NONE, RE.LOW, RE.MEDIUM, RE.HIGH],
+    "gpt-5.4-nano": [RE.NONE, RE.LOW, RE.MEDIUM, RE.HIGH],
+}

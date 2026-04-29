@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "bolna"
-version = "0.9.9"
+version = "0.10.16"
 readme = "README.md"
 authors = [
     { name = "Prateek Sachan", email = "ps@prateeksachan.com" }
@@ -18,10 +18,10 @@ classifiers = [
     "Programming Language :: Python :: 3",
 ]
 dynamic = ["dependencies"]
-requires-python = ">=3.8"
+requires-python = ">=3.10"
 
 [project.optional-dependencies]
-dev = ["pip-tools"]
+dev = ["pip-tools", "pre-commit", "pytest", "pytest-asyncio", "ruff"]
 
 [tool.setuptools]
 package-dir = {"bolna" = "bolna"}
@@ -29,23 +29,24 @@ package-dir = {"bolna" = "bolna"}
 [tool.setuptools.dynamic]
 dependencies = {file = ["requirements.txt"]}
 
-[tool.bumpver]
-current_version = "0.9.9"
-version_pattern = "MAJOR.MINOR.PATCH"
-commit_message = "bump bolna version {old_version} -> {new_version}"
-tag_message = "bolna-{new_version}"
-tag_scope = "default"
-pre_commit_hook = ""
-post_commit_hook = ""
-commit = true
-tag = true
-push = false
+[tool.ruff]
+line-length = 120
+target-version = "py310"
 
-[tool.bumpver.file_patterns]
-"pyproject.toml" = [
-    'current_version = "{version}"',
-    'version = "{version}"',
+[tool.ruff.lint]
+# Start minimal, grow over time. Uncomment rules as the codebase is cleaned up.
+# Roadmap: F541 → UP → F401 → F841 → I (isort) → E (pycodestyle)
+select = [
+    "E721",  # type comparison (use isinstance)
+    "F811",  # redefined unused name
+    "ISC",   # implicit string concatenation bugs
 ]
-"bolna/__init__.py" = [
-    '^__version__ = "{version}"$',
+
+[tool.commitizen]
+name = "cz_conventional_commits"
+version_provider = "pep621"
+tag_format = "$version"
+version_files = [
+    "bolna/__init__.py:__version__",
 ]
+update_changelog_on_bump = false

@@ -11,19 +11,25 @@ load_dotenv()
 
 class ExotelOutputHandler(TelephonyOutputHandler):
     def __init__(self, websocket=None, mark_event_meta_data=None, log_dir_name=None):
-        io_provider = 'exotel'
+        io_provider = "exotel"
 
         super().__init__(io_provider, websocket, mark_event_meta_data, log_dir_name)
         self.is_chunking_supported = True
 
     async def handle_interruption(self):
-        logger.info("interrupting because user spoke in between")
-        message_clear = {
-            "event": "clear",
-            "stream_sid": self.stream_sid,
-        }
-        await self.websocket.send_text(json.dumps(message_clear))
-        self.mark_event_meta_data.clear_data()
+        if self._closed:
+            return
+        try:
+            logger.info("interrupting because user spoke in between")
+            message_clear = {
+                "event": "clear",
+                "stream_sid": self.stream_sid,
+            }
+            await self.websocket.send_text(json.dumps(message_clear))
+            self.mark_event_meta_data.clear_data()
+        except Exception as e:
+            logger.info(f"WebSocket closed during interruption: {e}")
+            self._closed = True
 
     async def form_media_message(self, audio_data, audio_format):
         # Exotel expects PCM format (16-bit linear)
@@ -33,23 +39,14 @@ class ExotelOutputHandler(TelephonyOutputHandler):
             audio_data = audioop.ulaw2lin(audio_data, 2)
 
         base64_audio = base64.b64encode(audio_data).decode("ascii")
-        message = {
-            'event': 'media',
-            'stream_sid': self.stream_sid,
-            'media': {
-                'payload': base64_audio
-            }
-        }
+        message = {"event": "media", "stream_sid": self.stream_sid, "media": {"payload": base64_audio}}
 
         return message
 
     async def form_mark_message(self, mark_id):
-        mark_message = {
-            "event": "mark",
-            "stream_sid": self.stream_sid,
-            "mark": {
-                "name": mark_id
-            }
-        }
+        mark_message = {"event": "mark", "stream_sid": self.stream_sid, "mark": {"name": mark_id}}
 
         return mark_message
+
+    def requires_custom_voicemail_detection(self):
+        return False

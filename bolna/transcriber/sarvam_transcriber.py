@@ -19,6 +19,7 @@ from typing import Optional
 
 from .base_transcriber import BaseTranscriber
 from bolna.helpers.logger_config import configure_logger
+from bolna.helpers.ssl_context import get_ssl_context
 from bolna.helpers.utils import create_ws_data_packet
 
 load_dotenv()
@@ -37,8 +38,8 @@ class SarvamTranscriber(BaseTranscriber):
         encoding="linear16",
         sampling_rate="16000",
         output_queue=None,
-        high_vad_sensitivity=False,
-        vad_signals=False,
+        high_vad_sensitivity=True,
+        vad_signals=True,
         disable_sdk=False,
         **kwargs,
     ):
@@ -58,14 +59,6 @@ class SarvamTranscriber(BaseTranscriber):
         self.api_key = kwargs.get("transcriber_key", os.getenv("SARVAM_API_KEY"))
         self.api_host = os.getenv("SARVAM_HOST", "api.sarvam.ai")
 
-        # saaras models use translate endpoint, saarika models use transcription endpoint
-        if model.startswith("saaras"):
-            self.api_url = f"https://{self.api_host}/speech-to-text-translate"
-            self.ws_url = f"wss://{self.api_host}/speech-to-text-translate/ws"
-        else:
-            self.api_url = f"https://{self.api_host}/speech-to-text"
-            self.ws_url = f"wss://{self.api_host}/speech-to-text/ws"
-
         self.transcriber_output_queue = output_queue
         self.transcription_task = None
         self.sender_task = None
@@ -83,6 +76,7 @@ class SarvamTranscriber(BaseTranscriber):
         self.websocket_connection = None
         self.connection_authenticated = False
         self.meta_info = {}
+        self.connection_error = None
 
         self.current_turn_start_time = None
         self.current_turn_id = None
@@ -92,11 +86,14 @@ class SarvamTranscriber(BaseTranscriber):
         self.last_vocal_frame_timestamp = None
         self.turn_counter = 0
         self.turn_first_result_latency = None
-        
-        self.is_transcript_sent_for_processing = False
-        self.curr_message = ''
+
+        self.curr_message = ""
         self.finalized_transcript = ""
         self.interruption_signalled = False
+
+        self.api_url = None
+        self.ws_url = None
+        self._set_endpoints()
 
         self._configure_audio_params()
         self.session: Optional[aiohttp.ClientSession] = None
@@ -120,12 +117,23 @@ class SarvamTranscriber(BaseTranscriber):
             self.input_sampling_rate = self.sampling_rate
             self.audio_frame_duration = 0.2
 
-    def _get_ws_url(self):
+    def _set_endpoints(self):
         params = {"model": self.model}
+        ws_url = ""
 
-        # saaras auto-detects language, saarika requires language-code
-        if not self.model.startswith("saaras"):
+        # old saaras models use translate endpoint, saarika models use transcription endpoint
+        # saaras:v3 supports direct transcription
+        if self.model.startswith("saaras") and self.model != "saaras:v3":
+            self.api_url = f"https://{self.api_host}/speech-to-text-translate"
+            ws_url = f"wss://{self.api_host}/speech-to-text-translate/ws"
+
+        else:
+            self.api_url = f"https://{self.api_host}/speech-to-text"
+            ws_url = f"wss://{self.api_host}/speech-to-text/ws"
             params["language-code"] = self.language
+
+        if self.model == "saaras:v3":
+            params["mode"] = "transcribe"  # saaras:v3 supports direct transcription
 
         if self.high_vad_sensitivity:
             params["high_vad_sensitivity"] = "true"
@@ -133,8 +141,9 @@ class SarvamTranscriber(BaseTranscriber):
             params["vad_signals"] = "true"
         if self.target_language:
             params["target_language"] = self.target_language
+
         query_string = "&".join([f"{k}={v}" for k, v in params.items()])
-        return f"{self.ws_url}?{query_string}"
+        self.ws_url = f"{ws_url}?{query_string}"
 
     async def _get_http_transcription(self, audio_data):
         if self.session is None or self.session.closed:
@@ -206,7 +215,8 @@ class SarvamTranscriber(BaseTranscriber):
             wav_buffer.seek(0)
             return wav_buffer.getvalue()
         except Exception as e:
-            logger.error(f"WAV conversion error: {e}")
+            logger.error(f"WAV conversion error for language {self.language}: {e}")
+            logger.warning("Skipping audio frame - this may cause missing transcripts")
             return None
 
     def normalize_to_16k(self, raw_audio: bytes, in_sr: int) -> bytes:
@@ -281,7 +291,7 @@ class SarvamTranscriber(BaseTranscriber):
                         consecutive_errors += 1
                         if consecutive_errors >= 3:
                             break
-                        await asyncio.sleep(min(2 ** consecutive_errors, 10))
+                        await asyncio.sleep(min(2**consecutive_errors, 10))
         except asyncio.CancelledError:
             pass
 
@@ -331,20 +341,21 @@ class SarvamTranscriber(BaseTranscriber):
                         metrics = payload.get("metrics", {})
 
                         if transcript and transcript.strip():
+                            logger.debug(f"Sarvam transcript received: {transcript.strip()[:50]}...")
                             now_timestamp = time.time()
-                            
+
                             if self.first_result_latency_ms is None and self.audio_submission_time:
                                 first_result_latency_seconds = now_timestamp - self.audio_submission_time
                                 self.first_result_latency_ms = round(first_result_latency_seconds * 1000)
                                 self.meta_info["transcriber_first_result_latency"] = first_result_latency_seconds
-                                self.meta_info["transcriber_latency"] = first_result_latency_seconds  
+                                self.meta_info["transcriber_latency"] = first_result_latency_seconds
                                 self.meta_info["first_result_latency_ms"] = self.first_result_latency_ms
 
                             if self.current_turn_start_time and self.turn_first_result_latency is None:
                                 turn_latency_seconds = time.perf_counter() - self.current_turn_start_time
                                 self.turn_first_result_latency = round(turn_latency_seconds * 1000)
                                 self.meta_info["transcriber_first_result_latency"] = turn_latency_seconds
-                                self.meta_info["transcriber_latency"] = turn_latency_seconds  
+                                self.meta_info["transcriber_latency"] = turn_latency_seconds
 
                             transcript_data = {"type": "transcript", "content": transcript.strip()}
                             self.meta_info["transcriber_duration"] = metrics.get("audio_duration", 0)
@@ -361,6 +372,7 @@ class SarvamTranscriber(BaseTranscriber):
                     elif isinstance(data, dict) and data.get("type") == "events":
                         vad = data.get("data", {})
                         if vad.get("signal_type") == "START_SPEECH":
+                            logger.debug("Sarvam VAD: speech started")
                             self.current_turn_start_time = time.perf_counter()
                             self.turn_counter += 1
                             self.current_turn_id = f"turn_{self.turn_counter}"
@@ -368,6 +380,7 @@ class SarvamTranscriber(BaseTranscriber):
                             yield create_ws_data_packet("speech_started", self.meta_info)
 
                         elif vad.get("signal_type") == "END_SPEECH":
+                            logger.debug("Sarvam VAD: speech ended")
                             now = time.time()
                             self.last_vocal_frame_timestamp = now
                             self.meta_info["last_vocal_frame_timestamp"] = self.last_vocal_frame_timestamp
@@ -375,20 +388,20 @@ class SarvamTranscriber(BaseTranscriber):
                             if self.current_turn_start_time:
                                 total_stream_duration = time.perf_counter() - self.current_turn_start_time
                                 total_stream_duration_ms = round(total_stream_duration * 1000)
-                                
-                                self.meta_info['transcriber_total_stream_duration'] = total_stream_duration
-                                self.meta_info['transcriber_latency'] = total_stream_duration  
+
+                                self.meta_info["transcriber_total_stream_duration"] = total_stream_duration
+                                self.meta_info["transcriber_latency"] = total_stream_duration
 
                                 turn_info = {
                                     "turn_id": self.current_turn_id,
                                     "sequence_id": self.current_turn_id,
                                     "first_result_latency_ms": self.turn_first_result_latency,
-                                    "total_stream_duration_ms": total_stream_duration_ms,  
+                                    "total_stream_duration_ms": total_stream_duration_ms,
                                 }
                                 self.turn_latencies.append(turn_info)
                                 self.meta_info["turn_latencies"] = self.turn_latencies
-                                
-                                # Reset turn tracking 
+
+                                # Reset turn tracking
                                 self.current_turn_start_time = None
                                 self.current_turn_id = None
 
@@ -418,30 +431,31 @@ class SarvamTranscriber(BaseTranscriber):
             pass
 
     async def sarvam_connect(self, retries: int = 3, timeout: float = 10.0) -> ClientConnection:
-        ws_url = self._get_ws_url()
         additional_headers = {
-            'api-subscription-key': self.api_key,
+            "api-subscription-key": self.api_key,
         }
         attempt = 0
         last_err = None
         while attempt < retries:
             try:
+                logger.info(f"Attempting to connect to Sarvam websocket: {self.ws_url}")
                 ws = await asyncio.wait_for(
-                    websockets.connect(ws_url, additional_headers=additional_headers),
+                    websockets.connect(self.ws_url, additional_headers=additional_headers, ssl=get_ssl_context(self.ws_url)),
                     timeout=timeout,
                 )
                 self.websocket_connection = ws
                 self.connection_authenticated = True
+                logger.info("Successfully connected to Sarvam websocket")
                 return ws
             except asyncio.TimeoutError:
                 logger.error("Timeout while connecting to Sarvam websocket")
                 raise ConnectionError("Timeout while connecting to Sarvam websocket")
             except InvalidHandshake as e:
                 error_msg = str(e)
-                if '401' in error_msg or '403' in error_msg:
+                if "401" in error_msg or "403" in error_msg:
                     logger.error(f"Sarvam authentication failed: Invalid or expired API key - {e}")
                     raise ConnectionError(f"Sarvam authentication failed: Invalid or expired API key - {e}")
-                elif '404' in error_msg:
+                elif "404" in error_msg:
                     logger.error(f"Sarvam endpoint not found - check model/configuration: {e}")
                     raise ConnectionError(f"Sarvam endpoint not found: {e}")
                 else:
@@ -449,13 +463,13 @@ class SarvamTranscriber(BaseTranscriber):
                     last_err = e
                     attempt += 1
                     if attempt < retries:
-                        await asyncio.sleep(2 ** attempt)
+                        await asyncio.sleep(2**attempt)
             except Exception as e:
                 logger.error(f"Error connecting to Sarvam websocket (attempt {attempt + 1}/{retries}): {e}")
                 last_err = e
                 attempt += 1
                 if attempt < retries:
-                    await asyncio.sleep(2 ** attempt)
+                    await asyncio.sleep(2**attempt)
         raise ConnectionError(f"Failed to connect to Sarvam after {retries} attempts: {last_err}")
 
     async def push_to_transcriber_queue(self, data_packet):
@@ -473,6 +487,44 @@ class SarvamTranscriber(BaseTranscriber):
                 await self.websocket_connection.close()
             except Exception:
                 pass
+            finally:
+                self.websocket_connection = None
+                self.connection_authenticated = False
+
+    async def cleanup(self):
+        """Clean up all resources including HTTP session and websocket."""
+        logger.info("Cleaning up Sarvam transcriber resources")
+
+        # Close HTTP session (for non-streaming mode)
+        if hasattr(self, "session") and self.session and not self.session.closed:
+            try:
+                await self.session.close()
+                logger.info("Sarvam HTTP session closed")
+            except Exception as e:
+                logger.error(f"Error closing Sarvam HTTP session: {e}")
+
+        # Cancel tasks properly
+        for task_name, task in [
+            ("heartbeat_task", getattr(self, "heartbeat_task", None)),
+            ("sender_task", getattr(self, "sender_task", None)),
+            ("transcription_task", getattr(self, "transcription_task", None)),
+        ]:
+            if task is not None and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    logger.info(f"Sarvam {task_name} cancelled")
+                except Exception as e:
+                    logger.warning(f"Error cancelling Sarvam {task_name}: {e}")
+
+        # Close websocket
+        if self.websocket_connection is not None:
+            try:
+                await self.websocket_connection.close()
+                logger.info("Sarvam websocket connection closed")
+            except Exception as e:
+                logger.error(f"Error closing Sarvam websocket: {e}")
             finally:
                 self.websocket_connection = None
                 self.connection_authenticated = False
@@ -499,8 +551,15 @@ class SarvamTranscriber(BaseTranscriber):
             start_time = time.perf_counter()
             try:
                 sarvam_ws = await self.sarvam_connect()
-            except (ValueError, ConnectionError):
+            except (ValueError, ConnectionError) as e:
+                self.connection_error = str(e)
                 await self.toggle_connection()
+                try:
+                    meta = dict(self.meta_info or {})
+                    meta["connection_error"] = self.connection_error
+                    await self.push_to_transcriber_queue(create_ws_data_packet("transcriber_connection_closed", meta))
+                except Exception:
+                    traceback.print_exc()
                 return
 
             if not self.connection_time:
@@ -517,7 +576,8 @@ class SarvamTranscriber(BaseTranscriber):
                             else:
                                 await self._close(sarvam_ws, {"type": "CloseStream"})
                                 break
-                except Exception:
+                except Exception as e:
+                    self.connection_error = str(e)
                     traceback.print_exc()
             else:
                 self.sender_task = asyncio.create_task(self.sender())
@@ -531,7 +591,10 @@ class SarvamTranscriber(BaseTranscriber):
                 self.meta_info["total_stream_duration_ms"] = self.total_stream_duration_ms
 
             try:
-                await self.push_to_transcriber_queue(create_ws_data_packet("transcriber_connection_closed", self.meta_info))
+                meta = dict(self.meta_info or {})
+                if self.connection_error:
+                    meta["connection_error"] = self.connection_error
+                await self.push_to_transcriber_queue(create_ws_data_packet("transcriber_connection_closed", meta))
             except Exception:
                 traceback.print_exc()
         finally:

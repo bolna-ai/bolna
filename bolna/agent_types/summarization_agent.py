@@ -14,12 +14,11 @@ class SummarizationContextualAgent(BaseAgent):
 
     async def generate(self, history):
         summary = ""
-        logger.info("extracting json from the previous conversation data")
         try:
             summary = await self.llm.generate(history, request_json=False)
-            logger.info(f"summary {summary}")
         except Exception as e:
             import traceback
+
             traceback.print_exc()
             logger.error(f"error in generating summary: {e}")
         return {"summary": summary}

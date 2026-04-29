@@ -13,7 +13,5 @@ class ExtractionContextualAgent(BaseAgent):
         self.has_intro_been_sent = False
 
     async def generate(self, history):
-        logger.info("extracting json data request: {}".format(history))
         json_data = await self.llm.generate(history, request_json=True)
-        logger.info("extracting json data response: {}".format(json_data))
         return json_data
