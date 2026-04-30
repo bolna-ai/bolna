@@ -63,6 +63,10 @@ class MarkEventMetaData:
         self.counter = 0
         self.mark_changed = asyncio.Event()
         self._mark_stats = MarkStats()
+        self.heard_text_by_turn = {}
+        self.heard_text_by_response = {}
+        self.last_heard_turn_id = None
+        self.last_heard_response_uid = None
 
     def update_data(self, mark_id, value):
         value["counter"] = self.counter
@@ -110,6 +114,34 @@ class MarkEventMetaData:
             entry.acked += 1
             if delay >= 0:
                 entry.delays.append(delay)
+
+    def record_heard_text(self, mark_data, heard_text):
+        if not heard_text:
+            return
+
+        turn_id = mark_data.get("turn_id")
+        if turn_id is not None:
+            self.last_heard_turn_id = turn_id
+            self.heard_text_by_turn[turn_id] = self.heard_text_by_turn.get(turn_id, "") + heard_text
+
+        response_uid = mark_data.get("response_uid")
+        if response_uid is not None:
+            self.last_heard_response_uid = response_uid
+            self.heard_text_by_response[response_uid] = self.heard_text_by_response.get(response_uid, "") + heard_text
+
+    def get_heard_text_for_turn(self, turn_id=None):
+        if turn_id is None:
+            turn_id = self.last_heard_turn_id
+        if turn_id is None:
+            return ""
+        return (self.heard_text_by_turn.get(turn_id) or "").strip()
+
+    def get_heard_text_for_response(self, response_uid=None):
+        if response_uid is None:
+            response_uid = self.last_heard_response_uid
+        if response_uid is None:
+            return ""
+        return (self.heard_text_by_response.get(response_uid) or "").strip()
 
     def fetch_data(self, mark_id):
         result = self.mark_event_meta_data.pop(mark_id, {})

@@ -166,6 +166,7 @@ class DefaultInputHandler:
         if is_content_audio:
             heard_text = mark_event_meta_data_obj.get("text_synthesized") or ""
             self.response_heard_by_user += heard_text
+            self.mark_event_meta_data.record_heard_text(mark_event_meta_data_obj, heard_text)
             turn_id = mark_event_meta_data_obj.get("turn_id")
             if turn_id is not None and heard_text:
                 self.last_heard_turn_id = turn_id

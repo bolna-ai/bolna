@@ -1570,6 +1570,10 @@ class TaskManager(BaseManager):
             if not response_heard:
                 response_heard = input_handler.get_response_heard_for_turn(target_turn_id)
             if not response_heard:
+                response_heard = self.mark_event_meta_data.get_heard_text_for_response(target_response_uid)
+            if not response_heard:
+                response_heard = self.mark_event_meta_data.get_heard_text_for_turn(target_turn_id)
+            if not response_heard:
                 # Only fall back to global accumulator when target_turn_id is unknown.
                 # With a known target turn, the global can hold stale text from a
                 # previous turn (e.g. acked post-tool audio before reset), which
