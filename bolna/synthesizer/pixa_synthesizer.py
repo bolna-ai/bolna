@@ -334,8 +334,7 @@ class PixaSynthesizer(BaseSynthesizer):
                 headers["Authorization"] = f"Bearer {self.api_key}"
 
             websocket = await asyncio.wait_for(
-                websockets.connect(self.ws_url, additional_headers=headers, ssl=get_ssl_context(self.ws_url)),
-                timeout=10.0,
+                websockets.connect(self.ws_url, additional_headers=headers, ssl=get_ssl_context(self.ws_url)), timeout=10.0
             )
 
             # Send initial configuration

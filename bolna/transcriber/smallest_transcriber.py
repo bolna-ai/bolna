@@ -192,10 +192,7 @@ class SmallestTranscriber(BaseTranscriber):
                 logger.info(f"Attempting to connect to Smallest AI WebSocket: {websocket_url}")
 
                 ws = await asyncio.wait_for(
-                    websockets.connect(
-                        websocket_url, additional_headers=additional_headers, ssl=get_ssl_context(websocket_url)
-                    ),
-                    timeout=timeout,
+                    websockets.connect(websocket_url, additional_headers=additional_headers, ssl=get_ssl_context(websocket_url)), timeout=timeout
                 )
 
                 self.websocket_connection = ws
