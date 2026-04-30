@@ -351,6 +351,9 @@ class TaskManager(BaseManager):
 
         # Stores structured API call records for dashboard/backend persistence.
         self.function_tool_api_call_details = []
+        # Records every manual switch_language tool call — used post-call to
+        # compare against LID shadow detections (precision / latency analysis).
+        self.language_switch_events: list[dict] = []
         self.hangup_task = None
 
         self.conversation_config = None
@@ -359,8 +362,7 @@ class TaskManager(BaseManager):
             provider_config = self.task_config["tools_config"]["synthesizer"].get("provider_config")
             self.synthesizer_voice = provider_config["voice"]
             self.hangup_detail = None
-            self.shadow_end_call_enabled = False
-            self.shadow_end_call_events = []
+            self.end_call_experiment = None  # set below if task_config opts in
 
             self.handle_accumulated_message_task = None
             # self.initial_silence_task = None
@@ -439,31 +441,36 @@ class TaskManager(BaseManager):
                         )
                 self.check_for_completion_llm = os.getenv("CHECK_FOR_COMPLETION_LLM")
 
-                # Shadow end_call tool: inject alongside hangup_after_LLMCall for comparison testing
-                self.shadow_end_call_enabled = False
-                self.shadow_end_call_events = []
-                if os.getenv("SHADOW_END_CALL_TOOL", "").lower() == "true" and self.use_llm_to_determine_hangup:
-                    self.shadow_end_call_enabled = True
+                # A/B experiment: end_call tool as primary hangup, hangup_after_LLMCall as shadow.
+                if (
+                    self.conversation_config.get("end_call_tool_mode") == "primary_with_shadow_hangup"
+                    and self.use_llm_to_determine_hangup
+                    and self.conversation_config.get("call_cancellation_prompt")
+                ):
                     api_tools = self.kwargs.get("api_tools")
                     if api_tools is None:
                         api_tools = {"tools": [], "tools_params": {}}
                         self.kwargs["api_tools"] = api_tools
                     if END_CALL_FUNCTION_PREFIX not in api_tools.get("tools_params", {}):
                         tool_def = copy.deepcopy(END_CALL_TOOL_DEFINITION)
-                        # Use the agent's hangup criteria so the comparison is apples-to-apples
-                        cancellation_criteria = self.conversation_config.get("call_cancellation_prompt", "")
-                        if cancellation_criteria:
-                            tool_def["function"]["description"] = (
-                                f"End the current call. Always say your goodbye message before calling this function.\n"
-                                f"Criteria for when to end: {cancellation_criteria}"
-                            )
+                        cancellation_criteria = self.conversation_config["call_cancellation_prompt"]
+                        tool_def["function"]["description"] = (
+                            f"End the current call. Always say your goodbye message before calling this function.\n"
+                            f"Criteria for when to end: {cancellation_criteria}"
+                        )
                         tools_list = api_tools.get("tools", [])
                         if isinstance(tools_list, str):
                             tools_list = json.loads(tools_list)
                         tools_list.append(tool_def)
                         api_tools["tools"] = tools_list
                         api_tools["tools_params"][END_CALL_FUNCTION_PREFIX] = {"pre_call_message": None}
-                    logger.info("Shadow end_call tool injected for hangup comparison")
+                    self.end_call_experiment = {
+                        "end_call_invoked": False,
+                        "end_call_reason": None,
+                        "shadow_hangup_decision": None,
+                        "actual_hangup_reason": None,
+                    }
+                    logger.info("end_call_tool experiment active: tool primary, hangup_after_LLMCall shadow")
 
                 # Voicemail detection (time-based)
                 output_tool_available = (
@@ -1040,15 +1047,27 @@ class TaskManager(BaseManager):
                         if label == active_label:
                             self.transcriber_provider = cfg.get("provider", cfg.get("model"))
 
+                    # Audio LID tap.
+                    # LID_PROVIDER — which backend to use (default: "sarvam").
+                    # LID_MODE     — "shadow" (default) logs detections without switching;
+                    #                "active" performs live transcriber/synthesizer/prompt swap.
+                    #                Keep "shadow" until detection quality is validated.
+                    LID_PROVIDER = os.getenv("LID_PROVIDER", "sarvam")
+                    _lid_config = {"telephony_provider": provider}
+
                     self.tools["transcriber"] = TranscriberPool(
                         transcribers=transcribers,
                         shared_input_queue=self.audio_queue,
                         output_queue=self.transcriber_output_queue,
                         active_label=active_label,
                         multilingual_config=multilingual,
+                        lid_provider=LID_PROVIDER,
+                        lid_config=_lid_config,
+                        on_lid_switch=self.switch_language,
                     )
                     logger.info(
-                        f"TranscriberPool created with labels={list(transcribers.keys())}, active='{active_label}'"
+                        f"TranscriberPool created with labels={list(transcribers.keys())}, "
+                        f"active='{active_label}', lid_provider={LID_PROVIDER!r}"
                     )
                     return
 
@@ -1953,16 +1972,8 @@ class TaskManager(BaseManager):
         except asyncio.TimeoutError:
             logger.warning("wait_for_current_message: synth pipeline flush timed out after 3s")
 
-        start_time = time.time()
+        entry_time = time.time()
         while not self.conversation_ended:
-            elapsed = time.time() - start_time
-            if elapsed > self.hangup_mark_event_timeout:
-                mark_events = self.mark_event_meta_data.mark_event_meta_data
-                logger.warning(
-                    f"wait_for_current_message timed out after {self.hangup_mark_event_timeout}s with {len(mark_events)} remaining marks"
-                )
-                break
-
             mark_events = self.mark_event_meta_data.mark_event_meta_data
             mark_items_list = [{"mark_id": k, "mark_data": v} for k, v in mark_events.items()]
             logger.info(f"current_list: {mark_items_list}")
@@ -1987,12 +1998,28 @@ class TaskManager(BaseManager):
             if first_item.get("text_synthesized") and first_item.get("is_final_chunk") is True:
                 break
 
-            remaining = self.hangup_mark_event_timeout - elapsed
+            pending_ends = [
+                v.get("sent_ts", 0) + v.get("duration", 0)
+                for v in mark_events.values()
+                if v.get("type") != "pre_mark_message" and v.get("sent_ts")
+            ]
+            expected_play_end = max(pending_ends) if pending_ends else time.time()
+            deadline = expected_play_end + self.hangup_mark_event_timeout
+
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                logger.warning(
+                    f"wait_for_current_message timed out: {len(mark_events)} marks unflushed, "
+                    f"expected_play_end was {expected_play_end - entry_time:.1f}s after entry, "
+                    f"grace {self.hangup_mark_event_timeout}s exceeded"
+                )
+                break
+
             self.mark_event_meta_data.mark_changed.clear()
             try:
                 await asyncio.wait_for(self.mark_event_meta_data.mark_changed.wait(), timeout=remaining)
             except asyncio.TimeoutError:
-                pass  # re-enters loop, hits timeout check at top
+                pass
         return
 
     async def inject_digits_to_conversation(self) -> None:
@@ -2297,16 +2324,9 @@ class TaskManager(BaseManager):
         if called_fun.startswith(END_CALL_FUNCTION_PREFIX):
             reason = resp.get("reason", "")
 
-            if self.shadow_end_call_enabled:
-                logger.info(f"Shadow end_call invoked: reason={reason}, seq={meta_info.get('sequence_id')}")
-                self.shadow_end_call_events.append(
-                    {
-                        "seq": meta_info.get("sequence_id"),
-                        "reason": reason,
-                        "timestamp": time.time(),
-                    }
-                )
-                return
+            if self.end_call_experiment is not None and not self.end_call_experiment["end_call_invoked"]:
+                self.end_call_experiment["end_call_invoked"] = True
+                self.end_call_experiment["end_call_reason"] = reason
 
             logger.info(f"end_call tool invoked, reason: {reason}")
             convert_to_request_log(
@@ -3126,11 +3146,14 @@ class TaskManager(BaseManager):
                 cached_tokens=metadata.get("cached_tokens"),
             )
 
-            if self.shadow_end_call_enabled and (should_hangup or self.shadow_end_call_events):
+            if self.end_call_experiment is not None:
+                # Shadow mode: log decision, do not actually hang up. end_call tool drives real hangup.
+                self.end_call_experiment["shadow_hangup_decision"] = bool(should_hangup)
                 logger.info(
-                    f"hangup_after_LLMCall result: hangup={should_hangup}, seq={meta_info.get('sequence_id')}, "
-                    f"shadow_end_call_events={json.dumps(self.shadow_end_call_events)}"
+                    f"end_call_tool experiment shadow: hangup_after_LLMCall={should_hangup}, "
+                    f"seq={meta_info.get('sequence_id')}"
                 )
+                return
 
             if should_hangup:
                 if self.hangup_triggered or self.conversation_ended:
@@ -3753,14 +3776,27 @@ class TaskManager(BaseManager):
         """Get agent name for a language label from configured agent_names."""
         return self.agent_names.get(label, "")
 
-    async def switch_language(self, label, components=None):
+    async def switch_language(self, label, components=None, triggered_by: str = "manual"):
         """Switch the active language for multilingual pools.
 
         Args:
             label: language label to switch to (e.g. "hi", "en").
             components: list of component names to switch. Defaults to both.
+            triggered_by: "manual" (LLM tool call) or "lid" (automatic detection).
+                          Used in post-call telemetry to compare LID shadow detections
+                          against actual LLM-decided switches.
         """
         components = components or ["transcriber", "synthesizer"]
+
+        # Record every switch so shadow-eval can compare LID detections vs.
+        # actual LLM-decided switches on the same call.
+        self.language_switch_events.append({
+            "to_label":       label,
+            "from_label":     self.language,
+            "triggered_by":   triggered_by,
+            "switched_at":    time.time(),
+        })
+
         if "transcriber" in components and isinstance(self.tools.get("transcriber"), TranscriberPool):
             await self.tools["transcriber"].switch(label)
         if "synthesizer" in components and isinstance(self.tools.get("synthesizer"), SynthesizerPool):
@@ -4659,6 +4695,8 @@ class TaskManager(BaseManager):
                     "conversation_time": time.time() - self.start_time,
                     "label_flow": self.label_flow,
                     "function_tool_api_call_details": copy.deepcopy(self.function_tool_api_call_details),
+                    "lid_detection_events": list(getattr(self.tools.get("transcriber"), "lid_detection_events", [])),
+                    "language_switch_events": list(self.language_switch_events),
                     "call_sid": self.call_sid,
                     "stream_sid": self.stream_sid,
                     "transcriber_duration": self.transcriber_duration,
@@ -4682,16 +4720,12 @@ class TaskManager(BaseManager):
                     "has_transfer": self.has_transfer,
                 }
 
-                if self.shadow_end_call_enabled:
-                    end_call_seq = self.shadow_end_call_events[0]["seq"] if self.shadow_end_call_events else None
-                    hangup_detail_str = str(self.hangup_detail) if self.hangup_detail else None
-                    logger.info(
-                        f"Shadow end_call summary: "
-                        f"end_call_count={len(self.shadow_end_call_events)}, "
-                        f"first_end_call_seq={end_call_seq}, "
-                        f"actual_hangup_reason={hangup_detail_str}, "
-                        f"events={json.dumps(self.shadow_end_call_events)}"
+                if self.end_call_experiment is not None:
+                    self.end_call_experiment["actual_hangup_reason"] = (
+                        str(self.hangup_detail) if self.hangup_detail else None
                     )
+                    output["end_call_experiment"] = self.end_call_experiment
+                    logger.info(f"end_call_tool experiment outcome: {json.dumps(self.end_call_experiment)}")
 
                 try:
                     if welcome_message_sent_ts:

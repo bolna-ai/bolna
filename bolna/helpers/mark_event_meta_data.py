@@ -80,7 +80,7 @@ class MarkEventMetaData:
             value.get("duration", 0.0) or 0.0,
             len(value.get("text_synthesized", "") or ""),
         )
-
+        self.mark_changed.set()
         if value.get("type") != "pre_mark_message":
             self._mark_stats.total_sent += 1
             seq = value.get("sequence_id")
