@@ -3,16 +3,16 @@ lid_provider.py — Model-agnostic Language Identification (LID) interface.
 
 Two backends are shipped:
 
-  SarvamLID    — saaras:v3 streaming WebSocket with language_code=unknown.
-                 Natively streaming; emits language as audio arrives.
-                 No local model needed, API-based.
+  SarvamLID  — saaras:v3 streaming WebSocket with language_code=unknown.
+               Natively streaming; emits language as audio arrives.
+               No local model needed, API-based.
 
-  MMSLinguaLID — Meta MMS-LID (facebook/mms-lid-256), local CPU model.
-                 Designed for phone-quality narrowband audio (8kHz).
-                 Accumulates speech-only audio (energy VAD gated) before classifying.
+  WhisperLID — OpenAI Whisper tiny/base, LID-only mode (encoder + language head,
+               no decoder). Trained on diverse audio including phone calls.
+               Handles 8kHz mulaw telephony audio well.
 
 Usage (in TranscriberPool):
-    lid = LIDProvider.create(provider="sarvam", config={...}, on_language=callback)
+    lid = LIDProvider.create(provider="whisper", config={...}, on_language=callback)
     await lid.start()
     lid.feed(audio_chunk_bytes)
     await lid.stop()
@@ -168,38 +168,40 @@ class SarvamLID:
         logger.info("SarvamLID: stopped")
 
 
-# ── 2. Meta MMS-LID (local, CPU, telephony-friendly) ──────────────────────────
+# ── 2. Whisper LID-only (local, CPU, telephony-friendly) ──────────────────────
 
 
-class MMSLinguaLID:
+class WhisperLID:
     """
-    LID via Meta's MMS-LID (facebook/mms-lid-256 or mms-lid-1024).
+    LID via OpenAI Whisper (tiny/base) in language-detection-only mode.
 
-    Designed for phone-quality narrowband audio — works natively on 8kHz audio.
-    Supports 256/1024 languages including all major Indian languages.
+    Runs only the encoder + language detection head — skips the decoder
+    entirely so there's no transcription overhead. Whisper was trained on
+    diverse audio including phone calls and handles 8kHz mulaw telephony well.
+
     Uses energy-based VAD gating to skip silence/noise before classifying.
 
-    Requires:  pip install transformers torch torchaudio
+    Requires:  pip install openai-whisper torch
 
     Config keys:
-        model_name         — HF model id (default: facebook/mms-lid-256)
+        model_name         — whisper model size (default: tiny)
         classify_every_ms  — how often to classify after buffer fills (default 800)
-        min_buffer_ms      — minimum speech audio before first classify (default 2000)
+        min_buffer_ms      — minimum speech audio before first classify (default 1500)
         vad_rms_threshold  — silence gate RMS threshold (default 500)
         telephony_provider — "twilio" | "plivo" | other
         sampling_rate      — input sample rate (default 8000)
     """
 
-    _processor = None
+    # Process-level singleton — model loads only once per process
     _model = None
     _model_lock: Optional[asyncio.Lock] = None
 
     def __init__(self, on_language: OnLanguageCallback, config: dict):
         self.on_language = on_language
         self.config = config
-        self._model_name = config.get("model_name", "facebook/mms-lid-256")
+        self._model_name = config.get("model_name", "tiny")
         self._classify_every_ms = int(config.get("classify_every_ms", 800))
-        self._min_buffer_ms = int(config.get("min_buffer_ms", 2000))
+        self._min_buffer_ms = int(config.get("min_buffer_ms", 1500))
         self._vad_rms_threshold = int(config.get("vad_rms_threshold", 500))
         self._telephony = config.get("telephony_provider", "")
         self._input_sr = 8000 if self._telephony in ("twilio", "plivo") else int(config.get("sampling_rate", 8000))
@@ -220,22 +222,18 @@ class MMSLinguaLID:
     async def _load_model(cls, model_name: str):
         async with cls._get_lock():
             if cls._model is None:
-                logger.info(f"MMSLinguaLID: loading model {model_name}...")
-                from transformers import AutoFeatureExtractor, AutoModelForAudioClassification
+                logger.info(f"WhisperLID: loading model whisper-{model_name}...")
+                import whisper
 
-                cls._processor = await asyncio.get_event_loop().run_in_executor(
-                    None,
-                    lambda: AutoFeatureExtractor.from_pretrained(model_name),
-                )
                 cls._model = await asyncio.get_event_loop().run_in_executor(
                     None,
-                    lambda: AutoModelForAudioClassification.from_pretrained(model_name),
+                    lambda: whisper.load_model(model_name),
                 )
-                logger.info("MMSLinguaLID: model loaded")
-        return cls._processor, cls._model
+                logger.info("WhisperLID: model loaded")
+        return cls._model
 
-    def _pcm_to_array(self, pcm_bytes: bytes):
-        """Convert raw PCM bytes → float32 numpy array at 16kHz."""
+    def _pcm_to_float(self, pcm_bytes: bytes):
+        """Convert raw PCM bytes → float32 numpy array at 16kHz for Whisper."""
         import audioop
 
         import numpy as np
@@ -243,53 +241,38 @@ class MMSLinguaLID:
         raw = pcm_bytes
         if self._encoding == "mulaw":
             raw = audioop.ulaw2lin(raw, 2)
+        # Whisper expects 16kHz
         if self._input_sr != 16000:
             raw, _ = audioop.ratecv(raw, 2, 1, self._input_sr, 16000, None)
         return np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
 
     def _classify_sync(self, pcm_bytes: bytes) -> tuple[str, float]:
-        import torch
+        import whisper
 
-        processor = self.__class__._processor
         model = self.__class__._model
-        if processor is None or model is None:
-            raise RuntimeError("MMSLinguaLID model not yet loaded")
-        audio = self._pcm_to_array(pcm_bytes)
-        inputs = processor(audio, sampling_rate=16000, return_tensors="pt")
-        with torch.no_grad():
-            logits = model(**inputs).logits
-        probs = torch.softmax(logits, dim=-1)
-        conf, pred_id = probs.max(dim=-1)
-        label = model.config.id2label[pred_id.item()]  # e.g. "hin" or "eng"
-        # MMS uses ISO 639-3 (3-letter) — map to 2-letter ISO 639-1
-        _iso3_to_2 = {
-            "hin": "hi",
-            "eng": "en",
-            "ben": "bn",
-            "guj": "gu",
-            "tam": "ta",
-            "tel": "te",
-            "mar": "mr",
-            "pan": "pa",
-            "urd": "ur",
-            "kan": "kn",
-            "mal": "ml",
-            "ori": "or",
-        }
-        lang = _iso3_to_2.get(label, label[:2])
+        audio = self._pcm_to_float(pcm_bytes)
+
+        # Pad or trim to 30s as Whisper requires, then run encoder only
+        audio = whisper.pad_or_trim(audio)
+        mel = whisper.log_mel_spectrogram(audio).to(model.device)
+
+        # Detect language using only the encoder + language head (no decoder)
+        _, lang_probs = model.detect_language(mel)
+        lang = max(lang_probs, key=lang_probs.get)
+        conf = lang_probs[lang]
         return lang, float(conf)
 
     async def start(self) -> None:
         self._loop = asyncio.get_event_loop()
         await self._load_model(self._model_name)
-        logger.info("MMSLinguaLID: ready")
+        logger.info("WhisperLID: ready")
 
     def feed(self, audio_bytes: bytes) -> None:
         """Accept a raw audio chunk; skip silence via energy VAD, classify when buffer fills."""
         import audioop
 
         # Don't classify until model is fully loaded
-        if self.__class__._processor is None or self.__class__._model is None:
+        if self.__class__._model is None:
             return
 
         raw = audio_bytes
@@ -316,13 +299,13 @@ class MMSLinguaLID:
         snapshot = bytes(self._buffer)
         try:
             lang, conf = await asyncio.get_event_loop().run_in_executor(None, self._classify_sync, snapshot)
-            logger.info(f"MMSLinguaLID: {lang} conf={conf:.2f} buf={self._buffer_ms}ms")
+            logger.info(f"WhisperLID: {lang} conf={conf:.2f} buf={self._buffer_ms}ms")
             await self.on_language(lang, conf)
         except Exception as e:
-            logger.warning(f"MMSLinguaLID classify error: {e}")
+            logger.warning(f"WhisperLID classify error: {e}")
 
     async def stop(self) -> None:
-        logger.info("MMSLinguaLID: stopped")
+        logger.info("WhisperLID: stopped")
 
 
 # ── Factory ────────────────────────────────────────────────────────────────────
@@ -330,11 +313,11 @@ class MMSLinguaLID:
 
 class LIDProvider:
     @classmethod
-    def create(cls, provider: str, on_language: OnLanguageCallback, config: dict) -> "SarvamLID | MMSLinguaLID":
+    def create(cls, provider: str, on_language: OnLanguageCallback, config: dict) -> "SarvamLID | WhisperLID":
         provider = provider.lower()
         if provider == "sarvam":
             return SarvamLID(on_language=on_language, config=config)
-        if provider in ("mms", "mms-lid", "mmslid"):
-            return MMSLinguaLID(on_language=on_language, config=config)
+        if provider in ("whisper", "whisper-lid", "openai-whisper"):
+            return WhisperLID(on_language=on_language, config=config)
         logger.warning(f"LIDProvider: unknown provider '{provider}', falling back to sarvam")
         return SarvamLID(on_language=on_language, config=config)

@@ -1041,8 +1041,8 @@ class TaskManager(BaseManager):
                         if label == active_label:
                             self.transcriber_provider = cfg.get("provider", cfg.get("model"))
 
-                    # Audio LID tap — configurable via LID_PROVIDER env var (default: mms).
-                    LID_PROVIDER = os.getenv("LID_PROVIDER", "mms")
+                    # Audio LID tap — configurable via LID_PROVIDER env var (default: whisper).
+                    LID_PROVIDER = os.getenv("LID_PROVIDER", "whisper")
                     _lid_config = {"telephony_provider": provider}
 
                     self.tools["transcriber"] = TranscriberPool(
