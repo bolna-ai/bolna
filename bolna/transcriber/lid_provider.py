@@ -252,6 +252,8 @@ class MMSLinguaLID:
 
         processor = self.__class__._processor
         model = self.__class__._model
+        if processor is None or model is None:
+            raise RuntimeError("MMSLinguaLID model not yet loaded")
         audio = self._pcm_to_array(pcm_bytes)
         inputs = processor(audio, sampling_rate=16000, return_tensors="pt")
         with torch.no_grad():
@@ -285,6 +287,10 @@ class MMSLinguaLID:
     def feed(self, audio_bytes: bytes) -> None:
         """Accept a raw audio chunk; skip silence via energy VAD, classify when buffer fills."""
         import audioop
+
+        # Don't classify until model is fully loaded
+        if self.__class__._processor is None or self.__class__._model is None:
+            return
 
         raw = audio_bytes
         if self._encoding == "mulaw":
