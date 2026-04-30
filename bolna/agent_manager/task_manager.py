@@ -3010,10 +3010,12 @@ class TaskManager(BaseManager):
                 self.llm_task.cancel()
                 self.llm_task = None
                 self.interruption_manager.invalidate_pending_responses()
-                # Re-register the current sequence_id (already allocated by
-                # __get_updated_meta_info) so the new response's audio is not blocked
-                self.interruption_manager.revalidate_sequence_id(meta_info["sequence_id"])
 
+            # Always revalidate the new sequence_id — if the old task already
+            # completed and invalidate_pending_responses was called from the
+            # interruption path, the new seq_id would otherwise never be added
+            # back to sequence_ids, causing all audio to be BLOCKed permanently.
+            self.interruption_manager.revalidate_sequence_id(meta_info["sequence_id"])
             self.response_in_pipeline = True
             self.llm_task = asyncio.create_task(self._run_llm_task(transcriber_package))
 
@@ -3682,6 +3684,10 @@ class TaskManager(BaseManager):
                             "end_of_synthesizer_stream", False
                         ):
                             self._turn_audio_flushed.set()
+                            # The entire LLM response was blocked — no audio will ever reach
+                            # the SEND path that normally resets this flag. Clear it here so
+                            # subsequent user speech is not permanently treated as an interruption.
+                            self.response_in_pipeline = False
                         should_continue_outer_loop = True
                         break  # Exit inner loop, skip to next message
 
