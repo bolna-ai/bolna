@@ -3254,6 +3254,19 @@ class TaskManager(BaseManager):
     def _trigger_voicemail_check(self, transcriber_message, meta_info, is_final=True):
         self.voicemail_handler.trigger_check(transcriber_message, meta_info, is_final)
 
+    def _retire_dropped_response(self, meta_info, reason):
+        sequence_id = meta_info.get("sequence_id")
+        response_uid = meta_info.get("response_uid")
+        turn_id = meta_info.get("turn_id")
+        self.interruption_manager.retire_sequence_id(sequence_id)
+        logger.info(
+            "BOLNA_TRACE_TM drop_response seq=%s turn=%s response_uid=%s reason=%s",
+            sequence_id,
+            turn_id,
+            response_uid,
+            reason,
+        )
+
     async def _handle_transcriber_output(self, next_task, transcriber_message, meta_info):
         logger.info(
             "BOLNA_TRACE_TM handle_transcript next=%s seq=%s turn=%s response_uid=%s group_uid=%s request_id=%s text_len=%s text=%r",
@@ -3270,6 +3283,7 @@ class TaskManager(BaseManager):
             self.discard_pre_welcome_utterance or len(self.conversation_history) > 2
         ):
             logger.info(f"Welcome message is playing while spoken: {transcriber_message}")
+            self._retire_dropped_response(meta_info, "welcome_still_playing")
             return
 
         if self._speech_started_before_welcome:
@@ -3277,16 +3291,19 @@ class TaskManager(BaseManager):
                 f"Discarding transcript from speech that started before welcome finished: {transcriber_message}"
             )
             self._speech_started_before_welcome = False
+            self._retire_dropped_response(meta_info, "speech_started_before_welcome_finished")
             return
 
         if self.conversation_history.is_duplicate_user(transcriber_message):
             logger.info(f"Skipping duplicate transcript (same content): {transcriber_message}")
+            self._retire_dropped_response(meta_info, "duplicate_user_transcript")
             return
 
         self._trigger_voicemail_check(transcriber_message, meta_info, is_final=True)
 
         if self.voicemail_handler.detected:
             logger.info("Voicemail already detected - skipping normal transcriber output processing")
+            self._retire_dropped_response(meta_info, "voicemail_detected")
             return
 
         await self.language_detector.collect_transcript(transcriber_message)
