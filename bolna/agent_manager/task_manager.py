@@ -3293,15 +3293,28 @@ class TaskManager(BaseManager):
 
         has_live_assistant_audio = self.tools["input"].is_audio_being_played_to_user()
         has_pending_marks = self._has_interruptible_mark_activity()
-        if next_task == "llm" and (self.response_in_pipeline or has_live_assistant_audio or has_pending_marks):
+        has_pending_sequences = self.interruption_manager.has_pending_responses()
+        has_pending_generation = (
+            (self.llm_task is not None and not self.llm_task.done())
+            or (self.execute_function_call_task is not None and not self.execute_function_call_task.done())
+        )
+        if next_task == "llm" and (
+            self.response_in_pipeline
+            or has_live_assistant_audio
+            or has_pending_marks
+            or has_pending_sequences
+            or has_pending_generation
+        ):
             logger.info(
-                "BOLNA_TRACE_TM cleanup_before_user_append seq=%s turn=%s response_uid=%s response_in_pipeline=%s audio_playing=%s pending_marks=%s",
+                "BOLNA_TRACE_TM cleanup_before_user_append seq=%s turn=%s response_uid=%s response_in_pipeline=%s audio_playing=%s pending_marks=%s pending_sequences=%s pending_generation=%s",
                 meta_info.get("sequence_id"),
                 meta_info.get("turn_id"),
                 meta_info.get("response_uid"),
                 self.response_in_pipeline,
                 has_live_assistant_audio,
                 has_pending_marks,
+                has_pending_sequences,
+                has_pending_generation,
             )
             # Once audio starts sending, response_in_pipeline flips to False even
             # though the assistant turn may still be actively playing to the user.
