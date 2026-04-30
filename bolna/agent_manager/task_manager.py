@@ -253,6 +253,7 @@ class TaskManager(BaseManager):
         self.response_in_pipeline = False
         self._response_turn_id = 0
         self._turn_msg_map = {}  # turn_id → assistant message dict ref in _messages
+        self._pending_assistant_history = {}  # sequence_id -> {content, turn_id, response_uid}
 
         # Language detection
         self.language_detector = LanguageDetector(self.task_config["task_config"], run_id=self.run_id)
@@ -1743,6 +1744,7 @@ class TaskManager(BaseManager):
             self.tools["input"].reset_response_heard_by_user()
 
         self.interruption_manager.invalidate_pending_responses()
+        self._drop_all_staged_assistant_history("cleanup_downstream_tasks")
         self.response_in_pipeline = False
         await self.tools["synthesizer"].flush_synthesizer_stream()
 
@@ -2737,20 +2739,13 @@ class TaskManager(BaseManager):
         response_uid = meta_info.get("response_uid")
         if should_trigger_function_call:
             logger.info(f"There was a function call and need to make that work")
-            self.conversation_history.append_assistant(llm_response, turn_id=turn_id, response_uid=response_uid)
-            # Track pre-tool textual response so sync_history can find it if the
-            # user interrupts before the tool call completes. The final post-tool
-            # response will overwrite this entry when it is stored.
-            if turn_id is not None:
-                self._turn_msg_map[turn_id] = self.conversation_history.messages[-1]
+            self._stage_assistant_history(meta_info, llm_response)
         else:
             messages.append(
                 {"role": "assistant", "content": llm_response, "turn_id": turn_id, "response_uid": response_uid}
             )
-            self.conversation_history.append_assistant(llm_response, turn_id=turn_id, response_uid=response_uid)
+            self._stage_assistant_history(meta_info, llm_response)
             self.conversation_history.sync_interim(messages)
-            if turn_id is not None:
-                self._turn_msg_map[turn_id] = self.conversation_history.messages[-1]
 
     async def __do_llm_generation(
         self, messages, meta_info, next_step, should_bypass_synth=False, should_trigger_function_call=False
@@ -2905,9 +2900,6 @@ class TaskManager(BaseManager):
                     response_uid = meta_info.get("response_uid")
 
                     if not is_silence_trigger:
-                        self.conversation_history.append_assistant(
-                            static_text, turn_id=turn_id, response_uid=response_uid
-                        )
                         messages.append(
                             {
                                 "role": "assistant",
@@ -2916,9 +2908,8 @@ class TaskManager(BaseManager):
                                 "response_uid": response_uid,
                             }
                         )
+                        self._stage_assistant_history(meta_info, static_text)
                         self.conversation_history.sync_interim(messages)
-                        if turn_id is not None:
-                            self._turn_msg_map[turn_id] = self.conversation_history.messages[-1]
 
                     convert_to_request_log(
                         message=static_text,
@@ -3013,12 +3004,8 @@ class TaskManager(BaseManager):
                                 "response_uid": response_uid,
                             }
                         )
-                        self.conversation_history.append_assistant(
-                            filler_message, turn_id=turn_id, response_uid=response_uid
-                        )
+                        self._stage_assistant_history(meta_info, filler_message)
                         self.conversation_history.sync_interim(messages)
-                        if turn_id is not None:
-                            self._turn_msg_map[turn_id] = self.conversation_history.messages[-1]
 
                     await self._handle_llm_output(next_step, text_chunk, should_bypass_synth, meta_info)
         except BolnaComponentError:
@@ -3254,10 +3241,66 @@ class TaskManager(BaseManager):
     def _trigger_voicemail_check(self, transcriber_message, meta_info, is_final=True):
         self.voicemail_handler.trigger_check(transcriber_message, meta_info, is_final)
 
+    def _stage_assistant_history(self, meta_info, content):
+        sequence_id = meta_info.get("sequence_id")
+        response_uid = meta_info.get("response_uid")
+        turn_id = meta_info.get("turn_id")
+        if sequence_id is None or not content or not str(content).strip():
+            return
+        self._pending_assistant_history[sequence_id] = {
+            "content": content,
+            "turn_id": turn_id,
+            "response_uid": response_uid,
+        }
+        logger.info(
+            "BOLNA_TRACE_TM stage_assistant_history seq=%s turn=%s response_uid=%s text_len=%s",
+            sequence_id,
+            turn_id,
+            response_uid,
+            len(content),
+        )
+
+    def _commit_staged_assistant_history(self, sequence_id):
+        staged = self._pending_assistant_history.pop(sequence_id, None)
+        if staged is None:
+            return
+
+        self.conversation_history.append_assistant(
+            staged["content"], turn_id=staged["turn_id"], response_uid=staged["response_uid"]
+        )
+        if staged["turn_id"] is not None:
+            self._turn_msg_map[staged["turn_id"]] = self.conversation_history.messages[-1]
+        logger.info(
+            "BOLNA_TRACE_TM commit_assistant_history seq=%s turn=%s response_uid=%s text_len=%s",
+            sequence_id,
+            staged["turn_id"],
+            staged["response_uid"],
+            len(staged["content"]),
+        )
+
+    def _drop_staged_assistant_history(self, sequence_id, reason):
+        staged = self._pending_assistant_history.pop(sequence_id, None)
+        if staged is None:
+            return
+        logger.info(
+            "BOLNA_TRACE_TM drop_assistant_history seq=%s turn=%s response_uid=%s reason=%s",
+            sequence_id,
+            staged["turn_id"],
+            staged["response_uid"],
+            reason,
+        )
+
+    def _drop_all_staged_assistant_history(self, reason, keep_sequence_ids=None):
+        keep_sequence_ids = set(keep_sequence_ids or [])
+        drop_sequence_ids = [seq for seq in self._pending_assistant_history.keys() if seq not in keep_sequence_ids]
+        for sequence_id in drop_sequence_ids:
+            self._drop_staged_assistant_history(sequence_id, reason)
+
     def _retire_dropped_response(self, meta_info, reason):
         sequence_id = meta_info.get("sequence_id")
         response_uid = meta_info.get("response_uid")
         turn_id = meta_info.get("turn_id")
+        self._drop_staged_assistant_history(sequence_id, reason)
         self.interruption_manager.retire_sequence_id(sequence_id)
         logger.info(
             "BOLNA_TRACE_TM drop_response seq=%s turn=%s response_uid=%s reason=%s",
@@ -3381,6 +3424,7 @@ class TaskManager(BaseManager):
                 self.llm_task.cancel()
                 self.llm_task = None
                 self.interruption_manager.invalidate_pending_responses()
+                self._drop_all_staged_assistant_history("llm_task_cancelled_for_new_speech_final")
                 # Re-register the current sequence_id (already allocated by
                 # __get_updated_meta_info) so the new response's audio is not blocked
                 self.interruption_manager.revalidate_sequence_id(meta_info["sequence_id"])
@@ -4029,6 +4073,7 @@ class TaskManager(BaseManager):
 
                     if status == "SEND":
                         # Audio approved - send it
+                        self._commit_staged_assistant_history(sequence_id)
                         self.tools["input"].update_is_audio_being_played(True)
                         self.response_in_pipeline = False
                         await self.tools["output"].handle(message)
@@ -4052,6 +4097,7 @@ class TaskManager(BaseManager):
                     elif status == "BLOCK":
                         # Audio blocked (user speaking or invalid sequence) - discard
                         logger.info(f"Audio blocked: discarding message (sequence_id={sequence_id})")
+                        self._drop_staged_assistant_history(sequence_id, "output_blocked")
                         # Null byte (b'\x00') is the end-of-stream control signal, not audio.
                         # Always send it through handle() so the is_final_chunk post-mark is
                         # created and sent to Plivo. Without this, is_audio_being_played stays
