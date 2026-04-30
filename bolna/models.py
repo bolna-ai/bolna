@@ -122,6 +122,8 @@ class Transcriber(BaseModel):
     keywords: Optional[str] = None
     task: Optional[str] = "transcribe"
     provider: Optional[str] = "deepgram"
+    multilingual: Optional[Dict[str, Any]] = None
+    active: Optional[str] = None
 
     @field_validator("provider")
     def validate_model(cls, value):
