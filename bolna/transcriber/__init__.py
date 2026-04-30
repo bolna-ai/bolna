@@ -9,4 +9,4 @@ from .gladia_transcriber import GladiaTranscriber
 from .elevenlabs_transcriber import ElevenLabsTranscriber
 from .smallest_transcriber import SmallestTranscriber
 from .transcriber_pool import TranscriberPool
-from .lid_provider import LIDProvider, SarvamLID
+from .lid_provider import LIDProvider, SarvamLID, VoxLinguaLID
