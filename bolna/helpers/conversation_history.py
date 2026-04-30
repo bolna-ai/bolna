@@ -118,7 +118,7 @@ class ConversationHistory:
     @staticmethod
     def _trim_assistant_for_turn(msgs: list[dict], turn_id: int | None, response_heard: str | None, update_fn):
         if turn_id is None:
-            ConversationHistory._trim_last_assistant(msgs, response_heard, update_fn)
+            logger.info("Skipping assistant trim because turn_id is None; refusing to trim an older assistant blindly")
             return
 
         for i in range(len(msgs) - 1, -1, -1):
@@ -126,8 +126,9 @@ class ConversationHistory:
                 ConversationHistory._trim_assistant_at_index(msgs, i, response_heard, update_fn)
                 return
 
-        logger.info(f"No assistant message found for turn_id={turn_id}; falling back to last assistant trim")
-        ConversationHistory._trim_last_assistant(msgs, response_heard, update_fn)
+        logger.info(
+            f"No assistant message found for turn_id={turn_id}; skipping trim to avoid removing a different assistant turn"
+        )
 
     @staticmethod
     def _trim_assistant_at_index(msgs: list[dict], index: int, response_heard: str | None, update_fn):
