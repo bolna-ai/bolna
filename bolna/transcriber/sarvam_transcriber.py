@@ -176,6 +176,9 @@ class SarvamTranscriber(BaseTranscriber):
                         self.meta_info["transcriber_latency"] = elapsed
                         self.meta_info["first_result_latency_ms"] = round(elapsed * 1000)
                         self.meta_info["transcriber_duration"] = response_data.get("duration", 0)
+                        sarvam_request_id = response_data.get("request_id")
+                        if sarvam_request_id:
+                            logger.info(f"Sarvam request_id: {sarvam_request_id}")
                         transcript = response_data.get("transcript", "")
                         return create_ws_data_packet(transcript, self.meta_info)
                     except json.JSONDecodeError:
@@ -339,6 +342,9 @@ class SarvamTranscriber(BaseTranscriber):
                         payload = data.get("data", {})
                         transcript = payload.get("transcript", "")
                         metrics = payload.get("metrics", {})
+                        sarvam_request_id = payload.get("request_id")
+                        if sarvam_request_id:
+                            logger.info(f"Sarvam request_id: {sarvam_request_id}")
 
                         if transcript and transcript.strip():
                             logger.debug(f"Sarvam transcript received: {transcript.strip()[:50]}...")
