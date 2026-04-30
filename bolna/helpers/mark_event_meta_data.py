@@ -69,11 +69,13 @@ class MarkEventMetaData:
         self.counter += 1
         self.mark_event_meta_data[mark_id] = value
         logger.info(
-            "BOLNA_TRACE_MARK update mark_id=%s type=%s seq=%s turn=%s counter=%s dur=%.3f text_len=%s",
+            "BOLNA_TRACE_MARK update mark_id=%s type=%s seq=%s turn=%s response_uid=%s group_uid=%s counter=%s dur=%.3f text_len=%s",
             mark_id,
             value.get("type"),
             value.get("sequence_id"),
             value.get("turn_id"),
+            value.get("response_uid"),
+            value.get("response_group_uid"),
             value.get("counter"),
             value.get("duration", 0.0) or 0.0,
             len(value.get("text_synthesized", "") or ""),
@@ -113,11 +115,13 @@ class MarkEventMetaData:
         result = self.mark_event_meta_data.pop(mark_id, {})
         if result:
             logger.info(
-                "BOLNA_TRACE_MARK fetch mark_id=%s type=%s seq=%s turn=%s counter=%s",
+                "BOLNA_TRACE_MARK fetch mark_id=%s type=%s seq=%s turn=%s response_uid=%s group_uid=%s counter=%s",
                 mark_id,
                 result.get("type"),
                 result.get("sequence_id"),
                 result.get("turn_id"),
+                result.get("response_uid"),
+                result.get("response_group_uid"),
                 result.get("counter"),
             )
             self.mark_changed.set()

@@ -45,6 +45,19 @@ class ConversationHistory:
                     return
         msgs.append({"role": ChatRole.ASSISTANT, "content": content, "turn_id": turn_id})
 
+    def upsert_assistant_for_response(
+        self, response_uid: str | None, content: str, interim: bool = False, turn_id: int | None = None
+    ):
+        msgs = self._interim if interim else self._messages
+        if response_uid is not None:
+            for i in range(len(msgs) - 1, -1, -1):
+                if msgs[i].get("role") == ChatRole.ASSISTANT and msgs[i].get("response_uid") == response_uid:
+                    msgs[i]["content"] = content
+                    if turn_id is not None and msgs[i].get("turn_id") is None:
+                        msgs[i]["turn_id"] = turn_id
+                    return
+        msgs.append({"role": ChatRole.ASSISTANT, "content": content, "turn_id": turn_id, "response_uid": response_uid})
+
     def append_tool_result(self, tool_call_id: str, content: str):
         self._messages.append(
             {
@@ -108,6 +121,12 @@ class ConversationHistory:
     def sync_interim_turn_after_interruption(self, turn_id: int | None, response_heard: str | None, update_fn):
         self._trim_assistant_for_turn(self._interim, turn_id, response_heard, update_fn)
 
+    def sync_response_after_interruption(self, response_uid: str | None, response_heard: str | None, update_fn):
+        self._trim_assistant_for_response(self._messages, response_uid, response_heard, update_fn)
+
+    def sync_interim_response_after_interruption(self, response_uid: str | None, response_heard: str | None, update_fn):
+        self._trim_assistant_for_response(self._interim, response_uid, response_heard, update_fn)
+
     @staticmethod
     def _trim_last_assistant(msgs: list[dict], response_heard: str | None, update_fn):
         for i in range(len(msgs) - 1, -1, -1):
@@ -128,6 +147,21 @@ class ConversationHistory:
 
         logger.info(
             f"No assistant message found for turn_id={turn_id}; skipping trim to avoid removing a different assistant turn"
+        )
+
+    @staticmethod
+    def _trim_assistant_for_response(msgs: list[dict], response_uid: str | None, response_heard: str | None, update_fn):
+        if response_uid is None:
+            logger.info("Skipping assistant trim because response_uid is None; refusing to trim an older assistant blindly")
+            return
+
+        for i in range(len(msgs) - 1, -1, -1):
+            if msgs[i]["role"] == ChatRole.ASSISTANT and msgs[i].get("response_uid") == response_uid:
+                ConversationHistory._trim_assistant_at_index(msgs, i, response_heard, update_fn)
+                return
+
+        logger.info(
+            f"No assistant message found for response_uid={response_uid}; skipping trim to avoid removing a different assistant turn"
         )
 
     @staticmethod

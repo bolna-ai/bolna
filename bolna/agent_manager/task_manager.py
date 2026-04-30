@@ -1490,10 +1490,30 @@ class TaskManager(BaseManager):
                 latest_turn_id = turn_id
         return latest_turn_id
 
+    @staticmethod
+    def _get_latest_response_uid_from_marks(mark_events_data):
+        latest_response_uid = None
+        latest_counter = -1
+        for _, mark_data in mark_events_data:
+            response_uid = mark_data.get("response_uid")
+            if response_uid is None:
+                continue
+            counter = mark_data.get("counter", -1)
+            if counter >= latest_counter:
+                latest_counter = counter
+                latest_response_uid = response_uid
+        return latest_response_uid
+
     def _get_latest_assistant_turn_id(self):
         for msg in reversed(self.conversation_history.messages):
             if msg.get("role") == ChatRole.ASSISTANT and msg.get("turn_id") is not None:
                 return msg.get("turn_id")
+        return None
+
+    def _get_latest_assistant_response_uid(self):
+        for msg in reversed(self.conversation_history.messages):
+            if msg.get("role") == ChatRole.ASSISTANT and msg.get("response_uid") is not None:
+                return msg.get("response_uid")
         return None
 
     def _has_interruptible_mark_activity(self):
@@ -1512,16 +1532,23 @@ class TaskManager(BaseManager):
         try:
             mark_events_data = list(mark_events_data)
             target_turn_id = self._get_latest_turn_id_from_marks(mark_events_data)
+            target_response_uid = self._get_latest_response_uid_from_marks(mark_events_data)
             if target_turn_id is None:
                 target_turn_id = getattr(self.tools.get("input"), "last_heard_turn_id", None)
+            if target_response_uid is None:
+                target_response_uid = getattr(self.tools.get("input"), "last_heard_response_uid", None)
             if target_turn_id is None:
                 target_turn_id = self._get_latest_assistant_turn_id()
+            if target_response_uid is None:
+                target_response_uid = self._get_latest_assistant_response_uid()
             logger.info(
-                f"sync_history: target_turn_id={target_turn_id} marks={len(mark_events_data)} "
+                f"sync_history: target_turn_id={target_turn_id} target_response_uid={target_response_uid} marks={len(mark_events_data)} "
                 f"mark_ids={[mid for mid, _ in mark_events_data]}"
             )
             input_handler = self.tools["input"]
-            response_heard = input_handler.get_response_heard_for_turn(target_turn_id)
+            response_heard = input_handler.get_response_heard_for_response(target_response_uid)
+            if not response_heard:
+                response_heard = input_handler.get_response_heard_for_turn(target_turn_id)
             if not response_heard:
                 # Only fall back to global accumulator when target_turn_id is unknown.
                 # With a known target turn, the global can hold stale text from a
@@ -1664,26 +1691,38 @@ class TaskManager(BaseManager):
                                 response_heard = ""
                                 logger.info(f"turn_id={t_id}: nothing heard")
 
-            if target_turn_id is not None and response_heard and target_turn_id not in self._turn_msg_map:
+            if target_response_uid is not None and response_heard:
                 logger.info(
-                    f"sync_history: materializing assistant turn from heard audio | turn_id={target_turn_id} "
+                    f"sync_history: materializing assistant turn from heard audio | turn_id={target_turn_id} response_uid={target_response_uid} "
                     f"text={response_heard!r}"
                 )
-                self.conversation_history.upsert_assistant_for_turn(target_turn_id, response_heard, interim=False)
-                self.conversation_history.upsert_assistant_for_turn(target_turn_id, response_heard, interim=True)
+                self.conversation_history.upsert_assistant_for_response(
+                    target_response_uid, response_heard, interim=False, turn_id=target_turn_id
+                )
+                self.conversation_history.upsert_assistant_for_response(
+                    target_response_uid, response_heard, interim=True, turn_id=target_turn_id
+                )
                 for i in range(len(self.conversation_history.messages) - 1, -1, -1):
                     msg = self.conversation_history.messages[i]
                     if msg.get("role") == "assistant" or str(msg.get("role")).lower() == "assistant":
-                        if msg.get("turn_id") == target_turn_id:
+                        if msg.get("response_uid") == target_response_uid or msg.get("turn_id") == target_turn_id:
                             self._turn_msg_map[target_turn_id] = msg
                             break
 
-            self.conversation_history.sync_turn_after_interruption(
-                target_turn_id, response_heard, self.update_transcript_for_interruption
-            )
-            self.conversation_history.sync_interim_turn_after_interruption(
-                target_turn_id, response_heard, self.update_transcript_for_interruption
-            )
+            if target_response_uid is not None:
+                self.conversation_history.sync_response_after_interruption(
+                    target_response_uid, response_heard, self.update_transcript_for_interruption
+                )
+                self.conversation_history.sync_interim_response_after_interruption(
+                    target_response_uid, response_heard, self.update_transcript_for_interruption
+                )
+            else:
+                self.conversation_history.sync_turn_after_interruption(
+                    target_turn_id, response_heard, self.update_transcript_for_interruption
+                )
+                self.conversation_history.sync_interim_turn_after_interruption(
+                    target_turn_id, response_heard, self.update_transcript_for_interruption
+                )
             self._invalidate_response_chain()
 
         except Exception as e:
@@ -1759,10 +1798,16 @@ class TaskManager(BaseManager):
         # chunk_id is for chunking; turn_id is for transcript/history grouping.
         self._response_turn_id += 1
         meta_info_copy["turn_id"] = self._response_turn_id
+        response_uid = str(uuid.uuid4())
+        meta_info_copy["response_uid"] = response_uid
+        meta_info_copy["response_group_uid"] = response_uid
+        meta_info_copy.pop("parent_response_uid", None)
         logger.info(
-            "BOLNA_TRACE_META new_response seq=%s turn=%s request_id=%s origin=%s",
+            "BOLNA_TRACE_META new_response seq=%s turn=%s response_uid=%s group_uid=%s request_id=%s origin=%s",
             meta_info_copy.get("sequence_id"),
             meta_info_copy.get("turn_id"),
+            meta_info_copy.get("response_uid"),
+            meta_info_copy.get("response_group_uid"),
             meta_info_copy.get("request_id"),
             meta_info_copy.get("origin"),
         )
@@ -1771,6 +1816,8 @@ class TaskManager(BaseManager):
 
     def _spawn_followup_meta_info(self, meta_info):
         followup_meta_info = self.__get_updated_meta_info(meta_info)
+        followup_meta_info["response_group_uid"] = meta_info.get("response_group_uid") or meta_info.get("response_uid")
+        followup_meta_info["parent_response_uid"] = meta_info.get("response_uid")
         for key in (
             "chunk_id",
             "mark_id",
@@ -1783,9 +1830,12 @@ class TaskManager(BaseManager):
         ):
             followup_meta_info.pop(key, None)
         logger.info(
-            "BOLNA_TRACE_META followup seq=%s turn=%s request_id=%s parent_seq=%s parent_turn=%s",
+            "BOLNA_TRACE_META followup seq=%s turn=%s response_uid=%s group_uid=%s parent_response_uid=%s request_id=%s parent_seq=%s parent_turn=%s",
             followup_meta_info.get("sequence_id"),
             followup_meta_info.get("turn_id"),
+            followup_meta_info.get("response_uid"),
+            followup_meta_info.get("response_group_uid"),
+            followup_meta_info.get("parent_response_uid"),
             followup_meta_info.get("request_id"),
             meta_info.get("sequence_id"),
             meta_info.get("turn_id"),
@@ -2236,6 +2286,7 @@ class TaskManager(BaseManager):
         self.check_if_user_online = False
         function_call_log = None
         turn_id = meta_info.get("turn_id")
+        response_uid = meta_info.get("response_uid")
 
         if "execution_id" in resp and resp["execution_id"] != self.run_id:
             logger.warning(f"Correcting LLM-generated execution_id: '{resp['execution_id']}' -> '{self.run_id}'")
@@ -2271,7 +2322,7 @@ class TaskManager(BaseManager):
                 {"status": "success", "message": "Call is ending now. Say a brief goodbye to the user."}
             )
             self.conversation_history.append_assistant(
-                textual_response, tool_calls=resp["model_response"], turn_id=turn_id
+                textual_response, tool_calls=resp["model_response"], turn_id=turn_id, response_uid=response_uid
             )
             if turn_id is not None:
                 self._turn_msg_map[turn_id] = self.conversation_history.messages[-1]
@@ -2450,7 +2501,7 @@ class TaskManager(BaseManager):
                 textual_response = resp.get("textual_response", None)
                 if not textual_response:
                     self.conversation_history.append_assistant(
-                        textual_response, tool_calls=resp["model_response"], turn_id=turn_id
+                        textual_response, tool_calls=resp["model_response"], turn_id=turn_id, response_uid=response_uid
                     )
                     if turn_id is not None:
                         self._turn_msg_map[turn_id] = self.conversation_history.messages[-1]
@@ -2498,7 +2549,7 @@ class TaskManager(BaseManager):
                 self._turn_audio_flushed.clear()
                 await self._synthesize(create_ws_data_packet(handoff_text, meta_info=meta_info_handoff))
                 await self.wait_for_current_message()
-                self.conversation_history.append_assistant(handoff_text, turn_id=turn_id)
+                self.conversation_history.append_assistant(handoff_text, turn_id=turn_id, response_uid=response_uid)
                 if turn_id is not None:
                     self._turn_msg_map[turn_id] = self.conversation_history.messages[-1]
 
@@ -2512,7 +2563,7 @@ class TaskManager(BaseManager):
             self.check_if_user_online = self.conversation_config.get("check_if_user_online", True)
             if not textual_response:
                 self.conversation_history.append_assistant(
-                    textual_response, tool_calls=resp["model_response"], turn_id=turn_id
+                    textual_response, tool_calls=resp["model_response"], turn_id=turn_id, response_uid=response_uid
                 )
                 if turn_id is not None:
                     self._turn_msg_map[turn_id] = self.conversation_history.messages[-1]
@@ -2612,7 +2663,7 @@ class TaskManager(BaseManager):
         textual_response = resp.get("textual_response", None)
         if not textual_response:
             self.conversation_history.append_assistant(
-                textual_response, tool_calls=resp["model_response"], turn_id=turn_id
+                textual_response, tool_calls=resp["model_response"], turn_id=turn_id, response_uid=response_uid
             )
             if turn_id is not None:
                 self._turn_msg_map[turn_id] = self.conversation_history.messages[-1]
@@ -2683,17 +2734,20 @@ class TaskManager(BaseManager):
             reasoning_content=reasoning_content,
         )
         turn_id = meta_info.get("turn_id")
+        response_uid = meta_info.get("response_uid")
         if should_trigger_function_call:
             logger.info(f"There was a function call and need to make that work")
-            self.conversation_history.append_assistant(llm_response, turn_id=turn_id)
+            self.conversation_history.append_assistant(llm_response, turn_id=turn_id, response_uid=response_uid)
             # Track pre-tool textual response so sync_history can find it if the
             # user interrupts before the tool call completes. The final post-tool
             # response will overwrite this entry when it is stored.
             if turn_id is not None:
                 self._turn_msg_map[turn_id] = self.conversation_history.messages[-1]
         else:
-            messages.append({"role": "assistant", "content": llm_response, "turn_id": turn_id})
-            self.conversation_history.append_assistant(llm_response, turn_id=turn_id)
+            messages.append(
+                {"role": "assistant", "content": llm_response, "turn_id": turn_id, "response_uid": response_uid}
+            )
+            self.conversation_history.append_assistant(llm_response, turn_id=turn_id, response_uid=response_uid)
             self.conversation_history.sync_interim(messages)
             if turn_id is not None:
                 self._turn_msg_map[turn_id] = self.conversation_history.messages[-1]
@@ -2848,10 +2902,20 @@ class TaskManager(BaseManager):
                     static_text = llm_message["static_message"]
                     static_hash = llm_message["static_audio_hash"]
                     turn_id = meta_info.get("turn_id")
+                    response_uid = meta_info.get("response_uid")
 
                     if not is_silence_trigger:
-                        self.conversation_history.append_assistant(static_text, turn_id=turn_id)
-                        messages.append({"role": "assistant", "content": static_text, "turn_id": turn_id})
+                        self.conversation_history.append_assistant(
+                            static_text, turn_id=turn_id, response_uid=response_uid
+                        )
+                        messages.append(
+                            {
+                                "role": "assistant",
+                                "content": static_text,
+                                "turn_id": turn_id,
+                                "response_uid": response_uid,
+                            }
+                        )
                         self.conversation_history.sync_interim(messages)
                         if turn_id is not None:
                             self._turn_msg_map[turn_id] = self.conversation_history.messages[-1]
@@ -2940,8 +3004,18 @@ class TaskManager(BaseManager):
                     if text_chunk == filler_message:
                         logger.info("Got a pre function call message")
                         turn_id = meta_info.get("turn_id")
-                        messages.append({"role": "assistant", "content": filler_message, "turn_id": turn_id})
-                        self.conversation_history.append_assistant(filler_message, turn_id=turn_id)
+                        response_uid = meta_info.get("response_uid")
+                        messages.append(
+                            {
+                                "role": "assistant",
+                                "content": filler_message,
+                                "turn_id": turn_id,
+                                "response_uid": response_uid,
+                            }
+                        )
+                        self.conversation_history.append_assistant(
+                            filler_message, turn_id=turn_id, response_uid=response_uid
+                        )
                         self.conversation_history.sync_interim(messages)
                         if turn_id is not None:
                             self._turn_msg_map[turn_id] = self.conversation_history.messages[-1]
@@ -3182,10 +3256,12 @@ class TaskManager(BaseManager):
 
     async def _handle_transcriber_output(self, next_task, transcriber_message, meta_info):
         logger.info(
-            "BOLNA_TRACE_TM handle_transcript next=%s seq=%s turn=%s request_id=%s text_len=%s text=%r",
+            "BOLNA_TRACE_TM handle_transcript next=%s seq=%s turn=%s response_uid=%s group_uid=%s request_id=%s text_len=%s text=%r",
             next_task,
             meta_info.get("sequence_id"),
             meta_info.get("turn_id"),
+            meta_info.get("response_uid"),
+            meta_info.get("response_group_uid"),
             meta_info.get("request_id"),
             len((transcriber_message or "").strip()),
             (transcriber_message or "")[:120],
@@ -3219,9 +3295,10 @@ class TaskManager(BaseManager):
         has_pending_marks = self._has_interruptible_mark_activity()
         if next_task == "llm" and (self.response_in_pipeline or has_live_assistant_audio or has_pending_marks):
             logger.info(
-                "BOLNA_TRACE_TM cleanup_before_user_append seq=%s turn=%s response_in_pipeline=%s audio_playing=%s pending_marks=%s",
+                "BOLNA_TRACE_TM cleanup_before_user_append seq=%s turn=%s response_uid=%s response_in_pipeline=%s audio_playing=%s pending_marks=%s",
                 meta_info.get("sequence_id"),
                 meta_info.get("turn_id"),
+                meta_info.get("response_uid"),
                 self.response_in_pipeline,
                 has_live_assistant_audio,
                 has_pending_marks,
@@ -3240,9 +3317,10 @@ class TaskManager(BaseManager):
 
         self.conversation_history.append_user(transcriber_message)
         logger.info(
-            "BOLNA_TRACE_TM append_user seq=%s turn=%s history_len=%s text=%r",
+            "BOLNA_TRACE_TM append_user seq=%s turn=%s response_uid=%s history_len=%s text=%r",
             meta_info.get("sequence_id"),
             meta_info.get("turn_id"),
+            meta_info.get("response_uid"),
             len(self.conversation_history.messages),
             (transcriber_message or "")[:120],
         )
