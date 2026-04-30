@@ -14,6 +14,10 @@ from websockets.asyncio.client import ClientConnection
 from websockets.exceptions import InvalidHandshake, ConnectionClosed, ConnectionClosedError
 
 from .base_transcriber import BaseTranscriber
+from bolna.constants import (
+    OPENAI_TRANSCRIBEROPENAI_TRANSCRIBER_HEARTBEAT_INTERVAL_S,
+    OPENAI_TRANSCRIBEROPENAI_TRANSCRIBER_UTTERANCE_TIMEOUT_S,
+)
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.ssl_context import get_ssl_context
 from bolna.helpers.utils import create_ws_data_packet
@@ -21,9 +25,6 @@ from bolna.helpers.utils import create_ws_data_packet
 load_dotenv()
 logger = configure_logger(__name__)
 
-_SPEECH_RMS_THRESHOLD = 300  # PCM16 amplitude — below this is treated as silence
-_HEARTBEAT_INTERVAL_S = 5  # keepalive ping interval
-_UTTERANCE_TIMEOUT_S = 3.0  # force-finalize if completed never arrives after commit
 _EFFORT_SUPPORTED_MODELS = {"gpt-transcribe-alpha-walrus"}  # only alpha model supports effort
 
 
@@ -41,6 +42,7 @@ class OpenAITranscriber(BaseTranscriber):
         endpointing=400,
         effort="medium",
         noise_reduction=False,
+        speech_rms_threshold=300,
         **kwargs,
     ):
         super().__init__(input_queue)
@@ -53,6 +55,7 @@ class OpenAITranscriber(BaseTranscriber):
         self.endpointing_ms = int(endpointing)
         self.effort = effort
         self.noise_reduction = noise_reduction
+        self.speech_rms_threshold = speech_rms_threshold
 
         self.api_host = kwargs.get("transcriber_host", os.getenv("OPENAI_REALTIME_HOST", "api.openai.com"))
         _default_key_env = "OPENAI_API_KEY_EU" if "eu." in self.api_host else "OPENAI_API_KEY"
@@ -206,7 +209,7 @@ class OpenAITranscriber(BaseTranscriber):
         """Send WebSocket pings periodically to keep the connection alive."""
         try:
             while True:
-                await asyncio.sleep(_HEARTBEAT_INTERVAL_S)
+                await asyncio.sleep(OPENAI_TRANSCRIBER_HEARTBEAT_INTERVAL_S)
                 try:
                     await ws.ping()
                 except ConnectionClosed:
@@ -231,7 +234,7 @@ class OpenAITranscriber(BaseTranscriber):
                     and not self.is_transcript_sent_for_processing
                 ):
                     elapsed = time.time() - self._commit_time
-                    if elapsed > _UTTERANCE_TIMEOUT_S:
+                    if elapsed > OPENAI_TRANSCRIBER_UTTERANCE_TIMEOUT_S:
                         logger.warning(
                             f"Utterance timeout: completed event missing for {elapsed:.1f}s "
                             f"after commit on turn {self.current_turn_id}. Force-finalizing."
@@ -321,7 +324,7 @@ class OpenAITranscriber(BaseTranscriber):
                 pcm_24k = self._resample_to_24k(raw_audio)
                 rms = self._rms(pcm_24k)
 
-                if rms > _SPEECH_RMS_THRESHOLD:
+                if rms > self.speech_rms_threshold:
                     self._silence_start_time = None
                     if not self._speech_active:
                         self._speech_active = True
