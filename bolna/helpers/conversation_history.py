@@ -148,8 +148,8 @@ class ConversationHistory:
                 while index < len(msgs) and msgs[index].get("role") == ChatRole.TOOL:
                     msgs.pop(index)
             else:
-                while msgs and msgs[-1].get("role") in _UNHEARD_ROLES:
-                    msgs.pop()
+                while index < len(msgs) and msgs[index].get("role") in _UNHEARD_ROLES:
+                    msgs.pop(index)
         else:
             msgs[index]["content"] = updated
 

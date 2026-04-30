@@ -20,6 +20,7 @@ class SequenceStats(BaseModel):
     first_sent_ts: Optional[float] = None
     last_sent_ts: Optional[float] = None
     total_audio_duration: float = 0
+    turn_id: Optional[int] = None
 
 
 class SequenceSummary(BaseModel):
@@ -83,6 +84,9 @@ class MarkEventMetaData:
                 duration = value.get("duration", 0)
                 if duration > 0:
                     entry.total_audio_duration += duration
+                turn_id = value.get("turn_id")
+                if turn_id is not None and entry.turn_id is None:
+                    entry.turn_id = turn_id
 
     def record_ack(self, delay, sequence_id):
         self._mark_stats.total_acked += 1

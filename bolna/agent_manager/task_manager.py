@@ -1622,11 +1622,21 @@ class TaskManager(BaseManager):
                         msg = self._turn_msg_map.get(t_id)
                         full_text = (msg.get("content") or "") if msg else ""
 
+                        # Sum total audio duration across ALL sequences for this turn
+                        # (not just sequences with pending marks), so that fully-acked
+                        # early sequences are included in the proportion calculation.
                         total_dur = sum(
-                            self.mark_event_meta_data._mark_stats.per_sequence[s].total_audio_duration
-                            for s in info["seq_ids"]
-                            if s in self.mark_event_meta_data._mark_stats.per_sequence
+                            seq_stat.total_audio_duration
+                            for seq_stat in self.mark_event_meta_data._mark_stats.per_sequence.values()
+                            if seq_stat.turn_id == t_id
                         )
+                        if total_dur <= 0:
+                            # Fallback: use only pending sequences (may underestimate)
+                            total_dur = sum(
+                                self.mark_event_meta_data._mark_stats.per_sequence[s].total_audio_duration
+                                for s in info["seq_ids"]
+                                if s in self.mark_event_meta_data._mark_stats.per_sequence
+                            )
 
                         if total_dur <= 0:
                             logger.info(f"turn_id={t_id}: no duration stats, treating as fully unheard")
