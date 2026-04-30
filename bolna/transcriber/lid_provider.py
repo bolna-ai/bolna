@@ -184,7 +184,7 @@ class WhisperLID:
     Requires:  pip install openai-whisper torch
 
     Config keys:
-        model_name         — whisper model size (default: tiny)
+        model_name         — whisper model size (default: base)
         classify_every_ms  — how often to classify after buffer fills (default 800)
         min_buffer_ms      — minimum speech audio before first classify (default 1500)
         vad_rms_threshold  — silence gate RMS threshold (default 500)
@@ -199,7 +199,7 @@ class WhisperLID:
     def __init__(self, on_language: OnLanguageCallback, config: dict):
         self.on_language = on_language
         self.config = config
-        self._model_name = config.get("model_name", "tiny")
+        self._model_name = config.get("model_name", "base")
         self._classify_every_ms = int(config.get("classify_every_ms", 800))
         self._min_buffer_ms = int(config.get("min_buffer_ms", 1500))
         self._vad_rms_threshold = int(config.get("vad_rms_threshold", 500))
