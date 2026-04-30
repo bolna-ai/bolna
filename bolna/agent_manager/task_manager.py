@@ -34,7 +34,7 @@ from .base_manager import BaseManager
 from .interruption_manager import InterruptionManager
 from bolna.agent_types import *
 from bolna.providers import *
-from bolna.enums import TelephonyProvider, LogComponent, LogDirection, HangupReason, NodeType
+from bolna.enums import TelephonyProvider, LogComponent, LogDirection, HangupReason, NodeType, ChatRole
 from bolna.exceptions import BolnaComponentError, LLMError, SynthesizerError, TranscriberError
 from bolna.prompts import *
 from bolna.helpers.language_detector import LanguageDetector
@@ -251,6 +251,9 @@ class TaskManager(BaseManager):
         self.consider_next_transcript_after = time.time()
         self.llm_response_generated = False
         self.response_in_pipeline = False
+        self._response_turn_id = 0
+        self._turn_msg_map = {}  # turn_id → assistant message dict ref in _messages
+        self._pending_assistant_history = {}  # sequence_id -> {content, turn_id, response_uid}
 
         # Language detection
         self.language_detector = LanguageDetector(self.task_config["task_config"], run_id=self.run_id)
@@ -1485,12 +1488,99 @@ class TaskManager(BaseManager):
                 if partial and original_stream.startswith(partial):
                     return partial
 
-        return heard_text
+        # heard_text not found in original — stale/mismatched turn data.
+        # Treat as unheard rather than corrupting the message with foreign text.
+        logger.warning(
+            f"update_transcript_for_interruption: heard_text not found in original; treating as unheard. "
+            f"original[:30]={original_stream[:30]!r} heard[:30]={heard_text[:30]!r}"
+        )
+        return ""
+
+    @staticmethod
+    def _get_latest_turn_id_from_marks(mark_events_data):
+        latest_turn_id = None
+        latest_counter = -1
+        for _, mark_data in mark_events_data:
+            turn_id = mark_data.get("turn_id")
+            if turn_id is None:
+                continue
+            counter = mark_data.get("counter", -1)
+            if counter >= latest_counter:
+                latest_counter = counter
+                latest_turn_id = turn_id
+        return latest_turn_id
+
+    @staticmethod
+    def _get_latest_response_uid_from_marks(mark_events_data):
+        latest_response_uid = None
+        latest_counter = -1
+        for _, mark_data in mark_events_data:
+            response_uid = mark_data.get("response_uid")
+            if response_uid is None:
+                continue
+            counter = mark_data.get("counter", -1)
+            if counter >= latest_counter:
+                latest_counter = counter
+                latest_response_uid = response_uid
+        return latest_response_uid
+
+    def _get_latest_assistant_turn_id(self):
+        for msg in reversed(self.conversation_history.messages):
+            if msg.get("role") == ChatRole.ASSISTANT and msg.get("turn_id") is not None:
+                return msg.get("turn_id")
+        return None
+
+    def _get_latest_assistant_response_uid(self):
+        for msg in reversed(self.conversation_history.messages):
+            if msg.get("role") == ChatRole.ASSISTANT and msg.get("response_uid") is not None:
+                return msg.get("response_uid")
+        return None
+
+    def _has_interruptible_mark_activity(self):
+        for mark_data in self.mark_event_meta_data.mark_event_meta_data.values():
+            if mark_data.get("type") == "pre_mark_message":
+                continue
+            if mark_data.get("turn_id") is not None:
+                return True
+            sequence_id = mark_data.get("sequence_id")
+            if sequence_id is not None and sequence_id != -1:
+                return True
+        return False
 
     async def sync_history(self, mark_events_data, interruption_processed_at):
         """Sync history to reflect only what was actually spoken. Uses confirmed text or falls back to pending marks."""
         try:
-            response_heard = self.tools["input"].response_heard_by_user
+            mark_events_data = list(mark_events_data)
+            target_turn_id = self._get_latest_turn_id_from_marks(mark_events_data)
+            target_response_uid = self._get_latest_response_uid_from_marks(mark_events_data)
+            if target_turn_id is None:
+                target_turn_id = getattr(self.tools.get("input"), "last_heard_turn_id", None)
+            if target_response_uid is None:
+                target_response_uid = getattr(self.tools.get("input"), "last_heard_response_uid", None)
+            if target_turn_id is None:
+                target_turn_id = self._get_latest_assistant_turn_id()
+            if target_response_uid is None:
+                target_response_uid = self._get_latest_assistant_response_uid()
+            logger.info(
+                f"sync_history: target_turn_id={target_turn_id} target_response_uid={target_response_uid} marks={len(mark_events_data)} "
+                f"mark_ids={[mid for mid, _ in mark_events_data]}"
+            )
+            input_handler = self.tools["input"]
+            response_heard = input_handler.get_response_heard_for_response(target_response_uid)
+            if not response_heard:
+                response_heard = input_handler.get_response_heard_for_turn(target_turn_id)
+            if not response_heard:
+                response_heard = self.mark_event_meta_data.get_heard_text_for_response(target_response_uid)
+            if not response_heard:
+                response_heard = self.mark_event_meta_data.get_heard_text_for_turn(target_turn_id)
+            if not response_heard:
+                # Only fall back to global accumulator when target_turn_id is unknown.
+                # With a known target turn, the global can hold stale text from a
+                # previous turn (e.g. acked post-tool audio before reset), which
+                # would corrupt the wrong message.
+                if target_turn_id is None:
+                    response_heard = input_handler.response_heard_by_user
+                    target_turn_id = getattr(input_handler, "last_heard_turn_id", None)
             logger.info(f"sync_history: response_heard len={len(response_heard) if response_heard else 0}")
             if response_heard:
                 logger.info(f"response_heard (last 10 chars): {response_heard[-10:]}")
@@ -1502,6 +1592,8 @@ class TaskManager(BaseManager):
                     mark_data = mark.get("mark_data", {})
                     mark_type = mark_data.get("type", "")
                     text = mark_data.get("text_synthesized", "")
+                    if target_turn_id is not None and mark_data.get("turn_id") != target_turn_id:
+                        continue
                     if mark_type in ["pre_mark_message", "backchanneling"] or not text:
                         continue
                     pending_chunks.append(
@@ -1544,14 +1636,117 @@ class TaskManager(BaseManager):
                             f"Estimated played text (last 10 chars): {response_heard[-10:]}, len={len(response_heard)}"
                         )
                 else:
-                    logger.info("No pending content marks found to estimate played text")
-                    # No pending content marks - response likely completed normally
-                    return
+                    # No text_synthesized on marks (streaming synths). Group pending
+                    # marks by turn_id and use audio duration to determine play state.
+                    pending_by_turn = {}  # turn_id → {seq_ids: set, pending_dur: float}
+                    for mark in pending_marks:
+                        mark_data = mark.get("mark_data", {})
+                        if mark_data.get("type") == "pre_mark_message":
+                            continue
+                        t_id = mark_data.get("turn_id")
+                        s_id = mark_data.get("sequence_id")
+                        if t_id is None:
+                            continue
+                        entry = pending_by_turn.setdefault(t_id, {"seq_ids": set(), "pending_dur": 0.0})
+                        if s_id is not None and s_id != -1:
+                            entry["seq_ids"].add(s_id)
+                        entry["pending_dur"] += mark_data.get("duration", 0.0)
 
-            self.conversation_history.sync_after_interruption(response_heard, self.update_transcript_for_interruption)
-            self.conversation_history.sync_interim_after_interruption(
-                response_heard, self.update_transcript_for_interruption
-            )
+                    if not pending_by_turn:
+                        if target_turn_id is None:
+                            logger.info(
+                                "No pending marks with turn_id and no target_turn_id; "
+                                "skipping trim to avoid removing non-turn assistant messages like welcome"
+                            )
+                            return
+                        logger.info(
+                            "No pending marks with turn_id to estimate played text; "
+                            f"will trim target_turn_id={target_turn_id} as unheard"
+                        )
+                        response_heard = ""
+
+                    else:
+                        # Use the most recently interrupted turn
+                        t_id = target_turn_id if target_turn_id in pending_by_turn else max(pending_by_turn.keys())
+                        target_turn_id = t_id
+                        info = pending_by_turn[t_id]
+                        msg = self._turn_msg_map.get(t_id)
+                        full_text = (msg.get("content") or "") if msg else ""
+
+                        # Sum total audio duration across ALL sequences for this turn
+                        # (not just sequences with pending marks), so that fully-acked
+                        # early sequences are included in the proportion calculation.
+                        total_dur = sum(
+                            seq_stat.total_audio_duration
+                            for seq_stat in self.mark_event_meta_data._mark_stats.per_sequence.values()
+                            if seq_stat.turn_id == t_id
+                        )
+                        if total_dur <= 0:
+                            # Fallback: use only pending sequences (may underestimate)
+                            total_dur = sum(
+                                self.mark_event_meta_data._mark_stats.per_sequence[s].total_audio_duration
+                                for s in info["seq_ids"]
+                                if s in self.mark_event_meta_data._mark_stats.per_sequence
+                            )
+
+                        if total_dur <= 0:
+                            logger.info(f"turn_id={t_id}: no duration stats, treating as fully unheard")
+                            response_heard = ""
+                        else:
+                            heard_dur = max(0.0, total_dur - info["pending_dur"])
+                            proportion = min(1.0, heard_dur / total_dur)
+                            logger.info(
+                                f"turn_id={t_id}: total={total_dur:.3f}s pending={info['pending_dur']:.3f}s proportion={proportion:.2f}"
+                            )
+
+                            if proportion >= 1.0:
+                                # Fully played — nothing to trim
+                                return
+
+                            if proportion > 0 and full_text.strip():
+                                char_count = int(len(full_text.strip()) * proportion)
+                                if char_count < len(full_text.strip()):
+                                    last_space = full_text.strip()[:char_count].rfind(" ")
+                                    if last_space > 0:
+                                        char_count = last_space
+                                response_heard = full_text.strip()[:char_count]
+                                logger.info(f"turn_id={t_id}: partial, heard (last 20): {response_heard[-20:]!r}")
+                            else:
+                                response_heard = ""
+                                logger.info(f"turn_id={t_id}: nothing heard")
+
+            if target_response_uid is not None and response_heard:
+                logger.info(
+                    f"sync_history: materializing assistant turn from heard audio | turn_id={target_turn_id} response_uid={target_response_uid} "
+                    f"text={response_heard!r}"
+                )
+                self.conversation_history.upsert_assistant_for_response(
+                    target_response_uid, response_heard, interim=False, turn_id=target_turn_id
+                )
+                self.conversation_history.upsert_assistant_for_response(
+                    target_response_uid, response_heard, interim=True, turn_id=target_turn_id
+                )
+                for i in range(len(self.conversation_history.messages) - 1, -1, -1):
+                    msg = self.conversation_history.messages[i]
+                    if msg.get("role") == "assistant" or str(msg.get("role")).lower() == "assistant":
+                        if msg.get("response_uid") == target_response_uid or msg.get("turn_id") == target_turn_id:
+                            self._turn_msg_map[target_turn_id] = msg
+                            break
+
+            if target_response_uid is not None:
+                self.conversation_history.sync_response_after_interruption(
+                    target_response_uid, response_heard, self.update_transcript_for_interruption
+                )
+                self.conversation_history.sync_interim_response_after_interruption(
+                    target_response_uid, response_heard, self.update_transcript_for_interruption
+                )
+            else:
+                self.conversation_history.sync_turn_after_interruption(
+                    target_turn_id, response_heard, self.update_transcript_for_interruption
+                )
+                self.conversation_history.sync_interim_turn_after_interruption(
+                    target_turn_id, response_heard, self.update_transcript_for_interruption
+                )
             self._invalidate_response_chain()
 
         except Exception as e:
@@ -1572,6 +1767,7 @@ class TaskManager(BaseManager):
             self.tools["input"].reset_response_heard_by_user()
 
         self.interruption_manager.invalidate_pending_responses()
+        self._drop_all_staged_assistant_history("cleanup_downstream_tasks")
         self.response_in_pipeline = False
         await self.tools["synthesizer"].flush_synthesizer_stream()
 
@@ -1621,9 +1817,55 @@ class TaskManager(BaseManager):
 
         new_sequence_id = self.interruption_manager.get_next_sequence_id()
         meta_info_copy["sequence_id"] = new_sequence_id
-        meta_info_copy["turn_id"] = self.interruption_manager.get_turn_id()
+        # Transcript/tool-call grouping needs a response-turn id that is stable
+        # across all chunks and sub-steps of one response chain, but independent
+        # from audio sequencing. sequence_id is for interruption/audio gating;
+        # chunk_id is for chunking; turn_id is for transcript/history grouping.
+        self._response_turn_id += 1
+        meta_info_copy["turn_id"] = self._response_turn_id
+        response_uid = str(uuid.uuid4())
+        meta_info_copy["response_uid"] = response_uid
+        meta_info_copy["response_group_uid"] = response_uid
+        meta_info_copy.pop("parent_response_uid", None)
+        logger.info(
+            "BOLNA_TRACE_META new_response seq=%s turn=%s response_uid=%s group_uid=%s request_id=%s origin=%s",
+            meta_info_copy.get("sequence_id"),
+            meta_info_copy.get("turn_id"),
+            meta_info_copy.get("response_uid"),
+            meta_info_copy.get("response_group_uid"),
+            meta_info_copy.get("request_id"),
+            meta_info_copy.get("origin"),
+        )
 
         return meta_info_copy
+
+    def _spawn_followup_meta_info(self, meta_info):
+        followup_meta_info = self.__get_updated_meta_info(meta_info)
+        followup_meta_info["response_group_uid"] = meta_info.get("response_group_uid") or meta_info.get("response_uid")
+        followup_meta_info["parent_response_uid"] = meta_info.get("response_uid")
+        for key in (
+            "chunk_id",
+            "mark_id",
+            "is_first_chunk",
+            "is_first_chunk_of_entire_response",
+            "is_final_chunk_of_entire_response",
+            "end_of_synthesizer_stream",
+            "end_of_llm_stream",
+            "text_synthesized",
+        ):
+            followup_meta_info.pop(key, None)
+        logger.info(
+            "BOLNA_TRACE_META followup seq=%s turn=%s response_uid=%s group_uid=%s parent_response_uid=%s request_id=%s parent_seq=%s parent_turn=%s",
+            followup_meta_info.get("sequence_id"),
+            followup_meta_info.get("turn_id"),
+            followup_meta_info.get("response_uid"),
+            followup_meta_info.get("response_group_uid"),
+            followup_meta_info.get("parent_response_uid"),
+            followup_meta_info.get("request_id"),
+            meta_info.get("sequence_id"),
+            meta_info.get("turn_id"),
+        )
+        return followup_meta_info
 
     def _extract_sequence_and_meta(self, message):
         sequence, meta_info = None, None
@@ -2076,6 +2318,8 @@ class TaskManager(BaseManager):
     ):
         self.check_if_user_online = False
         function_call_log = None
+        turn_id = meta_info.get("turn_id")
+        response_uid = meta_info.get("response_uid")
 
         if "execution_id" in resp and resp["execution_id"] != self.run_id:
             logger.warning(f"Correcting LLM-generated execution_id: '{resp['execution_id']}' -> '{self.run_id}'")
@@ -2103,7 +2347,7 @@ class TaskManager(BaseManager):
             tool_result = json.dumps(
                 {"status": "success", "message": "Call is ending now. Say a brief goodbye to the user."}
             )
-            self.conversation_history.append_assistant(textual_response, tool_calls=resp["model_response"])
+            self.conversation_history.attach_tool_calls_to_turn(turn_id, resp["model_response"])
             self.conversation_history.append_tool_result(resp.get("tool_call_id", ""), tool_result)
             convert_to_request_log(
                 tool_result, meta_info, None, "function_call", direction="response", run_id=self.run_id
@@ -2120,7 +2364,10 @@ class TaskManager(BaseManager):
             )
 
             # Generate goodbye with should_trigger_function_call=False to prevent recursion
-            await self.__do_llm_generation(messages, meta_info, next_step, should_trigger_function_call=False)
+            followup_meta_info = self._spawn_followup_meta_info(meta_info)
+            await self.__do_llm_generation(
+                messages, followup_meta_info, next_step, should_trigger_function_call=False
+            )
             await self.wait_for_current_message()
 
             self.hangup_detail = "end_call_tool"
@@ -2274,18 +2521,20 @@ class TaskManager(BaseManager):
                 function_response = f"Already speaking in {language_label}, no switch needed"
 
                 textual_response = resp.get("textual_response", None)
-                if not textual_response:
-                    self.conversation_history.append_assistant(textual_response, tool_calls=resp["model_response"])
-                else:
-                    self.conversation_history.attach_tool_calls_to_last_response(resp["model_response"])
+                self.conversation_history.attach_tool_calls_to_turn(turn_id, resp["model_response"])
                 self.conversation_history.append_tool_result(resp.get("tool_call_id", ""), function_response)
                 convert_to_request_log(
                     function_response, meta_info, None, "function_call", direction="response", run_id=self.run_id
                 )
 
                 messages = self.conversation_history.get_copy()
+                followup_meta_info = self._spawn_followup_meta_info(meta_info)
                 await self.__do_llm_generation(
-                    messages, meta_info, next_step, should_bypass_synth=False, should_trigger_function_call=True
+                    messages,
+                    followup_meta_info,
+                    next_step,
+                    should_bypass_synth=False,
+                    should_trigger_function_call=True,
                 )
                 self.execute_function_call_task = None
                 return
@@ -2315,7 +2564,9 @@ class TaskManager(BaseManager):
                 self._turn_audio_flushed.clear()
                 await self._synthesize(create_ws_data_packet(handoff_text, meta_info=meta_info_handoff))
                 await self.wait_for_current_message()
-                self.conversation_history.append_assistant(handoff_text)
+                self.conversation_history.append_assistant(handoff_text, turn_id=turn_id, response_uid=response_uid)
+                if turn_id is not None:
+                    self._turn_msg_map[turn_id] = self.conversation_history.messages[-1]
 
             try:
                 await self.switch_language(language_label)
@@ -2325,18 +2576,16 @@ class TaskManager(BaseManager):
 
             textual_response = resp.get("textual_response", None)
             self.check_if_user_online = self.conversation_config.get("check_if_user_online", True)
-            if not textual_response:
-                self.conversation_history.append_assistant(textual_response, tool_calls=resp["model_response"])
-            else:
-                self.conversation_history.attach_tool_calls_to_last_response(resp["model_response"])
+            self.conversation_history.attach_tool_calls_to_turn(turn_id, resp["model_response"])
             self.conversation_history.append_tool_result(resp.get("tool_call_id", ""), function_response)
             convert_to_request_log(
                 function_response, meta_info, None, "function_call", direction="response", run_id=self.run_id
             )
 
             messages = self.conversation_history.get_copy()
+            followup_meta_info = self._spawn_followup_meta_info(meta_info)
             await self.__do_llm_generation(
-                messages, meta_info, next_step, should_bypass_synth=False, should_trigger_function_call=True
+                messages, followup_meta_info, next_step, should_bypass_synth=False, should_trigger_function_call=True
             )
             self.execute_function_call_task = None
             return
@@ -2420,10 +2669,7 @@ class TaskManager(BaseManager):
             set_response_prompt = function_response
 
         textual_response = resp.get("textual_response", None)
-        if not textual_response:
-            self.conversation_history.append_assistant(textual_response, tool_calls=resp["model_response"])
-        else:
-            self.conversation_history.attach_tool_calls_to_last_response(resp["model_response"])
+        self.conversation_history.attach_tool_calls_to_turn(turn_id, resp["model_response"])
         self.conversation_history.append_tool_result(resp.get("tool_call_id", ""), function_response)
 
         logger.info(f"Logging function call parameters ")
@@ -2451,13 +2697,14 @@ class TaskManager(BaseManager):
 
         if not called_fun.startswith("transfer_call"):
             should_bypass_synth = meta_info.get("bypass_synth", False)
-            await self.__do_llm_generation(
-                messages,
-                meta_info,
-                next_step,
-                should_bypass_synth=should_bypass_synth,
-                should_trigger_function_call=True,
-            )
+        followup_meta_info = self._spawn_followup_meta_info(meta_info)
+        await self.__do_llm_generation(
+            messages,
+            followup_meta_info,
+            next_step,
+            should_bypass_synth=should_bypass_synth,
+            should_trigger_function_call=True,
+        )
 
         self.execute_function_call_task = None
 
@@ -2487,12 +2734,16 @@ class TaskManager(BaseManager):
             cached_tokens=cached_tokens,
             reasoning_content=reasoning_content,
         )
+        turn_id = meta_info.get("turn_id")
+        response_uid = meta_info.get("response_uid")
         if should_trigger_function_call:
             logger.info(f"There was a function call and need to make that work")
-            self.conversation_history.append_assistant(llm_response)
+            self._stage_assistant_history(meta_info, llm_response)
         else:
-            messages.append({"role": "assistant", "content": llm_response})
-            self.conversation_history.append_assistant(llm_response)
+            messages.append(
+                {"role": "assistant", "content": llm_response, "turn_id": turn_id, "response_uid": response_uid}
+            )
+            self._stage_assistant_history(meta_info, llm_response)
             self.conversation_history.sync_interim(messages)
 
     async def __do_llm_generation(
@@ -2644,10 +2895,19 @@ class TaskManager(BaseManager):
                 if isinstance(llm_message, dict) and "static_message" in llm_message:
                     static_text = llm_message["static_message"]
                     static_hash = llm_message["static_audio_hash"]
+                    turn_id = meta_info.get("turn_id")
+                    response_uid = meta_info.get("response_uid")
 
                     if not is_silence_trigger:
-                        self.conversation_history.append_assistant(static_text)
-                        messages.append({"role": "assistant", "content": static_text})
+                        messages.append(
+                            {
+                                "role": "assistant",
+                                "content": static_text,
+                                "turn_id": turn_id,
+                                "response_uid": response_uid,
+                            }
+                        )
+                        self._stage_assistant_history(meta_info, static_text)
                         self.conversation_history.sync_interim(messages)
 
                     convert_to_request_log(
@@ -2733,8 +2993,17 @@ class TaskManager(BaseManager):
                     # filler_message = PRE_FUNCTION_CALL_MESSAGE.get(self.language, PRE_FUNCTION_CALL_MESSAGE[DEFAULT_LANGUAGE_CODE])
                     if text_chunk == filler_message:
                         logger.info("Got a pre function call message")
-                        messages.append({"role": "assistant", "content": filler_message})
-                        self.conversation_history.append_assistant(filler_message)
+                        turn_id = meta_info.get("turn_id")
+                        response_uid = meta_info.get("response_uid")
+                        messages.append(
+                            {
+                                "role": "assistant",
+                                "content": filler_message,
+                                "turn_id": turn_id,
+                                "response_uid": response_uid,
+                            }
+                        )
+                        self._stage_assistant_history(meta_info, filler_message)
                         self.conversation_history.sync_interim(messages)
 
                     await self._handle_llm_output(next_step, text_chunk, should_bypass_synth, meta_info)
@@ -2974,11 +3243,92 @@ class TaskManager(BaseManager):
     def _trigger_voicemail_check(self, transcriber_message, meta_info, is_final=True):
         self.voicemail_handler.trigger_check(transcriber_message, meta_info, is_final)
 
+    def _stage_assistant_history(self, meta_info, content):
+        sequence_id = meta_info.get("sequence_id")
+        response_uid = meta_info.get("response_uid")
+        turn_id = meta_info.get("turn_id")
+        if sequence_id is None or not content or not str(content).strip():
+            return
+        self._pending_assistant_history[sequence_id] = {
+            "content": content,
+            "turn_id": turn_id,
+            "response_uid": response_uid,
+        }
+        logger.info(
+            "BOLNA_TRACE_TM stage_assistant_history seq=%s turn=%s response_uid=%s text_len=%s",
+            sequence_id,
+            turn_id,
+            response_uid,
+            len(content),
+        )
+
+    def _commit_staged_assistant_history(self, sequence_id):
+        staged = self._pending_assistant_history.pop(sequence_id, None)
+        if staged is None:
+            return
+
+        self.conversation_history.append_assistant(
+            staged["content"], turn_id=staged["turn_id"], response_uid=staged["response_uid"]
+        )
+        if staged["turn_id"] is not None:
+            self._turn_msg_map[staged["turn_id"]] = self.conversation_history.messages[-1]
+        logger.info(
+            "BOLNA_TRACE_TM commit_assistant_history seq=%s turn=%s response_uid=%s text_len=%s",
+            sequence_id,
+            staged["turn_id"],
+            staged["response_uid"],
+            len(staged["content"]),
+        )
+
+    def _drop_staged_assistant_history(self, sequence_id, reason):
+        staged = self._pending_assistant_history.pop(sequence_id, None)
+        if staged is None:
+            return
+        logger.info(
+            "BOLNA_TRACE_TM drop_assistant_history seq=%s turn=%s response_uid=%s reason=%s",
+            sequence_id,
+            staged["turn_id"],
+            staged["response_uid"],
+            reason,
+        )
+
+    def _drop_all_staged_assistant_history(self, reason, keep_sequence_ids=None):
+        keep_sequence_ids = set(keep_sequence_ids or [])
+        drop_sequence_ids = [seq for seq in self._pending_assistant_history.keys() if seq not in keep_sequence_ids]
+        for sequence_id in drop_sequence_ids:
+            self._drop_staged_assistant_history(sequence_id, reason)
+
+    def _retire_dropped_response(self, meta_info, reason):
+        sequence_id = meta_info.get("sequence_id")
+        response_uid = meta_info.get("response_uid")
+        turn_id = meta_info.get("turn_id")
+        self._drop_staged_assistant_history(sequence_id, reason)
+        self.interruption_manager.retire_sequence_id(sequence_id)
+        logger.info(
+            "BOLNA_TRACE_TM drop_response seq=%s turn=%s response_uid=%s reason=%s",
+            sequence_id,
+            turn_id,
+            response_uid,
+            reason,
+        )
+
     async def _handle_transcriber_output(self, next_task, transcriber_message, meta_info):
+        logger.info(
+            "BOLNA_TRACE_TM handle_transcript next=%s seq=%s turn=%s response_uid=%s group_uid=%s request_id=%s text_len=%s text=%r",
+            next_task,
+            meta_info.get("sequence_id"),
+            meta_info.get("turn_id"),
+            meta_info.get("response_uid"),
+            meta_info.get("response_group_uid"),
+            meta_info.get("request_id"),
+            len((transcriber_message or "").strip()),
+            (transcriber_message or "")[:120],
+        )
         if not self.tools["input"].welcome_message_played() and (
             self.discard_pre_welcome_utterance or len(self.conversation_history) > 2
         ):
             logger.info(f"Welcome message is playing while spoken: {transcriber_message}")
+            self._retire_dropped_response(meta_info, "welcome_still_playing")
             return
 
         if self._speech_started_before_welcome:
@@ -2986,30 +3336,81 @@ class TaskManager(BaseManager):
                 f"Discarding transcript from speech that started before welcome finished: {transcriber_message}"
             )
             self._speech_started_before_welcome = False
+            self._retire_dropped_response(meta_info, "speech_started_before_welcome_finished")
             return
 
         if self.conversation_history.is_duplicate_user(transcriber_message):
             logger.info(f"Skipping duplicate transcript (same content): {transcriber_message}")
+            self._retire_dropped_response(meta_info, "duplicate_user_transcript")
             return
 
         self._trigger_voicemail_check(transcriber_message, meta_info, is_final=True)
 
         if self.voicemail_handler.detected:
             logger.info("Voicemail already detected - skipping normal transcriber output processing")
+            self._retire_dropped_response(meta_info, "voicemail_detected")
             return
 
         await self.language_detector.collect_transcript(transcriber_message)
 
-        if self.response_in_pipeline and next_task == "llm":
-            self.conversation_history.pop_unheard_responses()
+        has_live_assistant_audio = self.tools["input"].is_audio_being_played_to_user()
+        has_pending_marks = self._has_interruptible_mark_activity()
+        current_sequence_id = meta_info.get("sequence_id")
+        has_pending_sequences = self.interruption_manager.has_pending_responses_excluding(current_sequence_id)
+        has_pending_generation = (
+            (self.llm_task is not None and not self.llm_task.done())
+            or (self.execute_function_call_task is not None and not self.execute_function_call_task.done())
+        )
+        if next_task == "llm" and (
+            self.response_in_pipeline
+            or has_live_assistant_audio
+            or has_pending_marks
+            or has_pending_sequences
+            or has_pending_generation
+        ):
+            logger.info(
+                "BOLNA_TRACE_TM cleanup_before_user_append seq=%s turn=%s response_uid=%s response_in_pipeline=%s audio_playing=%s pending_marks=%s pending_sequences=%s pending_generation=%s",
+                meta_info.get("sequence_id"),
+                meta_info.get("turn_id"),
+                meta_info.get("response_uid"),
+                self.response_in_pipeline,
+                has_live_assistant_audio,
+                has_pending_marks,
+                has_pending_sequences,
+                has_pending_generation,
+            )
+            # Once audio starts sending, response_in_pipeline flips to False even
+            # though the assistant turn may still be actively playing to the user.
+            # For precise transcripting we need to reconcile that in-flight turn
+            # before appending the next user utterance, otherwise the full stored
+            # assistant text can leak into history even when only part of it was heard.
             self._invalidate_response_chain()
             original_message = transcriber_message
             transcriber_message = self.conversation_history.pop_and_merge_user(transcriber_message)
             if transcriber_message != original_message:
                 logger.info(f"Merged transcript with unheard response: {transcriber_message}")
             await self.__cleanup_downstream_tasks()
+            # cleanup invalidates all pending sequence ids. The current turn's
+            # sequence_id was already allocated by __get_updated_meta_info, so
+            # we must re-register it or the fresh LLM response will later be
+            # dropped in _synthesize as an invalid sequence.
+            self.interruption_manager.revalidate_sequence_id(current_sequence_id)
+            logger.info(
+                "BOLNA_TRACE_TM revalidated_current_seq_after_cleanup seq=%s turn=%s response_uid=%s",
+                meta_info.get("sequence_id"),
+                meta_info.get("turn_id"),
+                meta_info.get("response_uid"),
+            )
 
         self.conversation_history.append_user(transcriber_message)
+        logger.info(
+            "BOLNA_TRACE_TM append_user seq=%s turn=%s response_uid=%s history_len=%s text=%r",
+            meta_info.get("sequence_id"),
+            meta_info.get("turn_id"),
+            meta_info.get("response_uid"),
+            len(self.conversation_history.messages),
+            (transcriber_message or "")[:120],
+        )
 
         convert_to_request_log(
             message=transcriber_message, meta_info=meta_info, model=self.transcriber_provider, run_id=self.run_id
@@ -3025,6 +3426,7 @@ class TaskManager(BaseManager):
                 self.llm_task.cancel()
                 self.llm_task = None
                 self.interruption_manager.invalidate_pending_responses()
+                self._drop_all_staged_assistant_history("llm_task_cancelled_for_new_speech_final")
                 # Re-register the current sequence_id (already allocated by
                 # __get_updated_meta_info) so the new response's audio is not blocked
                 self.interruption_manager.revalidate_sequence_id(meta_info["sequence_id"])
@@ -3214,6 +3616,15 @@ class TaskManager(BaseManager):
                         logger.info(f"Received transcript, sending for further processing")
                         transcript_content = message["data"].get("content", "")
                         word_count = len(transcript_content.strip().split(" "))
+                        logger.info(
+                            "BOLNA_TRACE_TM final_transcript next=%s req=%s word_count=%s audio_playing=%s response_in_pipeline=%s text=%r",
+                            next_task,
+                            meta_info.get("request_id"),
+                            word_count,
+                            self.tools["input"].is_audio_being_played_to_user(),
+                            self.response_in_pipeline,
+                            transcript_content[:120],
+                        )
 
                         if self.interruption_manager.is_false_interruption(
                             word_count=word_count,
@@ -3677,6 +4088,7 @@ class TaskManager(BaseManager):
 
                     if status == "SEND":
                         # Audio approved - send it
+                        self._commit_staged_assistant_history(sequence_id)
                         self.tools["input"].update_is_audio_being_played(True)
                         self.response_in_pipeline = False
                         await self.tools["output"].handle(message)
@@ -3700,6 +4112,7 @@ class TaskManager(BaseManager):
                     elif status == "BLOCK":
                         # Audio blocked (user speaking or invalid sequence) - discard
                         logger.info(f"Audio blocked: discarding message (sequence_id={sequence_id})")
+                        self._drop_staged_assistant_history(sequence_id, "output_blocked")
                         # Null byte (b'\x00') is the end-of-stream control signal, not audio.
                         # Always send it through handle() so the is_final_chunk post-mark is
                         # created and sent to Plivo. Without this, is_audio_being_played stays
@@ -3729,7 +4142,7 @@ class TaskManager(BaseManager):
                 ):
                     self._turn_audio_flushed.set()
                     if message["meta_info"].get("end_of_synthesizer_stream", False):
-                        self.interruption_manager.on_successful_response_delivered()
+                        self.interruption_manager.on_successful_response_delivered(sequence_id)
                         self.interruption_manager.on_agent_speech_ended()
                     # Reset asked_if_user_is_still_there flag after any message except is_user_online_message
                     if message["meta_info"].get("message_category", "") != "is_user_online_message":

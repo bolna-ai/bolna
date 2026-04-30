@@ -31,10 +31,43 @@ class ConversationHistory:
         self._messages.append({"role": ChatRole.USER, "content": content})
 
     def append_assistant(self, content: str, tool_calls: list | None = None, **kwargs):
+        if self._messages:
+            last = self._messages[-1]
+            if (
+                last.get("role") == ChatRole.ASSISTANT
+                and last.get("content") == content
+                and last.get("turn_id") == kwargs.get("turn_id")
+                and last.get("response_uid") == kwargs.get("response_uid")
+            ):
+                if tool_calls is not None:
+                    last["tool_calls"] = tool_calls
+                return
         msg = {"role": ChatRole.ASSISTANT, "content": content, **kwargs}
         if tool_calls is not None:
             msg["tool_calls"] = tool_calls
         self._messages.append(msg)
+
+    def upsert_assistant_for_turn(self, turn_id: int | None, content: str, interim: bool = False):
+        msgs = self._interim if interim else self._messages
+        if turn_id is not None:
+            for i in range(len(msgs) - 1, -1, -1):
+                if msgs[i].get("role") == ChatRole.ASSISTANT and msgs[i].get("turn_id") == turn_id:
+                    msgs[i]["content"] = content
+                    return
+        msgs.append({"role": ChatRole.ASSISTANT, "content": content, "turn_id": turn_id})
+
+    def upsert_assistant_for_response(
+        self, response_uid: str | None, content: str, interim: bool = False, turn_id: int | None = None
+    ):
+        msgs = self._interim if interim else self._messages
+        if response_uid is not None:
+            for i in range(len(msgs) - 1, -1, -1):
+                if msgs[i].get("role") == ChatRole.ASSISTANT and msgs[i].get("response_uid") == response_uid:
+                    msgs[i]["content"] = content
+                    if turn_id is not None and msgs[i].get("turn_id") is None:
+                        msgs[i]["turn_id"] = turn_id
+                    return
+        msgs.append({"role": ChatRole.ASSISTANT, "content": content, "turn_id": turn_id, "response_uid": response_uid})
 
     def append_tool_result(self, tool_call_id: str, content: str):
         self._messages.append(
@@ -51,6 +84,21 @@ class ConversationHistory:
         else:
             logger.warning("attach_tool_calls_to_last_response: last message is not assistant, appending new")
             self.append_assistant(None, tool_calls=tool_calls)
+
+    def attach_tool_calls_to_turn(self, turn_id: int | None, tool_calls: list):
+        if turn_id is None:
+            self.attach_tool_calls_to_last_response(tool_calls)
+            return
+
+        for i in range(len(self._messages) - 1, -1, -1):
+            if self._messages[i].get("role") == ChatRole.ASSISTANT and self._messages[i].get("turn_id") == turn_id:
+                self._messages[i]["tool_calls"] = tool_calls
+                return
+
+        logger.warning(
+            f"attach_tool_calls_to_turn: no assistant found for turn_id={turn_id}, appending placeholder assistant"
+        )
+        self.append_assistant(None, tool_calls=tool_calls, turn_id=turn_id)
 
     def update_system_prompt(self, content: str):
         if self._messages and self._messages[0].get("role") == ChatRole.SYSTEM:
@@ -78,31 +126,78 @@ class ConversationHistory:
     def sync_interim_after_interruption(self, response_heard: str | None, update_fn):
         self._trim_last_assistant(self._interim, response_heard, update_fn)
 
+    def sync_turn_after_interruption(self, turn_id: int | None, response_heard: str | None, update_fn):
+        self._trim_assistant_for_turn(self._messages, turn_id, response_heard, update_fn)
+
+    def sync_interim_turn_after_interruption(self, turn_id: int | None, response_heard: str | None, update_fn):
+        self._trim_assistant_for_turn(self._interim, turn_id, response_heard, update_fn)
+
+    def sync_response_after_interruption(self, response_uid: str | None, response_heard: str | None, update_fn):
+        self._trim_assistant_for_response(self._messages, response_uid, response_heard, update_fn)
+
+    def sync_interim_response_after_interruption(self, response_uid: str | None, response_heard: str | None, update_fn):
+        self._trim_assistant_for_response(self._interim, response_uid, response_heard, update_fn)
+
     @staticmethod
     def _trim_last_assistant(msgs: list[dict], response_heard: str | None, update_fn):
         for i in range(len(msgs) - 1, -1, -1):
             if msgs[i]["role"] == ChatRole.ASSISTANT:
-                original = msgs[i]["content"]
-                if original is None:
-                    continue
-                updated = update_fn(original, response_heard)
-                logger.info(
-                    f"Trimming assistant message. Original (last 10 chars): {str(original)[-10:]} | Updated: {updated[-10:] if updated else '<empty>'}"
-                )
-                if not updated or not updated.strip():
-                    has_tool_calls = bool(msgs[i].get("tool_calls"))
-                    logger.info(
-                        f"Removing assistant message (last 10 chars): {str(original)[-10:]} | has_tool_calls={has_tool_calls} from transcript"
-                    )
-                    msgs.pop(i)
-                    # If the removed assistant had tool_calls, also remove its
-                    # dependent tool-role messages to keep the history valid.
-                    if has_tool_calls:
-                        while i < len(msgs) and msgs[i].get("role") == ChatRole.TOOL:
-                            msgs.pop(i)
-                else:
-                    msgs[i]["content"] = updated
+                ConversationHistory._trim_assistant_at_index(msgs, i, response_heard, update_fn)
                 break
+
+    @staticmethod
+    def _trim_assistant_for_turn(msgs: list[dict], turn_id: int | None, response_heard: str | None, update_fn):
+        if turn_id is None:
+            logger.info("Skipping assistant trim because turn_id is None; refusing to trim an older assistant blindly")
+            return
+
+        for i in range(len(msgs) - 1, -1, -1):
+            if msgs[i]["role"] == ChatRole.ASSISTANT and msgs[i].get("turn_id") == turn_id:
+                ConversationHistory._trim_assistant_at_index(msgs, i, response_heard, update_fn)
+                return
+
+        logger.info(
+            f"No assistant message found for turn_id={turn_id}; skipping trim to avoid removing a different assistant turn"
+        )
+
+    @staticmethod
+    def _trim_assistant_for_response(msgs: list[dict], response_uid: str | None, response_heard: str | None, update_fn):
+        if response_uid is None:
+            logger.info("Skipping assistant trim because response_uid is None; refusing to trim an older assistant blindly")
+            return
+
+        for i in range(len(msgs) - 1, -1, -1):
+            if msgs[i]["role"] == ChatRole.ASSISTANT and msgs[i].get("response_uid") == response_uid:
+                ConversationHistory._trim_assistant_at_index(msgs, i, response_heard, update_fn)
+                return
+
+        logger.info(
+            f"No assistant message found for response_uid={response_uid}; skipping trim to avoid removing a different assistant turn"
+        )
+
+    @staticmethod
+    def _trim_assistant_at_index(msgs: list[dict], index: int, response_heard: str | None, update_fn):
+        original = msgs[index]["content"]
+        if original is None:
+            return
+        updated = update_fn(original, response_heard)
+        logger.info(
+            f"Trimming assistant message. Original (last 10 chars): {str(original)[-10:]} | Updated: {updated[-10:] if updated else '<empty>'}"
+        )
+        if not updated or not updated.strip():
+            has_tool_calls = bool(msgs[index].get("tool_calls"))
+            logger.info(
+                f"Removing assistant message (last 10 chars): {str(original)[-10:]} | has_tool_calls={has_tool_calls} from transcript"
+            )
+            msgs.pop(index)
+            if has_tool_calls:
+                while index < len(msgs) and msgs[index].get("role") == ChatRole.TOOL:
+                    msgs.pop(index)
+            else:
+                while index < len(msgs) and msgs[index].get("role") in _UNHEARD_ROLES:
+                    msgs.pop(index)
+        else:
+            msgs[index]["content"] = updated
 
     @property
     def messages(self) -> list[dict]:

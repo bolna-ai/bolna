@@ -20,6 +20,7 @@ class SequenceStats(BaseModel):
     first_sent_ts: Optional[float] = None
     last_sent_ts: Optional[float] = None
     total_audio_duration: float = 0
+    turn_id: Optional[int] = None
 
 
 class SequenceSummary(BaseModel):
@@ -62,13 +63,28 @@ class MarkEventMetaData:
         self.counter = 0
         self.mark_changed = asyncio.Event()
         self._mark_stats = MarkStats()
+        self.heard_text_by_turn = {}
+        self.heard_text_by_response = {}
+        self.last_heard_turn_id = None
+        self.last_heard_response_uid = None
 
     def update_data(self, mark_id, value):
         value["counter"] = self.counter
         self.counter += 1
         self.mark_event_meta_data[mark_id] = value
+        logger.info(
+            "BOLNA_TRACE_MARK update mark_id=%s type=%s seq=%s turn=%s response_uid=%s group_uid=%s counter=%s dur=%.3f text_len=%s",
+            mark_id,
+            value.get("type"),
+            value.get("sequence_id"),
+            value.get("turn_id"),
+            value.get("response_uid"),
+            value.get("response_group_uid"),
+            value.get("counter"),
+            value.get("duration", 0.0) or 0.0,
+            len(value.get("text_synthesized", "") or ""),
+        )
         self.mark_changed.set()
-
         if value.get("type") != "pre_mark_message":
             self._mark_stats.total_sent += 1
             seq = value.get("sequence_id")
@@ -84,6 +100,9 @@ class MarkEventMetaData:
                 duration = value.get("duration", 0)
                 if duration > 0:
                     entry.total_audio_duration += duration
+                turn_id = value.get("turn_id")
+                if turn_id is not None and entry.turn_id is None:
+                    entry.turn_id = turn_id
 
     def record_ack(self, delay, sequence_id):
         self._mark_stats.total_acked += 1
@@ -96,14 +115,57 @@ class MarkEventMetaData:
             if delay >= 0:
                 entry.delays.append(delay)
 
+    def record_heard_text(self, mark_data, heard_text):
+        if not heard_text:
+            return
+
+        turn_id = mark_data.get("turn_id")
+        if turn_id is not None:
+            self.last_heard_turn_id = turn_id
+            self.heard_text_by_turn[turn_id] = self.heard_text_by_turn.get(turn_id, "") + heard_text
+
+        response_uid = mark_data.get("response_uid")
+        if response_uid is not None:
+            self.last_heard_response_uid = response_uid
+            self.heard_text_by_response[response_uid] = self.heard_text_by_response.get(response_uid, "") + heard_text
+
+    def get_heard_text_for_turn(self, turn_id=None):
+        if turn_id is None:
+            turn_id = self.last_heard_turn_id
+        if turn_id is None:
+            return ""
+        return (self.heard_text_by_turn.get(turn_id) or "").strip()
+
+    def get_heard_text_for_response(self, response_uid=None):
+        if response_uid is None:
+            response_uid = self.last_heard_response_uid
+        if response_uid is None:
+            return ""
+        return (self.heard_text_by_response.get(response_uid) or "").strip()
+
     def fetch_data(self, mark_id):
         result = self.mark_event_meta_data.pop(mark_id, {})
         if result:
+            logger.info(
+                "BOLNA_TRACE_MARK fetch mark_id=%s type=%s seq=%s turn=%s response_uid=%s group_uid=%s counter=%s",
+                mark_id,
+                result.get("type"),
+                result.get("sequence_id"),
+                result.get("turn_id"),
+                result.get("response_uid"),
+                result.get("response_group_uid"),
+                result.get("counter"),
+            )
             self.mark_changed.set()
         return result
 
     def clear_data(self):
         logger.info(f"Clearing mark meta data dict")
+        logger.info(
+            "BOLNA_TRACE_MARK clear pending=%s mark_ids=%s",
+            len(self.mark_event_meta_data),
+            list(self.mark_event_meta_data.keys()),
+        )
         self.counter = 0
 
         for mark_id, value in self.mark_event_meta_data.items():
