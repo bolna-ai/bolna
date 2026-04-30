@@ -182,8 +182,8 @@ class VoxLinguaLID:
     Requires:  pip install speechbrain soundfile torch torchaudio
 
     Config keys:
-        classify_every_ms  — how often to run classification (default 500)
-        min_buffer_ms      — minimum audio before first classify (default 800)
+        classify_every_ms  — how often to run classification (default 800)
+        min_buffer_ms      — minimum audio before first classify (default 2000)
         model_save_dir     — where to cache the HF model (default models/voxlingua)
         telephony_provider — "twilio" | "plivo" | other
         sampling_rate      — input sample rate (default 8000)
@@ -196,8 +196,8 @@ class VoxLinguaLID:
     def __init__(self, on_language: OnLanguageCallback, config: dict):
         self.on_language = on_language
         self.config = config
-        self._classify_every_ms = int(config.get("classify_every_ms", 500))
-        self._min_buffer_ms = int(config.get("min_buffer_ms", 800))
+        self._classify_every_ms = int(config.get("classify_every_ms", 800))
+        self._min_buffer_ms = int(config.get("min_buffer_ms", 2000))
         self._model_dir = config.get("model_save_dir", "models/voxlingua")
         self._telephony = config.get("telephony_provider", "")
         self._input_sr = 8000 if self._telephony in ("twilio", "plivo") else int(config.get("sampling_rate", 8000))
