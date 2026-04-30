@@ -3,12 +3,13 @@ lid_provider.py — Model-agnostic Language Identification (LID) interface.
 
 Two backends are shipped:
 
-  SarvamLID     — saaras:v3 streaming WebSocket with language_code=unknown.
-                  Natively streaming; emits language as audio arrives.
-                  No local model needed, API-based.
+  SarvamLID    — saaras:v3 streaming WebSocket with language_code=unknown.
+                 Natively streaming; emits language as audio arrives.
+                 No local model needed, API-based.
 
-  VoxLinguaLID  — SpeechBrain VoxLingua107 ECAPA-TDNN, local CPU model.
-                  ~360MB, no API key, accumulates audio buffer before classifying.
+  MMSLinguaLID — Meta MMS-LID (facebook/mms-lid-256), local CPU model.
+                 Designed for phone-quality narrowband audio (8kHz).
+                 Accumulates speech-only audio (energy VAD gated) before classifying.
 
 Usage (in TranscriberPool):
     lid = LIDProvider.create(provider="sarvam", config={...}, on_language=callback)
@@ -167,47 +168,42 @@ class SarvamLID:
         logger.info("SarvamLID: stopped")
 
 
-# ── 2. SpeechBrain VoxLingua107 (local, CPU) ──────────────────────────────────
+# ── 2. Meta MMS-LID (local, CPU, telephony-friendly) ──────────────────────────
 
 
-class VoxLinguaLID:
+class MMSLinguaLID:
     """
-    LID via SpeechBrain VoxLingua107 ECAPA-TDNN (local, no API key).
+    LID via Meta's MMS-LID (facebook/mms-lid-256 or mms-lid-1024).
 
-    Audio chunks are accumulated in a rolling buffer. Every
-    `classify_every_ms` milliseconds (default 500ms) the buffer is classified.
-    The model (~360MB) is downloaded on first use and cached as a process-level
-    singleton so subsequent calls are instant.
+    Designed for phone-quality narrowband audio — works natively on 8kHz audio.
+    Supports 256/1024 languages including all major Indian languages.
+    Uses energy-based VAD gating to skip silence/noise before classifying.
 
-    Requires:  pip install speechbrain soundfile torch torchaudio
+    Requires:  pip install transformers torch torchaudio
 
     Config keys:
-        classify_every_ms  — how often to run classification (default 800)
-        min_buffer_ms      — minimum audio before first classify (default 2000)
-        model_save_dir     — where to cache the HF model (default models/voxlingua)
+        model_name         — HF model id (default: facebook/mms-lid-256)
+        classify_every_ms  — how often to classify after buffer fills (default 800)
+        min_buffer_ms      — minimum speech audio before first classify (default 2000)
+        vad_rms_threshold  — silence gate RMS threshold (default 500)
         telephony_provider — "twilio" | "plivo" | other
         sampling_rate      — input sample rate (default 8000)
     """
 
-    # Process-level singleton so the 360MB model loads only once
+    _processor = None
     _model = None
     _model_lock: Optional[asyncio.Lock] = None
 
     def __init__(self, on_language: OnLanguageCallback, config: dict):
         self.on_language = on_language
         self.config = config
+        self._model_name = config.get("model_name", "facebook/mms-lid-256")
         self._classify_every_ms = int(config.get("classify_every_ms", 800))
         self._min_buffer_ms = int(config.get("min_buffer_ms", 2000))
-        self._model_dir = config.get("model_save_dir", "models/voxlingua")
+        self._vad_rms_threshold = int(config.get("vad_rms_threshold", 500))
         self._telephony = config.get("telephony_provider", "")
         self._input_sr = 8000 if self._telephony in ("twilio", "plivo") else int(config.get("sampling_rate", 8000))
         self._encoding = "mulaw" if self._telephony == "twilio" else "linear16"
-
-        # Energy threshold for silence gating — chunks below this RMS are
-        # treated as silence and not added to the classification buffer.
-        # Mulaw telephony noise typically sits around RMS 100-300; real speech
-        # is usually above 500. Configurable via config["vad_rms_threshold"].
-        self._vad_rms_threshold = int(config.get("vad_rms_threshold", 500))
 
         self._buffer = bytearray()
         self._buffer_ms = 0
@@ -221,69 +217,80 @@ class VoxLinguaLID:
         return cls._model_lock
 
     @classmethod
-    async def _load_model(cls, save_dir: str):
+    async def _load_model(cls, model_name: str):
         async with cls._get_lock():
             if cls._model is None:
-                logger.info("VoxLinguaLID: loading model (first time, ~360MB)...")
-                from speechbrain.inference.classifiers import EncoderClassifier
+                logger.info(f"MMSLinguaLID: loading model {model_name}...")
+                from transformers import AutoFeatureExtractor, AutoModelForAudioClassification
 
+                cls._processor = await asyncio.get_event_loop().run_in_executor(
+                    None,
+                    lambda: AutoFeatureExtractor.from_pretrained(model_name),
+                )
                 cls._model = await asyncio.get_event_loop().run_in_executor(
                     None,
-                    lambda: EncoderClassifier.from_hparams(
-                        source="TalTechNLP/voxlingua107-epaca-tdnn",
-                        savedir=save_dir,
-                        run_opts={"device": "cpu"},
-                    ),
+                    lambda: AutoModelForAudioClassification.from_pretrained(model_name),
                 )
-                logger.info("VoxLinguaLID: model loaded")
-        return cls._model
+                logger.info("MMSLinguaLID: model loaded")
+        return cls._processor, cls._model
 
-    def _pcm_to_tensor(self, pcm_bytes: bytes):
-        """Convert raw PCM bytes → float32 tensor at 16kHz for the model."""
+    def _pcm_to_array(self, pcm_bytes: bytes):
+        """Convert raw PCM bytes → float32 numpy array at 16kHz."""
         import audioop
 
         import numpy as np
-        import torch
 
         raw = pcm_bytes
         if self._encoding == "mulaw":
             raw = audioop.ulaw2lin(raw, 2)
         if self._input_sr != 16000:
             raw, _ = audioop.ratecv(raw, 2, 1, self._input_sr, 16000, None)
-        arr = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
-        return torch.from_numpy(arr).unsqueeze(0)  # [1, T]
+        return np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
 
     def _classify_sync(self, pcm_bytes: bytes) -> tuple[str, float]:
         import torch
 
+        processor = self.__class__._processor
         model = self.__class__._model
-        sig = self._pcm_to_tensor(pcm_bytes)
-        pred = model.classify_batch(sig)
-        label = pred[3][0]  # e.g. "hi: Hindi"
-        scores = pred[1].squeeze()
-        conf = float(torch.exp(scores.max()))
-        lang = label.split(":")[0].strip().lower()[:2]
-        return lang, conf
+        audio = self._pcm_to_array(pcm_bytes)
+        inputs = processor(audio, sampling_rate=16000, return_tensors="pt")
+        with torch.no_grad():
+            logits = model(**inputs).logits
+        probs = torch.softmax(logits, dim=-1)
+        conf, pred_id = probs.max(dim=-1)
+        label = model.config.id2label[pred_id.item()]  # e.g. "hin" or "eng"
+        # MMS uses ISO 639-3 (3-letter) — map to 2-letter ISO 639-1
+        _iso3_to_2 = {
+            "hin": "hi",
+            "eng": "en",
+            "ben": "bn",
+            "guj": "gu",
+            "tam": "ta",
+            "tel": "te",
+            "mar": "mr",
+            "pan": "pa",
+            "urd": "ur",
+            "kan": "kn",
+            "mal": "ml",
+            "ori": "or",
+        }
+        lang = _iso3_to_2.get(label, label[:2])
+        return lang, float(conf)
 
     async def start(self) -> None:
         self._loop = asyncio.get_event_loop()
-        await self._load_model(self._model_dir)
-        logger.info("VoxLinguaLID: ready")
+        await self._load_model(self._model_name)
+        logger.info("MMSLinguaLID: ready")
 
     def feed(self, audio_bytes: bytes) -> None:
-        """Accept a raw audio chunk and classify when enough speech has accumulated.
-
-        Silence frames (RMS below vad_rms_threshold) are skipped so VoxLingua
-        never classifies on noise/silence — the main cause of spurious detections
-        on compressed telephony audio.
-        """
+        """Accept a raw audio chunk; skip silence via energy VAD, classify when buffer fills."""
         import audioop
 
         raw = audio_bytes
         if self._encoding == "mulaw":
             raw = audioop.ulaw2lin(raw, 2)
 
-        # Energy-based VAD gate — skip silent frames
+        # Energy-based VAD gate — skip silent/noise frames
         rms = audioop.rms(raw, 2)
         if rms < self._vad_rms_threshold:
             return
@@ -303,13 +310,13 @@ class VoxLinguaLID:
         snapshot = bytes(self._buffer)
         try:
             lang, conf = await asyncio.get_event_loop().run_in_executor(None, self._classify_sync, snapshot)
-            logger.info(f"VoxLinguaLID: {lang} conf={conf:.2f} buf={self._buffer_ms}ms")
+            logger.info(f"MMSLinguaLID: {lang} conf={conf:.2f} buf={self._buffer_ms}ms")
             await self.on_language(lang, conf)
         except Exception as e:
-            logger.warning(f"VoxLinguaLID classify error: {e}")
+            logger.warning(f"MMSLinguaLID classify error: {e}")
 
     async def stop(self) -> None:
-        logger.info("VoxLinguaLID: stopped")
+        logger.info("MMSLinguaLID: stopped")
 
 
 # ── Factory ────────────────────────────────────────────────────────────────────
@@ -317,11 +324,11 @@ class VoxLinguaLID:
 
 class LIDProvider:
     @classmethod
-    def create(cls, provider: str, on_language: OnLanguageCallback, config: dict) -> "SarvamLID | VoxLinguaLID":
+    def create(cls, provider: str, on_language: OnLanguageCallback, config: dict) -> "SarvamLID | MMSLinguaLID":
         provider = provider.lower()
         if provider == "sarvam":
             return SarvamLID(on_language=on_language, config=config)
-        if provider in ("voxlingua", "speechbrain"):
-            return VoxLinguaLID(on_language=on_language, config=config)
+        if provider in ("mms", "mms-lid", "mmslid"):
+            return MMSLinguaLID(on_language=on_language, config=config)
         logger.warning(f"LIDProvider: unknown provider '{provider}', falling back to sarvam")
         return SarvamLID(on_language=on_language, config=config)
