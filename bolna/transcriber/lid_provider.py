@@ -203,6 +203,12 @@ class VoxLinguaLID:
         self._input_sr = 8000 if self._telephony in ("twilio", "plivo") else int(config.get("sampling_rate", 8000))
         self._encoding = "mulaw" if self._telephony == "twilio" else "linear16"
 
+        # Energy threshold for silence gating — chunks below this RMS are
+        # treated as silence and not added to the classification buffer.
+        # Mulaw telephony noise typically sits around RMS 100-300; real speech
+        # is usually above 500. Configurable via config["vad_rms_threshold"].
+        self._vad_rms_threshold = int(config.get("vad_rms_threshold", 500))
+
         self._buffer = bytearray()
         self._buffer_ms = 0
         self._last_classify_ms = 0
@@ -265,12 +271,23 @@ class VoxLinguaLID:
         logger.info("VoxLinguaLID: ready")
 
     def feed(self, audio_bytes: bytes) -> None:
-        """Accept a raw audio chunk and classify when enough data has accumulated."""
+        """Accept a raw audio chunk and classify when enough speech has accumulated.
+
+        Silence frames (RMS below vad_rms_threshold) are skipped so VoxLingua
+        never classifies on noise/silence — the main cause of spurious detections
+        on compressed telephony audio.
+        """
         import audioop
 
         raw = audio_bytes
         if self._encoding == "mulaw":
             raw = audioop.ulaw2lin(raw, 2)
+
+        # Energy-based VAD gate — skip silent frames
+        rms = audioop.rms(raw, 2)
+        if rms < self._vad_rms_threshold:
+            return
+
         self._buffer.extend(raw)
         self._buffer_ms = len(self._buffer) * 1000 // (self._input_sr * 2)
 
@@ -286,7 +303,7 @@ class VoxLinguaLID:
         snapshot = bytes(self._buffer)
         try:
             lang, conf = await asyncio.get_event_loop().run_in_executor(None, self._classify_sync, snapshot)
-            logger.debug(f"VoxLinguaLID: {lang} conf={conf:.2f} buf={self._buffer_ms}ms")
+            logger.info(f"VoxLinguaLID: {lang} conf={conf:.2f} buf={self._buffer_ms}ms")
             await self.on_language(lang, conf)
         except Exception as e:
             logger.warning(f"VoxLinguaLID classify error: {e}")
