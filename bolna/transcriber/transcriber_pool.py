@@ -318,6 +318,7 @@ class TranscriberPool:
                 f"TranscriberPool LID [shadow]: would switch {self.active_label} → {target_label} "
                 f"(lang={lang}, conf={confidence:.2f}, suppressed_reason=shadow_mode)"
             )
+            self._lid_last_switch_time = now
             self._record_lid_event(
                 detected_lang=lang,
                 confidence=confidence,
