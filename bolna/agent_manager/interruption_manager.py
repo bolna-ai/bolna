@@ -436,6 +436,13 @@ class InterruptionManager:
         """Returns True if there are pending audio responses."""
         return len(self.sequence_ids) > 1
 
+    def has_pending_responses_excluding(self, sequence_id: Optional[int]) -> bool:
+        """Returns True if there are pending audio responses other than the supplied sequence_id."""
+        active_ids = {sid for sid in self.sequence_ids if sid != -1}
+        if sequence_id is not None:
+            active_ids.discard(sequence_id)
+        return len(active_ids) > 0
+
     def set_first_interim_for_immediate_response(self) -> None:
         """Sets first interim timestamp to allow immediate response."""
         self.time_since_first_interim_result = (time.time() * 1000) - 1000

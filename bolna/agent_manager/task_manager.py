@@ -3293,7 +3293,8 @@ class TaskManager(BaseManager):
 
         has_live_assistant_audio = self.tools["input"].is_audio_being_played_to_user()
         has_pending_marks = self._has_interruptible_mark_activity()
-        has_pending_sequences = self.interruption_manager.has_pending_responses()
+        current_sequence_id = meta_info.get("sequence_id")
+        has_pending_sequences = self.interruption_manager.has_pending_responses_excluding(current_sequence_id)
         has_pending_generation = (
             (self.llm_task is not None and not self.llm_task.done())
             or (self.execute_function_call_task is not None and not self.execute_function_call_task.done())
