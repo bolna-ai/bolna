@@ -124,6 +124,8 @@ class Transcriber(BaseModel):
     provider: Optional[str] = "deepgram"
     multilingual: Optional[Dict[str, Any]] = None
     active: Optional[str] = None
+    effort: Optional[str] = "medium"
+    noise_reduction: Optional[bool] = False
 
     @field_validator("provider")
     def validate_model(cls, value):

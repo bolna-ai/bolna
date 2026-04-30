@@ -20,6 +20,7 @@ from .transcriber import (
     GladiaTranscriber,
     ElevenLabsTranscriber,
     SmallestTranscriber,
+    OpenAITranscriber,
 )
 from .input_handlers import (
     DefaultInputHandler,
@@ -63,6 +64,7 @@ SUPPORTED_TRANSCRIBER_PROVIDERS = {
     TranscriberProvider.GLADIA.value: GladiaTranscriber,
     TranscriberProvider.ELEVENLABS.value: ElevenLabsTranscriber,
     TranscriberProvider.SMALLEST.value: SmallestTranscriber,
+    TranscriberProvider.OPENAI.value: OpenAITranscriber,
 }
 
 # Backwards compatibility
