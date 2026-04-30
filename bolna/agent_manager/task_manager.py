@@ -1759,6 +1759,13 @@ class TaskManager(BaseManager):
         # chunk_id is for chunking; turn_id is for transcript/history grouping.
         self._response_turn_id += 1
         meta_info_copy["turn_id"] = self._response_turn_id
+        logger.info(
+            "BOLNA_TRACE_META new_response seq=%s turn=%s request_id=%s origin=%s",
+            meta_info_copy.get("sequence_id"),
+            meta_info_copy.get("turn_id"),
+            meta_info_copy.get("request_id"),
+            meta_info_copy.get("origin"),
+        )
 
         return meta_info_copy
 
@@ -1775,6 +1782,14 @@ class TaskManager(BaseManager):
             "text_synthesized",
         ):
             followup_meta_info.pop(key, None)
+        logger.info(
+            "BOLNA_TRACE_META followup seq=%s turn=%s request_id=%s parent_seq=%s parent_turn=%s",
+            followup_meta_info.get("sequence_id"),
+            followup_meta_info.get("turn_id"),
+            followup_meta_info.get("request_id"),
+            meta_info.get("sequence_id"),
+            meta_info.get("turn_id"),
+        )
         return followup_meta_info
 
     def _extract_sequence_and_meta(self, message):
@@ -3166,6 +3181,15 @@ class TaskManager(BaseManager):
         self.voicemail_handler.trigger_check(transcriber_message, meta_info, is_final)
 
     async def _handle_transcriber_output(self, next_task, transcriber_message, meta_info):
+        logger.info(
+            "BOLNA_TRACE_TM handle_transcript next=%s seq=%s turn=%s request_id=%s text_len=%s text=%r",
+            next_task,
+            meta_info.get("sequence_id"),
+            meta_info.get("turn_id"),
+            meta_info.get("request_id"),
+            len((transcriber_message or "").strip()),
+            (transcriber_message or "")[:120],
+        )
         if not self.tools["input"].welcome_message_played() and (
             self.discard_pre_welcome_utterance or len(self.conversation_history) > 2
         ):
@@ -3194,6 +3218,14 @@ class TaskManager(BaseManager):
         has_live_assistant_audio = self.tools["input"].is_audio_being_played_to_user()
         has_pending_marks = self._has_interruptible_mark_activity()
         if next_task == "llm" and (self.response_in_pipeline or has_live_assistant_audio or has_pending_marks):
+            logger.info(
+                "BOLNA_TRACE_TM cleanup_before_user_append seq=%s turn=%s response_in_pipeline=%s audio_playing=%s pending_marks=%s",
+                meta_info.get("sequence_id"),
+                meta_info.get("turn_id"),
+                self.response_in_pipeline,
+                has_live_assistant_audio,
+                has_pending_marks,
+            )
             # Once audio starts sending, response_in_pipeline flips to False even
             # though the assistant turn may still be actively playing to the user.
             # For precise transcripting we need to reconcile that in-flight turn
@@ -3207,6 +3239,13 @@ class TaskManager(BaseManager):
             await self.__cleanup_downstream_tasks()
 
         self.conversation_history.append_user(transcriber_message)
+        logger.info(
+            "BOLNA_TRACE_TM append_user seq=%s turn=%s history_len=%s text=%r",
+            meta_info.get("sequence_id"),
+            meta_info.get("turn_id"),
+            len(self.conversation_history.messages),
+            (transcriber_message or "")[:120],
+        )
 
         convert_to_request_log(
             message=transcriber_message, meta_info=meta_info, model=self.transcriber_provider, run_id=self.run_id
@@ -3411,6 +3450,15 @@ class TaskManager(BaseManager):
                         logger.info(f"Received transcript, sending for further processing")
                         transcript_content = message["data"].get("content", "")
                         word_count = len(transcript_content.strip().split(" "))
+                        logger.info(
+                            "BOLNA_TRACE_TM final_transcript next=%s req=%s word_count=%s audio_playing=%s response_in_pipeline=%s text=%r",
+                            next_task,
+                            meta_info.get("request_id"),
+                            word_count,
+                            self.tools["input"].is_audio_being_played_to_user(),
+                            self.response_in_pipeline,
+                            transcript_content[:120],
+                        )
 
                         if self.interruption_manager.is_false_interruption(
                             word_count=word_count,

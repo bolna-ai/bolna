@@ -126,6 +126,7 @@ class DefaultInputHandler:
         return self.mark_event_meta_data.fetch_data(mark_id)
 
     def process_mark_message(self, packet):
+        logger.info("BOLNA_TRACE_ACK recv mark_id=%s", packet.get("name"))
         mark_event_meta_data_obj = self.get_mark_event_meta_data_obj(packet)
         if not mark_event_meta_data_obj:
             logger.info(
@@ -158,6 +159,16 @@ class DefaultInputHandler:
             if turn_id is not None and heard_text:
                 self.last_heard_turn_id = turn_id
                 self.response_heard_by_turn[turn_id] = self.response_heard_by_turn.get(turn_id, "") + heard_text
+        logger.info(
+            "BOLNA_TRACE_ACK applied mark_id=%s type=%s seq=%s turn=%s final=%s heard_len=%s last_heard_turn=%s",
+            packet.get("name"),
+            message_type,
+            mark_event_meta_data_obj.get("sequence_id"),
+            mark_event_meta_data_obj.get("turn_id"),
+            mark_event_meta_data_obj.get("is_final_chunk"),
+            len(mark_event_meta_data_obj.get("text_synthesized", "") or ""),
+            self.last_heard_turn_id,
+        )
 
         if mark_event_meta_data_obj.get("is_final_chunk"):
             if message_type != "is_user_online_message":
