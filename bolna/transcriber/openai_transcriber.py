@@ -15,8 +15,8 @@ from websockets.exceptions import InvalidHandshake, ConnectionClosed, Connection
 
 from .base_transcriber import BaseTranscriber
 from bolna.constants import (
-    OPENAI_TRANSCRIBEROPENAI_TRANSCRIBER_HEARTBEAT_INTERVAL_S,
-    OPENAI_TRANSCRIBEROPENAI_TRANSCRIBER_UTTERANCE_TIMEOUT_S,
+    OPENAI_TRANSCRIBER_HEARTBEAT_INTERVAL_S,
+    OPENAI_TRANSCRIBER_UTTERANCE_TIMEOUT_S,
 )
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.ssl_context import get_ssl_context
