@@ -1468,7 +1468,13 @@ class TaskManager(BaseManager):
                 if partial and original_stream.startswith(partial):
                     return partial
 
-        return heard_text
+        # heard_text not found in original — stale/mismatched turn data.
+        # Treat as unheard rather than corrupting the message with foreign text.
+        logger.warning(
+            f"update_transcript_for_interruption: heard_text not found in original; treating as unheard. "
+            f"original[:30]={original_stream[:30]!r} heard[:30]={heard_text[:30]!r}"
+        )
+        return ""
 
     @staticmethod
     def _get_latest_turn_id_from_marks(mark_events_data):
@@ -1517,8 +1523,12 @@ class TaskManager(BaseManager):
             input_handler = self.tools["input"]
             response_heard = input_handler.get_response_heard_for_turn(target_turn_id)
             if not response_heard:
-                response_heard = input_handler.response_heard_by_user
+                # Only fall back to global accumulator when target_turn_id is unknown.
+                # With a known target turn, the global can hold stale text from a
+                # previous turn (e.g. acked post-tool audio before reset), which
+                # would corrupt the wrong message.
                 if target_turn_id is None:
+                    response_heard = input_handler.response_heard_by_user
                     target_turn_id = getattr(input_handler, "last_heard_turn_id", None)
             logger.info(f"sync_history: response_heard len={len(response_heard) if response_heard else 0}")
             if response_heard:
