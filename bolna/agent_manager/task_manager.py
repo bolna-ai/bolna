@@ -1629,30 +1629,30 @@ class TaskManager(BaseManager):
                         )
 
                         if total_dur <= 0:
-                            logger.info(f"turn_id={t_id}: no duration stats, skipping")
-                            return
-
-                        heard_dur = max(0.0, total_dur - info["pending_dur"])
-                        proportion = min(1.0, heard_dur / total_dur)
-                        logger.info(
-                            f"turn_id={t_id}: total={total_dur:.3f}s pending={info['pending_dur']:.3f}s proportion={proportion:.2f}"
-                        )
-
-                        if proportion >= 1.0:
-                            # Fully played — nothing to trim
-                            return
-
-                        if proportion > 0 and full_text.strip():
-                            char_count = int(len(full_text.strip()) * proportion)
-                            if char_count < len(full_text.strip()):
-                                last_space = full_text.strip()[:char_count].rfind(" ")
-                                if last_space > 0:
-                                    char_count = last_space
-                            response_heard = full_text.strip()[:char_count]
-                            logger.info(f"turn_id={t_id}: partial, heard (last 20): {response_heard[-20:]!r}")
-                        else:
+                            logger.info(f"turn_id={t_id}: no duration stats, treating as fully unheard")
                             response_heard = ""
-                            logger.info(f"turn_id={t_id}: nothing heard")
+                        else:
+                            heard_dur = max(0.0, total_dur - info["pending_dur"])
+                            proportion = min(1.0, heard_dur / total_dur)
+                            logger.info(
+                                f"turn_id={t_id}: total={total_dur:.3f}s pending={info['pending_dur']:.3f}s proportion={proportion:.2f}"
+                            )
+
+                            if proportion >= 1.0:
+                                # Fully played — nothing to trim
+                                return
+
+                            if proportion > 0 and full_text.strip():
+                                char_count = int(len(full_text.strip()) * proportion)
+                                if char_count < len(full_text.strip()):
+                                    last_space = full_text.strip()[:char_count].rfind(" ")
+                                    if last_space > 0:
+                                        char_count = last_space
+                                response_heard = full_text.strip()[:char_count]
+                                logger.info(f"turn_id={t_id}: partial, heard (last 20): {response_heard[-20:]!r}")
+                            else:
+                                response_heard = ""
+                                logger.info(f"turn_id={t_id}: nothing heard")
 
             if target_turn_id is not None and response_heard and target_turn_id not in self._turn_msg_map:
                 logger.info(
