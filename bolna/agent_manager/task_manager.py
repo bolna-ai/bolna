@@ -3345,6 +3345,17 @@ class TaskManager(BaseManager):
             if transcriber_message != original_message:
                 logger.info(f"Merged transcript with unheard response: {transcriber_message}")
             await self.__cleanup_downstream_tasks()
+            # cleanup invalidates all pending sequence ids. The current turn's
+            # sequence_id was already allocated by __get_updated_meta_info, so
+            # we must re-register it or the fresh LLM response will later be
+            # dropped in _synthesize as an invalid sequence.
+            self.interruption_manager.revalidate_sequence_id(current_sequence_id)
+            logger.info(
+                "BOLNA_TRACE_TM revalidated_current_seq_after_cleanup seq=%s turn=%s response_uid=%s",
+                meta_info.get("sequence_id"),
+                meta_info.get("turn_id"),
+                meta_info.get("response_uid"),
+            )
 
         self.conversation_history.append_user(transcriber_message)
         logger.info(
