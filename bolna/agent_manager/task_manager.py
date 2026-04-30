@@ -4053,7 +4053,7 @@ class TaskManager(BaseManager):
                 ):
                     self._turn_audio_flushed.set()
                     if message["meta_info"].get("end_of_synthesizer_stream", False):
-                        self.interruption_manager.on_successful_response_delivered()
+                        self.interruption_manager.on_successful_response_delivered(sequence_id)
                         self.interruption_manager.on_agent_speech_ended()
                     # Reset asked_if_user_is_still_there flag after any message except is_user_online_message
                     if message["meta_info"].get("message_category", "") != "is_user_online_message":
