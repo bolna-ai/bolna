@@ -1,9 +1,16 @@
 import asyncio
+import os
 import time
 from typing import Callable, Awaitable, Optional
 from bolna.helpers.logger_config import configure_logger
 
 logger = configure_logger(__name__)
+
+# LID_MODE controls whether confirmed detections actually switch the stack.
+#   "shadow"  — log detections + suppressed_reason but never call switch/on_lid_switch
+#   "active"  — live switching (opt-in)
+# Default is "shadow" so the feature is safe to deploy without data first.
+_LID_MODE = os.getenv("LID_MODE", "shadow").lower()
 
 
 class TranscriberPool:
@@ -47,7 +54,7 @@ class TranscriberPool:
             multilingual_config: raw multilingual config dict from task_config
             lid_provider: "sarvam" | None (disables LID tap)
             lid_config: extra config forwarded to the LID backend
-            on_lid_switch: async callback(label) invoked when LID triggers a switch.
+            on_lid_switch: async callback(label) invoked when LID confirms a switch.
                            Typically wired to TaskManager.switch_language().
         """
         self.transcribers = transcribers
@@ -67,6 +74,12 @@ class TranscriberPool:
         self._lid: Optional[object] = None          # LIDProvider instance
         self._lid_task: Optional[asyncio.Task] = None
         self._on_lid_switch = on_lid_switch
+        # "shadow" logs detections without switching; "active" performs live switch.
+        self._lid_mode = _LID_MODE
+        # Accumulates detection events during the call; flushed into task_output
+        # at call end so server.py can persist them in bulk — same pattern as
+        # function_tool_api_call_details / call_interruption_stats.
+        self.lid_detection_events: list[dict] = []
 
         # Debounce state
         self._lid_pending_lang: Optional[str] = None
@@ -203,23 +216,60 @@ class TranscriberPool:
             logger.error(f"TranscriberPool: failed to start LID tap: {e}")
             self._lid = None
 
+    def _record_lid_event(
+        self,
+        detected_lang: str,
+        confidence: float,
+        target_label: Optional[str],
+        would_switch: bool,
+        suppressed_reason: Optional[str],
+    ) -> None:
+        """Append a detection event to lid_detection_events.
+
+        Events are collected in-memory during the call and returned in task_output
+        so server.py can persist them in bulk — identical to how
+        function_tool_api_call_details works for tool_call_api_logs.
+        No DB, no HTTP, no callbacks needed inside bolna.
+        """
+        self.lid_detection_events.append({
+            "detected_lang": detected_lang,
+            "confidence": confidence,
+            "active_label": self.active_label,
+            "target_label": target_label,
+            "lid_mode": self._lid_mode,
+            "would_switch": would_switch,
+            "suppressed_reason": suppressed_reason,
+        })
+
     async def _handle_lid_signal(self, lang: str, confidence: float) -> None:
         """
         Called by the LID provider every time it detects a language.
 
         Applies debounce (N consecutive same-language detections above threshold)
-        and cooldown (no switching within X seconds of the last switch) before
-        calling switch() and notifying the task manager via on_lid_switch.
+        and cooldown (no switching within X seconds of the last switch).
+
+        In shadow mode (LID_MODE=shadow, the default): logs what would happen but
+        never calls switch() or on_lid_switch.
+
+        In active mode (LID_MODE=active): delegates the full transition to
+        on_lid_switch (TaskManager.switch_language), which owns transcriber +
+        synthesizer + system-prompt atomically. We do NOT call self.switch() here
+        to avoid the double-switch race where the transcriber flips before the
+        synthesizer and prompt catch up.
         """
         # Skip confidence check for Sarvam — it doesn't return language_probability
-        # in unknown-language mode; the language_code itself is the signal.
+        # in unknown-language mode; the language_code itself is the detection signal.
         if self._lid_provider_name != "sarvam" and confidence < self._LID_CONFIDENCE_THRESHOLD:
-            logger.debug(f"TranscriberPool LID: {lang} conf={confidence:.2f} below threshold, ignoring")
+            logger.debug(
+                f"TranscriberPool LID: {lang} conf={confidence:.2f} below threshold — suppressed"
+            )
             return
 
-        # Already on this language — reset debounce and do nothing
-        active_lang = (self._multilingual_config.get(self.active_label, {})
-                       .get("language_code", "")).split("-")[0].lower()
+        # Use same fallback as _lang_to_label build: language_code first, then language.
+        _active_cfg = self._multilingual_config.get(self.active_label, {})
+        active_lang = (
+            _active_cfg.get("language_code") or _active_cfg.get("language") or ""
+        ).split("-")[0].lower()
         if lang == active_lang:
             self._lid_pending_lang = None
             self._lid_pending_count = 0
@@ -228,7 +278,10 @@ class TranscriberPool:
         # Cooldown check
         now = time.monotonic()
         if now - self._lid_last_switch_time < self._LID_COOLDOWN_S:
-            logger.debug(f"TranscriberPool LID: cooldown active, ignoring {lang}")
+            logger.debug(
+                f"TranscriberPool LID: cooldown active — suppressed {lang} "
+                f"(suppressed_reason=cooldown)"
+            )
             return
 
         # Debounce accumulation
@@ -243,29 +296,56 @@ class TranscriberPool:
             f"count={self._lid_pending_count}/{self._LID_DEBOUNCE_COUNT}"
         )
 
-        if self._lid_pending_count >= self._LID_DEBOUNCE_COUNT:
-            # Find the transcriber label for this language
-            target_label = self._lang_to_label.get(lang)
-            if target_label and target_label != self.active_label:
-                logger.info(
-                    f"TranscriberPool LID: switching {self.active_label} → {target_label} "
-                    f"(lang={lang}, conf={confidence:.2f})"
-                )
-                self._lid_last_switch_time = now
-                self._lid_pending_lang = None
-                self._lid_pending_count = 0
-                await self.switch(target_label)
-                if self._on_lid_switch:
-                    try:
-                        await self._on_lid_switch(target_label)
-                    except Exception as e:
-                        logger.error(f"TranscriberPool: on_lid_switch callback error: {e}")
-            else:
-                if not target_label:
-                    logger.warning(
-                        f"TranscriberPool LID: detected lang '{lang}' has no matching transcriber. "
-                        f"Available: {self._lang_to_label}"
-                    )
+        if self._lid_pending_count < self._LID_DEBOUNCE_COUNT:
+            return
+
+        target_label = self._lang_to_label.get(lang)
+        if not target_label:
+            logger.warning(
+                f"TranscriberPool LID: detected lang '{lang}' has no matching transcriber. "
+                f"Available: {self._lang_to_label}"
+            )
+            return
+
+        if target_label == self.active_label:
+            return
+
+        self._lid_pending_lang = None
+        self._lid_pending_count = 0
+
+        if self._lid_mode == "shadow":
+            logger.info(
+                f"TranscriberPool LID [shadow]: would switch {self.active_label} → {target_label} "
+                f"(lang={lang}, conf={confidence:.2f}, suppressed_reason=shadow_mode)"
+            )
+            self._record_lid_event(
+                detected_lang=lang,
+                confidence=confidence,
+                target_label=target_label,
+                would_switch=False,
+                suppressed_reason="shadow_mode",
+            )
+            return
+
+        # Active mode — hand full transition to on_lid_switch so transcriber,
+        # synthesizer, and system-prompt all flip atomically.
+        logger.info(
+            f"TranscriberPool LID [active]: switching {self.active_label} → {target_label} "
+            f"(lang={lang}, conf={confidence:.2f})"
+        )
+        self._lid_last_switch_time = now
+        self._record_lid_event(
+            detected_lang=lang,
+            confidence=confidence,
+            target_label=target_label,
+            would_switch=True,
+            suppressed_reason=None,
+        )
+        if self._on_lid_switch:
+            try:
+                await self._on_lid_switch(target_label, triggered_by="lid")
+            except Exception as e:
+                logger.error(f"TranscriberPool: on_lid_switch callback error: {e}")
 
     async def switch(self, label):
         """Switch which transcriber receives audio.

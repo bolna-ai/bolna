@@ -19,12 +19,13 @@ import asyncio
 import base64
 import io
 import json
-import logging
 import os
 import wave
 from typing import Awaitable, Callable, Optional
 
-logger = logging.getLogger(__name__)
+from bolna.helpers.logger_config import configure_logger
+
+logger = configure_logger(__name__)
 
 # Signature: async def on_language(lang: str, confidence: float) -> None
 OnLanguageCallback = Callable[[str, float], Awaitable[None]]
@@ -53,10 +54,15 @@ class SarvamLID:
         self._input_sr = 8000 if self._telephony in ("twilio", "plivo") else self._sr
         self._encoding = "mulaw" if self._telephony == "twilio" else "linear16"
 
-        self._queue: asyncio.Queue = asyncio.Queue()
+        # Bounded queue: LID is best-effort. If the Sarvam WS stalls, we drop
+        # chunks rather than buffering unboundedly for the entire call duration.
+        self._queue: asyncio.Queue = asyncio.Queue(maxsize=200)
         self._ws = None
         self._sender_task: Optional[asyncio.Task] = None
         self._receiver_task: Optional[asyncio.Task] = None
+        # Set to True if the receiver loop exits abnormally (WS drop / error).
+        # feed() will log a warning when dead so silent stat bias is visible.
+        self._dead: bool = False
 
     def _build_url(self) -> str:
         params = {
@@ -98,7 +104,13 @@ class SarvamLID:
         logger.info("SarvamLID: connected")
 
     def feed(self, audio_bytes: bytes) -> None:
-        self._queue.put_nowait(audio_bytes)
+        if self._dead:
+            logger.warning("SarvamLID: feed() called but WS is dead — chunk dropped (LID inactive)")
+            return
+        try:
+            self._queue.put_nowait(audio_bytes)
+        except asyncio.QueueFull:
+            logger.debug("SarvamLID: audio queue full — chunk dropped (backpressure)")
 
     async def _sender_loop(self) -> None:
         try:
@@ -114,6 +126,8 @@ class SarvamLID:
             pass
         except Exception as e:
             logger.error(f"SarvamLID sender error: {e}")
+            self._dead = True
+            logger.warning("SarvamLID: sender loop exited abnormally — LID inactive for remainder of call")
 
     async def _receiver_loop(self) -> None:
         try:
@@ -123,12 +137,14 @@ class SarvamLID:
                     if data.get("type") == "data":
                         payload = data.get("data", {})
                         lang = payload.get("language_code", "")
-                        # Sarvam returns language_probability=None in unknown mode;
-                        # the language_code itself is the detection signal.
+                        # Sarvam returns language_probability=None when operating in
+                        # unknown-language mode — the language_code is the signal.
+                        # conf is passed through for API compatibility but the pool's
+                        # confidence gate is skipped for Sarvam (see _handle_lid_signal).
                         conf = float(payload.get("language_probability") or 0.0)
                         if lang and lang != "unknown":
                             short = lang.split("-")[0].lower()
-                            logger.info(f"SarvamLID: detected {lang!r} (short={short!r})")
+                            logger.info(f"SarvamLID: detected {lang!r} (short={short!r}, conf={conf:.2f})")
                             await self.on_language(short, conf)
                 except Exception as e:
                     logger.error(f"SarvamLID receiver parse error: {e}")
@@ -136,6 +152,8 @@ class SarvamLID:
             pass
         except Exception as e:
             logger.error(f"SarvamLID receiver error: {e}")
+            self._dead = True
+            logger.warning("SarvamLID: receiver loop exited abnormally — LID inactive for remainder of call")
 
     async def stop(self) -> None:
         self._queue.put_nowait(None)

@@ -348,6 +348,9 @@ class TaskManager(BaseManager):
 
         # Stores structured API call records for dashboard/backend persistence.
         self.function_tool_api_call_details = []
+        # Records every manual switch_language tool call — used post-call to
+        # compare against LID shadow detections (precision / latency analysis).
+        self.language_switch_events: list[dict] = []
         self.hangup_task = None
 
         self.conversation_config = None
@@ -1041,7 +1044,11 @@ class TaskManager(BaseManager):
                         if label == active_label:
                             self.transcriber_provider = cfg.get("provider", cfg.get("model"))
 
-                    # Audio LID tap — configurable via LID_PROVIDER env var (default: sarvam).
+                    # Audio LID tap.
+                    # LID_PROVIDER — which backend to use (default: "sarvam").
+                    # LID_MODE     — "shadow" (default) logs detections without switching;
+                    #                "active" performs live transcriber/synthesizer/prompt swap.
+                    #                Keep "shadow" until detection quality is validated.
                     LID_PROVIDER = os.getenv("LID_PROVIDER", "sarvam")
                     _lid_config = {"telephony_provider": provider}
 
@@ -1056,7 +1063,8 @@ class TaskManager(BaseManager):
                         on_lid_switch=self.switch_language,
                     )
                     logger.info(
-                        f"TranscriberPool created with labels={list(transcribers.keys())}, active='{active_label}'"
+                        f"TranscriberPool created with labels={list(transcribers.keys())}, "
+                        f"active='{active_label}', lid_provider={LID_PROVIDER!r}"
                     )
                     return
 
@@ -3336,14 +3344,27 @@ class TaskManager(BaseManager):
         """Get agent name for a language label from configured agent_names."""
         return self.agent_names.get(label, "")
 
-    async def switch_language(self, label, components=None):
+    async def switch_language(self, label, components=None, triggered_by: str = "manual"):
         """Switch the active language for multilingual pools.
 
         Args:
             label: language label to switch to (e.g. "hi", "en").
             components: list of component names to switch. Defaults to both.
+            triggered_by: "manual" (LLM tool call) or "lid" (automatic detection).
+                          Used in post-call telemetry to compare LID shadow detections
+                          against actual LLM-decided switches.
         """
         components = components or ["transcriber", "synthesizer"]
+
+        # Record every switch so shadow-eval can compare LID detections vs.
+        # actual LLM-decided switches on the same call.
+        self.language_switch_events.append({
+            "to_label":       label,
+            "from_label":     self.language,
+            "triggered_by":   triggered_by,
+            "switched_at":    time.time(),
+        })
+
         if "transcriber" in components and isinstance(self.tools.get("transcriber"), TranscriberPool):
             await self.tools["transcriber"].switch(label)
         if "synthesizer" in components and isinstance(self.tools.get("synthesizer"), SynthesizerPool):
@@ -4240,6 +4261,8 @@ class TaskManager(BaseManager):
                     "conversation_time": time.time() - self.start_time,
                     "label_flow": self.label_flow,
                     "function_tool_api_call_details": copy.deepcopy(self.function_tool_api_call_details),
+                    "lid_detection_events": list(getattr(self.tools.get("transcriber"), "lid_detection_events", [])),
+                    "language_switch_events": list(self.language_switch_events),
                     "call_sid": self.call_sid,
                     "stream_sid": self.stream_sid,
                     "transcriber_duration": self.transcriber_duration,
