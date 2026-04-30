@@ -253,7 +253,9 @@ class ElevenlabsSynthesizer(StreamSynthesizer):
     async def establish_connection(self):
         try:
             start_time = time.perf_counter()
-            websocket = await asyncio.wait_for(websockets.connect(self.ws_url, ssl=get_ssl_context(self.ws_url)), timeout=10.0)
+            websocket = await asyncio.wait_for(
+                websockets.connect(self.ws_url, ssl=get_ssl_context(self.ws_url)), timeout=10.0
+            )
             if hasattr(websocket, "response") and hasattr(websocket.response, "headers"):
                 self.ws_trace_id = websocket.response.headers.get("x-trace-id")
                 logger.info(f"Elevenlabs WebSocket connected trace_id={self.ws_trace_id}")

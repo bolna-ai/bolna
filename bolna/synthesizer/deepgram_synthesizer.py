@@ -203,7 +203,11 @@ class DeepgramSynthesizer(StreamSynthesizer):
         try:
             start_time = time.perf_counter()
             websocket = await asyncio.wait_for(
-                websockets.connect(self.ws_url, additional_headers={"Authorization": f"Token {self.api_key}"}, ssl=get_ssl_context(self.ws_url)),
+                websockets.connect(
+                    self.ws_url,
+                    additional_headers={"Authorization": f"Token {self.api_key}"},
+                    ssl=get_ssl_context(self.ws_url),
+                ),
                 timeout=10.0,
             )
             if not self.connection_time:

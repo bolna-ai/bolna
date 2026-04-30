@@ -440,7 +440,9 @@ class SarvamTranscriber(BaseTranscriber):
             try:
                 logger.info(f"Attempting to connect to Sarvam websocket: {self.ws_url}")
                 ws = await asyncio.wait_for(
-                    websockets.connect(self.ws_url, additional_headers=additional_headers, ssl=get_ssl_context(self.ws_url)),
+                    websockets.connect(
+                        self.ws_url, additional_headers=additional_headers, ssl=get_ssl_context(self.ws_url)
+                    ),
                     timeout=timeout,
                 )
                 self.websocket_connection = ws
