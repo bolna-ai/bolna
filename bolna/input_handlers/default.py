@@ -215,18 +215,30 @@ class DefaultInputHandler:
         #     logger.info(f"straight away returning")
         #     return {"message": "invalid input type"}
 
-        if message["type"] == "audio":
+        if not isinstance(message, dict):
+            logger.info(f"Invalid websocket message: {message}")
+            return {"message": "invalid input"}
+
+        message_type = message.get("type")
+
+        if message_type == "audio":
+            if "data" not in message:
+                logger.info("Invalid audio message: missing data")
+                return {"message": "invalid input"}
             self.__process_audio(message["data"])
 
-        elif message["type"] == "text":
+        elif message_type == "text":
+            if "data" not in message:
+                logger.info("Invalid text message: missing data")
+                return {"message": "invalid input"}
             logger.info(f"Received text: {message['data']}")
             self.__process_text(message["data"])
 
-        elif message["type"] == "mark":
+        elif message_type == "mark":
             logger.info(f"Received mark event")
             self.__process_mark_event(message)
 
-        elif message["type"] == "init":
+        elif message_type == "init":
             logger.info(f"Received init event")
             if self.observable_variables.get("init_event_observable") is not None:
                 self.observable_variables.get("init_event_observable").value = message.get("meta_data", None)
