@@ -31,6 +31,17 @@ class ConversationHistory:
         self._messages.append({"role": ChatRole.USER, "content": content})
 
     def append_assistant(self, content: str, tool_calls: list | None = None, **kwargs):
+        if self._messages:
+            last = self._messages[-1]
+            if (
+                last.get("role") == ChatRole.ASSISTANT
+                and last.get("content") == content
+                and last.get("turn_id") == kwargs.get("turn_id")
+                and last.get("response_uid") == kwargs.get("response_uid")
+            ):
+                if tool_calls is not None:
+                    last["tool_calls"] = tool_calls
+                return
         msg = {"role": ChatRole.ASSISTANT, "content": content, **kwargs}
         if tool_calls is not None:
             msg["tool_calls"] = tool_calls
