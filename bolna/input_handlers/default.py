@@ -36,6 +36,10 @@ class DefaultInputHandler:
         self.is_welcome_message_played = is_welcome_message_played
         # This variable stores the response which has been heard by the user
         self.response_heard_by_user = ""
+        self.response_heard_by_turn = {}
+        self.last_heard_turn_id = None
+        self.response_heard_by_response = {}
+        self.last_heard_response_uid = None
         self._is_audio_being_played_to_user = False
         self.observable_variables = observable_variables
         self.mark_event_meta_data = mark_event_meta_data
@@ -92,6 +96,24 @@ class DefaultInputHandler:
 
     def reset_response_heard_by_user(self):
         self.response_heard_by_user = ""
+        self.response_heard_by_turn = {}
+        self.last_heard_turn_id = None
+        self.response_heard_by_response = {}
+        self.last_heard_response_uid = None
+
+    def get_response_heard_for_turn(self, turn_id=None):
+        if turn_id is None:
+            turn_id = self.last_heard_turn_id
+        if turn_id is None:
+            return ""
+        return (self.response_heard_by_turn.get(turn_id) or "").strip()
+
+    def get_response_heard_for_response(self, response_uid=None):
+        if response_uid is None:
+            response_uid = self.last_heard_response_uid
+        if response_uid is None:
+            return ""
+        return (self.response_heard_by_response.get(response_uid) or "").strip()
 
     async def stop_handler(self):
         self.running = False
@@ -115,6 +137,7 @@ class DefaultInputHandler:
         return self.mark_event_meta_data.fetch_data(mark_id)
 
     def process_mark_message(self, packet):
+        logger.info("BOLNA_TRACE_ACK recv mark_id=%s", packet.get("name"))
         mark_event_meta_data_obj = self.get_mark_event_meta_data_obj(packet)
         if not mark_event_meta_data_obj:
             logger.info(
@@ -141,7 +164,31 @@ class DefaultInputHandler:
                 self.mark_event_meta_data.record_ack(delay, mark_event_meta_data_obj.get("sequence_id"))
 
         if is_content_audio:
-            self.response_heard_by_user += mark_event_meta_data_obj.get("text_synthesized") or ""
+            heard_text = mark_event_meta_data_obj.get("text_synthesized") or ""
+            self.response_heard_by_user += heard_text
+            self.mark_event_meta_data.record_heard_text(mark_event_meta_data_obj, heard_text)
+            turn_id = mark_event_meta_data_obj.get("turn_id")
+            if turn_id is not None and heard_text:
+                self.last_heard_turn_id = turn_id
+                self.response_heard_by_turn[turn_id] = self.response_heard_by_turn.get(turn_id, "") + heard_text
+            response_uid = mark_event_meta_data_obj.get("response_uid")
+            if response_uid is not None and heard_text:
+                self.last_heard_response_uid = response_uid
+                self.response_heard_by_response[response_uid] = (
+                    self.response_heard_by_response.get(response_uid, "") + heard_text
+                )
+        logger.info(
+            "BOLNA_TRACE_ACK applied mark_id=%s type=%s seq=%s turn=%s response_uid=%s final=%s heard_len=%s last_heard_turn=%s last_heard_response_uid=%s",
+            packet.get("name"),
+            message_type,
+            mark_event_meta_data_obj.get("sequence_id"),
+            mark_event_meta_data_obj.get("turn_id"),
+            mark_event_meta_data_obj.get("response_uid"),
+            mark_event_meta_data_obj.get("is_final_chunk"),
+            len(mark_event_meta_data_obj.get("text_synthesized", "") or ""),
+            self.last_heard_turn_id,
+            self.last_heard_response_uid,
+        )
 
         if mark_event_meta_data_obj.get("is_final_chunk"):
             if message_type != "is_user_online_message":
