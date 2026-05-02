@@ -101,7 +101,7 @@ class SarvamTranscriber(BaseTranscriber):
             self.session = aiohttp.ClientSession()
 
     def _configure_audio_params(self):
-        if self.telephony_provider == "plivo":
+        if self.telephony_provider in ("plivo", "vobiz", "exotel"):
             self.encoding = "linear16"
             self.input_sampling_rate = 8000
             self.sampling_rate = 16000
