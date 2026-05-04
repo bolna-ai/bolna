@@ -3223,7 +3223,7 @@ class TaskManager(BaseManager):
                         eot_confidence = message["data"].get("confidence")
                         logger.info(f"EagerEndOfTurn received (confidence={eot_confidence}): {eager_transcript}")
 
-                        if eager_transcript and self.tools["input"].welcome_message_played():
+                        if eager_transcript and self.tools["input"].welcome_message_played() and not self.tools["input"].is_audio_being_played_to_user():
                             logger.info(f"Starting speculative LLM task")
 
                             if self.output_task is None:
