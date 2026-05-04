@@ -37,7 +37,7 @@ class TranscriberPool:
     # Minimum confidence score to accept a LID detection.
     _LID_CONFIDENCE_THRESHOLD = 0.70
     # Seconds to wait after a switch before accepting new LID signals.
-    _LID_COOLDOWN_S = 10.0
+    _LID_COOLDOWN_S = 3.0
 
     def __init__(self, transcribers, shared_input_queue, output_queue, active_label, multilingual_config,
                  lid_provider: str = None, lid_config: dict = None,

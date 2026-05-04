@@ -4,6 +4,9 @@ from bolna.enums import ReasoningEffort as RE
 PREPROCESS_DIR = "agent_data"
 PCM16_SCALE = 32768.0
 
+OPENAI_TRANSCRIBER_HEARTBEAT_INTERVAL_S = 5
+OPENAI_TRANSCRIBER_UTTERANCE_TIMEOUT_S = 3.0
+
 # Model prefixes
 GPT5_MODEL_PREFIX = "gpt-5"
 
