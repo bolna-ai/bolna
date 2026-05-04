@@ -61,6 +61,7 @@ class TranscriberProvider(str, Enum):
     """Enum for transcriber (STT) providers."""
 
     DEEPGRAM = "deepgram"
+    DEEPGRAM_TEST = "deepgram-test"
     AZURE = "azure"
     SARVAM = "sarvam"
     ASSEMBLY = "assembly"
