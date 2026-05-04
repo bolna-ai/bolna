@@ -15,6 +15,11 @@ from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.ssl_context import get_ssl_context
 from bolna.helpers.utils import create_ws_data_packet, timestamp_ms
 from bolna.enums import TelephonyProvider
+from bolna.constants import (
+    DEEPGRAM_FLUX_EOT_THRESHOLD,
+    DEEPGRAM_FLUX_EAGER_EOT_THRESHOLD,
+    DEEPGRAM_FLUX_EOT_TIMEOUT_MS,
+)
 
 
 logger = configure_logger(__name__)
@@ -105,11 +110,11 @@ class DeepgramTranscriber(BaseTranscriber):
         # Flux model support
         self.is_flux_model = model.startswith('flux-')
         self.is_flux_multi = model == 'flux-general-multi'
-        self.eot_threshold = kwargs.get("eot_threshold") or 0.7
+        self.eot_threshold = kwargs.get("eot_threshold") or DEEPGRAM_FLUX_EOT_THRESHOLD
         self.eager_eot_threshold = kwargs.get("eager_eot_threshold")
         if self.eager_eot_threshold is None and self.is_flux_model:
-            self.eager_eot_threshold = 0.5
-        self.eot_timeout_ms = kwargs.get("eot_timeout_ms") or 3000
+            self.eager_eot_threshold = DEEPGRAM_FLUX_EAGER_EOT_THRESHOLD
+        self.eot_timeout_ms = kwargs.get("eot_timeout_ms") or DEEPGRAM_FLUX_EOT_TIMEOUT_MS
         self.eager_transcript_pending = None
         self.language_hints = kwargs.get("language_hints")
 
@@ -202,34 +207,44 @@ class DeepgramTranscriber(BaseTranscriber):
 
         self.audio_frame_duration = 0.5
 
-        if self.provider in ('twilio', 'exotel', 'plivo'):
-            self.encoding = 'mulaw' if self.provider == "twilio" else "linear16"
-            self.sampling_rate = 8000
+        if self.provider in TelephonyProvider.telephony_values():
+            if self.provider != TelephonyProvider.SIP_TRUNK.value:
+                self.encoding = "mulaw" if self.provider == "twilio" else "linear16"
+                self.sampling_rate = 8000
             self.audio_frame_duration = 0.2
             dg_params['encoding'] = self.encoding
             dg_params['sample_rate'] = self.sampling_rate
+            dg_params['channels'] = "1"
 
         elif self.provider == "web_based_call":
             dg_params['encoding'] = "linear16"
             dg_params['sample_rate'] = 16000
+            dg_params['channels'] = "1"
             self.sampling_rate = 16000
             self.audio_frame_duration = 0.256
 
         elif not self.connected_via_dashboard:
             dg_params['encoding'] = "linear16"
             dg_params['sample_rate'] = 16000
+            dg_params['channels'] = "1"
 
         if self.provider == "playground":
             self.sampling_rate = 8000
             self.audio_frame_duration = 0.0
 
-        if self.keywords and len(self.keywords.split(",")) > 0:
-            dg_params['keyterm'] = self.keywords.split(",")
+        if self.keywords:
+            keyword_list = [kw.strip() for kw in self.keywords.split(",") if kw.strip()]
+            if keyword_list:
+                dg_params['keyterm'] = keyword_list
 
         if self.is_flux_multi:
             hints = self._resolve_language_hints()
             if hints:
                 dg_params['language_hint'] = hints
+
+        if self.run_id:
+            dg_params['tag'] = self.run_id
+            dg_params['extra'] = f"run_id:{self.run_id}"
 
         websocket_api = '{}://{}/v2/listen?'.format(os.getenv("DEEPGRAM_HOST_PROTOCOL", "wss"), self.deepgram_host)
         websocket_url = websocket_api + urlencode(dg_params, doseq=True)
@@ -975,15 +990,17 @@ class DeepgramTranscriber(BaseTranscriber):
                         if self.connection_on:
                             await self.push_to_transcriber_queue(message)
                         else:
-                            logger.info("closing the deepgram connection, waiting for Metadata")
                             await self._close(deepgram_ws, data={"type": "CloseStream"})
-                            try:
-                                async with asyncio.timeout(5):
-                                    async for _ in self.receiver(deepgram_ws):
-                                        if "deepgram_duration" in self.meta_info:
-                                            break
-                            except asyncio.TimeoutError:
-                                logger.warning("Timeout waiting for Deepgram Metadata after CloseStream")
+                            if not self.is_flux_model:
+                                # Nova sends a Metadata message after CloseStream — drain it for billing duration
+                                logger.info("closing the deepgram connection, waiting for Metadata")
+                                try:
+                                    async with asyncio.timeout(5):
+                                        async for _ in self.receiver(deepgram_ws):
+                                            if "deepgram_duration" in self.meta_info:
+                                                break
+                                except asyncio.TimeoutError:
+                                    logger.warning("Timeout waiting for Deepgram Metadata after CloseStream")
                             break
                 except ConnectionClosedError as e:
                     logger.error(f"Deepgram websocket connection closed during streaming: {e}")
