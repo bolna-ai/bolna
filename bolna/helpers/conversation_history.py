@@ -217,39 +217,81 @@ class ConversationHistory:
 
     @staticmethod
     def _sanitize_tool_messages(msgs: list[dict]):
-        """Remove orphaned tool-role messages that have no preceding assistant with tool_calls.
+        """Repair assistant/tool-call pairs before sending history to OpenAI.
 
-        OpenAI requires every message with role='tool' to follow an assistant
-        message that contains a matching 'tool_calls' entry.  Interruptions can
-        cause the assistant message to be popped/trimmed while the tool result
-        stays, producing an invalid sequence.  This method walks the list and
-        removes any tool messages whose pairing is broken.
+        OpenAI requires every assistant message with ``tool_calls`` to be
+        followed by tool messages for each call id, and every tool message to
+        have a matching assistant parent. Interruptions and end-of-call cleanup
+        can leave either side behind, so normalize both directions here.
         """
+        sanitized = []
         i = 0
         while i < len(msgs):
-            if msgs[i].get("role") == ChatRole.TOOL:
-                # Walk backwards to find the nearest assistant with tool_calls
-                tool_call_id = msgs[i].get("tool_call_id", "")
-                found_parent = False
-                for j in range(i - 1, -1, -1):
-                    if msgs[j].get("role") == ChatRole.ASSISTANT and msgs[j].get("tool_calls"):
-                        # Check if this assistant message contains a matching tool_call id
-                        for tc in msgs[j]["tool_calls"]:
-                            tc_id = tc.get("id", "") if isinstance(tc, dict) else ""
-                            if tc_id == tool_call_id:
-                                found_parent = True
-                                break
-                        break  # stop at the nearest assistant with tool_calls
-                    if msgs[j].get("role") == ChatRole.USER:
-                        break  # crossed a user boundary, no parent
-                if not found_parent:
+            msg = msgs[i]
+            role = msg.get("role")
+
+            if role in (ChatRole.ASSISTANT, ChatRole.ASSISTANT.value) and msg.get("tool_calls"):
+                expected_ids = [
+                    tc.get("id", "")
+                    for tc in msg.get("tool_calls", [])
+                    if isinstance(tc, dict) and tc.get("id")
+                ]
+                expected_set = set(expected_ids)
+
+                j = i + 1
+                following_tools = []
+                while j < len(msgs) and msgs[j].get("role") in (ChatRole.TOOL, ChatRole.TOOL.value):
+                    following_tools.append(msgs[j])
+                    j += 1
+
+                matched_tools = []
+                matched_ids = set()
+                for tool_msg in following_tools:
+                    tool_call_id = tool_msg.get("tool_call_id", "")
+                    if tool_call_id in expected_set and tool_call_id not in matched_ids:
+                        matched_tools.append(tool_msg)
+                        matched_ids.add(tool_call_id)
+                    else:
+                        logger.warning(
+                            f"Removing orphaned tool message after assistant at index {i} "
+                            f"(tool_call_id={tool_call_id}): no matching pending tool_call"
+                        )
+
+                if expected_set and expected_set.issubset(matched_ids):
+                    sanitized.append(msg)
+                    sanitized.extend(matched_tools)
+                else:
+                    missing_ids = expected_set - matched_ids
                     logger.warning(
-                        f"Removing orphaned tool message at index {i} "
-                        f"(tool_call_id={tool_call_id}): no matching assistant with tool_calls"
+                        f"Removing incomplete assistant tool_calls at index {i}: "
+                        f"missing tool responses for {sorted(missing_ids)}"
                     )
-                    msgs.pop(i)
-                    continue
+                    msg.pop("tool_calls", None)
+                    if msg.get("content") and str(msg.get("content")).strip():
+                        sanitized.append(msg)
+                    else:
+                        logger.warning(f"Removing assistant tool-call placeholder at index {i}: no content to keep")
+                    for tool_msg in following_tools:
+                        logger.warning(
+                            f"Removing orphaned tool message at index {i} "
+                            f"(tool_call_id={tool_msg.get('tool_call_id', '')}): assistant tool_calls incomplete"
+                        )
+
+                i = j
+                continue
+
+            if role in (ChatRole.TOOL, ChatRole.TOOL.value):
+                logger.warning(
+                    f"Removing orphaned tool message at index {i} "
+                    f"(tool_call_id={msg.get('tool_call_id', '')}): no matching assistant with tool_calls"
+                )
+                i += 1
+                continue
+
+            sanitized.append(msg)
             i += 1
+
+        msgs[:] = sanitized
 
     def is_duplicate_user(self, content: str) -> bool:
         if not self._messages:
