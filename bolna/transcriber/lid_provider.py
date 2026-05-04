@@ -46,24 +46,23 @@ OnLanguageCallback = Callable[[str, float], Awaitable[None]]
 def _resample_to_16k(pcm_bytes: bytes, in_sr: int) -> bytes:
     """Resample raw 16-bit PCM from in_sr to 16000 Hz.
 
-    Uses scipy resample_poly (polyphase filter) — same approach as
-    SarvamTranscriber.normalize_to_16k — which preserves more signal
-    content than audioop.ratecv's basic linear interpolation.
-    Falls back to audioop.ratecv if scipy fails.
+    Mirrors SarvamTranscriber._convert_audio_to_wav exactly:
+      - Primary:  audioop.ratecv  (fast, low-overhead)
+      - Fallback: scipy resample_poly (polyphase filter, higher quality)
     """
     if in_sr == 16000:
         return pcm_bytes
+    import audioop
     try:
+        resampled, _ = audioop.ratecv(pcm_bytes, 2, 1, in_sr, 16000, None)
+        return resampled
+    except Exception:
         audio_np = np.frombuffer(pcm_bytes, dtype=np.int16)
         gcd = np.gcd(in_sr, 16000)
         up = 16000 // gcd
         down = in_sr // gcd
         resampled = resample_poly(audio_np, up, down)
         return np.clip(resampled, -32768, 32767).astype(np.int16).tobytes()
-    except Exception:
-        import audioop
-        resampled, _ = audioop.ratecv(pcm_bytes, 2, 1, in_sr, 16000, None)
-        return resampled
 
 
 class SarvamLID:
