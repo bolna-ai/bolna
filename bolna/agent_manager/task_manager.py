@@ -3218,12 +3218,18 @@ class TaskManager(BaseManager):
 
                         self.llm_response_generated = False
 
-                    elif isinstance(message.get("data"), dict) and message["data"].get("type", "") == "eager_end_of_turn":
+                    elif (
+                        isinstance(message.get("data"), dict) and message["data"].get("type", "") == "eager_end_of_turn"
+                    ):
                         eager_transcript = message["data"].get("content", "").strip()
                         eot_confidence = message["data"].get("confidence")
                         logger.info(f"EagerEndOfTurn received (confidence={eot_confidence}): {eager_transcript}")
 
-                        if eager_transcript and self.tools["input"].welcome_message_played() and not self.tools["input"].is_audio_being_played_to_user():
+                        if (
+                            eager_transcript
+                            and self.tools["input"].welcome_message_played()
+                            and not self.tools["input"].is_audio_being_played_to_user()
+                        ):
                             logger.info(f"Starting speculative LLM task")
 
                             if self.output_task is None:
@@ -3292,7 +3298,11 @@ class TaskManager(BaseManager):
                             self.llm_task = self.eager_llm_task
                             self.eager_llm_task = None
                             # Correct history if final transcript differs from the eager one
-                            if self.history and self.history[-1].get("role") == "user" and self.history[-1].get("content") != transcriber_message:
+                            if (
+                                self.history
+                                and self.history[-1].get("role") == "user"
+                                and self.history[-1].get("content") != transcriber_message
+                            ):
                                 self.history[-1]["content"] = transcriber_message
                                 logger.info(f"Updated eager history entry with final transcript")
                         else:
@@ -3411,12 +3421,14 @@ class TaskManager(BaseManager):
 
         # Record every switch so shadow-eval can compare LID detections vs.
         # actual LLM-decided switches on the same call.
-        self.language_switch_events.append({
-            "to_label":       label,
-            "from_label":     self.language,
-            "triggered_by":   triggered_by,
-            "switched_at":    time.time(),
-        })
+        self.language_switch_events.append(
+            {
+                "to_label": label,
+                "from_label": self.language,
+                "triggered_by": triggered_by,
+                "switched_at": time.time(),
+            }
+        )
 
         if "transcriber" in components and isinstance(self.tools.get("transcriber"), TranscriberPool):
             await self.tools["transcriber"].switch(label)

@@ -108,8 +108,8 @@ class DeepgramTranscriber(BaseTranscriber):
         self.connection_error = None
 
         # Flux model support
-        self.is_flux_model = model.startswith('flux-')
-        self.is_flux_multi = model == 'flux-general-multi'
+        self.is_flux_model = model.startswith("flux-")
+        self.is_flux_multi = model == "flux-general-multi"
         self.eot_threshold = kwargs.get("eot_threshold") or DEEPGRAM_FLUX_EOT_THRESHOLD
         self.eager_eot_threshold = kwargs.get("eager_eot_threshold")
         if self.eager_eot_threshold is None and self.is_flux_model:
@@ -197,13 +197,13 @@ class DeepgramTranscriber(BaseTranscriber):
 
     def _get_flux_ws_url(self):
         dg_params = {
-            'model': self.model,
-            'eot_threshold': self.eot_threshold,
-            'eot_timeout_ms': self.eot_timeout_ms,
+            "model": self.model,
+            "eot_threshold": self.eot_threshold,
+            "eot_timeout_ms": self.eot_timeout_ms,
         }
 
         if self.eager_eot_threshold is not None:
-            dg_params['eager_eot_threshold'] = self.eager_eot_threshold
+            dg_params["eager_eot_threshold"] = self.eager_eot_threshold
 
         self.audio_frame_duration = 0.5
 
@@ -212,21 +212,21 @@ class DeepgramTranscriber(BaseTranscriber):
                 self.encoding = "mulaw" if self.provider == "twilio" else "linear16"
                 self.sampling_rate = 8000
             self.audio_frame_duration = 0.2
-            dg_params['encoding'] = self.encoding
-            dg_params['sample_rate'] = self.sampling_rate
-            dg_params['channels'] = "1"
+            dg_params["encoding"] = self.encoding
+            dg_params["sample_rate"] = self.sampling_rate
+            dg_params["channels"] = "1"
 
         elif self.provider == "web_based_call":
-            dg_params['encoding'] = "linear16"
-            dg_params['sample_rate'] = 16000
-            dg_params['channels'] = "1"
+            dg_params["encoding"] = "linear16"
+            dg_params["sample_rate"] = 16000
+            dg_params["channels"] = "1"
             self.sampling_rate = 16000
             self.audio_frame_duration = 0.256
 
         elif not self.connected_via_dashboard:
-            dg_params['encoding'] = "linear16"
-            dg_params['sample_rate'] = 16000
-            dg_params['channels'] = "1"
+            dg_params["encoding"] = "linear16"
+            dg_params["sample_rate"] = 16000
+            dg_params["channels"] = "1"
 
         if self.provider == "playground":
             self.sampling_rate = 8000
@@ -235,18 +235,18 @@ class DeepgramTranscriber(BaseTranscriber):
         if self.keywords:
             keyword_list = [kw.strip() for kw in self.keywords.split(",") if kw.strip()]
             if keyword_list:
-                dg_params['keyterm'] = keyword_list
+                dg_params["keyterm"] = keyword_list
 
         if self.is_flux_multi:
             hints = self._resolve_language_hints()
             if hints:
-                dg_params['language_hint'] = hints
+                dg_params["language_hint"] = hints
 
         if self.run_id:
-            dg_params['tag'] = self.run_id
-            dg_params['extra'] = f"run_id:{self.run_id}"
+            dg_params["tag"] = self.run_id
+            dg_params["extra"] = f"run_id:{self.run_id}"
 
-        websocket_api = '{}://{}/v2/listen?'.format(os.getenv("DEEPGRAM_HOST_PROTOCOL", "wss"), self.deepgram_host)
+        websocket_api = "{}://{}/v2/listen?".format(os.getenv("DEEPGRAM_HOST_PROTOCOL", "wss"), self.deepgram_host)
         websocket_url = websocket_api + urlencode(dg_params, doseq=True)
         return websocket_url
 
@@ -258,10 +258,10 @@ class DeepgramTranscriber(BaseTranscriber):
         """
         if self.language_hints:
             return [h for h in self.language_hints if h]
-        if not self.language or self.language == 'multi':
+        if not self.language or self.language == "multi":
             return None
-        if self.language.startswith('multi-'):
-            return [self.language.split('-', 1)[1]]
+        if self.language.startswith("multi-"):
+            return [self.language.split("-", 1)[1]]
         return [self.language]
 
     async def send_heartbeat(self, ws: ClientConnection):
@@ -769,7 +769,7 @@ class DeepgramTranscriber(BaseTranscriber):
                 msg = json.loads(msg)
 
                 if self.connection_start_time is None:
-                    self.connection_start_time = (time.time() - (self.num_frames * self.audio_frame_duration))
+                    self.connection_start_time = time.time() - (self.num_frames * self.audio_frame_duration)
 
                 if msg["type"] == "Connected":
                     logger.info(f"Connected to Deepgram Flux: request_id={msg.get('request_id')}")
@@ -803,17 +803,16 @@ class DeepgramTranscriber(BaseTranscriber):
                                     result_received_at = timestamp_ms()
                                     latency_ms = round(result_received_at - audio_sent_at, 5)
 
-                            self.current_turn_interim_details.append({
-                                'transcript': transcript,
-                                'latency_ms': latency_ms,
-                                'is_final': False,
-                                'received_at': time.time()
-                            })
+                            self.current_turn_interim_details.append(
+                                {
+                                    "transcript": transcript,
+                                    "latency_ms": latency_ms,
+                                    "is_final": False,
+                                    "received_at": time.time(),
+                                }
+                            )
 
-                            data = {
-                                "type": "interim_transcript_received",
-                                "content": transcript
-                            }
+                            data = {"type": "interim_transcript_received", "content": transcript}
                             yield create_ws_data_packet(data, self.meta_info)
 
                     elif event == "EagerEndOfTurn":
@@ -822,11 +821,7 @@ class DeepgramTranscriber(BaseTranscriber):
                             self.eager_transcript_pending = transcript
                             self.last_interim_time = time.time()
 
-                            data = {
-                                "type": "eager_end_of_turn",
-                                "content": transcript,
-                                "confidence": eot_confidence
-                            }
+                            data = {"type": "eager_end_of_turn", "content": transcript, "confidence": eot_confidence}
                             yield create_ws_data_packet(data, self.meta_info)
 
                     elif event == "TurnResumed":
@@ -841,18 +836,20 @@ class DeepgramTranscriber(BaseTranscriber):
 
                         if transcript:
                             try:
-                                self.turn_latencies.append({
-                                    'turn_id': self.current_turn_id,
-                                    'sequence_id': self.current_turn_id,
-                                    'interim_details': self.current_turn_interim_details
-                                })
+                                self.turn_latencies.append(
+                                    {
+                                        "turn_id": self.current_turn_id,
+                                        "sequence_id": self.current_turn_id,
+                                        "interim_details": self.current_turn_interim_details,
+                                    }
+                                )
                             except Exception as e:
                                 logger.error(f"Error building turn latencies: {e}")
 
                             data = {
                                 "type": "transcript",
                                 "content": transcript,
-                                "was_eager": self.eager_transcript_pending is not None
+                                "was_eager": self.eager_transcript_pending is not None,
                             }
 
                             self._reset_turn_state()
@@ -885,7 +882,9 @@ class DeepgramTranscriber(BaseTranscriber):
             logger.info(f"Attempting to connect to Deepgram websocket: {websocket_url}")
 
             deepgram_ws = await asyncio.wait_for(
-                websockets.connect(websocket_url, additional_headers=additional_headers, ssl=get_ssl_context(websocket_url)),
+                websockets.connect(
+                    websocket_url, additional_headers=additional_headers, ssl=get_ssl_context(websocket_url)
+                ),
                 timeout=10.0,  # 10 second timeout
             )
 
