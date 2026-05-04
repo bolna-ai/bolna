@@ -8,5 +8,6 @@ from .pixa_transcriber import PixaTranscriber
 from .gladia_transcriber import GladiaTranscriber
 from .elevenlabs_transcriber import ElevenLabsTranscriber
 from .smallest_transcriber import SmallestTranscriber
+from .openai_transcriber import OpenAITranscriber
 from .transcriber_pool import TranscriberPool
 from .lid_provider import LIDProvider, SarvamLID
