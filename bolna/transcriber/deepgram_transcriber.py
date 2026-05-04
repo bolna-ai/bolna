@@ -231,7 +231,7 @@ class DeepgramTranscriber(BaseTranscriber):
             if hints:
                 dg_params['language_hint'] = hints
 
-        websocket_api = 'wss://{}/v2/listen?'.format(self.deepgram_host)
+        websocket_api = '{}://{}/v2/listen?'.format(os.getenv("DEEPGRAM_HOST_PROTOCOL", "wss"), self.deepgram_host)
         websocket_url = websocket_api + urlencode(dg_params, doseq=True)
         return websocket_url
 
