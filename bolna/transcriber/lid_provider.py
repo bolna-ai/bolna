@@ -32,12 +32,38 @@ import os
 import wave
 from typing import Awaitable, Callable, Optional
 
+import numpy as np
+from scipy.signal import resample_poly
+
 from bolna.helpers.logger_config import configure_logger
 
 logger = configure_logger(__name__)
 
 # Signature: async def on_language(lang: str, confidence: float) -> None
 OnLanguageCallback = Callable[[str, float], Awaitable[None]]
+
+
+def _resample_to_16k(pcm_bytes: bytes, in_sr: int) -> bytes:
+    """Resample raw 16-bit PCM from in_sr to 16000 Hz.
+
+    Uses scipy resample_poly (polyphase filter) — same approach as
+    SarvamTranscriber.normalize_to_16k — which preserves more signal
+    content than audioop.ratecv's basic linear interpolation.
+    Falls back to audioop.ratecv if scipy fails.
+    """
+    if in_sr == 16000:
+        return pcm_bytes
+    try:
+        audio_np = np.frombuffer(pcm_bytes, dtype=np.int16)
+        gcd = np.gcd(in_sr, 16000)
+        up = 16000 // gcd
+        down = in_sr // gcd
+        resampled = resample_poly(audio_np, up, down)
+        return np.clip(resampled, -32768, 32767).astype(np.int16).tobytes()
+    except Exception:
+        import audioop
+        resampled, _ = audioop.ratecv(pcm_bytes, 2, 1, in_sr, 16000, None)
+        return resampled
 
 
 class SarvamLID:
@@ -247,14 +273,12 @@ class VoxLinguaLID:
     def _pcm_to_tensor(self, pcm_bytes: bytes):
         import audioop
 
-        import numpy as np
         import torch
 
         raw = pcm_bytes
         if self._encoding == "mulaw":
             raw = audioop.ulaw2lin(raw, 2)
-        if self._input_sr != 16000:
-            raw, _ = audioop.ratecv(raw, 2, 1, self._input_sr, 16000, None)
+        raw = _resample_to_16k(raw, self._input_sr)
         arr = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
         return torch.from_numpy(arr).unsqueeze(0)
 
@@ -372,13 +396,10 @@ class MMSLinguaLID:
     def _pcm_to_array(self, pcm_bytes: bytes):
         import audioop
 
-        import numpy as np
-
         raw = pcm_bytes
         if self._encoding == "mulaw":
             raw = audioop.ulaw2lin(raw, 2)
-        if self._input_sr != 16000:
-            raw, _ = audioop.ratecv(raw, 2, 1, self._input_sr, 16000, None)
+        raw = _resample_to_16k(raw, self._input_sr)
         return np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
 
     def _classify_sync(self, pcm_bytes: bytes) -> tuple[str, float]:
@@ -500,13 +521,10 @@ class WhisperLID:
     def _pcm_to_float(self, pcm_bytes: bytes):
         import audioop
 
-        import numpy as np
-
         raw = pcm_bytes
         if self._encoding == "mulaw":
             raw = audioop.ulaw2lin(raw, 2)
-        if self._input_sr != 16000:
-            raw, _ = audioop.ratecv(raw, 2, 1, self._input_sr, 16000, None)
+        raw = _resample_to_16k(raw, self._input_sr)
         return np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
 
     def _classify_sync(self, pcm_bytes: bytes) -> tuple[str, float]:
