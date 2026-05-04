@@ -239,6 +239,7 @@ class TranscriberPool:
             "lid_mode": self._lid_mode,
             "would_switch": would_switch,
             "suppressed_reason": suppressed_reason,
+            "detected_at": time.time(),
         })
 
     async def _handle_lid_signal(self, lang: str, confidence: float) -> None:
