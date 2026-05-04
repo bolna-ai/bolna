@@ -3360,12 +3360,14 @@ class TaskManager(BaseManager):
 
         # Record every switch so shadow-eval can compare LID detections vs.
         # actual LLM-decided switches on the same call.
-        self.language_switch_events.append({
-            "to_label":       label,
-            "from_label":     self.language,
-            "triggered_by":   triggered_by,
-            "switched_at":    time.time(),
-        })
+        self.language_switch_events.append(
+            {
+                "to_label": label,
+                "from_label": self.language,
+                "triggered_by": triggered_by,
+                "switched_at": time.time(),
+            }
+        )
 
         if "transcriber" in components and isinstance(self.tools.get("transcriber"), TranscriberPool):
             await self.tools["transcriber"].switch(label)

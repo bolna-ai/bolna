@@ -39,9 +39,17 @@ class TranscriberPool:
     # Seconds to wait after a switch before accepting new LID signals.
     _LID_COOLDOWN_S = 3.0
 
-    def __init__(self, transcribers, shared_input_queue, output_queue, active_label, multilingual_config,
-                 lid_provider: str = None, lid_config: dict = None,
-                 on_lid_switch: Optional[Callable[[str], Awaitable[None]]] = None):
+    def __init__(
+        self,
+        transcribers,
+        shared_input_queue,
+        output_queue,
+        active_label,
+        multilingual_config,
+        lid_provider: str = None,
+        lid_config: dict = None,
+        on_lid_switch: Optional[Callable[[str], Awaitable[None]]] = None,
+    ):
         """
         Args:
             transcribers: dict mapping label -> transcriber instance.
@@ -71,7 +79,7 @@ class TranscriberPool:
         # ── LID tap state ──────────────────────────────────────────────────
         self._lid_provider_name = lid_provider
         self._lid_config = lid_config or {}
-        self._lid: Optional[object] = None          # LIDProvider instance
+        self._lid: Optional[object] = None  # LIDProvider instance
         self._lid_task: Optional[asyncio.Task] = None
         self._on_lid_switch = on_lid_switch
         # "shadow" logs detections without switching; "active" performs live switch.
@@ -205,6 +213,7 @@ class TranscriberPool:
         """Instantiate and connect the configured LID provider."""
         try:
             from bolna.transcriber.lid_provider import LIDProvider
+
             self._lid = LIDProvider.create(
                 provider=self._lid_provider_name,
                 on_language=self._handle_lid_signal,
@@ -231,15 +240,17 @@ class TranscriberPool:
         function_tool_api_call_details works for tool_call_api_logs.
         No DB, no HTTP, no callbacks needed inside bolna.
         """
-        self.lid_detection_events.append({
-            "detected_lang": detected_lang,
-            "confidence": confidence,
-            "active_label": self.active_label,
-            "target_label": target_label,
-            "lid_mode": self._lid_mode,
-            "would_switch": would_switch,
-            "suppressed_reason": suppressed_reason,
-        })
+        self.lid_detection_events.append(
+            {
+                "detected_lang": detected_lang,
+                "confidence": confidence,
+                "active_label": self.active_label,
+                "target_label": target_label,
+                "lid_mode": self._lid_mode,
+                "would_switch": would_switch,
+                "suppressed_reason": suppressed_reason,
+            }
+        )
 
     async def _handle_lid_signal(self, lang: str, confidence: float) -> None:
         """
@@ -260,16 +271,12 @@ class TranscriberPool:
         # Skip confidence check for Sarvam — it doesn't return language_probability
         # in unknown-language mode; the language_code itself is the detection signal.
         if self._lid_provider_name != "sarvam" and confidence < self._LID_CONFIDENCE_THRESHOLD:
-            logger.debug(
-                f"TranscriberPool LID: {lang} conf={confidence:.2f} below threshold — suppressed"
-            )
+            logger.debug(f"TranscriberPool LID: {lang} conf={confidence:.2f} below threshold — suppressed")
             return
 
         # Use same fallback as _lang_to_label build: language_code first, then language.
         _active_cfg = self._multilingual_config.get(self.active_label, {})
-        active_lang = (
-            _active_cfg.get("language_code") or _active_cfg.get("language") or ""
-        ).split("-")[0].lower()
+        active_lang = (_active_cfg.get("language_code") or _active_cfg.get("language") or "").split("-")[0].lower()
         if lang == active_lang:
             self._lid_pending_lang = None
             self._lid_pending_count = 0
@@ -278,10 +285,7 @@ class TranscriberPool:
         # Cooldown check
         now = time.monotonic()
         if now - self._lid_last_switch_time < self._LID_COOLDOWN_S:
-            logger.debug(
-                f"TranscriberPool LID: cooldown active — suppressed {lang} "
-                f"(suppressed_reason=cooldown)"
-            )
+            logger.debug(f"TranscriberPool LID: cooldown active — suppressed {lang} (suppressed_reason=cooldown)")
             return
 
         # Debounce accumulation
