@@ -230,6 +230,7 @@ class TaskManager(BaseManager):
 
         # Setup IO SERVICE, TRANSCRIBER, LLM, SYNTHESIZER
         self.llm_task = None
+        self.eager_llm_task = None
         self.llm_queue_task = None
         self.eager_llm_task = None
         self.execute_function_call_task = None
