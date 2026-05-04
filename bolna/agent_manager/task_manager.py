@@ -1006,7 +1006,7 @@ class TaskManager(BaseManager):
                 self.transcriber_provider = transcriber_config.get("provider", transcriber_config.get("model"))
 
                 # --- Multilingual pool path ---
-                if "multilingual" in transcriber_config:
+                if "multilingual" in transcriber_config and transcriber_config.get("multilingual"):
                     multilingual = transcriber_config["multilingual"]
                     active_label = transcriber_config.get("active", DEFAULT_LANGUAGE_CODE)
                     self.language = active_label
