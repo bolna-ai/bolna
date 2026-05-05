@@ -279,7 +279,9 @@ class TranscriberPool:
         # Drop detections for languages not in the agent's supported pool.
         # e.g. if agent supports [hi, en, gu, bn] and Azure detects "te", silently ignore.
         if lang not in self._lang_to_label:
-            logger.debug(f"TranscriberPool LID: {lang} not in supported languages {list(self._lang_to_label.keys())} — ignored")
+            logger.debug(
+                f"TranscriberPool LID: {lang} not in supported languages {list(self._lang_to_label.keys())} — ignored"
+            )
             return
 
         logger.info(f"TranscriberPool LID: {lang} conf={confidence:.2f} (provider={self._lid_provider_name})")

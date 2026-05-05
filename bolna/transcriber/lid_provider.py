@@ -237,9 +237,7 @@ class AzureLID:
         self._push_stream = speechsdk.audio.PushAudioInputStream(audio_format)
         audio_config = speechsdk.audio.AudioConfig(stream=self._push_stream)
 
-        auto_detect_config = speechsdk.languageconfig.AutoDetectSourceLanguageConfig(
-            languages=self._languages
-        )
+        auto_detect_config = speechsdk.languageconfig.AutoDetectSourceLanguageConfig(languages=self._languages)
         self._recognizer = speechsdk.SpeechRecognizer(
             speech_config=speech_config,
             audio_config=audio_config,
@@ -264,6 +262,7 @@ class AzureLID:
             return
         try:
             import azure.cognitiveservices.speech as speechsdk
+
             result = evt.result
             if result.reason == speechsdk.ResultReason.RecognizedSpeech:
                 lang_result = speechsdk.AutoDetectSourceLanguageResult(result)
@@ -311,9 +310,7 @@ class LIDProvider:
     }
 
     @classmethod
-    def create(
-        cls, provider: str, on_language: OnLanguageCallback, config: dict
-    ) -> "SarvamLID | AzureLID":
+    def create(cls, provider: str, on_language: OnLanguageCallback, config: dict) -> "SarvamLID | AzureLID":
         klass = cls._PROVIDERS.get(provider.lower(), AzureLID)
         if klass is AzureLID and provider.lower() not in cls._PROVIDERS:
             logger.warning(f"LIDProvider: unknown provider '{provider}', falling back to azure")
