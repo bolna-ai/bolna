@@ -286,6 +286,24 @@ class AzureLID:
         self._recognizer.start_continuous_recognition()
         logger.info(f"AzureLID: started continuous LID for languages={self._languages}")
 
+    @staticmethod
+    def _duration_to_conf(duration_ticks: int) -> float:
+        """Map utterance duration to a confidence proxy.
+
+        Azure doesn't expose LID confidence, so we use utterance duration
+        as a signal — longer speech = more reliable detection.
+
+          < 500ms  → 0.60  (below 0.70 threshold; needs 3 debounce hits)
+          500–1000ms → 0.80
+          > 1000ms → 1.00
+        """
+        duration_ms = duration_ticks / 10_000  # ticks are 100ns units
+        if duration_ms < 500:
+            return 0.60
+        if duration_ms < 1000:
+            return 0.80
+        return 1.00
+
     def _on_recognized(self, evt) -> None:
         if self._loop is None or self._dead:
             return
@@ -297,9 +315,14 @@ class AzureLID:
                 detected = lang_result.language  # e.g. "hi-IN"
                 if detected and detected != "Unknown":
                     short = detected.split("-")[0].lower()
-                    logger.info(f"AzureLID: detected {detected!r} (short={short!r})")
+                    conf = self._duration_to_conf(result.duration)
+                    duration_ms = result.duration / 10_000
+                    logger.info(
+                        f"AzureLID: detected {detected!r} (short={short!r}, "
+                        f"duration={duration_ms:.0f}ms, conf={conf:.2f})"
+                    )
                     asyncio.run_coroutine_threadsafe(
-                        self.on_language(short, 1.0), self._loop
+                        self.on_language(short, conf), self._loop
                     )
         except Exception as e:
             logger.warning(f"AzureLID recognized callback error: {e}")
