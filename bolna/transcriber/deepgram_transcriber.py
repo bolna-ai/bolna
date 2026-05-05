@@ -781,8 +781,10 @@ class DeepgramTranscriber(BaseTranscriber):
                     languages = msg.get("languages")
                     languages_hinted = msg.get("languages_hinted")
 
+                    rid = self.run_id or "?"
+
                     if event == "StartOfTurn":
-                        logger.info(f"Flux: StartOfTurn (turn_index={turn_index}, transcript={transcript!r})")
+                        logger.info(f"run_id={rid} Flux: StartOfTurn (turn_index={turn_index}, transcript={transcript!r})")
                         self.turn_counter += 1
                         self.current_turn_id = self.turn_counter
                         self.speech_start_time = timestamp_ms()
@@ -818,15 +820,15 @@ class DeepgramTranscriber(BaseTranscriber):
                             )
 
                             if languages:
-                                logger.info(f"Flux LID Update: languages={languages} hinted={languages_hinted}")
+                                logger.info(f"run_id={rid} Flux LID Update: languages={languages} hinted={languages_hinted}")
 
                             data = {"type": "interim_transcript_received", "content": transcript}
                             yield create_ws_data_packet(data, self.meta_info)
 
                     elif event == "EagerEndOfTurn":
                         if languages:
-                            logger.info(f"Flux LID EagerEndOfTurn: languages={languages} hinted={languages_hinted}")
-                        logger.info(f"Flux: EagerEndOfTurn (confidence={eot_confidence}, transcript={transcript})")
+                            logger.info(f"run_id={rid} Flux LID EagerEndOfTurn: languages={languages} hinted={languages_hinted}")
+                        logger.info(f"run_id={rid} Flux: EagerEndOfTurn (confidence={eot_confidence}, transcript={transcript})")
                         self.eager_transcript_pending = transcript
                         self.last_interim_time = time.time()
 
@@ -834,7 +836,7 @@ class DeepgramTranscriber(BaseTranscriber):
                         yield create_ws_data_packet(data, self.meta_info)
 
                     elif event == "TurnResumed":
-                        logger.info(f"Flux: TurnResumed - user continued speaking after EagerEndOfTurn")
+                        logger.info(f"run_id={rid} Flux: TurnResumed - user continued speaking after EagerEndOfTurn")
                         self.eager_transcript_pending = None
 
                         data = {"type": "turn_resumed"}
@@ -842,8 +844,8 @@ class DeepgramTranscriber(BaseTranscriber):
 
                     elif event == "EndOfTurn":
                         if languages:
-                            logger.info(f"Flux LID EndOfTurn: languages={languages} hinted={languages_hinted}")
-                        logger.info(f"Flux: EndOfTurn (confidence={eot_confidence}) - final transcript: {transcript}")
+                            logger.info(f"run_id={rid} Flux LID EndOfTurn: languages={languages} hinted={languages_hinted}")
+                        logger.info(f"run_id={rid} Flux: EndOfTurn (confidence={eot_confidence}) transcript={transcript!r}")
 
                         if transcript:
                             try:
