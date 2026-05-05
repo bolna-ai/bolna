@@ -250,6 +250,7 @@ class TranscriberPool:
                 "lid_provider": self._lid_provider_name,
                 "would_switch": would_switch,
                 "suppressed_reason": suppressed_reason,
+                "detected_at": time.time(),
             }
         )
 
