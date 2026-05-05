@@ -212,7 +212,7 @@ class TranscriberPool:
     async def _start_lid_tap(self) -> None:
         """Instantiate and connect the configured LID provider."""
         try:
-            from bolna.transcriber.lid_provider import LIDProvider
+            from bolna.lid import LIDProvider
 
             self._lid = LIDProvider.create(
                 provider=self._lid_provider_name,
