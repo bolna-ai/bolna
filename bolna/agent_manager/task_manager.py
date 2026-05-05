@@ -3297,14 +3297,6 @@ class TaskManager(BaseManager):
                             logger.info(f"EndOfTurn follows EagerEndOfTurn - using speculative LLM")
                             self.llm_task = self.eager_llm_task
                             self.eager_llm_task = None
-                            # Correct history if final transcript differs from the eager one
-                            if (
-                                self.history
-                                and self.history[-1].get("role") == "user"
-                                and self.history[-1].get("content") != transcriber_message
-                            ):
-                                self.history[-1]["content"] = transcriber_message
-                                logger.info(f"Updated eager history entry with final transcript")
                         else:
                             meta_info = self.__get_updated_meta_info(meta_info)
                             await self._handle_transcriber_output(next_task, transcriber_message, meta_info)
