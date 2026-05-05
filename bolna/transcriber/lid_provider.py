@@ -77,6 +77,7 @@ class SarvamLID:
     def _convert_to_wav_b64(self, raw: bytes) -> Optional[str]:
         """Convert telephony audio to 16kHz WAV base64 for Sarvam."""
         import audioop
+
         try:
             if self._encoding == "mulaw":
                 raw = audioop.ulaw2lin(raw, 2)
@@ -95,6 +96,7 @@ class SarvamLID:
 
     async def start(self) -> None:
         import websockets as ws_lib
+
         url = self._build_url()
         headers = {"api-subscription-key": self._api_key}
         logger.info(f"SarvamLID: connecting to {url}")
