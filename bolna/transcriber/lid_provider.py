@@ -1,10 +1,14 @@
 """
 lid_provider.py — Model-agnostic Language Identification (LID) interface.
 
-Four backends are available:
+Five backends are available:
 
   SarvamLID    — saaras:v3 streaming WebSocket with language_code=unknown.
                  Natively streaming, API-based, 100% accurate on Indian telephony.
+
+  AzureLID     — Azure Cognitive Services continuous LID via PushAudioInputStream.
+                 Natively accepts 8kHz mulaw — no upsampling needed. Supports up
+                 to 10 candidate languages. Strong for Indian telephony.
 
   VoxLinguaLID — SpeechBrain VoxLingua107 ECAPA-TDNN (local, ~360MB).
                  NOTE: Struggles on 8kHz mulaw telephony — use only with clean audio.
@@ -206,7 +210,125 @@ class SarvamLID:
         logger.info("SarvamLID: stopped")
 
 
-# ── 2. SpeechBrain VoxLingua107 (local, CPU) ──────────────────────────────────
+# ── 2. Azure Cognitive Services LID ──────────────────────────────────────────
+
+
+class AzureLID:
+    """
+    LID via Azure Cognitive Services continuous language identification.
+
+    Uses PushAudioInputStream with native mulaw/linear16 support — no
+    upsampling required. Supports up to 10 candidate languages simultaneously.
+    Returns language detections inline via the recognized/recognizing callbacks.
+
+    Requires: pip install azure-cognitiveservices-speech (already in requirements)
+
+    Config keys:
+        azure_speech_key     — AZURE_SPEECH_KEY env var
+        azure_speech_region  — AZURE_SPEECH_REGION env var (e.g. "eastus")
+        languages            — list of BCP-47 locales to detect
+                               (default: ["hi-IN","en-IN","ta-IN","te-IN","kn-IN","gu-IN","bn-IN","mr-IN"])
+        telephony_provider   — "twilio" | "plivo" | other
+        sampling_rate        — 8000 (telephony default)
+    """
+
+    _DEFAULT_LANGUAGES = ["hi-IN", "en-IN", "ta-IN", "te-IN", "kn-IN", "gu-IN", "bn-IN", "mr-IN"]
+
+    def __init__(self, on_language: OnLanguageCallback, config: dict):
+        self.on_language = on_language
+        self.config = config
+        self._key = config.get("azure_speech_key") or os.getenv("AZURE_SPEECH_KEY", "")
+        self._region = config.get("azure_speech_region") or os.getenv("AZURE_SPEECH_REGION", "eastus")
+        self._languages = config.get("languages", self._DEFAULT_LANGUAGES)
+        self._telephony = config.get("telephony_provider", "")
+        self._encoding = "mulaw" if self._telephony == "twilio" else "linear16"
+        self._sr = int(config.get("sampling_rate", 8000))
+        self._push_stream = None
+        self._recognizer = None
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._dead: bool = False
+
+    async def start(self) -> None:
+        import azure.cognitiveservices.speech as speechsdk
+        from azure.cognitiveservices.speech.audio import AudioStreamWaveFormat
+
+        self._loop = asyncio.get_event_loop()
+
+        speech_config = speechsdk.SpeechConfig(subscription=self._key, region=self._region)
+        # Continuous LID fires on every recognized utterance
+        speech_config.set_property(
+            property_id=speechsdk.PropertyId.SpeechServiceConnection_LanguageIdMode,
+            value="Continuous",
+        )
+
+        audio_format = speechsdk.audio.AudioStreamFormat(
+            samples_per_second=self._sr,
+            bits_per_sample=8 if self._encoding == "mulaw" else 16,
+            channels=1,
+            wave_stream_format=AudioStreamWaveFormat.MULAW if self._encoding == "mulaw" else AudioStreamWaveFormat.PCM,
+        )
+        self._push_stream = speechsdk.audio.PushAudioInputStream(audio_format)
+        audio_config = speechsdk.audio.AudioConfig(stream=self._push_stream)
+
+        auto_detect_config = speechsdk.languageconfig.AutoDetectSourceLanguageConfig(
+            languages=self._languages
+        )
+
+        self._recognizer = speechsdk.SpeechRecognizer(
+            speech_config=speech_config,
+            audio_config=audio_config,
+            auto_detect_source_language_config=auto_detect_config,
+        )
+
+        self._recognizer.recognized.connect(self._on_recognized)
+        self._recognizer.canceled.connect(self._on_canceled)
+
+        self._recognizer.start_continuous_recognition()
+        logger.info(f"AzureLID: started continuous LID for languages={self._languages}")
+
+    def _on_recognized(self, evt) -> None:
+        if self._loop is None or self._dead:
+            return
+        try:
+            import azure.cognitiveservices.speech as speechsdk
+            result = evt.result
+            if result.reason == speechsdk.ResultReason.RecognizedSpeech:
+                lang_result = speechsdk.AutoDetectSourceLanguageResult(result)
+                detected = lang_result.language  # e.g. "hi-IN"
+                if detected and detected != "Unknown":
+                    short = detected.split("-")[0].lower()
+                    logger.info(f"AzureLID: detected {detected!r} (short={short!r})")
+                    asyncio.run_coroutine_threadsafe(
+                        self.on_language(short, 1.0), self._loop
+                    )
+        except Exception as e:
+            logger.warning(f"AzureLID recognized callback error: {e}")
+
+    def _on_canceled(self, evt) -> None:
+        logger.warning(f"AzureLID: recognition canceled — {evt.reason}. LID inactive.")
+        self._dead = True
+
+    def feed(self, audio_bytes: bytes) -> None:
+        if self._dead or self._push_stream is None:
+            return
+        try:
+            self._push_stream.write(audio_bytes)
+        except Exception as e:
+            logger.warning(f"AzureLID feed error: {e}")
+            self._dead = True
+
+    async def stop(self) -> None:
+        try:
+            if self._recognizer:
+                self._recognizer.stop_continuous_recognition()
+            if self._push_stream:
+                self._push_stream.close()
+        except Exception as e:
+            logger.warning(f"AzureLID stop error: {e}")
+        logger.info("AzureLID: stopped")
+
+
+# ── 3. SpeechBrain VoxLingua107 (local, CPU) ──────────────────────────────────
 
 
 class VoxLinguaLID:
@@ -330,7 +452,7 @@ class VoxLinguaLID:
         logger.info("VoxLinguaLID: stopped")
 
 
-# ── 3. Meta MMS-LID (local, CPU) ──────────────────────────────────────────────
+# ── 4. Meta MMS-LID (local, CPU) ──────────────────────────────────────────────
 
 
 class MMSLinguaLID:
@@ -458,7 +580,7 @@ class MMSLinguaLID:
         logger.info("MMSLinguaLID: stopped")
 
 
-# ── 4. OpenAI Whisper LID-only (local, CPU) ───────────────────────────────────
+# ── 5. OpenAI Whisper LID-only (local, CPU) ───────────────────────────────────
 
 
 class WhisperLID:
@@ -580,10 +702,12 @@ class LIDProvider:
     @classmethod
     def create(
         cls, provider: str, on_language: OnLanguageCallback, config: dict
-    ) -> "SarvamLID | VoxLinguaLID | MMSLinguaLID | WhisperLID":
+    ) -> "SarvamLID | AzureLID | VoxLinguaLID | MMSLinguaLID | WhisperLID":
         p = provider.lower()
         if p == "sarvam":
             return SarvamLID(on_language=on_language, config=config)
+        if p in ("azure", "azure-lid", "azurelid"):
+            return AzureLID(on_language=on_language, config=config)
         if p in ("voxlingua", "speechbrain"):
             return VoxLinguaLID(on_language=on_language, config=config)
         if p in ("mms", "mms-lid", "mmslid"):
