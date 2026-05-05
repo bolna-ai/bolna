@@ -1553,10 +1553,15 @@ class TaskManager(BaseManager):
             mark_events_data = list(mark_events_data)
             target_turn_id = self._get_latest_turn_id_from_marks(mark_events_data)
             target_response_uid = self._get_latest_response_uid_from_marks(mark_events_data)
+            # Track whether target came from actual evidence (marks / acked text) vs a
+            # blind fallback.  We must NOT trim a previously-committed message (e.g. a
+            # filler) when a *later* interruption has no pending marks at all.
+            target_from_evidence = target_turn_id is not None or target_response_uid is not None
             if target_turn_id is None:
                 target_turn_id = getattr(self.tools.get("input"), "last_heard_turn_id", None)
             if target_response_uid is None:
                 target_response_uid = getattr(self.tools.get("input"), "last_heard_response_uid", None)
+            target_from_evidence = target_from_evidence or target_turn_id is not None or target_response_uid is not None
             if target_turn_id is None:
                 target_turn_id = self._get_latest_assistant_turn_id()
             if target_response_uid is None:
@@ -1657,6 +1662,15 @@ class TaskManager(BaseManager):
                             logger.info(
                                 "No pending marks with turn_id and no target_turn_id; "
                                 "skipping trim to avoid removing non-turn assistant messages like welcome"
+                            )
+                            return
+                        if not target_from_evidence:
+                            # target_turn_id was obtained via blind fallback (_get_latest_assistant_turn_id)
+                            # with no marks and no ack evidence — this is a second cleanup after a
+                            # previous one already committed the filler.  Do NOT remove it.
+                            logger.info(
+                                f"No pending marks and target_turn_id={target_turn_id} came from blind fallback; "
+                                "skipping trim to avoid removing already-committed history"
                             )
                             return
                         logger.info(
