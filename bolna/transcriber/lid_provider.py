@@ -304,18 +304,17 @@ class AzureLID:
         logger.info("AzureLID: stopped")
 
 
-# ── Factory ────────────────────────────────────────────────────────────────────
-
-
 class LIDProvider:
+    _PROVIDERS = {
+        "sarvam": SarvamLID,
+        "azure": AzureLID,
+    }
+
     @classmethod
     def create(
         cls, provider: str, on_language: OnLanguageCallback, config: dict
     ) -> "SarvamLID | AzureLID":
-        p = provider.lower()
-        if p == "sarvam":
-            return SarvamLID(on_language=on_language, config=config)
-        if p in ("azure", "azure-lid", "azurelid"):
-            return AzureLID(on_language=on_language, config=config)
-        logger.warning(f"LIDProvider: unknown provider '{provider}', falling back to azure")
-        return AzureLID(on_language=on_language, config=config)
+        klass = cls._PROVIDERS.get(provider.lower(), AzureLID)
+        if klass is AzureLID and provider.lower() not in cls._PROVIDERS:
+            logger.warning(f"LIDProvider: unknown provider '{provider}', falling back to azure")
+        return klass(on_language=on_language, config=config)
