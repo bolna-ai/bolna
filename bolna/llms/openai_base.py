@@ -15,6 +15,12 @@ from bolna.helpers.logger_config import configure_logger
 logger = configure_logger(__name__)
 
 
+def _clean_rescue_answer(answer: str) -> str | None:
+    """Strip leftover 'functions' / 'functions.xxx' tokens from a rescue textual_response."""
+    cleaned = re.sub(r'\bfunctions(\.\w+)?\b', '', answer).strip()
+    return cleaned if cleaned else None
+
+
 class OpenAICompatibleLLM(BaseLLM):
     """Base class for OpenAI-API-compatible LLM providers.
 
@@ -129,7 +135,7 @@ class OpenAICompatibleLLM(BaseLLM):
                 "type": "function",
             }],
             tool_call_id=f"rescued_{func_name}",
-            textual_response=answer.strip() if answer.strip() else None,
+            textual_response=_clean_rescue_answer(answer),
         )
 
         try:

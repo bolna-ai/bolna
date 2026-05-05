@@ -216,7 +216,7 @@ class AzureLLM(OpenAICompatibleLLM):
                     end_pos = self._find_tool_call_end(text_tool_buffer)
                     if end_pos != -1:
                         captured_tool_text = text_tool_buffer[:end_pos]
-                        remainder = text_tool_buffer[end_pos:]
+                        remainder = text_tool_buffer[end_pos:].lstrip('\n')
                         text_tool_buffer = None
                         answer += remainder
                         buffer = remainder
@@ -232,7 +232,7 @@ class AzureLLM(OpenAICompatibleLLM):
                     end_pos = self._find_tool_call_end(after)
                     if end_pos != -1:
                         captured_tool_text = after[:end_pos]
-                        remainder = after[end_pos:]
+                        remainder = after[end_pos:].lstrip('\n')
                         answer += remainder
                         buffer = remainder
                     else:
