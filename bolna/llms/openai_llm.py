@@ -257,6 +257,9 @@ class OpenAiLLM(OpenAICompatibleLLM):
         if self.trigger_function_call:
             accumulator = ToolCallAccumulator(self.api_params, tools, self.language, self.model, self.run_id)
 
+        text_tool_buffer = None
+        captured_tool_text = None
+
         start_time = now_ms()
         first_token_time = None
         latency_data = None
@@ -333,15 +336,59 @@ class OpenAiLLM(OpenAICompatibleLLM):
             elif hasattr(delta, "content") and delta.content is not None:
                 if accumulator:
                     accumulator.received_textual = True
-                answer += delta.content
-                buffer += delta.content
-                if synthesize and len(buffer) >= self.buffer_size:
-                    split = buffer.rsplit(" ", 1)
-                    yield LLMStreamChunk(data=split[0], end_of_stream=False, latency=latency_data)
-                    buffer = split[1] if len(split) > 1 else ""
+                content = delta.content
+
+                if text_tool_buffer is not None:
+                    text_tool_buffer += content
+                    end_pos = self._find_tool_call_end(text_tool_buffer)
+                    if end_pos != -1:
+                        captured_tool_text = text_tool_buffer[:end_pos]
+                        remainder = text_tool_buffer[end_pos:]
+                        text_tool_buffer = None
+                        answer += remainder
+                        buffer = remainder
+                elif "functions." in (buffer + content):
+                    combined = buffer + content
+                    idx = combined.find("functions.")
+                    before = combined[:idx]
+                    after = combined[idx:]
+                    if before:
+                        answer += before
+                        if synthesize:
+                            yield LLMStreamChunk(data=before, end_of_stream=False, latency=latency_data)
+                    end_pos = self._find_tool_call_end(after)
+                    if end_pos != -1:
+                        captured_tool_text = after[:end_pos]
+                        remainder = after[end_pos:]
+                        answer += remainder
+                        buffer = remainder
+                    else:
+                        text_tool_buffer = after
+                        buffer = ""
+                else:
+                    answer += content
+                    buffer += content
+                    if synthesize and len(buffer) >= self.buffer_size:
+                        split = buffer.rsplit(" ", 1)
+                        yield LLMStreamChunk(data=split[0], end_of_stream=False, latency=latency_data)
+                        buffer = split[1] if len(split) > 1 else ""
 
         if latency_data:
             latency_data.total_stream_duration_ms = now_ms() - start_time
+
+        if text_tool_buffer is not None:
+            captured_tool_text = text_tool_buffer
+
+        if captured_tool_text and not (accumulator and accumulator.final_tool_calls):
+            logger.warning(f"Text tool call detected in content stream, attempting rescue: {captured_tool_text[:80]}")
+            rescue_chunk = self._try_rescue_text_tool_call(
+                captured_tool_text, model_args, meta_info, answer, latency_data
+            )
+            if rescue_chunk:
+                yield rescue_chunk
+            else:
+                logger.warning("Text tool call rescue failed, falling back to TTS")
+                buffer += captured_tool_text
 
         if accumulator and accumulator.final_tool_calls:
             api_call_payload = accumulator.build_api_payload(model_args, meta_info, answer)
