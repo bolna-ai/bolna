@@ -272,7 +272,7 @@ class AzureLID:
                     short = detected.split("-")[0].lower()
                     conf = self._duration_to_conf(result.duration)
                     duration_ms = result.duration / 10_000
-                    logger.info(
+                    logger.debug(
                         f"AzureLID: detected {detected!r} (short={short!r}, "
                         f"duration={duration_ms:.0f}ms, conf={conf:.2f})"
                     )

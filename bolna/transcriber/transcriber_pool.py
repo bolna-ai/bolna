@@ -281,6 +281,8 @@ class TranscriberPool:
             logger.debug(f"TranscriberPool LID: {lang} not in supported languages {list(self._lang_to_label.keys())} — ignored")
             return
 
+        logger.info(f"TranscriberPool LID: {lang} conf={confidence:.2f} (provider={self._lid_provider_name})")
+
         # Use same fallback as _lang_to_label build: language_code first, then language.
         _active_cfg = self._multilingual_config.get(self.active_label, {})
         active_lang = (_active_cfg.get("language_code") or _active_cfg.get("language") or "").split("-")[0].lower()
