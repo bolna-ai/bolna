@@ -225,7 +225,7 @@ class AzureLID:
 
     Config keys:
         azure_speech_key     — AZURE_SPEECH_KEY env var
-        azure_speech_region  — AZURE_SPEECH_REGION env var (e.g. "eastus")
+        azure_speech_region  — AZURE_SPEECH_REGION env var (e.g. "centralindia")
         languages            — list of BCP-47 locales to detect
                                (default: ["hi-IN","en-IN","ta-IN","te-IN","kn-IN","gu-IN","bn-IN","mr-IN"])
         telephony_provider   — "twilio" | "plivo" | other
@@ -238,7 +238,7 @@ class AzureLID:
         self.on_language = on_language
         self.config = config
         self._key = config.get("azure_speech_key") or os.getenv("AZURE_SPEECH_KEY", "")
-        self._region = config.get("azure_speech_region") or os.getenv("AZURE_SPEECH_REGION", "eastus")
+        self._region = config.get("azure_speech_region") or os.getenv("AZURE_SPEECH_REGION", "centralindia")
         self._languages = config.get("languages", self._DEFAULT_LANGUAGES)
         self._telephony = config.get("telephony_provider", "")
         self._encoding = "mulaw" if self._telephony == "twilio" else "linear16"
