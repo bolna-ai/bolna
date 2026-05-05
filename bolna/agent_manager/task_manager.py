@@ -1497,6 +1497,49 @@ class TaskManager(BaseManager):
         return ""
 
     @staticmethod
+    def _trim_partial_to_complete_words(text):
+        partial_text = (text or "").strip()
+        if not partial_text:
+            return ""
+
+        last_space = partial_text.rfind(" ")
+        if last_space <= 0:
+            return ""
+        return partial_text[:last_space]
+
+    @staticmethod
+    def _normalized_transcript_text(text):
+        return " ".join((text or "").strip().split())
+
+    @classmethod
+    def _prepare_precise_transcript_messages(cls, messages):
+        cleaned = []
+        for message in copy.deepcopy(messages):
+            role = message.get("role")
+            content = message.get("content")
+            role_value = role.value if hasattr(role, "value") else role
+
+            if cleaned and role_value == "user":
+                previous = cleaned[-1]
+                previous_role = previous.get("role")
+                previous_role_value = previous_role.value if hasattr(previous_role, "value") else previous_role
+                if previous_role_value == "user":
+                    current_text = cls._normalized_transcript_text(content)
+                    previous_text = cls._normalized_transcript_text(previous.get("content"))
+                    if current_text and previous_text and current_text.startswith(previous_text):
+                        logger.info(
+                            "Collapsing overlapping user transcript in precise transcript: previous=%r current=%r",
+                            previous.get("content"),
+                            content,
+                        )
+                        cleaned[-1] = message
+                        continue
+
+            cleaned.append(message)
+
+        return cleaned
+
+    @staticmethod
     def _get_latest_turn_id_from_marks(mark_events_data):
         latest_turn_id = None
         latest_counter = -1
@@ -1628,9 +1671,7 @@ class TaskManager(BaseManager):
                             char_count = int(len(chunk["text"]) * proportion)
                             partial_text = chunk["text"][:char_count]
                             if partial_text and char_count < len(chunk["text"]):
-                                last_space = partial_text.rfind(" ")
-                                if last_space > 0:
-                                    partial_text = partial_text[:last_space]
+                                partial_text = self._trim_partial_to_complete_words(partial_text)
                             if partial_text:
                                 played_text.append(partial_text)
                         cumulative_duration += chunk_duration
@@ -1720,9 +1761,8 @@ class TaskManager(BaseManager):
                             if proportion > 0 and full_text.strip():
                                 char_count = int(len(full_text.strip()) * proportion)
                                 if char_count < len(full_text.strip()):
-                                    last_space = full_text.strip()[:char_count].rfind(" ")
-                                    if last_space > 0:
-                                        char_count = last_space
+                                    partial_text = self._trim_partial_to_complete_words(full_text.strip()[:char_count])
+                                    char_count = len(partial_text)
                                 response_heard = full_text.strip()[:char_count]
                                 logger.info(f"turn_id={t_id}: partial, heard (last 20): {response_heard[-20:]!r}")
                             else:
@@ -4693,7 +4733,9 @@ class TaskManager(BaseManager):
                 ]
 
                 output = {
-                    "messages": self.history,
+                    "messages": self._prepare_precise_transcript_messages(self.history)
+                    if self.generate_precise_transcript
+                    else self.history,
                     "conversation_time": time.time() - self.start_time,
                     "label_flow": self.label_flow,
                     "function_tool_api_call_details": copy.deepcopy(self.function_tool_api_call_details),
