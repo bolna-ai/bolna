@@ -247,6 +247,7 @@ class TranscriberPool:
                 "active_label": self.active_label,
                 "target_label": target_label,
                 "lid_mode": self._lid_mode,
+                "lid_provider": self._lid_provider_name,
                 "would_switch": would_switch,
                 "suppressed_reason": suppressed_reason,
             }
