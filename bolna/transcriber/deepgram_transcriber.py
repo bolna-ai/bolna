@@ -782,7 +782,7 @@ class DeepgramTranscriber(BaseTranscriber):
                     languages_hinted = msg.get("languages_hinted")
 
                     if event == "StartOfTurn":
-                        logger.info(f"Flux: StartOfTurn (turn_index={turn_index})")
+                        logger.info(f"Flux: StartOfTurn (turn_index={turn_index}, transcript={transcript!r})")
                         self.turn_counter += 1
                         self.current_turn_id = self.turn_counter
                         self.speech_start_time = timestamp_ms()
@@ -790,6 +790,12 @@ class DeepgramTranscriber(BaseTranscriber):
                         self.is_transcript_sent_for_processing = False
                         self.final_transcript = ""
                         yield create_ws_data_packet("speech_started", self.meta_info)
+                        # StartOfTurn is guaranteed non-empty — use it immediately for barge-in
+                        # instead of waiting for the first Update (~0.25s later)
+                        if transcript:
+                            self.last_interim_time = time.time()
+                            data = {"type": "interim_transcript_received", "content": transcript}
+                            yield create_ws_data_packet(data, self.meta_info)
 
                     elif event == "Update":
                         if transcript:
