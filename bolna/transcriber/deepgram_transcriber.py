@@ -214,19 +214,16 @@ class DeepgramTranscriber(BaseTranscriber):
             self.audio_frame_duration = 0.2
             dg_params["encoding"] = self.encoding
             dg_params["sample_rate"] = self.sampling_rate
-            dg_params["channels"] = "1"
 
         elif self.provider == "web_based_call":
             dg_params["encoding"] = "linear16"
             dg_params["sample_rate"] = 16000
-            dg_params["channels"] = "1"
             self.sampling_rate = 16000
             self.audio_frame_duration = 0.256
 
         elif not self.connected_via_dashboard:
             dg_params["encoding"] = "linear16"
             dg_params["sample_rate"] = 16000
-            dg_params["channels"] = "1"
 
         if self.provider == "playground":
             self.sampling_rate = 8000
@@ -241,10 +238,6 @@ class DeepgramTranscriber(BaseTranscriber):
             hints = self._resolve_language_hints()
             if hints:
                 dg_params["language_hint"] = hints
-
-        if self.run_id:
-            dg_params["tag"] = self.run_id
-            dg_params["extra"] = f"run_id:{self.run_id}"
 
         websocket_api = "{}://{}/v2/listen?".format(os.getenv("DEEPGRAM_HOST_PROTOCOL", "wss"), self.deepgram_host)
         websocket_url = websocket_api + urlencode(dg_params, doseq=True)
