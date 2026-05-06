@@ -1980,7 +1980,7 @@ class TaskManager(BaseManager):
 
             start_time = time.time()
             try:
-                json_data = await self.tools["llm_agent"].generate(self.conversation_history.get_copy())
+                json_data = await self.tools["llm_agent"].generate(self.history)
             except BolnaComponentError:
                 raise
             except Exception as e:
@@ -2343,7 +2343,7 @@ class TaskManager(BaseManager):
     async def _process_conversation_formulaic_task(self, message, sequence, meta_info):
         llm_response = ""
         logger.info("Agent flow is formulaic and hence moving smoothly")
-        async for text_chunk in self.tools["llm_agent"].generate(self.conversation_history.get_copy()):
+        async for text_chunk in self.tools["llm_agent"].generate(self.history):
             if is_valid_md5(text_chunk):
                 self.synthesizer_tasks.append(
                     asyncio.create_task(
