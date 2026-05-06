@@ -32,13 +32,16 @@ class ElevenLabsLID(LIDBackend):
     """
 
     _WS_URL = "wss://api.elevenlabs.io/v1/speech-to-text/realtime"
+    _WS_URL_IN = "wss://api.in.residency.elevenlabs.io/v1/speech-to-text/realtime"
 
     def __init__(self, on_language, config):
         super().__init__(on_language, config)
         self._api_key = config.get("elevenlabs_api_key") or os.getenv("ELEVENLABS_API_KEY", "")
         self._telephony = config.get("telephony_provider", "")
         self._sr = int(config.get("sampling_rate", 8000))
-        self._model_id = config.get("model_id", "scribe_v2_experimental")
+        self._model_id = config.get("model_id", "scribe_v2_realtime")
+        # India-residency keys must use the India endpoint
+        self._ws_url = self._WS_URL_IN if "_residency_in" in self._api_key else self._WS_URL
         # ulaw_8000 is the native telephony format — no conversion needed
         self._audio_format = "ulaw_8000" if self._telephony in ("twilio", "plivo") else "pcm_16000"
         self._queue = asyncio.Queue(maxsize=200)
@@ -56,14 +59,14 @@ class ElevenLabsLID(LIDBackend):
             "vad_silence_threshold_secs": "0.6",
         }
         qs = "&".join(f"{k}={v}" for k, v in params.items())
-        return f"{self._WS_URL}?{qs}"
+        return f"{self._ws_url}?{qs}"
 
     async def start(self):
         import websockets as ws_lib
 
         url = self._build_url()
         headers = {"xi-api-key": self._api_key}
-        logger.info(f"ElevenLabsLID: connecting — format={self._audio_format!r}, model={self._model_id!r}")
+        logger.info(f"ElevenLabsLID: connecting — format={self._audio_format!r}, model={self._model_id!r}, url={self._ws_url!r}")
         self._ws = await ws_lib.connect(url, additional_headers=headers)
         self._sender_task = asyncio.create_task(self._sender_loop())
         self._receiver_task = asyncio.create_task(self._receiver_loop())
