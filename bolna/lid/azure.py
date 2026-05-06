@@ -48,6 +48,8 @@ class AzureLID(LIDBackend):
         self._recognizer = None
         self._loop = None
         self._dead = False
+        self._feed_count = 0
+        self._feed_bytes = 0
 
     async def start(self):
         import azure.cognitiveservices.speech as speechsdk
@@ -130,6 +132,10 @@ class AzureLID(LIDBackend):
             return
         try:
             self._push_stream.write(audio_bytes)
+            self._feed_count += 1
+            self._feed_bytes += len(audio_bytes)
+            if self._feed_count in (1, 10, 50, 100) or self._feed_count % 200 == 0:
+                logger.info(f"AzureLID: feed #{self._feed_count}, total={self._feed_bytes} bytes")
         except Exception as e:
             logger.warning(f"AzureLID feed error: {e}")
             self._dead = True
