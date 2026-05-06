@@ -2,7 +2,9 @@ import asyncio
 import os
 import time
 from typing import Callable, Awaitable, Optional
+
 from bolna.helpers.logger_config import configure_logger
+from bolna.lid import LIDProvider
 
 logger = configure_logger(__name__)
 
@@ -212,8 +214,6 @@ class TranscriberPool:
     async def _start_lid_tap(self) -> None:
         """Instantiate and connect the configured LID provider."""
         try:
-            from bolna.lid import LIDProvider
-
             self._lid = LIDProvider.create(
                 provider=self._lid_provider_name,
                 on_language=self._handle_lid_signal,
