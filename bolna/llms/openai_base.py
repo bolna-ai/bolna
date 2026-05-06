@@ -17,7 +17,7 @@ logger = configure_logger(__name__)
 
 def _clean_rescue_answer(answer: str) -> str | None:
     """Strip leftover 'functions' / 'functions.xxx' tokens from a rescue textual_response."""
-    cleaned = re.sub(r'\bfunctions(\.\w+)?\b', '', answer).strip()
+    cleaned = re.sub(r"\bfunctions(\.\w+)?\b", "", answer).strip()
     return cleaned if cleaned else None
 
 
@@ -32,19 +32,19 @@ class OpenAICompatibleLLM(BaseLLM):
     @staticmethod
     def _find_tool_call_end(text):
         """Return the index after the closing brace/paren of a text-based tool call, or -1 if incomplete."""
-        m = re.search(r'functions\.\w+\s*[({]', text)
+        m = re.search(r"functions\.\w+\s*[({]", text)
         if not m:
             return -1
         start = m.end() - 1
         depth = 0
         for i in range(start, len(text)):
-            if text[i] in '({':
+            if text[i] in "({":
                 depth += 1
-            elif text[i] in ')}':
+            elif text[i] in ")}":
                 depth -= 1
                 if depth == 0:
                     end = i + 1
-                    if end < len(text) and text[end] == ';':
+                    if end < len(text) and text[end] == ";":
                         end += 1
                     return end
         return -1
@@ -56,7 +56,7 @@ class OpenAICompatibleLLM(BaseLLM):
         Returns (func_name, args_json_str) or None if unparseable.
         Handles both strict JSON and JS-style unquoted keys.
         """
-        m = re.search(r'functions\.(\w+)\s*([({])', text)
+        m = re.search(r"functions\.(\w+)\s*([({])", text)
         if not m:
             return None
 
@@ -65,9 +65,9 @@ class OpenAICompatibleLLM(BaseLLM):
         depth = 0
         end = -1
         for i in range(start, len(text)):
-            if text[i] in '({':
+            if text[i] in "({":
                 depth += 1
-            elif text[i] in ')}':
+            elif text[i] in ")}":
                 depth -= 1
                 if depth == 0:
                     end = i + 1
@@ -77,7 +77,7 @@ class OpenAICompatibleLLM(BaseLLM):
             return None
 
         raw = text[start:end]
-        if raw.startswith('('):
+        if raw.startswith("("):
             raw = raw[1:-1].strip()
 
         try:
@@ -128,12 +128,14 @@ class OpenAICompatibleLLM(BaseLLM):
             model_args=model_args,
             meta_info=meta_info,
             called_fun=func_name,
-            model_response=[{
-                "index": 0,
-                "id": f"rescued_{func_name}",
-                "function": {"name": func_name, "arguments": args_str},
-                "type": "function",
-            }],
+            model_response=[
+                {
+                    "index": 0,
+                    "id": f"rescued_{func_name}",
+                    "function": {"name": func_name, "arguments": args_str},
+                    "type": "function",
+                }
+            ],
             tool_call_id=f"rescued_{func_name}",
             textual_response=_clean_rescue_answer(answer),
         )
