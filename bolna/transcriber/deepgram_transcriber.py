@@ -551,7 +551,8 @@ class DeepgramTranscriber(BaseTranscriber):
                                 self.turn_latencies.append(
                                     {
                                         "turn_id": self.current_turn_id,
-                                        "asr_start_epoch_ms": self._turn_first_speech_epoch_ms,
+                                        "asr_start_epoch_ms": self.speech_start_time,
+                                        "asr_turn_start_epoch_ms": self._turn_first_speech_epoch_ms,
                                         "asr_finalized_epoch_ms": timestamp_ms(),
                                         "interim_details": self.current_turn_interim_details,
                                         "first_interim_to_final_ms": first_interim_to_final_ms,

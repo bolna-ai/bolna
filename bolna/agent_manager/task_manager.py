@@ -4265,6 +4265,8 @@ class TaskManager(BaseManager):
                         _turn["asr_start_ms"] = round(_turn.pop("asr_start_epoch_ms") - _call_start_ms, 2)
                     if _turn.get("asr_finalized_epoch_ms") is not None:
                         _turn["asr_finalized_ms"] = round(_turn.pop("asr_finalized_epoch_ms") - _call_start_ms, 2)
+                    if _turn.get("asr_turn_start_epoch_ms") is not None:
+                        _turn["asr_turn_start_ms"] = round(_turn.pop("asr_turn_start_epoch_ms") - _call_start_ms, 2)
 
                 # Collect language detection latency if available
                 if hasattr(self, "language_detector") and self.language_detector.latency_data:
@@ -4275,6 +4277,7 @@ class TaskManager(BaseManager):
                     {
                         "sequence_id": e["sequence_id"],
                         "user_start_ms": round(e["user_start_s"] * 1000 - _call_start_ms, 2) if e.get("user_start_s") and e["user_start_s"] > 0 else None,
+                        "user_first_start_ms": round(e["user_first_start_s"] * 1000 - _call_start_ms, 2) if e.get("user_first_start_s") and e["user_first_start_s"] > 0 else None,
                         "user_end_ms": round(e["user_end_s"] * 1000 - _call_start_ms, 2),
                         "agent_start_ms": round(e["agent_start_s"] * 1000 - _call_start_ms, 2),
                         "agent_end_ms": self._agent_end_timestamps.get(e["sequence_id"]),

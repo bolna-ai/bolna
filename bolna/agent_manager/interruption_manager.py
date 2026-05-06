@@ -260,7 +260,8 @@ class InterruptionManager:
             self.user_bot_latencies.append(
                 {
                     "sequence_id": sequence_id,
-                    "user_start_s": self._pending_user_start_ts if self._pending_user_start_ts > 0 else None,
+                    "user_start_s": self._last_user_start_ts if self._last_user_start_ts > 0 else None,
+                    "user_first_start_s": self._pending_user_start_ts if self._pending_user_start_ts > 0 else None,
                     "user_end_s": self._adjusted_user_stop_ts,
                     "agent_start_s": now_s,
                     "latency_ms": round(latency_ms, 2),
