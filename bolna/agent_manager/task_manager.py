@@ -4251,6 +4251,8 @@ class TaskManager(BaseManager):
                 # Annotate each transcriber turn with was_interrupted so callers
                 # can see which ASR turns had a user barge-in without cross-referencing
                 # the separate interruption_events list.
+                _call_start_ms = self.conversation_start_init_ts
+
                 _interrupted_ids = self.interruption_manager.interrupted_transcriber_turn_ids
                 for _turn in self.transcriber_latencies.turn_latencies:
                     _tid = _turn.get("turn_id") or _turn.get("sequence_id")
@@ -4265,8 +4267,6 @@ class TaskManager(BaseManager):
                     self.llm_latencies.other_latencies.append(self.language_detector.latency_data)
 
                 welcome_message_sent_ts = self.tools["output"].get_welcome_message_sent_ts()
-
-                _call_start_ms = self.conversation_start_init_ts
                 _user_bot_latencies = [
                     {
                         "sequence_id": e["sequence_id"],
