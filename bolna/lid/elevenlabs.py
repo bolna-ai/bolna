@@ -56,6 +56,7 @@ class ElevenLabsLID(LIDBackend):
             "audio_format": self._audio_format,
             "commit_strategy": "vad",
             "include_language_detection": "true",
+            "include_timestamps": "true",
             "vad_silence_threshold_secs": "0.6",
         }
         qs = "&".join(f"{k}={v}" for k, v in params.items())
@@ -111,13 +112,19 @@ class ElevenLabsLID(LIDBackend):
                         logger.info(f"ElevenLabsLID: session started — config={data.get('config', {})}")
 
                     elif msg_type == "committed_transcript":
+                        # language_code is only present in committed_transcript_with_timestamps
+                        # (requires include_timestamps=true). Log text for debug visibility.
+                        logger.debug(f"ElevenLabsLID: committed_transcript text={data.get('text', '')!r}")
+
+                    elif msg_type == "committed_transcript_with_timestamps":
                         lang = data.get("language_code") or ""
-                        # language_probability not returned in committed_transcript;
-                        # use 1.0 as confidence since VAD-committed utterances are reliable.
+                        # language_probability not returned; use 1.0 since VAD-committed utterances are reliable.
                         if lang and lang != "und":
                             short = lang.split("-")[0].lower()
-                            logger.info(f"ElevenLabsLID: detected {lang!r} (short={short!r})")
+                            logger.info(f"ElevenLabsLID: detected {lang!r} (short={short!r}, text={data.get('text', '')!r})")
                             await self.on_language(short, 1.0)
+                        else:
+                            logger.debug(f"ElevenLabsLID: committed_transcript_with_timestamps — lang={lang!r}")
 
                     elif msg_type in (
                         "auth_error", "quota_exceeded", "transcriber_error",
