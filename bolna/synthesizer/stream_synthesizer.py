@@ -58,6 +58,8 @@ class StreamSynthesizer(BaseSynthesizer):
         # Turn-level latency tracking
         self.current_turn_start_time = None
         self.current_turn_id = None
+        self.current_sequence_id = None
+        self.current_tts_start_ms = None
         self.current_turn_ttfb = None
         self.ws_send_time = None
 
@@ -174,6 +176,8 @@ class StreamSynthesizer(BaseSynthesizer):
             self.current_turn_ttfb = None
             logger.info(f"Push new_turn text_len={len(meta_info.get('text', '') or '')}")
         self.current_turn_id = meta_info.get("turn_id") or meta_info.get("sequence_id")
+        self.current_sequence_id = meta_info.get("sequence_id") or self.current_turn_id
+        self.current_tts_start_ms = meta_info.get("tts_start_ms")
 
     def _on_push(self, meta_info, text):
         """Provider-specific hook called during push before sender is created."""
@@ -260,13 +264,16 @@ class StreamSynthesizer(BaseSynthesizer):
                 self.turn_latencies.append(
                     {
                         "turn_id": self.current_turn_id,
-                        "sequence_id": self.current_turn_id,
+                        "sequence_id": self.current_sequence_id,
+                        "tts_start_ms": self.current_tts_start_ms,
                         "first_result_latency_ms": round((self.current_turn_ttfb or 0) * 1000),
                         "total_stream_duration_ms": round(total_stream_duration * 1000),
                     }
                 )
                 self.current_turn_start_time = None
                 self.current_turn_id = None
+                self.current_sequence_id = None
+                self.current_tts_start_ms = None
                 self.ws_send_time = None
                 self.current_turn_ttfb = None
         except Exception:

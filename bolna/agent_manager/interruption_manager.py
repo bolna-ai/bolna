@@ -59,6 +59,7 @@ class InterruptionManager:
         self.longest_agent_monologue_ms: float = 0.0
 
         self._adjusted_user_stop_ts: Optional[float] = None
+        self._last_user_start_ts: float = -1
         self.user_bot_latencies: List[Dict] = []
 
         logger.info(
@@ -145,6 +146,7 @@ class InterruptionManager:
         if not self.callee_speaking:
             self.callee_speaking = True
             self.callee_speaking_start_time = time.time()
+            self._last_user_start_ts = self.callee_speaking_start_time
             logger.info("User started speaking")
 
     def on_interim_transcript_received(self) -> None:
@@ -203,6 +205,7 @@ class InterruptionManager:
 
         event: Dict = {
             "type": "user_interrupted_agent",
+            "turn_id": self.turn_id,
             "user_start_s": self.callee_speaking_start_time if self.callee_speaking_start_time > 0 else None,
             "user_end_s": None,
             "recovery_completed": False,
@@ -224,6 +227,7 @@ class InterruptionManager:
 
         event: Dict = {
             "type": "agent_interrupted_user",
+            "turn_id": self.turn_id,
             "user_start_s": self.callee_speaking_start_time if self.callee_speaking_start_time > 0 else None,
             "user_end_s": None,
             "recovery_completed": False,
@@ -254,6 +258,7 @@ class InterruptionManager:
             self.user_bot_latencies.append(
                 {
                     "sequence_id": sequence_id,
+                    "user_start_s": self._last_user_start_ts if self._last_user_start_ts > 0 else None,
                     "user_end_s": self._adjusted_user_stop_ts,
                     "agent_start_s": now_s,
                     "latency_ms": round(latency_ms, 2),

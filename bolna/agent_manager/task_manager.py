@@ -166,6 +166,7 @@ class TaskManager(BaseManager):
         self.has_transfer = False
         self.hangup_triggered = False
         self.hangup_triggered_at = None
+        self._agent_end_timestamps: dict = {}
         self.hangup_message_queued = False
         self.switch_handoff_messages = {}
         self.agent_names = {}
@@ -1621,7 +1622,7 @@ class TaskManager(BaseManager):
 
         new_sequence_id = self.interruption_manager.get_next_sequence_id()
         meta_info_copy["sequence_id"] = new_sequence_id
-        meta_info_copy["turn_id"] = self.interruption_manager.get_turn_id()
+        meta_info_copy["turn_id"] = getattr(self.tools.get("transcriber"), "turn_counter", 0)
 
         return meta_info_copy
 
@@ -2706,6 +2707,8 @@ class TaskManager(BaseManager):
 
                 if latency:
                     latency_dict = latency.model_dump()
+                    latency_dict["turn_id"] = meta_info.get("turn_id")
+                    latency_dict["llm_start_ms"] = round(meta_info.get("llm_start_time", 0) * 1000 - self.conversation_start_init_ts, 2) if meta_info.get("llm_start_time") else None
                     previous_latency_item = (
                         self.llm_latencies.turn_latencies[-1] if self.llm_latencies.turn_latencies else None
                     )
@@ -2821,12 +2824,14 @@ class TaskManager(BaseManager):
             self.llm_latencies.other_latencies.append(
                 {
                     "type": "hangup_check",
+                    "ts_ms": round(time.time() * 1000 - self.conversation_start_init_ts, 2),
                     "latency_ms": metadata.get("latency_ms", None),
                     "model": self.check_for_completion_llm,
                     "provider": "openai",  # TODO: Make dynamic based on provider used
                     "service_tier": metadata.get("service_tier", None),
                     "llm_host": metadata.get("llm_host", None),
                     "sequence_id": meta_info.get("sequence_id"),
+                    "turn_id": meta_info.get("turn_id"),
                 }
             )
 
@@ -3569,6 +3574,7 @@ class TaskManager(BaseManager):
         text = message["data"]
         meta_info["type"] = "audio"
         meta_info["synthesizer_start_time"] = time.time()
+        meta_info["tts_start_ms"] = round(meta_info["synthesizer_start_time"] * 1000 - self.conversation_start_init_ts, 2)
         try:
             if not self.conversation_ended and (
                 "is_first_message" in meta_info
@@ -3737,6 +3743,9 @@ class TaskManager(BaseManager):
                 ):
                     self._turn_audio_flushed.set()
                     if message["meta_info"].get("end_of_synthesizer_stream", False):
+                        _seq = message["meta_info"].get("sequence_id")
+                        if _seq is not None:
+                            self._agent_end_timestamps[_seq] = round(time.time() * 1000 - self.conversation_start_init_ts, 2)
                         self.interruption_manager.on_successful_response_delivered()
                         self.interruption_manager.on_agent_speech_ended()
                     # Reset asked_if_user_is_still_there flag after any message except is_user_online_message
@@ -4246,6 +4255,10 @@ class TaskManager(BaseManager):
                 for _turn in self.transcriber_latencies.turn_latencies:
                     _tid = _turn.get("turn_id") or _turn.get("sequence_id")
                     _turn["was_interrupted"] = _tid in _interrupted_ids if _tid is not None else False
+                    if _turn.get("asr_start_epoch_ms") is not None:
+                        _turn["asr_start_ms"] = round(_turn.pop("asr_start_epoch_ms") - _call_start_ms, 2)
+                    if _turn.get("asr_finalized_epoch_ms") is not None:
+                        _turn["asr_finalized_ms"] = round(_turn.pop("asr_finalized_epoch_ms") - _call_start_ms, 2)
 
                 # Collect language detection latency if available
                 if hasattr(self, "language_detector") and self.language_detector.latency_data:
@@ -4257,8 +4270,10 @@ class TaskManager(BaseManager):
                 _user_bot_latencies = [
                     {
                         "sequence_id": e["sequence_id"],
+                        "user_start_ms": round(e["user_start_s"] * 1000 - _call_start_ms, 2) if e.get("user_start_s") and e["user_start_s"] > 0 else None,
                         "user_end_ms": round(e["user_end_s"] * 1000 - _call_start_ms, 2),
                         "agent_start_ms": round(e["agent_start_s"] * 1000 - _call_start_ms, 2),
+                        "agent_end_ms": self._agent_end_timestamps.get(e["sequence_id"]),
                         "latency_ms": e["latency_ms"],
                     }
                     for e in self.interruption_manager.user_bot_latencies
@@ -4289,6 +4304,8 @@ class TaskManager(BaseManager):
                         ),
                         "user_bot_latencies": _user_bot_latencies,
                         "mark_tracking": self.mark_event_meta_data.get_mark_tracking_summary(),
+                        "hangup_triggered_ms": round(self.hangup_triggered_at * 1000 - self.conversation_start_init_ts, 2) if self.hangup_triggered_at else None,
+                        "call_start_epoch_ms": self.conversation_start_init_ts,
                     },
                     "hangup_detail": self.hangup_detail,
                     "has_transfer": self.has_transfer,

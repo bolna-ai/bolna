@@ -65,6 +65,8 @@ class PixaSynthesizer(BaseSynthesizer):
         self.connection_error = None
         self.current_turn_start_time = None
         self.current_turn_id = None
+        self.current_sequence_id = None
+        self.current_tts_start_ms = None
         self.current_text = ""
 
         self.api_host = os.environ.get("PIXA_TTS_HOST", "hindi.heypixa.ai")
@@ -304,7 +306,8 @@ class PixaSynthesizer(BaseSynthesizer):
                             self.turn_latencies.append(
                                 {
                                     "turn_id": self.current_turn_id,
-                                    "sequence_id": self.current_turn_id,
+                                    "sequence_id": self.current_sequence_id,
+                                    "tts_start_ms": self.current_tts_start_ms,
                                     "first_result_latency_ms": round(
                                         (self.meta_info.get("synthesizer_latency", 0)) * 1000
                                     ),
@@ -313,6 +316,8 @@ class PixaSynthesizer(BaseSynthesizer):
                             )
                             self.current_turn_start_time = None
                             self.current_turn_id = None
+                            self.current_sequence_id = None
+                            self.current_tts_start_ms = None
                     except Exception:
                         pass
 
@@ -410,6 +415,8 @@ class PixaSynthesizer(BaseSynthesizer):
             try:
                 self.current_turn_start_time = time.perf_counter()
                 self.current_turn_id = meta_info.get("turn_id") or meta_info.get("sequence_id")
+                self.current_sequence_id = meta_info.get("sequence_id") or self.current_turn_id
+                self.current_tts_start_ms = meta_info.get("tts_start_ms")
             except Exception:
                 pass
 
