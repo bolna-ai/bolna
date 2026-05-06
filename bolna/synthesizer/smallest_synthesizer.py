@@ -45,8 +45,8 @@ class SmallestSynthesizer(StreamSynthesizer):
         self.speed = speed
         self.add_wav_header = add_wav_header
 
-        self.api_url = f"https://waves-api.smallest.ai/api/v1/{self.model}/get_speech"
-        self.ws_url = f"wss://waves-api.smallest.ai/api/v1/{self.model}/get_speech/stream?timeout=60"
+        self.api_url = f"https://api.smallest.ai/waves/v1/{self.model}/get_speech"
+        self.ws_url = f"wss://api.smallest.ai/waves/v1/{self.model}/get_speech/stream"
 
         self.ws_trace_id = None
 
@@ -189,7 +189,7 @@ class SmallestSynthesizer(StreamSynthesizer):
             websocket = await asyncio.wait_for(
                 websockets.connect(
                     self.ws_url,
-                    additional_headers={"Authorization": f"Token {self.api_key}"},
+                    additional_headers={"Authorization": f"Bearer {self.api_key}"},
                     ssl=get_ssl_context(self.ws_url),
                 ),
                 timeout=10.0,
