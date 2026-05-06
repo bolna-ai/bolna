@@ -125,12 +125,11 @@ class SarvamSynthesizer(StreamSynthesizer):
 
             if end_of_llm_stream:
                 self.last_text_sent = True
-
-            try:
-                await self._send_json({"type": "flush"})
-            except Exception as e:
-                logger.info(f"Error sending end-of-stream signal: {e}")
-                self.connection_error = str(e)
+                try:
+                    await self._send_json({"type": "flush"})
+                except Exception as e:
+                    logger.info(f"Error sending end-of-stream signal: {e}")
+                    self.connection_error = str(e)
 
         except asyncio.CancelledError:
             logger.info("Sender task was cancelled.")
