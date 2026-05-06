@@ -94,6 +94,7 @@ class DeepgramTranscriber(BaseTranscriber):
         self.speech_start_time = None
         self.speech_end_time = None
         self._turn_first_speech_epoch_ms = None  # epoch ms of first SpeechStarted per turn
+        self._turn_pending = False  # True after SpeechStarted until first real interim confirms speech
         self.current_turn_interim_details = []
         self.audio_frame_timestamps = []  # List of (frame_start, frame_end, send_timestamp)
         self.turn_counter = 0
@@ -210,6 +211,7 @@ class DeepgramTranscriber(BaseTranscriber):
         self.speech_start_time = None
         self.speech_end_time = None
         self._turn_first_speech_epoch_ms = None
+        self._turn_pending = False
         self.last_interim_time = None
         self.current_turn_interim_details = []
         self.current_turn_start_time = None
@@ -482,9 +484,8 @@ class DeepgramTranscriber(BaseTranscriber):
                 if msg["type"] == "SpeechStarted":
                     logger.info("Received SpeechStarted event from deepgram")
                     if not isinstance(self.current_turn_id, int):
-                        self.turn_counter += 1
-                        self.current_turn_id = self.turn_counter
                         self._turn_first_speech_epoch_ms = timestamp_ms()
+                        self._turn_pending = True  # counter incremented on first real interim
                     self.speech_start_time = timestamp_ms()
                     self.current_turn_interim_details = []
                     self.is_transcript_sent_for_processing = False
@@ -498,6 +499,11 @@ class DeepgramTranscriber(BaseTranscriber):
                     deepgram_request_id = msg.get("metadata", {}).get("request_id")
 
                     if transcript.strip():
+                        if self._turn_pending:
+                            self.turn_counter += 1
+                            self.current_turn_id = self.turn_counter
+                            self._turn_pending = False
+                            logger.info(f"Starting new turn with turn_id: {self.current_turn_id}")
                         # Calculate latency using end position (start + duration) for cumulative transcripts
                         self.__set_transcription_cursor(msg)
                         audio_position_end = self.transcription_cursor
@@ -553,6 +559,7 @@ class DeepgramTranscriber(BaseTranscriber):
                                         "turn_id": self.current_turn_id,
                                         "asr_start_epoch_ms": self.speech_start_time,
                                         "asr_turn_start_epoch_ms": self._turn_first_speech_epoch_ms,
+                                        "final_transcript": self.final_transcript,
                                         "asr_finalized_epoch_ms": timestamp_ms(),
                                         "interim_details": self.current_turn_interim_details,
                                         "first_interim_to_final_ms": first_interim_to_final_ms,
@@ -634,6 +641,7 @@ class DeepgramTranscriber(BaseTranscriber):
                         self.speech_start_time = None
                         self.speech_end_time = None
                         self._turn_first_speech_epoch_ms = None
+                        self._turn_pending = False
                         self.current_turn_interim_details = []
                         self.current_turn_start_time = None
                         self.current_turn_id = None
