@@ -60,6 +60,7 @@ class InterruptionManager:
 
         self._adjusted_user_stop_ts: Optional[float] = None
         self._last_user_start_ts: float = -1
+        self._pending_user_start_ts: float = -1  # snapshot of user_start paired with _adjusted_user_stop_ts
         self.user_bot_latencies: List[Dict] = []
 
         logger.info(
@@ -182,6 +183,7 @@ class InterruptionManager:
                 self._adjusted_user_stop_ts = user_stop_ts_wall
             else:
                 self._adjusted_user_stop_ts = now_s - (stop_offset_ms / 1000.0)
+            self._pending_user_start_ts = self._last_user_start_ts
 
         if self.callee_speaking_start_time > 0:
             self._total_user_speaking_ms += (now_s - self.callee_speaking_start_time) * 1000
@@ -258,13 +260,14 @@ class InterruptionManager:
             self.user_bot_latencies.append(
                 {
                     "sequence_id": sequence_id,
-                    "user_start_s": self._last_user_start_ts if self._last_user_start_ts > 0 else None,
+                    "user_start_s": self._pending_user_start_ts if self._pending_user_start_ts > 0 else None,
                     "user_end_s": self._adjusted_user_stop_ts,
                     "agent_start_s": now_s,
                     "latency_ms": round(latency_ms, 2),
                 }
             )
             self._adjusted_user_stop_ts = None
+            self._pending_user_start_ts = -1
 
         logger.info(f"Agent speech started (sequence_id={sequence_id})")
 
