@@ -62,7 +62,7 @@ class SmallestTranscriber(BaseTranscriber):
 
         # API configuration
         self.api_key = kwargs.get("transcriber_key", os.getenv("SMALLEST_API_KEY"))
-        self.smallest_host = os.getenv("SMALLEST_HOST", "waves-api.smallest.ai")
+        self.smallest_host = os.getenv("SMALLEST_HOST", "api.smallest.ai")
 
         # Queues
         self.transcriber_output_queue = output_queue
@@ -171,7 +171,7 @@ class SmallestTranscriber(BaseTranscriber):
         if self.word_timestamps:
             params["word_timestamps"] = "true"
 
-        websocket_url = f"wss://{self.smallest_host}/api/v1/lightning/get_text?{urlencode(params)}"
+        websocket_url = f"wss://{self.smallest_host}/waves/v1/pulse/get_text?{urlencode(params)}"
         logger.info(
             f"Smallest WebSocket URL params - language: {self.language}, sample_rate: {self.sampling_rate}, encoding: {self.encoding}, word_timestamps: {self.word_timestamps}"
         )
