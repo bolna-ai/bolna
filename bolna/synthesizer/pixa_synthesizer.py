@@ -414,8 +414,8 @@ class PixaSynthesizer(BaseSynthesizer):
 
             try:
                 self.current_turn_start_time = time.perf_counter()
-                self.current_turn_id = meta_info.get("turn_id") or meta_info.get("sequence_id")
-                self.current_sequence_id = meta_info.get("sequence_id") or self.current_turn_id
+                self.current_turn_id = meta_info.get("turn_id") if meta_info.get("turn_id") is not None else meta_info.get("sequence_id")
+                self.current_sequence_id = meta_info.get("sequence_id") if meta_info.get("sequence_id") is not None else self.current_turn_id
                 self.current_tts_start_ms = meta_info.get("tts_start_ms")
             except Exception:
                 pass

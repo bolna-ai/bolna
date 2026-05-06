@@ -617,6 +617,7 @@ class TaskManager(BaseManager):
             "meta": {
                 "request_id": meta_info.get("request_id"),
                 "sequence_id": meta_info.get("sequence_id"),
+                "turn_id": meta_info.get("turn_id"),
             },
             "started_at": datetime.now().isoformat(),
             "status": "pending",
