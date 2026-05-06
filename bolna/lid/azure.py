@@ -77,6 +77,7 @@ class AzureLID(LIDBackend):
             auto_detect_source_language_config=auto_detect_config,
         )
         self._recognizer.recognized.connect(self._on_recognized)
+        self._recognizer.recognizing.connect(self._on_recognizing)
         self._recognizer.canceled.connect(self._on_canceled)
         self._recognizer.start_continuous_recognition()
         logger.info(f"AzureLID: started continuous LID for languages={self._languages}")
@@ -90,6 +91,9 @@ class AzureLID(LIDBackend):
             return 0.80
         return 1.00
 
+    def _on_recognizing(self, evt):
+        logger.info(f"AzureLID: recognizing — reason={evt.result.reason}, text={evt.result.text!r}")
+
     def _on_recognized(self, evt):
         if self._loop is None or self._dead:
             return
@@ -97,6 +101,7 @@ class AzureLID(LIDBackend):
             import azure.cognitiveservices.speech as speechsdk
 
             result = evt.result
+            logger.info(f"AzureLID: recognized — reason={result.reason}, text={result.text!r}")
             if result.reason == speechsdk.ResultReason.RecognizedSpeech:
                 lang_result = speechsdk.AutoDetectSourceLanguageResult(result)
                 detected = lang_result.language
@@ -104,11 +109,15 @@ class AzureLID(LIDBackend):
                     short = detected.split("-")[0].lower()
                     conf = self._duration_to_conf(result.duration)
                     duration_ms = result.duration / 10_000
-                    logger.debug(
+                    logger.info(
                         f"AzureLID: detected {detected!r} (short={short!r}, "
                         f"duration={duration_ms:.0f}ms, conf={conf:.2f})"
                     )
                     asyncio.run_coroutine_threadsafe(self.on_language(short, conf), self._loop)
+                else:
+                    logger.info(f"AzureLID: recognized but language=Unknown or empty")
+            elif result.reason == speechsdk.ResultReason.NoMatch:
+                logger.info(f"AzureLID: NoMatch — {result.no_match_details}")
         except Exception as e:
             logger.warning(f"AzureLID recognized callback error: {e}")
 
