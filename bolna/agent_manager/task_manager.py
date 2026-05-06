@@ -1816,9 +1816,8 @@ class TaskManager(BaseManager):
         await self.tools["output"].handle_interruption()
         await self.tools["synthesizer"].handle_interruption()
 
-        if self.generate_precise_transcript:
-            await self.sync_history(self.mark_event_meta_data.fetch_cleared_mark_event_data().items(), current_ts)
-            self.tools["input"].reset_response_heard_by_user()
+        await self.sync_history(self.mark_event_meta_data.fetch_cleared_mark_event_data().items(), current_ts)
+        self.tools["input"].reset_response_heard_by_user()
 
         self.interruption_manager.invalidate_pending_responses()
         self._drop_all_staged_assistant_history("cleanup_downstream_tasks")
