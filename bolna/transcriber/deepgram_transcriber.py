@@ -479,8 +479,9 @@ class DeepgramTranscriber(BaseTranscriber):
 
                 if msg["type"] == "SpeechStarted":
                     logger.info("Received SpeechStarted event from deepgram")
-                    self.turn_counter += 1
-                    self.current_turn_id = self.turn_counter
+                    if self.current_turn_id is None:
+                        self.turn_counter += 1
+                        self.current_turn_id = self.turn_counter
                     self.speech_start_time = timestamp_ms()
                     self.current_turn_interim_details = []
                     self.is_transcript_sent_for_processing = False
