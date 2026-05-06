@@ -4259,7 +4259,7 @@ class TaskManager(BaseManager):
 
                 _interrupted_ids = self.interruption_manager.interrupted_transcriber_turn_ids
                 for _turn in self.transcriber_latencies.turn_latencies:
-                    _tid = _turn.get("turn_id") or _turn.get("sequence_id")
+                    _tid = _turn.get("turn_id")
                     _turn["was_interrupted"] = _tid in _interrupted_ids if _tid is not None else False
                     if _turn.get("asr_start_epoch_ms") is not None:
                         _turn["asr_start_ms"] = round(_turn.pop("asr_start_epoch_ms") - _call_start_ms, 2)
