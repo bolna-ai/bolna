@@ -118,13 +118,21 @@ class ElevenLabsLID(LIDBackend):
 
                     elif msg_type == "committed_transcript_with_timestamps":
                         lang = data.get("language_code") or ""
-                        # language_probability not returned; use 1.0 since VAD-committed utterances are reliable.
+                        words = data.get("words") or []
+                        # Average word-level logprobs as utterance confidence proxy.
+                        # logprob is in (-inf, 0]; convert to (0, 1] via exp.
+                        import math
+                        logprobs = [w.get("logprob") for w in words if w.get("logprob") is not None]
+                        conf = round(sum(math.exp(lp) for lp in logprobs) / len(logprobs), 3) if logprobs else 1.0
                         if lang and lang != "und":
                             short = lang.split("-")[0].lower()
-                            logger.info(f"ElevenLabsLID: detected {lang!r} (short={short!r}, text={data.get('text', '')!r})")
-                            await self.on_language(short, 1.0)
+                            logger.info(
+                                f"ElevenLabsLID: detected {lang!r} "
+                                f"(short={short!r}, conf={conf:.3f}, text={data.get('text', '')!r})"
+                            )
+                            await self.on_language(short, conf)
                         else:
-                            logger.debug(f"ElevenLabsLID: committed_transcript_with_timestamps — lang={lang!r}")
+                            logger.debug(f"ElevenLabsLID: committed_transcript_with_timestamps — lang={lang!r}, conf={conf:.3f}")
 
                     elif msg_type in (
                         "auth_error", "quota_exceeded", "transcriber_error",
