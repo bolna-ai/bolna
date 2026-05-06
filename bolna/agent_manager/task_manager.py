@@ -1622,7 +1622,10 @@ class TaskManager(BaseManager):
 
         new_sequence_id = self.interruption_manager.get_next_sequence_id()
         meta_info_copy["sequence_id"] = new_sequence_id
-        meta_info_copy["turn_id"] = getattr(self.tools.get("transcriber"), "turn_counter", 0)
+        _transcriber = self.tools.get("transcriber")
+        if hasattr(_transcriber, "transcribers") and hasattr(_transcriber, "active_label"):
+            _transcriber = _transcriber.transcribers.get(_transcriber.active_label, _transcriber)
+        meta_info_copy["turn_id"] = getattr(_transcriber, "turn_counter", 0)
 
         return meta_info_copy
 
