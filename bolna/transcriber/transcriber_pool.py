@@ -2,7 +2,9 @@ import asyncio
 import os
 import time
 from typing import Callable, Awaitable, Optional
+
 from bolna.helpers.logger_config import configure_logger
+from bolna.lid import LIDProvider
 
 logger = configure_logger(__name__)
 
@@ -212,8 +214,6 @@ class TranscriberPool:
     async def _start_lid_tap(self) -> None:
         """Instantiate and connect the configured LID provider."""
         try:
-            from bolna.transcriber.lid_provider import LIDProvider
-
             self._lid = LIDProvider.create(
                 provider=self._lid_provider_name,
                 on_language=self._handle_lid_signal,
@@ -247,8 +247,10 @@ class TranscriberPool:
                 "active_label": self.active_label,
                 "target_label": target_label,
                 "lid_mode": self._lid_mode,
+                "lid_provider": self._lid_provider_name,
                 "would_switch": would_switch,
                 "suppressed_reason": suppressed_reason,
+                "detected_at": time.time(),
             }
         )
 
@@ -273,6 +275,16 @@ class TranscriberPool:
         if self._lid_provider_name != "sarvam" and confidence < self._LID_CONFIDENCE_THRESHOLD:
             logger.debug(f"TranscriberPool LID: {lang} conf={confidence:.2f} below threshold — suppressed")
             return
+
+        # Drop detections for languages not in the agent's supported pool.
+        # e.g. if agent supports [hi, en, gu, bn] and Azure detects "te", silently ignore.
+        if lang not in self._lang_to_label:
+            logger.debug(
+                f"TranscriberPool LID: {lang} not in supported languages {list(self._lang_to_label.keys())} — ignored"
+            )
+            return
+
+        logger.info(f"TranscriberPool LID: {lang} conf={confidence:.2f} (provider={self._lid_provider_name})")
 
         # Use same fallback as _lang_to_label build: language_code first, then language.
         _active_cfg = self._multilingual_config.get(self.active_label, {})
