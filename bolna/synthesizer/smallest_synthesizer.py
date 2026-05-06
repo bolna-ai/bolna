@@ -20,7 +20,7 @@ class SmallestSynthesizer(StreamSynthesizer):
     def __init__(
         self,
         voice_id,
-        model="lightning",
+        model="lightning-v3.1",
         language="en",
         audio_format="mp3",
         sampling_rate="8000",
@@ -46,7 +46,7 @@ class SmallestSynthesizer(StreamSynthesizer):
         self.add_wav_header = add_wav_header
 
         self.api_url = f"https://waves-api.smallest.ai/api/v1/{self.model}/get_speech"
-        self.ws_url = "wss://waves-api.smallest.ai/api/v1/lightning-v2/get_speech/stream?timeout=60"
+        self.ws_url = f"wss://waves-api.smallest.ai/api/v1/{self.model}/get_speech/stream?timeout=60"
 
         self.ws_trace_id = None
 
