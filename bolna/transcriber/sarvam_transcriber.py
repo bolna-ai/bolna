@@ -20,7 +20,7 @@ from typing import Optional
 from .base_transcriber import BaseTranscriber
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.ssl_context import get_ssl_context
-from bolna.helpers.utils import create_ws_data_packet
+from bolna.helpers.utils import create_ws_data_packet, timestamp_ms
 
 load_dotenv()
 logger = configure_logger(__name__)
@@ -403,6 +403,8 @@ class SarvamTranscriber(BaseTranscriber):
                                     "sequence_id": self.current_turn_id,
                                     "first_result_latency_ms": self.turn_first_result_latency,
                                     "total_stream_duration_ms": total_stream_duration_ms,
+                                    "asr_finalized_epoch_ms": timestamp_ms(),
+                                    "final_transcript": self.final_transcript or None,
                                 }
                                 self.turn_latencies.append(turn_info)
                                 self.meta_info["turn_latencies"] = self.turn_latencies

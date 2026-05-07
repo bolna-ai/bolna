@@ -250,6 +250,9 @@ class DeepgramTranscriber(BaseTranscriber):
                     "first_interim_to_final_ms": first_interim_to_final_ms,
                     "last_interim_to_final_ms": last_interim_to_final_ms,
                     "force_finalized": True,
+                    "asr_start_epoch_ms": self.current_turn_start_time,
+                    "asr_finalized_epoch_ms": timestamp_ms(),
+                    "final_transcript": transcript_to_send,
                 }
             )
         except Exception as e:
@@ -564,6 +567,9 @@ class DeepgramTranscriber(BaseTranscriber):
                                         "interim_details": self.current_turn_interim_details,
                                         "first_interim_to_final_ms": first_interim_to_final_ms,
                                         "last_interim_to_final_ms": last_interim_to_final_ms,
+                                        "asr_start_epoch_ms": self.current_turn_start_time,
+                                        "asr_finalized_epoch_ms": timestamp_ms(),
+                                        "final_transcript": self.final_transcript,
                                     }
                                 )
 
@@ -612,6 +618,9 @@ class DeepgramTranscriber(BaseTranscriber):
                                     "interim_details": self.current_turn_interim_details,
                                     "first_interim_to_final_ms": first_interim_to_final_ms,
                                     "last_interim_to_final_ms": last_interim_to_final_ms,
+                                    "asr_start_epoch_ms": self.current_turn_start_time,
+                                    "asr_finalized_epoch_ms": timestamp_ms(),
+                                    "final_transcript": self.final_transcript,
                                 }
                             )
 

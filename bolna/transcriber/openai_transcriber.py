@@ -20,7 +20,7 @@ from bolna.constants import (
 )
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.ssl_context import get_ssl_context
-from bolna.helpers.utils import create_ws_data_packet
+from bolna.helpers.utils import create_ws_data_packet, timestamp_ms
 
 load_dotenv()
 logger = configure_logger(__name__)
@@ -432,6 +432,8 @@ class OpenAITranscriber(BaseTranscriber):
                                     "total_stream_duration_ms": round(
                                         (self.meta_info.get("transcriber_total_stream_duration") or 0) * 1000
                                     ),
+                                    "asr_finalized_epoch_ms": timestamp_ms(),
+                                    "final_transcript": transcript,
                                 }
                             )
                             self._reset_turn_state()
