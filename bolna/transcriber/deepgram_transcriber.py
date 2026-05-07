@@ -110,11 +110,13 @@ class DeepgramTranscriber(BaseTranscriber):
         # Flux model support
         self.is_flux_model = model.startswith("flux-")
         self.is_flux_multi = model == "flux-general-multi"
-        self.eot_threshold = kwargs.get("eot_threshold") or DEEPGRAM_FLUX_EOT_THRESHOLD
+        _eot_threshold = kwargs.get("eot_threshold")
+        self.eot_threshold = _eot_threshold if _eot_threshold is not None else DEEPGRAM_FLUX_EOT_THRESHOLD
         self.eager_eot_threshold = kwargs.get("eager_eot_threshold")
         if self.eager_eot_threshold is None and self.is_flux_model:
             self.eager_eot_threshold = DEEPGRAM_FLUX_EAGER_EOT_THRESHOLD
-        self.eot_timeout_ms = kwargs.get("eot_timeout_ms") or DEEPGRAM_FLUX_EOT_TIMEOUT_MS
+        _eot_timeout_ms = kwargs.get("eot_timeout_ms")
+        self.eot_timeout_ms = _eot_timeout_ms if _eot_timeout_ms is not None else DEEPGRAM_FLUX_EOT_TIMEOUT_MS
         self.eager_transcript_pending = None
         self.language_hints = kwargs.get("language_hints")
 
@@ -826,12 +828,15 @@ class DeepgramTranscriber(BaseTranscriber):
                     elif event == "EagerEndOfTurn":
                         if languages:
                             logger.info(f"Flux LID EagerEndOfTurn: languages={languages} hinted={languages_hinted}")
-                        logger.info(f"Flux: EagerEndOfTurn (confidence={eot_confidence}, transcript={transcript})")
-                        self.eager_transcript_pending = transcript
-                        self.last_interim_time = time.time()
+                        logger.info(f"Flux: EagerEndOfTurn (confidence={eot_confidence}, transcript={transcript!r})")
+                        if transcript:
+                            self.eager_transcript_pending = transcript
+                            self.last_interim_time = time.time()
 
-                        data = {"type": "eager_end_of_turn", "content": transcript, "confidence": eot_confidence}
-                        yield create_ws_data_packet(data, self.meta_info)
+                            data = {"type": "eager_end_of_turn", "content": transcript, "confidence": eot_confidence}
+                            yield create_ws_data_packet(data, self.meta_info)
+                        else:
+                            logger.warning("Flux: EagerEndOfTurn received with empty transcript, ignoring")
 
                     elif event == "TurnResumed":
                         logger.info(f"Flux: TurnResumed - user continued speaking after EagerEndOfTurn")
@@ -869,6 +874,10 @@ class DeepgramTranscriber(BaseTranscriber):
                             yield create_ws_data_packet(data, self.meta_info)
                         else:
                             logger.warning("Flux: EndOfTurn received with empty transcript")
+                            if self.eager_transcript_pending is not None:
+                                # EagerEndOfTurn fired but the turn produced nothing — cancel speculative LLM
+                                logger.info("Flux: cancelling speculative LLM task via turn_resumed (empty EndOfTurn)")
+                                yield create_ws_data_packet({"type": "turn_resumed"}, self.meta_info)
                             self._reset_turn_state()
                             self.eager_transcript_pending = None
 
