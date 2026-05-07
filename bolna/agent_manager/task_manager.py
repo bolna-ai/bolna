@@ -5023,14 +5023,13 @@ class TaskManager(BaseManager):
                         if e.get("user_end_s") is not None
                         else None,
                         "agent_start_ms": round(e["agent_start_s"] * 1000 - _call_start_ms, 2),
-                        "agent_end_ms": self._agent_end_timestamps.get(e["sequence_id"]),
                         "latency_ms": e["latency_ms"],
-                        # agent_end_ms: actual playback end from provider mark ACK (more accurate
-                        # than ElevenLabs stream end). Present only when the final mark was ACKed.
-                        **(
-                            {"agent_end_ms": round(e["agent_end_s"] * 1000 - _call_start_ms, 2)}
+                        # agent_end_ms: mark ACK from provider (actual playback end, most accurate).
+                        # None when the final mark was never ACKed (e.g. call dropped mid-audio).
+                        "agent_end_ms": (
+                            round(e["agent_end_s"] * 1000 - _call_start_ms, 2)
                             if e.get("agent_end_s") is not None
-                            else {}
+                            else None
                         ),
                     }
                     for e in self.interruption_manager.user_bot_latencies
