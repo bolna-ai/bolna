@@ -1722,6 +1722,13 @@ class TaskManager(BaseManager):
     def final_chunk_played_observer(self, is_final_chunk_played):
         logger.info(f"Updating last_transmitted_timestamp")
         self.last_transmitted_timestamp = time.time()
+        # Record actual audio playback end (mark ACK from provider) for agent_end_ms tracking.
+        input_handler = self.tools.get("input")
+        if input_handler is not None:
+            seq_id = getattr(input_handler, "last_final_chunk_sequence_id", None)
+            ts = getattr(input_handler, "last_final_chunk_played_ts", None)
+            if seq_id is not None and ts is not None:
+                self.interruption_manager.on_agent_audio_fully_played(seq_id, ts)
 
     async def agent_hangup_observer(self, is_agent_hangup):
         logger.info(f"agent_hangup_observer triggered with is_agent_hangup = {is_agent_hangup}")
@@ -4261,6 +4268,9 @@ class TaskManager(BaseManager):
                         "user_end_ms": round(e["user_end_s"] * 1000 - _call_start_ms, 2),
                         "agent_start_ms": round(e["agent_start_s"] * 1000 - _call_start_ms, 2),
                         "latency_ms": e["latency_ms"],
+                        # agent_end_ms: actual playback end from provider mark ACK (more accurate
+                        # than ElevenLabs stream end). Present only when the final mark was ACKed.
+                        **({"agent_end_ms": round(e["agent_end_s"] * 1000 - _call_start_ms, 2)} if e.get("agent_end_s") is not None else {}),
                     }
                     for e in self.interruption_manager.user_bot_latencies
                 ]

@@ -267,6 +267,20 @@ class InterruptionManager:
         """Clean end of agent audio (end_of_synthesizer_stream in SEND path)."""
         self._finalize_agent_speaking_session()
 
+    def on_agent_audio_fully_played(self, sequence_id: int, ts: float) -> None:
+        """Record when the telephony provider ACKed the last audio mark for a sequence.
+
+        Called from final_chunk_played_observer via task_manager when is_final_chunk
+        mark is received back. This is the actual end of audio playback at the caller's
+        phone — more accurate than on_agent_speech_ended which fires at ElevenLabs
+        stream-end (much earlier than real playback end).
+        """
+        for entry in reversed(self.user_bot_latencies):
+            if entry.get("sequence_id") == sequence_id:
+                entry["agent_end_s"] = ts
+                logger.info(f"Recorded agent audio fully played: sequence_id={sequence_id}")
+                return
+
     def _finalize_agent_speaking_session(self) -> None:
         """Close current agent speaking window; called on clean end or barge-in."""
         if self._agent_speaking_start_time <= 0:
