@@ -124,6 +124,11 @@ class Transcriber(BaseModel):
     provider: Optional[str] = "deepgram"
     multilingual: Optional[Dict[str, Any]] = None
     active: Optional[str] = None
+    # Flux model parameters
+    eot_threshold: Optional[float] = None
+    eager_eot_threshold: Optional[float] = None
+    eot_timeout_ms: Optional[int] = None
+    language_hints: Optional[List[str]] = None
     effort: Optional[str] = "medium"
     noise_reduction: Optional[bool] = False
 

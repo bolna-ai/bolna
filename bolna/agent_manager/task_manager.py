@@ -230,6 +230,9 @@ class TaskManager(BaseManager):
 
         # Setup IO SERVICE, TRANSCRIBER, LLM, SYNTHESIZER
         self.llm_task = None
+        self.eager_llm_task = None
+        self.eager_history_snapshot = None
+        self.eager_meta_info = None
         self.llm_queue_task = None
         self.execute_function_call_task = None
         self.synthesizer_tasks = []
@@ -1585,6 +1588,13 @@ class TaskManager(BaseManager):
             logger.info(f"Cancelling LLM Task")
             self.llm_task.cancel()
             self.llm_task = None
+
+        if self.eager_llm_task is not None:
+            logger.info(f"Cancelling Eager LLM Task")
+            self.eager_llm_task.cancel()
+            self.eager_llm_task = None
+            self.eager_history_snapshot = None
+            self.eager_meta_info = None
 
         if self.first_message_task is not None:
             logger.info("Cancelling first message task")
@@ -3211,6 +3221,50 @@ class TaskManager(BaseManager):
 
                         self.llm_response_generated = False
 
+                    elif (
+                        isinstance(message.get("data"), dict) and message["data"].get("type", "") == "eager_end_of_turn"
+                    ):
+                        eager_transcript = message["data"].get("content", "").strip()
+                        eot_confidence = message["data"].get("confidence")
+                        logger.info(f"EagerEndOfTurn received (confidence={eot_confidence}): {eager_transcript}")
+
+                        if (
+                            eager_transcript
+                            and self.tools["input"].welcome_message_played()
+                            and not self.tools["input"].is_audio_being_played_to_user()
+                        ):
+                            logger.info(f"Starting speculative LLM task")
+
+                            if self.output_task is None:
+                                self.output_task = asyncio.create_task(self.__process_output_loop())
+
+                            meta_info = self.__get_updated_meta_info(meta_info)
+                            meta_info["eager_eot"] = True
+                            meta_info["eot_confidence"] = eot_confidence
+
+                            self.eager_history_snapshot = len(self.history)
+                            self.eager_meta_info = meta_info
+                            self.eager_llm_task = asyncio.create_task(
+                                self._run_llm_task(create_ws_data_packet(eager_transcript, meta_info))
+                            )
+                            self.history.append({"role": "user", "content": eager_transcript})
+                        else:
+                            logger.info(f"Skipping speculative LLM (audio playing or welcome not done)")
+
+                    elif isinstance(message.get("data"), dict) and message["data"].get("type", "") == "turn_resumed":
+                        logger.info(f"TurnResumed: Cancelling speculative LLM task")
+
+                        if self.eager_llm_task is not None:
+                            self.eager_llm_task.cancel()
+                            self.eager_llm_task = None
+                            self.eager_meta_info = None
+
+                            snapshot = getattr(self, "eager_history_snapshot", None)
+                            if snapshot is not None and len(self.history) > snapshot:
+                                removed = self.history[snapshot:]
+                                self.history = self.history[:snapshot]
+                                logger.info(f"Reverted {len(removed)} speculative history entries")
+
                     # Whenever speech_final or UtteranceEnd is received from Deepgram, this condition would get triggered
                     elif isinstance(message.get("data"), dict) and message["data"].get("type", "") == "transcript":
                         logger.info(f"Received transcript, sending for further processing")
@@ -3245,8 +3299,38 @@ class TaskManager(BaseManager):
                         self.interruption_manager.reset_delay_for_speech_final(len(self.history))
 
                         transcriber_message = message["data"].get("content")
-                        meta_info = self.__get_updated_meta_info(meta_info)
-                        await self._handle_transcriber_output(next_task, transcriber_message, meta_info)
+                        was_eager = message["data"].get("was_eager", False)
+
+                        if was_eager and self.eager_llm_task is not None:
+                            logger.info(f"EndOfTurn follows EagerEndOfTurn - using speculative LLM")
+                            # Run side effects that _handle_transcriber_output normally handles,
+                            # but skip creating a new LLM task — reuse the already-running eager one.
+                            self._trigger_voicemail_check(transcriber_message, meta_info, is_final=True)
+                            if not self.voicemail_handler.detected:
+                                await self.language_detector.collect_transcript(transcriber_message)
+                                convert_to_request_log(
+                                    message=transcriber_message,
+                                    meta_info=meta_info,
+                                    model=self.transcriber_provider,
+                                    run_id=self.run_id,
+                                )
+                                # Cancel any existing llm_task the same way _handle_transcriber_output does
+                                if self.llm_task is not None and not self.llm_task.done():
+                                    self.llm_task.cancel()
+                                    self.llm_task = None
+                                    self.interruption_manager.invalidate_pending_responses()
+                                # Revalidate the eager task's sequence_id (not a fresh one) —
+                                # invalidate_pending_responses from the interruption path can remove it,
+                                # and without this call all audio from the eager task would be BLOCKed.
+                                self.interruption_manager.revalidate_sequence_id(self.eager_meta_info["sequence_id"])
+                                self.response_in_pipeline = True
+                            self.llm_task = self.eager_llm_task
+                            self.eager_llm_task = None
+                            self.eager_meta_info = None
+                            self.eager_history_snapshot = None
+                        else:
+                            meta_info = self.__get_updated_meta_info(meta_info)
+                            await self._handle_transcriber_output(next_task, transcriber_message, meta_info)
 
                     # Handle speech_ended notification (UtteranceEnd with no new transcript)
                     elif isinstance(message.get("data"), dict) and message["data"].get("type", "") == "speech_ended":
@@ -4232,7 +4316,7 @@ class TaskManager(BaseManager):
                 if hasattr(self, "transcriber_task") and self.transcriber_task is not None:
                     tasks_to_cancel.append(process_task_cancellation(self.transcriber_task, "transcriber_task"))
 
-            if self._is_conversation_task():
+            if self._is_conversation_task() and "transcriber" in self.tools and "synthesizer" in self.tools:
                 self.transcriber_latencies.connection_latency_ms = self.tools["transcriber"].connection_time
                 self.synthesizer_latencies.connection_latency_ms = self.tools["synthesizer"].connection_time
 
