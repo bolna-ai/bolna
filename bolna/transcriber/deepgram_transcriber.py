@@ -275,7 +275,7 @@ class DeepgramTranscriber(BaseTranscriber):
                     if rcvd_code == 1000 or sent_code == 1000:
                         logger.info("WebSocket closed normally (1000 OK) during heartbeat.")
                     else:
-                        logger.warning(
+                        logger.error(
                             f"WebSocket closed: received={rcvd_code}, sent={sent_code}, "
                             f"reason={getattr(e.rcvd, 'reason', '') or getattr(e.sent, 'reason', '')}"
                         )
@@ -287,7 +287,6 @@ class DeepgramTranscriber(BaseTranscriber):
                 await asyncio.sleep(5)  # Send a heartbeat message every 5 seconds
         except asyncio.CancelledError:
             logger.info("Heartbeat task cancelled")
-            raise
         except Exception as e:
             logger.error("Error in send_heartbeat: " + str(e))
             raise
@@ -310,7 +309,7 @@ class DeepgramTranscriber(BaseTranscriber):
                     if rcvd_code == 1000 or sent_code == 1000:
                         logger.info("WebSocket closed normally (1000 OK) during Flux heartbeat.")
                     else:
-                        logger.warning(
+                        logger.error(
                             f"WebSocket closed during Flux heartbeat: received={rcvd_code}, sent={sent_code}"
                         )
                     break
@@ -321,7 +320,6 @@ class DeepgramTranscriber(BaseTranscriber):
                 await asyncio.sleep(5)  # Send ping every 5 seconds
         except asyncio.CancelledError:
             logger.info("Flux heartbeat task cancelled")
-            raise
         except Exception as e:
             logger.error(f"Error in send_heartbeat_flux: {e}")
             raise
