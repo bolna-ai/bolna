@@ -2693,6 +2693,16 @@ class TaskManager(BaseManager):
 
                 if trigger_function_call:
                     logger.info(f"Triggering function call for {data}")
+                    # Stamp total_stream_duration_ms before early return — function call chunk carries the final latency
+                    if latency:
+                        fc_latency_dict = latency.model_dump()
+                        fc_latency_dict["turn_id"] = meta_info.get("turn_id")
+                        fc_latency_dict["llm_start_ms"] = round(meta_info.get("llm_start_time", 0) * 1000 - self.conversation_start_init_ts, 2) if meta_info.get("llm_start_time") else None
+                        prev = self.llm_latencies.turn_latencies[-1] if self.llm_latencies.turn_latencies else None
+                        if prev and prev.get("sequence_id") == fc_latency_dict.get("sequence_id"):
+                            self.llm_latencies.turn_latencies[-1] = fc_latency_dict
+                        else:
+                            self.llm_latencies.turn_latencies.append(fc_latency_dict)
                     textual_response = data.textual_response if hasattr(data, "textual_response") else None
                     if textual_response:  # intentionally omitting tool_calls, which will be filled later if the tool_call flow completed (requirement from OpenAI)
                         self.__store_into_history(
@@ -2783,6 +2793,10 @@ class TaskManager(BaseManager):
                 cached_tokens=actual_cached_tokens,
                 reasoning_content=actual_reasoning_content,
             )
+
+        # Stamp full response text on the last LLM turn entry (new field, no existing fields changed)
+        if llm_response.strip() and self.llm_latencies.turn_latencies:
+            self.llm_latencies.turn_latencies[-1]["response_text"] = llm_response.strip()
 
         # Collect RAG latency if present (from KnowledgeBaseAgent)
         if meta_info.get("rag_latency"):
