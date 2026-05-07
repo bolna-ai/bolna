@@ -307,7 +307,7 @@ class DeepgramTranscriber(BaseTranscriber):
                     sent_code = getattr(e.sent, "code", None)
 
                     if rcvd_code == 1000 or sent_code == 1000:
-                        logger.error("WebSocket closed normally (1000 OK) during Flux heartbeat.")
+                        logger.info("WebSocket closed normally (1000 OK) during Flux heartbeat.")
                     else:
                         logger.error(f"WebSocket closed during Flux heartbeat: received={rcvd_code}, sent={sent_code}")
                     break
