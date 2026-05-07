@@ -588,9 +588,7 @@ class DeepgramTranscriber(BaseTranscriber):
                                 )
                                 pass
                             self.meta_info["user_stop_offset_ms"] = self.endpointing_ms
-                            last_word_end_wall = self._compute_last_word_end_wall(msg)
-                            if last_word_end_wall is not None:
-                                self.meta_info["user_stop_ts_wall"] = last_word_end_wall
+                            self.meta_info["user_stop_ts_wall"] = self._compute_last_word_end_wall(msg)
                             yield create_ws_data_packet(data, self.meta_info)
 
                 elif msg["type"] == "UtteranceEnd":

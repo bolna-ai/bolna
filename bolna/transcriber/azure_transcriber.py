@@ -48,6 +48,7 @@ class AzureTranscriber(BaseTranscriber):
         self.current_turn_id = None
         self.speech_start_time = None
         self._turn_start_epoch_ms = None
+        self.turn_counter = 0
 
         if self.audio_provider in ("twilio", "exotel", "plivo"):
             self.encoding = "mulaw" if self.audio_provider in ("twilio",) else "linear16"
@@ -220,6 +221,7 @@ class AzureTranscriber(BaseTranscriber):
             }
             self.current_turn_interim_details.append(interim_detail)
             if self._turn_start_epoch_ms is None:
+                self.turn_counter += 1
                 self._turn_start_epoch_ms = timestamp_ms()
 
             data = {"type": "interim_transcript_received", "content": evt.result.text.strip()}
