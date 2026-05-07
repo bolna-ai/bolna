@@ -4624,12 +4624,11 @@ class TaskManager(BaseManager):
                         if exc is not None:
                             raise cls(str(exc), provider=provider)
 
-                if self.generate_precise_transcript:
-                    has_pending_marks = len(self.mark_event_meta_data.mark_event_meta_data) > 0
-                    has_response_heard = bool(self.tools["input"].response_heard_by_user)
-                    if has_pending_marks or has_response_heard:
-                        await self.sync_history(self.mark_event_meta_data.mark_event_meta_data.items(), time.time())
-                    self.tools["input"].reset_response_heard_by_user()
+                has_pending_marks = len(self.mark_event_meta_data.mark_event_meta_data) > 0
+                has_response_heard = bool(self.tools["input"].response_heard_by_user)
+                if has_pending_marks or has_response_heard:
+                    await self.sync_history(self.mark_event_meta_data.mark_event_meta_data.items(), time.time())
+                self.tools["input"].reset_response_heard_by_user()
                 logger.info("Conversation completed")
                 self.conversation_ended = True
             else:
