@@ -1,5 +1,6 @@
 import os
 import json
+import re
 from urllib.parse import urlparse
 from bolna.llms.http_client_pool import get_shared_http_client
 from dotenv import load_dotenv
@@ -218,12 +219,14 @@ class AzureLLM(OpenAICompatibleLLM):
                     text_tool_buffer += content
                     end_pos = self._find_tool_call_end(text_tool_buffer)
                     if end_pos != -1:
+                        if captured_tool_text is not None:
+                            logger.warning(f"Multiple text tool calls in one stream — dropping earlier: {captured_tool_text[:60]!r}")
                         captured_tool_text = text_tool_buffer[:end_pos]
                         remainder = text_tool_buffer[end_pos:].lstrip("\n")
                         text_tool_buffer = None
                         answer += remainder
                         buffer = remainder
-                elif "functions." in (buffer + content):
+                elif re.search(r"functions\.\w", buffer + content):
                     combined = buffer + content
                     idx = combined.find("functions.")
                     before = combined[:idx]
@@ -234,6 +237,8 @@ class AzureLLM(OpenAICompatibleLLM):
                             yield LLMStreamChunk(data=before, end_of_stream=False, latency=latency_data)
                     end_pos = self._find_tool_call_end(after)
                     if end_pos != -1:
+                        if captured_tool_text is not None:
+                            logger.warning(f"Multiple text tool calls in one stream — dropping earlier: {captured_tool_text[:60]!r}")
                         captured_tool_text = after[:end_pos]
                         remainder = after[end_pos:].lstrip("\n")
                         answer += remainder

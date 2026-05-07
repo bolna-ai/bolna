@@ -140,8 +140,19 @@ class OpenAICompatibleLLM(BaseLLM):
             textual_response=_clean_rescue_answer(answer),
         )
 
+        # Mirror ToolCallAccumulator.build_api_payload: validate required keys against the tool spec
+        tools_list = json.loads(self.tools) if isinstance(self.tools, str) else (self.tools or [])
+        tool_spec = next((t for t in tools_list if t.get("function", {}).get("name") == func_name), None)
+
         try:
             parsed_args = json.loads(args_str)
+            if tool_spec and tool_spec["function"].get("parameters") is not None:
+                required_keys = tool_spec["function"]["parameters"].get("required", [])
+                missing = [k for k in required_keys if k not in parsed_args]
+                if missing:
+                    logger.warning(f"Text tool call rescue: '{func_name}' missing required args {missing}, zeroing resp")
+                    api_call_payload.resp = None
+                    return LLMStreamChunk(data=api_call_payload, end_of_stream=False, latency=latency_data, is_function_call=True)
             for k, v in parsed_args.items():
                 setattr(api_call_payload, k, v)
             logger.info(f"Text tool call rescue succeeded: {func_name}")
