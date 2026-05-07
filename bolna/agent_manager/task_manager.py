@@ -3322,9 +3322,7 @@ class TaskManager(BaseManager):
                                 # Revalidate the eager task's sequence_id (not a fresh one) —
                                 # invalidate_pending_responses from the interruption path can remove it,
                                 # and without this call all audio from the eager task would be BLOCKed.
-                                self.interruption_manager.revalidate_sequence_id(
-                                    self.eager_meta_info["sequence_id"]
-                                )
+                                self.interruption_manager.revalidate_sequence_id(self.eager_meta_info["sequence_id"])
                                 self.response_in_pipeline = True
                             self.llm_task = self.eager_llm_task
                             self.eager_llm_task = None
