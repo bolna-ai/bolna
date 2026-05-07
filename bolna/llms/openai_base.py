@@ -1,5 +1,4 @@
 import json
-import re
 from typing import Optional
 
 from openai import BadRequestError, APIError
@@ -15,12 +14,6 @@ from bolna.helpers.logger_config import configure_logger
 logger = configure_logger(__name__)
 
 
-def _clean_rescue_answer(answer: str) -> str | None:
-    """Strip leftover 'functions' / 'functions.xxx' tokens from a rescue textual_response."""
-    cleaned = re.sub(r"\bfunctions(\.\w+)?\b", "", answer).strip()
-    return cleaned if cleaned else None
-
-
 class OpenAICompatibleLLM(BaseLLM):
     """Base class for OpenAI-API-compatible LLM providers.
 
@@ -28,143 +21,6 @@ class OpenAICompatibleLLM(BaseLLM):
     - Call _init_responses_api() during __init__
     - Override _responses_client property if they need a different client
     """
-
-    @staticmethod
-    def _find_tool_call_end(text):
-        """Return the index after the closing brace/paren of a text-based tool call, or -1 if incomplete."""
-        m = re.search(r"functions\.\w+\s*[({]", text)
-        if not m:
-            return -1
-        start = m.end() - 1
-        depth = 0
-        for i in range(start, len(text)):
-            if text[i] in "({":
-                depth += 1
-            elif text[i] in ")}":
-                depth -= 1
-                if depth == 0:
-                    end = i + 1
-                    if end < len(text) and text[end] == ";":
-                        end += 1
-                    return end
-        return -1
-
-    @staticmethod
-    def _parse_text_tool_call(text):
-        """Parse functions.name({...}) or functions.name { ... } from text.
-
-        Returns (func_name, args_json_str) or None if unparseable.
-        Handles both strict JSON and JS-style unquoted keys.
-        """
-        m = re.search(r"functions\.(\w+)\s*([({])", text)
-        if not m:
-            return None
-
-        func_name = m.group(1)
-        start = m.start(2)
-        depth = 0
-        end = -1
-        for i in range(start, len(text)):
-            if text[i] in "({":
-                depth += 1
-            elif text[i] in ")}":
-                depth -= 1
-                if depth == 0:
-                    end = i + 1
-                    break
-
-        if end == -1:
-            return None
-
-        raw = text[start:end]
-        if raw.startswith("("):
-            raw = raw[1:-1].strip()
-
-        try:
-            json.loads(raw)
-            return func_name, raw
-        except json.JSONDecodeError:
-            pass
-
-        # Fix JS-style unquoted keys: notes: "..." → "notes": "..."
-        fixed = re.sub(r'(?<!["\w])([a-zA-Z_]\w*)\s*:', r'"\1":', raw)
-        try:
-            json.loads(fixed)
-            return func_name, fixed
-        except json.JSONDecodeError:
-            logger.warning(f"Could not parse text tool call args for {func_name}: {raw[:100]}")
-            return None
-
-    def _try_rescue_text_tool_call(self, text, model_args, meta_info, answer, latency_data):
-        """Attempt to execute a tool call that was output as plain text instead of delta.tool_calls.
-
-        Parses the text, builds FunctionCallPayload directly from api_params, and returns an
-        LLMStreamChunk with is_function_call=True. Returns None if rescue is not possible
-        (no tools registered, unknown function, or unparseable args) so the caller can fall
-        back to sending the raw text to TTS.
-        """
-        if not self.trigger_function_call:
-            return None
-
-        parsed = self._parse_text_tool_call(text)
-        if not parsed:
-            return None
-
-        func_name, args_str = parsed
-
-        if func_name not in self.api_params:
-            logger.warning(f"Text tool call rescue: '{func_name}' not in api_params, falling back to TTS")
-            return None
-
-        func_conf = self.api_params[func_name]
-        method = func_conf.get("method")
-
-        api_call_payload = FunctionCallPayload(
-            url=func_conf.get("url"),
-            method=method.lower() if method else None,
-            param=func_conf.get("param"),
-            api_token=func_conf.get("api_token"),
-            headers=func_conf.get("headers"),
-            model_args=model_args,
-            meta_info=meta_info,
-            called_fun=func_name,
-            model_response=[
-                {
-                    "index": 0,
-                    "id": f"rescued_{func_name}",
-                    "function": {"name": func_name, "arguments": args_str},
-                    "type": "function",
-                }
-            ],
-            tool_call_id=f"rescued_{func_name}",
-            textual_response=_clean_rescue_answer(answer),
-        )
-
-        # Mirror ToolCallAccumulator.build_api_payload: validate required keys against the tool spec
-        tools_list = json.loads(self.tools) if isinstance(self.tools, str) else (self.tools or [])
-        tool_spec = next((t for t in tools_list if t.get("function", {}).get("name") == func_name), None)
-
-        try:
-            parsed_args = json.loads(args_str)
-            if tool_spec and tool_spec["function"].get("parameters") is not None:
-                required_keys = tool_spec["function"]["parameters"].get("required", [])
-                missing = [k for k in required_keys if k not in parsed_args]
-                if missing:
-                    logger.warning(
-                        f"Text tool call rescue: '{func_name}' missing required args {missing}, zeroing resp"
-                    )
-                    api_call_payload.resp = None
-                    return LLMStreamChunk(
-                        data=api_call_payload, end_of_stream=False, latency=latency_data, is_function_call=True
-                    )
-            for k, v in parsed_args.items():
-                setattr(api_call_payload, k, v)
-            logger.info(f"Text tool call rescue succeeded: {func_name}")
-        except Exception as e:
-            logger.error(f"Text tool call rescue: failed to apply args for {func_name}: {e}")
-            api_call_payload.resp = None
-
-        return LLMStreamChunk(data=api_call_payload, end_of_stream=False, latency=latency_data, is_function_call=True)
 
     def _init_responses_api(self, use_responses_api: bool = False, compact_threshold: Optional[int] = None):
         self.use_responses_api = use_responses_api
