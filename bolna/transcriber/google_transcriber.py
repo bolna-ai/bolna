@@ -84,6 +84,7 @@ class GoogleTranscriber(BaseTranscriber):
         self.turn_latencies = []
         self.current_turn_start_time = None
         self.current_turn_id = None
+        self._turn_start_epoch_ms = None
 
         # Request tracking
         self.meta_info = None
@@ -201,6 +202,7 @@ class GoogleTranscriber(BaseTranscriber):
                         self.meta_info["transcriber_start_time"] = time.perf_counter()
                         # start turn-level tracking
                         self.current_turn_start_time = self.meta_info["transcriber_start_time"]
+                        self._turn_start_epoch_ms = timestamp_ms()
                         self.current_turn_id = (
                             self.meta_info.get("turn_id") or self.meta_info.get("request_id") or self._request_id
                         )
@@ -268,6 +270,7 @@ class GoogleTranscriber(BaseTranscriber):
                     "sequence_id": self.current_turn_id,
                     "first_result_latency_ms": first_ms,
                     "total_stream_duration_ms": int(round(total_s * 1000)),
+                    "asr_start_epoch_ms": self._turn_start_epoch_ms,
                     "asr_finalized_epoch_ms": timestamp_ms(),
                 }
                 if final_transcript:
@@ -280,6 +283,7 @@ class GoogleTranscriber(BaseTranscriber):
                     pass
                 # reset turn tracking
                 self.current_turn_start_time = None
+                self._turn_start_epoch_ms = None
                 self.current_turn_id = None
         except Exception:
             logger.exception("Error appending turn latency")

@@ -47,6 +47,7 @@ class AzureTranscriber(BaseTranscriber):
         self.current_turn_start_time = None
         self.current_turn_id = None
         self.speech_start_time = None
+        self._turn_start_epoch_ms = None
 
         if self.audio_provider in ("twilio", "exotel", "plivo"):
             self.encoding = "mulaw" if self.audio_provider in ("twilio",) else "linear16"
@@ -218,6 +219,8 @@ class AzureTranscriber(BaseTranscriber):
                 "duration_seconds": duration_seconds,
             }
             self.current_turn_interim_details.append(interim_detail)
+            if self._turn_start_epoch_ms is None:
+                self._turn_start_epoch_ms = timestamp_ms()
 
             data = {"type": "interim_transcript_received", "content": evt.result.text.strip()}
             try:
@@ -275,6 +278,7 @@ class AzureTranscriber(BaseTranscriber):
                     "interim_details": self.current_turn_interim_details,
                     "first_interim_to_final_ms": first_interim_to_final_ms,
                     "last_interim_to_final_ms": last_interim_to_final_ms,
+                    "asr_start_epoch_ms": self._turn_start_epoch_ms,
                     "asr_finalized_epoch_ms": timestamp_ms(),
                     "final_transcript": evt.result.text.strip(),
                 }
@@ -282,6 +286,7 @@ class AzureTranscriber(BaseTranscriber):
 
                 self.current_turn_interim_details = []
                 self.current_turn_start_time = None
+                self._turn_start_epoch_ms = None
                 self.current_turn_id = None
             except Exception as e:
                 logger.error(f"Error tracking turn latencies: {e}")
