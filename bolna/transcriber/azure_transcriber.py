@@ -290,6 +290,7 @@ class AzureTranscriber(BaseTranscriber):
                 self.current_turn_start_time = None
                 self._turn_start_epoch_ms = None
                 self.current_turn_id = None
+                self._turn_start_epoch_ms = None
             except Exception as e:
                 logger.error(f"Error tracking turn latencies: {e}")
 
