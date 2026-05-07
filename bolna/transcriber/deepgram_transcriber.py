@@ -15,6 +15,11 @@ from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.ssl_context import get_ssl_context
 from bolna.helpers.utils import create_ws_data_packet, timestamp_ms
 from bolna.enums import TelephonyProvider
+from bolna.constants import (
+    DEEPGRAM_FLUX_EOT_THRESHOLD,
+    DEEPGRAM_FLUX_EAGER_EOT_THRESHOLD,
+    DEEPGRAM_FLUX_EOT_TIMEOUT_MS,
+)
 
 
 logger = configure_logger(__name__)
@@ -102,7 +107,26 @@ class DeepgramTranscriber(BaseTranscriber):
         self.utterance_timeout_task = None
         self.connection_error = None
 
+        # Flux model support
+        self.is_flux_model = model.startswith("flux-")
+        self.is_flux_multi = model == "flux-general-multi"
+        _eot_threshold = kwargs.get("eot_threshold")
+        self.eot_threshold = _eot_threshold if _eot_threshold is not None else DEEPGRAM_FLUX_EOT_THRESHOLD
+        self.eager_eot_threshold = kwargs.get("eager_eot_threshold")
+        if self.eager_eot_threshold is None and self.is_flux_model:
+            self.eager_eot_threshold = DEEPGRAM_FLUX_EAGER_EOT_THRESHOLD
+        _eot_timeout_ms = kwargs.get("eot_timeout_ms")
+        self.eot_timeout_ms = _eot_timeout_ms if _eot_timeout_ms is not None else DEEPGRAM_FLUX_EOT_TIMEOUT_MS
+        self.eager_transcript_pending = None
+        self.language_hints = kwargs.get("language_hints")
+
     def get_deepgram_ws_url(self):
+        if self.is_flux_model:
+            return self._get_flux_ws_url()
+        else:
+            return self._get_nova_ws_url()
+
+    def _get_nova_ws_url(self):
         dg_params = {
             "model": self.model,
             # 'diarize': 'true',
@@ -139,7 +163,6 @@ class DeepgramTranscriber(BaseTranscriber):
             dg_params["sample_rate"] = 16000
             dg_params["channels"] = "1"
             self.sampling_rate = 16000
-            # TODO what is the purpose of this?
             self.audio_frame_duration = 0.256
 
         elif not self.connected_via_dashboard:
@@ -174,6 +197,71 @@ class DeepgramTranscriber(BaseTranscriber):
 
         return websocket_url
 
+    def _get_flux_ws_url(self):
+        dg_params = {
+            "model": self.model,
+            "eot_threshold": self.eot_threshold,
+            "eot_timeout_ms": self.eot_timeout_ms,
+        }
+
+        if self.eager_eot_threshold is not None:
+            dg_params["eager_eot_threshold"] = self.eager_eot_threshold
+
+        self.audio_frame_duration = 0.5
+
+        if self.provider in TelephonyProvider.telephony_values():
+            if self.provider != TelephonyProvider.SIP_TRUNK.value:
+                self.encoding = "mulaw" if self.provider == "twilio" else "linear16"
+                self.sampling_rate = 8000
+            self.audio_frame_duration = 0.2
+            dg_params["encoding"] = self.encoding
+            dg_params["sample_rate"] = self.sampling_rate
+
+        elif self.provider == "web_based_call":
+            dg_params["encoding"] = "linear16"
+            dg_params["sample_rate"] = 16000
+            self.sampling_rate = 16000
+            self.audio_frame_duration = 0.256
+
+        elif not self.connected_via_dashboard:
+            dg_params["encoding"] = "linear16"
+            dg_params["sample_rate"] = 16000
+
+        if self.provider == "playground":
+            self.sampling_rate = 8000
+            self.audio_frame_duration = 0.0
+
+        if self.keywords:
+            keyword_list = [kw.strip() for kw in self.keywords.split(",") if kw.strip()]
+            if keyword_list:
+                dg_params["keyterm"] = keyword_list
+
+        if self.is_flux_multi:
+            hints = self._resolve_language_hints()
+            if hints:
+                dg_params["language_hint"] = hints
+
+        if self.run_id:
+            dg_params["tag"] = self.run_id
+
+        websocket_api = "{}://{}/v2/listen?".format(os.getenv("DEEPGRAM_HOST_PROTOCOL", "wss"), self.deepgram_host)
+        websocket_url = websocket_api + urlencode(dg_params, doseq=True)
+        return websocket_url
+
+    def _resolve_language_hints(self):
+        """Resolve language_hint values for flux-general-multi.
+
+        Precedence: explicit language_hints kwarg > derived from self.language.
+        Returns None for auto-detect (no hint param sent).
+        """
+        if self.language_hints:
+            return [h for h in self.language_hints if h]
+        if not self.language or self.language == "multi":
+            return None
+        if self.language.startswith("multi-"):
+            return [self.language.split("-", 1)[1]]
+        return [self.language]
+
     async def send_heartbeat(self, ws: ClientConnection):
         try:
             while True:
@@ -187,7 +275,7 @@ class DeepgramTranscriber(BaseTranscriber):
                     if rcvd_code == 1000 or sent_code == 1000:
                         logger.info("WebSocket closed normally (1000 OK) during heartbeat.")
                     else:
-                        logger.warning(
+                        logger.error(
                             f"WebSocket closed: received={rcvd_code}, sent={sent_code}, "
                             f"reason={getattr(e.rcvd, 'reason', '') or getattr(e.sent, 'reason', '')}"
                         )
@@ -199,9 +287,39 @@ class DeepgramTranscriber(BaseTranscriber):
                 await asyncio.sleep(5)  # Send a heartbeat message every 5 seconds
         except asyncio.CancelledError:
             logger.info("Heartbeat task cancelled")
-            raise
         except Exception as e:
             logger.error("Error in send_heartbeat: " + str(e))
+            raise
+
+    async def send_heartbeat_flux(self, ws: ClientConnection):
+        """Flux uses WebSocket ping frames instead of KeepAlive JSON"""
+        try:
+            while True:
+                try:
+                    pong_waiter = await ws.ping()
+                    await asyncio.wait_for(pong_waiter, timeout=10)
+                    logger.debug("Flux heartbeat ping/pong successful")
+                except asyncio.TimeoutError:
+                    logger.warning("Flux heartbeat ping timeout - connection may be stale")
+                    break
+                except ConnectionClosed as e:
+                    rcvd_code = getattr(e.rcvd, "code", None)
+                    sent_code = getattr(e.sent, "code", None)
+
+                    if rcvd_code == 1000 or sent_code == 1000:
+                        logger.info("WebSocket closed normally (1000 OK) during Flux heartbeat.")
+                    else:
+                        logger.error(f"WebSocket closed during Flux heartbeat: received={rcvd_code}, sent={sent_code}")
+                    break
+                except Exception as e:
+                    logger.error(f"Error sending Flux heartbeat ping: {e}")
+                    break
+
+                await asyncio.sleep(5)  # Send ping every 5 seconds
+        except asyncio.CancelledError:
+            logger.error("Flux heartbeat task cancelled")
+        except Exception as e:
+            logger.error(f"Error in send_heartbeat_flux: {e}")
             raise
 
     def _reset_turn_state(self):
@@ -491,7 +609,6 @@ class DeepgramTranscriber(BaseTranscriber):
                         self.meta_info.get("request_id"),
                     )
                     yield create_ws_data_packet("speech_started", self.meta_info)
-                    pass
 
                 elif msg["type"] == "Results":
                     transcript = msg["channel"]["alternatives"][0]["transcript"]
@@ -671,6 +788,135 @@ class DeepgramTranscriber(BaseTranscriber):
                 traceback.print_exc()
                 self.interruption_signalled = False
 
+    async def receiver_flux(self, ws: ClientConnection):
+        async for msg in ws:
+            try:
+                msg = json.loads(msg)
+
+                if self.connection_start_time is None:
+                    self.connection_start_time = time.time() - (self.num_frames * self.audio_frame_duration)
+
+                if msg["type"] == "Connected":
+                    logger.info(f"Connected to Deepgram Flux: request_id={msg.get('request_id')}")
+                    continue
+
+                elif msg["type"] == "TurnInfo":
+                    event = msg.get("event")
+                    transcript = msg.get("transcript", "").strip()
+                    turn_index = msg.get("turn_index")
+                    eot_confidence = msg.get("end_of_turn_confidence")
+                    words = msg.get("words", [])
+                    # flux-general-multi: languages detected this turn, sorted by word count
+                    languages = msg.get("languages")
+                    languages_hinted = msg.get("languages_hinted")
+
+                    if event == "StartOfTurn":
+                        logger.info(f"Flux: StartOfTurn (turn_index={turn_index}, transcript={transcript!r})")
+                        self.turn_counter += 1
+                        self.current_turn_id = self.turn_counter
+                        self.speech_start_time = timestamp_ms()
+                        self.current_turn_interim_details = []
+                        self.is_transcript_sent_for_processing = False
+                        self.final_transcript = ""
+                        yield create_ws_data_packet("speech_started", self.meta_info)
+                        # StartOfTurn is guaranteed non-empty — use it immediately for barge-in
+                        # instead of waiting for the first Update (~0.25s later)
+                        if transcript:
+                            self.last_interim_time = time.time()
+                            data = {"type": "interim_transcript_received", "content": transcript}
+                            yield create_ws_data_packet(data, self.meta_info)
+
+                    elif event == "Update":
+                        if transcript:
+                            self.last_interim_time = time.time()
+                            latency_ms = None
+                            if words and len(words) > 0:
+                                audio_window_end = msg.get("audio_window_end", 0)
+                                audio_sent_at = self._find_audio_send_timestamp(audio_window_end)
+                                if audio_sent_at:
+                                    result_received_at = timestamp_ms()
+                                    latency_ms = round(result_received_at - audio_sent_at, 5)
+
+                            self.current_turn_interim_details.append(
+                                {
+                                    "transcript": transcript,
+                                    "latency_ms": latency_ms,
+                                    "is_final": False,
+                                    "received_at": time.time(),
+                                }
+                            )
+
+                            if languages:
+                                logger.info(f"Flux LID Update: languages={languages} hinted={languages_hinted}")
+
+                            data = {"type": "interim_transcript_received", "content": transcript}
+                            yield create_ws_data_packet(data, self.meta_info)
+
+                    elif event == "EagerEndOfTurn":
+                        if languages:
+                            logger.info(f"Flux LID EagerEndOfTurn: languages={languages} hinted={languages_hinted}")
+                        logger.info(f"Flux: EagerEndOfTurn (confidence={eot_confidence}, transcript={transcript!r})")
+                        if transcript:
+                            self.eager_transcript_pending = transcript
+                            self.last_interim_time = time.time()
+
+                            data = {"type": "eager_end_of_turn", "content": transcript, "confidence": eot_confidence}
+                            yield create_ws_data_packet(data, self.meta_info)
+                        else:
+                            logger.warning("Flux: EagerEndOfTurn received with empty transcript, ignoring")
+
+                    elif event == "TurnResumed":
+                        logger.info(f"Flux: TurnResumed - user continued speaking after EagerEndOfTurn")
+                        self.eager_transcript_pending = None
+
+                        data = {"type": "turn_resumed"}
+                        yield create_ws_data_packet(data, self.meta_info)
+
+                    elif event == "EndOfTurn":
+                        if languages:
+                            logger.info(f"Flux LID EndOfTurn: languages={languages} hinted={languages_hinted}")
+                        logger.info(f"Flux: EndOfTurn (confidence={eot_confidence}) transcript={transcript!r}")
+
+                        if transcript:
+                            try:
+                                self.turn_latencies.append(
+                                    {
+                                        "turn_id": self.current_turn_id,
+                                        "sequence_id": self.current_turn_id,
+                                        "interim_details": self.current_turn_interim_details,
+                                    }
+                                )
+                            except Exception as e:
+                                logger.error(f"Error building turn latencies: {e}")
+
+                            data = {
+                                "type": "transcript",
+                                "content": transcript,
+                                "was_eager": self.eager_transcript_pending is not None,
+                            }
+
+                            self._reset_turn_state()
+                            self.eager_transcript_pending = None
+
+                            yield create_ws_data_packet(data, self.meta_info)
+                        else:
+                            logger.warning("Flux: EndOfTurn received with empty transcript")
+                            if self.eager_transcript_pending is not None:
+                                # EagerEndOfTurn fired but the turn produced nothing — cancel speculative LLM
+                                logger.info("Flux: cancelling speculative LLM task via turn_resumed (empty EndOfTurn)")
+                                yield create_ws_data_packet({"type": "turn_resumed"}, self.meta_info)
+                            self._reset_turn_state()
+                            self.eager_transcript_pending = None
+
+                elif msg["type"] == "Error":
+                    error_code = msg.get("code", "unknown")
+                    error_desc = msg.get("description", "No description")
+                    logger.error(f"Flux error: {error_code} - {error_desc}")
+
+            except Exception as e:
+                traceback.print_exc()
+                logger.error(f"Error processing Flux message: {e}")
+
     async def push_to_transcriber_queue(self, data_packet):
         await self.transcriber_output_queue.put(data_packet)
 
@@ -775,22 +1021,32 @@ class DeepgramTranscriber(BaseTranscriber):
 
             if self.stream:
                 self.sender_task = asyncio.create_task(self.sender_stream(deepgram_ws))
-                self.heartbeat_task = asyncio.create_task(self.send_heartbeat(deepgram_ws))
-                self.utterance_timeout_task = asyncio.create_task(self.monitor_utterance_timeout())
+
+                if self.is_flux_model:
+                    self.heartbeat_task = asyncio.create_task(self.send_heartbeat_flux(deepgram_ws))
+                else:
+                    self.heartbeat_task = asyncio.create_task(self.send_heartbeat(deepgram_ws))
+                    self.utterance_timeout_task = asyncio.create_task(self.monitor_utterance_timeout())
+
+                receiver_method = self.receiver_flux if self.is_flux_model else self.receiver
+                logger.info(f"Using {'Flux' if self.is_flux_model else 'Nova'} receiver for model: {self.model}")
+
                 try:
-                    async for message in self.receiver(deepgram_ws):
+                    async for message in receiver_method(deepgram_ws):
                         if self.connection_on:
                             await self.push_to_transcriber_queue(message)
                         else:
-                            logger.info("closing the deepgram connection, waiting for Metadata")
                             await self._close(deepgram_ws, data={"type": "CloseStream"})
-                            try:
-                                async with asyncio.timeout(5):
-                                    async for _ in self.receiver(deepgram_ws):
-                                        if "deepgram_duration" in self.meta_info:
-                                            break
-                            except asyncio.TimeoutError:
-                                logger.warning("Timeout waiting for Deepgram Metadata after CloseStream")
+                            if not self.is_flux_model:
+                                # Nova sends a Metadata message after CloseStream — drain it for billing duration
+                                logger.info("closing the deepgram connection, waiting for Metadata")
+                                try:
+                                    async with asyncio.timeout(5):
+                                        async for _ in self.receiver(deepgram_ws):
+                                            if "deepgram_duration" in self.meta_info:
+                                                break
+                                except asyncio.TimeoutError:
+                                    logger.warning("Timeout waiting for Deepgram Metadata after CloseStream")
                             break
                 except ConnectionClosedError as e:
                     logger.error(f"Deepgram websocket connection closed during streaming: {e}")

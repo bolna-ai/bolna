@@ -7,6 +7,11 @@ PCM16_SCALE = 32768.0
 OPENAI_TRANSCRIBER_HEARTBEAT_INTERVAL_S = 5
 OPENAI_TRANSCRIBER_UTTERANCE_TIMEOUT_S = 3.0
 
+# Deepgram Flux defaults — all overridable via agent transcriber config
+DEEPGRAM_FLUX_EOT_THRESHOLD = 0.7  # confidence to declare end-of-turn
+DEEPGRAM_FLUX_EAGER_EOT_THRESHOLD = 0.5  # confidence to trigger speculative LLM early
+DEEPGRAM_FLUX_EOT_TIMEOUT_MS = 500  # max silence before forcing end-of-turn
+
 # Model prefixes
 GPT5_MODEL_PREFIX = "gpt-5"
 
