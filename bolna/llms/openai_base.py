@@ -150,9 +150,13 @@ class OpenAICompatibleLLM(BaseLLM):
                 required_keys = tool_spec["function"]["parameters"].get("required", [])
                 missing = [k for k in required_keys if k not in parsed_args]
                 if missing:
-                    logger.warning(f"Text tool call rescue: '{func_name}' missing required args {missing}, zeroing resp")
+                    logger.warning(
+                        f"Text tool call rescue: '{func_name}' missing required args {missing}, zeroing resp"
+                    )
                     api_call_payload.resp = None
-                    return LLMStreamChunk(data=api_call_payload, end_of_stream=False, latency=latency_data, is_function_call=True)
+                    return LLMStreamChunk(
+                        data=api_call_payload, end_of_stream=False, latency=latency_data, is_function_call=True
+                    )
             for k, v in parsed_args.items():
                 setattr(api_call_payload, k, v)
             logger.info(f"Text tool call rescue succeeded: {func_name}")

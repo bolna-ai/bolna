@@ -220,7 +220,9 @@ class AzureLLM(OpenAICompatibleLLM):
                     end_pos = self._find_tool_call_end(text_tool_buffer)
                     if end_pos != -1:
                         if captured_tool_text is not None:
-                            logger.warning(f"Multiple text tool calls in one stream — dropping earlier: {captured_tool_text[:60]!r}")
+                            logger.warning(
+                                f"Multiple text tool calls in one stream — dropping earlier: {captured_tool_text[:60]!r}"
+                            )
                         captured_tool_text = text_tool_buffer[:end_pos]
                         remainder = text_tool_buffer[end_pos:].lstrip("\n")
                         text_tool_buffer = None
@@ -238,7 +240,9 @@ class AzureLLM(OpenAICompatibleLLM):
                     end_pos = self._find_tool_call_end(after)
                     if end_pos != -1:
                         if captured_tool_text is not None:
-                            logger.warning(f"Multiple text tool calls in one stream — dropping earlier: {captured_tool_text[:60]!r}")
+                            logger.warning(
+                                f"Multiple text tool calls in one stream — dropping earlier: {captured_tool_text[:60]!r}"
+                            )
                         captured_tool_text = after[:end_pos]
                         remainder = after[end_pos:].lstrip("\n")
                         answer += remainder
