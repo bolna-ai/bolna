@@ -58,9 +58,22 @@ class TelephonyOutputHandler(DefaultOutputHandler):
                         # sending of pre-mark message
                         pre_mark_event_meta_data = {
                             "type": "pre_mark_message",
+                            "sequence_id": meta_info.get("sequence_id"),
+                            "turn_id": meta_info.get("turn_id"),
+                            "response_uid": meta_info.get("response_uid"),
+                            "response_group_uid": meta_info.get("response_group_uid"),
                         }
                         mark_id = str(uuid.uuid4())
                         self.mark_event_meta_data.update_data(mark_id, pre_mark_event_meta_data)
+                        logger.info(
+                            "BOLNA_TRACE_TEL send_pre_mark mark_id=%s seq=%s turn=%s response_uid=%s group_uid=%s category=%s",
+                            mark_id,
+                            meta_info.get("sequence_id"),
+                            meta_info.get("turn_id"),
+                            meta_info.get("response_uid"),
+                            meta_info.get("response_group_uid"),
+                            meta_info.get("message_category", ""),
+                        )
                         mark_message = await self.form_mark_message(mark_id)
                         await self.websocket.send_text(json.dumps(mark_message))
 
@@ -81,7 +94,6 @@ class TelephonyOutputHandler(DefaultOutputHandler):
                             self.welcome_message_sent_ts = time.time() * 1000
                         logger.info(f"Sending media event - {meta_info.get('mark_id')}")
 
-                    # sending of post-mark message
                     mark_event_meta_data = {
                         "text_synthesized": ""
                         if meta_info["sequence_id"] == -1
@@ -91,6 +103,9 @@ class TelephonyOutputHandler(DefaultOutputHandler):
                         "is_final_chunk": meta_info.get("end_of_llm_stream", False)
                         and meta_info.get("end_of_synthesizer_stream", False),
                         "sequence_id": meta_info["sequence_id"],
+                        "turn_id": meta_info.get("turn_id"),
+                        "response_uid": meta_info.get("response_uid"),
+                        "response_group_uid": meta_info.get("response_group_uid"),
                         "duration": len(audio_chunk) / 8000
                         if meta_info.get("format", "mulaw") == "mulaw"
                         else len(audio_chunk) / 16000,
@@ -101,8 +116,19 @@ class TelephonyOutputHandler(DefaultOutputHandler):
                         if (meta_info.get("mark_id") and meta_info.get("mark_id") != "")
                         else str(uuid.uuid4())
                     )
-
+                    # sending of post-mark message
                     self.mark_event_meta_data.update_data(mark_id, mark_event_meta_data)
+                    logger.info(
+                        "BOLNA_TRACE_TEL send_post_mark mark_id=%s seq=%s turn=%s response_uid=%s group_uid=%s final=%s category=%s text_len=%s",
+                        mark_id,
+                        meta_info.get("sequence_id"),
+                        meta_info.get("turn_id"),
+                        meta_info.get("response_uid"),
+                        meta_info.get("response_group_uid"),
+                        mark_event_meta_data.get("is_final_chunk"),
+                        meta_info.get("message_category", ""),
+                        len(mark_event_meta_data.get("text_synthesized", "") or ""),
+                    )
                     mark_message = await self.form_mark_message(mark_id)
                     await self.websocket.send_text(json.dumps(mark_message))
                 else:
