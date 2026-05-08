@@ -4336,6 +4336,8 @@ class TaskManager(BaseManager):
                         "user_bot_latencies": _user_bot_latencies,
                         "mark_tracking": self.mark_event_meta_data.get_mark_tracking_summary(),
                         "hangup_triggered_ms": round(self.hangup_triggered_at * 1000 - self.conversation_start_init_ts, 2) if self.hangup_triggered_at else None,
+                        "hangup_detail": str(self.hangup_detail) if self.hangup_detail else None,
+                        "voicemail_detected": self.voicemail_handler.detected,
                         "call_start_epoch_ms": self.conversation_start_init_ts,
                     },
                     "hangup_detail": self.hangup_detail,
