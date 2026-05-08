@@ -278,8 +278,11 @@ class InterruptionManager:
         self._agent_speaking_start_time = -1
         logger.info(f"Agent speaking session closed: {duration_ms:.0f}ms")
 
-    def on_successful_response_delivered(self) -> None:
+    def on_successful_response_delivered(self, sequence_id: Optional[int] = None) -> None:
         """Agent delivered a full response after an interruption — counts as recovery."""
+        if sequence_id is not None:
+            self.retire_sequence_id(sequence_id)
+
         if not self._awaiting_recovery:
             return
 
@@ -367,6 +370,14 @@ class InterruptionManager:
         self.sequence_ids.add(self.curr_sequence_id)
         return self.curr_sequence_id
 
+    def retire_sequence_id(self, sequence_id: Optional[int]) -> None:
+        """Retire a completed sequence so it no longer counts as pending."""
+        if sequence_id is None or sequence_id == -1:
+            return
+        if sequence_id in self.sequence_ids:
+            self.sequence_ids.discard(sequence_id)
+            logger.info(f"Retired sequence_id={sequence_id}")
+
     # ── Delay logic ───────────────────────────────────────────────────────────
 
     def should_delay_output(self, welcome_message_played: bool) -> Tuple[bool, float]:
@@ -435,6 +446,13 @@ class InterruptionManager:
     def has_pending_responses(self) -> bool:
         """Returns True if there are pending audio responses."""
         return len(self.sequence_ids) > 1
+
+    def has_pending_responses_excluding(self, sequence_id: Optional[int]) -> bool:
+        """Returns True if there are pending audio responses other than the supplied sequence_id."""
+        active_ids = {sid for sid in self.sequence_ids if sid != -1}
+        if sequence_id is not None:
+            active_ids.discard(sequence_id)
+        return len(active_ids) > 0
 
     def set_first_interim_for_immediate_response(self) -> None:
         """Sets first interim timestamp to allow immediate response."""
