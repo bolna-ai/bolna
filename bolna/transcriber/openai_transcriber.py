@@ -421,6 +421,9 @@ class OpenAITranscriber(BaseTranscriber):
                     ):
                         logger.info("OpenAI session config accepted")
 
+                    else:
+                        logger.info(f"OpenAI unhandled event: {event_type} | {json.dumps(data)[:300]}")
+
                 except Exception:
                     traceback.print_exc()
 
