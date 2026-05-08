@@ -129,8 +129,10 @@ class Transcriber(BaseModel):
     eager_eot_threshold: Optional[float] = None
     eot_timeout_ms: Optional[int] = None
     language_hints: Optional[List[str]] = None
-    effort: Optional[str] = "medium"
+    delay: Optional[str] = "medium"
     noise_reduction: Optional[bool] = False
+    vad_threshold: Optional[float] = 0.5
+    vad_prefix_padding_ms: Optional[int] = 300
 
     @field_validator("provider")
     def validate_model(cls, value):

@@ -20,12 +20,10 @@ from bolna.constants import (
 )
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.ssl_context import get_ssl_context
-from bolna.helpers.utils import create_ws_data_packet
+from bolna.helpers.utils import create_ws_data_packet, timestamp_ms
 
 load_dotenv()
 logger = configure_logger(__name__)
-
-_EFFORT_SUPPORTED_MODELS = {"gpt-transcribe-alpha-walrus"}  # only alpha model supports effort
 
 
 class OpenAITranscriber(BaseTranscriber):
@@ -33,16 +31,18 @@ class OpenAITranscriber(BaseTranscriber):
         self,
         telephony_provider,
         input_queue=None,
-        model="gpt-transcribe-alpha-walrus",
+        model="gpt-realtime-whisper",
         stream=True,
         language="en",
         encoding="linear16",
         sampling_rate="16000",
         output_queue=None,
         endpointing=400,
-        effort="medium",
+        delay="medium",
         noise_reduction=False,
         speech_rms_threshold=300,
+        vad_threshold=0.5,
+        vad_prefix_padding_ms=300,
         **kwargs,
     ):
         super().__init__(input_queue)
@@ -53,9 +53,12 @@ class OpenAITranscriber(BaseTranscriber):
         self.encoding = encoding
         self.sampling_rate = int(sampling_rate)
         self.endpointing_ms = int(endpointing)
-        self.effort = effort
+        # 'effort' was the old parameter name; accept it for backward compat
+        self.delay = kwargs.pop("effort", None) or delay
         self.noise_reduction = noise_reduction
         self.speech_rms_threshold = speech_rms_threshold
+        self.vad_threshold = float(vad_threshold)
+        self.vad_prefix_padding_ms = int(vad_prefix_padding_ms)
 
         self.api_host = kwargs.get("transcriber_host", os.getenv("OPENAI_REALTIME_HOST", "api.openai.com"))
         _default_key_env = "OPENAI_API_KEY_EU" if "eu." in self.api_host else "OPENAI_API_KEY"
@@ -86,8 +89,6 @@ class OpenAITranscriber(BaseTranscriber):
         # _reset_turn_state() clears current_turn_id (e.g. utterance timeout race).
         self._last_committed_turn_id: Optional[str] = None
 
-        # Wall-clock time when silence began (None while speech is active)
-        self._silence_start_time: Optional[float] = None
         self._speech_active = False
         self._first_result_received = False
         # True from the moment audio is appended, False after a commit or before any audio
@@ -129,13 +130,6 @@ class OpenAITranscriber(BaseTranscriber):
             resampled_np = resample_poly(audio_np, 24000 // gcd, in_rate // gcd)
             return np.clip(resampled_np, -32768, 32767).astype(np.int16).tobytes()
 
-    @staticmethod
-    def _rms(pcm_bytes: bytes) -> float:
-        samples = np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.float32)
-        if len(samples) == 0:
-            return 0.0
-        return float(np.sqrt(np.mean(samples**2)))
-
     def _reset_turn_state(self):
         """Reset per-turn state after a transcript is delivered.
 
@@ -160,7 +154,6 @@ class OpenAITranscriber(BaseTranscriber):
         url = f"wss://{self.api_host}/v1/realtime?intent=transcription"
         headers = {
             "Authorization": f"Bearer {self.api_key}",
-            "openai-beta": "realtime=v1",
         }
         try:
             logger.info(f"Attempting to connect to OpenAI Realtime transcription: {url}")
@@ -171,28 +164,23 @@ class OpenAITranscriber(BaseTranscriber):
             self.websocket_connection = ws
             self.connection_authenticated = True
 
-            transcription_cfg = {"model": self.model, "language": self.language}
-            if self.effort is not None and self.model in _EFFORT_SUPPORTED_MODELS:
-                transcription_cfg["effort"] = self.effort
-            session_cfg = {
-                "input_audio_format": "pcm16",
-                "input_audio_transcription": transcription_cfg,
-                "turn_detection": None,
+            audio_input_cfg = {
+                "format": {"type": "audio/pcm", "rate": 24000},
+                "transcription": {
+                    "model": self.model,
+                    "language": self.language,
+                },
             }
             if self.noise_reduction:
-                session_cfg["input_audio_noise_reduction"] = {"type": "near_field"}
+                audio_input_cfg["noise_reduction"] = {"type": "near_field"}
 
-            await ws.send(
-                json.dumps(
-                    {
-                        "type": "transcription_session.update",
-                        "session": session_cfg,
-                    }
-                )
-            )
-            logger.info(
-                f"Connected to OpenAI Realtime transcription (model={self.model}, effort={self.effort}, language={self.language})"
-            )
+            session_cfg = {
+                "type": "transcription",
+                "audio": {"input": audio_input_cfg},
+            }
+
+            await ws.send(json.dumps({"type": "session.update", "session": session_cfg}))
+            logger.info(f"Connected to OpenAI Realtime transcription (model={self.model}, language={self.language})")
             return ws
 
         except asyncio.TimeoutError:
@@ -247,54 +235,12 @@ class OpenAITranscriber(BaseTranscriber):
         except Exception as e:
             logger.error(f"Error in OpenAI utterance timeout monitor: {e}")
 
-    async def _commit_turn(self, ws: ClientConnection):
-        if self.current_turn_id is None:
-            # Safety net: a late transcription.completed from the previous turn may have
-            # cleared current_turn_id before we got here (shouldn't happen after the
-            # _reset_turn_state fix, but guard anyway).
-            self.turn_counter += 1
-            self.current_turn_id = f"turn_{self.turn_counter}"
-            logger.warning(f"_commit_turn: assigned fallback turn_id {self.current_turn_id}")
-        self._last_committed_turn_id = self.current_turn_id
-        try:
-            await ws.send(json.dumps({"type": "input_audio_buffer.commit"}))
-            self._audio_appended_since_commit = False
-            self._turn_committed = True
-            self._commit_time = time.time()
-            self.meta_info["last_vocal_frame_timestamp"] = self._commit_time
-            self.meta_info["user_stop_offset_ms"] = self.endpointing_ms
-            self.meta_info["user_stop_ts_wall"] = self._commit_time
-            await self.push_to_transcriber_queue(create_ws_data_packet({"type": "speech_ended"}, self.meta_info))
-            logger.info(f"Committed turn {self.current_turn_id} after {self.endpointing_ms}ms silence")
-        except Exception as e:
-            logger.error(f"Error committing turn: {e}")
-
     async def sender_stream(self, ws: ClientConnection):
         try:
             while True:
                 try:
                     ws_data_packet = await asyncio.wait_for(self.input_queue.get(), timeout=0.05)
                 except asyncio.TimeoutError:
-                    if self._speech_active:
-                        if self._silence_start_time is None:
-                            self._silence_start_time = time.time()
-                        elif (time.time() - self._silence_start_time) * 1000 >= self.endpointing_ms:
-                            await self._commit_turn(ws)
-                            self._speech_active = False
-                            self._silence_start_time = None
-                    # Only inject silence while speech is active — after a commit the server
-                    # starts a fresh empty buffer, and sending silence into it would cause a
-                    # spurious second transcription item when EOS fires its own commit.
-                    if self._speech_active:
-                        silent_pcm = b"\x00" * int(24000 * 0.05 * 2)  # 50 ms @ 24kHz PCM16
-                        await ws.send(
-                            json.dumps(
-                                {
-                                    "type": "input_audio_buffer.append",
-                                    "audio": base64.b64encode(silent_pcm).decode(),
-                                }
-                            )
-                        )
                     continue
 
                 if not self.audio_submitted:
@@ -305,8 +251,6 @@ class OpenAITranscriber(BaseTranscriber):
                     self.meta_info["request_id"] = self.current_request_id
 
                 if await self._check_and_process_end_of_stream(ws_data_packet, ws):
-                    # Wait for OpenAI to deliver the final transcript before closing,
-                    # mirroring Deepgram's 5s post-CloseStream drain window.
                     try:
                         await asyncio.wait_for(self._final_transcript_event.wait(), timeout=5.0)
                     except asyncio.TimeoutError:
@@ -322,43 +266,16 @@ class OpenAITranscriber(BaseTranscriber):
                     continue
 
                 pcm_24k = self._resample_to_24k(raw_audio)
-                rms = self._rms(pcm_24k)
-
-                if rms > self.speech_rms_threshold:
-                    self._silence_start_time = None
-                    if not self._speech_active:
-                        self._speech_active = True
-                        self._first_result_received = False
-                        self.audio_submission_time = time.time()
-                        self._final_transcript_event.clear()
-                        self._audio_appended_since_commit = False
-                        self.turn_counter += 1
-                        self.current_turn_id = f"turn_{self.turn_counter}"
-                        self.current_turn_start_time = time.perf_counter()
-                        self.current_turn_interim_details = []
-                        self.is_transcript_sent_for_processing = False
-                        logger.info(f"Speech detected, starting turn {self.current_turn_id}")
-                        await self.push_to_transcriber_queue(create_ws_data_packet("speech_started", self.meta_info))
-                else:
-                    if self._speech_active:
-                        if self._silence_start_time is None:
-                            self._silence_start_time = time.time()
-                        elif (time.time() - self._silence_start_time) * 1000 >= self.endpointing_ms:
-                            await self._commit_turn(ws)
-                            self._speech_active = False
-                            self._silence_start_time = None
-
                 self.num_frames += 1
-                if self._speech_active:
-                    self._audio_appended_since_commit = True
-                    await ws.send(
-                        json.dumps(
-                            {
-                                "type": "input_audio_buffer.append",
-                                "audio": base64.b64encode(pcm_24k).decode(),
-                            }
-                        )
+                self._audio_appended_since_commit = True
+                await ws.send(
+                    json.dumps(
+                        {
+                            "type": "input_audio_buffer.append",
+                            "audio": base64.b64encode(pcm_24k).decode(),
+                        }
                     )
+                )
 
         except asyncio.CancelledError:
             logger.info("OpenAI sender_stream task cancelled")
@@ -455,8 +372,48 @@ class OpenAITranscriber(BaseTranscriber):
                             self.meta_info,
                         )
 
+                    elif event_type == "input_audio_buffer.speech_started":
+                        self._speech_active = True
+                        self.turn_counter += 1
+                        self.current_turn_id = f"turn_{self.turn_counter}"
+                        self.current_turn_start_time = time.perf_counter()
+                        self._turn_start_epoch_ms = timestamp_ms()
+                        self.current_turn_interim_details = []
+                        self.is_transcript_sent_for_processing = False
+                        self._first_result_received = False
+                        self._final_transcript_event.clear()
+                        self._audio_appended_since_commit = False
+                        self.audio_submission_time = time.time()
+                        logger.info(f"Speech detected (server VAD), starting turn {self.current_turn_id}")
+                        yield create_ws_data_packet("speech_started", self.meta_info)
+
+                    elif event_type == "input_audio_buffer.speech_stopped":
+                        self._speech_active = False
+                        self._last_committed_turn_id = self.current_turn_id
+                        self._turn_committed = True
+                        self._commit_time = time.time()
+                        self.meta_info["last_vocal_frame_timestamp"] = self._commit_time
+                        self.meta_info["user_stop_offset_ms"] = self.endpointing_ms
+                        self.meta_info["user_stop_ts_wall"] = self._commit_time
+                        logger.info(f"Speech stopped (server VAD), committed turn {self.current_turn_id}")
+                        yield create_ws_data_packet({"type": "speech_ended"}, self.meta_info)
+
+                    elif event_type in (
+                        "input_audio_buffer.committed",
+                        "conversation.item.created",
+                        "conversation.item.added",
+                        "conversation.item.done",
+                        "rate_limits.updated",
+                    ):
+                        pass  # expected acknowledgement events, no action needed
+
                     elif event_type == "error":
-                        logger.error(f"OpenAI Realtime error event: {data.get('error', {})}")
+                        err = data.get("error", {})
+                        if err.get("code") == "input_audio_buffer_commit_empty":
+                            # Harmless: EOS commit raced with server VAD commit
+                            logger.debug(f"OpenAI commit-empty (ignored): {err.get('message', '')}")
+                        else:
+                            logger.error(f"OpenAI Realtime error event: {err}")
 
                     elif event_type in (
                         "transcription_session.updated",
@@ -464,7 +421,10 @@ class OpenAITranscriber(BaseTranscriber):
                         "transcription_session.created",
                         "session.created",
                     ):
-                        logger.info("OpenAI session config accepted")
+                        logger.info(f"OpenAI session event: {event_type}")
+
+                    else:
+                        logger.info(f"OpenAI unhandled event: {event_type} | {json.dumps(data)[:300]}")
 
                 except Exception:
                     traceback.print_exc()

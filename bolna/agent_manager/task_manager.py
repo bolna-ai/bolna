@@ -2429,9 +2429,7 @@ class TaskManager(BaseManager):
 
             # Generate goodbye with should_trigger_function_call=False to prevent recursion
             followup_meta_info = self._spawn_followup_meta_info(meta_info)
-            await self.__do_llm_generation(
-                messages, followup_meta_info, next_step, should_trigger_function_call=False
-            )
+            await self.__do_llm_generation(messages, followup_meta_info, next_step, should_trigger_function_call=False)
             await self.wait_for_current_message()
 
             self.hangup_detail = "end_call_tool"
@@ -3421,9 +3419,8 @@ class TaskManager(BaseManager):
         has_pending_marks = self._has_interruptible_mark_activity()
         current_sequence_id = meta_info.get("sequence_id")
         has_pending_sequences = self.interruption_manager.has_pending_responses_excluding(current_sequence_id)
-        has_pending_generation = (
-            (self.llm_task is not None and not self.llm_task.done())
-            or (self.execute_function_call_task is not None and not self.execute_function_call_task.done())
+        has_pending_generation = (self.llm_task is not None and not self.llm_task.done()) or (
+            self.execute_function_call_task is not None and not self.execute_function_call_task.done()
         )
         if next_task == "llm" and (
             self.response_in_pipeline

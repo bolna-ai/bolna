@@ -163,7 +163,9 @@ class ConversationHistory:
     @staticmethod
     def _trim_assistant_for_response(msgs: list[dict], response_uid: str | None, response_heard: str | None, update_fn):
         if response_uid is None:
-            logger.info("Skipping assistant trim because response_uid is None; refusing to trim an older assistant blindly")
+            logger.info(
+                "Skipping assistant trim because response_uid is None; refusing to trim an older assistant blindly"
+            )
             return
 
         for i in range(len(msgs) - 1, -1, -1):
@@ -232,9 +234,7 @@ class ConversationHistory:
 
             if role in (ChatRole.ASSISTANT, ChatRole.ASSISTANT.value) and msg.get("tool_calls"):
                 expected_ids = [
-                    tc.get("id", "")
-                    for tc in msg.get("tool_calls", [])
-                    if isinstance(tc, dict) and tc.get("id")
+                    tc.get("id", "") for tc in msg.get("tool_calls", []) if isinstance(tc, dict) and tc.get("id")
                 ]
                 expected_set = set(expected_ids)
 
