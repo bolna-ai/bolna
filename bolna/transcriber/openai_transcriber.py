@@ -167,6 +167,12 @@ class OpenAITranscriber(BaseTranscriber):
             audio_input_cfg = {
                 "format": {"type": "audio/pcm", "rate": 24000},
                 "transcription": transcription_cfg,
+                "turn_detection": {
+                    "type": "server_vad",
+                    "threshold": self.vad_threshold,
+                    "prefix_padding_ms": self.vad_prefix_padding_ms,
+                    "silence_duration_ms": self.endpointing_ms,
+                },
             }
             if self.noise_reduction:
                 audio_input_cfg["noise_reduction"] = True
