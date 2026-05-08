@@ -25,11 +25,6 @@ from bolna.helpers.utils import create_ws_data_packet, timestamp_ms
 load_dotenv()
 logger = configure_logger(__name__)
 
-# Maps the product/UI model name to the API model identifier used in session config
-_API_MODEL_MAP = {
-    "gpt-realtime-whisper": "whisper-1",
-}
-
 
 class OpenAITranscriber(BaseTranscriber):
     def __init__(
@@ -159,7 +154,6 @@ class OpenAITranscriber(BaseTranscriber):
         url = f"wss://{self.api_host}/v1/realtime?intent=transcription"
         headers = {
             "Authorization": f"Bearer {self.api_key}",
-            "OpenAI-Beta": "realtime=v1",
         }
         try:
             logger.info(f"Attempting to connect to OpenAI Realtime transcription: {url}")
@@ -170,24 +164,22 @@ class OpenAITranscriber(BaseTranscriber):
             self.websocket_connection = ws
             self.connection_authenticated = True
 
-            transcription_cfg = {
-                "model": _API_MODEL_MAP.get(self.model, self.model),
-                "language": self.language,
-            }
-            session_cfg = {
-                "input_audio_format": "pcm16",
-                "input_audio_transcription": transcription_cfg,
-                "turn_detection": {
-                    "type": "server_vad",
-                    "threshold": self.vad_threshold,
-                    "prefix_padding_ms": self.vad_prefix_padding_ms,
-                    "silence_duration_ms": self.endpointing_ms,
+            audio_input_cfg = {
+                "format": {"type": "audio/pcm", "rate": 24000},
+                "transcription": {
+                    "model": self.model,
+                    "language": self.language,
                 },
             }
             if self.noise_reduction:
-                session_cfg["input_audio_noise_reduction"] = {"type": "near_field"}
+                audio_input_cfg["noise_reduction"] = {"type": "near_field"}
 
-            await ws.send(json.dumps({"type": "transcription_session.update", "session": session_cfg}))
+            session_cfg = {
+                "type": "transcription",
+                "audio": {"input": audio_input_cfg},
+            }
+
+            await ws.send(json.dumps({"type": "session.update", "session": session_cfg}))
             logger.info(
                 f"Connected to OpenAI Realtime transcription (model={self.model}, language={self.language})"
             )
@@ -411,6 +403,9 @@ class OpenAITranscriber(BaseTranscriber):
                     elif event_type in (
                         "input_audio_buffer.committed",
                         "conversation.item.created",
+                        "conversation.item.added",
+                        "conversation.item.done",
+                        "rate_limits.updated",
                     ):
                         pass  # expected acknowledgement events, no action needed
 
