@@ -180,9 +180,7 @@ class OpenAITranscriber(BaseTranscriber):
             }
 
             await ws.send(json.dumps({"type": "session.update", "session": session_cfg}))
-            logger.info(
-                f"Connected to OpenAI Realtime transcription (model={self.model}, language={self.language})"
-            )
+            logger.info(f"Connected to OpenAI Realtime transcription (model={self.model}, language={self.language})")
             return ws
 
         except asyncio.TimeoutError:
