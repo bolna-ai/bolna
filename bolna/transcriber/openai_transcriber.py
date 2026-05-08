@@ -25,6 +25,12 @@ from bolna.helpers.utils import create_ws_data_packet, timestamp_ms
 load_dotenv()
 logger = configure_logger(__name__)
 
+# Maps the product/UI model name to the API model identifier used in session config
+_API_MODEL_MAP = {
+    "gpt-realtime-whisper": "whisper-1",
+}
+
+
 class OpenAITranscriber(BaseTranscriber):
     def __init__(
         self,
@@ -153,7 +159,7 @@ class OpenAITranscriber(BaseTranscriber):
         url = f"wss://{self.api_host}/v1/realtime?intent=transcription"
         headers = {
             "Authorization": f"Bearer {self.api_key}",
-            "openai-beta": "realtime=v1",
+            "OpenAI-Beta": "realtime=v1",
         }
         try:
             logger.info(f"Attempting to connect to OpenAI Realtime transcription: {url}")
@@ -164,12 +170,13 @@ class OpenAITranscriber(BaseTranscriber):
             self.websocket_connection = ws
             self.connection_authenticated = True
 
+            transcription_cfg = {
+                "model": _API_MODEL_MAP.get(self.model, self.model),
+                "language": self.language,
+            }
             session_cfg = {
                 "input_audio_format": "pcm16",
-                "input_audio_transcription": {
-                    "model": self.model,
-                    "language": self.language,
-                },
+                "input_audio_transcription": transcription_cfg,
                 "turn_detection": {
                     "type": "server_vad",
                     "threshold": self.vad_threshold,
@@ -401,8 +408,19 @@ class OpenAITranscriber(BaseTranscriber):
                         logger.info(f"Speech stopped (server VAD), committed turn {self.current_turn_id}")
                         yield create_ws_data_packet({"type": "speech_ended"}, self.meta_info)
 
+                    elif event_type in (
+                        "input_audio_buffer.committed",
+                        "conversation.item.created",
+                    ):
+                        pass  # expected acknowledgement events, no action needed
+
                     elif event_type == "error":
-                        logger.error(f"OpenAI Realtime error event: {data.get('error', {})}")
+                        err = data.get("error", {})
+                        if err.get("code") == "input_audio_buffer_commit_empty":
+                            # Harmless: EOS commit raced with server VAD commit
+                            logger.debug(f"OpenAI commit-empty (ignored): {err.get('message', '')}")
+                        else:
+                            logger.error(f"OpenAI Realtime error event: {err}")
 
                     elif event_type in (
                         "transcription_session.updated",
@@ -410,7 +428,7 @@ class OpenAITranscriber(BaseTranscriber):
                         "transcription_session.created",
                         "session.created",
                     ):
-                        logger.info("OpenAI session config accepted")
+                        logger.info(f"OpenAI session event: {event_type}")
 
                     else:
                         logger.info(f"OpenAI unhandled event: {event_type} | {json.dumps(data)[:300]}")
