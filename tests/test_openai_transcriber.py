@@ -197,7 +197,8 @@ async def main():
     default_wav = os.path.join(os.path.dirname(__file__), "test_speech_24k.wav")
     wav_path = sys.argv[1] if len(sys.argv) > 1 else (default_wav if os.path.exists(default_wav) else None)
 
-    if not os.getenv("OPENAI_API_KEY"):
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
         print("[error] OPENAI_API_KEY not set")
         sys.exit(1)
 
@@ -213,6 +214,8 @@ async def main():
         endpointing=ENDPOINTING_MS,
         noise_reduction=False,
         sampling_rate=16000,
+        transcriber_host="api.openai.com",
+        transcriber_key=api_key,
     )
 
     print(f"[test] starting transcriber (endpointing={ENDPOINTING_MS}ms, effort=medium)")

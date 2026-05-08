@@ -150,9 +150,10 @@ class OpenAITranscriber(BaseTranscriber):
         self._commit_time = None
 
     async def openai_connect(self) -> ClientConnection:
-        url = f"wss://{self.api_host}/v1/realtime/transcription_sessions"
+        url = f"wss://{self.api_host}/v1/realtime?intent=transcription"
         headers = {
             "Authorization": f"Bearer {self.api_key}",
+            "openai-beta": "realtime=v1",
         }
         try:
             logger.info(f"Attempting to connect to OpenAI Realtime transcription: {url}")
@@ -163,29 +164,25 @@ class OpenAITranscriber(BaseTranscriber):
             self.websocket_connection = ws
             self.connection_authenticated = True
 
-            transcription_cfg = {"model": self.model, "language": self.language}
-            audio_input_cfg = {
-                "format": {"type": "audio/pcm", "rate": 24000},
-                "transcription": transcription_cfg,
+            session_cfg = {
+                "input_audio_format": "pcm16",
+                "input_audio_transcription": {
+                    "model": self.model,
+                    "language": self.language,
+                },
+                "turn_detection": {
+                    "type": "server_vad",
+                    "threshold": self.vad_threshold,
+                    "prefix_padding_ms": self.vad_prefix_padding_ms,
+                    "silence_duration_ms": self.endpointing_ms,
+                },
             }
             if self.noise_reduction:
-                audio_input_cfg["noise_reduction"] = True
+                session_cfg["input_audio_noise_reduction"] = {"type": "near_field"}
 
-            session_cfg = {
-                "type": "transcription",
-                "audio": {"input": audio_input_cfg},
-            }
-
-            await ws.send(
-                json.dumps(
-                    {
-                        "type": "session.update",
-                        "session": session_cfg,
-                    }
-                )
-            )
+            await ws.send(json.dumps({"type": "transcription_session.update", "session": session_cfg}))
             logger.info(
-                f"Connected to OpenAI Realtime transcription (model={self.model}, delay={self.delay}, language={self.language})"
+                f"Connected to OpenAI Realtime transcription (model={self.model}, language={self.language})"
             )
             return ws
 
