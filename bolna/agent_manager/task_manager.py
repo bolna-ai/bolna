@@ -104,6 +104,7 @@ class TaskManager(BaseManager):
         self.rag_latencies = {"turn_latencies": []}
         self.routing_latencies = {"turn_latencies": []}
         self.stream_sid_ts = None
+        self.welcome_message_duration_ms = None
 
         self.task_config = task
 
@@ -945,12 +946,14 @@ class TaskManager(BaseManager):
                                 duration = calculate_audio_duration(
                                     len(data), self.sampling_rate, format=message["meta_info"]["format"]
                                 )
+                                self.welcome_message_duration_ms = round(duration * 1000, 2)
                                 if self.should_record:
                                     self.conversation_recording["output"].append(
                                         {"data": data, "start_time": time.time(), "duration": duration}
                                     )
                         except Exception as e:
                             duration = 0.256
+                            self.welcome_message_duration_ms = round(duration * 1000, 2)
                             logger.error(
                                 "Exception in __forced_first_message for duration calculation: {}".format(str(e))
                             )
@@ -2613,6 +2616,7 @@ class TaskManager(BaseManager):
                         self.routing_latencies["turn_latencies"].append(
                             {
                                 "latency_ms": routing_info["routing_latency_ms"],
+                                "routing_end_ms": round(time.time() * 1000 - self.conversation_start_init_ts, 2),
                                 "routing_model": routing_info.get("routing_model"),
                                 "routing_provider": routing_info.get("routing_provider"),
                                 "previous_node": routing_info.get("previous_node"),
@@ -4329,6 +4333,7 @@ class TaskManager(BaseManager):
                         "rag_latencies": self.rag_latencies,
                         "routing_latencies": self.routing_latencies,
                         "welcome_message_sent_ts": None,
+                        "welcome_message_duration_ms": self.welcome_message_duration_ms,
                         "stream_sid_ts": None,
                         "interruption_stats": self.interruption_manager.get_interruption_stats(
                             self.conversation_start_init_ts
