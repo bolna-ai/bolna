@@ -150,7 +150,7 @@ class OpenAITranscriber(BaseTranscriber):
         self._commit_time = None
 
     async def openai_connect(self) -> ClientConnection:
-        url = f"wss://{self.api_host}/v1/realtime?model={self.model}"
+        url = f"wss://{self.api_host}/v1/realtime?model=gpt-realtime-2"
         headers = {
             "Authorization": f"Bearer {self.api_key}",
         }
