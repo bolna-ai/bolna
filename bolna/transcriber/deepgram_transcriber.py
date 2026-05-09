@@ -60,6 +60,7 @@ class DeepgramTranscriber(BaseTranscriber):
         self.encoding = encoding
         self.api_key = kwargs.get("transcriber_key", os.getenv("DEEPGRAM_AUTH_TOKEN"))
         self.deepgram_host = os.getenv("DEEPGRAM_HOST", "api.deepgram.com")
+        self.deepgram_flux_host = os.getenv("DEEPGRAM_FLUX_HOST", "api.deepgram.com")
         self.transcriber_output_queue = output_queue
         self.transcription_task = None
         self.keywords = keywords
@@ -244,7 +245,9 @@ class DeepgramTranscriber(BaseTranscriber):
         if self.run_id:
             dg_params["tag"] = self.run_id
 
-        websocket_api = "{}://{}/v2/listen?".format(os.getenv("DEEPGRAM_HOST_PROTOCOL", "wss"), self.deepgram_host)
+        websocket_api = "{}://{}/v2/listen?".format(
+            os.getenv("DEEPGRAM_FLUX_HOST_PROTOCOL", "wss"), self.deepgram_flux_host
+        )
         websocket_url = websocket_api + urlencode(dg_params, doseq=True)
         return websocket_url
 
