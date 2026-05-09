@@ -245,9 +245,7 @@ class DeepgramTranscriber(BaseTranscriber):
         if self.run_id:
             dg_params["tag"] = self.run_id
 
-        websocket_api = "{}://{}/v2/listen?".format(
-            os.getenv("DEEPGRAM_HOST_PROTOCOL", "wss"), self.deepgram_flux_host
-        )
+        websocket_api = "{}://{}/v2/listen?".format(os.getenv("DEEPGRAM_HOST_PROTOCOL", "wss"), self.deepgram_flux_host)
         websocket_url = websocket_api + urlencode(dg_params, doseq=True)
         return websocket_url
 
