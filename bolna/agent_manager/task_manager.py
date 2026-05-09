@@ -1819,6 +1819,11 @@ class TaskManager(BaseManager):
         await self.tools["output"].handle_interruption()
         await self.tools["synthesizer"].handle_interruption()
 
+        # handle_interruption clears the welcome's pending mark; its ACK would
+        # otherwise be the only signal that flips this flag.
+        if not self.tools["input"].welcome_message_played():
+            self.tools["input"].is_welcome_message_played = True
+
         if self.generate_precise_transcript:
             await self.sync_history(self.mark_event_meta_data.fetch_cleared_mark_event_data().items(), current_ts)
             self.tools["input"].reset_response_heard_by_user()
