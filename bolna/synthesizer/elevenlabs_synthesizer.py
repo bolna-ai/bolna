@@ -227,11 +227,13 @@ class ElevenlabsSynthesizer(StreamSynthesizer):
                         current_norm = self.normalize_text(self.current_text.strip()).replace('"', "").strip()
                         logger.info(f"Last four char - {last_four} | current text - {current_norm}")
 
-                        if current_norm.endswith(last_four):
+                        last_four_no_space = last_four.replace(" ", "")
+                        if last_four and current_norm.endswith(last_four):
                             logger.info("send end_of_synthesizer_stream")
                             yield b"\x00", ""
                         elif (
-                            current_norm.replace('"', "").replace(" ", "").strip().endswith(last_four.replace(" ", ""))
+                            last_four_no_space
+                            and current_norm.replace('"', "").replace(" ", "").strip().endswith(last_four_no_space)
                         ):
                             logger.info("send end_of_synthesizer_stream on fallback")
                             yield b"\x00", ""
