@@ -231,9 +231,8 @@ class ElevenlabsSynthesizer(StreamSynthesizer):
                         if last_four and current_norm.endswith(last_four):
                             logger.info("send end_of_synthesizer_stream")
                             yield b"\x00", ""
-                        elif (
+                        elif last_four_no_space and current_norm.replace('"', "").replace(" ", "").strip().endswith(
                             last_four_no_space
-                            and current_norm.replace('"', "").replace(" ", "").strip().endswith(last_four_no_space)
                         ):
                             logger.info("send end_of_synthesizer_stream on fallback")
                             yield b"\x00", ""
