@@ -44,6 +44,13 @@ class DictWithMissing(dict):
         return ""
 
 
+def is_s2s_agent(task_or_config: dict) -> bool:
+    if not isinstance(task_or_config, dict):
+        return False
+    tools_config = task_or_config.get("tools_config", task_or_config)
+    return tools_config.get("s2s") is not None
+
+
 def load_file(file_path, is_json=False):
     data = None
     with open(file_path, "r") as f:
@@ -245,7 +252,7 @@ def get_required_input_types(task):
     input_types = dict()
     for i, chain in enumerate(task["toolchain"]["pipelines"]):
         first_model = chain[0]
-        if chain[0] == "transcriber":
+        if chain[0] == "transcriber" or chain[0] == "s2s":
             input_types["audio"] = i
         elif chain[0] == "synthesizer" or chain[0] == "llm":
             input_types["text"] = i
@@ -754,7 +761,7 @@ def convert_to_request_log(
     log["cached"] = is_cached
     log["is_final"] = False
     match component:
-        case LogComponent.LLM:
+        case LogComponent.LLM | LogComponent.S2S:
             log["latency"] = meta_info.get("llm_latency", None) if direction == LogDirection.RESPONSE else None
             log["llm_metadata"] = meta_info.get("llm_metadata", None)
             if direction == LogDirection.RESPONSE:
@@ -875,6 +882,11 @@ def pcm_to_ulaw(pcm_bytes):
     # audioop.lin2ulaw expects 16-bit PCM and returns 8-bit ulaw
     ulaw_bytes = audioop.lin2ulaw(pcm_bytes, 2)  # 2 = sample width in bytes (16-bit)
     return ulaw_bytes
+
+
+def ulaw_to_pcm(ulaw_bytes):
+    """Convert ulaw (8-bit compressed) to PCM audio (16-bit signed linear)."""
+    return audioop.ulaw2lin(ulaw_bytes, 2)
 
 
 def compute_function_pre_call_message(language, function_name, api_tool_pre_call_message):
