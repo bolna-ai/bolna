@@ -1328,8 +1328,8 @@ class TaskManager(BaseManager):
             vad_prefix_padding_ms=provider_cfg.get("vad_prefix_padding_ms", 300),
             reasoning_effort=provider_cfg.get("reasoning_effort"),
             preamble_silence_ms=provider_cfg.get("preamble_silence_ms", 300),
-            temperature=provider_cfg.get("temperature", 0.8),
             max_response_output_tokens=provider_cfg.get("max_response_output_tokens"),
+            transcription_model=provider_cfg.get("transcription_model", "gpt-4o-mini-transcribe"),
         )
         logger.info(f"S2S provider '{provider_name}' initialized | model={provider_cfg.get('model')}")
 

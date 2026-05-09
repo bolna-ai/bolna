@@ -23,18 +23,11 @@ logger = configure_logger(__name__)
 
 OPENAI_REALTIME_URL = "wss://api.openai.com/v1/realtime"
 
-# Beta-format models use flat session config + OpenAI-Beta header
-_BETA_MODEL_PREFIXES = ("gpt-4o-realtime-preview",)
-
 _REASONING_MODEL_PREFIXES = ("gpt-realtime-2",)
 
 
 class OpenAIRealtimeS2S(BaseS2SProvider):
-    """OpenAI Realtime API speech-to-speech provider.
-
-    Supports both beta-format models (gpt-4o-realtime-preview) and
-    GA-format models (gpt-realtime with reasoning).
-    """
+    """OpenAI Realtime API speech-to-speech provider."""
 
     def __init__(
         self,
@@ -49,8 +42,8 @@ class OpenAIRealtimeS2S(BaseS2SProvider):
         vad_prefix_padding_ms: int = 300,
         reasoning_effort: Optional[str] = None,
         preamble_silence_ms: int = 300,
-        temperature: float = 0.8,
         max_response_output_tokens: Optional[int] = None,
+        transcription_model: str = "gpt-4o-mini-transcribe",
         **kwargs,
     ):
         super().__init__(
@@ -66,8 +59,8 @@ class OpenAIRealtimeS2S(BaseS2SProvider):
         self.vad_prefix_padding_ms = vad_prefix_padding_ms
         self.reasoning_effort = reasoning_effort
         self.preamble_silence_ms = preamble_silence_ms
-        self.temperature = temperature
         self.max_response_output_tokens = max_response_output_tokens
+        self.transcription_model = transcription_model
 
         self._ws: Optional[websockets.WebSocketClientProtocol] = None
         self._current_phase: Optional[str] = None  # "commentary" or "final_answer"
@@ -83,26 +76,14 @@ class OpenAIRealtimeS2S(BaseS2SProvider):
             "output_text_tokens": 0,
         }
 
-    @property
-    def _is_beta_model(self) -> bool:
-        """Beta models use flat session config and OpenAI-Beta header."""
-        return self.model.startswith(_BETA_MODEL_PREFIXES)
-
-    # ------------------------------------------------------------------
-    # Connection
-    # ------------------------------------------------------------------
-
     async def connect(self) -> None:
         url = f"{OPENAI_REALTIME_URL}?model={self.model}"
         headers = {"Authorization": f"Bearer {self.api_key}"}
-        if self._is_beta_model:
-            headers["OpenAI-Beta"] = "realtime=v1"
 
         t0 = time.time()
         self._ws = await websockets.connect(url, additional_headers=headers, max_size=None)
         self.connection_time = (time.time() - t0) * 1000
 
-        # Wait for session.created
         raw = await self._ws.recv()
         event = json.loads(raw)
         if event.get("type") != "session.created":
@@ -111,10 +92,7 @@ class OpenAIRealtimeS2S(BaseS2SProvider):
 
         await self._send_session_update()
         await self._await_session_updated()
-        logger.info(
-            f"OpenAI Realtime connected in {self.connection_time:.0f}ms | "
-            f"model={self.model} format={'beta' if self._is_beta_model else 'GA'}"
-        )
+        logger.info(f"OpenAI Realtime connected in {self.connection_time:.0f}ms | model={self.model}")
 
     async def _await_session_updated(self, timeout: float = 2.0) -> None:
         # Surface session.update rejections at connect time; mid-call surfacing is too late.
@@ -138,40 +116,13 @@ class OpenAIRealtimeS2S(BaseS2SProvider):
                 )
 
     async def _send_session_update(self) -> None:
-        if self._is_beta_model:
-            session_config = self._build_beta_session_config()
-        else:
-            session_config = self._build_ga_session_config()
-
+        session_config = self._build_session_config()
         if self.tools:
             session_config["tools"] = self._format_tools()
             session_config["tool_choice"] = "auto"
-
         await self._send({"type": "session.update", "session": session_config})
 
-    def _build_beta_session_config(self) -> dict:
-        """Beta format: flat fields, used by gpt-4o-realtime-preview."""
-        config: dict = {
-            "modalities": ["audio", "text"],
-            "instructions": self.system_prompt,
-            "voice": self.voice,
-            "input_audio_format": "pcm16",
-            "output_audio_format": "pcm16",
-            "input_audio_transcription": {"model": "whisper-1"},
-            "turn_detection": {
-                "type": "server_vad",
-                "threshold": self.vad_threshold,
-                "prefix_padding_ms": self.vad_prefix_padding_ms,
-                "silence_duration_ms": self.vad_silence_duration_ms,
-            },
-            "temperature": self.temperature,
-        }
-        if self.max_response_output_tokens is not None:
-            config["max_response_output_tokens"] = self.max_response_output_tokens
-        return config
-
-    def _build_ga_session_config(self) -> dict:
-        """GA format: nested audio objects, used by gpt-realtime and newer models."""
+    def _build_session_config(self) -> dict:
         config: dict = {
             "type": "realtime",
             "output_modalities": ["audio"],
@@ -179,8 +130,13 @@ class OpenAIRealtimeS2S(BaseS2SProvider):
             "audio": {
                 "input": {
                     "format": {"type": "audio/pcm", "rate": 24000},
-                    "turn_detection": {"type": "semantic_vad"},
-                    "transcription": {"model": "gpt-4o-mini-transcribe"},
+                    "turn_detection": {
+                        "type": "server_vad",
+                        "threshold": self.vad_threshold,
+                        "prefix_padding_ms": self.vad_prefix_padding_ms,
+                        "silence_duration_ms": self.vad_silence_duration_ms,
+                    },
+                    "transcription": {"model": self.transcription_model},
                 },
                 "output": {
                     "format": {"type": "audio/pcm", "rate": 24000},
