@@ -49,7 +49,7 @@ class SarvamSynthesizer(StreamSynthesizer):
         self.sampling_rate = int(sampling_rate)
         self.original_sampling_rate = SARVAM_MODEL_SAMPLING_RATE_MAPPING.get(model, None)
         self.api_url = "https://api.sarvam.ai/text-to-speech"
-        self.ws_url = f"wss://api.sarvam.ai/text-to-speech/ws?model={model}"
+        self.ws_url = f"wss://api.sarvam.ai/text-to-speech/ws?model={model}&send_completion_event=true"
 
         self.language = language
         self.loudness = 1.0
@@ -166,8 +166,16 @@ class SarvamSynthesizer(StreamSynthesizer):
                     chunk = base64.b64decode(data["data"]["audio"])
                     yield chunk
 
-                if self.last_text_sent:
+                event_type = data.get("data", {}).get("event_type") or data.get("event_type")
+                if event_type == "final":
+                    self.last_text_sent = False
                     yield b"\x00"
+                    continue
+
+                if data.get("type") == "error":
+                    logger.error(f"Sarvam TTS error response: {data}")
+                    self.connection_error = json.dumps(data)
+                    return
 
             except websockets.exceptions.ConnectionClosed:
                 break
