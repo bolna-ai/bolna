@@ -168,6 +168,8 @@ class TaskManager(BaseManager):
         self.has_transfer = False
         self.hangup_triggered = False
         self.hangup_triggered_at = None
+        self.hangup_decision_at = None
+        self.dtmf_events: list[dict] = []
         self._agent_end_timestamps: dict = {}
         self.hangup_message_queued = False
         self.switch_handoff_messages = {}
@@ -2114,6 +2116,10 @@ class TaskManager(BaseManager):
                 dtmf_digits = await self.queues["dtmf"].get()
                 logger.info(f"DTMF collected {dtmf_digits}")
 
+                _dtmf_ts = round(time.time() * 1000 - self.conversation_start_init_ts, 2)
+                for _digit in dtmf_digits:
+                    self.dtmf_events.append({"digit": _digit, "ts_ms": _dtmf_ts})
+
                 dtmf_message = "dtmf_number: " + dtmf_digits
                 base_meta_info = {
                     "io": self.tools["input"].io_provider,
@@ -3269,6 +3275,8 @@ class TaskManager(BaseManager):
         llm_response = ""
 
     async def process_call_hangup(self):
+        if self.hangup_decision_at is None:
+            self.hangup_decision_at = time.time()
         # Guard: Prevent multiple concurrent hangup attempts
         if self.hangup_triggered or self.conversation_ended:
             logger.info(f"process_call_hangup: Hangup already in progress or conversation ended, skipping")
@@ -4976,7 +4984,12 @@ class TaskManager(BaseManager):
                     if self.hangup_triggered_at
                     else None,
                     "hangup_detail": self.hangup_detail.value if self.hangup_detail else None,
+                    "hangup_decision_ms": round(self.hangup_decision_at * 1000 - self.conversation_start_init_ts, 2)
+                    if self.hangup_decision_at
+                    else None,
                     "voicemail_detected": self.voicemail_handler.detected,
+                    "voicemail_check_count": self.voicemail_handler.check_count,
+                    "dtmf_events": list(self.dtmf_events),
                     "language_switch_events": list(self.language_switch_events),
                     "lid_detection_events": list(getattr(self.tools.get("transcriber"), "lid_detection_events", [])),
                     "transcriber_error_events": list(self.transcriber_error_events),
