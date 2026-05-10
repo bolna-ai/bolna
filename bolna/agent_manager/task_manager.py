@@ -4333,17 +4333,12 @@ class TaskManager(BaseManager):
                         "rag_latencies": self.rag_latencies,
                         "routing_latencies": self.routing_latencies,
                         "welcome_message_sent_ts": None,
-                        "welcome_message_duration_ms": self.welcome_message_duration_ms,
                         "stream_sid_ts": None,
                         "interruption_stats": self.interruption_manager.get_interruption_stats(
                             self.conversation_start_init_ts
                         ),
                         "user_bot_latencies": _user_bot_latencies,
                         "mark_tracking": self.mark_event_meta_data.get_mark_tracking_summary(),
-                        "hangup_triggered_ms": round(self.hangup_triggered_at * 1000 - self.conversation_start_init_ts, 2) if self.hangup_triggered_at else None,
-                        "hangup_detail": str(self.hangup_detail) if self.hangup_detail else None,
-                        "voicemail_detected": self.voicemail_handler.detected,
-                        "call_start_epoch_ms": self.conversation_start_init_ts,
                     },
                     "hangup_detail": self.hangup_detail,
                     "has_transfer": self.has_transfer,
@@ -4365,6 +4360,47 @@ class TaskManager(BaseManager):
                         output["latency_dict"]["stream_sid_ts"] = self.stream_sid_ts - self.conversation_start_init_ts
                 except Exception as e:
                     logger.error(f"error in logging audio latency ts {str(e)}")
+
+                output["progression_data"] = {
+                    "call_start_epoch_ms": self.conversation_start_init_ts,
+                    "llm_latencies": copy.deepcopy(output["latency_dict"]["llm_latencies"]),
+                    "transcriber_latencies": copy.deepcopy(output["latency_dict"]["transcriber_latencies"]),
+                    "synthesizer_latencies": copy.deepcopy(output["latency_dict"]["synthesizer_latencies"]),
+                    "rag_latencies": output["latency_dict"]["rag_latencies"],
+                    "routing_latencies": copy.deepcopy(output["latency_dict"]["routing_latencies"]),
+                    "welcome_message_sent_ts": output["latency_dict"]["welcome_message_sent_ts"],
+                    "welcome_message_duration_ms": self.welcome_message_duration_ms,
+                    "interruption_stats": output["latency_dict"]["interruption_stats"],
+                    "user_bot_latencies": copy.deepcopy(output["latency_dict"]["user_bot_latencies"]),
+                    "mark_tracking": output["latency_dict"]["mark_tracking"],
+                    "hangup_triggered_ms": round(self.hangup_triggered_at * 1000 - self.conversation_start_init_ts, 2) if self.hangup_triggered_at else None,
+                    "hangup_detail": str(self.hangup_detail) if self.hangup_detail else None,
+                    "voicemail_detected": self.voicemail_handler.detected,
+                }
+
+                # Strip PR-added fields from latency_dict sub-dicts so latency_dict stays at master state.
+                # progression_data (deep-copied above) keeps the full enriched versions.
+                _llm_turns = (output["latency_dict"]["llm_latencies"] or {}).get("turn_latencies", [])
+                for _t in _llm_turns:
+                    for _f in ("turn_id", "llm_start_ms", "response_text"):
+                        _t.pop(_f, None)
+
+                _asr_turns = (output["latency_dict"]["transcriber_latencies"] or {}).get("turn_latencies", [])
+                for _t in _asr_turns:
+                    for _f in ("asr_start_ms", "asr_finalized_ms", "asr_turn_start_ms", "final_transcript"):
+                        _t.pop(_f, None)
+
+                _tts_turns = (output["latency_dict"]["synthesizer_latencies"] or {}).get("turn_latencies", [])
+                for _t in _tts_turns:
+                    _t.pop("tts_start_ms", None)
+
+                for _e in output["latency_dict"]["user_bot_latencies"]:
+                    for _f in ("user_first_start_ms", "agent_end_ms"):
+                        _e.pop(_f, None)
+
+                _routing_turns = (output["latency_dict"]["routing_latencies"] or {}).get("turn_latencies", [])
+                for _t in _routing_turns:
+                    _t.pop("routing_end_ms", None)
 
                 tasks_to_cancel.append(process_task_cancellation(self.output_task, "output_task"))
                 tasks_to_cancel.append(process_task_cancellation(self.hangup_task, "hangup_task"))
