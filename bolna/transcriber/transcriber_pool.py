@@ -390,8 +390,18 @@ class TranscriberPool:
             logger.info(f"TranscriberPool: transcriber '{label}' connection dropped, reconnecting")
             await target.run()
 
+        # Carry turn_counter forward so the incoming transcriber continues
+        # the turn sequence rather than restarting from 0. The next speech
+        # event on the new transcriber will increment the counter normally.
+        old_transcriber = self.transcribers[old]
+        inherited_turn_counter = getattr(old_transcriber, "turn_counter", 0)
+        if hasattr(target, "turn_counter"):
+            target.turn_counter = inherited_turn_counter
+        if hasattr(target, "current_turn_id") and getattr(old_transcriber, "current_turn_id", None) is not None:
+            target.current_turn_id = old_transcriber.current_turn_id
+
         self.active_label = label
-        logger.info(f"TranscriberPool: switched {old} -> {label}")
+        logger.info(f"TranscriberPool: switched {old} -> {label} (inherited turn_counter={inherited_turn_counter})")
 
     async def toggle_connection(self):
         """Stop all transcriber connections."""
