@@ -4957,6 +4957,11 @@ class TaskManager(BaseManager):
                     if _seq is not None and _seq in _seq_to_asr_turn:
                         _ub["turn_id"] = _seq_to_asr_turn[_seq]
 
+                for _tts_t in output["progression_data"]["synthesizer_latencies"].get("turn_latencies", []):
+                    _seq = _tts_t.get("sequence_id")
+                    if _seq is not None and _seq in _seq_to_asr_turn:
+                        _tts_t["turn_id"] = _seq_to_asr_turn[_seq]
+
                 # Strip PR-added fields from latency_dict sub-dicts so latency_dict stays at master state.
                 # progression_data (deep-copied above) keeps the full enriched versions.
                 _llm_turns = (output["latency_dict"]["llm_latencies"] or {}).get("turn_latencies", [])
