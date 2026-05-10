@@ -35,6 +35,7 @@ class DefaultInputHandler:
         self.queue = queue
         self.conversation_recording = conversation_recording
         self.is_welcome_message_played = is_welcome_message_played
+        self.welcome_message_played_ts = None
         # This variable stores the response which has been heard by the user
         self.response_heard_by_user = ""
         self.response_heard_by_turn = {}
@@ -212,6 +213,7 @@ class DefaultInputHandler:
                 logger.info("Received mark event for agent_welcome_message")
                 self.audio_chunks_received = 0
                 self.is_welcome_message_played = True
+                self.welcome_message_played_ts = time.time() * 1000
 
             elif message_type == "agent_hangup":
                 logger.info(f"Agent hangup has been triggered")

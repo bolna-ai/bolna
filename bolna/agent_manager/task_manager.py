@@ -105,6 +105,7 @@ class TaskManager(BaseManager):
         self.routing_latencies = {"turn_latencies": []}
         self.stream_sid_ts = None
         self.welcome_message_duration_ms = None
+        self.transcriber_error_events: list[dict] = []
 
         self.task_config = task
 
@@ -3608,6 +3609,13 @@ class TaskManager(BaseManager):
     async def _log_transcriber_connection_error(self, connection_error):
         if connection_error:
             provider = self.task_config["tools_config"]["transcriber"].get("provider", "unknown")
+            self.transcriber_error_events.append(
+                {
+                    "error": connection_error,
+                    "provider": provider,
+                    "ts_ms": round(time.time() * 1000 - self.conversation_start_init_ts, 2),
+                }
+            )
             await self._end_call_on_component_error(
                 TranscriberError(connection_error, provider=provider), HangupReason.TRANSCRIBER_CONNECTION_ERROR
             )
@@ -4969,6 +4977,17 @@ class TaskManager(BaseManager):
                     else None,
                     "hangup_detail": self.hangup_detail.value if self.hangup_detail else None,
                     "voicemail_detected": self.voicemail_handler.detected,
+                    "language_switch_events": list(self.language_switch_events),
+                    "lid_detection_events": list(getattr(self.tools.get("transcriber"), "lid_detection_events", [])),
+                    "transcriber_error_events": list(self.transcriber_error_events),
+                    "welcome_message_played_ts": (
+                        round(
+                            self.tools["input"].welcome_message_played_ts - self.conversation_start_init_ts,
+                            2,
+                        )
+                        if getattr(self.tools.get("input"), "welcome_message_played_ts", None)
+                        else None
+                    ),
                 }
 
                 # In progression_data: promote asr_turn_id to turn_id on LLM entries so the

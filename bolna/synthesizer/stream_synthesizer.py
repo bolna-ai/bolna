@@ -62,6 +62,7 @@ class StreamSynthesizer(BaseSynthesizer):
         self.current_tts_start_ms = None
         self.current_turn_ttfb = None
         self.ws_send_time = None
+        self.current_sequence_chars = 0
 
     # ------------------------------------------------------------------
     # Subclass hooks (override these)
@@ -155,6 +156,7 @@ class StreamSynthesizer(BaseSynthesizer):
         text = message.get("data")
         self.current_text = text
         self.synthesized_characters += len(text) if text else 0
+        self.current_sequence_chars += len(text) if text else 0
         end_of_llm_stream = meta_info.get("end_of_llm_stream", False)
         self.meta_info = copy.deepcopy(meta_info)
         meta_info["text"] = text
@@ -268,6 +270,7 @@ class StreamSynthesizer(BaseSynthesizer):
                         "tts_start_ms": self.current_tts_start_ms,
                         "first_result_latency_ms": round((self.current_turn_ttfb or 0) * 1000),
                         "total_stream_duration_ms": round(total_stream_duration * 1000),
+                        "characters": self.current_sequence_chars,
                     }
                 )
                 self.current_turn_start_time = None
@@ -276,6 +279,7 @@ class StreamSynthesizer(BaseSynthesizer):
                 self.current_tts_start_ms = None
                 self.ws_send_time = None
                 self.current_turn_ttfb = None
+                self.current_sequence_chars = 0
         except Exception:
             pass
 
