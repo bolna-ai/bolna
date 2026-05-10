@@ -3032,7 +3032,11 @@ class TaskManager(BaseManager):
                     if latency:
                         fc_latency_dict = latency.model_dump()
                         fc_latency_dict["turn_id"] = meta_info.get("turn_id")
-                        fc_latency_dict["llm_start_ms"] = round(meta_info.get("llm_start_time", 0) * 1000 - self.conversation_start_init_ts, 2) if meta_info.get("llm_start_time") else None
+                        fc_latency_dict["llm_start_ms"] = (
+                            round(meta_info.get("llm_start_time", 0) * 1000 - self.conversation_start_init_ts, 2)
+                            if meta_info.get("llm_start_time")
+                            else None
+                        )
                         _t = self.tools.get("transcriber")
                         if hasattr(_t, "transcribers") and hasattr(_t, "active_label"):
                             _t = _t.transcribers.get(_t.active_label, _t)
@@ -3061,7 +3065,11 @@ class TaskManager(BaseManager):
                 if latency:
                     latency_dict = latency.model_dump()
                     latency_dict["turn_id"] = meta_info.get("turn_id")
-                    latency_dict["llm_start_ms"] = round(meta_info.get("llm_start_time", 0) * 1000 - self.conversation_start_init_ts, 2) if meta_info.get("llm_start_time") else None
+                    latency_dict["llm_start_ms"] = (
+                        round(meta_info.get("llm_start_time", 0) * 1000 - self.conversation_start_init_ts, 2)
+                        if meta_info.get("llm_start_time")
+                        else None
+                    )
                     _t = self.tools.get("transcriber")
                     if hasattr(_t, "transcribers") and hasattr(_t, "active_label"):
                         _t = _t.transcribers.get(_t.active_label, _t)
@@ -4162,7 +4170,9 @@ class TaskManager(BaseManager):
         text = message["data"]
         meta_info["type"] = "audio"
         meta_info["synthesizer_start_time"] = time.time()
-        meta_info["tts_start_ms"] = round(meta_info["synthesizer_start_time"] * 1000 - self.conversation_start_init_ts, 2)
+        meta_info["tts_start_ms"] = round(
+            meta_info["synthesizer_start_time"] * 1000 - self.conversation_start_init_ts, 2
+        )
         try:
             if not self.conversation_ended and (
                 "is_first_message" in meta_info
@@ -4335,7 +4345,9 @@ class TaskManager(BaseManager):
                     if message["meta_info"].get("end_of_synthesizer_stream", False):
                         _seq = message["meta_info"].get("sequence_id")
                         if _seq is not None:
-                            self._agent_end_timestamps[_seq] = round(time.time() * 1000 - self.conversation_start_init_ts, 2)
+                            self._agent_end_timestamps[_seq] = round(
+                                time.time() * 1000 - self.conversation_start_init_ts, 2
+                            )
                         self.interruption_manager.on_successful_response_delivered(sequence_id)
                         self.interruption_manager.on_agent_speech_ended()
                     # Reset asked_if_user_is_still_there flag after any message except is_user_online_message
@@ -4862,15 +4874,23 @@ class TaskManager(BaseManager):
                 _user_bot_latencies = [
                     {
                         "sequence_id": e["sequence_id"],
-                        "user_start_ms": round(e["user_start_s"] * 1000 - _call_start_ms, 2) if e.get("user_start_s") and e["user_start_s"] > 0 else None,
-                        "user_first_start_ms": round(e["user_first_start_s"] * 1000 - _call_start_ms, 2) if e.get("user_first_start_s") and e["user_first_start_s"] > 0 else None,
+                        "user_start_ms": round(e["user_start_s"] * 1000 - _call_start_ms, 2)
+                        if e.get("user_start_s") and e["user_start_s"] > 0
+                        else None,
+                        "user_first_start_ms": round(e["user_first_start_s"] * 1000 - _call_start_ms, 2)
+                        if e.get("user_first_start_s") and e["user_first_start_s"] > 0
+                        else None,
                         "user_end_ms": round(e["user_end_s"] * 1000 - _call_start_ms, 2),
                         "agent_start_ms": round(e["agent_start_s"] * 1000 - _call_start_ms, 2),
                         "agent_end_ms": self._agent_end_timestamps.get(e["sequence_id"]),
                         "latency_ms": e["latency_ms"],
                         # agent_end_ms: actual playback end from provider mark ACK (more accurate
                         # than ElevenLabs stream end). Present only when the final mark was ACKed.
-                        **({"agent_end_ms": round(e["agent_end_s"] * 1000 - _call_start_ms, 2)} if e.get("agent_end_s") is not None else {}),
+                        **(
+                            {"agent_end_ms": round(e["agent_end_s"] * 1000 - _call_start_ms, 2)}
+                            if e.get("agent_end_s") is not None
+                            else {}
+                        ),
                     }
                     for e in self.interruption_manager.user_bot_latencies
                 ]
@@ -4936,7 +4956,9 @@ class TaskManager(BaseManager):
                     "interruption_stats": output["latency_dict"]["interruption_stats"],
                     "user_bot_latencies": copy.deepcopy(output["latency_dict"]["user_bot_latencies"]),
                     "mark_tracking": output["latency_dict"]["mark_tracking"],
-                    "hangup_triggered_ms": round(self.hangup_triggered_at * 1000 - self.conversation_start_init_ts, 2) if self.hangup_triggered_at else None,
+                    "hangup_triggered_ms": round(self.hangup_triggered_at * 1000 - self.conversation_start_init_ts, 2)
+                    if self.hangup_triggered_at
+                    else None,
                     "hangup_detail": self.hangup_detail.value if self.hangup_detail else None,
                     "voicemail_detected": self.voicemail_handler.detected,
                 }
