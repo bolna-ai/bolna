@@ -3033,6 +3033,10 @@ class TaskManager(BaseManager):
                         fc_latency_dict = latency.model_dump()
                         fc_latency_dict["turn_id"] = meta_info.get("turn_id")
                         fc_latency_dict["llm_start_ms"] = round(meta_info.get("llm_start_time", 0) * 1000 - self.conversation_start_init_ts, 2) if meta_info.get("llm_start_time") else None
+                        _t = self.tools.get("transcriber")
+                        if hasattr(_t, "transcribers") and hasattr(_t, "active_label"):
+                            _t = _t.transcribers.get(_t.active_label, _t)
+                        fc_latency_dict["asr_turn_id"] = getattr(_t, "turn_counter", None)
                         prev = self.llm_latencies.turn_latencies[-1] if self.llm_latencies.turn_latencies else None
                         if prev and prev.get("sequence_id") == fc_latency_dict.get("sequence_id"):
                             self.llm_latencies.turn_latencies[-1] = fc_latency_dict
@@ -3058,6 +3062,10 @@ class TaskManager(BaseManager):
                     latency_dict = latency.model_dump()
                     latency_dict["turn_id"] = meta_info.get("turn_id")
                     latency_dict["llm_start_ms"] = round(meta_info.get("llm_start_time", 0) * 1000 - self.conversation_start_init_ts, 2) if meta_info.get("llm_start_time") else None
+                    _t = self.tools.get("transcriber")
+                    if hasattr(_t, "transcribers") and hasattr(_t, "active_label"):
+                        _t = _t.transcribers.get(_t.active_label, _t)
+                    latency_dict["asr_turn_id"] = getattr(_t, "turn_counter", None)
                     previous_latency_item = (
                         self.llm_latencies.turn_latencies[-1] if self.llm_latencies.turn_latencies else None
                     )
@@ -4929,7 +4937,7 @@ class TaskManager(BaseManager):
                     "user_bot_latencies": copy.deepcopy(output["latency_dict"]["user_bot_latencies"]),
                     "mark_tracking": output["latency_dict"]["mark_tracking"],
                     "hangup_triggered_ms": round(self.hangup_triggered_at * 1000 - self.conversation_start_init_ts, 2) if self.hangup_triggered_at else None,
-                    "hangup_detail": str(self.hangup_detail) if self.hangup_detail else None,
+                    "hangup_detail": self.hangup_detail.value if self.hangup_detail else None,
                     "voicemail_detected": self.voicemail_handler.detected,
                 }
 
@@ -4937,7 +4945,7 @@ class TaskManager(BaseManager):
                 # progression_data (deep-copied above) keeps the full enriched versions.
                 _llm_turns = (output["latency_dict"]["llm_latencies"] or {}).get("turn_latencies", [])
                 for _t in _llm_turns:
-                    for _f in ("turn_id", "llm_start_ms", "response_text"):
+                    for _f in ("turn_id", "llm_start_ms", "response_text", "asr_turn_id"):
                         _t.pop(_f, None)
 
                 _asr_turns = (output["latency_dict"]["transcriber_latencies"] or {}).get("turn_latencies", [])
