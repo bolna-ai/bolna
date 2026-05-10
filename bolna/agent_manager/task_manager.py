@@ -4941,6 +4941,22 @@ class TaskManager(BaseManager):
                     "voicemail_detected": self.voicemail_handler.detected,
                 }
 
+                # In progression_data: promote asr_turn_id to turn_id on LLM entries so the
+                # progression service can group by turn_id directly without seq indirection.
+                # Also stamp turn_id on user_bot_latencies using the same asr_turn map.
+                _seq_to_asr_turn: dict = {}
+                for _lt in output["progression_data"]["llm_latencies"].get("turn_latencies", []):
+                    _seq = _lt.get("sequence_id")
+                    _asr_tid = _lt.get("asr_turn_id")
+                    if _seq is not None and _asr_tid is not None:
+                        _seq_to_asr_turn[_seq] = _asr_tid
+                        _lt["turn_id"] = _asr_tid  # overwrite _response_turn_id with asr_turn_id
+
+                for _ub in output["progression_data"]["user_bot_latencies"]:
+                    _seq = _ub.get("sequence_id")
+                    if _seq is not None and _seq in _seq_to_asr_turn:
+                        _ub["turn_id"] = _seq_to_asr_turn[_seq]
+
                 # Strip PR-added fields from latency_dict sub-dicts so latency_dict stays at master state.
                 # progression_data (deep-copied above) keeps the full enriched versions.
                 _llm_turns = (output["latency_dict"]["llm_latencies"] or {}).get("turn_latencies", [])
