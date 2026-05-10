@@ -75,6 +75,7 @@ class AssemblyAITranscriber(BaseTranscriber):
         self.connection_authenticated = False
         self.current_turn_start_time = None
         self.current_turn_id = None
+        self.turn_counter = 0
         self.current_turn_interim_details = []
         self.connection_error = None
         self._turn_start_epoch_ms = None
@@ -399,7 +400,8 @@ class AssemblyAITranscriber(BaseTranscriber):
                             if self.current_turn_start_time is None:
                                 self.current_turn_start_time = time.perf_counter()
                                 self._turn_start_epoch_ms = timestamp_ms()
-                                self.current_turn_id = self.generate_request_id()
+                                self.turn_counter += 1
+                                self.current_turn_id = self.turn_counter
                                 self.current_turn_interim_details = []
                                 if "transcriber_first_result_latency" in (self.meta_info or {}):
                                     del self.meta_info["transcriber_first_result_latency"]
@@ -452,7 +454,8 @@ class AssemblyAITranscriber(BaseTranscriber):
                             if self.current_turn_start_time is None:
                                 self.current_turn_start_time = time.perf_counter()
                                 self._turn_start_epoch_ms = timestamp_ms()
-                                self.current_turn_id = self.generate_request_id()
+                                self.turn_counter += 1
+                                self.current_turn_id = self.turn_counter
                                 self.current_turn_interim_details = []
                                 if "transcriber_first_result_latency" in (self.meta_info or {}):
                                     del self.meta_info["transcriber_first_result_latency"]

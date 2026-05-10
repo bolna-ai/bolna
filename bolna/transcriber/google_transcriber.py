@@ -84,6 +84,7 @@ class GoogleTranscriber(BaseTranscriber):
         self.turn_latencies = []
         self.current_turn_start_time = None
         self.current_turn_id = None
+        self.turn_counter = 0
         self._turn_start_epoch_ms = None
 
         # Request tracking
@@ -203,9 +204,8 @@ class GoogleTranscriber(BaseTranscriber):
                         # start turn-level tracking
                         self.current_turn_start_time = self.meta_info["transcriber_start_time"]
                         self._turn_start_epoch_ms = timestamp_ms()
-                        self.current_turn_id = (
-                            self.meta_info.get("turn_id") or self.meta_info.get("request_id") or self._request_id
-                        )
+                        self.turn_counter += 1
+                        self.current_turn_id = self.turn_counter
                     except Exception:
                         pass
 

@@ -3041,6 +3041,10 @@ class TaskManager(BaseManager):
                         if hasattr(_t, "transcribers") and hasattr(_t, "active_label"):
                             _t = _t.transcribers.get(_t.active_label, _t)
                         fc_latency_dict["asr_turn_id"] = getattr(_t, "turn_counter", None)
+                        fc_latency_dict["input_tokens"] = actual_input_tokens
+                        fc_latency_dict["output_tokens"] = actual_output_tokens
+                        fc_latency_dict["reasoning_tokens"] = actual_reasoning_tokens
+                        fc_latency_dict["cached_tokens"] = actual_cached_tokens
                         prev = self.llm_latencies.turn_latencies[-1] if self.llm_latencies.turn_latencies else None
                         if prev and prev.get("sequence_id") == fc_latency_dict.get("sequence_id"):
                             self.llm_latencies.turn_latencies[-1] = fc_latency_dict
@@ -3074,6 +3078,10 @@ class TaskManager(BaseManager):
                     if hasattr(_t, "transcribers") and hasattr(_t, "active_label"):
                         _t = _t.transcribers.get(_t.active_label, _t)
                     latency_dict["asr_turn_id"] = getattr(_t, "turn_counter", None)
+                    latency_dict["input_tokens"] = actual_input_tokens
+                    latency_dict["output_tokens"] = actual_output_tokens
+                    latency_dict["reasoning_tokens"] = actual_reasoning_tokens
+                    latency_dict["cached_tokens"] = actual_cached_tokens
                     previous_latency_item = (
                         self.llm_latencies.turn_latencies[-1] if self.llm_latencies.turn_latencies else None
                     )
@@ -4988,7 +4996,16 @@ class TaskManager(BaseManager):
                 # progression_data (deep-copied above) keeps the full enriched versions.
                 _llm_turns = (output["latency_dict"]["llm_latencies"] or {}).get("turn_latencies", [])
                 for _t in _llm_turns:
-                    for _f in ("turn_id", "llm_start_ms", "response_text", "asr_turn_id"):
+                    for _f in (
+                        "turn_id",
+                        "llm_start_ms",
+                        "response_text",
+                        "asr_turn_id",
+                        "input_tokens",
+                        "output_tokens",
+                        "reasoning_tokens",
+                        "cached_tokens",
+                    ):
                         _t.pop(_f, None)
 
                 _asr_turns = (output["latency_dict"]["transcriber_latencies"] or {}).get("turn_latencies", [])
