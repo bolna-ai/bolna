@@ -172,6 +172,7 @@ class StreamSynthesizer(BaseSynthesizer):
             self.current_turn_start_time = time.perf_counter()
             self.ws_send_time = None
             self.current_turn_ttfb = None
+            self.last_text_sent = False
             logger.info(f"Push new_turn text_len={len(meta_info.get('text', '') or '')}")
         self.current_turn_id = meta_info.get("turn_id") or meta_info.get("sequence_id")
 
