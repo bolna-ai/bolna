@@ -536,6 +536,7 @@ async def write_request_logs(message, run_id):
         LogComponent.LLM_HANGUP,
         LogComponent.LLM_VOICEMAIL,
         LogComponent.LLM_LANGUAGE_DETECTION,
+        LogComponent.S2S,
     ):
         # Convert dict to string if necessary
         if isinstance(message_data, dict):
