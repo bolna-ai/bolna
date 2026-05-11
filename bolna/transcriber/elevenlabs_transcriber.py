@@ -471,7 +471,7 @@ class ElevenLabsTranscriber(BaseTranscriber):
 
                 elif msg_type == "committed_transcript_with_timestamps":
                     transcript = msg.get("text", "")
-                    words = msg.get("words", [])
+                    words = msg.get("words") or []
                     detected_language = msg.get("language_code")
                     logger.info(f"Committed transcript with timestamps: {transcript} ({len(words)} words)")
 
