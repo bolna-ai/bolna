@@ -729,6 +729,44 @@ class TaskManager(BaseManager):
         except (TypeError, json.JSONDecodeError):
             api_call_detail["response_json"] = None
 
+    async def _execute_api_tool(self, called_fun, url, method, param, api_token, headers, meta_info, fn_args):
+        runtime_args = self._extract_api_call_runtime_args(fn_args)
+        try:
+            prepared_request = prepare_api_request(param, api_token, headers, **runtime_args)
+        except Exception as exc:
+            logger.warning(f"Could not prepare structured function call request for logging: {exc}")
+            prepared_request = {"request_body": None, "api_params": None, "headers": headers}
+        function_call_log = self._start_api_call_detail(
+            called_fun=called_fun,
+            url=url,
+            method=method,
+            param=param,
+            headers=prepared_request["headers"],
+            meta_info=meta_info,
+            runtime_args=runtime_args,
+            request_body=prepared_request["request_body"],
+            api_params=prepared_request["api_params"],
+        )
+        response = await trigger_api(
+            url=url,
+            method=method.lower() if isinstance(method, str) else method,
+            param=param,
+            api_token=api_token,
+            headers_data=headers,
+            meta_info=meta_info,
+            run_id=self.run_id,
+            return_response_metadata=True,
+            **fn_args,
+        )
+        self._finalize_api_call_detail(
+            function_call_log,
+            response=response.get("body"),
+            status_code=response.get("status_code"),
+            content_type=response.get("content_type"),
+            error=response.get("error"),
+        )
+        return response
+
     @property
     def history(self):
         return self.conversation_history.messages
@@ -2891,45 +2929,7 @@ class TaskManager(BaseManager):
             )
             return
 
-        runtime_args = self._extract_api_call_runtime_args(resp)
-        try:
-            prepared_request = prepare_api_request(param, api_token, headers, **runtime_args)
-        except Exception as exc:
-            logger.warning(f"Could not prepare structured function call request for logging: {exc}")
-            prepared_request = {
-                "request_body": None,
-                "api_params": None,
-                "headers": headers,
-            }
-        function_call_log = self._start_api_call_detail(
-            called_fun=called_fun,
-            url=url,
-            method=method,
-            param=param,
-            headers=prepared_request["headers"],
-            meta_info=meta_info,
-            runtime_args=runtime_args,
-            request_body=prepared_request["request_body"],
-            api_params=prepared_request["api_params"],
-        )
-        response = await trigger_api(
-            url=url,
-            method=method.lower(),
-            param=param,
-            api_token=api_token,
-            headers_data=headers,
-            meta_info=meta_info,
-            run_id=self.run_id,
-            return_response_metadata=True,
-            **resp,
-        )
-        self._finalize_api_call_detail(
-            function_call_log,
-            response=response.get("body"),
-            status_code=response.get("status_code"),
-            content_type=response.get("content_type"),
-            error=response.get("error"),
-        )
+        response = await self._execute_api_tool(called_fun, url, method, param, api_token, headers, meta_info, resp)
         function_response = str(response.get("body"))
         get_res_keys, get_res_values = await computed_api_response(function_response)
 
@@ -5211,8 +5211,10 @@ class TaskManager(BaseManager):
             headers = tool_config.get("headers", {})
 
             meta_info = {"request_id": str(uuid.uuid4()), "sequence_id": None}
-            result = await trigger_api(url, method, param, api_token, headers, meta_info, self.run_id, **fn_args)
-            await s2s.send_function_result(event.call_id, str(result))
+            response = await self._execute_api_tool(
+                event.name, url, method, param, api_token, headers, meta_info, fn_args
+            )
+            await s2s.send_function_result(event.call_id, str(response.get("body", response)))
 
             if is_transfer:
                 logger.info(f"S2S transfer_call triggered with args: {fn_args}")
