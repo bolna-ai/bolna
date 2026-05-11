@@ -3114,6 +3114,7 @@ class TaskManager(BaseManager):
                         if hasattr(_t, "transcribers") and hasattr(_t, "active_label"):
                             _t = _t.transcribers.get(_t.active_label, _t)
                         fc_latency_dict["asr_turn_id"] = getattr(_t, "turn_counter", None)
+                        fc_latency_dict["model"] = self.llm_config.get("model") if self.llm_config else None
                         fc_latency_dict["input_tokens"] = actual_input_tokens
                         fc_latency_dict["output_tokens"] = actual_output_tokens
                         fc_latency_dict["reasoning_tokens"] = actual_reasoning_tokens
@@ -3151,6 +3152,7 @@ class TaskManager(BaseManager):
                     if hasattr(_t, "transcribers") and hasattr(_t, "active_label"):
                         _t = _t.transcribers.get(_t.active_label, _t)
                     latency_dict["asr_turn_id"] = getattr(_t, "turn_counter", None)
+                    latency_dict["model"] = self.llm_config.get("model") if self.llm_config else None
                     latency_dict["input_tokens"] = actual_input_tokens
                     latency_dict["output_tokens"] = actual_output_tokens
                     latency_dict["reasoning_tokens"] = actual_reasoning_tokens
