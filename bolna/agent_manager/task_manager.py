@@ -4434,12 +4434,14 @@ class TaskManager(BaseManager):
                         logger.info(f"Audio blocked: discarding message (sequence_id={sequence_id})")
                         if sequence_id is not None and sequence_id not in self._blocked_sequences:
                             self._blocked_sequences.add(sequence_id)
-                            self.blocked_audio_events.append({
-                                "sequence_id": sequence_id,
-                                "ts_ms": round(time.time() * 1000 - self.conversation_start_init_ts, 2),
-                                "is_audio_playing": self.tools["input"].is_audio_being_played_to_user(),
-                                "response_in_pipeline": self.response_in_pipeline,
-                            })
+                            self.blocked_audio_events.append(
+                                {
+                                    "sequence_id": sequence_id,
+                                    "ts_ms": round(time.time() * 1000 - self.conversation_start_init_ts, 2),
+                                    "is_audio_playing": self.tools["input"].is_audio_being_played_to_user(),
+                                    "response_in_pipeline": self.response_in_pipeline,
+                                }
+                            )
                         self._drop_staged_assistant_history(sequence_id, "output_blocked")
                         # Null byte (b'\x00') is the end-of-stream control signal, not audio.
                         # Always send it through handle() so the is_final_chunk post-mark is
