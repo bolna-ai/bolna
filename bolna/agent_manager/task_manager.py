@@ -106,6 +106,8 @@ class TaskManager(BaseManager):
         self.stream_sid_ts = None
         self.welcome_message_duration_ms = None
         self.transcriber_error_events: list[dict] = []
+        self.blocked_audio_events: list[dict] = []
+        self._blocked_sequences: set = set()  # dedup: only record first block per sequence
 
         self.task_config = task
 
@@ -3787,7 +3789,10 @@ class TaskManager(BaseManager):
                         ):
                             logger.info(f"Condition for interruption hit")
                             self.interruption_manager.on_user_speech_started()
-                            _asr_turn_id = getattr(self.tools.get("transcriber"), "current_turn_id", None)
+                            _t = self.tools.get("transcriber")
+                            if hasattr(_t, "transcribers") and hasattr(_t, "active_label"):
+                                _t = _t.transcribers.get(_t.active_label, _t)
+                            _asr_turn_id = getattr(_t, "current_turn_id", None)
                             self.interruption_manager.on_interruption_triggered(asr_turn_id=_asr_turn_id)
                             # Also record in the interrupted set for was_interrupted annotation
                             self.interruption_manager.record_interrupted_transcriber_turn(_asr_turn_id)
@@ -4423,6 +4428,14 @@ class TaskManager(BaseManager):
                     elif status == "BLOCK":
                         # Audio blocked (user speaking or invalid sequence) - discard
                         logger.info(f"Audio blocked: discarding message (sequence_id={sequence_id})")
+                        if sequence_id is not None and sequence_id not in self._blocked_sequences:
+                            self._blocked_sequences.add(sequence_id)
+                            self.blocked_audio_events.append({
+                                "sequence_id": sequence_id,
+                                "ts_ms": round(time.time() * 1000 - self.conversation_start_init_ts, 2),
+                                "is_audio_playing": self.tools["input"].is_audio_being_played_to_user(),
+                                "response_in_pipeline": self.response_in_pipeline,
+                            })
                         self._drop_staged_assistant_history(sequence_id, "output_blocked")
                         # Null byte (b'\x00') is the end-of-stream control signal, not audio.
                         # Always send it through handle() so the is_final_chunk post-mark is
@@ -5093,6 +5106,7 @@ class TaskManager(BaseManager):
                     "lid_detection_events": list(getattr(self.tools.get("transcriber"), "lid_detection_events", [])),
                     "transcriber_error_events": list(self.transcriber_error_events),
                     "transcriber_reconnect_count": getattr(self.tools.get("transcriber"), "reconnect_count", 0),
+                    "blocked_audio_events": list(self.blocked_audio_events),
                     "welcome_message_played_ts": (
                         round(
                             self.tools["input"].welcome_message_played_ts - self.conversation_start_init_ts,
