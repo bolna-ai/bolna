@@ -5137,12 +5137,20 @@ class TaskManager(BaseManager):
                         "output_tokens",
                         "reasoning_tokens",
                         "cached_tokens",
+                        "model",
+                        "connection_latency_ms",
                     ):
                         _t.pop(_f, None)
 
                 _asr_turns = (output["latency_dict"]["transcriber_latencies"] or {}).get("turn_latencies", [])
                 for _t in _asr_turns:
-                    for _f in ("asr_start_ms", "asr_finalized_ms", "asr_turn_start_ms", "final_transcript"):
+                    for _f in (
+                        "asr_start_ms",
+                        "asr_finalized_ms",
+                        "asr_turn_start_ms",
+                        "final_transcript",
+                        "was_interrupted",
+                    ):
                         _t.pop(_f, None)
 
                 _tts_turns = (output["latency_dict"]["synthesizer_latencies"] or {}).get("turn_latencies", [])
