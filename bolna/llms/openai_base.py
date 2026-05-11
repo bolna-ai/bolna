@@ -407,6 +407,10 @@ class OpenAICompatibleLLM(BaseLLM):
         except Exception as e:
             if self.previous_response_id and self._is_stale_response_error(e):
                 logger.warning(f"Stale previous_response_id, retrying with full history: {e}")
+                if isinstance(meta_info, dict):
+                    meta_info.setdefault("_non_fatal_errors", []).append(
+                        {"error_type": "stale_response_id", "error": str(e), "model": self.model}
+                    )
                 self.previous_response_id = None
                 async for chunk in self._generate_stream_responses(
                     messages, synthesize, request_json, meta_info, tool_choice

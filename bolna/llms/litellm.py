@@ -103,6 +103,10 @@ class LiteLLM(BaseLLM):
                     is_cached=False,
                     run_id=self.run_id,
                 )
+            if isinstance(meta_info, dict):
+                meta_info.setdefault("_non_fatal_errors", []).append(
+                    {"error_type": "content_policy_violation", "error": error_message, "model": self.model}
+                )
             return
         except AuthenticationError as e:
             logger.error(f"LiteLLM authentication failed: Invalid or expired API key - {e}")
@@ -204,6 +208,10 @@ class LiteLLM(BaseLLM):
                     direction=LogDirection.WARNING,
                     is_cached=False,
                     run_id=self.run_id,
+                )
+            if isinstance(meta_info, dict):
+                meta_info.setdefault("_non_fatal_errors", []).append(
+                    {"error_type": "content_policy_violation", "error": error_message, "model": self.model}
                 )
             # Don't re-raise - allow graceful degradation for content policy violations
         except AuthenticationError as e:

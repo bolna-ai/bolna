@@ -170,6 +170,7 @@ class TaskManager(BaseManager):
         self.hangup_triggered_at = None
         self.hangup_decision_at = None
         self.dtmf_events: list[dict] = []
+        self.non_fatal_llm_error_events: list[dict] = []
         self._agent_end_timestamps: dict = {}
         self.hangup_message_queued = False
         self.switch_handoff_messages = {}
@@ -3184,6 +3185,7 @@ class TaskManager(BaseManager):
         should_bypass_synth = "bypass_synth" in meta_info and meta_info["bypass_synth"] is True
         next_step = self._get_next_step(sequence, "llm")
         meta_info["llm_start_time"] = time.time()
+        meta_info["_non_fatal_errors"] = []
 
         if self.turn_based_conversation:
             self.history.append({"role": "user", "content": message["data"]})
@@ -3201,6 +3203,10 @@ class TaskManager(BaseManager):
             )
 
         await self.__do_llm_generation(messages, meta_info, next_step, should_bypass_synth)
+
+        for _err in meta_info.get("_non_fatal_errors", []):
+            self.non_fatal_llm_error_events.append(_err)
+
         # TODO : Write a better check for completion prompt
 
         # Hangup detection - now supported for all agent types including graph_agent
@@ -4990,6 +4996,7 @@ class TaskManager(BaseManager):
                     "voicemail_detected": self.voicemail_handler.detected,
                     "voicemail_check_count": self.voicemail_handler.check_count,
                     "dtmf_events": list(self.dtmf_events),
+                    "non_fatal_llm_error_events": list(self.non_fatal_llm_error_events),
                     "language_switch_events": list(self.language_switch_events),
                     "lid_detection_events": list(getattr(self.tools.get("transcriber"), "lid_detection_events", [])),
                     "transcriber_error_events": list(self.transcriber_error_events),
