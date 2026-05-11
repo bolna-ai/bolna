@@ -26,6 +26,7 @@ class BaseS2SProvider(ABC):
         self.tools = tools or []
         self.connection_time: Optional[float] = None
         self.turn_latencies: list = []
+        self.first_audio_latencies: list = []
 
     @abstractmethod
     async def connect(self) -> None: ...

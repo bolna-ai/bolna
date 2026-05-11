@@ -5462,6 +5462,7 @@ class TaskManager(BaseManager):
                 s2s_provider = self.tools.get("s2s")
                 s2s_connection_time = s2s_provider.connection_time if s2s_provider else None
                 s2s_turn_latencies = s2s_provider.turn_latencies if s2s_provider else []
+                s2s_first_audio_latencies = s2s_provider.first_audio_latencies if s2s_provider else []
 
                 output = {
                     "messages": self.history,
@@ -5475,6 +5476,7 @@ class TaskManager(BaseManager):
                     "latency_dict": {
                         "s2s_connection_latency_ms": s2s_connection_time,
                         "s2s_turn_latencies": s2s_turn_latencies,
+                        "s2s_first_audio_latencies": s2s_first_audio_latencies,
                         "welcome_message_sent_ts": None,
                         "stream_sid_ts": None,
                     },

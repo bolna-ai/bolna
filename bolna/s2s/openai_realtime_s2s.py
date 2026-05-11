@@ -66,6 +66,7 @@ class OpenAIRealtimeS2S(BaseS2SProvider):
         self._current_phase: Optional[str] = None  # "commentary" or "final_answer"
         self._current_response_transcript = ""
         self._turn_start_time: Optional[float] = None
+        self._first_audio_recorded_this_turn: bool = False
         self._response_done_event: asyncio.Event = asyncio.Event()
         self._response_done_event.set()
         self.usage_total = {
@@ -188,6 +189,9 @@ class OpenAIRealtimeS2S(BaseS2SProvider):
 
             # --- Audio output (beta: response.audio.delta, GA: response.output_audio.delta) ---
             if event_type in ("response.audio.delta", "response.output_audio.delta"):
+                if not self._first_audio_recorded_this_turn and self._turn_start_time:
+                    self.first_audio_latencies.append((time.time() - self._turn_start_time) * 1000)
+                    self._first_audio_recorded_this_turn = True
                 audio_bytes = base64.b64decode(event["delta"])
                 is_preamble = self._current_phase == "commentary"
                 yield AudioDelta(data=audio_bytes, is_preamble=is_preamble)
@@ -284,6 +288,7 @@ class OpenAIRealtimeS2S(BaseS2SProvider):
 
             elif event_type == "response.created":
                 self._turn_start_time = time.time()
+                self._first_audio_recorded_this_turn = False
                 self._response_done_event.clear()
 
             elif event_type == "input_audio_buffer.speech_stopped":
