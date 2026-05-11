@@ -631,6 +631,12 @@ class DeepgramTranscriber(BaseTranscriber):
                             self.current_turn_id = self.turn_counter
                             self._turn_pending = False
                             logger.info(f"Starting new turn with turn_id: {self.current_turn_id}")
+                        elif self.current_turn_id is None:
+                            # SpeechStarted was suppressed (e.g. Deepgram VAD inhibited during
+                            # agent audio playback) but real speech arrived — still assign a turn_id.
+                            self.turn_counter += 1
+                            self.current_turn_id = self.turn_counter
+                            logger.info(f"Turn id assigned without SpeechStarted: {self.current_turn_id}")
                         # Calculate latency using end position (start + duration) for cumulative transcripts
                         self.__set_transcription_cursor(msg)
                         audio_position_end = self.transcription_cursor
