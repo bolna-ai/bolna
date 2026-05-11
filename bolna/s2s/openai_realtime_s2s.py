@@ -66,6 +66,8 @@ class OpenAIRealtimeS2S(BaseS2SProvider):
         self._current_phase: Optional[str] = None  # "commentary" or "final_answer"
         self._current_response_transcript = ""
         self._turn_start_time: Optional[float] = None
+        self._response_done_event: asyncio.Event = asyncio.Event()
+        self._response_done_event.set()
         self.usage_total = {
             "input_tokens": 0,
             "output_tokens": 0,
@@ -247,6 +249,7 @@ class OpenAIRealtimeS2S(BaseS2SProvider):
                 self._current_response_transcript = ""
                 self._current_phase = None
                 usage = self._extract_usage(event)
+                self._response_done_event.set()
                 yield ResponseDone(transcript=transcript, usage=usage)
 
             # --- Interruption ---
@@ -270,6 +273,7 @@ class OpenAIRealtimeS2S(BaseS2SProvider):
 
             elif event_type == "response.created":
                 self._turn_start_time = time.time()
+                self._response_done_event.clear()
 
             elif event_type == "input_audio_buffer.speech_stopped":
                 logger.debug("OpenAI VAD: speech_stopped")
@@ -307,7 +311,17 @@ class OpenAIRealtimeS2S(BaseS2SProvider):
         )
 
     async def commit_function_results(self) -> None:
+        await self._wait_for_response_done()
         await self._send({"type": "response.create"})
+
+    async def _wait_for_response_done(self, timeout: float = 5.0) -> None:
+        # OpenAI rejects response.create while another response is active; wait for the prior one to finish.
+        if self._response_done_event.is_set():
+            return
+        try:
+            await asyncio.wait_for(self._response_done_event.wait(), timeout=timeout)
+        except asyncio.TimeoutError:
+            logger.warning("Timed out waiting for response.done before commit; sending anyway")
 
     # ------------------------------------------------------------------
     # Trigger response (e.g. welcome message)
@@ -332,6 +346,7 @@ class OpenAIRealtimeS2S(BaseS2SProvider):
             response_config["reasoning"] = {"effort": reasoning_effort}
         if response_config:
             payload["response"] = response_config
+        await self._wait_for_response_done()
         await self._send(payload)
 
     # ------------------------------------------------------------------
