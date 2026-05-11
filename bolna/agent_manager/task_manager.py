@@ -363,6 +363,7 @@ class TaskManager(BaseManager):
         # Records every manual switch_language tool call — used post-call to
         # compare against LID shadow detections (precision / latency analysis).
         self.language_switch_events: list[dict] = []
+        self.transfer_call_events: list[dict] = []
         self.hangup_task = None
 
         self.conversation_config = None
@@ -2505,6 +2506,17 @@ class TaskManager(BaseManager):
             if self.tools["input"].io_provider != "default":
                 payload["call_sid"] = self.tools["input"].get_call_sid()
 
+            self.transfer_call_events.append({
+                "type": "transfer_start",
+                "ts_ms": round(time.time() * 1000 - self.conversation_start_init_ts, 2),
+                "tool_name": called_fun,
+                "tool_call_id": resp.get("tool_call_id", ""),
+                "turn_id": meta_info.get("turn_id"),
+                "sequence_id": meta_info.get("sequence_id"),
+                "transfer_number": payload.get("call_transfer_number"),
+                "provider": self.tools["input"].io_provider,
+            })
+
             if self.tools["input"].io_provider == "default":
                 mock_response = (
                     f"This is a mocked response demonstrating a successful transfer of call to {call_transfer_number}"
@@ -2542,6 +2554,16 @@ class TaskManager(BaseManager):
                 self._finalize_api_call_detail(
                     function_call_log, response=mock_response, status_code=200, content_type="text/plain"
                 )
+                self.transfer_call_events.append({
+                    "type": "transfer_end",
+                    "ts_ms": round(time.time() * 1000 - self.conversation_start_init_ts, 2),
+                    "tool_call_id": resp.get("tool_call_id", ""),
+                    "turn_id": meta_info.get("turn_id"),
+                    "sequence_id": meta_info.get("sequence_id"),
+                    "status_code": 200,
+                    "latency_ms": function_call_log.get("latency_ms"),
+                    "success": True,
+                })
 
                 bos_packet = create_ws_data_packet("<beginning_of_stream>", meta_info)
                 await self.tools["output"].handle(bos_packet)
@@ -2595,6 +2617,16 @@ class TaskManager(BaseManager):
                         status_code=response.status,
                         content_type=response.headers.get("Content-Type"),
                     )
+                    self.transfer_call_events.append({
+                        "type": "transfer_end",
+                        "ts_ms": round(time.time() * 1000 - self.conversation_start_init_ts, 2),
+                        "tool_call_id": resp.get("tool_call_id", ""),
+                        "turn_id": meta_info.get("turn_id"),
+                        "sequence_id": meta_info.get("sequence_id"),
+                        "status_code": response.status,
+                        "latency_ms": function_call_log.get("latency_ms"),
+                        "success": response.status < 400,
+                    })
                     return
 
         if called_fun == "switch_language":
@@ -3212,7 +3244,7 @@ class TaskManager(BaseManager):
         # Hangup detection - now supported for all agent types including graph_agent
         if self.use_llm_to_determine_hangup and not self.turn_based_conversation:
             completion_res, metadata = await self.tools["llm_agent"].check_for_completion(
-                messages, self.check_for_completion_prompt
+                messages, self.check_for_completion_prompt, meta_info=meta_info
             )
 
             should_hangup = (
@@ -4998,6 +5030,7 @@ class TaskManager(BaseManager):
                     "dtmf_events": list(self.dtmf_events),
                     "non_fatal_llm_error_events": list(self.non_fatal_llm_error_events),
                     "language_switch_events": list(self.language_switch_events),
+                    "transfer_call_events": list(self.transfer_call_events),
                     "lid_detection_events": list(getattr(self.tools.get("transcriber"), "lid_detection_events", [])),
                     "transcriber_error_events": list(self.transcriber_error_events),
                     "welcome_message_played_ts": (
