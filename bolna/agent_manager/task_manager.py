@@ -2599,6 +2599,7 @@ class TaskManager(BaseManager):
                     is_cached=False,
                     run_id=self.run_id,
                 )
+                _transfer_end_recorded = False
                 try:
                     async with session.post(url, json=payload) as response:
                         response_text = await response.text()
@@ -2628,6 +2629,7 @@ class TaskManager(BaseManager):
                             "latency_ms": function_call_log.get("latency_ms"),
                             "success": response.status < 400,
                         })
+                        _transfer_end_recorded = True
                 except Exception as transfer_exc:
                     logger.warning(f"Transfer webhook did not respond (call likely redirected): {transfer_exc}")
                     self._finalize_api_call_detail(function_call_log, error=transfer_exc)
@@ -2641,6 +2643,23 @@ class TaskManager(BaseManager):
                         "latency_ms": function_call_log.get("latency_ms"),
                         "success": None,
                     })
+                    _transfer_end_recorded = True
+                finally:
+                    # CancelledError (BaseException) bypasses except — ensure transfer_end is
+                    # always recorded so it appears in progression_data even if the task is
+                    # cancelled mid-flight when Plivo terminates the call.
+                    if not _transfer_end_recorded:
+                        self._finalize_api_call_detail(function_call_log, error="cancelled")
+                        self.transfer_call_events.append({
+                            "type": "transfer_end",
+                            "ts_ms": round(time.time() * 1000 - self.conversation_start_init_ts, 2),
+                            "tool_call_id": resp.get("tool_call_id", ""),
+                            "turn_id": meta_info.get("turn_id"),
+                            "sequence_id": meta_info.get("sequence_id"),
+                            "status_code": None,
+                            "latency_ms": function_call_log.get("latency_ms"),
+                            "success": None,
+                        })
                 return
 
         if called_fun == "switch_language":
@@ -4366,8 +4385,9 @@ class TaskManager(BaseManager):
                         self.response_in_pipeline = False
                         await self.tools["output"].handle(message)
                         # Track when agent audio first starts flowing for this sequence.
-                        # Deduplicated inside on_agent_speech_started — safe to call per chunk.
-                        if sequence_id is not None and sequence_id != -1:
+                        # Only fire on real audio bytes — BOS/EOS control packets are strings
+                        # and fire before _synthesize() sets tts_start_ms, causing inversion.
+                        if sequence_id is not None and sequence_id != -1 and isinstance(message.get("data"), bytes):
                             self.interruption_manager.on_agent_speech_started(sequence_id)
                         try:
                             duration = calculate_audio_duration(
