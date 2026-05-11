@@ -124,7 +124,7 @@ class KnowledgeBaseAgent(BaseAgent):
             "used_sources": used_sources,
         }
 
-    async def check_for_completion(self, messages, check_for_completion_prompt):
+    async def check_for_completion(self, messages, check_for_completion_prompt, meta_info=None):
         """Check if the conversation should end (used for auto-hangup feature)."""
         try:
             prompt = [
@@ -133,7 +133,7 @@ class KnowledgeBaseAgent(BaseAgent):
             ]
             start_time = time.time()
             response, metadata = await self.conversation_completion_llm.generate(
-                prompt, request_json=True, ret_metadata=True
+                prompt, request_json=True, ret_metadata=True, meta_info=meta_info
             )
             latency_ms = (time.time() - start_time) * 1000
 

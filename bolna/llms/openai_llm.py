@@ -424,9 +424,9 @@ class OpenAiLLM(OpenAICompatibleLLM):
 
         self.started_streaming = False
 
-    async def generate(self, messages, request_json=False, ret_metadata=False):
+    async def generate(self, messages, request_json=False, ret_metadata=False, meta_info=None):
         if self.use_responses_api:
-            return await self._generate_responses(messages, request_json, ret_metadata)
+            return await self._generate_responses(messages, request_json, ret_metadata, meta_info)
         return await self._generate_chat(messages, request_json, ret_metadata)
 
     async def _generate_chat(self, messages, request_json=False, ret_metadata=False):

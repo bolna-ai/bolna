@@ -548,7 +548,7 @@ class OpenAICompatibleLLM(BaseLLM):
 
         self.started_streaming = False
 
-    async def _generate_responses(self, messages, request_json=False, ret_metadata=False):
+    async def _generate_responses(self, messages, request_json=False, ret_metadata=False, meta_info=None):
         instructions, input_items = self._build_responses_input(messages)
 
         create_kwargs = {
@@ -623,7 +623,11 @@ class OpenAICompatibleLLM(BaseLLM):
         except Exception as e:
             if self.previous_response_id and self._is_stale_response_error(e):
                 logger.warning(f"Stale previous_response_id, retrying with full history: {e}")
+                if isinstance(meta_info, dict):
+                    meta_info.setdefault("_non_fatal_errors", []).append(
+                        {"error_type": "stale_response_id", "error": str(e), "model": self.model}
+                    )
                 self.previous_response_id = None
-                return await self._generate_responses(messages, request_json, ret_metadata)
+                return await self._generate_responses(messages, request_json, ret_metadata, meta_info)
             logger.error(f"Responses API error: {e}")
             raise
