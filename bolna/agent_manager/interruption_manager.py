@@ -197,7 +197,7 @@ class InterruptionManager:
 
     # ── Interruption event callbacks ──────────────────────────────────────────
 
-    def on_interruption_triggered(self) -> None:
+    def on_interruption_triggered(self, asr_turn_id: Optional[int] = None) -> None:
         """User barged in while agent was speaking. user_end_s filled later by on_user_speech_ended()."""
         self.turn_id += 1
         self.user_interrupted_agent_count += 1
@@ -208,6 +208,7 @@ class InterruptionManager:
         event: Dict = {
             "type": "user_interrupted_agent",
             "turn_id": self.turn_id,
+            "asr_turn_id": asr_turn_id,
             "user_start_s": self.callee_speaking_start_time if self.callee_speaking_start_time > 0 else None,
             "user_end_s": None,
             "recovery_completed": False,
@@ -350,6 +351,7 @@ class InterruptionManager:
             entry: Dict = {
                 "type": e["type"],
                 "recovery_completed": e["recovery_completed"],
+                "asr_turn_id": e.get("asr_turn_id"),
             }
             if e.get("user_start_s") is not None:
                 entry["user_start_ms"] = round(e["user_start_s"] * 1000 - call_start_ms, 2)

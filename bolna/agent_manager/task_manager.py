@@ -3780,10 +3780,9 @@ class TaskManager(BaseManager):
                         ):
                             logger.info(f"Condition for interruption hit")
                             self.interruption_manager.on_user_speech_started()
-                            self.interruption_manager.on_interruption_triggered()
-                            # Tag the ASR turn that was active at interrupt time so
-                            # we can annotate turn_latencies with was_interrupted=True
                             _asr_turn_id = getattr(self.tools.get("transcriber"), "current_turn_id", None)
+                            self.interruption_manager.on_interruption_triggered(asr_turn_id=_asr_turn_id)
+                            # Also record in the interrupted set for was_interrupted annotation
                             self.interruption_manager.record_interrupted_transcriber_turn(_asr_turn_id)
                             self.tools["input"].update_is_audio_being_played(False)
                             await self.__cleanup_downstream_tasks()
