@@ -524,6 +524,15 @@ class OpenAICompatibleLLM(BaseLLM):
             latency_data,
         )
         if fc_chunk:
+            if response_usage:
+                fc_chunk.input_tokens = getattr(response_usage, "input_tokens", None)
+                fc_chunk.output_tokens = getattr(response_usage, "output_tokens", None)
+                _od = getattr(response_usage, "output_tokens_details", None)
+                if _od:
+                    fc_chunk.reasoning_tokens = getattr(_od, "reasoning_tokens", None)
+                _id = getattr(response_usage, "input_tokens_details", None)
+                if _id:
+                    fc_chunk.cached_tokens = getattr(_id, "cached_tokens", None)
             yield fc_chunk
 
         usage_kwargs = {}

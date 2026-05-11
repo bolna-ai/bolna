@@ -402,9 +402,19 @@ class OpenAiLLM(OpenAICompatibleLLM):
         if accumulator and accumulator.final_tool_calls:
             api_call_payload = accumulator.build_api_payload(model_args, meta_info, answer)
             if api_call_payload:
-                yield LLMStreamChunk(
+                fc_chunk = LLMStreamChunk(
                     data=api_call_payload, end_of_stream=False, latency=latency_data, is_function_call=True
                 )
+                if stream_usage:
+                    fc_chunk.input_tokens = getattr(stream_usage, "prompt_tokens", None)
+                    fc_chunk.output_tokens = getattr(stream_usage, "completion_tokens", None)
+                    _d = getattr(stream_usage, "completion_tokens_details", None)
+                    if _d:
+                        fc_chunk.reasoning_tokens = getattr(_d, "reasoning_tokens", None)
+                    _pd = getattr(stream_usage, "prompt_tokens_details", None)
+                    if _pd:
+                        fc_chunk.cached_tokens = getattr(_pd, "cached_tokens", None)
+                yield fc_chunk
 
         usage_kwargs = {}
         if stream_usage:
@@ -652,6 +662,15 @@ class OpenAiLLM(OpenAICompatibleLLM):
             latency_data,
         )
         if fc_chunk:
+            if response_usage and isinstance(response_usage, dict):
+                fc_chunk.input_tokens = response_usage.get("input_tokens")
+                fc_chunk.output_tokens = response_usage.get("output_tokens")
+                _od = response_usage.get("output_tokens_details") or {}
+                if _od.get("reasoning_tokens"):
+                    fc_chunk.reasoning_tokens = _od["reasoning_tokens"]
+                _id = response_usage.get("input_tokens_details") or {}
+                if _id.get("cached_tokens"):
+                    fc_chunk.cached_tokens = _id["cached_tokens"]
             yield fc_chunk
 
         usage_kwargs = {}
