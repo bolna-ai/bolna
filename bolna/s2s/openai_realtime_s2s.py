@@ -166,6 +166,17 @@ class OpenAIRealtimeS2S(BaseS2SProvider):
         )
 
     async def receive_events(self) -> AsyncGenerator:
+        # Surface abnormal WS closes as S2SError so the task manager can react.
+        try:
+            async for event in self._receive_events_impl():
+                yield event
+        except websockets.ConnectionClosed as e:
+            yield S2SError(
+                message=f"WebSocket closed: code={e.code} reason={e.reason!r}",
+                code="connection_closed",
+            )
+
+    async def _receive_events_impl(self) -> AsyncGenerator:
         """Map OpenAI Realtime events to provider-agnostic S2S events.
 
         Handles both beta event names (response.audio.*) and GA event names

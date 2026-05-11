@@ -4986,6 +4986,8 @@ class TaskManager(BaseManager):
         self._s2s_turn_seq = 0
         self._s2s_pending_calls: set = set()
         self._s2s_tool_tasks: set = set()
+        self._s2s_response_has_function_calls = False
+        self._s2s_commit_after_done = False
         s2s_cfg = (self.task_config["tools_config"].get("s2s") or {}).get("provider_config") or {}
         self._s2s_welcome_gate_ms = int(s2s_cfg.get("welcome_audio_gate_ms") or 1500)
         self._s2s_welcome_started_at = time.time()
@@ -5009,10 +5011,14 @@ class TaskManager(BaseManager):
         except asyncio.CancelledError:
             pass
         finally:
+            self.conversation_ended = True
+            for tool_task in list(self._s2s_tool_tasks):
+                tool_task.cancel()
+            if self._s2s_tool_tasks:
+                await asyncio.gather(*self._s2s_tool_tasks, return_exceptions=True)
             await s2s.disconnect()
 
         logger.info("S2S conversation completed")
-        self.conversation_ended = True
 
     async def _s2s_audio_ingest_loop(self):
         """Read audio from audio_queue, convert to PCM@24kHz, send to S2S provider."""
@@ -5056,7 +5062,12 @@ class TaskManager(BaseManager):
             else:
                 pcm_24k = data  # Web calls: already PCM
 
-            await self.tools["s2s"].send_audio(pcm_24k)
+            try:
+                await self.tools["s2s"].send_audio(pcm_24k)
+            except Exception as e:
+                logger.error(f"S2S audio ingest: send_audio failed, ending conversation: {e}")
+                self.conversation_ended = True
+                break
             chunks_sent += 1
             if chunks_sent % 50 == 0:
                 logger.debug(f"S2S audio ingest: {chunks_sent} chunks sent")
@@ -5114,6 +5125,7 @@ class TaskManager(BaseManager):
                     self.time_since_last_spoken_human_word = time.time()
 
             elif isinstance(event, FunctionCall):
+                self._s2s_response_has_function_calls = True
                 self._s2s_dispatch_function_call(event)
 
             elif isinstance(event, Interrupted):
@@ -5136,6 +5148,10 @@ class TaskManager(BaseManager):
                     logger.info("S2S welcome message complete, enabling audio input")
                 if event.usage:
                     self._log_s2s_turn_usage(event)
+                if self._s2s_response_has_function_calls:
+                    self._s2s_response_has_function_calls = False
+                    self._s2s_commit_after_done = True
+                    await self._maybe_commit_s2s_function_results()
                 eos_meta = {
                     "end_of_llm_stream": True,
                     "end_of_synthesizer_stream": True,
@@ -5251,11 +5267,18 @@ class TaskManager(BaseManager):
                 logger.error(f"S2S: failed to deliver error result for '{event.name}': {send_err}")
         finally:
             self._s2s_pending_calls.discard(event.call_id)
-            if not self._s2s_pending_calls and not is_transfer and not is_end_call:
-                try:
-                    await s2s.commit_function_results()
-                except Exception as commit_err:
-                    logger.error(f"S2S: commit_function_results failed: {commit_err}")
+            if not is_transfer and not is_end_call:
+                await self._maybe_commit_s2s_function_results()
+
+    async def _maybe_commit_s2s_function_results(self):
+        # Commit once per response: requires response.done observed AND all dispatched tool tasks finished.
+        if self._s2s_pending_calls or not self._s2s_commit_after_done:
+            return
+        self._s2s_commit_after_done = False
+        try:
+            await self.tools["s2s"].commit_function_results()
+        except Exception as commit_err:
+            logger.error(f"S2S: commit_function_results failed: {commit_err}")
 
     async def run(self):
         self._component_error = None  # Reset for each run
