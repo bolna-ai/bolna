@@ -3371,12 +3371,14 @@ class TaskManager(BaseManager):
             logger.info(f"process_call_hangup: Hangup already in progress or conversation ended, skipping")
             return
 
-        # Set immediately to prevent user interruptions from cancelling hangup
+        # hangup_triggered flag set immediately to prevent user interruptions from cancelling hangup.
+        # hangup_triggered_at is set AFTER the goodbye plays so progression shows
+        # the actual disconnect time, not the decision time (use hangup_decision_at for that).
         self.hangup_triggered = True
-        self.hangup_triggered_at = time.time()  # Track when hangup was triggered for timeout monitoring
         message = self.call_hangup_message if not self.voicemail_handler.detected else ""
         if not message or message.strip() == "":
             self.hangup_message_queued = False  # No hangup message to wait for
+            self.hangup_triggered_at = time.time()
             await self.__process_end_of_conversation()
         else:
             self.hangup_message_queued = True  # Hangup message will be synthesized
@@ -3392,6 +3394,8 @@ class TaskManager(BaseManager):
                 "end_of_llm_stream": True,
             }
             await self._synthesize(create_ws_data_packet(message, meta_info=meta_info))
+            # Stamp after goodbye is queued — actual disconnect happens after it plays
+            self.hangup_triggered_at = time.time()
         return
 
     async def _listen_llm_input_queue(self):
