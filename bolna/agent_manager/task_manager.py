@@ -2506,16 +2506,18 @@ class TaskManager(BaseManager):
             if self.tools["input"].io_provider != "default":
                 payload["call_sid"] = self.tools["input"].get_call_sid()
 
-            self.transfer_call_events.append({
-                "type": "transfer_start",
-                "ts_ms": round(time.time() * 1000 - self.conversation_start_init_ts, 2),
-                "tool_name": called_fun,
-                "tool_call_id": resp.get("tool_call_id", ""),
-                "turn_id": meta_info.get("turn_id"),
-                "sequence_id": meta_info.get("sequence_id"),
-                "transfer_number": payload.get("call_transfer_number"),
-                "provider": self.tools["input"].io_provider,
-            })
+            self.transfer_call_events.append(
+                {
+                    "type": "transfer_start",
+                    "ts_ms": round(time.time() * 1000 - self.conversation_start_init_ts, 2),
+                    "tool_name": called_fun,
+                    "tool_call_id": resp.get("tool_call_id", ""),
+                    "turn_id": meta_info.get("turn_id"),
+                    "sequence_id": meta_info.get("sequence_id"),
+                    "transfer_number": payload.get("call_transfer_number"),
+                    "provider": self.tools["input"].io_provider,
+                }
+            )
 
             if self.tools["input"].io_provider == "default":
                 mock_response = (
@@ -2554,16 +2556,18 @@ class TaskManager(BaseManager):
                 self._finalize_api_call_detail(
                     function_call_log, response=mock_response, status_code=200, content_type="text/plain"
                 )
-                self.transfer_call_events.append({
-                    "type": "transfer_end",
-                    "ts_ms": round(time.time() * 1000 - self.conversation_start_init_ts, 2),
-                    "tool_call_id": resp.get("tool_call_id", ""),
-                    "turn_id": meta_info.get("turn_id"),
-                    "sequence_id": meta_info.get("sequence_id"),
-                    "status_code": 200,
-                    "latency_ms": function_call_log.get("latency_ms"),
-                    "success": True,
-                })
+                self.transfer_call_events.append(
+                    {
+                        "type": "transfer_end",
+                        "ts_ms": round(time.time() * 1000 - self.conversation_start_init_ts, 2),
+                        "tool_call_id": resp.get("tool_call_id", ""),
+                        "turn_id": meta_info.get("turn_id"),
+                        "sequence_id": meta_info.get("sequence_id"),
+                        "status_code": 200,
+                        "latency_ms": function_call_log.get("latency_ms"),
+                        "success": True,
+                    }
+                )
 
                 bos_packet = create_ws_data_packet("<beginning_of_stream>", meta_info)
                 await self.tools["output"].handle(bos_packet)
@@ -2619,38 +2623,24 @@ class TaskManager(BaseManager):
                             status_code=response.status,
                             content_type=response.headers.get("Content-Type"),
                         )
-                        self.transfer_call_events.append({
-                            "type": "transfer_end",
-                            "ts_ms": round(time.time() * 1000 - self.conversation_start_init_ts, 2),
-                            "tool_call_id": resp.get("tool_call_id", ""),
-                            "turn_id": meta_info.get("turn_id"),
-                            "sequence_id": meta_info.get("sequence_id"),
-                            "status_code": response.status,
-                            "latency_ms": function_call_log.get("latency_ms"),
-                            "success": response.status < 400,
-                        })
+                        self.transfer_call_events.append(
+                            {
+                                "type": "transfer_end",
+                                "ts_ms": round(time.time() * 1000 - self.conversation_start_init_ts, 2),
+                                "tool_call_id": resp.get("tool_call_id", ""),
+                                "turn_id": meta_info.get("turn_id"),
+                                "sequence_id": meta_info.get("sequence_id"),
+                                "status_code": response.status,
+                                "latency_ms": function_call_log.get("latency_ms"),
+                                "success": response.status < 400,
+                            }
+                        )
                         _transfer_end_recorded = True
                 except Exception as transfer_exc:
                     logger.warning(f"Transfer webhook did not respond (call likely redirected): {transfer_exc}")
                     self._finalize_api_call_detail(function_call_log, error=transfer_exc)
-                    self.transfer_call_events.append({
-                        "type": "transfer_end",
-                        "ts_ms": round(time.time() * 1000 - self.conversation_start_init_ts, 2),
-                        "tool_call_id": resp.get("tool_call_id", ""),
-                        "turn_id": meta_info.get("turn_id"),
-                        "sequence_id": meta_info.get("sequence_id"),
-                        "status_code": None,
-                        "latency_ms": function_call_log.get("latency_ms"),
-                        "success": None,
-                    })
-                    _transfer_end_recorded = True
-                finally:
-                    # CancelledError (BaseException) bypasses except — ensure transfer_end is
-                    # always recorded so it appears in progression_data even if the task is
-                    # cancelled mid-flight when Plivo terminates the call.
-                    if not _transfer_end_recorded:
-                        self._finalize_api_call_detail(function_call_log, error="cancelled")
-                        self.transfer_call_events.append({
+                    self.transfer_call_events.append(
+                        {
                             "type": "transfer_end",
                             "ts_ms": round(time.time() * 1000 - self.conversation_start_init_ts, 2),
                             "tool_call_id": resp.get("tool_call_id", ""),
@@ -2659,7 +2649,27 @@ class TaskManager(BaseManager):
                             "status_code": None,
                             "latency_ms": function_call_log.get("latency_ms"),
                             "success": None,
-                        })
+                        }
+                    )
+                    _transfer_end_recorded = True
+                finally:
+                    # CancelledError (BaseException) bypasses except — ensure transfer_end is
+                    # always recorded so it appears in progression_data even if the task is
+                    # cancelled mid-flight when Plivo terminates the call.
+                    if not _transfer_end_recorded:
+                        self._finalize_api_call_detail(function_call_log, error="cancelled")
+                        self.transfer_call_events.append(
+                            {
+                                "type": "transfer_end",
+                                "ts_ms": round(time.time() * 1000 - self.conversation_start_init_ts, 2),
+                                "tool_call_id": resp.get("tool_call_id", ""),
+                                "turn_id": meta_info.get("turn_id"),
+                                "sequence_id": meta_info.get("sequence_id"),
+                                "status_code": None,
+                                "latency_ms": function_call_log.get("latency_ms"),
+                                "success": None,
+                            }
+                        )
                 return
 
         if called_fun == "switch_language":
