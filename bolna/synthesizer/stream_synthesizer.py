@@ -176,10 +176,13 @@ class StreamSynthesizer(BaseSynthesizer):
             self.current_turn_start_time = time.perf_counter()
             self.ws_send_time = None
             self.current_turn_ttfb = None
+            # Anchor tts_start_ms to the first push — re-pushes of speculative responses
+            # (e.g. after a tool call confirms the eager response) would overwrite this
+            # to a later timestamp, making tts_start appear after agent_speech_start.
+            self.current_tts_start_ms = meta_info.get("tts_start_ms")
             logger.info(f"Push new_turn text_len={len(meta_info.get('text', '') or '')}")
         self.current_turn_id = meta_info.get("turn_id")
         self.current_sequence_id = meta_info.get("sequence_id")
-        self.current_tts_start_ms = meta_info.get("tts_start_ms")
 
     def _on_push(self, meta_info, text):
         """Provider-specific hook called during push before sender is created."""

@@ -4928,6 +4928,11 @@ class TaskManager(BaseManager):
         finally:
             self._component_error = None
 
+            # Cancel llm_task first and await it so that any transfer_end appended
+            # in __execute_function_call's finally block is captured before
+            # progression_data snapshots transfer_call_events below.
+            await process_task_cancellation(self.llm_task, "llm_task")
+
             # Construct output
             tasks_to_cancel = []
             tasks_to_cancel.append(process_task_cancellation(self.first_message_task_new, "first_message_task_new"))
