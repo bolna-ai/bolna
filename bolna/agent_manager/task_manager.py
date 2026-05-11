@@ -3129,12 +3129,16 @@ class TaskManager(BaseManager):
                         fc_latency_dict["output_tokens"] = actual_output_tokens
                         fc_latency_dict["reasoning_tokens"] = actual_reasoning_tokens
                         fc_latency_dict["cached_tokens"] = actual_cached_tokens
+                        textual_response = data.textual_response if hasattr(data, "textual_response") else None
+                        if textual_response:
+                            fc_latency_dict["response_text"] = textual_response.strip()
                         prev = self.llm_latencies.turn_latencies[-1] if self.llm_latencies.turn_latencies else None
                         if prev and prev.get("sequence_id") == fc_latency_dict.get("sequence_id"):
                             self.llm_latencies.turn_latencies[-1] = fc_latency_dict
                         else:
                             self.llm_latencies.turn_latencies.append(fc_latency_dict)
-                    textual_response = data.textual_response if hasattr(data, "textual_response") else None
+                    else:
+                        textual_response = None
                     if textual_response:  # intentionally omitting tool_calls, which will be filled later if the tool_call flow completed (requirement from OpenAI)
                         self.__store_into_history(
                             meta_info,
