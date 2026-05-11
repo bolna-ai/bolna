@@ -3512,8 +3512,23 @@ class TaskManager(BaseManager):
             self.hangup_message_queued = False  # No hangup message to wait for
             self.hangup_triggered_at = time.time()
             await self.__process_end_of_conversation()
+        elif self.is_s2s:
+            s2s = self.tools.get("s2s")
+            if s2s is None:
+                self.hangup_message_queued = False
+                await self.__process_end_of_conversation()
+                return
+            self.hangup_message_queued = True
+            self._s2s_hangup_in_progress = True
+            try:
+                await s2s.trigger_response(instructions=f'Say exactly: "{message}"')
+            except Exception as e:
+                logger.error(f"S2S hangup trigger_response failed: {e}")
+                self._s2s_hangup_in_progress = False
+                self.hangup_message_queued = False
+                await self.__process_end_of_conversation()
         else:
-            self.hangup_message_queued = True  # Hangup message will be synthesized
+            self.hangup_message_queued = True
             await self.wait_for_current_message()
             await self.__cleanup_downstream_tasks()
             meta_info = {
@@ -4969,6 +4984,7 @@ class TaskManager(BaseManager):
         s2s_cfg = (self.task_config["tools_config"].get("s2s") or {}).get("provider_config") or {}
         self._s2s_welcome_gate_ms = int(s2s_cfg.get("welcome_audio_gate_ms") or 1500)
         self._s2s_welcome_started_at = time.time()
+        self._s2s_hangup_in_progress = False
 
         # Trigger welcome message — model will speak from its instructions
         welcome = self.kwargs.get("agent_welcome_message", "").strip()
@@ -5067,6 +5083,8 @@ class TaskManager(BaseManager):
                     "is_preamble": event.is_preamble,
                     "format": "mulaw" if is_telephony else "pcm",
                 }
+                if self._s2s_hangup_in_progress:
+                    meta_info["message_category"] = "agent_hangup"
                 await self.buffered_output_queue.put(
                     {
                         "data": audio_out,
@@ -5113,16 +5131,15 @@ class TaskManager(BaseManager):
                     logger.info("S2S welcome message complete, enabling audio input")
                 if event.usage:
                     self._log_s2s_turn_usage(event)
-                await self.buffered_output_queue.put(
-                    {
-                        "data": b"\x00",
-                        "meta_info": {
-                            "end_of_llm_stream": True,
-                            "end_of_synthesizer_stream": True,
-                            "sequence_id": -1,
-                        },
-                    }
-                )
+                eos_meta = {
+                    "end_of_llm_stream": True,
+                    "end_of_synthesizer_stream": True,
+                    "sequence_id": -1,
+                }
+                if self._s2s_hangup_in_progress:
+                    eos_meta["message_category"] = "agent_hangup"
+                    self._s2s_hangup_in_progress = False
+                await self.buffered_output_queue.put({"data": b"\x00", "meta_info": eos_meta})
 
             elif isinstance(event, S2SError):
                 logger.error(f"S2S error: {event.message} (code={event.code})")
