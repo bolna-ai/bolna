@@ -479,10 +479,15 @@ class TaskManager(BaseManager):
                 self.check_for_completion_llm = os.getenv("CHECK_FOR_COMPLETION_LLM")
 
                 # A/B experiment: end_call tool as primary hangup, hangup_after_LLMCall as shadow.
+                # S2S also enters this block — it has no llm_agent for the legacy check_for_completion
+                # path, so the function tool is its only completion-detection mechanism.
                 if (
-                    self.conversation_config.get("end_call_tool_mode") == "primary_with_shadow_hangup"
-                    and self.use_llm_to_determine_hangup
+                    self.use_llm_to_determine_hangup
                     and self.conversation_config.get("call_cancellation_prompt")
+                    and (
+                        self.conversation_config.get("end_call_tool_mode") == "primary_with_shadow_hangup"
+                        or self.is_s2s
+                    )
                 ):
                     api_tools = self.kwargs.get("api_tools")
                     if api_tools is None:
