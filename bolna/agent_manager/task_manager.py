@@ -2488,6 +2488,10 @@ class TaskManager(BaseManager):
             await self.tools["transcriber"].toggle_connection()
             await asyncio.sleep(2)  # Making sure whatever message was passed is over
 
+        if self._is_s2s_task() and "s2s" in self.tools:
+            logger.info("Stopping S2S session")
+            await self.tools["s2s"].disconnect()
+
         self.voicemail_handler.cancel_task()
 
     def __update_preprocessed_tree_node(self):
