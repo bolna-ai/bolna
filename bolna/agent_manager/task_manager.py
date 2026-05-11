@@ -1307,15 +1307,12 @@ class TaskManager(BaseManager):
         if s2s_class is None:
             raise Exception(f"S2S provider '{provider_name}' not supported")
 
-        # Convert Bolna api_tools to provider tool format
         tools = []
-        api_tools = self.task_config["tools_config"].get("api_tools")
+        api_tools = self.kwargs.get("api_tools")
         if api_tools and api_tools.get("tools"):
-            raw_tools = api_tools["tools"]
-            if isinstance(raw_tools, list):
-                for t in raw_tools:
-                    if isinstance(t, dict):
-                        tools.append(t)
+            for t in api_tools["tools"]:
+                if isinstance(t, dict):
+                    tools.append(t)
 
         self.tools["s2s"] = s2s_class(
             system_prompt=self.system_prompt.get("content", ""),
@@ -2569,22 +2566,7 @@ class TaskManager(BaseManager):
         if called_fun.startswith(END_CALL_FUNCTION_PREFIX):
             reason = resp.get("reason", "")
 
-            if self.end_call_experiment is not None and not self.end_call_experiment["end_call_invoked"]:
-                self.end_call_experiment["end_call_invoked"] = True
-                self.end_call_experiment["end_call_reason"] = reason
-
-            logger.info(f"end_call tool invoked, reason: {reason}")
-            convert_to_request_log(
-                json.dumps({"called_fun": called_fun, "reason": reason}),
-                meta_info,
-                None,
-                "function_call",
-                direction="request",
-                run_id=self.run_id,
-            )
-
             # Tool-result flow: feed result back to LLM so it generates a clean goodbye
-            textual_response = resp.get("textual_response", None)
             tool_result = json.dumps(
                 {"status": "success", "message": "Call is ending now. Say a brief goodbye to the user."}
             )
@@ -2609,9 +2591,7 @@ class TaskManager(BaseManager):
             await self.__do_llm_generation(messages, followup_meta_info, next_step, should_trigger_function_call=False)
             await self.wait_for_current_message()
 
-            self.hangup_detail = "end_call_tool"
-            self.call_hangup_message_config = None
-            await self.process_call_hangup()
+            await self._record_end_call_and_hangup(called_fun, reason, meta_info)
             return
 
         if called_fun.startswith("transfer_call"):
@@ -3496,6 +3476,23 @@ class TaskManager(BaseManager):
 
         self.llm_processed_request_ids.add(self.current_request_id)
         llm_response = ""
+
+    async def _record_end_call_and_hangup(self, called_fun: str, reason: str, meta_info: dict):
+        if self.end_call_experiment is not None and not self.end_call_experiment["end_call_invoked"]:
+            self.end_call_experiment["end_call_invoked"] = True
+            self.end_call_experiment["end_call_reason"] = reason
+        logger.info(f"end_call tool invoked, reason: {reason}")
+        convert_to_request_log(
+            json.dumps({"called_fun": called_fun, "reason": reason}),
+            meta_info,
+            None,
+            "function_call",
+            direction="request",
+            run_id=self.run_id,
+        )
+        self.hangup_detail = "end_call_tool"
+        self.call_hangup_message_config = None
+        await self.process_call_hangup()
 
     async def process_call_hangup(self):
         if self.hangup_decision_at is None:
@@ -5116,11 +5113,14 @@ class TaskManager(BaseManager):
                     logger.info("S2S welcome message complete, enabling audio input")
                 if event.usage:
                     self._log_s2s_turn_usage(event)
-                # Send end-of-stream marker
                 await self.buffered_output_queue.put(
                     {
                         "data": b"\x00",
-                        "meta_info": {"end_of_llm_stream": True, "sequence_id": -1},
+                        "meta_info": {
+                            "end_of_llm_stream": True,
+                            "end_of_synthesizer_stream": True,
+                            "sequence_id": -1,
+                        },
                     }
                 )
 
@@ -5176,7 +5176,19 @@ class TaskManager(BaseManager):
     async def _s2s_handle_function_call(self, event: FunctionCall):
         s2s = self.tools["s2s"]
         is_transfer = event.name.startswith("transfer_call")
+        is_end_call = event.name.startswith(END_CALL_FUNCTION_PREFIX)
         try:
+            if is_end_call:
+                try:
+                    fn_args = json.loads(event.arguments) if event.arguments else {}
+                except json.JSONDecodeError:
+                    fn_args = {}
+                reason = fn_args.get("reason", "")
+                await s2s.send_function_result(event.call_id, json.dumps({"status": "ending"}))
+                meta_info = {"request_id": str(uuid.uuid4()), "sequence_id": None}
+                await self._record_end_call_and_hangup(event.name, reason, meta_info)
+                return
+
             api_tools = self.kwargs.get("api_tools", {})
             tools_params = api_tools.get("tools_params", {})
             tool_config = tools_params.get(event.name)
@@ -5215,7 +5227,7 @@ class TaskManager(BaseManager):
                 logger.error(f"S2S: failed to deliver error result for '{event.name}': {send_err}")
         finally:
             self._s2s_pending_calls.discard(event.call_id)
-            if not self._s2s_pending_calls and not is_transfer:
+            if not self._s2s_pending_calls and not is_transfer and not is_end_call:
                 try:
                     await s2s.commit_function_results()
                 except Exception as commit_err:
