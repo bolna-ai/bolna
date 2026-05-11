@@ -269,6 +269,20 @@ class InterruptionManager:
             )
             self._adjusted_user_stop_ts = None
             self._pending_user_start_ts = -1
+        else:
+            # Tool-call follow-up or any agent response without a preceding user turn
+            # in this sequence (e.g. seq=5 after a tool call consumed seq=4's user timing).
+            # Record agent_start_s so agent_speech_start appears in the progression.
+            self.user_bot_latencies.append(
+                {
+                    "sequence_id": sequence_id,
+                    "user_start_s": None,
+                    "user_first_start_s": None,
+                    "user_end_s": None,
+                    "agent_start_s": now_s,
+                    "latency_ms": None,
+                }
+            )
 
         logger.info(f"Agent speech started (sequence_id={sequence_id})")
 
