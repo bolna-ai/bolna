@@ -3702,15 +3702,18 @@ class TaskManager(BaseManager):
             await self.__process_end_of_conversation()
 
     async def _log_transcriber_connection_error(self, connection_error):
+        provider = self.task_config["tools_config"]["transcriber"].get("provider", "unknown")
+        # Always record the drop — "error" when exception drove it, "drop" for clean closes
+        # (e.g. Sarvam normal end-of-stream, Deepgram inactivity timeout on standby).
+        self.transcriber_error_events.append(
+            {
+                "event": "error" if connection_error else "drop",
+                "error": connection_error,
+                "provider": provider,
+                "ts_ms": round(time.time() * 1000 - self.conversation_start_init_ts, 2),
+            }
+        )
         if connection_error:
-            provider = self.task_config["tools_config"]["transcriber"].get("provider", "unknown")
-            self.transcriber_error_events.append(
-                {
-                    "error": connection_error,
-                    "provider": provider,
-                    "ts_ms": round(time.time() * 1000 - self.conversation_start_init_ts, 2),
-                }
-            )
             await self._end_call_on_component_error(
                 TranscriberError(connection_error, provider=provider), HangupReason.TRANSCRIBER_CONNECTION_ERROR
             )
@@ -5089,6 +5092,7 @@ class TaskManager(BaseManager):
                     "transfer_call_events": list(self.transfer_call_events),
                     "lid_detection_events": list(getattr(self.tools.get("transcriber"), "lid_detection_events", [])),
                     "transcriber_error_events": list(self.transcriber_error_events),
+                    "transcriber_reconnect_count": getattr(self.tools.get("transcriber"), "reconnect_count", 0),
                     "welcome_message_played_ts": (
                         round(
                             self.tools["input"].welcome_message_played_ts - self.conversation_start_init_ts,

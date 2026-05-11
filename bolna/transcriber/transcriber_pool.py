@@ -91,6 +91,10 @@ class TranscriberPool:
         # function_tool_api_call_details / call_interruption_stats.
         self.lid_detection_events: list[dict] = []
 
+        # Counts how many times a standby transcriber was reconnected mid-call
+        # (e.g. provider inactivity timeout on a transcriber that never received audio).
+        self.reconnect_count: int = 0
+
         # Debounce state
         self._lid_pending_lang: Optional[str] = None
         self._lid_pending_count: int = 0
@@ -389,6 +393,7 @@ class TranscriberPool:
         if transcription_task is not None and transcription_task.done():
             logger.info(f"TranscriberPool: transcriber '{label}' connection dropped, reconnecting")
             await target.run()
+            self.reconnect_count += 1
 
         # Carry turn_counter forward so the incoming transcriber continues
         # the turn sequence rather than restarting from 0. The next speech
