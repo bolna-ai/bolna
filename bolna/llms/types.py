@@ -16,6 +16,7 @@ class LatencyData(BaseModel):
     sequence_id: Optional[int] = None
     first_token_latency_ms: Optional[float] = None
     total_stream_duration_ms: Optional[float] = None
+    connection_latency_ms: Optional[float] = None
     service_tier: Optional[str] = None
     llm_host: Optional[str] = None
 

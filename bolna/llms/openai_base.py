@@ -426,6 +426,13 @@ class OpenAICompatibleLLM(BaseLLM):
             if event.type == ResponseStreamEvent.CREATED:
                 self.previous_response_id = event.response.id
                 service_tier = getattr(event.response, "service_tier", None)
+                if latency_data is None:
+                    latency_data = LatencyData(
+                        sequence_id=meta_info.get("sequence_id") if meta_info else None,
+                        connection_latency_ms=round(now - start_time, 2),
+                    )
+                else:
+                    latency_data.connection_latency_ms = round(now - start_time, 2)
                 continue
 
             if event.type == ResponseStreamEvent.FAILED:

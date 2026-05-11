@@ -291,8 +291,12 @@ class OpenAiLLM(OpenAICompatibleLLM):
             logger.error(f"OpenAI unexpected error: {e}")
             raise
 
+        _connection_latency_ms: Optional[float] = None
         async for chunk in completion_stream:
             now = now_ms()
+            # First chunk = TCP+TLS+HTTP headers received, before any content or token.
+            if _connection_latency_ms is None:
+                _connection_latency_ms = round(now - start_time, 2)
             if hasattr(chunk, "service_tier") and chunk.service_tier:
                 service_tier = chunk.service_tier
                 if latency_data:
@@ -311,6 +315,7 @@ class OpenAiLLM(OpenAICompatibleLLM):
                     sequence_id=meta_info.get("sequence_id") if meta_info else None,
                     first_token_latency_ms=first_token_time - start_time,
                     total_stream_duration_ms=None,
+                    connection_latency_ms=_connection_latency_ms,
                     service_tier=service_tier,
                     llm_host=self.llm_host,
                 )
@@ -547,6 +552,13 @@ class OpenAiLLM(OpenAICompatibleLLM):
                     resp = evt.get("response", {})
                     self.previous_response_id = resp.get("id")
                     ws_service_tier = resp.get("service_tier")
+                    if latency_data is None:
+                        latency_data = LatencyData(
+                            sequence_id=meta_info.get("sequence_id") if meta_info else None,
+                            connection_latency_ms=round(now - start_time, 2),
+                        )
+                    else:
+                        latency_data.connection_latency_ms = round(now - start_time, 2)
                     continue
 
                 if evt_type == ResponseStreamEvent.FAILED:
