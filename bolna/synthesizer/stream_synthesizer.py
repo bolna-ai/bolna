@@ -180,6 +180,7 @@ class StreamSynthesizer(BaseSynthesizer):
             # (e.g. after a tool call confirms the eager response) would overwrite this
             # to a later timestamp, making tts_start appear after agent_speech_start.
             self.current_tts_start_ms = meta_info.get("tts_start_ms")
+            self.last_text_sent = False
             logger.info(f"Push new_turn text_len={len(meta_info.get('text', '') or '')}")
         self.current_turn_id = meta_info.get("turn_id")
         self.current_sequence_id = meta_info.get("sequence_id")
