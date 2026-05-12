@@ -4426,7 +4426,6 @@ class TaskManager(BaseManager):
                 )
                 self.hangup_detail = HangupReason.INACTIVITY_TIMEOUT
                 await self.process_call_hangup()
-                break
 
             elif (
                 time_since_last_spoken_ai_word > self.trigger_user_online_message_after
