@@ -602,6 +602,7 @@ class DeepgramTranscriber(BaseTranscriber):
                     self.speech_start_time = timestamp_ms()
                     self.current_turn_interim_details = []
                     self.is_transcript_sent_for_processing = False
+                    self.final_transcript = ""
 
                     logger.info(f"Starting new turn with turn_id: {self.current_turn_id}")
                     logger.info(
