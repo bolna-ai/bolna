@@ -40,7 +40,7 @@ class OpenAITranscriber(BaseTranscriber):
         endpointing=400,
         delay="medium",
         noise_reduction=False,
-        speech_rms_threshold=300,
+        speech_rms_threshold=500,
         vad_threshold=0.5,
         vad_prefix_padding_ms=300,
         **kwargs,
@@ -325,6 +325,11 @@ class OpenAITranscriber(BaseTranscriber):
                         self._final_transcript_event.clear()
                         self._audio_appended_since_commit = False
                         self._speech_frames_in_turn = 0
+                        # Clear stale commit state from the previous turn so the utterance
+                        # timeout monitor does not fire against the old commit_time while
+                        # new speech is in progress.
+                        self._turn_committed = False
+                        self._commit_time = None
                         self.turn_counter += 1
                         self.current_turn_id = f"turn_{self.turn_counter}"
                         self.current_turn_start_time = time.perf_counter()
