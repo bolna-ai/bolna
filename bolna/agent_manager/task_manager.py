@@ -4082,23 +4082,32 @@ class TaskManager(BaseManager):
                         audio_chunk = wav_bytes_to_pcm(resample(audio, format="wav", target_sample_rate=8000))
                         meta_info["format"] = "pcm"
                 else:
-                    start_time = time.perf_counter()
-                    audio_chunk = self.preloaded_welcome_audio if self.preloaded_welcome_audio else None
+                    is_welcome = meta_info.get("message_category") == "agent_welcome_message"
+                    if is_welcome:
+                        audio_chunk = self.preloaded_welcome_audio if self.preloaded_welcome_audio else None
+                    else:
+                        start_time = time.perf_counter()
+                        audio_chunk = await get_raw_audio_bytes(
+                            text,
+                            self.assistant_name,
+                            "pcm",
+                            local=self.is_local,
+                            assistant_id=self.assistant_id,
+                        )
+                        logger.info(f"Time to fetch preprocessed audio from S3 {time.perf_counter() - start_time}")
                     if meta_info["text"] == "":
                         audio_chunk = None
-                    logger.info(f"Time to get response from S3 {time.perf_counter() - start_time}")
                     if not self.buffered_output_queue.empty():
                         logger.info(f"Output queue was not empty and hence emptying it")
                         self.buffered_output_queue = asyncio.Queue()
                     meta_info["format"] = "pcm"
-                    if "message_category" in meta_info and meta_info["message_category"] == "agent_welcome_message":
-                        if audio_chunk is None:
-                            logger.info(f"File doesn't exist in S3. Hence we're synthesizing it from synthesizer")
-                            meta_info["cached"] = False
-                            await self._synthesize(create_ws_data_packet(meta_info["text"], meta_info=meta_info))
-                            return
-                        else:
-                            meta_info["is_first_chunk"] = True
+                    if audio_chunk is None:
+                        logger.info(f"Preprocessed audio not available, falling back to live synthesis")
+                        meta_info["cached"] = False
+                        await self._synthesize(create_ws_data_packet(meta_info["text"], meta_info=meta_info))
+                        return
+                    if is_welcome:
+                        meta_info["is_first_chunk"] = True
                 meta_info["end_of_synthesizer_stream"] = True
                 if yield_in_chunks and audio_chunk is not None:
                     i = 0
