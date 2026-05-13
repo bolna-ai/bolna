@@ -253,9 +253,7 @@ class OpenAITranscriber(BaseTranscriber):
                     and not self.is_transcript_sent_for_processing
                 ):
                     elapsed = time.time() - self._commit_time
-                    # Wait 5× endpointing duration for the transcript, minimum 1s.
-                    utterance_timeout = max(self.endpointing_ms * 5 / 1000, 1.0)
-                    if elapsed > utterance_timeout:
+                    if elapsed > self.endpointing_ms / 1000:
                         logger.warning(
                             f"Utterance timeout: completed event missing for {elapsed:.1f}s "
                             f"after commit on turn {self.current_turn_id}. Force-finalizing."
@@ -281,6 +279,14 @@ class OpenAITranscriber(BaseTranscriber):
                             await self._commit_turn(ws)
                             self._speech_active = False
                             self._silence_start_time = None
+                    # Inject silence frames while speech is active so the model gets
+                    # explicit end-of-speech context in the buffer.
+                    if self._speech_active:
+                        silent_pcm = b"\x00" * int(24000 * 0.05 * 2)  # 50ms @ 24kHz PCM16
+                        await ws.send(json.dumps({
+                            "type": "input_audio_buffer.append",
+                            "audio": base64.b64encode(silent_pcm).decode(),
+                        }))
                     continue
 
                 if not self.audio_submitted:
