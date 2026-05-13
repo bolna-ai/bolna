@@ -95,6 +95,8 @@ class OpenAITranscriber(BaseTranscriber):
         self._audio_appended_since_commit = False
         # Wall-clock time when silence began (None while speech is active)
         self._silence_start_time: Optional[float] = None
+        # Number of speech frames appended in the current turn (used to skip commits on very short audio)
+        self._speech_frames_in_turn: int = 0
         # Signals sender_stream that the final transcript has arrived after EOS
         self._final_transcript_event = asyncio.Event()
         # Set when a turn has been committed; cleared when transcript arrives
@@ -178,6 +180,7 @@ class OpenAITranscriber(BaseTranscriber):
         self._turn_committed = False
         self._commit_time = None
         self._silence_start_time = None
+        self._speech_frames_in_turn = 0
 
     async def openai_connect(self) -> ClientConnection:
         url = f"wss://{self.api_host}/v1/realtime?intent=transcription"
@@ -312,6 +315,7 @@ class OpenAITranscriber(BaseTranscriber):
                         self.audio_submission_time = time.time()
                         self._final_transcript_event.clear()
                         self._audio_appended_since_commit = False
+                        self._speech_frames_in_turn = 0
                         self.turn_counter += 1
                         self.current_turn_id = f"turn_{self.turn_counter}"
                         self.current_turn_start_time = time.perf_counter()
@@ -325,12 +329,22 @@ class OpenAITranscriber(BaseTranscriber):
                         if self._silence_start_time is None:
                             self._silence_start_time = time.time()
                         elif (time.time() - self._silence_start_time) * 1000 >= self.endpointing_ms:
-                            await self._commit_turn(ws)
-                            self._speech_active = False
+                            # Require at least 300ms of speech frames before committing to avoid
+                            # sending tiny noise bursts that return no transcript and trigger the
+                            # 3-second utterance timeout.
+                            min_frames = int(24000 * 0.3 / (len(pcm_24k) / 2)) if pcm_24k else 15
+                            if self._speech_frames_in_turn >= min_frames:
+                                await self._commit_turn(ws)
+                            else:
+                                logger.debug(f"Skipping commit for turn {self.current_turn_id}: only {self._speech_frames_in_turn} frames (min {min_frames})")
+                                self._speech_active = False
+                                self._audio_appended_since_commit = False
+                                self._speech_frames_in_turn = 0
                             self._silence_start_time = None
 
                 self.num_frames += 1
                 if self._speech_active:
+                    self._speech_frames_in_turn += 1
                     self._audio_appended_since_commit = True
                     await ws.send(
                         json.dumps(

@@ -5,7 +5,7 @@ PREPROCESS_DIR = "agent_data"
 PCM16_SCALE = 32768.0
 
 OPENAI_TRANSCRIBER_HEARTBEAT_INTERVAL_S = 5
-OPENAI_TRANSCRIBER_UTTERANCE_TIMEOUT_S = 3.0
+OPENAI_TRANSCRIBER_UTTERANCE_TIMEOUT_S = 1.5
 
 # Deepgram Flux defaults — all overridable via agent transcriber config
 DEEPGRAM_FLUX_EOT_THRESHOLD = 0.7  # confidence to declare end-of-turn
