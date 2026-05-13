@@ -93,6 +93,8 @@ class OpenAITranscriber(BaseTranscriber):
         self._first_result_received = False
         # True from the moment audio is appended, False after a commit or before any audio
         self._audio_appended_since_commit = False
+        # Wall-clock time when silence began (None while speech is active)
+        self._silence_start_time: Optional[float] = None
         # Signals sender_stream that the final transcript has arrived after EOS
         self._final_transcript_event = asyncio.Event()
         # Set when a turn has been committed; cleared when transcript arrives
@@ -129,6 +131,32 @@ class OpenAITranscriber(BaseTranscriber):
             gcd = int(np.gcd(in_rate, 24000))
             resampled_np = resample_poly(audio_np, 24000 // gcd, in_rate // gcd)
             return np.clip(resampled_np, -32768, 32767).astype(np.int16).tobytes()
+
+    @staticmethod
+    def _rms(pcm_bytes: bytes) -> float:
+        samples = np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.float32)
+        if len(samples) == 0:
+            return 0.0
+        return float(np.sqrt(np.mean(samples**2)))
+
+    async def _commit_turn(self, ws: ClientConnection):
+        if self.current_turn_id is None:
+            self.turn_counter += 1
+            self.current_turn_id = f"turn_{self.turn_counter}"
+            logger.warning(f"_commit_turn: assigned fallback turn_id {self.current_turn_id}")
+        self._last_committed_turn_id = self.current_turn_id
+        try:
+            await ws.send(json.dumps({"type": "input_audio_buffer.commit"}))
+            self._audio_appended_since_commit = False
+            self._turn_committed = True
+            self._commit_time = time.time()
+            self.meta_info["last_vocal_frame_timestamp"] = self._commit_time
+            self.meta_info["user_stop_offset_ms"] = self.endpointing_ms
+            self.meta_info["user_stop_ts_wall"] = self._commit_time
+            await self.push_to_transcriber_queue(create_ws_data_packet({"type": "speech_ended"}, self.meta_info))
+            logger.info(f"Committed turn {self.current_turn_id} after {self.endpointing_ms}ms silence")
+        except Exception as e:
+            logger.error(f"Error committing turn: {e}")
 
     def _reset_turn_state(self):
         """Reset per-turn state after a transcript is delivered.
@@ -241,6 +269,13 @@ class OpenAITranscriber(BaseTranscriber):
                 try:
                     ws_data_packet = await asyncio.wait_for(self.input_queue.get(), timeout=0.05)
                 except asyncio.TimeoutError:
+                    if self._speech_active:
+                        if self._silence_start_time is None:
+                            self._silence_start_time = time.time()
+                        elif (time.time() - self._silence_start_time) * 1000 >= self.endpointing_ms:
+                            await self._commit_turn(ws)
+                            self._speech_active = False
+                            self._silence_start_time = None
                     continue
 
                 if not self.audio_submitted:
@@ -266,16 +301,44 @@ class OpenAITranscriber(BaseTranscriber):
                     continue
 
                 pcm_24k = self._resample_to_24k(raw_audio)
+                rms = self._rms(pcm_24k)
+
+                if rms > self.speech_rms_threshold:
+                    self._silence_start_time = None
+                    if not self._speech_active:
+                        self._speech_active = True
+                        self._first_result_received = False
+                        self.audio_submission_time = time.time()
+                        self._final_transcript_event.clear()
+                        self._audio_appended_since_commit = False
+                        self.turn_counter += 1
+                        self.current_turn_id = f"turn_{self.turn_counter}"
+                        self.current_turn_start_time = time.perf_counter()
+                        self._turn_start_epoch_ms = timestamp_ms()
+                        self.current_turn_interim_details = []
+                        self.is_transcript_sent_for_processing = False
+                        logger.info(f"Speech detected (RMS), starting turn {self.current_turn_id}")
+                        await self.push_to_transcriber_queue(create_ws_data_packet("speech_started", self.meta_info))
+                else:
+                    if self._speech_active:
+                        if self._silence_start_time is None:
+                            self._silence_start_time = time.time()
+                        elif (time.time() - self._silence_start_time) * 1000 >= self.endpointing_ms:
+                            await self._commit_turn(ws)
+                            self._speech_active = False
+                            self._silence_start_time = None
+
                 self.num_frames += 1
-                self._audio_appended_since_commit = True
-                await ws.send(
-                    json.dumps(
-                        {
-                            "type": "input_audio_buffer.append",
-                            "audio": base64.b64encode(pcm_24k).decode(),
-                        }
+                if self._speech_active:
+                    self._audio_appended_since_commit = True
+                    await ws.send(
+                        json.dumps(
+                            {
+                                "type": "input_audio_buffer.append",
+                                "audio": base64.b64encode(pcm_24k).decode(),
+                            }
+                        )
                     )
-                )
 
         except asyncio.CancelledError:
             logger.info("OpenAI sender_stream task cancelled")
