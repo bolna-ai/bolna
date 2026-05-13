@@ -4228,10 +4228,15 @@ class TaskManager(BaseManager):
 
                 sequence_id = message["meta_info"].get("sequence_id")
 
+                # agent_hangup audio must always reach Plivo regardless of interruption state.
+                # If callee_speaking is stuck True (e.g. Deepgram false VAD with no SpeechFinal),
+                # the WAIT loop would block the goodbye forever and the call would never end.
+                is_hangup_message = message["meta_info"].get("message_category") == "agent_hangup"
+
                 # Centralized tri-state decision loop (handles race condition + grace period)
                 should_continue_outer_loop = False
                 while True:
-                    status = self.interruption_manager.get_audio_send_status(sequence_id, len(self.history))
+                    status = "SEND" if is_hangup_message else self.interruption_manager.get_audio_send_status(sequence_id, len(self.history))
 
                     if status == "SEND":
                         # Audio approved - send it
