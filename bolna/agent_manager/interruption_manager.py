@@ -220,7 +220,7 @@ class InterruptionManager:
             f"Interruption triggered — turn_id={self.turn_id}, user_interrupted_agent_count={self.user_interrupted_agent_count}"
         )
 
-    def on_agent_interrupted_user(self) -> None:
+    def on_agent_interrupted_user(self, asr_turn_id: Optional[int] = None) -> None:
         """Agent responded prematurely and was cancelled within the grace period.
         Does NOT set _awaiting_recovery — recovery is only tracked for user barge-ins
         to keep barge_in_recovery_rate denominator consistent with user_interrupted_agent_count.
@@ -231,6 +231,7 @@ class InterruptionManager:
         event: Dict = {
             "type": "agent_interrupted_user",
             "turn_id": self.turn_id,
+            "asr_turn_id": asr_turn_id,
             "user_start_s": self.callee_speaking_start_time if self.callee_speaking_start_time > 0 else None,
             "user_end_s": None,
             "recovery_completed": False,

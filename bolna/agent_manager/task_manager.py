@@ -601,6 +601,39 @@ class TaskManager(BaseManager):
         return redacted_headers
 
     @staticmethod
+    def _stamp_llm_latency_dict(
+        self,
+        latency_dict: dict,
+        meta_info: dict,
+        actual_input_tokens,
+        actual_output_tokens,
+        actual_reasoning_tokens,
+        actual_cached_tokens,
+        response_text: str | None = None,
+    ) -> None:
+        """Stamp observability fields onto an LLM turn latency dict.
+
+        Called from both the function-call and regular-text branches of
+        __do_llm_generation so the two paths stay in sync automatically.
+        """
+        latency_dict["turn_id"] = meta_info.get("turn_id")
+        latency_dict["llm_start_ms"] = (
+            round(meta_info.get("llm_start_time", 0) * 1000 - self.conversation_start_init_ts, 2)
+            if meta_info.get("llm_start_time")
+            else None
+        )
+        _t = self.tools.get("transcriber")
+        if hasattr(_t, "transcribers") and hasattr(_t, "active_label"):
+            _t = _t.transcribers.get(_t.active_label, _t)
+        latency_dict["asr_turn_id"] = getattr(_t, "turn_counter", None)
+        latency_dict["model"] = self.llm_config.get("model") if self.llm_config else None
+        latency_dict["input_tokens"] = actual_input_tokens
+        latency_dict["output_tokens"] = actual_output_tokens
+        latency_dict["reasoning_tokens"] = actual_reasoning_tokens
+        latency_dict["cached_tokens"] = actual_cached_tokens
+        if response_text:
+            latency_dict["response_text"] = response_text.strip()
+
     def _extract_api_call_runtime_args(resp):
         excluded_keys = {"model_response", "textual_response"}
         return {key: copy.deepcopy(value) for key, value in resp.items() if key not in excluded_keys}
@@ -3116,24 +3149,16 @@ class TaskManager(BaseManager):
                     # Stamp total_stream_duration_ms before early return — function call chunk carries the final latency
                     if latency:
                         fc_latency_dict = latency.model_dump()
-                        fc_latency_dict["turn_id"] = meta_info.get("turn_id")
-                        fc_latency_dict["llm_start_ms"] = (
-                            round(meta_info.get("llm_start_time", 0) * 1000 - self.conversation_start_init_ts, 2)
-                            if meta_info.get("llm_start_time")
-                            else None
-                        )
-                        _t = self.tools.get("transcriber")
-                        if hasattr(_t, "transcribers") and hasattr(_t, "active_label"):
-                            _t = _t.transcribers.get(_t.active_label, _t)
-                        fc_latency_dict["asr_turn_id"] = getattr(_t, "turn_counter", None)
-                        fc_latency_dict["model"] = self.llm_config.get("model") if self.llm_config else None
-                        fc_latency_dict["input_tokens"] = actual_input_tokens
-                        fc_latency_dict["output_tokens"] = actual_output_tokens
-                        fc_latency_dict["reasoning_tokens"] = actual_reasoning_tokens
-                        fc_latency_dict["cached_tokens"] = actual_cached_tokens
                         textual_response = data.textual_response if hasattr(data, "textual_response") else None
-                        if textual_response:
-                            fc_latency_dict["response_text"] = textual_response.strip()
+                        self._stamp_llm_latency_dict(
+                            fc_latency_dict,
+                            meta_info,
+                            actual_input_tokens,
+                            actual_output_tokens,
+                            actual_reasoning_tokens,
+                            actual_cached_tokens,
+                            response_text=textual_response,
+                        )
                         prev = self.llm_latencies.turn_latencies[-1] if self.llm_latencies.turn_latencies else None
                         if prev and prev.get("sequence_id") == fc_latency_dict.get("sequence_id"):
                             self.llm_latencies.turn_latencies[-1] = fc_latency_dict
@@ -3158,21 +3183,14 @@ class TaskManager(BaseManager):
 
                 if latency:
                     latency_dict = latency.model_dump()
-                    latency_dict["turn_id"] = meta_info.get("turn_id")
-                    latency_dict["llm_start_ms"] = (
-                        round(meta_info.get("llm_start_time", 0) * 1000 - self.conversation_start_init_ts, 2)
-                        if meta_info.get("llm_start_time")
-                        else None
+                    self._stamp_llm_latency_dict(
+                        latency_dict,
+                        meta_info,
+                        actual_input_tokens,
+                        actual_output_tokens,
+                        actual_reasoning_tokens,
+                        actual_cached_tokens,
                     )
-                    _t = self.tools.get("transcriber")
-                    if hasattr(_t, "transcribers") and hasattr(_t, "active_label"):
-                        _t = _t.transcribers.get(_t.active_label, _t)
-                    latency_dict["asr_turn_id"] = getattr(_t, "turn_counter", None)
-                    latency_dict["model"] = self.llm_config.get("model") if self.llm_config else None
-                    latency_dict["input_tokens"] = actual_input_tokens
-                    latency_dict["output_tokens"] = actual_output_tokens
-                    latency_dict["reasoning_tokens"] = actual_reasoning_tokens
-                    latency_dict["cached_tokens"] = actual_cached_tokens
                     previous_latency_item = (
                         self.llm_latencies.turn_latencies[-1] if self.llm_latencies.turn_latencies else None
                     )
@@ -3827,7 +3845,12 @@ class TaskManager(BaseManager):
                                 )
                                 # on_agent_interrupted_user MUST come before reset_utterance_end_time
                                 # so it can still read the previous turn's utterance_end_time.
-                                self.interruption_manager.on_agent_interrupted_user()
+                                _t = self.tools.get("transcriber")
+                                if hasattr(_t, "transcribers") and hasattr(_t, "active_label"):
+                                    _t = _t.transcribers.get(_t.active_label, _t)
+                                self.interruption_manager.on_agent_interrupted_user(
+                                    asr_turn_id=getattr(_t, "current_turn_id", None)
+                                )
                                 self.interruption_manager.reset_utterance_end_time()
                                 await self.__cleanup_downstream_tasks()
                         elif (
