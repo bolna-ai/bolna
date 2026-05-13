@@ -16,7 +16,6 @@ from websockets.exceptions import InvalidHandshake, ConnectionClosed, Connection
 from .base_transcriber import BaseTranscriber
 from bolna.constants import (
     OPENAI_TRANSCRIBER_HEARTBEAT_INTERVAL_S,
-    OPENAI_TRANSCRIBER_UTTERANCE_TIMEOUT_S,
 )
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.ssl_context import get_ssl_context
@@ -254,7 +253,9 @@ class OpenAITranscriber(BaseTranscriber):
                     and not self.is_transcript_sent_for_processing
                 ):
                     elapsed = time.time() - self._commit_time
-                    if elapsed > OPENAI_TRANSCRIBER_UTTERANCE_TIMEOUT_S:
+                    # Wait 5× endpointing duration for the transcript, minimum 1s.
+                    utterance_timeout = max(self.endpointing_ms * 5 / 1000, 1.0)
+                    if elapsed > utterance_timeout:
                         logger.warning(
                             f"Utterance timeout: completed event missing for {elapsed:.1f}s "
                             f"after commit on turn {self.current_turn_id}. Force-finalizing."
