@@ -131,7 +131,10 @@ class InterruptionManager:
         welcome_played: bool,
     ) -> bool:
         """Returns True if final transcript should be ignored (too short, not a phrase match)."""
-        if not is_audio_playing or not welcome_played:
+        # Apply word-count filtering during welcome playback too.
+        # Short responses like "hello" (user answering the phone) while the welcome message
+        # is still playing should not interrupt and cancel the welcome audio.
+        if not is_audio_playing:
             return False
 
         transcript_stripped = transcript.strip()
