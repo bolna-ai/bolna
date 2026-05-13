@@ -279,8 +279,9 @@ class OpenAITranscriber(BaseTranscriber):
                             await self._commit_turn(ws)
                             self._speech_active = False
                             self._silence_start_time = None
-                    # Inject silence frames while speech is active so the model gets
-                    # explicit end-of-speech context in the buffer.
+                    # Only inject silence while speech is active — after a commit the server
+                    # starts a fresh empty buffer, and sending silence into it would cause a
+                    # spurious second transcription item when EOS fires its own commit.
                     if self._speech_active:
                         silent_pcm = b"\x00" * int(24000 * 0.05 * 2)  # 50ms @ 24kHz PCM16
                         await ws.send(json.dumps({
