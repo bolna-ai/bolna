@@ -4236,7 +4236,11 @@ class TaskManager(BaseManager):
                 # Centralized tri-state decision loop (handles race condition + grace period)
                 should_continue_outer_loop = False
                 while True:
-                    status = "SEND" if is_hangup_message else self.interruption_manager.get_audio_send_status(sequence_id, len(self.history))
+                    status = (
+                        "SEND"
+                        if is_hangup_message
+                        else self.interruption_manager.get_audio_send_status(sequence_id, len(self.history))
+                    )
 
                     if status == "SEND":
                         # Audio approved - send it
