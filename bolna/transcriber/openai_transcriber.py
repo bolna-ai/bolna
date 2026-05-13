@@ -344,6 +344,7 @@ class OpenAITranscriber(BaseTranscriber):
                             min_frames = int(24000 * 0.3 / (len(pcm_24k) / 2)) if pcm_24k else 15
                             if self._speech_frames_in_turn >= min_frames:
                                 await self._commit_turn(ws)
+                                self._speech_active = False
                             else:
                                 logger.debug(f"Skipping commit for turn {self.current_turn_id}: only {self._speech_frames_in_turn} frames (min {min_frames})")
                                 self._speech_active = False
