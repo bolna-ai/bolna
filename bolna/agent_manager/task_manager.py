@@ -3391,9 +3391,7 @@ class TaskManager(BaseManager):
             len((transcriber_message or "").strip()),
             (transcriber_message or "")[:120],
         )
-        if not self.tools["input"].welcome_message_played() and (
-            self.discard_pre_welcome_utterance or len(self.conversation_history) > 2
-        ):
+        if not self.tools["input"].welcome_message_played():
             logger.info(f"Welcome message is playing while spoken: {transcriber_message}")
             self._retire_dropped_response(meta_info, "welcome_still_playing")
             return
