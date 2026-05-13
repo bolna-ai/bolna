@@ -3372,8 +3372,9 @@ class TaskManager(BaseManager):
             return
 
         # hangup_triggered flag set immediately to prevent user interruptions from cancelling hangup.
-        # hangup_triggered_at is set AFTER the goodbye plays so progression shows
-        # the actual disconnect time, not the decision time (use hangup_decision_at for that).
+        # hangup_triggered_at is stamped after the goodbye is queued for synthesis (not at playback end).
+        # For short goodbye messages this is close enough to playback start; use hangup_decision_at
+        # to get the earlier decision timestamp.
         self.hangup_triggered = True
         message = self.call_hangup_message if not self.voicemail_handler.detected else ""
         if not message or message.strip() == "":
@@ -5169,7 +5170,6 @@ class TaskManager(BaseManager):
                         "asr_finalized_ms",
                         "asr_turn_start_ms",
                         "final_transcript",
-                        "was_interrupted",
                     ):
                         _t.pop(_f, None)
 

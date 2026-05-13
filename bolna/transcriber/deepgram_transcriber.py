@@ -363,16 +363,14 @@ class DeepgramTranscriber(BaseTranscriber):
             self.turn_latencies.append(
                 {
                     "turn_id": self.current_turn_id,
-                    "asr_start_epoch_ms": self.speech_start_time,
+                    "asr_start_epoch_ms": self.current_turn_start_time,
                     "asr_turn_start_epoch_ms": self._turn_first_speech_epoch_ms,
                     "asr_finalized_epoch_ms": timestamp_ms(),
+                    "final_transcript": transcript_to_send,
                     "interim_details": self.current_turn_interim_details,
                     "first_interim_to_final_ms": first_interim_to_final_ms,
                     "last_interim_to_final_ms": last_interim_to_final_ms,
                     "force_finalized": True,
-                    "asr_start_epoch_ms": self.current_turn_start_time,
-                    "asr_finalized_epoch_ms": timestamp_ms(),
-                    "final_transcript": transcript_to_send,
                 }
             )
         except Exception as e:
@@ -705,16 +703,13 @@ class DeepgramTranscriber(BaseTranscriber):
                                 self.turn_latencies.append(
                                     {
                                         "turn_id": self.current_turn_id,
-                                        "asr_start_epoch_ms": self.speech_start_time,
+                                        "asr_start_epoch_ms": self.current_turn_start_time,
                                         "asr_turn_start_epoch_ms": self._turn_first_speech_epoch_ms,
-                                        "final_transcript": self.final_transcript,
                                         "asr_finalized_epoch_ms": timestamp_ms(),
+                                        "final_transcript": self.final_transcript,
                                         "interim_details": self.current_turn_interim_details,
                                         "first_interim_to_final_ms": first_interim_to_final_ms,
                                         "last_interim_to_final_ms": last_interim_to_final_ms,
-                                        "asr_start_epoch_ms": self.current_turn_start_time,
-                                        "asr_finalized_epoch_ms": timestamp_ms(),
-                                        "final_transcript": self.final_transcript,
                                     }
                                 )
 
@@ -733,6 +728,8 @@ class DeepgramTranscriber(BaseTranscriber):
                                 )
                                 pass
                             self.meta_info["user_stop_offset_ms"] = self.endpointing_ms
+                            # Always assign (even None) to clear any stale value from a previous turn.
+                            # None is safe: interruption_manager guards on it before use.
                             self.meta_info["user_stop_ts_wall"] = self._compute_last_word_end_wall(msg)
                             yield create_ws_data_packet(data, self.meta_info)
 
@@ -763,15 +760,13 @@ class DeepgramTranscriber(BaseTranscriber):
                             self.turn_latencies.append(
                                 {
                                     "turn_id": self.current_turn_id,
-                                    "asr_start_epoch_ms": self.speech_start_time,
+                                    "asr_start_epoch_ms": self.current_turn_start_time,
                                     "asr_turn_start_epoch_ms": self._turn_first_speech_epoch_ms,
                                     "asr_finalized_epoch_ms": timestamp_ms(),
+                                    "final_transcript": self.final_transcript,
                                     "interim_details": self.current_turn_interim_details,
                                     "first_interim_to_final_ms": first_interim_to_final_ms,
                                     "last_interim_to_final_ms": last_interim_to_final_ms,
-                                    "asr_start_epoch_ms": self.current_turn_start_time,
-                                    "asr_finalized_epoch_ms": timestamp_ms(),
-                                    "final_transcript": self.final_transcript,
                                 }
                             )
 
