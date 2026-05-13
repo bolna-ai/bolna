@@ -331,7 +331,7 @@ class OpenAITranscriber(BaseTranscriber):
                         self._turn_start_epoch_ms = timestamp_ms()
                         self.current_turn_interim_details = []
                         self.is_transcript_sent_for_processing = False
-                        logger.info(f"Speech detected (RMS), starting turn {self.current_turn_id}")
+                        logger.info(f"Speech detected (RMS={rms:.0f} threshold={self.speech_rms_threshold}), starting turn {self.current_turn_id}")
                         await self.push_to_transcriber_queue(create_ws_data_packet("speech_started", self.meta_info))
                 else:
                     if self._speech_active:
