@@ -177,6 +177,7 @@ class OpenAITranscriber(BaseTranscriber):
         self.is_transcript_sent_for_processing = True
         self._turn_committed = False
         self._commit_time = None
+        self._silence_start_time = None
 
     async def openai_connect(self) -> ClientConnection:
         url = f"wss://{self.api_host}/v1/realtime?intent=transcription"
@@ -435,32 +436,6 @@ class OpenAITranscriber(BaseTranscriber):
                             self.meta_info,
                         )
 
-                    elif event_type == "input_audio_buffer.speech_started":
-                        self._speech_active = True
-                        self.turn_counter += 1
-                        self.current_turn_id = f"turn_{self.turn_counter}"
-                        self.current_turn_start_time = time.perf_counter()
-                        self._turn_start_epoch_ms = timestamp_ms()
-                        self.current_turn_interim_details = []
-                        self.is_transcript_sent_for_processing = False
-                        self._first_result_received = False
-                        self._final_transcript_event.clear()
-                        self._audio_appended_since_commit = False
-                        self.audio_submission_time = time.time()
-                        logger.info(f"Speech detected (server VAD), starting turn {self.current_turn_id}")
-                        yield create_ws_data_packet("speech_started", self.meta_info)
-
-                    elif event_type == "input_audio_buffer.speech_stopped":
-                        self._speech_active = False
-                        self._last_committed_turn_id = self.current_turn_id
-                        self._turn_committed = True
-                        self._commit_time = time.time()
-                        self.meta_info["last_vocal_frame_timestamp"] = self._commit_time
-                        self.meta_info["user_stop_offset_ms"] = self.endpointing_ms
-                        self.meta_info["user_stop_ts_wall"] = self._commit_time
-                        logger.info(f"Speech stopped (server VAD), committed turn {self.current_turn_id}")
-                        yield create_ws_data_packet({"type": "speech_ended"}, self.meta_info)
-
                     elif event_type in (
                         "input_audio_buffer.committed",
                         "conversation.item.created",
@@ -473,7 +448,7 @@ class OpenAITranscriber(BaseTranscriber):
                     elif event_type == "error":
                         err = data.get("error", {})
                         if err.get("code") == "input_audio_buffer_commit_empty":
-                            # Harmless: EOS commit raced with server VAD commit
+                            # Harmless: EOS commit on empty buffer (no speech in final window)
                             logger.debug(f"OpenAI commit-empty (ignored): {err.get('message', '')}")
                         else:
                             logger.error(f"OpenAI Realtime error event: {err}")
