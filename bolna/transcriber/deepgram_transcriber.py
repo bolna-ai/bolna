@@ -99,6 +99,8 @@ class DeepgramTranscriber(BaseTranscriber):
         self.connection_authenticated = False
         self.speech_start_time = None
         self.speech_end_time = None
+        self._turn_first_speech_epoch_ms = None  # epoch ms of first SpeechStarted per turn
+        self._turn_pending = False  # True after SpeechStarted until first real interim confirms speech
         self.current_turn_interim_details = []
         self.audio_frame_timestamps = []  # List of (frame_start, frame_end, send_timestamp)
         self.turn_counter = 0
@@ -327,6 +329,8 @@ class DeepgramTranscriber(BaseTranscriber):
         """Reset turn state variables after finalizing a transcript"""
         self.speech_start_time = None
         self.speech_end_time = None
+        self._turn_first_speech_epoch_ms = None
+        self._turn_pending = False
         self.last_interim_time = None
         self.current_turn_interim_details = []
         self.current_turn_start_time = None
@@ -359,7 +363,10 @@ class DeepgramTranscriber(BaseTranscriber):
             self.turn_latencies.append(
                 {
                     "turn_id": self.current_turn_id,
-                    "sequence_id": self.current_turn_id,
+                    "asr_start_epoch_ms": self.current_turn_start_time,
+                    "asr_turn_start_epoch_ms": self._turn_first_speech_epoch_ms,
+                    "asr_finalized_epoch_ms": timestamp_ms(),
+                    "final_transcript": transcript_to_send,
                     "interim_details": self.current_turn_interim_details,
                     "first_interim_to_final_ms": first_interim_to_final_ms,
                     "last_interim_to_final_ms": last_interim_to_final_ms,
@@ -597,8 +604,9 @@ class DeepgramTranscriber(BaseTranscriber):
 
                 if msg["type"] == "SpeechStarted":
                     logger.info("Received SpeechStarted event from deepgram")
-                    self.turn_counter += 1
-                    self.current_turn_id = self.turn_counter
+                    if not isinstance(self.current_turn_id, int):
+                        self._turn_first_speech_epoch_ms = timestamp_ms()
+                        self._turn_pending = True  # counter incremented on first real interim
                     self.speech_start_time = timestamp_ms()
                     self.current_turn_interim_details = []
                     self.is_transcript_sent_for_processing = False
@@ -616,6 +624,17 @@ class DeepgramTranscriber(BaseTranscriber):
                     deepgram_request_id = msg.get("metadata", {}).get("request_id")
 
                     if transcript.strip():
+                        if self._turn_pending:
+                            self.turn_counter += 1
+                            self.current_turn_id = self.turn_counter
+                            self._turn_pending = False
+                            logger.info(f"Starting new turn with turn_id: {self.current_turn_id}")
+                        elif self.current_turn_id is None:
+                            # SpeechStarted was suppressed (e.g. Deepgram VAD inhibited during
+                            # agent audio playback) but real speech arrived — still assign a turn_id.
+                            self.turn_counter += 1
+                            self.current_turn_id = self.turn_counter
+                            logger.info(f"Turn id assigned without SpeechStarted: {self.current_turn_id}")
                         # Calculate latency using end position (start + duration) for cumulative transcripts
                         self.__set_transcription_cursor(msg)
                         audio_position_end = self.transcription_cursor
@@ -684,7 +703,10 @@ class DeepgramTranscriber(BaseTranscriber):
                                 self.turn_latencies.append(
                                     {
                                         "turn_id": self.current_turn_id,
-                                        "sequence_id": self.current_turn_id,
+                                        "asr_start_epoch_ms": self.current_turn_start_time,
+                                        "asr_turn_start_epoch_ms": self._turn_first_speech_epoch_ms,
+                                        "asr_finalized_epoch_ms": timestamp_ms(),
+                                        "final_transcript": self.final_transcript,
                                         "interim_details": self.current_turn_interim_details,
                                         "first_interim_to_final_ms": first_interim_to_final_ms,
                                         "last_interim_to_final_ms": last_interim_to_final_ms,
@@ -694,6 +716,7 @@ class DeepgramTranscriber(BaseTranscriber):
                                 # Complete turn reset
                                 self.speech_start_time = None
                                 self.speech_end_time = None
+                                self._turn_first_speech_epoch_ms = None
                                 self.current_turn_interim_details = []
                                 self.current_turn_start_time = None
                                 self.current_turn_id = None
@@ -705,9 +728,9 @@ class DeepgramTranscriber(BaseTranscriber):
                                 )
                                 pass
                             self.meta_info["user_stop_offset_ms"] = self.endpointing_ms
-                            last_word_end_wall = self._compute_last_word_end_wall(msg)
-                            if last_word_end_wall is not None:
-                                self.meta_info["user_stop_ts_wall"] = last_word_end_wall
+                            # Always assign (even None) to clear any stale value from a previous turn.
+                            # None is safe: interruption_manager guards on it before use.
+                            self.meta_info["user_stop_ts_wall"] = self._compute_last_word_end_wall(msg)
                             yield create_ws_data_packet(data, self.meta_info)
 
                 elif msg["type"] == "UtteranceEnd":
@@ -737,7 +760,10 @@ class DeepgramTranscriber(BaseTranscriber):
                             self.turn_latencies.append(
                                 {
                                     "turn_id": self.current_turn_id,
-                                    "sequence_id": self.current_turn_id,
+                                    "asr_start_epoch_ms": self.current_turn_start_time,
+                                    "asr_turn_start_epoch_ms": self._turn_first_speech_epoch_ms,
+                                    "asr_finalized_epoch_ms": timestamp_ms(),
+                                    "final_transcript": self.final_transcript,
                                     "interim_details": self.current_turn_interim_details,
                                     "first_interim_to_final_ms": first_interim_to_final_ms,
                                     "last_interim_to_final_ms": last_interim_to_final_ms,
@@ -747,6 +773,7 @@ class DeepgramTranscriber(BaseTranscriber):
                             # Complete turn reset
                             self.speech_start_time = None
                             self.speech_end_time = None
+                            self._turn_first_speech_epoch_ms = None
                             self.current_turn_interim_details = []
                             self.current_turn_start_time = None
                             self.current_turn_id = None
@@ -772,6 +799,8 @@ class DeepgramTranscriber(BaseTranscriber):
                         )
                         self.speech_start_time = None
                         self.speech_end_time = None
+                        self._turn_first_speech_epoch_ms = None
+                        self._turn_pending = False
                         self.current_turn_interim_details = []
                         self.current_turn_start_time = None
                         self.current_turn_id = None
@@ -880,11 +909,20 @@ class DeepgramTranscriber(BaseTranscriber):
 
                         if transcript:
                             try:
+                                first_interim_to_final_ms, last_interim_to_final_ms = (
+                                    self.calculate_interim_to_final_latencies(self.current_turn_interim_details)
+                                )
                                 self.turn_latencies.append(
                                     {
                                         "turn_id": self.current_turn_id,
                                         "sequence_id": self.current_turn_id,
                                         "interim_details": self.current_turn_interim_details,
+                                        "first_interim_to_final_ms": first_interim_to_final_ms,
+                                        "last_interim_to_final_ms": last_interim_to_final_ms,
+                                        "asr_start_epoch_ms": self.speech_start_time,
+                                        "asr_turn_start_epoch_ms": self._turn_first_speech_epoch_ms,
+                                        "asr_finalized_epoch_ms": timestamp_ms(),
+                                        "final_transcript": transcript,
                                     }
                                 )
                             except Exception as e:

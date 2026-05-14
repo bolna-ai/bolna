@@ -10,7 +10,7 @@ from google.cloud import speech_v1p1beta1 as speech
 
 from .base_transcriber import BaseTranscriber
 from bolna.helpers.logger_config import configure_logger
-from bolna.helpers.utils import create_ws_data_packet
+from bolna.helpers.utils import create_ws_data_packet, timestamp_ms
 
 load_dotenv()
 logger = configure_logger(__name__)
@@ -84,6 +84,8 @@ class GoogleTranscriber(BaseTranscriber):
         self.turn_latencies = []
         self.current_turn_start_time = None
         self.current_turn_id = None
+        self.turn_counter = 0
+        self._turn_start_epoch_ms = None
 
         # Request tracking
         self.meta_info = None
@@ -201,9 +203,9 @@ class GoogleTranscriber(BaseTranscriber):
                         self.meta_info["transcriber_start_time"] = time.perf_counter()
                         # start turn-level tracking
                         self.current_turn_start_time = self.meta_info["transcriber_start_time"]
-                        self.current_turn_id = (
-                            self.meta_info.get("turn_id") or self.meta_info.get("request_id") or self._request_id
-                        )
+                        self._turn_start_epoch_ms = timestamp_ms()
+                        self.turn_counter += 1
+                        self.current_turn_id = self.turn_counter
                     except Exception:
                         pass
 
@@ -254,7 +256,7 @@ class GoogleTranscriber(BaseTranscriber):
                 except Exception:
                     logger.exception("Non-bytes chunk received in google audio generator; dropping")
 
-    def _append_turn_latency(self):
+    def _append_turn_latency(self, final_transcript=None):
         """
         Add a turn latency entry compatible with the Deepgram 'turn_latencies' entries.
         Called when a final transcript arrives (end-of-turn semantics).
@@ -263,14 +265,17 @@ class GoogleTranscriber(BaseTranscriber):
             if self.current_turn_id and self.current_turn_start_time:
                 first_ms = int(round((self.meta_info.get("transcriber_first_result_latency", 0)) * 1000))
                 total_s = (time.perf_counter() - self.current_turn_start_time) if self.current_turn_start_time else 0
-                self.turn_latencies.append(
-                    {
-                        "turn_id": self.current_turn_id,
-                        "sequence_id": self.current_turn_id,
-                        "first_result_latency_ms": first_ms,
-                        "total_stream_duration_ms": int(round(total_s * 1000)),
-                    }
-                )
+                entry = {
+                    "turn_id": self.current_turn_id,
+                    "sequence_id": self.current_turn_id,
+                    "first_result_latency_ms": first_ms,
+                    "total_stream_duration_ms": int(round(total_s * 1000)),
+                    "asr_start_epoch_ms": self._turn_start_epoch_ms,
+                    "asr_finalized_epoch_ms": timestamp_ms(),
+                }
+                if final_transcript:
+                    entry["final_transcript"] = final_transcript
+                self.turn_latencies.append(entry)
                 # also expose on meta_info for immediate consumption
                 try:
                     self.meta_info["turn_latencies"] = self.turn_latencies
@@ -278,6 +283,7 @@ class GoogleTranscriber(BaseTranscriber):
                     pass
                 # reset turn tracking
                 self.current_turn_start_time = None
+                self._turn_start_epoch_ms = None
                 self.current_turn_id = None
         except Exception:
             logger.exception("Error appending turn latency")
@@ -367,7 +373,7 @@ class GoogleTranscriber(BaseTranscriber):
                                 pass
 
                             # append to turn_latencies (A)
-                            self._append_turn_latency()
+                            self._append_turn_latency(transcript)
 
                             data = {"type": "transcript", "content": transcript}
                             self._enqueue_output(data, meta=self.meta_info)

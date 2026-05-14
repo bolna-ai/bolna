@@ -24,6 +24,7 @@ class VoicemailHandler:
             self.enabled = False
         self.detected: bool = False
         self.check_task: Optional[asyncio.Task] = None
+        self.check_count: int = 0
         self.detection_start_time: Optional[float] = None
         self.last_check_time: Optional[float] = None
         self.check_interval: float = config.get("voicemail_check_interval", 7.0)
@@ -88,6 +89,7 @@ class VoicemailHandler:
         )
 
         try:
+            self.check_count += 1
             self.check_task = asyncio.create_task(self._background_check(transcriber_message, meta_info, is_final))
         except Exception as e:
             logger.error(f"Error starting voicemail check background task: {e}")

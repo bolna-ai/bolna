@@ -402,6 +402,8 @@ class GeminiLLM(BaseLLM):
                                 is_cached=False,
                                 run_id=self.run_id,
                             )
+                            if latency_data and latency_data.total_stream_duration_ms is None:
+                                latency_data.total_stream_duration_ms = now_ms() - start_time
                             yield LLMStreamChunk(
                                 data=payload, end_of_stream=False, latency=latency_data, is_function_call=True
                             )
@@ -429,7 +431,7 @@ class GeminiLLM(BaseLLM):
         finally:
             self.started_streaming = False
 
-        if latency_data:
+        if latency_data and latency_data.total_stream_duration_ms is None:
             latency_data.total_stream_duration_ms = now_ms() - start_time
 
         reasoning_content = "\n".join(accumulated_thought_parts) if accumulated_thought_parts else None

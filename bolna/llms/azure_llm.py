@@ -278,9 +278,19 @@ class AzureLLM(OpenAICompatibleLLM):
         if accumulator and accumulator.final_tool_calls:
             api_call_payload = accumulator.build_api_payload(model_args, meta_info, answer)
             if api_call_payload:
-                yield LLMStreamChunk(
+                fc_chunk = LLMStreamChunk(
                     data=api_call_payload, end_of_stream=False, latency=latency_data, is_function_call=True
                 )
+                if stream_usage:
+                    fc_chunk.input_tokens = getattr(stream_usage, "prompt_tokens", None)
+                    fc_chunk.output_tokens = getattr(stream_usage, "completion_tokens", None)
+                    _d = getattr(stream_usage, "completion_tokens_details", None)
+                    if _d:
+                        fc_chunk.reasoning_tokens = getattr(_d, "reasoning_tokens", None)
+                    _pd = getattr(stream_usage, "prompt_tokens_details", None)
+                    if _pd:
+                        fc_chunk.cached_tokens = getattr(_pd, "cached_tokens", None)
+                yield fc_chunk
 
         # Extract actual token counts from stream usage
         usage_kwargs = {}

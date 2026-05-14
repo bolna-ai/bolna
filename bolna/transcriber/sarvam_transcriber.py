@@ -20,7 +20,7 @@ from typing import Optional
 from .base_transcriber import BaseTranscriber
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.ssl_context import get_ssl_context
-from bolna.helpers.utils import create_ws_data_packet
+from bolna.helpers.utils import create_ws_data_packet, timestamp_ms
 
 load_dotenv()
 logger = configure_logger(__name__)
@@ -81,6 +81,7 @@ class SarvamTranscriber(BaseTranscriber):
         self.current_turn_start_time = None
         self.current_turn_id = None
         self.turn_latencies = []
+        self._turn_start_epoch_ms = None
         self.first_result_latency_ms = None
         self.total_stream_duration_ms = None
         self.last_vocal_frame_timestamp = None
@@ -380,6 +381,7 @@ class SarvamTranscriber(BaseTranscriber):
                         if vad.get("signal_type") == "START_SPEECH":
                             logger.debug("Sarvam VAD: speech started")
                             self.current_turn_start_time = time.perf_counter()
+                            self._turn_start_epoch_ms = timestamp_ms()
                             self.turn_counter += 1
                             self.current_turn_id = f"turn_{self.turn_counter}"
                             self.turn_first_result_latency = None
@@ -403,12 +405,16 @@ class SarvamTranscriber(BaseTranscriber):
                                     "sequence_id": self.current_turn_id,
                                     "first_result_latency_ms": self.turn_first_result_latency,
                                     "total_stream_duration_ms": total_stream_duration_ms,
+                                    "asr_start_epoch_ms": self._turn_start_epoch_ms,
+                                    "asr_finalized_epoch_ms": timestamp_ms(),
+                                    "final_transcript": self.final_transcript or None,
                                 }
                                 self.turn_latencies.append(turn_info)
                                 self.meta_info["turn_latencies"] = self.turn_latencies
 
                                 # Reset turn tracking
                                 self.current_turn_start_time = None
+                                self._turn_start_epoch_ms = None
                                 self.current_turn_id = None
 
                             if self.final_transcript:

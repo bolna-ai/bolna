@@ -2,6 +2,7 @@ import asyncio
 import base64
 import time
 import uuid
+from typing import Optional
 from starlette.websockets import WebSocketDisconnect
 
 from dotenv import load_dotenv
@@ -34,6 +35,7 @@ class DefaultInputHandler:
         self.queue = queue
         self.conversation_recording = conversation_recording
         self.is_welcome_message_played = is_welcome_message_played
+        self.welcome_message_played_ts = None
         # This variable stores the response which has been heard by the user
         self.response_heard_by_user = ""
         self.response_heard_by_turn = {}
@@ -51,6 +53,11 @@ class DefaultInputHandler:
         self.plivo_latency_samples = []
         self.calculated_plivo_latency = 0.25
         self.max_latency_samples = 10
+        # Tracks the sequence_id and wall-clock time of the most recently fully-played
+        # agent audio chunk (is_final_chunk mark ACK). Read by task_manager to populate
+        # agent_end_ms in user_bot_latencies.
+        self.last_final_chunk_sequence_id: Optional[int] = None
+        self.last_final_chunk_played_ts: Optional[float] = None
 
     def get_calculated_plivo_latency(self):
         return self.calculated_plivo_latency
@@ -191,6 +198,11 @@ class DefaultInputHandler:
         )
 
         if mark_event_meta_data_obj.get("is_final_chunk"):
+            # Record which sequence finished playing and when — task_manager reads these
+            # to populate agent_end_ms in user_bot_latencies (actual playback end, not stream end).
+            self.last_final_chunk_sequence_id = mark_event_meta_data_obj.get("sequence_id")
+            self.last_final_chunk_played_ts = time.time()
+
             if message_type != "is_user_online_message":
                 self.observable_variables["final_chunk_played_observable"].value = not self.observable_variables[
                     "final_chunk_played_observable"
@@ -201,6 +213,7 @@ class DefaultInputHandler:
                 logger.info("Received mark event for agent_welcome_message")
                 self.audio_chunks_received = 0
                 self.is_welcome_message_played = True
+                self.welcome_message_played_ts = time.time() * 1000
 
             elif message_type == "agent_hangup":
                 logger.info(f"Agent hangup has been triggered")

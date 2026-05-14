@@ -203,7 +203,7 @@ class GraphAgent(BaseAgent):
                 self.routing_model = os.getenv("DEFAULT_ROUTING_MODEL_OPENAI", "gpt-4.1-mini")
             logger.info(f"Routing initialized with OpenAI ({self.routing_model})")
 
-    async def check_for_completion(self, messages, check_for_completion_prompt):
+    async def check_for_completion(self, messages, check_for_completion_prompt, meta_info=None):
         """Check if the conversation should end. Returns (hangup_dict, metadata)."""
         try:
             prompt = [
@@ -213,7 +213,7 @@ class GraphAgent(BaseAgent):
 
             start_time = time.time()
             response, metadata = await self.conversation_completion_llm.generate(
-                prompt, request_json=True, ret_metadata=True
+                prompt, request_json=True, ret_metadata=True, meta_info=meta_info
             )
             latency_ms = (time.time() - start_time) * 1000
 

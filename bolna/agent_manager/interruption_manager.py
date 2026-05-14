@@ -59,6 +59,8 @@ class InterruptionManager:
         self.longest_agent_monologue_ms: float = 0.0
 
         self._adjusted_user_stop_ts: Optional[float] = None
+        self._last_user_start_ts: float = -1
+        self._pending_user_start_ts: float = -1  # snapshot of user_start paired with _adjusted_user_stop_ts
         self.user_bot_latencies: List[Dict] = []
 
         logger.info(
@@ -145,6 +147,7 @@ class InterruptionManager:
         if not self.callee_speaking:
             self.callee_speaking = True
             self.callee_speaking_start_time = time.time()
+            self._last_user_start_ts = self.callee_speaking_start_time
             logger.info("User started speaking")
 
     def on_interim_transcript_received(self) -> None:
@@ -180,6 +183,7 @@ class InterruptionManager:
                 self._adjusted_user_stop_ts = user_stop_ts_wall
             else:
                 self._adjusted_user_stop_ts = now_s - (stop_offset_ms / 1000.0)
+            self._pending_user_start_ts = self._last_user_start_ts
 
         if self.callee_speaking_start_time > 0:
             self._total_user_speaking_ms += (now_s - self.callee_speaking_start_time) * 1000
@@ -193,7 +197,7 @@ class InterruptionManager:
 
     # ── Interruption event callbacks ──────────────────────────────────────────
 
-    def on_interruption_triggered(self) -> None:
+    def on_interruption_triggered(self, asr_turn_id: Optional[int] = None) -> None:
         """User barged in while agent was speaking. user_end_s filled later by on_user_speech_ended()."""
         self.turn_id += 1
         self.user_interrupted_agent_count += 1
@@ -203,6 +207,8 @@ class InterruptionManager:
 
         event: Dict = {
             "type": "user_interrupted_agent",
+            "turn_id": self.turn_id,
+            "asr_turn_id": asr_turn_id,
             "user_start_s": self.callee_speaking_start_time if self.callee_speaking_start_time > 0 else None,
             "user_end_s": None,
             "recovery_completed": False,
@@ -214,7 +220,7 @@ class InterruptionManager:
             f"Interruption triggered — turn_id={self.turn_id}, user_interrupted_agent_count={self.user_interrupted_agent_count}"
         )
 
-    def on_agent_interrupted_user(self) -> None:
+    def on_agent_interrupted_user(self, asr_turn_id: Optional[int] = None) -> None:
         """Agent responded prematurely and was cancelled within the grace period.
         Does NOT set _awaiting_recovery — recovery is only tracked for user barge-ins
         to keep barge_in_recovery_rate denominator consistent with user_interrupted_agent_count.
@@ -224,6 +230,8 @@ class InterruptionManager:
 
         event: Dict = {
             "type": "agent_interrupted_user",
+            "turn_id": self.turn_id,
+            "asr_turn_id": asr_turn_id,
             "user_start_s": self.callee_speaking_start_time if self.callee_speaking_start_time > 0 else None,
             "user_end_s": None,
             "recovery_completed": False,
@@ -254,18 +262,49 @@ class InterruptionManager:
             self.user_bot_latencies.append(
                 {
                     "sequence_id": sequence_id,
+                    "user_start_s": self._last_user_start_ts if self._last_user_start_ts > 0 else None,
+                    "user_first_start_s": self._pending_user_start_ts if self._pending_user_start_ts > 0 else None,
                     "user_end_s": self._adjusted_user_stop_ts,
                     "agent_start_s": now_s,
                     "latency_ms": round(latency_ms, 2),
                 }
             )
             self._adjusted_user_stop_ts = None
+            self._pending_user_start_ts = -1
+        else:
+            # Tool-call follow-up or any agent response without a preceding user turn
+            # in this sequence (e.g. seq=5 after a tool call consumed seq=4's user timing).
+            # Record agent_start_s so agent_speech_start appears in the progression.
+            self.user_bot_latencies.append(
+                {
+                    "sequence_id": sequence_id,
+                    "user_start_s": None,
+                    "user_first_start_s": None,
+                    "user_end_s": None,
+                    "agent_start_s": now_s,
+                    "latency_ms": None,
+                }
+            )
 
         logger.info(f"Agent speech started (sequence_id={sequence_id})")
 
     def on_agent_speech_ended(self) -> None:
         """Clean end of agent audio (end_of_synthesizer_stream in SEND path)."""
         self._finalize_agent_speaking_session()
+
+    def on_agent_audio_fully_played(self, sequence_id: int, ts: float) -> None:
+        """Record when the telephony provider ACKed the last audio mark for a sequence.
+
+        Called from final_chunk_played_observer via task_manager when is_final_chunk
+        mark is received back. This is the actual end of audio playback at the caller's
+        phone — more accurate than on_agent_speech_ended which fires at ElevenLabs
+        stream-end (much earlier than real playback end).
+        """
+        for entry in reversed(self.user_bot_latencies):
+            if entry.get("sequence_id") == sequence_id:
+                entry["agent_end_s"] = ts
+                logger.info(f"Recorded agent audio fully played: sequence_id={sequence_id}")
+                return
 
     def _finalize_agent_speaking_session(self) -> None:
         """Close current agent speaking window; called on clean end or barge-in."""
@@ -313,6 +352,7 @@ class InterruptionManager:
             entry: Dict = {
                 "type": e["type"],
                 "recovery_completed": e["recovery_completed"],
+                "asr_turn_id": e.get("asr_turn_id"),
             }
             if e.get("user_start_s") is not None:
                 entry["user_start_ms"] = round(e["user_start_s"] * 1000 - call_start_ms, 2)

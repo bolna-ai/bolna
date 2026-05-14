@@ -85,6 +85,7 @@ class OpenAITranscriber(BaseTranscriber):
         self.current_turn_start_time = None
         self.turn_counter = 0
         self.current_turn_interim_details = []
+        self._turn_start_epoch_ms = None
         # Saved at commit time so the receiver can still identify the turn after
         # _reset_turn_state() clears current_turn_id (e.g. utterance timeout race).
         self._last_committed_turn_id: Optional[str] = None
@@ -145,6 +146,7 @@ class OpenAITranscriber(BaseTranscriber):
             return
         self.current_turn_interim_details = []
         self.current_turn_start_time = None
+        self._turn_start_epoch_ms = None
         self.current_turn_id = None
         self.is_transcript_sent_for_processing = True
         self._turn_committed = False
@@ -349,6 +351,9 @@ class OpenAITranscriber(BaseTranscriber):
                                     "total_stream_duration_ms": round(
                                         (self.meta_info.get("transcriber_total_stream_duration") or 0) * 1000
                                     ),
+                                    "asr_start_epoch_ms": self._turn_start_epoch_ms,
+                                    "asr_finalized_epoch_ms": timestamp_ms(),
+                                    "final_transcript": transcript,
                                 }
                             )
                             self._reset_turn_state()

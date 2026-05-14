@@ -104,6 +104,10 @@ class TaskManager(BaseManager):
         self.rag_latencies = {"turn_latencies": []}
         self.routing_latencies = {"turn_latencies": []}
         self.stream_sid_ts = None
+        self.welcome_message_duration_ms = None
+        self.transcriber_error_events: list[dict] = []
+        self.blocked_audio_events: list[dict] = []
+        self._blocked_sequences: set = set()  # dedup: only record first block per sequence
 
         self.task_config = task
 
@@ -166,6 +170,10 @@ class TaskManager(BaseManager):
         self.has_transfer = False
         self.hangup_triggered = False
         self.hangup_triggered_at = None
+        self.hangup_decision_at = None
+        self.dtmf_events: list[dict] = []
+        self.non_fatal_llm_error_events: list[dict] = []
+        self._agent_end_timestamps: dict = {}
         self.hangup_message_queued = False
         self.switch_handoff_messages = {}
         self.agent_names = {}
@@ -357,6 +365,7 @@ class TaskManager(BaseManager):
         # Records every manual switch_language tool call — used post-call to
         # compare against LID shadow detections (precision / latency analysis).
         self.language_switch_events: list[dict] = []
+        self.transfer_call_events: list[dict] = []
         self.hangup_task = None
 
         self.conversation_config = None
@@ -592,6 +601,39 @@ class TaskManager(BaseManager):
         return redacted_headers
 
     @staticmethod
+    def _stamp_llm_latency_dict(
+        self,
+        latency_dict: dict,
+        meta_info: dict,
+        actual_input_tokens,
+        actual_output_tokens,
+        actual_reasoning_tokens,
+        actual_cached_tokens,
+        response_text: str | None = None,
+    ) -> None:
+        """Stamp observability fields onto an LLM turn latency dict.
+
+        Called from both the function-call and regular-text branches of
+        __do_llm_generation so the two paths stay in sync automatically.
+        """
+        latency_dict["turn_id"] = meta_info.get("turn_id")
+        latency_dict["llm_start_ms"] = (
+            round(meta_info.get("llm_start_time", 0) * 1000 - self.conversation_start_init_ts, 2)
+            if meta_info.get("llm_start_time")
+            else None
+        )
+        _t = self.tools.get("transcriber")
+        if hasattr(_t, "transcribers") and hasattr(_t, "active_label"):
+            _t = _t.transcribers.get(_t.active_label, _t)
+        latency_dict["asr_turn_id"] = getattr(_t, "turn_counter", None)
+        latency_dict["model"] = self.llm_config.get("model") if self.llm_config else None
+        latency_dict["input_tokens"] = actual_input_tokens
+        latency_dict["output_tokens"] = actual_output_tokens
+        latency_dict["reasoning_tokens"] = actual_reasoning_tokens
+        latency_dict["cached_tokens"] = actual_cached_tokens
+        if response_text:
+            latency_dict["response_text"] = response_text.strip()
+
     def _extract_api_call_runtime_args(resp):
         excluded_keys = {"model_response", "textual_response"}
         return {key: copy.deepcopy(value) for key, value in resp.items() if key not in excluded_keys}
@@ -622,6 +664,7 @@ class TaskManager(BaseManager):
             "meta": {
                 "request_id": meta_info.get("request_id"),
                 "sequence_id": meta_info.get("sequence_id"),
+                "turn_id": meta_info.get("turn_id"),
             },
             "started_at": datetime.now().isoformat(),
             "status": "pending",
@@ -949,12 +992,14 @@ class TaskManager(BaseManager):
                                 duration = calculate_audio_duration(
                                     len(data), self.sampling_rate, format=message["meta_info"]["format"]
                                 )
+                                self.welcome_message_duration_ms = round(duration * 1000, 2)
                                 if self.should_record:
                                     self.conversation_recording["output"].append(
                                         {"data": data, "start_time": time.time(), "duration": duration}
                                     )
                         except Exception as e:
                             duration = 0.256
+                            self.welcome_message_duration_ms = round(duration * 1000, 2)
                             logger.error(
                                 "Exception in __forced_first_message for duration calculation: {}".format(str(e))
                             )
@@ -2032,6 +2077,13 @@ class TaskManager(BaseManager):
     def final_chunk_played_observer(self, is_final_chunk_played):
         logger.info(f"Updating last_transmitted_timestamp")
         self.last_transmitted_timestamp = time.time()
+        # Record actual audio playback end (mark ACK from provider) for agent_end_ms tracking.
+        input_handler = self.tools.get("input")
+        if input_handler is not None:
+            seq_id = getattr(input_handler, "last_final_chunk_sequence_id", None)
+            ts = getattr(input_handler, "last_final_chunk_played_ts", None)
+            if seq_id is not None and ts is not None:
+                self.interruption_manager.on_agent_audio_fully_played(seq_id, ts)
 
     async def agent_hangup_observer(self, is_agent_hangup):
         logger.info(f"agent_hangup_observer triggered with is_agent_hangup = {is_agent_hangup}")
@@ -2100,6 +2152,10 @@ class TaskManager(BaseManager):
             try:
                 dtmf_digits = await self.queues["dtmf"].get()
                 logger.info(f"DTMF collected {dtmf_digits}")
+
+                _dtmf_ts = round(time.time() * 1000 - self.conversation_start_init_ts, 2)
+                for _digit in dtmf_digits:
+                    self.dtmf_events.append({"digit": _digit, "ts_ms": _dtmf_ts})
 
                 dtmf_message = "dtmf_number: " + dtmf_digits
                 base_meta_info = {
@@ -2485,6 +2541,19 @@ class TaskManager(BaseManager):
             if self.tools["input"].io_provider != "default":
                 payload["call_sid"] = self.tools["input"].get_call_sid()
 
+            self.transfer_call_events.append(
+                {
+                    "type": "transfer_start",
+                    "ts_ms": round(time.time() * 1000 - self.conversation_start_init_ts, 2),
+                    "tool_name": called_fun,
+                    "tool_call_id": resp.get("tool_call_id", ""),
+                    "turn_id": meta_info.get("turn_id"),
+                    "sequence_id": meta_info.get("sequence_id"),
+                    "transfer_number": payload.get("call_transfer_number"),
+                    "provider": self.tools["input"].io_provider,
+                }
+            )
+
             if self.tools["input"].io_provider == "default":
                 mock_response = (
                     f"This is a mocked response demonstrating a successful transfer of call to {call_transfer_number}"
@@ -2522,6 +2591,18 @@ class TaskManager(BaseManager):
                 self._finalize_api_call_detail(
                     function_call_log, response=mock_response, status_code=200, content_type="text/plain"
                 )
+                self.transfer_call_events.append(
+                    {
+                        "type": "transfer_end",
+                        "ts_ms": round(time.time() * 1000 - self.conversation_start_init_ts, 2),
+                        "tool_call_id": resp.get("tool_call_id", ""),
+                        "turn_id": meta_info.get("turn_id"),
+                        "sequence_id": meta_info.get("sequence_id"),
+                        "status_code": 200,
+                        "latency_ms": function_call_log.get("latency_ms"),
+                        "success": True,
+                    }
+                )
 
                 bos_packet = create_ws_data_packet("<beginning_of_stream>", meta_info)
                 await self.tools["output"].handle(bos_packet)
@@ -2557,25 +2638,74 @@ class TaskManager(BaseManager):
                     is_cached=False,
                     run_id=self.run_id,
                 )
-                async with session.post(url, json=payload) as response:
-                    response_text = await response.text()
-                    logger.info(f"Response from the server after call transfer: {response_text}")
-                    convert_to_request_log(
-                        str(response_text),
-                        meta_info,
-                        None,
-                        LogComponent.FUNCTION_CALL,
-                        direction=LogDirection.RESPONSE,
-                        is_cached=False,
-                        run_id=self.run_id,
+                _transfer_end_recorded = False
+                try:
+                    async with session.post(url, json=payload) as response:
+                        response_text = await response.text()
+                        logger.info(f"Response from the server after call transfer: {response_text}")
+                        convert_to_request_log(
+                            str(response_text),
+                            meta_info,
+                            None,
+                            LogComponent.FUNCTION_CALL,
+                            direction=LogDirection.RESPONSE,
+                            is_cached=False,
+                            run_id=self.run_id,
+                        )
+                        self._finalize_api_call_detail(
+                            function_call_log,
+                            response=response_text,
+                            status_code=response.status,
+                            content_type=response.headers.get("Content-Type"),
+                        )
+                        self.transfer_call_events.append(
+                            {
+                                "type": "transfer_end",
+                                "ts_ms": round(time.time() * 1000 - self.conversation_start_init_ts, 2),
+                                "tool_call_id": resp.get("tool_call_id", ""),
+                                "turn_id": meta_info.get("turn_id"),
+                                "sequence_id": meta_info.get("sequence_id"),
+                                "status_code": response.status,
+                                "latency_ms": function_call_log.get("latency_ms"),
+                                "success": response.status < 400,
+                            }
+                        )
+                        _transfer_end_recorded = True
+                except Exception as transfer_exc:
+                    logger.warning(f"Transfer webhook did not respond (call likely redirected): {transfer_exc}")
+                    self._finalize_api_call_detail(function_call_log, error=transfer_exc)
+                    self.transfer_call_events.append(
+                        {
+                            "type": "transfer_end",
+                            "ts_ms": round(time.time() * 1000 - self.conversation_start_init_ts, 2),
+                            "tool_call_id": resp.get("tool_call_id", ""),
+                            "turn_id": meta_info.get("turn_id"),
+                            "sequence_id": meta_info.get("sequence_id"),
+                            "status_code": None,
+                            "latency_ms": function_call_log.get("latency_ms"),
+                            "success": None,
+                        }
                     )
-                    self._finalize_api_call_detail(
-                        function_call_log,
-                        response=response_text,
-                        status_code=response.status,
-                        content_type=response.headers.get("Content-Type"),
-                    )
-                    return
+                    _transfer_end_recorded = True
+                finally:
+                    # CancelledError (BaseException) bypasses except — ensure transfer_end is
+                    # always recorded so it appears in progression_data even if the task is
+                    # cancelled mid-flight when Plivo terminates the call.
+                    if not _transfer_end_recorded:
+                        self._finalize_api_call_detail(function_call_log, error="cancelled")
+                        self.transfer_call_events.append(
+                            {
+                                "type": "transfer_end",
+                                "ts_ms": round(time.time() * 1000 - self.conversation_start_init_ts, 2),
+                                "tool_call_id": resp.get("tool_call_id", ""),
+                                "turn_id": meta_info.get("turn_id"),
+                                "sequence_id": meta_info.get("sequence_id"),
+                                "status_code": None,
+                                "latency_ms": function_call_log.get("latency_ms"),
+                                "success": None,
+                            }
+                        )
+                return
 
         if called_fun == "switch_language":
             language_label = resp.get("language", "")
@@ -2919,6 +3049,7 @@ class TaskManager(BaseManager):
                         self.routing_latencies["turn_latencies"].append(
                             {
                                 "latency_ms": routing_info["routing_latency_ms"],
+                                "routing_end_ms": round(time.time() * 1000 - self.conversation_start_init_ts, 2),
                                 "routing_model": routing_info.get("routing_model"),
                                 "routing_provider": routing_info.get("routing_provider"),
                                 "previous_node": routing_info.get("previous_node"),
@@ -3015,7 +3146,26 @@ class TaskManager(BaseManager):
 
                 if trigger_function_call:
                     logger.info(f"Triggering function call for {data}")
-                    textual_response = data.textual_response if hasattr(data, "textual_response") else None
+                    # Stamp total_stream_duration_ms before early return — function call chunk carries the final latency
+                    if latency:
+                        fc_latency_dict = latency.model_dump()
+                        textual_response = data.textual_response if hasattr(data, "textual_response") else None
+                        self._stamp_llm_latency_dict(
+                            fc_latency_dict,
+                            meta_info,
+                            actual_input_tokens,
+                            actual_output_tokens,
+                            actual_reasoning_tokens,
+                            actual_cached_tokens,
+                            response_text=textual_response,
+                        )
+                        prev = self.llm_latencies.turn_latencies[-1] if self.llm_latencies.turn_latencies else None
+                        if prev and prev.get("sequence_id") == fc_latency_dict.get("sequence_id"):
+                            self.llm_latencies.turn_latencies[-1] = fc_latency_dict
+                        else:
+                            self.llm_latencies.turn_latencies.append(fc_latency_dict)
+                    else:
+                        textual_response = None
                     if textual_response:  # intentionally omitting tool_calls, which will be filled later if the tool_call flow completed (requirement from OpenAI)
                         self.__store_into_history(
                             meta_info,
@@ -3033,6 +3183,14 @@ class TaskManager(BaseManager):
 
                 if latency:
                     latency_dict = latency.model_dump()
+                    self._stamp_llm_latency_dict(
+                        latency_dict,
+                        meta_info,
+                        actual_input_tokens,
+                        actual_output_tokens,
+                        actual_reasoning_tokens,
+                        actual_cached_tokens,
+                    )
                     previous_latency_item = (
                         self.llm_latencies.turn_latencies[-1] if self.llm_latencies.turn_latencies else None
                     )
@@ -3113,6 +3271,10 @@ class TaskManager(BaseManager):
                 reasoning_content=actual_reasoning_content,
             )
 
+        # Stamp full response text on the last LLM turn entry (new field, no existing fields changed)
+        if llm_response.strip() and self.llm_latencies.turn_latencies:
+            self.llm_latencies.turn_latencies[-1]["response_text"] = llm_response.strip()
+
         # Collect RAG latency if present (from KnowledgeBaseAgent)
         if meta_info.get("rag_latency"):
             rag_latency = meta_info["rag_latency"]
@@ -3124,6 +3286,7 @@ class TaskManager(BaseManager):
         should_bypass_synth = "bypass_synth" in meta_info and meta_info["bypass_synth"] is True
         next_step = self._get_next_step(sequence, "llm")
         meta_info["llm_start_time"] = time.time()
+        meta_info["_non_fatal_errors"] = []
 
         if self.turn_based_conversation:
             self.history.append({"role": "user", "content": message["data"]})
@@ -3141,12 +3304,16 @@ class TaskManager(BaseManager):
             )
 
         await self.__do_llm_generation(messages, meta_info, next_step, should_bypass_synth)
+
+        for _err in meta_info.get("_non_fatal_errors", []):
+            self.non_fatal_llm_error_events.append(_err)
+
         # TODO : Write a better check for completion prompt
 
         # Hangup detection - now supported for all agent types including graph_agent
         if self.use_llm_to_determine_hangup and not self.turn_based_conversation:
             completion_res, metadata = await self.tools["llm_agent"].check_for_completion(
-                messages, self.check_for_completion_prompt
+                messages, self.check_for_completion_prompt, meta_info=meta_info
             )
 
             should_hangup = (
@@ -3157,12 +3324,14 @@ class TaskManager(BaseManager):
             self.llm_latencies.other_latencies.append(
                 {
                     "type": "hangup_check",
+                    "ts_ms": round(time.time() * 1000 - self.conversation_start_init_ts, 2),
                     "latency_ms": metadata.get("latency_ms", None),
                     "model": self.check_for_completion_llm,
                     "provider": "openai",  # TODO: Make dynamic based on provider used
                     "service_tier": metadata.get("service_tier", None),
                     "llm_host": metadata.get("llm_host", None),
                     "sequence_id": meta_info.get("sequence_id"),
+                    "turn_id": meta_info.get("turn_id"),
                 }
             )
 
@@ -3213,17 +3382,22 @@ class TaskManager(BaseManager):
         llm_response = ""
 
     async def process_call_hangup(self):
+        if self.hangup_decision_at is None:
+            self.hangup_decision_at = time.time()
         # Guard: Prevent multiple concurrent hangup attempts
         if self.hangup_triggered or self.conversation_ended:
             logger.info(f"process_call_hangup: Hangup already in progress or conversation ended, skipping")
             return
 
-        # Set immediately to prevent user interruptions from cancelling hangup
+        # hangup_triggered flag set immediately to prevent user interruptions from cancelling hangup.
+        # hangup_triggered_at is stamped after the goodbye is queued for synthesis (not at playback end).
+        # For short goodbye messages this is close enough to playback start; use hangup_decision_at
+        # to get the earlier decision timestamp.
         self.hangup_triggered = True
-        self.hangup_triggered_at = time.time()  # Track when hangup was triggered for timeout monitoring
         message = self.call_hangup_message if not self.voicemail_handler.detected else ""
         if not message or message.strip() == "":
             self.hangup_message_queued = False  # No hangup message to wait for
+            self.hangup_triggered_at = time.time()
             await self.__process_end_of_conversation()
         else:
             self.hangup_message_queued = True  # Hangup message will be synthesized
@@ -3239,6 +3413,8 @@ class TaskManager(BaseManager):
                 "end_of_llm_stream": True,
             }
             await self._synthesize(create_ws_data_packet(message, meta_info=meta_info))
+            # Stamp after goodbye is queued — actual disconnect happens after it plays
+            self.hangup_triggered_at = time.time()
         return
 
     async def _listen_llm_input_queue(self):
@@ -3549,8 +3725,18 @@ class TaskManager(BaseManager):
             await self.__process_end_of_conversation()
 
     async def _log_transcriber_connection_error(self, connection_error):
+        provider = self.task_config["tools_config"]["transcriber"].get("provider", "unknown")
+        # Always record the drop — "error" when exception drove it, "drop" for clean closes
+        # (e.g. Sarvam normal end-of-stream, Deepgram inactivity timeout on standby).
+        self.transcriber_error_events.append(
+            {
+                "event": "error" if connection_error else "drop",
+                "error": connection_error,
+                "provider": provider,
+                "ts_ms": round(time.time() * 1000 - self.conversation_start_init_ts, 2),
+            }
+        )
         if connection_error:
-            provider = self.task_config["tools_config"]["transcriber"].get("provider", "unknown")
             await self._end_call_on_component_error(
                 TranscriberError(connection_error, provider=provider), HangupReason.TRANSCRIBER_CONNECTION_ERROR
             )
@@ -3624,10 +3810,12 @@ class TaskManager(BaseManager):
                         ):
                             logger.info(f"Condition for interruption hit")
                             self.interruption_manager.on_user_speech_started()
-                            self.interruption_manager.on_interruption_triggered()
-                            # Tag the ASR turn that was active at interrupt time so
-                            # we can annotate turn_latencies with was_interrupted=True
-                            _asr_turn_id = getattr(self.tools.get("transcriber"), "current_turn_id", None)
+                            _t = self.tools.get("transcriber")
+                            if hasattr(_t, "transcribers") and hasattr(_t, "active_label"):
+                                _t = _t.transcribers.get(_t.active_label, _t)
+                            _asr_turn_id = getattr(_t, "current_turn_id", None)
+                            self.interruption_manager.on_interruption_triggered(asr_turn_id=_asr_turn_id)
+                            # Also record in the interrupted set for was_interrupted annotation
                             self.interruption_manager.record_interrupted_transcriber_turn(_asr_turn_id)
                             self.tools["input"].update_is_audio_being_played(False)
                             await self.__cleanup_downstream_tasks()
@@ -3655,7 +3843,12 @@ class TaskManager(BaseManager):
                                 )
                                 # on_agent_interrupted_user MUST come before reset_utterance_end_time
                                 # so it can still read the previous turn's utterance_end_time.
-                                self.interruption_manager.on_agent_interrupted_user()
+                                _t = self.tools.get("transcriber")
+                                if hasattr(_t, "transcribers") and hasattr(_t, "active_label"):
+                                    _t = _t.transcribers.get(_t.active_label, _t)
+                                self.interruption_manager.on_agent_interrupted_user(
+                                    asr_turn_id=getattr(_t, "current_turn_id", None)
+                                )
                                 self.interruption_manager.reset_utterance_end_time()
                                 await self.__cleanup_downstream_tasks()
                         elif (
@@ -4121,6 +4314,9 @@ class TaskManager(BaseManager):
         text = message["data"]
         meta_info["type"] = "audio"
         meta_info["synthesizer_start_time"] = time.time()
+        meta_info["tts_start_ms"] = round(
+            meta_info["synthesizer_start_time"] * 1000 - self.conversation_start_init_ts, 2
+        )
         try:
             if not self.conversation_ended and (
                 "is_first_message" in meta_info
@@ -4247,8 +4443,9 @@ class TaskManager(BaseManager):
                         self.response_in_pipeline = False
                         await self.tools["output"].handle(message)
                         # Track when agent audio first starts flowing for this sequence.
-                        # Deduplicated inside on_agent_speech_started — safe to call per chunk.
-                        if sequence_id is not None and sequence_id != -1:
+                        # Only fire on real audio bytes — BOS/EOS control packets are strings
+                        # and fire before _synthesize() sets tts_start_ms, causing inversion.
+                        if sequence_id is not None and sequence_id != -1 and isinstance(message.get("data"), bytes):
                             self.interruption_manager.on_agent_speech_started(sequence_id)
                         try:
                             duration = calculate_audio_duration(
@@ -4266,6 +4463,16 @@ class TaskManager(BaseManager):
                     elif status == "BLOCK":
                         # Audio blocked (user speaking or invalid sequence) - discard
                         logger.info(f"Audio blocked: discarding message (sequence_id={sequence_id})")
+                        if sequence_id is not None and sequence_id not in self._blocked_sequences:
+                            self._blocked_sequences.add(sequence_id)
+                            self.blocked_audio_events.append(
+                                {
+                                    "sequence_id": sequence_id,
+                                    "ts_ms": round(time.time() * 1000 - self.conversation_start_init_ts, 2),
+                                    "is_audio_playing": self.tools["input"].is_audio_being_played_to_user(),
+                                    "response_in_pipeline": self.response_in_pipeline,
+                                }
+                            )
                         self._drop_staged_assistant_history(sequence_id, "output_blocked")
                         # Null byte (b'\x00') is the end-of-stream control signal, not audio.
                         # Always send it through handle() so the is_final_chunk post-mark is
@@ -4300,6 +4507,11 @@ class TaskManager(BaseManager):
                 ):
                     self._turn_audio_flushed.set()
                     if message["meta_info"].get("end_of_synthesizer_stream", False):
+                        _seq = message["meta_info"].get("sequence_id")
+                        if _seq is not None:
+                            self._agent_end_timestamps[_seq] = round(
+                                time.time() * 1000 - self.conversation_start_init_ts, 2
+                            )
                         self.interruption_manager.on_successful_response_delivered(sequence_id)
                         self.interruption_manager.on_agent_speech_ended()
                     # Reset asked_if_user_is_still_there flag after any message except is_user_online_message
@@ -4772,6 +4984,11 @@ class TaskManager(BaseManager):
         finally:
             self._component_error = None
 
+            # Cancel llm_task first and await it so that any transfer_end appended
+            # in __execute_function_call's finally block is captured before
+            # progression_data snapshots transfer_call_events below.
+            await process_task_cancellation(self.llm_task, "llm_task")
+
             # Construct output
             tasks_to_cancel = []
             tasks_to_cancel.append(process_task_cancellation(self.first_message_task_new, "first_message_task_new"))
@@ -4805,24 +5022,45 @@ class TaskManager(BaseManager):
                 # Annotate each transcriber turn with was_interrupted so callers
                 # can see which ASR turns had a user barge-in without cross-referencing
                 # the separate interruption_events list.
+                _call_start_ms = self.conversation_start_init_ts
+
                 _interrupted_ids = self.interruption_manager.interrupted_transcriber_turn_ids
                 for _turn in self.transcriber_latencies.turn_latencies:
-                    _tid = _turn.get("turn_id") or _turn.get("sequence_id")
+                    _tid = _turn.get("turn_id")
                     _turn["was_interrupted"] = _tid in _interrupted_ids if _tid is not None else False
+                    if _turn.get("asr_start_epoch_ms") is not None:
+                        _turn["asr_start_ms"] = round(_turn.pop("asr_start_epoch_ms") - _call_start_ms, 2)
+                    if _turn.get("asr_finalized_epoch_ms") is not None:
+                        _turn["asr_finalized_ms"] = round(_turn.pop("asr_finalized_epoch_ms") - _call_start_ms, 2)
+                    if _turn.get("asr_turn_start_epoch_ms") is not None:
+                        _turn["asr_turn_start_ms"] = round(_turn.pop("asr_turn_start_epoch_ms") - _call_start_ms, 2)
 
                 # Collect language detection latency if available
                 if hasattr(self, "language_detector") and self.language_detector.latency_data:
                     self.llm_latencies.other_latencies.append(self.language_detector.latency_data)
 
                 welcome_message_sent_ts = self.tools["output"].get_welcome_message_sent_ts()
-
-                _call_start_ms = self.conversation_start_init_ts
                 _user_bot_latencies = [
                     {
                         "sequence_id": e["sequence_id"],
-                        "user_end_ms": round(e["user_end_s"] * 1000 - _call_start_ms, 2),
+                        "user_start_ms": round(e["user_start_s"] * 1000 - _call_start_ms, 2)
+                        if e.get("user_start_s") and e["user_start_s"] > 0
+                        else None,
+                        "user_first_start_ms": round(e["user_first_start_s"] * 1000 - _call_start_ms, 2)
+                        if e.get("user_first_start_s") and e["user_first_start_s"] > 0
+                        else None,
+                        "user_end_ms": round(e["user_end_s"] * 1000 - _call_start_ms, 2)
+                        if e.get("user_end_s") is not None
+                        else None,
                         "agent_start_ms": round(e["agent_start_s"] * 1000 - _call_start_ms, 2),
                         "latency_ms": e["latency_ms"],
+                        # agent_end_ms: mark ACK from provider (actual playback end, most accurate).
+                        # None when the final mark was never ACKed (e.g. call dropped mid-audio).
+                        "agent_end_ms": (
+                            round(e["agent_end_s"] * 1000 - _call_start_ms, 2)
+                            if e.get("agent_end_s") is not None
+                            else None
+                        ),
                     }
                     for e in self.interruption_manager.user_bot_latencies
                 ]
@@ -4875,6 +5113,106 @@ class TaskManager(BaseManager):
                         output["latency_dict"]["stream_sid_ts"] = self.stream_sid_ts - self.conversation_start_init_ts
                 except Exception as e:
                     logger.error(f"error in logging audio latency ts {str(e)}")
+
+                output["progression_data"] = {
+                    "call_start_epoch_ms": self.conversation_start_init_ts,
+                    "llm_latencies": copy.deepcopy(output["latency_dict"]["llm_latencies"]),
+                    "transcriber_latencies": copy.deepcopy(output["latency_dict"]["transcriber_latencies"]),
+                    "synthesizer_latencies": copy.deepcopy(output["latency_dict"]["synthesizer_latencies"]),
+                    "rag_latencies": output["latency_dict"]["rag_latencies"],
+                    "routing_latencies": copy.deepcopy(output["latency_dict"]["routing_latencies"]),
+                    "welcome_message_sent_ts": output["latency_dict"]["welcome_message_sent_ts"],
+                    "welcome_message_duration_ms": self.welcome_message_duration_ms,
+                    "interruption_stats": output["latency_dict"]["interruption_stats"],
+                    "user_bot_latencies": copy.deepcopy(output["latency_dict"]["user_bot_latencies"]),
+                    "mark_tracking": output["latency_dict"]["mark_tracking"],
+                    "hangup_triggered_ms": round(self.hangup_triggered_at * 1000 - self.conversation_start_init_ts, 2)
+                    if self.hangup_triggered_at
+                    else None,
+                    "hangup_detail": self.hangup_detail.value if self.hangup_detail else None,
+                    "hangup_decision_ms": round(self.hangup_decision_at * 1000 - self.conversation_start_init_ts, 2)
+                    if self.hangup_decision_at
+                    else None,
+                    "voicemail_detected": self.voicemail_handler.detected,
+                    "voicemail_check_count": self.voicemail_handler.check_count,
+                    "dtmf_events": list(self.dtmf_events),
+                    "non_fatal_llm_error_events": list(self.non_fatal_llm_error_events),
+                    "language_switch_events": list(self.language_switch_events),
+                    "transfer_call_events": list(self.transfer_call_events),
+                    "lid_detection_events": list(getattr(self.tools.get("transcriber"), "lid_detection_events", [])),
+                    "transcriber_error_events": list(self.transcriber_error_events),
+                    "transcriber_reconnect_count": getattr(self.tools.get("transcriber"), "reconnect_count", 0),
+                    "blocked_audio_events": list(self.blocked_audio_events),
+                    "welcome_message_played_ts": (
+                        round(
+                            self.tools["input"].welcome_message_played_ts - self.conversation_start_init_ts,
+                            2,
+                        )
+                        if getattr(self.tools.get("input"), "welcome_message_played_ts", None)
+                        else None
+                    ),
+                }
+
+                # In progression_data: promote asr_turn_id to turn_id on LLM entries so the
+                # progression service can group by turn_id directly without seq indirection.
+                # Also stamp turn_id on user_bot_latencies using the same asr_turn map.
+                _seq_to_asr_turn: dict = {}
+                for _lt in output["progression_data"]["llm_latencies"].get("turn_latencies", []):
+                    _seq = _lt.get("sequence_id")
+                    _asr_tid = _lt.get("asr_turn_id")
+                    if _seq is not None and _asr_tid is not None:
+                        _seq_to_asr_turn[_seq] = _asr_tid
+                        _lt["turn_id"] = _asr_tid  # overwrite _response_turn_id with asr_turn_id
+
+                for _ub in output["progression_data"]["user_bot_latencies"]:
+                    _seq = _ub.get("sequence_id")
+                    if _seq is not None and _seq in _seq_to_asr_turn:
+                        _ub["turn_id"] = _seq_to_asr_turn[_seq]
+
+                for _tts_t in output["progression_data"]["synthesizer_latencies"].get("turn_latencies", []):
+                    _seq = _tts_t.get("sequence_id")
+                    if _seq is not None and _seq in _seq_to_asr_turn:
+                        _tts_t["turn_id"] = _seq_to_asr_turn[_seq]
+
+                # Strip PR-added fields from latency_dict sub-dicts so latency_dict stays at master state.
+                # progression_data (deep-copied above) keeps the full enriched versions.
+                _llm_turns = (output["latency_dict"]["llm_latencies"] or {}).get("turn_latencies", [])
+                for _t in _llm_turns:
+                    for _f in (
+                        "turn_id",
+                        "llm_start_ms",
+                        "response_text",
+                        "asr_turn_id",
+                        "input_tokens",
+                        "output_tokens",
+                        "reasoning_tokens",
+                        "cached_tokens",
+                        "model",
+                        "connection_latency_ms",
+                    ):
+                        _t.pop(_f, None)
+
+                _asr_turns = (output["latency_dict"]["transcriber_latencies"] or {}).get("turn_latencies", [])
+                for _t in _asr_turns:
+                    for _f in (
+                        "asr_start_ms",
+                        "asr_finalized_ms",
+                        "asr_turn_start_ms",
+                        "final_transcript",
+                    ):
+                        _t.pop(_f, None)
+
+                _tts_turns = (output["latency_dict"]["synthesizer_latencies"] or {}).get("turn_latencies", [])
+                for _t in _tts_turns:
+                    _t.pop("tts_start_ms", None)
+
+                for _e in output["latency_dict"]["user_bot_latencies"]:
+                    for _f in ("user_first_start_ms", "agent_end_ms"):
+                        _e.pop(_f, None)
+
+                _routing_turns = (output["latency_dict"]["routing_latencies"] or {}).get("turn_latencies", [])
+                for _t in _routing_turns:
+                    _t.pop("routing_end_ms", None)
 
                 tasks_to_cancel.append(process_task_cancellation(self.output_task, "output_task"))
                 tasks_to_cancel.append(process_task_cancellation(self.hangup_task, "hangup_task"))

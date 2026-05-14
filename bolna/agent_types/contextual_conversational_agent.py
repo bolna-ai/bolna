@@ -20,7 +20,7 @@ class StreamingContextualAgent(BaseAgent):
         self.voicemail_llm = OpenAiLLM(model=os.getenv("VOICEMAIL_DETECTION_LLM", "gpt-4.1-mini"))
         self.history = [{"content": ""}]
 
-    async def check_for_completion(self, messages, check_for_completion_prompt):
+    async def check_for_completion(self, messages, check_for_completion_prompt, meta_info=None):
         try:
             prompt = [
                 {"role": "system", "content": check_for_completion_prompt},
@@ -29,7 +29,7 @@ class StreamingContextualAgent(BaseAgent):
 
             start_time = time.time()
             response, metadata = await self.conversation_completion_llm.generate(
-                prompt, request_json=True, ret_metadata=True
+                prompt, request_json=True, ret_metadata=True, meta_info=meta_info
             )
             latency_ms = (time.time() - start_time) * 1000
 

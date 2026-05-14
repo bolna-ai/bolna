@@ -58,8 +58,11 @@ class StreamSynthesizer(BaseSynthesizer):
         # Turn-level latency tracking
         self.current_turn_start_time = None
         self.current_turn_id = None
+        self.current_sequence_id = None
+        self.current_tts_start_ms = None
         self.current_turn_ttfb = None
         self.ws_send_time = None
+        self.current_sequence_chars = 0
 
     # ------------------------------------------------------------------
     # Subclass hooks (override these)
@@ -153,6 +156,7 @@ class StreamSynthesizer(BaseSynthesizer):
         text = message.get("data")
         self.current_text = text
         self.synthesized_characters += len(text) if text else 0
+        self.current_sequence_chars += len(text) if text else 0
         end_of_llm_stream = meta_info.get("end_of_llm_stream", False)
         self.meta_info = copy.deepcopy(meta_info)
         meta_info["text"] = text
@@ -172,9 +176,14 @@ class StreamSynthesizer(BaseSynthesizer):
             self.current_turn_start_time = time.perf_counter()
             self.ws_send_time = None
             self.current_turn_ttfb = None
+            # Anchor tts_start_ms to the first push — re-pushes of speculative responses
+            # (e.g. after a tool call confirms the eager response) would overwrite this
+            # to a later timestamp, making tts_start appear after agent_speech_start.
+            self.current_tts_start_ms = meta_info.get("tts_start_ms")
             self.last_text_sent = False
             logger.info(f"Push new_turn text_len={len(meta_info.get('text', '') or '')}")
-        self.current_turn_id = meta_info.get("turn_id") or meta_info.get("sequence_id")
+        self.current_turn_id = meta_info.get("turn_id")
+        self.current_sequence_id = meta_info.get("sequence_id")
 
     def _on_push(self, meta_info, text):
         """Provider-specific hook called during push before sender is created."""
@@ -261,15 +270,20 @@ class StreamSynthesizer(BaseSynthesizer):
                 self.turn_latencies.append(
                     {
                         "turn_id": self.current_turn_id,
-                        "sequence_id": self.current_turn_id,
+                        "sequence_id": self.current_sequence_id,
+                        "tts_start_ms": self.current_tts_start_ms,
                         "first_result_latency_ms": round((self.current_turn_ttfb or 0) * 1000),
                         "total_stream_duration_ms": round(total_stream_duration * 1000),
+                        "characters": self.current_sequence_chars,
                     }
                 )
                 self.current_turn_start_time = None
                 self.current_turn_id = None
+                self.current_sequence_id = None
+                self.current_tts_start_ms = None
                 self.ws_send_time = None
                 self.current_turn_ttfb = None
+                self.current_sequence_chars = 0
         except Exception:
             pass
 
