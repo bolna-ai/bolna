@@ -60,6 +60,7 @@ class MarkEventMetaData:
     def __init__(self):
         self.mark_event_meta_data = {}
         self.previous_mark_event_meta_data = {}
+        self._mark_history: Dict[str, Dict] = {}
         self.counter = 0
         self.mark_changed = asyncio.Event()
         self._mark_stats = MarkStats()
@@ -70,8 +71,12 @@ class MarkEventMetaData:
 
     def update_data(self, mark_id, value):
         value["counter"] = self.counter
+        value.setdefault("acked", False)
+        value.setdefault("ack_ts", None)
         self.counter += 1
         self.mark_event_meta_data[mark_id] = value
+        if value.get("type") != "pre_mark_message":
+            self._mark_history[mark_id] = value
         logger.info(
             "BOLNA_TRACE_MARK update mark_id=%s type=%s seq=%s turn=%s response_uid=%s group_uid=%s counter=%s dur=%.3f text_len=%s",
             mark_id,
@@ -144,6 +149,10 @@ class MarkEventMetaData:
         return (self.heard_text_by_response.get(response_uid) or "").strip()
 
     def fetch_data(self, mark_id):
+        entry = self.mark_event_meta_data.get(mark_id)
+        if entry is not None and entry.get("type") != "pre_mark_message":
+            entry["acked"] = True
+            entry["ack_ts"] = time.time()
         result = self.mark_event_meta_data.pop(mark_id, {})
         if result:
             logger.info(
@@ -170,6 +179,7 @@ class MarkEventMetaData:
 
         for mark_id, value in self.mark_event_meta_data.items():
             if value.get("type") != "pre_mark_message":
+                value["cleared_on_interrupt"] = True
                 seq = value.get("sequence_id")
                 if seq is not None and seq in self._mark_stats.per_sequence:
                     self._mark_stats.per_sequence[seq].interrupted = True
@@ -217,6 +227,36 @@ class MarkEventMetaData:
 
     def fetch_cleared_mark_event_data(self):
         return self.previous_mark_event_meta_data
+
+    def get_chunk_marks(self) -> List[Dict]:
+        """Per-mark wall-clock detail for post-call audio analysis.
+
+        Returns one dict per agent audio chunk (excluding pre_mark_message), ordered
+        by send counter. Each entry carries the actually-spoken text, send/ack
+        timestamps, sequence/turn linkage, and an interruption flag.
+        """
+        out = []
+        for mark_id, data in self._mark_history.items():
+            if data.get("type") == "pre_mark_message":
+                continue
+            out.append(
+                {
+                    "mark_id": mark_id,
+                    "sequence_id": data.get("sequence_id"),
+                    "type": data.get("type"),
+                    "text_synthesized": data.get("text_synthesized", ""),
+                    "is_first_chunk": data.get("is_first_chunk", False),
+                    "is_final_chunk": data.get("is_final_chunk", False),
+                    "sent_ts": data.get("sent_ts"),
+                    "duration": data.get("duration"),
+                    "counter": data.get("counter"),
+                    "acked": data.get("acked", False),
+                    "ack_ts": data.get("ack_ts"),
+                    "cleared_on_interrupt": data.get("cleared_on_interrupt", False),
+                }
+            )
+        out.sort(key=lambda m: m["sent_ts"] if m.get("sent_ts") is not None else 0)
+        return out
 
     def __str__(self):
         return f"{self.mark_event_meta_data}"

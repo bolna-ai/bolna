@@ -5102,6 +5102,7 @@ class TaskManager(BaseManager):
                         ),
                         "user_bot_latencies": _user_bot_latencies,
                         "mark_tracking": self.mark_event_meta_data.get_mark_tracking_summary(),
+                        "synthesizer_chunk_marks": self.mark_event_meta_data.get_chunk_marks(),
                     },
                     "hangup_detail": self.hangup_detail,
                     "has_transfer": self.has_transfer,
