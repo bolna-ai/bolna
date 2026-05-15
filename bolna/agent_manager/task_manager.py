@@ -5209,7 +5209,6 @@ class TaskManager(BaseManager):
                         "asr_start_ms",
                         "asr_finalized_ms",
                         "asr_turn_start_ms",
-                        "final_transcript",
                     ):
                         _t.pop(_f, None)
 
