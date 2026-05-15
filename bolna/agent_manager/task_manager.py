@@ -600,7 +600,6 @@ class TaskManager(BaseManager):
                 redacted_headers[key] = value
         return redacted_headers
 
-    @staticmethod
     def _stamp_llm_latency_dict(
         self,
         latency_dict: dict,
