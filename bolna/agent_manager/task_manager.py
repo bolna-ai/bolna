@@ -633,6 +633,7 @@ class TaskManager(BaseManager):
         if response_text:
             latency_dict["response_text"] = response_text.strip()
 
+    @staticmethod
     def _extract_api_call_runtime_args(resp):
         excluded_keys = {"model_response", "textual_response"}
         return {key: copy.deepcopy(value) for key, value in resp.items() if key not in excluded_keys}
