@@ -628,6 +628,7 @@ class TaskManager(BaseManager):
                 redacted_headers[key] = value
         return redacted_headers
 
+    @staticmethod
     def _stamp_llm_latency_dict(
         self,
         latency_dict: dict,
@@ -661,7 +662,6 @@ class TaskManager(BaseManager):
         if response_text:
             latency_dict["response_text"] = response_text.strip()
 
-    @staticmethod
     def _extract_api_call_runtime_args(resp):
         excluded_keys = {"model_response", "textual_response"}
         return {key: copy.deepcopy(value) for key, value in resp.items() if key not in excluded_keys}
@@ -3525,16 +3525,19 @@ class TaskManager(BaseManager):
             s2s = self.tools.get("s2s")
             if s2s is None:
                 self.hangup_message_queued = False
+                self.hangup_triggered_at = time.time()
                 await self.__process_end_of_conversation()
                 return
             self.hangup_message_queued = True
             self._s2s_hangup_in_progress = True
             try:
                 await s2s.trigger_response(instructions=f'Say exactly: "{message}"')
+                self.hangup_triggered_at = time.time()
             except Exception as e:
                 logger.error(f"S2S hangup trigger_response failed: {e}")
                 self._s2s_hangup_in_progress = False
                 self.hangup_message_queued = False
+                self.hangup_triggered_at = time.time()
                 await self.__process_end_of_conversation()
         else:
             self.hangup_message_queued = True
