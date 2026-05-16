@@ -3500,7 +3500,11 @@ class TaskManager(BaseManager):
             run_id=self.run_id,
         )
         self.hangup_detail = "end_call_tool"
-        self.call_hangup_message_config = None
+        # Non-S2S has already played the goodbye before this point. S2S may invoke end_call
+        # silently — only clear the configured farewell if the model actually spoke this turn.
+        model_already_spoke = self.conversation_history and self.conversation_history.last_role == ChatRole.ASSISTANT
+        if not self.is_s2s or model_already_spoke:
+            self.call_hangup_message_config = None
         await self.process_call_hangup()
 
     async def process_call_hangup(self):
