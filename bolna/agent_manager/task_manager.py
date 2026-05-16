@@ -5153,7 +5153,8 @@ class TaskManager(BaseManager):
                 if not self._s2s_welcome_done:
                     self._s2s_welcome_done = True
                     logger.info("S2S welcome message complete, enabling audio input")
-                if event.usage:
+                # Log every turn — even interrupted/usage-less ones — so transcripts always reach request_logs.
+                if event.transcript or self._s2s_last_assistant_transcript or event.usage:
                     self._log_s2s_turn_usage(event)
                 if self._s2s_response_has_function_calls:
                     self._s2s_response_has_function_calls = False
