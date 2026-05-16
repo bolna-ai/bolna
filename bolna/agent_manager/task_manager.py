@@ -5252,10 +5252,19 @@ class TaskManager(BaseManager):
                 await self.process_call_hangup()
                 return
 
+            if self.hangup_triggered or self.conversation_ended:
+                logger.info(f"S2S function call '{event.name}' skipped — call already ending")
+                return
+
             response = await self._execute_api_tool(
                 event.name, url, method, param, api_token, headers, meta_info, fn_args
             )
-            await s2s.send_function_result(event.call_id, str(response.get("body", response)))
+            response_body = str(response.get("body", response))
+            await s2s.send_function_result(event.call_id, response_body)
+            convert_to_request_log(
+                response_body, meta_info, None, LogComponent.FUNCTION_CALL,
+                direction=LogDirection.RESPONSE, run_id=self.run_id,
+            )
 
         except Exception as e:
             logger.exception(f"S2S function call error for '{event.name}': {e}")
