@@ -772,6 +772,194 @@ class TaskManager(BaseManager):
         )
         return response
 
+    async def _execute_transfer_call_webhook(self, called_fun, url, param, args, meta_info):
+        self.has_transfer = True
+        await asyncio.sleep(2)
+        try:
+            from_number = self.context_data["recipient_data"]["from_number"]
+        except Exception:
+            from_number = None
+
+        io_provider = self.tools["input"].io_provider
+        payload = {
+            "call_sid": None,
+            "provider": io_provider,
+            "stream_sid": self.stream_sid,
+            "from_number": from_number,
+            "execution_id": self.run_id,
+            **(self.transfer_call_params or {}),
+        }
+
+        if io_provider != "default":
+            payload["call_sid"] = self.tools["input"].get_call_sid()
+
+        if url is None:
+            url = os.getenv("CALL_TRANSFER_WEBHOOK_URL")
+            try:
+                json_params = copy.deepcopy(param)
+                if isinstance(param, str):
+                    json_params = json.loads(param)
+                call_transfer_number = (
+                    json_params.get("call_transfer_number") if isinstance(json_params, dict) else None
+                )
+                if call_transfer_number:
+                    payload["call_transfer_number"] = call_transfer_number
+            except Exception as e:
+                logger.error(f"Error parsing transfer_call params: {e}")
+
+        if param is not None and isinstance(args, dict):
+            payload = {**payload, **args}
+
+        if io_provider != "default":
+            payload["call_sid"] = self.tools["input"].get_call_sid()
+
+        tool_call_id = args.get("tool_call_id", "") if isinstance(args, dict) else ""
+
+        self.transfer_call_events.append(
+            {
+                "type": "transfer_start",
+                "ts_ms": round(time.time() * 1000 - self.conversation_start_init_ts, 2),
+                "tool_name": called_fun,
+                "tool_call_id": tool_call_id,
+                "turn_id": meta_info.get("turn_id"),
+                "sequence_id": meta_info.get("sequence_id"),
+                "transfer_number": payload.get("call_transfer_number"),
+                "provider": io_provider,
+            }
+        )
+
+        if io_provider == "default":
+            mock_response = (
+                f"This is a mocked response demonstrating a successful transfer of call to "
+                f"{payload.get('call_transfer_number')}"
+            )
+            function_call_log = self._start_api_call_detail(
+                called_fun=called_fun,
+                url=url,
+                method="POST",
+                param=param,
+                headers={"Content-Type": "application/json"},
+                meta_info=meta_info,
+                runtime_args={
+                    **self._extract_api_call_runtime_args(args if isinstance(args, dict) else {}),
+                    "tool_call_id": tool_call_id,
+                },
+                request_body=payload,
+                api_params=payload,
+            )
+            convert_to_request_log(
+                str(payload), meta_info, None, LogComponent.FUNCTION_CALL,
+                direction=LogDirection.REQUEST, run_id=self.run_id,
+            )
+            convert_to_request_log(
+                mock_response, meta_info, None, LogComponent.FUNCTION_CALL,
+                direction=LogDirection.RESPONSE, run_id=self.run_id,
+            )
+            self._finalize_api_call_detail(
+                function_call_log, response=mock_response, status_code=200, content_type="text/plain"
+            )
+            self.transfer_call_events.append(
+                {
+                    "type": "transfer_end",
+                    "ts_ms": round(time.time() * 1000 - self.conversation_start_init_ts, 2),
+                    "tool_call_id": tool_call_id,
+                    "turn_id": meta_info.get("turn_id"),
+                    "sequence_id": meta_info.get("sequence_id"),
+                    "status_code": 200,
+                    "latency_ms": function_call_log.get("latency_ms"),
+                    "success": True,
+                }
+            )
+            bos_packet = create_ws_data_packet("<beginning_of_stream>", meta_info)
+            await self.tools["output"].handle(bos_packet)
+            await self.tools["output"].handle(create_ws_data_packet(mock_response, meta_info))
+            eos_packet = create_ws_data_packet("<end_of_stream>", meta_info)
+            await self.tools["output"].handle(eos_packet)
+            return
+
+        async with aiohttp.ClientSession() as session:
+            logger.info(f"Sending the payload to stop the conversation {payload} url {url}")
+            while self.tools["input"].is_audio_being_played_to_user():
+                await asyncio.sleep(1)
+            function_call_log = self._start_api_call_detail(
+                called_fun=called_fun,
+                url=url,
+                method="POST",
+                param=param,
+                headers={"Content-Type": "application/json"},
+                meta_info=meta_info,
+                runtime_args={
+                    **self._extract_api_call_runtime_args(args if isinstance(args, dict) else {}),
+                    "tool_call_id": tool_call_id,
+                },
+                request_body=payload,
+                api_params=payload,
+            )
+            convert_to_request_log(
+                str(payload), meta_info, None, LogComponent.FUNCTION_CALL,
+                direction=LogDirection.REQUEST, is_cached=False, run_id=self.run_id,
+            )
+            _transfer_end_recorded = False
+            try:
+                async with session.post(url, json=payload) as response:
+                    response_text = await response.text()
+                    logger.info(f"Response from the server after call transfer: {response_text}")
+                    convert_to_request_log(
+                        str(response_text), meta_info, None, LogComponent.FUNCTION_CALL,
+                        direction=LogDirection.RESPONSE, is_cached=False, run_id=self.run_id,
+                    )
+                    self._finalize_api_call_detail(
+                        function_call_log,
+                        response=response_text,
+                        status_code=response.status,
+                        content_type=response.headers.get("Content-Type"),
+                    )
+                    self.transfer_call_events.append(
+                        {
+                            "type": "transfer_end",
+                            "ts_ms": round(time.time() * 1000 - self.conversation_start_init_ts, 2),
+                            "tool_call_id": tool_call_id,
+                            "turn_id": meta_info.get("turn_id"),
+                            "sequence_id": meta_info.get("sequence_id"),
+                            "status_code": response.status,
+                            "latency_ms": function_call_log.get("latency_ms"),
+                            "success": response.status < 400,
+                        }
+                    )
+                    _transfer_end_recorded = True
+            except Exception as transfer_exc:
+                logger.warning(f"Transfer webhook did not respond (call likely redirected): {transfer_exc}")
+                self._finalize_api_call_detail(function_call_log, error=transfer_exc)
+                self.transfer_call_events.append(
+                    {
+                        "type": "transfer_end",
+                        "ts_ms": round(time.time() * 1000 - self.conversation_start_init_ts, 2),
+                        "tool_call_id": tool_call_id,
+                        "turn_id": meta_info.get("turn_id"),
+                        "sequence_id": meta_info.get("sequence_id"),
+                        "status_code": None,
+                        "latency_ms": function_call_log.get("latency_ms"),
+                        "success": None,
+                    }
+                )
+                _transfer_end_recorded = True
+            finally:
+                # CancelledError bypasses except — defensive transfer_end so progression_data is intact.
+                if not _transfer_end_recorded:
+                    self._finalize_api_call_detail(function_call_log, error="cancelled")
+                    self.transfer_call_events.append(
+                        {
+                            "type": "transfer_end",
+                            "ts_ms": round(time.time() * 1000 - self.conversation_start_init_ts, 2),
+                            "tool_call_id": tool_call_id,
+                            "turn_id": meta_info.get("turn_id"),
+                            "sequence_id": meta_info.get("sequence_id"),
+                            "status_code": None,
+                            "latency_ms": function_call_log.get("latency_ms"),
+                            "success": None,
+                        }
+                    )
+
     @property
     def history(self):
         return self.conversation_history.messages
@@ -2642,213 +2830,8 @@ class TaskManager(BaseManager):
             return
 
         if called_fun.startswith("transfer_call"):
-            self.has_transfer = True
-            await asyncio.sleep(2)
-            try:
-                from_number = self.context_data["recipient_data"]["from_number"]
-            except Exception as e:
-                from_number = None
-
-            call_sid = None
-            call_transfer_number = None
-            payload = {
-                "call_sid": call_sid,
-                "provider": self.tools["input"].io_provider,
-                "stream_sid": self.stream_sid,
-                "from_number": from_number,
-                "execution_id": self.run_id,
-                **(self.transfer_call_params or {}),
-            }
-
-            if self.tools["input"].io_provider != "default":
-                call_sid = self.tools["input"].get_call_sid()
-                payload["call_sid"] = call_sid
-
-            if url is None:
-                url = os.getenv("CALL_TRANSFER_WEBHOOK_URL")
-
-                try:
-                    json_function_call_params = copy.deepcopy(param)
-                    if isinstance(param, str):
-                        json_function_call_params = json.loads(param)
-                    call_transfer_number = json_function_call_params["call_transfer_number"]
-                    if call_transfer_number:
-                        payload["call_transfer_number"] = call_transfer_number
-                except Exception as e:
-                    logger.error(f"Error in __execute_function_call {e}")
-
-            if param is not None:
-                logger.info(f"Gotten response {resp}")
-                payload = {**payload, **resp}
-
-            if self.tools["input"].io_provider != "default":
-                payload["call_sid"] = self.tools["input"].get_call_sid()
-
-            self.transfer_call_events.append(
-                {
-                    "type": "transfer_start",
-                    "ts_ms": round(time.time() * 1000 - self.conversation_start_init_ts, 2),
-                    "tool_name": called_fun,
-                    "tool_call_id": resp.get("tool_call_id", ""),
-                    "turn_id": meta_info.get("turn_id"),
-                    "sequence_id": meta_info.get("sequence_id"),
-                    "transfer_number": payload.get("call_transfer_number"),
-                    "provider": self.tools["input"].io_provider,
-                }
-            )
-
-            if self.tools["input"].io_provider == "default":
-                mock_response = (
-                    f"This is a mocked response demonstrating a successful transfer of call to {call_transfer_number}"
-                )
-                function_call_log = self._start_api_call_detail(
-                    called_fun=called_fun,
-                    url=url,
-                    method="POST",
-                    param=param,
-                    headers={"Content-Type": "application/json"},
-                    meta_info=meta_info,
-                    runtime_args={
-                        **self._extract_api_call_runtime_args(resp),
-                        "tool_call_id": resp.get("tool_call_id", ""),
-                    },
-                    request_body=payload,
-                    api_params=payload,
-                )
-                convert_to_request_log(
-                    str(payload),
-                    meta_info,
-                    None,
-                    LogComponent.FUNCTION_CALL,
-                    direction=LogDirection.REQUEST,
-                    run_id=self.run_id,
-                )
-                convert_to_request_log(
-                    mock_response,
-                    meta_info,
-                    None,
-                    LogComponent.FUNCTION_CALL,
-                    direction=LogDirection.RESPONSE,
-                    run_id=self.run_id,
-                )
-                self._finalize_api_call_detail(
-                    function_call_log, response=mock_response, status_code=200, content_type="text/plain"
-                )
-                self.transfer_call_events.append(
-                    {
-                        "type": "transfer_end",
-                        "ts_ms": round(time.time() * 1000 - self.conversation_start_init_ts, 2),
-                        "tool_call_id": resp.get("tool_call_id", ""),
-                        "turn_id": meta_info.get("turn_id"),
-                        "sequence_id": meta_info.get("sequence_id"),
-                        "status_code": 200,
-                        "latency_ms": function_call_log.get("latency_ms"),
-                        "success": True,
-                    }
-                )
-
-                bos_packet = create_ws_data_packet("<beginning_of_stream>", meta_info)
-                await self.tools["output"].handle(bos_packet)
-                await self.tools["output"].handle(create_ws_data_packet(mock_response, meta_info))
-                eos_packet = create_ws_data_packet("<end_of_stream>", meta_info)
-                await self.tools["output"].handle(eos_packet)
-                return
-
-            async with aiohttp.ClientSession() as session:
-                logger.info(f"Sending the payload to stop the conversation {payload} url {url}")
-                while self.tools["input"].is_audio_being_played_to_user():
-                    await asyncio.sleep(1)
-                function_call_log = self._start_api_call_detail(
-                    called_fun=called_fun,
-                    url=url,
-                    method="POST",
-                    param=param,
-                    headers={"Content-Type": "application/json"},
-                    meta_info=meta_info,
-                    runtime_args={
-                        **self._extract_api_call_runtime_args(resp),
-                        "tool_call_id": resp.get("tool_call_id", ""),
-                    },
-                    request_body=payload,
-                    api_params=payload,
-                )
-                convert_to_request_log(
-                    str(payload),
-                    meta_info,
-                    None,
-                    LogComponent.FUNCTION_CALL,
-                    direction=LogDirection.REQUEST,
-                    is_cached=False,
-                    run_id=self.run_id,
-                )
-                _transfer_end_recorded = False
-                try:
-                    async with session.post(url, json=payload) as response:
-                        response_text = await response.text()
-                        logger.info(f"Response from the server after call transfer: {response_text}")
-                        convert_to_request_log(
-                            str(response_text),
-                            meta_info,
-                            None,
-                            LogComponent.FUNCTION_CALL,
-                            direction=LogDirection.RESPONSE,
-                            is_cached=False,
-                            run_id=self.run_id,
-                        )
-                        self._finalize_api_call_detail(
-                            function_call_log,
-                            response=response_text,
-                            status_code=response.status,
-                            content_type=response.headers.get("Content-Type"),
-                        )
-                        self.transfer_call_events.append(
-                            {
-                                "type": "transfer_end",
-                                "ts_ms": round(time.time() * 1000 - self.conversation_start_init_ts, 2),
-                                "tool_call_id": resp.get("tool_call_id", ""),
-                                "turn_id": meta_info.get("turn_id"),
-                                "sequence_id": meta_info.get("sequence_id"),
-                                "status_code": response.status,
-                                "latency_ms": function_call_log.get("latency_ms"),
-                                "success": response.status < 400,
-                            }
-                        )
-                        _transfer_end_recorded = True
-                except Exception as transfer_exc:
-                    logger.warning(f"Transfer webhook did not respond (call likely redirected): {transfer_exc}")
-                    self._finalize_api_call_detail(function_call_log, error=transfer_exc)
-                    self.transfer_call_events.append(
-                        {
-                            "type": "transfer_end",
-                            "ts_ms": round(time.time() * 1000 - self.conversation_start_init_ts, 2),
-                            "tool_call_id": resp.get("tool_call_id", ""),
-                            "turn_id": meta_info.get("turn_id"),
-                            "sequence_id": meta_info.get("sequence_id"),
-                            "status_code": None,
-                            "latency_ms": function_call_log.get("latency_ms"),
-                            "success": None,
-                        }
-                    )
-                    _transfer_end_recorded = True
-                finally:
-                    # CancelledError (BaseException) bypasses except — ensure transfer_end is
-                    # always recorded so it appears in progression_data even if the task is
-                    # cancelled mid-flight when Plivo terminates the call.
-                    if not _transfer_end_recorded:
-                        self._finalize_api_call_detail(function_call_log, error="cancelled")
-                        self.transfer_call_events.append(
-                            {
-                                "type": "transfer_end",
-                                "ts_ms": round(time.time() * 1000 - self.conversation_start_init_ts, 2),
-                                "tool_call_id": resp.get("tool_call_id", ""),
-                                "turn_id": meta_info.get("turn_id"),
-                                "sequence_id": meta_info.get("sequence_id"),
-                                "status_code": None,
-                                "latency_ms": function_call_log.get("latency_ms"),
-                                "success": None,
-                            }
-                        )
-                return
+            await self._execute_transfer_call_webhook(called_fun, url, param, resp, meta_info)
+            return
 
         if called_fun == "switch_language":
             language_label = resp.get("language", "")
@@ -5254,22 +5237,25 @@ class TaskManager(BaseManager):
                 logger.warning(f"S2S function call '{event.name}' has invalid JSON arguments: {e}")
                 fn_args = {}
 
-            url = tool_config.get("url", "")
+            url = tool_config.get("url")
             method = tool_config.get("method", "POST")
             param = tool_config.get("param", {})
             api_token = tool_config.get("api_token", "")
             headers = tool_config.get("headers", {})
-
             meta_info = {"request_id": str(uuid.uuid4()), "sequence_id": None}
+
+            if is_transfer:
+                await self._execute_transfer_call_webhook(event.name, url, param, fn_args, meta_info)
+                await s2s.send_function_result(event.call_id, json.dumps({"status": "transferred"}))
+                logger.info(f"S2S transfer_call triggered with args: {fn_args}")
+                self.ended_by_assistant = True
+                await self.process_call_hangup()
+                return
+
             response = await self._execute_api_tool(
                 event.name, url, method, param, api_token, headers, meta_info, fn_args
             )
             await s2s.send_function_result(event.call_id, str(response.get("body", response)))
-
-            if is_transfer:
-                logger.info(f"S2S transfer_call triggered with args: {fn_args}")
-                self.ended_by_assistant = True
-                await self.process_call_hangup()
 
         except Exception as e:
             logger.exception(f"S2S function call error for '{event.name}': {e}")
