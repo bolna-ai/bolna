@@ -628,7 +628,6 @@ class TaskManager(BaseManager):
                 redacted_headers[key] = value
         return redacted_headers
 
-    @staticmethod
     def _stamp_llm_latency_dict(
         self,
         latency_dict: dict,
@@ -662,6 +661,7 @@ class TaskManager(BaseManager):
         if response_text:
             latency_dict["response_text"] = response_text.strip()
 
+    @staticmethod
     def _extract_api_call_runtime_args(resp):
         excluded_keys = {"model_response", "textual_response"}
         return {key: copy.deepcopy(value) for key, value in resp.items() if key not in excluded_keys}
