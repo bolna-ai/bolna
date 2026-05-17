@@ -2508,6 +2508,7 @@ class TaskManager(BaseManager):
 
             call_sid = None
             call_transfer_number = None
+            transfer_call_reason = None
             payload = {
                 "call_sid": call_sid,
                 "provider": self.tools["input"].io_provider,
@@ -2531,6 +2532,9 @@ class TaskManager(BaseManager):
                     call_transfer_number = json_function_call_params["call_transfer_number"]
                     if call_transfer_number:
                         payload["call_transfer_number"] = call_transfer_number
+                    transfer_call_reason = json_function_call_params.get("transfer_call_reason")
+                    if transfer_call_reason:
+                        payload["transfer_call_reason"] = transfer_call_reason
                 except Exception as e:
                     logger.error(f"Error in __execute_function_call {e}")
 
@@ -2550,6 +2554,7 @@ class TaskManager(BaseManager):
                     "turn_id": meta_info.get("turn_id"),
                     "sequence_id": meta_info.get("sequence_id"),
                     "transfer_number": payload.get("call_transfer_number"),
+                    "transfer_call_reason": payload.get("transfer_call_reason"),
                     "provider": self.tools["input"].io_provider,
                 }
             )
