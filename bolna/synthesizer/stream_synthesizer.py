@@ -186,7 +186,6 @@ class StreamSynthesizer(BaseSynthesizer):
             self.current_tts_start_ms = meta_info.get("tts_start_ms")
             self.last_text_sent = False
             self.current_text = ""
-            logger.info(f"Push new_turn current_text reset text_len={len(meta_info.get('text', '') or '')}")
         self.current_turn_id = meta_info.get("turn_id")
         self.current_sequence_id = meta_info.get("sequence_id")
 
