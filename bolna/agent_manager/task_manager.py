@@ -848,12 +848,20 @@ class TaskManager(BaseManager):
                 api_params=payload,
             )
             convert_to_request_log(
-                str(payload), meta_info, None, LogComponent.FUNCTION_CALL,
-                direction=LogDirection.REQUEST, run_id=self.run_id,
+                str(payload),
+                meta_info,
+                None,
+                LogComponent.FUNCTION_CALL,
+                direction=LogDirection.REQUEST,
+                run_id=self.run_id,
             )
             convert_to_request_log(
-                mock_response, meta_info, None, LogComponent.FUNCTION_CALL,
-                direction=LogDirection.RESPONSE, run_id=self.run_id,
+                mock_response,
+                meta_info,
+                None,
+                LogComponent.FUNCTION_CALL,
+                direction=LogDirection.RESPONSE,
+                run_id=self.run_id,
             )
             self._finalize_api_call_detail(
                 function_call_log, response=mock_response, status_code=200, content_type="text/plain"
@@ -896,8 +904,13 @@ class TaskManager(BaseManager):
                 api_params=payload,
             )
             convert_to_request_log(
-                str(payload), meta_info, None, LogComponent.FUNCTION_CALL,
-                direction=LogDirection.REQUEST, is_cached=False, run_id=self.run_id,
+                str(payload),
+                meta_info,
+                None,
+                LogComponent.FUNCTION_CALL,
+                direction=LogDirection.REQUEST,
+                is_cached=False,
+                run_id=self.run_id,
             )
             _transfer_end_recorded = False
             try:
@@ -905,8 +918,13 @@ class TaskManager(BaseManager):
                     response_text = await response.text()
                     logger.info(f"Response from the server after call transfer: {response_text}")
                     convert_to_request_log(
-                        str(response_text), meta_info, None, LogComponent.FUNCTION_CALL,
-                        direction=LogDirection.RESPONSE, is_cached=False, run_id=self.run_id,
+                        str(response_text),
+                        meta_info,
+                        None,
+                        LogComponent.FUNCTION_CALL,
+                        direction=LogDirection.RESPONSE,
+                        is_cached=False,
+                        run_id=self.run_id,
                     )
                     self._finalize_api_call_detail(
                         function_call_log,
@@ -5262,8 +5280,12 @@ class TaskManager(BaseManager):
             response_body = str(response.get("body", response))
             await s2s.send_function_result(event.call_id, response_body)
             convert_to_request_log(
-                response_body, meta_info, None, LogComponent.FUNCTION_CALL,
-                direction=LogDirection.RESPONSE, run_id=self.run_id,
+                response_body,
+                meta_info,
+                None,
+                LogComponent.FUNCTION_CALL,
+                direction=LogDirection.RESPONSE,
+                run_id=self.run_id,
             )
 
         except Exception as e:
