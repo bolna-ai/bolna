@@ -227,14 +227,11 @@ class ElevenlabsSynthesizer(StreamSynthesizer):
                         current_norm = self.normalize_text(self.current_text.strip()).replace('"', "").strip()
                         logger.info(f"Last four char - {last_four} | current text - {current_norm}")
 
-                        last_four_no_space = last_four.replace(" ", "")
-                        if last_four and current_norm.endswith(last_four):
+                        # Guard: skip if last_four is purely punctuation/whitespace (e.g. ".", ",", "'").
+                        # Such chunks match trivially against any response ending with that character.
+                        has_alnum = any(c.isalnum() for c in last_four)
+                        if last_four and has_alnum and current_norm.endswith(last_four):
                             logger.info("send end_of_synthesizer_stream")
-                            yield b"\x00", ""
-                        elif last_four_no_space and current_norm.replace('"', "").replace(" ", "").strip().endswith(
-                            last_four_no_space
-                        ):
-                            logger.info("send end_of_synthesizer_stream on fallback")
                             yield b"\x00", ""
                     except Exception as e:
                         logger.error(f"Error getting chars from response - {e}")
