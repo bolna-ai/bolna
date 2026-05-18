@@ -113,6 +113,9 @@ class StreamSynthesizer(BaseSynthesizer):
         """
         return item, {}
 
+    async def handle_interruption(self):
+        self.current_text = ""
+
     # ------------------------------------------------------------------
     # Shared sender helpers
     # ------------------------------------------------------------------
@@ -154,15 +157,17 @@ class StreamSynthesizer(BaseSynthesizer):
     async def _push_stream(self, message):
         meta_info = message.get("meta_info")
         text = message.get("data")
-        self.current_text = text
         self.synthesized_characters += len(text) if text else 0
         self.current_sequence_chars += len(text) if text else 0
         end_of_llm_stream = meta_info.get("end_of_llm_stream", False)
         self.meta_info = copy.deepcopy(meta_info)
         meta_info["text"] = text
 
-        # Stamp turn start on first push of a new turn
+        # Stamp turn start on first push of a new turn — resets current_text to "" if new turn.
+        # Accumulation must happen after this so the reset doesn't wipe the first chunk.
         self._stamp_turn_start(meta_info)
+        self.current_text = (self.current_text or "") + (text or "")
+        logger.info(f"current_text accumulated len={len(self.current_text)} end_of_llm_stream={end_of_llm_stream}")
 
         # Provider-specific pre-push hook (e.g. update context_id)
         self._on_push(meta_info, text)
@@ -181,6 +186,7 @@ class StreamSynthesizer(BaseSynthesizer):
             # to a later timestamp, making tts_start appear after agent_speech_start.
             self.current_tts_start_ms = meta_info.get("tts_start_ms")
             self.last_text_sent = False
+            self.current_text = ""
             logger.info(f"Push new_turn text_len={len(meta_info.get('text', '') or '')}")
         self.current_turn_id = meta_info.get("turn_id")
         self.current_sequence_id = meta_info.get("sequence_id")

@@ -99,6 +99,7 @@ class CartesiaSynthesizer(StreamSynthesizer):
                 self.context_id = None
         except Exception as e:
             logger.error(f"Error in handle_interruption: {e}")
+        await super().handle_interruption()
 
     # ------------------------------------------------------------------
     # Payload

@@ -99,6 +99,7 @@ class RimeSynthesizer(StreamSynthesizer):
                     await self.websocket.send(json.dumps({"operation": "clear"}))
             except Exception:
                 pass
+        await super().handle_interruption()
 
     # ------------------------------------------------------------------
     # sender / receiver

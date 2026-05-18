@@ -115,6 +115,7 @@ class PixaSynthesizer(BaseSynthesizer):
                 self.context_id = None
         except Exception as e:
             logger.error(f"Error in handle_interruption: {e}")
+        await super().handle_interruption()
 
     def form_payload(self, text, is_final=False):
         payload = {"type": "text", "content": text, "is_final": is_final}
