@@ -92,7 +92,6 @@ class DeepgramSynthesizer(StreamSynthesizer):
                 logger.info("Sent Clear message to Deepgram TTS WebSocket")
         except Exception as e:
             logger.error(f"Error handling interruption: {e}")
-        await super().handle_interruption()
 
     # ------------------------------------------------------------------
     # sender / receiver

@@ -112,7 +112,6 @@ class ElevenlabsSynthesizer(StreamSynthesizer):
                 await self.websocket.send(json.dumps(interrupt_message))
         except Exception:
             pass
-        await super().handle_interruption()
 
     # ------------------------------------------------------------------
     # sender / receiver
