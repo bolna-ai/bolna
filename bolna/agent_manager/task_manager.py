@@ -2468,23 +2468,23 @@ class TaskManager(BaseManager):
             )
 
             textual_response = resp.get("textual_response", None)
+            tool_result = json.dumps(
+                {"status": "success", "message": "Call is ending now. Say a brief goodbye to the user."}
+            )
             self.conversation_history.attach_tool_calls_to_turn(turn_id, resp["model_response"])
+            self.conversation_history.append_tool_result(resp.get("tool_call_id", ""), tool_result)
+            convert_to_request_log(
+                tool_result, meta_info, None, "function_call", direction="response", run_id=self.run_id
+            )
 
             if textual_response:
                 # The LLM emitted the goodbye in the same response as the tool call;
-                # it has already been streamed to TTS. Skip the follow-up LLM call
-                # to avoid generating a duplicate goodbye.
+                # it has already been streamed to TTS. Skip the follow-up LLM to avoid
+                # generating a duplicate goodbye.
                 await self.wait_for_current_message()
             else:
-                # No goodbye text in this turn. Feed the tool result back so the LLM generates one.
-                tool_result = json.dumps(
-                    {"status": "success", "message": "Call is ending now. Say a brief goodbye to the user."}
-                )
-                self.conversation_history.append_tool_result(resp.get("tool_call_id", ""), tool_result)
-                convert_to_request_log(
-                    tool_result, meta_info, None, "function_call", direction="response", run_id=self.run_id
-                )
-
+                # No goodbye text in this turn. Feed the tool result back so the LLM
+                # generates one.
                 messages = self.conversation_history.get_copy()
                 convert_to_request_log(
                     format_messages(messages, True),
