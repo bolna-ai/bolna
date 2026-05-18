@@ -274,9 +274,7 @@ class TranscriberPool:
         to avoid the double-switch race where the transcriber flips before the
         synthesizer and prompt catch up.
         """
-        # Skip confidence check for Sarvam — it doesn't return language_probability
-        # in unknown-language mode; the language_code itself is the detection signal.
-        if self._lid_provider_name != "sarvam" and confidence < self._LID_CONFIDENCE_THRESHOLD:
+        if confidence < self._LID_CONFIDENCE_THRESHOLD:
             logger.debug(f"TranscriberPool LID: {lang} conf={confidence:.2f} below threshold — suppressed")
             return
 
