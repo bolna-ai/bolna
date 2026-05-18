@@ -201,6 +201,7 @@ class LogComponent(str, Enum):
     LLM_HANGUP = "llm_hangup"
     LLM_LANGUAGE_DETECTION = "llm_language_detection"
     LLM_VOICEMAIL = "llm_voicemail"
+    S2S = "s2s"
     SYNTHESIZER = "synthesizer"
     TRANSCRIBER = "transcriber"
     WARNING = "warning"
@@ -268,6 +269,16 @@ class EdgeConditionType(str, Enum):
 class NodeType(str, Enum):
     LLM = "llm"
     STATIC = "static"
+
+
+class S2SProvider(str, Enum):
+    """Enum for speech-to-speech providers."""
+
+    OPENAI_REALTIME = "openai_realtime"
+
+    @classmethod
+    def all_values(cls):
+        return [p.value for p in cls]
 
 
 class UsageSource(str, Enum):

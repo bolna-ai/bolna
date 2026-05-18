@@ -208,4 +208,5 @@ MODEL_REASONING_EFFORT_MAP = {
     "gpt-5.4": [RE.NONE, RE.LOW, RE.MEDIUM, RE.HIGH, RE.XHIGH],
     "gpt-5.4-mini": [RE.NONE, RE.LOW, RE.MEDIUM, RE.HIGH],
     "gpt-5.4-nano": [RE.NONE, RE.LOW, RE.MEDIUM, RE.HIGH],
+    "gpt-realtime-2": [RE.MINIMAL, RE.LOW, RE.MEDIUM, RE.HIGH, RE.XHIGH],
 }

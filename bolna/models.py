@@ -7,6 +7,7 @@ from .enums import (
     TelephonyProvider,
     SynthesizerProvider,
     TranscriberProvider,
+    S2SProvider,
     ReasoningEffort,
     Verbosity,
     ExpressionOperator,
@@ -488,6 +489,28 @@ class ToolModel(BaseModel):
     tools_params: Dict[str, APIParams]
 
 
+class OpenAIRealtimeConfig(BaseModel):
+    voice: str = "alloy"
+    model: str = "gpt-realtime-1.5"
+    reasoning_effort: Optional[ReasoningEffort] = None
+    vad_threshold: Optional[float] = 0.5
+    vad_silence_duration_ms: Optional[int] = 500
+    vad_prefix_padding_ms: Optional[int] = 300
+    preamble_silence_ms: Optional[int] = 300
+    max_response_output_tokens: Optional[int] = None
+    welcome_audio_gate_ms: Optional[int] = 1500
+    transcription_model: Optional[str] = "gpt-4o-mini-transcribe"
+
+
+class S2SConfig(BaseModel):
+    provider: str
+    provider_config: OpenAIRealtimeConfig = Field(default_factory=OpenAIRealtimeConfig)
+
+    @field_validator("provider")
+    def validate_provider(cls, value):
+        return validate_attribute(value, S2SProvider.all_values())
+
+
 class ToolsConfig(BaseModel):
     llm_agent: Optional[Union[LlmAgent, SimpleLlmAgent]] = None
     synthesizer: Optional[Synthesizer] = None
@@ -495,6 +518,7 @@ class ToolsConfig(BaseModel):
     input: Optional[IOModel] = None
     output: Optional[IOModel] = None
     api_tools: Optional[ToolModel] = None
+    s2s: Optional[S2SConfig] = None
     switch_tool_description: Optional[str] = None
     switch_handoff_messages: Optional[Dict[str, str]] = None
     agent_names: Optional[Dict[str, str]] = None
