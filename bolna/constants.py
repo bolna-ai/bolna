@@ -14,6 +14,7 @@ DEEPGRAM_FLUX_EOT_TIMEOUT_MS = 500  # max silence before forcing end-of-turn
 
 # Model prefixes
 GPT5_MODEL_PREFIX = "gpt-5"
+GPT5_4_MODEL_PREFIX = "gpt-5.4"
 
 HIGH_LEVEL_ASSISTANT_ANALYTICS_DATA = {
     "extraction_details": {},
