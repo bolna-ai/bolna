@@ -185,6 +185,7 @@ class HangupReason(str, Enum):
     TRANSCRIBER_CONNECTION_ERROR = "transcriber_connection_error"
     SYNTHESIZER_ERROR = "synthesizer_error"
     LLM_ERROR = "llm_error"
+    END_CALL_TOOL = "end_call_tool"
 
     @classmethod
     def all_values(cls):

@@ -2501,7 +2501,7 @@ class TaskManager(BaseManager):
                 )
                 await self.wait_for_current_message()
 
-            self.hangup_detail = "end_call_tool"
+            self.hangup_detail = HangupReason.END_CALL_TOOL
             self.call_hangup_message_config = None
             await self.process_call_hangup()
             return
