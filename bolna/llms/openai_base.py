@@ -369,10 +369,7 @@ class OpenAICompatibleLLM(BaseLLM):
 
         if responses_tools:
             create_kwargs["tools"] = responses_tools
-            tc = tool_choice or "auto"
-            if isinstance(tc, dict) and tc.get("type") == "function" and "function" in tc:
-                tc = {"type": "function", "name": tc["function"].get("name")}
-            create_kwargs["tool_choice"] = tc
+            create_kwargs["tool_choice"] = MessageFormatAdapter.chat_tool_choice_to_responses(tool_choice or "auto")
             create_kwargs["parallel_tool_calls"] = False
 
         if request_json:

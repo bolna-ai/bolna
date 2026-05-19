@@ -1,6 +1,7 @@
 import asyncio
 from collections import defaultdict
 import os
+import re
 import time
 from openai import OpenAI
 from dotenv import load_dotenv
@@ -40,6 +41,7 @@ load_dotenv()
 logger = configure_logger(__name__)
 
 _DETERMINISTIC_REASONING_PREFIX = "deterministic:"
+_PROMPT_VAR_PATTERN = re.compile(r"\{([a-zA-Z_][a-zA-Z0-9_]*)\}")
 
 
 class GraphAgent(BaseAgent):
@@ -658,6 +660,11 @@ class GraphAgent(BaseAgent):
     def _get_tool_choice_for_node(self):
         """Check if current node should force a tool call.
 
+        Drops the force to None (auto) when the node's prompt references
+        recipient vars that aren't populated. Without those values the
+        LLM has nothing real to put in the function args and would either
+        hallucinate or stall, producing silent loops.
+
         Returns:
         - {"type": "function", "function": {"name": "..."}} if force_function_call is a function name string
         - "required" if force_function_call is True (LLM must call some function)
@@ -671,11 +678,36 @@ class GraphAgent(BaseAgent):
             return None
 
         fn = current_node.get("function_call")
-        if fn:
-            logger.info(f"Node '{self.current_node_id}' forcing specific function: {fn}")
-            return {"type": "function", "function": {"name": fn}}
+        if not fn:
+            return None
 
-        return None
+        missing = self._missing_forced_function_vars(current_node, fn)
+        if missing:
+            logger.warning(
+                f"Dropping forced function call '{fn}' on node '{self.current_node_id}': "
+                f"recipient_data missing required vars referenced in prompt: {missing}"
+            )
+            return None
+
+        logger.info(f"Node '{self.current_node_id}' forcing specific function: {fn}")
+        return {"type": "function", "function": {"name": fn}}
+
+    def _missing_forced_function_vars(self, node: dict, fn: str) -> List[str]:
+        tools = getattr(self.llm, "tools", None) or []
+        if isinstance(tools, str):
+            tools = json.loads(tools)
+        spec = next(
+            (t["function"] for t in tools if t.get("function", {}).get("name") == fn),
+            None,
+        )
+        required = set((spec or {}).get("parameters", {}).get("required") or [])
+        if not required:
+            return []
+
+        prompt_vars = set(_PROMPT_VAR_PATTERN.findall(node.get("prompt", "") or ""))
+        referenced = prompt_vars & required
+        recipient_data = self.context_data.get("recipient_data") or {}
+        return sorted(v for v in referenced if not recipient_data.get(v))
 
     async def _build_messages(self, history: List[dict]) -> List[dict]:
         """Build messages array: system prompt (+ optional RAG) + conversation history."""
