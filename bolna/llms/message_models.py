@@ -106,3 +106,14 @@ class MessageFormatAdapter:
                 }
             )
         return result
+
+    @staticmethod
+    def chat_tool_choice_to_responses(tool_choice):
+        """Flatten Chat-Completions tool_choice for the Responses API.
+
+        {"type":"function","function":{"name":...}} -> {"type":"function","name":...}
+        String forms ("auto", "required", "none") and None pass through unchanged.
+        """
+        if isinstance(tool_choice, dict) and tool_choice.get("type") == "function" and "function" in tool_choice:
+            return {"type": "function", "name": tool_choice["function"].get("name")}
+        return tool_choice
