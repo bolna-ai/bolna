@@ -3884,6 +3884,7 @@ class TaskManager(BaseManager):
                             eager_transcript
                             and self.tools["input"].welcome_message_played()
                             and not self.tools["input"].is_audio_being_played_to_user()
+                            and not self.response_in_pipeline
                         ):
                             logger.info(f"Starting speculative LLM task")
 
