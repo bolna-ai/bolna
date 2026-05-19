@@ -197,6 +197,7 @@ class OpenAITranscriber(BaseTranscriber):
             self.connection_authenticated = True
 
             session_cfg = {
+                "type": "transcription",
                 "input_audio_format": "pcm16",
                 "input_audio_transcription": {
                     "model": self.model,
