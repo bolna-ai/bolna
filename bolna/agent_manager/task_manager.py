@@ -27,6 +27,7 @@ from bolna.constants import (
     SWITCH_LANGUAGE_TOOL_DEFINITION,
     END_CALL_FUNCTION_PREFIX,
     END_CALL_TOOL_DEFINITION,
+    GPT5_4_MODEL_PREFIX,
 )
 from bolna.helpers.function_calling_helpers import trigger_api, computed_api_response, prepare_api_request
 from bolna.helpers.conversation_history import ConversationHistory
@@ -341,7 +342,7 @@ class TaskManager(BaseManager):
                 if "thinking_budget" in self.llm_agent_config:
                     self.llm_config["thinking_budget"] = self.llm_agent_config["thinking_budget"]
 
-                if self.llm_agent_config.get("use_responses_api"):
+                if self.llm_agent_config.get("use_responses_api") or GPT5_4_MODEL_PREFIX in self.llm_config.get("model", ""):
                     self.llm_config["use_responses_api"] = True
 
                 if self.llm_agent_config.get("compact_threshold"):
