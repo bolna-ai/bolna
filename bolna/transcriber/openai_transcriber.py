@@ -196,16 +196,19 @@ class OpenAITranscriber(BaseTranscriber):
             self.websocket_connection = ws
             self.connection_authenticated = True
 
-            session_cfg = {
-                "type": "transcription",
-                "input_audio_format": "pcm16",
-                "input_audio_transcription": {
+            audio_input_cfg = {
+                "transcription": {
                     "model": self.model,
                     "language": self.language,
                 },
+                "turn_detection": None,
             }
             if self.noise_reduction:
-                session_cfg["input_audio_noise_reduction"] = {"type": "near_field"}
+                audio_input_cfg["noise_reduction"] = {"type": "near_field"}
+            session_cfg = {
+                "type": "transcription",
+                "audio": {"input": audio_input_cfg},
+            }
 
             await ws.send(json.dumps({"type": "session.update", "session": session_cfg}))
             logger.info(f"Connected to OpenAI Realtime transcription (model={self.model}, language={self.language})")
@@ -500,7 +503,7 @@ class OpenAITranscriber(BaseTranscriber):
                         "transcription_session.created",
                         "session.created",
                     ):
-                        logger.info(f"OpenAI session event: {event_type}")
+                        logger.info(f"OpenAI session event: {event_type} | {json.dumps(data.get('session', {}))[:400]}")
 
                     else:
                         logger.info(f"OpenAI unhandled event: {event_type} | {json.dumps(data)[:300]}")
