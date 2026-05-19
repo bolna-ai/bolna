@@ -40,7 +40,7 @@ class OpenAITranscriber(BaseTranscriber):
         endpointing=400,
         delay="medium",
         noise_reduction=False,
-        speech_rms_threshold=600,
+        speech_rms_threshold=400,
         vad_threshold=0.5,
         vad_prefix_padding_ms=300,
         **kwargs,
