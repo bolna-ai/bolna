@@ -202,12 +202,11 @@ class OpenAITranscriber(BaseTranscriber):
                     "model": self.model,
                     "language": self.language,
                 },
-                "turn_detection": None,
             }
             if self.noise_reduction:
                 session_cfg["input_audio_noise_reduction"] = {"type": "near_field"}
 
-            await ws.send(json.dumps({"type": "transcription_session.update", "session": session_cfg}))
+            await ws.send(json.dumps({"type": "session.update", "session": session_cfg}))
             logger.info(f"Connected to OpenAI Realtime transcription (model={self.model}, language={self.language})")
             return ws
 
