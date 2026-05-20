@@ -104,6 +104,17 @@ class ElevenlabsSynthesizer(StreamSynthesizer):
     # Interruption
     # ------------------------------------------------------------------
 
+    async def _on_reconnect(self):
+        # If all LLM text was already delivered (last_text_sent) but WS dropped before
+        # ElevenLabs sent audio, re-send the full buffered turn text + flush on the new connection.
+        if self.last_text_sent and self._turn_text_buffer:
+            logger.info(f"ElevenLabs reconnect: re-sending {len(self._turn_text_buffer)} buffered chars on new WS")
+            try:
+                await self.websocket.send(json.dumps({"text": self._turn_text_buffer}))
+                await self.websocket.send(json.dumps({"text": "", "flush": True}))
+            except Exception as e:
+                logger.warning(f"ElevenLabs reconnect: failed to re-send buffered text: {e}")
+
     async def handle_interruption(self):
         try:
             if self.context_id:
