@@ -205,6 +205,8 @@ class DeepgramTranscriber(BaseTranscriber):
             "model": self.model,
             "eot_threshold": self.eot_threshold,
             "eot_timeout_ms": self.eot_timeout_ms,
+            "punctuate": "false",
+            "smart_format": "false",
         }
 
         if self.eager_eot_threshold is not None:
