@@ -1,6 +1,7 @@
 import asyncio
 from collections import defaultdict
 import os
+import re
 import time
 from openai import OpenAI
 from dotenv import load_dotenv
@@ -40,6 +41,7 @@ load_dotenv()
 logger = configure_logger(__name__)
 
 _DETERMINISTIC_REASONING_PREFIX = "deterministic:"
+_PROMPT_VAR_PATTERN = re.compile(r"\{([a-zA-Z_][a-zA-Z0-9_]*)\}")
 
 
 class GraphAgent(BaseAgent):
@@ -655,13 +657,11 @@ class GraphAgent(BaseAgent):
         example_lines = [f'  {lang.upper()}: "{text}"' for lang, text in examples.items()]
         return f"{prompt}\n\nExample responses:\n" + "\n".join(example_lines)
 
-    def _get_tool_choice_for_node(self):
-        """Check if current node should force a tool call.
+    def _get_tool_choice_for_node(self, history: Optional[List[dict]] = None):
+        """Return forced tool_choice for the current node, or None if not forced.
 
-        Returns:
-        - {"type": "function", "function": {"name": "..."}} if force_function_call is a function name string
-        - "required" if force_function_call is True (LLM must call some function)
-        - None otherwise (defaults to "auto")
+        Drops the force when required prompt vars aren't in recipient_data,
+        or when the tool has already been called this node visit.
         """
         if not self.llm or not getattr(self.llm, "trigger_function_call", False):
             return None
@@ -671,11 +671,59 @@ class GraphAgent(BaseAgent):
             return None
 
         fn = current_node.get("function_call")
-        if fn:
-            logger.info(f"Node '{self.current_node_id}' forcing specific function: {fn}")
-            return {"type": "function", "function": {"name": fn}}
+        if not fn:
+            return None
 
-        return None
+        missing = self._missing_forced_function_vars(current_node, fn)
+        if missing:
+            logger.warning(
+                f"Dropping forced function call '{fn}' on node '{self.current_node_id}': "
+                f"recipient_data missing required vars referenced in prompt: {missing}"
+            )
+            return None
+
+        if history is not None and self._forced_function_already_called(fn, history):
+            logger.info(
+                f"Dropping forced function call '{fn}' on node '{self.current_node_id}': "
+                f"tool already invoked this node visit, letting LLM speak from the result"
+            )
+            return None
+
+        logger.info(f"Node '{self.current_node_id}' forcing specific function: {fn}")
+        return {"type": "function", "function": {"name": fn}}
+
+    def _missing_forced_function_vars(self, node: dict, fn: str) -> List[str]:
+        tools = getattr(self.llm, "tools", None) or []
+        if isinstance(tools, str):
+            tools = json.loads(tools)
+        spec = next(
+            (t["function"] for t in tools if t.get("function", {}).get("name") == fn),
+            None,
+        )
+        required = set((spec or {}).get("parameters", {}).get("required") or [])
+        if not required:
+            return []
+
+        prompt_vars = set(_PROMPT_VAR_PATTERN.findall(node.get("prompt", "") or ""))
+        referenced = prompt_vars & required
+        recipient_data = self.context_data.get("recipient_data") or {}
+        return sorted(v for v in referenced if not recipient_data.get(v))
+
+    def _forced_function_already_called(self, fn: str, history: List[dict]) -> bool:
+        node_history = history[self.current_node_entry_index :] if self.current_node_entry_index < len(history) else []
+        call_ids_for_fn = {
+            tc.get("id")
+            for msg in node_history
+            if msg.get("role") == "assistant" and msg.get("tool_calls")
+            for tc in msg["tool_calls"]
+            if tc.get("function", {}).get("name") == fn
+        }
+        if not call_ids_for_fn:
+            return False
+        return any(
+            msg.get("role") == "tool" and msg.get("tool_call_id") in call_ids_for_fn
+            for msg in node_history
+        )
 
     async def _build_messages(self, history: List[dict]) -> List[dict]:
         """Build messages array: system prompt (+ optional RAG) + conversation history."""
@@ -784,7 +832,7 @@ class GraphAgent(BaseAgent):
                     }
                 )
                 yield {"messages": messages}
-                tool_choice = self._get_tool_choice_for_node()
+                tool_choice = self._get_tool_choice_for_node(history=message)
                 async for chunk in self.llm.generate_stream(
                     messages, synthesize=synthesize, meta_info=meta_info, tool_choice=tool_choice
                 ):
@@ -859,7 +907,7 @@ class GraphAgent(BaseAgent):
 
             messages = await self._build_messages(message)
             yield {"messages": messages}
-            tool_choice = self._get_tool_choice_for_node()
+            tool_choice = self._get_tool_choice_for_node(history=message)
             async for chunk in self.llm.generate_stream(
                 messages, synthesize=synthesize, meta_info=meta_info, tool_choice=tool_choice
             ):

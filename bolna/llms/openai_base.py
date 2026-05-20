@@ -369,7 +369,7 @@ class OpenAICompatibleLLM(BaseLLM):
 
         if responses_tools:
             create_kwargs["tools"] = responses_tools
-            create_kwargs["tool_choice"] = tool_choice or "auto"
+            create_kwargs["tool_choice"] = MessageFormatAdapter.chat_tool_choice_to_responses(tool_choice or "auto")
             create_kwargs["parallel_tool_calls"] = False
 
         if request_json:
