@@ -342,7 +342,9 @@ class TaskManager(BaseManager):
                 if "thinking_budget" in self.llm_agent_config:
                     self.llm_config["thinking_budget"] = self.llm_agent_config["thinking_budget"]
 
-                if self.llm_agent_config.get("use_responses_api") or GPT5_4_MODEL_PREFIX in self.llm_config.get("model", ""):
+                if self.llm_agent_config.get("use_responses_api") or GPT5_4_MODEL_PREFIX in self.llm_config.get(
+                    "model", ""
+                ):
                     self.llm_config["use_responses_api"] = True
 
                 if self.llm_agent_config.get("compact_threshold"):
