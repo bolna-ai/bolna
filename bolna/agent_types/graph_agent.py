@@ -657,13 +657,18 @@ class GraphAgent(BaseAgent):
         example_lines = [f'  {lang.upper()}: "{text}"' for lang, text in examples.items()]
         return f"{prompt}\n\nExample responses:\n" + "\n".join(example_lines)
 
-    def _get_tool_choice_for_node(self):
+    def _get_tool_choice_for_node(self, history: Optional[List[dict]] = None):
         """Check if current node should force a tool call.
 
         Drops the force to None (auto) when the node's prompt references
         recipient vars that aren't populated. Without those values the
         LLM has nothing real to put in the function args and would either
         hallucinate or stall, producing silent loops.
+
+        Also drops the force once the tool has already been called for this
+        node visit (its result is in history). Forcing again would re-invoke
+        the same tool with the same args on every turn instead of letting
+        the LLM speak naturally about the result.
 
         Returns:
         - {"type": "function", "function": {"name": "..."}} if force_function_call is a function name string
@@ -689,6 +694,13 @@ class GraphAgent(BaseAgent):
             )
             return None
 
+        if history is not None and self._forced_function_already_called(fn, history):
+            logger.info(
+                f"Dropping forced function call '{fn}' on node '{self.current_node_id}': "
+                f"tool already invoked this node visit, letting LLM speak from the result"
+            )
+            return None
+
         logger.info(f"Node '{self.current_node_id}' forcing specific function: {fn}")
         return {"type": "function", "function": {"name": fn}}
 
@@ -708,6 +720,22 @@ class GraphAgent(BaseAgent):
         referenced = prompt_vars & required
         recipient_data = self.context_data.get("recipient_data") or {}
         return sorted(v for v in referenced if not recipient_data.get(v))
+
+    def _forced_function_already_called(self, fn: str, history: List[dict]) -> bool:
+        node_history = history[self.current_node_entry_index :] if self.current_node_entry_index < len(history) else []
+        call_ids_for_fn = {
+            tc.get("id")
+            for msg in node_history
+            if msg.get("role") == "assistant" and msg.get("tool_calls")
+            for tc in msg["tool_calls"]
+            if tc.get("function", {}).get("name") == fn
+        }
+        if not call_ids_for_fn:
+            return False
+        return any(
+            msg.get("role") == "tool" and msg.get("tool_call_id") in call_ids_for_fn
+            for msg in node_history
+        )
 
     async def _build_messages(self, history: List[dict]) -> List[dict]:
         """Build messages array: system prompt (+ optional RAG) + conversation history."""
@@ -816,7 +844,7 @@ class GraphAgent(BaseAgent):
                     }
                 )
                 yield {"messages": messages}
-                tool_choice = self._get_tool_choice_for_node()
+                tool_choice = self._get_tool_choice_for_node(history=message)
                 async for chunk in self.llm.generate_stream(
                     messages, synthesize=synthesize, meta_info=meta_info, tool_choice=tool_choice
                 ):
@@ -891,7 +919,7 @@ class GraphAgent(BaseAgent):
 
             messages = await self._build_messages(message)
             yield {"messages": messages}
-            tool_choice = self._get_tool_choice_for_node()
+            tool_choice = self._get_tool_choice_for_node(history=message)
             async for chunk in self.llm.generate_stream(
                 messages, synthesize=synthesize, meta_info=meta_info, tool_choice=tool_choice
             ):
