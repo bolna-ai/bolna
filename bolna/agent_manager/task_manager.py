@@ -172,6 +172,7 @@ class TaskManager(BaseManager):
         self.hangup_triggered = False
         self.hangup_triggered_at = None
         self.hangup_decision_at = None
+        self._hangup_processing = False
         self.dtmf_events: list[dict] = []
         self.non_fatal_llm_error_events: list[dict] = []
         self._agent_end_timestamps: dict = {}
@@ -2484,6 +2485,7 @@ class TaskManager(BaseManager):
                 # The LLM emitted the goodbye in the same response as the tool call;
                 # it has already been streamed to TTS. Skip the follow-up LLM to avoid
                 # generating a duplicate goodbye.
+                self._enter_hangup_state()
                 await self.wait_for_current_message()
             else:
                 # No goodbye text in this turn. Feed the tool result back so the LLM
@@ -2502,6 +2504,7 @@ class TaskManager(BaseManager):
                 await self.__do_llm_generation(
                     messages, followup_meta_info, next_step, should_trigger_function_call=False
                 )
+                self._enter_hangup_state()
                 await self.wait_for_current_message()
 
             self.hangup_detail = HangupReason.END_CALL_TOOL
@@ -3392,18 +3395,19 @@ class TaskManager(BaseManager):
         self.llm_processed_request_ids.add(self.current_request_id)
         llm_response = ""
 
+    def _enter_hangup_state(self):
+        self.hangup_triggered = True
+        if self.hangup_decision_at is None:
+            self.hangup_decision_at = time.time()
+
     async def process_call_hangup(self):
         if self.hangup_decision_at is None:
             self.hangup_decision_at = time.time()
-        # Guard: Prevent multiple concurrent hangup attempts
-        if self.hangup_triggered or self.conversation_ended:
+        if self._hangup_processing or self.conversation_ended:
             logger.info(f"process_call_hangup: Hangup already in progress or conversation ended, skipping")
             return
 
-        # hangup_triggered flag set immediately to prevent user interruptions from cancelling hangup.
-        # hangup_triggered_at is stamped after the goodbye is queued for synthesis (not at playback end).
-        # For short goodbye messages this is close enough to playback start; use hangup_decision_at
-        # to get the earlier decision timestamp.
+        self._hangup_processing = True
         self.hangup_triggered = True
         message = self.call_hangup_message if not self.voicemail_handler.detected else ""
         if not message or message.strip() == "":
