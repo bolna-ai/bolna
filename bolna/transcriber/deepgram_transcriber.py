@@ -205,8 +205,6 @@ class DeepgramTranscriber(BaseTranscriber):
             "model": self.model,
             "eot_threshold": self.eot_threshold,
             "eot_timeout_ms": self.eot_timeout_ms,
-            "punctuate": "false",
-            "smart_format": "false",
         }
 
         if self.eager_eot_threshold is not None:
@@ -834,7 +832,7 @@ class DeepgramTranscriber(BaseTranscriber):
 
                 elif msg["type"] == "TurnInfo":
                     event = msg.get("event")
-                    transcript = msg.get("transcript", "").strip()
+                    transcript = msg.get("transcript", "").strip().rstrip(",.'?|'!।")
                     turn_index = msg.get("turn_index")
                     eot_confidence = msg.get("end_of_turn_confidence")
                     words = msg.get("words", [])
