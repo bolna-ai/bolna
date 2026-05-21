@@ -524,7 +524,6 @@ class ConversationConfig(BaseModel):
     trigger_user_online_message_after: Optional[int] = 10
     check_user_online_message: Optional[Union[str, Dict[str, str]]] = "Hey, are you still there"
     check_if_user_online: Optional[bool] = True
-    generate_precise_transcript: Optional[bool] = False
     dtmf_enabled: Optional[bool] = False
     # Voicemail detection configuration
     voicemail: Optional[bool] = False
