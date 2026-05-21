@@ -3454,6 +3454,9 @@ class TaskManager(BaseManager):
 
         if not self.conversation_ended:
             logger.warning("ElevenLabs hangup audio not generated within 5s — forcing end of conversation")
+            # Clear hangup_message_queued so __process_end_of_conversation skips waiting
+            # for hangup_sent() — audio was never delivered, no Plivo ack will ever arrive.
+            self.hangup_message_queued = False
             await self.__process_end_of_conversation()
 
     async def _listen_llm_input_queue(self):
