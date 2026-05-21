@@ -50,6 +50,14 @@ class SynthesizerPool:
         return self.synthesizers[self.active_label].connection_time
 
     @property
+    def ws_send_time(self):
+        return self.synthesizers[self.active_label].ws_send_time
+
+    @property
+    def ws_recv_time(self):
+        return self.synthesizers[self.active_label].ws_recv_time
+
+    @property
     def turn_latencies(self):
         all_latencies = []
         for s in self.synthesizers.values():

@@ -68,6 +68,7 @@ class ElevenlabsSynthesizer(StreamSynthesizer):
 
         self.context_id = None
         self.ws_send_time = None
+        self.ws_recv_time = None
         self.ws_trace_id = None
         self.current_turn_ttfb = None
 
@@ -154,6 +155,10 @@ class ElevenlabsSynthesizer(StreamSynthesizer):
                 logger.info(f"Error sending end-of-stream signal: {e}")
                 self.connection_error = str(e)
 
+            if os.getenv("BOLNA_QA_BLOCK_ELEVENLABS_AUDIO"):
+                logger.warning("BOLNA_QA_BLOCK_ELEVENLABS_AUDIO: closing WS after send to simulate no audio response")
+                await self.websocket.close()
+
         except asyncio.CancelledError:
             logger.info("Sender task was cancelled.")
         except Exception as e:
@@ -192,7 +197,8 @@ class ElevenlabsSynthesizer(StreamSynthesizer):
                 if "audio" in data and data["audio"] and self.ws_send_time is not None:
                     audio_chunk_count += 1
                     if audio_chunk_count == 1:
-                        time_since_send = (time.perf_counter() - self.ws_send_time) * 1000
+                        self.ws_recv_time = time.perf_counter()
+                        time_since_send = (self.ws_recv_time - self.ws_send_time) * 1000
                         logger.info(
                             f"WS recv FIRST trace_id={self.ws_trace_id} recv_wait={recv_duration:.0f}ms time_since_send={time_since_send:.0f}ms"
                         )

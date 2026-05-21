@@ -3430,7 +3430,31 @@ class TaskManager(BaseManager):
             await self._synthesize(create_ws_data_packet(message, meta_info=meta_info))
             # Stamp after goodbye is queued — actual disconnect happens after it plays
             self.hangup_triggered_at = time.time()
+            # ElevenLabs only: if no audio within 5s of text being sent, force disconnect.
+            if self.synthesizer_provider == "elevenlabs":
+                asyncio.create_task(self._hangup_audio_delivery_timeout())
         return
+
+    async def _hangup_audio_delivery_timeout(self):
+        """ElevenLabs only: force end of conversation if no audio is generated within 5s of
+        the hangup text being sent. Prevents call hanging open until call_terminate when the
+        ElevenLabs WS is in a reconnect loop."""
+        # Poll up to 3s for sender to get a connection and send the text
+        deadline = time.perf_counter() + 3
+        while time.perf_counter() < deadline:
+            if self.tools["synthesizer"].ws_send_time is not None:
+                break
+            await asyncio.sleep(0.1)
+
+        await asyncio.sleep(5)
+
+        # If ElevenLabs returned audio, it's playing — don't interrupt
+        if self.tools["synthesizer"].ws_recv_time is not None:
+            return
+
+        if not self.conversation_ended:
+            logger.warning("ElevenLabs hangup audio not generated within 5s — forcing end of conversation")
+            await self.__process_end_of_conversation()
 
     async def _listen_llm_input_queue(self):
         logger.info(
