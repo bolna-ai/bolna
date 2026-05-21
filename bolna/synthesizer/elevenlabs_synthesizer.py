@@ -155,10 +155,6 @@ class ElevenlabsSynthesizer(StreamSynthesizer):
                 logger.info(f"Error sending end-of-stream signal: {e}")
                 self.connection_error = str(e)
 
-            if os.getenv("BOLNA_QA_BLOCK_ELEVENLABS_AUDIO"):
-                logger.warning("BOLNA_QA_BLOCK_ELEVENLABS_AUDIO: closing WS after send to simulate no audio response")
-                await self.websocket.close()
-
         except asyncio.CancelledError:
             logger.info("Sender task was cancelled.")
         except Exception as e:
