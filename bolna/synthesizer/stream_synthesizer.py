@@ -62,6 +62,7 @@ class StreamSynthesizer(BaseSynthesizer):
         self.current_tts_start_ms = None
         self.current_turn_ttfb = None
         self.ws_send_time = None
+        self.ws_recv_time = None
         self.current_sequence_chars = 0
 
     # ------------------------------------------------------------------
@@ -175,6 +176,7 @@ class StreamSynthesizer(BaseSynthesizer):
         if self.current_turn_start_time is None:
             self.current_turn_start_time = time.perf_counter()
             self.ws_send_time = None
+            self.ws_recv_time = None
             self.current_turn_ttfb = None
             # Anchor tts_start_ms to the first push — re-pushes of speculative responses
             # (e.g. after a tool call confirms the eager response) would overwrite this

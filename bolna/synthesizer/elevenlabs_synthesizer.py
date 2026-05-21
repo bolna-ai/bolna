@@ -67,7 +67,6 @@ class ElevenlabsSynthesizer(StreamSynthesizer):
         self.api_url = f"https://{self.elevenlabs_host}/v1/text-to-speech/{self.voice}/stream?optimize_streaming_latency=2&output_format="
 
         self.context_id = None
-        self.ws_send_time = None
         self.ws_trace_id = None
         self.current_turn_ttfb = None
 
@@ -192,7 +191,8 @@ class ElevenlabsSynthesizer(StreamSynthesizer):
                 if "audio" in data and data["audio"] and self.ws_send_time is not None:
                     audio_chunk_count += 1
                     if audio_chunk_count == 1:
-                        time_since_send = (time.perf_counter() - self.ws_send_time) * 1000
+                        self.ws_recv_time = time.perf_counter()
+                        time_since_send = (self.ws_recv_time - self.ws_send_time) * 1000
                         logger.info(
                             f"WS recv FIRST trace_id={self.ws_trace_id} recv_wait={recv_duration:.0f}ms time_since_send={time_since_send:.0f}ms"
                         )
