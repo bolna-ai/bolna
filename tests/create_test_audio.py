@@ -42,7 +42,7 @@ def main():
     combined = AudioSegment.silent(duration=500, frame_rate=16000)  # leading silence
 
     for i, (lang, text) in enumerate(SEGMENTS):
-        print(f"  Generating segment {i+1}/{len(SEGMENTS)}: {lang} — {text[:40]}...")
+        print(f"  Generating segment {i + 1}/{len(SEGMENTS)}: {lang} — {text[:40]}...")
         seg = make_segment(lang, text)
         combined += seg + silence
 

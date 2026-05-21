@@ -317,13 +317,7 @@ class TranscriberPool:
         if self._lid_pending_count < self._LID_DEBOUNCE_COUNT:
             return
 
-        target_label = self._lang_to_label.get(lang)
-        if not target_label:
-            logger.warning(
-                f"TranscriberPool LID: detected lang '{lang}' has no matching transcriber. "
-                f"Available: {self._lang_to_label}"
-            )
-            return
+        target_label = self._lang_to_label[lang]
 
         if target_label == self.active_label:
             return
