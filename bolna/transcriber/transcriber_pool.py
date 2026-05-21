@@ -289,7 +289,11 @@ class TranscriberPool:
         logger.info(f"TranscriberPool LID: {lang} conf={confidence:.2f} (provider={self._lid_provider_name})")
 
         _active_cfg = self._multilingual_config.get(self.active_label, {})
-        active_lang = (_active_cfg.get("language_code") or _active_cfg.get("language") or self.active_label or "").split("-")[0].lower()
+        active_lang = (
+            (_active_cfg.get("language_code") or _active_cfg.get("language") or self.active_label or "")
+            .split("-")[0]
+            .lower()
+        )
         if lang == active_lang:
             self._lid_pending_lang = None
             self._lid_pending_count = 0
