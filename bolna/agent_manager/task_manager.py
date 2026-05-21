@@ -1096,11 +1096,11 @@ class TaskManager(BaseManager):
                             self.transcriber_provider = cfg.get("provider", cfg.get("model"))
 
                     # Audio LID tap.
-                    # LID_PROVIDER — which backend to use (default: "azure").
+                    # LID_PROVIDER — which backend to use (default: "sarvam").
                     # LID_MODE     — "shadow" (default) logs detections without switching;
                     #                "active" performs live transcriber/synthesizer/prompt swap.
                     #                Keep "shadow" until detection quality is validated.
-                    LID_PROVIDER = os.getenv("LID_PROVIDER", "azure")
+                    LID_PROVIDER = os.getenv("LID_PROVIDER", "sarvam")
                     _lid_config = {"telephony_provider": provider}
 
                     self.tools["transcriber"] = TranscriberPool(

@@ -16,6 +16,6 @@ class LIDProvider:
     def create(cls, provider, on_language, config):
         klass = cls._PROVIDERS.get(provider.lower())
         if klass is None:
-            logger.warning(f"LIDProvider: unknown provider '{provider}', falling back to azure")
-            klass = AzureLID
+            logger.warning(f"LIDProvider: unknown provider '{provider}', falling back to sarvam")
+            klass = SarvamLID
         return klass(on_language=on_language, config=config)
