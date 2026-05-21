@@ -40,16 +40,12 @@ class SarvamLID(LIDBackend):
         self._sr = int(config.get("sampling_rate", 16000))
         self._input_sr = 8000 if self._telephony in ("twilio", "plivo") else self._sr
         self._encoding = "mulaw" if self._telephony == "twilio" else "linear16"
-        self._queue = asyncio.Queue(maxsize=200)
+        self._queue = asyncio.Queue(maxsize=20)
         self._ws = None
         self._sender_task = None
         self._receiver_task = None
         self._dead = False
         self._resample_state = None
-        # Buffer incoming audio until we have 100ms per chunk for Sarvam
-        _sample_width = 1 if self._encoding == "mulaw" else 2
-        self._target_chunk_bytes = int(self._input_sr * 0.1 * _sample_width)
-        self._audio_buffer = bytearray()
 
     def _build_url(self) -> str:
         params = {
@@ -93,14 +89,10 @@ class SarvamLID(LIDBackend):
         if self._dead:
             logger.warning("SarvamLID: feed() called but WS is dead — chunk dropped (LID inactive)")
             return
-        self._audio_buffer.extend(audio_bytes)
-        while len(self._audio_buffer) >= self._target_chunk_bytes:
-            chunk = bytes(self._audio_buffer[:self._target_chunk_bytes])
-            self._audio_buffer = self._audio_buffer[self._target_chunk_bytes:]
-            try:
-                self._queue.put_nowait(chunk)
-            except asyncio.QueueFull:
-                logger.debug("SarvamLID: audio queue full — chunk dropped (backpressure)")
+        try:
+            self._queue.put_nowait(audio_bytes)
+        except asyncio.QueueFull:
+            logger.debug("SarvamLID: audio queue full — chunk dropped (backpressure)")
 
     async def _sender_loop(self):
         try:
@@ -141,8 +133,10 @@ class SarvamLID(LIDBackend):
                         conf = float(lang_prob)
                         if lang and lang != "unknown":
                             short = lang.split("-")[0].lower()
-                            logger.info(f"SarvamLID: detected {lang!r} (short={short!r}, duration={audio_duration:.2f}s, conf={conf:.2f})")
-                            await self.on_language(short, conf)
+                            logger.info(
+                                f"SarvamLID: detected {lang!r} (short={short!r}, duration={audio_duration:.2f}s, conf={conf:.2f})"
+                            )
+                            asyncio.create_task(self.on_language(short, conf))
                 except Exception as e:
                     logger.error(f"SarvamLID receiver parse error: {e}")
         except asyncio.CancelledError:

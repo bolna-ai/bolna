@@ -33,7 +33,7 @@ def read_wav_chunks(path: str, chunk_duration_s: float):
         sampwidth = wf.getsampwidth()
         n_frames = wf.getnframes()
 
-        print(f"Audio: {sr}Hz, {n_channels}ch, {sampwidth*8}-bit, {n_frames/sr:.1f}s total")
+        print(f"Audio: {sr}Hz, {n_channels}ch, {sampwidth * 8}-bit, {n_frames / sr:.1f}s total")
 
         if n_channels != 1:
             raise ValueError(f"Expected mono audio, got {n_channels} channels")
@@ -46,7 +46,7 @@ def read_wav_chunks(path: str, chunk_duration_s: float):
             yield data, sr, sampwidth
 
 
-async def run(wav_path: str):
+async def run(wav_path: str, fast: bool = False):
     detections = []
     start_time = time.monotonic()
 
@@ -76,8 +76,8 @@ async def run(wav_path: str):
 
     for i, (chunk, _, _) in enumerate(chunks):
         lid.feed(chunk)
-        # Sleep to simulate real-time streaming
-        await asyncio.sleep(CHUNK_DURATION_S)
+        # Sleep to simulate real-time streaming (skip with --fast)
+        await asyncio.sleep(0.005 if fast else CHUNK_DURATION_S)
 
     # Give receiver a moment to flush final detections
     await asyncio.sleep(1.0)
@@ -93,6 +93,7 @@ async def run(wav_path: str):
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("Usage: python tests/test_sarvam_lid.py <path_to_wav>")
+        print("Usage: python tests/test_sarvam_lid.py <path_to_wav> [--fast]")
         sys.exit(1)
-    asyncio.run(run(sys.argv[1]))
+    fast_mode = "--fast" in sys.argv
+    asyncio.run(run(sys.argv[1], fast=fast_mode))
