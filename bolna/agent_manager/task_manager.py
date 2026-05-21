@@ -264,6 +264,8 @@ class TaskManager(BaseManager):
         self.consider_next_transcript_after = time.time()
         self.llm_response_generated = False
         self.response_in_pipeline = False
+        self._pipeline_guard_task = None
+        self._pipeline_guard_deadline_sec = 10.0
         self._response_turn_id = 0
         self._turn_msg_map = {}  # turn_id → assistant message dict ref in _messages
         self._pending_assistant_history = {}  # sequence_id -> {content, turn_id, response_uid}
@@ -1880,6 +1882,9 @@ class TaskManager(BaseManager):
         self.interruption_manager.invalidate_pending_responses()
         self._drop_all_staged_assistant_history("cleanup_downstream_tasks")
         self.response_in_pipeline = False
+        if self._pipeline_guard_task is not None and not self._pipeline_guard_task.done():
+            self._pipeline_guard_task.cancel()
+            self._pipeline_guard_task = None
         await self.tools["synthesizer"].flush_synthesizer_stream()
 
         # Stop the output loop first so that we do not transmit anything else
@@ -1992,6 +1997,48 @@ class TaskManager(BaseManager):
             meta_info = message["meta_info"]
             sequence = meta_info.get("sequence", 0)
         return sequence, meta_info
+
+    def _set_response_in_pipeline(self, sequence_id):
+        """Mark a new response as in-flight and arm a watchdog.
+
+        Some LLM/TTS failure modes (empty stream, synth wedge, httpx stall)
+        never emit audio, so the flag is never cleared by the SEND or
+        BLOCK-with-EOS paths in __process_output_loop and remains stuck True.
+        The guard armed here clears the flag after a deadline if no audio
+        flowed and the sequence is still current.
+        """
+        self.response_in_pipeline = True
+        prev = getattr(self, "_pipeline_guard_task", None)
+        if prev is not None and not prev.done():
+            prev.cancel()
+        self._pipeline_guard_task = None
+        if sequence_id is None:
+            logger.warning("pipeline_guard not armed: sequence_id is None")
+            return
+        self._pipeline_guard_task = asyncio.create_task(
+            self._guard_response_in_pipeline(sequence_id)
+        )
+
+    async def _guard_response_in_pipeline(self, sequence_id):
+        deadline_sec = self._pipeline_guard_deadline_sec
+        try:
+            await asyncio.sleep(deadline_sec)
+        except asyncio.CancelledError:
+            return
+        if self.hangup_triggered or self.conversation_ended:
+            return
+        if not self.response_in_pipeline:
+            return
+        if not self.interruption_manager.is_valid_sequence(sequence_id):
+            return
+        if self.tools["input"].is_audio_being_played_to_user():
+            return
+        logger.warning(
+            "Pipeline guard cleared response_in_pipeline after %.1fs with no audio | sequence_id=%s",
+            deadline_sec,
+            sequence_id,
+        )
+        self.response_in_pipeline = False
 
     def _is_extraction_task(self):
         return self.task_config["task_type"] == "extraction"
@@ -2279,7 +2326,7 @@ class TaskManager(BaseManager):
                 "message_category": "event_proactive",
             }
         )
-        self.response_in_pipeline = True
+        self._set_response_in_pipeline(meta_info["sequence_id"])
         task = asyncio.create_task(self._run_llm_task(create_ws_data_packet("", meta_info)))
         self.llm_task = task
         try:
@@ -3691,7 +3738,7 @@ class TaskManager(BaseManager):
             # interruption path, the new seq_id would otherwise never be added
             # back to sequence_ids, causing all audio to be BLOCKed permanently.
             self.interruption_manager.revalidate_sequence_id(meta_info["sequence_id"])
-            self.response_in_pipeline = True
+            self._set_response_in_pipeline(meta_info["sequence_id"])
             self.llm_task = asyncio.create_task(self._run_llm_task(transcriber_package))
 
         elif next_task == "synthesizer":
@@ -4000,7 +4047,7 @@ class TaskManager(BaseManager):
                                 # invalidate_pending_responses from the interruption path can remove it,
                                 # and without this call all audio from the eager task would be BLOCKed.
                                 self.interruption_manager.revalidate_sequence_id(self.eager_meta_info["sequence_id"])
-                                self.response_in_pipeline = True
+                                self._set_response_in_pipeline(self.eager_meta_info["sequence_id"])
                             self.llm_task = self.eager_llm_task
                             self.eager_llm_task = None
                             self.eager_meta_info = None
@@ -4582,7 +4629,7 @@ class TaskManager(BaseManager):
                 "format": self.task_config["tools_config"]["output"].get("format", "pcm"),
             }
         )
-        self.response_in_pipeline = True
+        self._set_response_in_pipeline(meta_info["sequence_id"])
         task = asyncio.create_task(self._run_llm_task(create_ws_data_packet(injected_message, meta_info)))
         self.llm_task = task
         try:
