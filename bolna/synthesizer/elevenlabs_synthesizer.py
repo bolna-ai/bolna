@@ -67,8 +67,6 @@ class ElevenlabsSynthesizer(StreamSynthesizer):
         self.api_url = f"https://{self.elevenlabs_host}/v1/text-to-speech/{self.voice}/stream?optimize_streaming_latency=2&output_format="
 
         self.context_id = None
-        self.ws_send_time = None
-        self.ws_recv_time = None
         self.ws_trace_id = None
         self.current_turn_ttfb = None
 

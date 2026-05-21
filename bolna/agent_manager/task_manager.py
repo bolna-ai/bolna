@@ -3446,14 +3446,22 @@ class TaskManager(BaseManager):
                 break
             await asyncio.sleep(0.1)
 
-        await asyncio.sleep(5)
+        if self.tools["synthesizer"].ws_send_time is None:
+            # Text never reached ElevenLabs — no audio can arrive, cut immediately
+            logger.warning("ElevenLabs hangup text never sent after 3s — forcing end of conversation")
+            if not self.conversation_ended:
+                self.hangup_message_queued = False
+                await self.__process_end_of_conversation()
+            return
+
+        await asyncio.sleep(8)
 
         # If ElevenLabs returned audio, it's playing — don't interrupt
         if self.tools["synthesizer"].ws_recv_time is not None:
             return
 
         if not self.conversation_ended:
-            logger.warning("ElevenLabs hangup audio not generated within 5s — forcing end of conversation")
+            logger.warning("ElevenLabs hangup audio not generated within 8s — forcing end of conversation")
             # Clear hangup_message_queued so __process_end_of_conversation skips waiting
             # for hangup_sent() — audio was never delivered, no Plivo ack will ever arrive.
             self.hangup_message_queued = False
