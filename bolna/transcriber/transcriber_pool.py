@@ -105,7 +105,7 @@ class TranscriberPool:
         self._lang_to_label: dict[str, str] = {}
         if multilingual_config:
             for label, cfg in multilingual_config.items():
-                lang = (cfg.get("language_code") or cfg.get("language") or "").lower()
+                lang = (cfg.get("language_code") or cfg.get("language") or label or "").lower()
                 short = lang.split("-")[0]
                 if short:
                     self._lang_to_label[short] = label
@@ -276,30 +276,30 @@ class TranscriberPool:
         """
         if confidence < self._LID_CONFIDENCE_THRESHOLD:
             logger.debug(f"TranscriberPool LID: {lang} conf={confidence:.2f} below threshold — suppressed")
+            self._record_lid_event(lang, confidence, None, False, "low_confidence")
             return
 
-        # Drop detections for languages not in the agent's supported pool.
-        # e.g. if agent supports [hi, en, gu, bn] and Azure detects "te", silently ignore.
         if lang not in self._lang_to_label:
             logger.debug(
                 f"TranscriberPool LID: {lang} not in supported languages {list(self._lang_to_label.keys())} — ignored"
             )
+            self._record_lid_event(lang, confidence, None, False, "unsupported_language")
             return
 
         logger.info(f"TranscriberPool LID: {lang} conf={confidence:.2f} (provider={self._lid_provider_name})")
 
-        # Use same fallback as _lang_to_label build: language_code first, then language.
         _active_cfg = self._multilingual_config.get(self.active_label, {})
-        active_lang = (_active_cfg.get("language_code") or _active_cfg.get("language") or "").split("-")[0].lower()
+        active_lang = (_active_cfg.get("language_code") or _active_cfg.get("language") or self.active_label or "").split("-")[0].lower()
         if lang == active_lang:
             self._lid_pending_lang = None
             self._lid_pending_count = 0
+            self._record_lid_event(lang, confidence, None, False, "already_active")
             return
 
-        # Cooldown check
         now = time.monotonic()
         if now - self._lid_last_switch_time < self._LID_COOLDOWN_S:
             logger.debug(f"TranscriberPool LID: cooldown active — suppressed {lang} (suppressed_reason=cooldown)")
+            self._record_lid_event(lang, confidence, self._lang_to_label[lang], False, "cooldown")
             return
 
         # Debounce accumulation
@@ -315,6 +315,7 @@ class TranscriberPool:
         )
 
         if self._lid_pending_count < self._LID_DEBOUNCE_COUNT:
+            self._record_lid_event(lang, confidence, self._lang_to_label[lang], False, "debounce_pending")
             return
 
         target_label = self._lang_to_label[lang]
