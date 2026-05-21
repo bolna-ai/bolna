@@ -720,10 +720,7 @@ class GraphAgent(BaseAgent):
         }
         if not call_ids_for_fn:
             return False
-        return any(
-            msg.get("role") == "tool" and msg.get("tool_call_id") in call_ids_for_fn
-            for msg in node_history
-        )
+        return any(msg.get("role") == "tool" and msg.get("tool_call_id") in call_ids_for_fn for msg in node_history)
 
     async def _build_messages(self, history: List[dict]) -> List[dict]:
         """Build messages array: system prompt (+ optional RAG) + conversation history."""

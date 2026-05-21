@@ -832,7 +832,7 @@ class DeepgramTranscriber(BaseTranscriber):
 
                 elif msg["type"] == "TurnInfo":
                     event = msg.get("event")
-                    transcript = msg.get("transcript", "").strip()
+                    transcript = msg.get("transcript", "").strip().rstrip(",.'?|'!।")
                     turn_index = msg.get("turn_index")
                     eot_confidence = msg.get("end_of_turn_confidence")
                     words = msg.get("words", [])
