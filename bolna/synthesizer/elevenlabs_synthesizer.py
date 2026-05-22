@@ -151,16 +151,13 @@ class ElevenlabsSynthesizer(StreamSynthesizer):
                 closing_context_id = self.context_id
                 self.context_id = str(uuid.uuid4())
                 try:
-                    # close_context is what triggers ElevenLabs to emit isFinal;
+                    # close_context flushes implicitly and triggers isFinal;
                     # a bare flush leaves the context open and isFinal never arrives.
-                    await self.websocket.send(
-                        json.dumps({"context_id": closing_context_id, "text": "", "flush": True})
-                    )
                     await self.websocket.send(
                         json.dumps({"context_id": closing_context_id, "close_context": True})
                     )
                     logger.info(
-                        f"Elevenlabs sender end_of_llm_stream close_context "
+                        f"Elevenlabs sender close_context "
                         f"context_id={closing_context_id} trace_id={self.ws_trace_id}"
                     )
                 except Exception as e:
