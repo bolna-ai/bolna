@@ -274,7 +274,7 @@ class TranscriberPool:
         to avoid the double-switch race where the transcriber flips before the
         synthesizer and prompt catch up.
         """
-        if confidence < self._LID_CONFIDENCE_THRESHOLD:
+        if confidence is not None and confidence < self._LID_CONFIDENCE_THRESHOLD:
             logger.debug(f"TranscriberPool LID: {lang} conf={confidence:.2f} below threshold — suppressed")
             self._record_lid_event(lang, confidence, None, False, "low_confidence")
             return

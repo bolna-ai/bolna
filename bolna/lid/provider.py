@@ -1,6 +1,7 @@
 from bolna.helpers.logger_config import configure_logger
 
 from .azure import AzureLID
+from .elevenlabs_scribe import ElevenLabsScribeLID
 from .sarvam import SarvamLID
 
 logger = configure_logger(__name__)
@@ -10,6 +11,7 @@ class LIDProvider:
     _PROVIDERS = {
         "sarvam": SarvamLID,
         "azure": AzureLID,
+        "elevenlabs_scribe": ElevenLabsScribeLID,
     }
 
     @classmethod
