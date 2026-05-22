@@ -138,7 +138,9 @@ class ElevenlabsSynthesizer(StreamSynthesizer):
                         if self.ws_send_time is None:
                             self.ws_send_time = time.perf_counter()
                             logger.info(f"WS send trace_id={self.ws_trace_id} first_text_sent")
-                        await self.websocket.send(json.dumps({"text": text_chunk}))
+                        await self.websocket.send(
+                            json.dumps({"text": text_chunk, "context_id": self.context_id})
+                        )
                     except Exception as e:
                         logger.info(f"Error sending chunk: {e}")
                         self.connection_error = str(e)
@@ -146,18 +148,41 @@ class ElevenlabsSynthesizer(StreamSynthesizer):
 
             if end_of_llm_stream:
                 self.last_text_sent = True
+                closing_context_id = self.context_id
                 self.context_id = str(uuid.uuid4())
+                try:
+                    # close_context is what triggers ElevenLabs to emit isFinal;
+                    # a bare flush leaves the context open and isFinal never arrives.
+                    await self.websocket.send(
+                        json.dumps({"context_id": closing_context_id, "text": "", "flush": True})
+                    )
+                    await self.websocket.send(
+                        json.dumps({"context_id": closing_context_id, "close_context": True})
+                    )
+                    logger.info(
+                        f"Elevenlabs sender end_of_llm_stream close_context "
+                        f"context_id={closing_context_id} trace_id={self.ws_trace_id}"
+                    )
+                except Exception as e:
+                    logger.info(f"Error closing context: {e}")
+                    self.connection_error = str(e)
+                return
 
             try:
-                await self.websocket.send(json.dumps({"text": "", "flush": True}))
+                await self.websocket.send(
+                    json.dumps({"text": "", "flush": True, "context_id": self.context_id})
+                )
             except Exception as e:
-                logger.info(f"Error sending end-of-stream signal: {e}")
+                logger.info(f"Error sending flush: {e}")
                 self.connection_error = str(e)
 
         except asyncio.CancelledError:
             logger.info("Sender task was cancelled.")
         except Exception as e:
             logger.error(f"Unexpected error in sender: {e}")
+
+    # Fallback when ElevenLabs drops or delays isFinal after a context close.
+    POST_CLOSE_EOS_TIMEOUT_S = 2.0
 
     async def receiver(self):
         """Yields (audio_chunk, text_spoken) tuples, or (b'\\x00', '') for end-of-stream."""
@@ -185,7 +210,21 @@ class ElevenlabsSynthesizer(StreamSynthesizer):
                     not_connected_since = None
 
                 recv_start = time.perf_counter()
-                response = await self.websocket.recv()
+                if self.last_text_sent:
+                    try:
+                        response = await asyncio.wait_for(
+                            self.websocket.recv(), timeout=self.POST_CLOSE_EOS_TIMEOUT_S
+                        )
+                    except asyncio.TimeoutError:
+                        logger.warning(
+                            f"ElevenLabs: no audio for {self.POST_CLOSE_EOS_TIMEOUT_S}s after "
+                            f"close_context; emitting EOS fallback trace_id={self.ws_trace_id}"
+                        )
+                        self.last_text_sent = False
+                        yield b"\x00", ""
+                        continue
+                else:
+                    response = await self.websocket.recv()
                 recv_duration = (time.perf_counter() - recv_start) * 1000
                 data = json.loads(response)
 
@@ -217,26 +256,9 @@ class ElevenlabsSynthesizer(StreamSynthesizer):
                     logger.info(f"WS recv isFinal trace_id={self.ws_trace_id}")
                     audio_chunk_count = 0
                     last_recv_time = None
+                    self.last_text_sent = False
                     yield b"\x00", ""
-
-                elif self.last_text_sent:
-                    try:
-                        response_chars = data.get("alignment", {}).get("chars", [])
-                        response_text = "".join(response_chars)
-                        last_four = " ".join(response_text.split(" ")[-4:]).replace('"', "").strip()
-                        current_norm = self.normalize_text(self.current_text.strip()).replace('"', "").strip()
-                        logger.info(f"Last four char - {last_four} | current text - {current_norm}")
-
-                        # Guard: skip if last_four is purely punctuation/whitespace (e.g. ".", ",", "'").
-                        # Such chunks match trivially against any response ending with that character.
-                        has_alnum = any(c.isalnum() for c in last_four)
-                        if last_four and has_alnum and current_norm.endswith(last_four):
-                            logger.info("send end_of_synthesizer_stream")
-                            yield b"\x00", ""
-                    except Exception as e:
-                        logger.error(f"Error getting chars from response - {e}")
-                        yield b"\x00", ""
-                else:
+                elif not ("audio" in data and data["audio"]):
                     logger.info("No audio data in the response")
 
             except websockets.exceptions.ConnectionClosed:
