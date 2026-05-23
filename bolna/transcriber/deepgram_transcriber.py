@@ -19,11 +19,36 @@ from bolna.constants import (
     DEEPGRAM_FLUX_EOT_THRESHOLD,
     DEEPGRAM_FLUX_EAGER_EOT_THRESHOLD,
     DEEPGRAM_FLUX_EOT_TIMEOUT_MS,
+    DEEPGRAM_MAX_KEYWORDS,
+    DEEPGRAM_MAX_KEYWORD_URL_CHARS,
 )
 
 
 logger = configure_logger(__name__)
 load_dotenv()
+
+
+def _build_keyword_list(keywords_str, url_encode=True):
+    """Cap keywords by count and total encoded URL length.
+
+    Hindi/non-ASCII keywords expand ~9x after URL-encoding, so a list that looks
+    small by count can easily exceed Deepgram's URL length limit and return 400.
+    """
+    raw = [kw.strip() for kw in keywords_str.split(",") if kw.strip()]
+    result = []
+    total_chars = 0
+    for kw in raw[:DEEPGRAM_MAX_KEYWORDS]:
+        encoded = quote(kw) if url_encode else kw
+        cost = len(f"&keywords={encoded}")
+        if total_chars + cost > DEEPGRAM_MAX_KEYWORD_URL_CHARS:
+            logger.warning(
+                "Deepgram keywords truncated at %d/%d entries (%d chars) — URL length limit reached",
+                len(result), len(raw), total_chars,
+            )
+            break
+        result.append(encoded)
+        total_chars += cost
+    return result
 
 
 class DeepgramTranscriber(BaseTranscriber):
@@ -75,12 +100,10 @@ class DeepgramTranscriber(BaseTranscriber):
                 self.api_url += f"&tag={quote(self.run_id)}&extra={quote(f'run_id:{self.run_id}')}"
             self.session = aiohttp.ClientSession()
             if self.keywords is not None:
-                keyword_list = [quote(kw.strip()) for kw in self.keywords.split(",") if kw.strip()]
+                keyword_list = _build_keyword_list(self.keywords)
                 if keyword_list:
-                    if self.model.startswith("nova-3"):
-                        keyword_string = "&keyterm=" + "&keyterm=".join(keyword_list)
-                    else:
-                        keyword_string = "&keywords=" + "&keywords=".join(keyword_list)
+                    param = "keyterm" if self.model.startswith("nova-3") else "keywords"
+                    keyword_string = f"&{param}=" + f"&{param}=".join(keyword_list)
                     self.api_url = f"{self.api_url}{keyword_string}"
         self.audio_submitted = False
         self.audio_submission_time = None
@@ -191,12 +214,10 @@ class DeepgramTranscriber(BaseTranscriber):
         websocket_url = websocket_api + urlencode(dg_params)
 
         if self.keywords:
-            keyword_list = [quote(kw.strip()) for kw in self.keywords.split(",") if kw.strip()]
+            keyword_list = _build_keyword_list(self.keywords)
             if keyword_list:
-                if self.model.startswith("nova-3"):
-                    websocket_url += "&keyterm=" + "&keyterm=".join(keyword_list)
-                else:
-                    websocket_url += "&keywords=" + "&keywords=".join(keyword_list)
+                param = "keyterm" if self.model.startswith("nova-3") else "keywords"
+                websocket_url += f"&{param}=" + f"&{param}=".join(keyword_list)
 
         return websocket_url
 
@@ -235,7 +256,7 @@ class DeepgramTranscriber(BaseTranscriber):
             self.audio_frame_duration = 0.0
 
         if self.keywords:
-            keyword_list = [kw.strip() for kw in self.keywords.split(",") if kw.strip()]
+            keyword_list = _build_keyword_list(self.keywords, url_encode=False)
             if keyword_list:
                 dg_params["keyterm"] = keyword_list
 

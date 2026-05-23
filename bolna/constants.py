@@ -11,6 +11,10 @@ OPENAI_TRANSCRIBER_UTTERANCE_TIMEOUT_S = 0.5
 DEEPGRAM_FLUX_EOT_THRESHOLD = 0.7  # confidence to declare end-of-turn
 DEEPGRAM_FLUX_EAGER_EOT_THRESHOLD = 0.5  # confidence to trigger speculative LLM early
 DEEPGRAM_FLUX_EOT_TIMEOUT_MS = 500  # max silence before forcing end-of-turn
+DEEPGRAM_MAX_KEYWORDS = 100  # Deepgram hard limit for keywords/keyterms per request
+# Max total URL-encoded length for the keyword portion. Hindi keywords expand ~9x after
+# encoding (%E0%A4%XX per byte), so a 79-entry mixed list can exceed 7500 chars → 400.
+DEEPGRAM_MAX_KEYWORD_URL_CHARS = 4000
 
 # Model prefixes
 GPT5_MODEL_PREFIX = "gpt-5"
