@@ -4087,6 +4087,16 @@ class TaskManager(BaseManager):
         """Check if sequence_id is valid. Delegates to InterruptionManager."""
         return self.interruption_manager.is_valid_sequence(sequence_id)
 
+    def _collect_flux_lid_events(self) -> list:
+        """Collect flux_lid_events from the transcriber or all transcribers in a pool."""
+        t = self.tools.get("transcriber")
+        if isinstance(t, TranscriberPool):
+            events = []
+            for transcriber in t.transcribers.values():
+                events.extend(getattr(transcriber, "flux_lid_events", []))
+            return events
+        return list(getattr(t, "flux_lid_events", []))
+
     def _get_voice_name_for_label(self, label):
         """Get agent name for a language label from configured agent_names."""
         return self.agent_names.get(label, "")
@@ -5073,7 +5083,7 @@ class TaskManager(BaseManager):
                     "label_flow": self.label_flow,
                     "function_tool_api_call_details": copy.deepcopy(self.function_tool_api_call_details),
                     "lid_detection_events": list(getattr(self.tools.get("transcriber"), "lid_detection_events", [])),
-                    "asr_lid_events": list(getattr(self.tools.get("transcriber"), "flux_lid_events", [])),
+                    "asr_lid_events": self._collect_flux_lid_events(),
                     "language_switch_events": list(self.language_switch_events),
                     "call_sid": self.call_sid,
                     "stream_sid": self.stream_sid,
@@ -5141,7 +5151,7 @@ class TaskManager(BaseManager):
                     "language_switch_events": list(self.language_switch_events),
                     "transfer_call_events": list(self.transfer_call_events),
                     "lid_detection_events": list(getattr(self.tools.get("transcriber"), "lid_detection_events", [])),
-                    "asr_lid_events": list(getattr(self.tools.get("transcriber"), "flux_lid_events", [])),
+                    "asr_lid_events": self._collect_flux_lid_events(),
                     "transcriber_error_events": list(self.transcriber_error_events),
                     "transcriber_reconnect_count": getattr(self.tools.get("transcriber"), "reconnect_count", 0),
                     "blocked_audio_events": list(self.blocked_audio_events),
