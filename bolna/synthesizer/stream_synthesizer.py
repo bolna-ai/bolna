@@ -186,11 +186,13 @@ class StreamSynthesizer(BaseSynthesizer):
         self.current_sequence_id = meta_info.get("sequence_id")
         # Eager stub — captured even if turn never produces audio (e.g. TTS WS drop).
         # _record_turn_latency() upserts by sequence_id on completion, replacing this entry.
-        self._upsert_turn_latency({
-            "turn_id": self.current_turn_id,
-            "sequence_id": self.current_sequence_id,
-            "tts_start_ms": self.current_tts_start_ms,
-        })
+        self._upsert_turn_latency(
+            {
+                "turn_id": self.current_turn_id,
+                "sequence_id": self.current_sequence_id,
+                "tts_start_ms": self.current_tts_start_ms,
+            }
+        )
 
     def _on_push(self, meta_info, text):
         """Provider-specific hook called during push before sender is created."""
@@ -336,16 +338,15 @@ class StreamSynthesizer(BaseSynthesizer):
                 logger.info(f"{self.provider_name} sender task cancelled during cleanup.")
                 # Always stamp cancellation — even if sequence_id is None the event is useful
                 _t = self.task_manager_instance
-                _cancelled_at = (
-                    round(time.time() * 1000 - _t.conversation_start_init_ts, 2)
-                    if _t is not None else None
+                _cancelled_at = round(time.time() * 1000 - _t.conversation_start_init_ts, 2) if _t is not None else None
+                self._upsert_turn_latency(
+                    {
+                        "turn_id": self.current_turn_id,
+                        "sequence_id": self.current_sequence_id,
+                        "tts_start_ms": self.current_tts_start_ms,
+                        "cancelled_at_ms": _cancelled_at,
+                    }
                 )
-                self._upsert_turn_latency({
-                    "turn_id": self.current_turn_id,
-                    "sequence_id": self.current_sequence_id,
-                    "tts_start_ms": self.current_tts_start_ms,
-                    "cancelled_at_ms": _cancelled_at,
-                })
             except Exception as e:
                 logger.warning(f"Error cancelling {self.provider_name} sender task: {e}")
 

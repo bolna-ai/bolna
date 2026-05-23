@@ -68,6 +68,7 @@ class MarkEventMetaData:
         self.heard_text_by_response = {}
         self.last_heard_turn_id = None
         self.last_heard_response_uid = None
+        self.welcome_pre_mark_id = None
 
     def update_data(self, mark_id, value):
         value["counter"] = self.counter
