@@ -3307,15 +3307,15 @@ class TaskManager(BaseManager):
         _t_s = self.tools.get("transcriber")
         if hasattr(_t_s, "transcribers") and hasattr(_t_s, "active_label"):
             _t_s = _t_s.transcribers.get(_t_s.active_label, _t_s)
-        self.llm_latencies.turn_latencies.append({
-            "sequence_id": meta_info.get("sequence_id"),
-            "turn_id": meta_info.get("turn_id"),
-            "asr_turn_id": getattr(_t_s, "turn_counter", None),
-            "model": self.llm_config.get("model") if self.llm_config else None,
-            "llm_start_ms": round(
-                meta_info["llm_start_time"] * 1000 - self.conversation_start_init_ts, 2
-            ),
-        })
+        self.llm_latencies.turn_latencies.append(
+            {
+                "sequence_id": meta_info.get("sequence_id"),
+                "turn_id": meta_info.get("turn_id"),
+                "asr_turn_id": getattr(_t_s, "turn_counter", None),
+                "model": self.llm_config.get("model") if self.llm_config else None,
+                "llm_start_ms": round(meta_info["llm_start_time"] * 1000 - self.conversation_start_init_ts, 2),
+            }
+        )
 
         if self.turn_based_conversation:
             self.history.append({"role": "user", "content": message["data"]})
