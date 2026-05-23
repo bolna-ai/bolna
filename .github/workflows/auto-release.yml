@@ -11,7 +11,6 @@ permissions:
 jobs:
   bump:
     runs-on: ubuntu-latest
-    # skip if last push was from the bot (avoids re-trigger after bump commit)
     if: github.event.pull_request.head.repo.full_name == github.repository
     steps:
       - uses: actions/checkout@v6
@@ -20,33 +19,29 @@ jobs:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Check if already bumped
-        id: check
+      - name: Compute next version
+        id: v
         run: |
-          LAST_AUTHOR=$(git log -1 --format='%an')
-          if [ "$LAST_AUTHOR" = "github-actions[bot]" ]; then
+          CURRENT=$(grep -oP '(?<=__version__ = ")[^"]+' bolna/__init__.py)
+          LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "0.0.0")
+          HIGHEST=$(printf '%s\n%s\n' "$CURRENT" "$LATEST_TAG" | sort -V | tail -1)
+          if [ "$CURRENT" = "$HIGHEST" ] && [ "$CURRENT" != "$LATEST_TAG" ]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          CURRENT=$(python3 -c "import re; m = re.search(r'__version__\s*=\s*\"(.+?)\"', open('bolna/__init__.py').read()); print(m.group(1))")
-          LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "0.0.0")
-          if [ "$CURRENT" != "$LATEST_TAG" ]; then
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "skip=false" >> "$GITHUB_OUTPUT"
-          fi
+          IFS='.' read -r MAJOR MINOR PATCH <<<"$LATEST_TAG"
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+          echo "next=$MAJOR.$MINOR.$((PATCH + 1))" >> "$GITHUB_OUTPUT"
 
-      - name: Set up Python
-        if: steps.check.outputs.skip == 'false'
-        uses: actions/setup-python@v6
-        with:
-          python-version: '3.10'
-
-      - name: Bump patch version
-        if: steps.check.outputs.skip == 'false'
+      - name: Apply bump
+        if: steps.v.outputs.skip == 'false'
+        env:
+          NEXT: ${{ steps.v.outputs.next }}
         run: |
-          pip install commitizen
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          cz bump --increment PATCH --yes
+          sed -i "s/^__version__ = \".*\"/__version__ = \"$NEXT\"/" bolna/__init__.py
+          sed -i "s/^version = \".*\"/version = \"$NEXT\"/" pyproject.toml
+          git add bolna/__init__.py pyproject.toml
+          git commit -m "bump: version $NEXT"
           git push origin HEAD:${{ github.event.pull_request.head.ref }}
