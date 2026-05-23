@@ -218,7 +218,12 @@ class ElevenlabsSynthesizer(StreamSynthesizer):
                     logger.info(f"WS recv isFinal trace_id={self.ws_trace_id}")
                     audio_chunk_count = 0
                     last_recv_time = None
-                    yield b"\x00", ""
+                    # Only treat isFinal as EOS once we've sent the last text.
+                    # ElevenLabs sends isFinal per flush, so a mid-stream flush
+                    # from an earlier LLM chunk would otherwise retire the sequence
+                    # with audio still queued.
+                    if self.last_text_sent:
+                        yield b"\x00", ""
 
                 elif self.last_text_sent:
                     try:
