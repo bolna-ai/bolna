@@ -2127,12 +2127,17 @@ class TaskManager(BaseManager):
             if first_item.get("text_synthesized") and first_item.get("is_final_chunk") is True:
                 break
 
-            pending_ends = [
-                v.get("sent_ts", 0) + v.get("duration", 0)
+            # Use time.time() + remaining audio duration rather than sent_ts + duration.
+            # sent_ts is when we buffered the chunk into Plivo, not when Plivo starts
+            # playing it. A 8s chunk sent at T=0 after 14s of preceding audio won't
+            # start playing until T=14 — so sent_ts+duration underestimates play_end by
+            # the length of all preceding queued chunks, firing the timeout too early.
+            remaining_durations = [
+                v.get("duration", 0)
                 for v in mark_events.values()
                 if v.get("type") != "pre_mark_message" and v.get("sent_ts")
             ]
-            expected_play_end = max(pending_ends) if pending_ends else time.time()
+            expected_play_end = (time.time() + sum(remaining_durations)) if remaining_durations else time.time()
             deadline = expected_play_end + self.hangup_mark_event_timeout
 
             remaining = deadline - time.time()
