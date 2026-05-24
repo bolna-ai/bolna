@@ -360,7 +360,6 @@ class OpenAICompatibleLLM(BaseLLM):
             "truncation": "auto",
             "max_output_tokens": self.max_tokens,
             "temperature": self.temperature,
-            "user": f"{self.run_id}#{meta_info['turn_id']}" if meta_info else None,
         }
 
         if stream is not None:

@@ -237,7 +237,6 @@ class OpenAiLLM(OpenAICompatibleLLM):
             "messages": messages,
             "stream": True,
             "stream_options": {"include_usage": True},
-            "user": f"{self.run_id}#{meta_info['turn_id']}",
         }
 
         if not self.model.startswith(GPT5_MODEL_PREFIX):
