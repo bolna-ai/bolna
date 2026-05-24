@@ -500,9 +500,10 @@ class OpenAiLLM(OpenAICompatibleLLM):
         if not messages:
             raise ValueError("No messages provided")
 
-        # store=False: WS previous_response_id uses connection-local cache, not server storage
+        # store=True activates server-side prompt-cache (cached_tokens in usage)
+        # on top of the WS connection-local cache. Storage is free per OpenAI.
         create_params, responses_tools = self._build_responses_create_kwargs(
-            messages, meta_info, request_json, tool_choice, store=False
+            messages, meta_info, request_json, tool_choice, store=True
         )
 
         # WS endpoint silently closes on float temperature — coerce to int
