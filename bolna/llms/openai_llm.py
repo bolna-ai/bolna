@@ -114,9 +114,7 @@ class OpenAIWSConnection:
         if self._ws is None or self._ws.state is not WSState.OPEN:
             return
         try:
-            await self._ws.send(
-                json.dumps({"type": ResponseStreamEvent.CANCEL, "response_id": response_id})
-            )
+            await self._ws.send(json.dumps({"type": ResponseStreamEvent.CANCEL, "response_id": response_id}))
         except Exception:
             pass
 
