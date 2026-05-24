@@ -106,21 +106,17 @@ class OpenAIWSConnection:
                     return
 
     async def cancel_response(self, response_id: str):
-        """Cancel an in-flight response. Best-effort, errors are non-critical."""
-        if self._ws is None:
+        """Best-effort cancel: signal the server to terminate the in-flight
+        response. We do not drain events here — the concurrent stream_response
+        loop is the sole recv consumer and will see the resulting terminal
+        event itself. Holding the lock would block the cancel until the
+        stream completes naturally, defeating its purpose."""
+        if self._ws is None or self._ws.state is not WSState.OPEN:
             return
         try:
             await self._ws.send(
-                json.dumps(
-                    {
-                        "type": ResponseStreamEvent.CANCEL,
-                        "response_id": response_id,
-                    }
-                )
+                json.dumps({"type": ResponseStreamEvent.CANCEL, "response_id": response_id})
             )
-            async for raw_msg in self._ws:
-                if json.loads(raw_msg).get("type") in self.TERMINAL_EVENTS:
-                    break
         except Exception:
             pass
 
@@ -707,11 +703,10 @@ class OpenAiLLM(OpenAICompatibleLLM):
 
         self.started_streaming = False
 
-    def invalidate_response_chain(self):
-        response_id = self.previous_response_id
-        super().invalidate_response_chain()
-        if self._ws_transport and response_id:
-            asyncio.ensure_future(self._ws_transport.cancel_response(response_id))
+    def cancel_in_flight_response(self):
+        """Cancel the in-flight WS response; keeps previous_response_id alive."""
+        if self._ws_transport and self.previous_response_id:
+            asyncio.ensure_future(self._ws_transport.cancel_response(self.previous_response_id))
 
     async def close(self):
         # httpx client is shared via pool, don't close it here

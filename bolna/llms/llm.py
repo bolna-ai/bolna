@@ -24,6 +24,14 @@ class BaseLLM:
         """
         pass
 
+    def set_interruption_hint(self, heard_text):
+        """Record what the user heard before barge-in. Consumed on next request."""
+        pass
+
+    def cancel_in_flight_response(self):
+        """Best-effort cancel of the in-flight response without resetting chain state."""
+        pass
+
     async def close(self):
         """Release resources (HTTP clients, WebSocket connections, etc.).
 
