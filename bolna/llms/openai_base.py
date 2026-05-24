@@ -222,17 +222,7 @@ class OpenAICompatibleLLM(BaseLLM):
         self._interruption_hint = "" if heard_text is None else heard_text
 
     def _extract_new_input(self, messages):
-        """Extract only new items since last server response.
-
-        The server already has all context up to its last output. We only
-        need to send:
-        - New user messages (after the last assistant message)
-        - Function call outputs (tool results)
-        """
-        instructions = ""
-        if messages and messages[0].get("role") == ChatRole.SYSTEM:
-            instructions = messages[0].get("content", "")
-
+        """Send only items after the last assistant; prior context (including system) lives on the chain."""
         last_assistant_idx = -1
         for i in range(len(messages) - 1, -1, -1):
             if messages[i].get("role") == ChatRole.ASSISTANT:
@@ -241,11 +231,11 @@ class OpenAICompatibleLLM(BaseLLM):
 
         if last_assistant_idx < 0:
             _, input_items = MessageFormatAdapter.chat_to_responses_input(messages)
-            return instructions, input_items
+            return "", input_items
 
         new_messages = messages[last_assistant_idx + 1 :]
         _, input_items = MessageFormatAdapter.chat_to_responses_input(new_messages)
-        return instructions, input_items
+        return "", input_items
 
     @staticmethod
     def _is_stale_response_error(error):
@@ -349,12 +339,11 @@ class OpenAICompatibleLLM(BaseLLM):
         self, messages, meta_info, request_json, tool_choice, *, store=True, stream=None
     ):
         """Build create kwargs common to both HTTP SSE and WebSocket streaming paths."""
-        instructions, input_items = self._build_responses_input(messages)
+        _, input_items = self._build_responses_input(messages)
         responses_tools = MessageFormatAdapter.chat_tools_to_responses_tools(self._parse_tools())
 
         create_kwargs = {
             "model": self.model,
-            "instructions": instructions or None,
             "input": input_items,
             "store": store,
             "truncation": "auto",
@@ -589,11 +578,10 @@ class OpenAICompatibleLLM(BaseLLM):
         self.started_streaming = False
 
     async def _generate_responses(self, messages, request_json=False, ret_metadata=False, meta_info=None):
-        instructions, input_items = self._build_responses_input(messages)
+        _, input_items = self._build_responses_input(messages)
 
         create_kwargs = {
             "model": self.model,
-            "instructions": instructions or None,
             "input": input_items,
             "store": True,
             "truncation": "auto",
