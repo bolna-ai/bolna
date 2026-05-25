@@ -2864,10 +2864,15 @@ class TaskManager(BaseManager):
         # message, _sanitize_tool_messages strips the orphaned pair, and
         # the LLM loops the same FC indefinitely.
         self.conversation_history.attach_tool_calls_to_turn(turn_id, resp["model_response"])
-        self.conversation_history.upsert_tool_result(
-            tool_call_id,
-            json.dumps({"status": "pending", "message": "Tool call in progress"}),
-        )
+        # Only write a pending placeholder when we have a real tool_call_id to
+        # key the upsert on. Empty ids can't be disambiguated from each other,
+        # so two empty-id rows would both end up stripped by sanitize. In that
+        # legacy path we keep the old append-after-trigger_api semantics.
+        if tool_call_id:
+            self.conversation_history.upsert_tool_result(
+                tool_call_id,
+                json.dumps({"status": "pending", "message": "Tool call in progress"}),
+            )
 
         response = None
         cancelled = False
@@ -2885,15 +2890,16 @@ class TaskManager(BaseManager):
             )
         except asyncio.CancelledError:
             cancelled = True
-            self.conversation_history.upsert_tool_result(
-                tool_call_id,
-                json.dumps(
-                    {
-                        "status": "interrupted_by_user",
-                        "message": "Tool call interrupted by user mid-flight",
-                    }
-                ),
-            )
+            if tool_call_id:
+                self.conversation_history.upsert_tool_result(
+                    tool_call_id,
+                    json.dumps(
+                        {
+                            "status": "interrupted_by_user",
+                            "message": "Tool call interrupted by user mid-flight",
+                        }
+                    ),
+                )
             self.execute_function_call_task = None
             raise
         finally:
@@ -2947,7 +2953,9 @@ class TaskManager(BaseManager):
 
         textual_response = resp.get("textual_response", None)
         # Overwrite the pending placeholder with the real body. attach_tool_calls
-        # was already done before trigger_api, so we don't repeat it here.
+        # was already done before trigger_api, so we don't repeat it here. For
+        # the empty-id legacy path no placeholder was written, so this still
+        # writes the single tool message (matching old append semantics).
         self.conversation_history.upsert_tool_result(tool_call_id, function_response)
 
         logger.info(f"Logging function call parameters ")
