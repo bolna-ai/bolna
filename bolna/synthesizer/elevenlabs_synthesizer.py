@@ -148,12 +148,11 @@ class ElevenlabsSynthesizer(StreamSynthesizer):
             if end_of_llm_stream:
                 self.last_text_sent = True
                 self.context_id = str(uuid.uuid4())
-
-            try:
-                await self.websocket.send(json.dumps({"text": "", "flush": True}))
-            except Exception as e:
-                logger.info(f"Error sending end-of-stream signal: {e}")
-                self.connection_error = str(e)
+                try:
+                    await self.websocket.send(json.dumps({"text": "", "flush": True}))
+                except Exception as e:
+                    logger.info(f"Error sending end-of-stream signal: {e}")
+                    self.connection_error = str(e)
 
         except asyncio.CancelledError:
             logger.info("Sender task was cancelled.")
