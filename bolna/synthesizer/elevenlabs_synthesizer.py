@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import re
 import time
 import uuid
 from websockets.exceptions import InvalidHandshake
@@ -227,14 +228,14 @@ class ElevenlabsSynthesizer(StreamSynthesizer):
                         current_norm = self.normalize_text(self.current_text.strip()).replace('"', "").strip()
                         logger.info(f"Last four char - {last_four} | current text - {current_norm}")
 
-                        last_four_no_space = last_four.replace(" ", "")
-                        if last_four and current_norm.endswith(last_four):
+                        # Skip punctuation-only chunks (e.g. ".", ",") that match trivially.
+                        has_alnum = any(c.isalnum() for c in last_four)
+                        # Strip whitespace before compare: ElevenLabs alignment splits
+                        # "first-time" into "first- time", breaking endswith.
+                        last_four_cmp = re.sub(r"\s+", "", last_four)
+                        current_cmp = re.sub(r"\s+", "", current_norm)
+                        if last_four_cmp and has_alnum and current_cmp.endswith(last_four_cmp):
                             logger.info("send end_of_synthesizer_stream")
-                            yield b"\x00", ""
-                        elif last_four_no_space and current_norm.replace('"', "").replace(" ", "").strip().endswith(
-                            last_four_no_space
-                        ):
-                            logger.info("send end_of_synthesizer_stream on fallback")
                             yield b"\x00", ""
                     except Exception as e:
                         logger.error(f"Error getting chars from response - {e}")

@@ -22,6 +22,14 @@ class BaseSynthesizer:
         self.synthesized_characters = 0
         self.model = "default"
 
+    def _upsert_turn_latency(self, entry: dict) -> None:
+        """Replace existing turn_latencies entry with matching sequence_id, or append if new."""
+        for i, t in enumerate(self.turn_latencies):
+            if t.get("sequence_id") == entry.get("sequence_id"):
+                self.turn_latencies[i] = entry
+                return
+        self.turn_latencies.append(entry)
+
     # ------------------------------------------------------------------
     # Common accessors
     # ------------------------------------------------------------------

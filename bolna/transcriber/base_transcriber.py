@@ -24,6 +24,14 @@ class BaseTranscriber:
         self.connection_error = None
         self.is_transcript_sent_for_processing = False
 
+    def _upsert_turn_latency(self, entry: dict) -> None:
+        """Replace existing turn_latencies entry with matching turn_id, or append if new."""
+        for i, t in enumerate(self.turn_latencies):
+            if t.get("turn_id") == entry.get("turn_id"):
+                self.turn_latencies[i] = entry
+                return
+        self.turn_latencies.append(entry)
+
     def update_meta_info(self):
         self.meta_info["request_id"] = self.current_request_id if self.current_request_id else None
         self.meta_info["previous_request_id"] = self.previous_request_id
