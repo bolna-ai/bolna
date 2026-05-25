@@ -122,6 +122,9 @@ class DeepgramTranscriber(BaseTranscriber):
         self.eot_timeout_ms = _eot_timeout_ms if _eot_timeout_ms is not None else DEEPGRAM_FLUX_EOT_TIMEOUT_MS
         self.eager_transcript_pending = None
         self.language_hints = kwargs.get("language_hints")
+        # ASR-native LID events (flux-general-multi only) — collected per turn and
+        # merged into lid_shadow_events.asr_lid_events at call end.
+        self.flux_lid_events: list[dict] = []
 
     def get_deepgram_ws_url(self):
         if self.is_flux_model:
@@ -912,6 +915,15 @@ class DeepgramTranscriber(BaseTranscriber):
 
                             if languages:
                                 logger.info(f"Flux LID Update: languages={languages} hinted={languages_hinted}")
+                                self.flux_lid_events.append({
+                                    "detected_lang": languages[0],
+                                    "all_languages": languages,
+                                    "event_type": "Update",
+                                    "turn_index": turn_index,
+                                    "transcript": transcript,
+                                    "lid_provider": "deepgram_flux",
+                                    "detected_at": time.time(),
+                                })
 
                             data = {"type": "interim_transcript_received", "content": transcript}
                             yield create_ws_data_packet(data, self.meta_info)
@@ -919,6 +931,15 @@ class DeepgramTranscriber(BaseTranscriber):
                     elif event == "EagerEndOfTurn":
                         if languages:
                             logger.info(f"Flux LID EagerEndOfTurn: languages={languages} hinted={languages_hinted}")
+                            self.flux_lid_events.append({
+                                "detected_lang": languages[0],
+                                "all_languages": languages,
+                                "event_type": "EagerEndOfTurn",
+                                "turn_index": turn_index,
+                                "transcript": transcript,
+                                "lid_provider": "deepgram_flux",
+                                "detected_at": time.time(),
+                            })
                         logger.info(f"Flux: EagerEndOfTurn (confidence={eot_confidence}, transcript={transcript!r})")
                         if transcript:
                             self.eager_transcript_pending = transcript
@@ -939,6 +960,15 @@ class DeepgramTranscriber(BaseTranscriber):
                     elif event == "EndOfTurn":
                         if languages:
                             logger.info(f"Flux LID EndOfTurn: languages={languages} hinted={languages_hinted}")
+                            self.flux_lid_events.append({
+                                "detected_lang": languages[0],
+                                "all_languages": languages,
+                                "event_type": "EndOfTurn",
+                                "turn_index": turn_index,
+                                "transcript": transcript,
+                                "lid_provider": "deepgram_flux",
+                                "detected_at": time.time(),
+                            })
                         logger.info(f"Flux: EndOfTurn (confidence={eot_confidence}) transcript={transcript!r}")
 
                         if transcript:

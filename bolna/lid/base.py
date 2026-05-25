@@ -1,11 +1,12 @@
-from typing import Awaitable, Callable
+from typing import Awaitable, Callable, Optional
 
 from bolna.helpers.logger_config import configure_logger
 
 logger = configure_logger(__name__)
 
-# async def on_language(lang: str, confidence: float) -> None
-OnLanguageCallback = Callable[[str, float], Awaitable[None]]
+# async def on_language(lang: str, confidence: Optional[float]) -> None
+# confidence is None when the provider does not return a score (e.g. ElevenLabs Scribe streaming)
+OnLanguageCallback = Callable[[str, Optional[float]], Awaitable[None]]
 
 
 class LIDBackend:
