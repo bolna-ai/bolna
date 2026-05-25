@@ -360,7 +360,7 @@ class DeepgramTranscriber(BaseTranscriber):
                 self.current_turn_interim_details
             )
 
-            self.turn_latencies.append(
+            self._upsert_turn_latency(
                 {
                     "turn_id": self.current_turn_id,
                     "asr_start_epoch_ms": self.current_turn_start_time,
@@ -588,6 +588,16 @@ class DeepgramTranscriber(BaseTranscriber):
 
         except asyncio.CancelledError:
             logger.info("Sender stream task cancelled")
+            # Stamp cancellation on the open ASR stub if a turn was in progress
+            if self.current_turn_id is not None:
+                self._upsert_turn_latency(
+                    {
+                        "turn_id": self.current_turn_id,
+                        "asr_start_epoch_ms": self.current_turn_start_time,
+                        "asr_turn_start_epoch_ms": self._turn_first_speech_epoch_ms,
+                        "cancelled_at_ms": timestamp_ms(),
+                    }
+                )
             raise
         except Exception as e:
             logger.error("Error in sender_stream: " + str(e))
@@ -629,12 +639,28 @@ class DeepgramTranscriber(BaseTranscriber):
                             self.current_turn_id = self.turn_counter
                             self._turn_pending = False
                             logger.info(f"Starting new turn with turn_id: {self.current_turn_id}")
+                            # Eager stub — captured even if turn is never finalized (e.g. transcriber drop)
+                            self.turn_latencies.append(
+                                {
+                                    "turn_id": self.current_turn_id,
+                                    "asr_start_epoch_ms": self.current_turn_start_time,
+                                    "asr_turn_start_epoch_ms": self._turn_first_speech_epoch_ms,
+                                }
+                            )
                         elif self.current_turn_id is None:
                             # SpeechStarted was suppressed (e.g. Deepgram VAD inhibited during
                             # agent audio playback) but real speech arrived — still assign a turn_id.
                             self.turn_counter += 1
                             self.current_turn_id = self.turn_counter
                             logger.info(f"Turn id assigned without SpeechStarted: {self.current_turn_id}")
+                            # Eager stub for turns where SpeechStarted was suppressed
+                            self.turn_latencies.append(
+                                {
+                                    "turn_id": self.current_turn_id,
+                                    "asr_start_epoch_ms": self.current_turn_start_time,
+                                    "asr_turn_start_epoch_ms": self._turn_first_speech_epoch_ms,
+                                }
+                            )
                         # Calculate latency using end position (start + duration) for cumulative transcripts
                         self.__set_transcription_cursor(msg)
                         audio_position_end = self.transcription_cursor
@@ -700,7 +726,7 @@ class DeepgramTranscriber(BaseTranscriber):
                                     self.calculate_interim_to_final_latencies(self.current_turn_interim_details)
                                 )
 
-                                self.turn_latencies.append(
+                                self._upsert_turn_latency(
                                     {
                                         "turn_id": self.current_turn_id,
                                         "asr_start_epoch_ms": self.current_turn_start_time,
@@ -757,7 +783,7 @@ class DeepgramTranscriber(BaseTranscriber):
                                 self.calculate_interim_to_final_latencies(self.current_turn_interim_details)
                             )
 
-                            self.turn_latencies.append(
+                            self._upsert_turn_latency(
                                 {
                                     "turn_id": self.current_turn_id,
                                     "asr_start_epoch_ms": self.current_turn_start_time,
@@ -832,7 +858,7 @@ class DeepgramTranscriber(BaseTranscriber):
 
                 elif msg["type"] == "TurnInfo":
                     event = msg.get("event")
-                    transcript = msg.get("transcript", "").strip()
+                    transcript = msg.get("transcript", "").strip().rstrip(",.'?|'!।")
                     turn_index = msg.get("turn_index")
                     eot_confidence = msg.get("end_of_turn_confidence")
                     words = msg.get("words", [])
@@ -848,6 +874,14 @@ class DeepgramTranscriber(BaseTranscriber):
                         self.current_turn_interim_details = []
                         self.is_transcript_sent_for_processing = False
                         self.final_transcript = ""
+                        # Eager stub — captured even if turn is never finalized
+                        self.turn_latencies.append(
+                            {
+                                "turn_id": self.current_turn_id,
+                                "asr_start_epoch_ms": self.speech_start_time,
+                                "asr_turn_start_epoch_ms": self.speech_start_time,
+                            }
+                        )
                         yield create_ws_data_packet("speech_started", self.meta_info)
                         # StartOfTurn is guaranteed non-empty — use it immediately for barge-in
                         # instead of waiting for the first Update (~0.25s later)
@@ -912,7 +946,7 @@ class DeepgramTranscriber(BaseTranscriber):
                                 first_interim_to_final_ms, last_interim_to_final_ms = (
                                     self.calculate_interim_to_final_latencies(self.current_turn_interim_details)
                                 )
-                                self.turn_latencies.append(
+                                self._upsert_turn_latency(
                                     {
                                         "turn_id": self.current_turn_id,
                                         "sequence_id": self.current_turn_id,

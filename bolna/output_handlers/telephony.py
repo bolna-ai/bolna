@@ -65,6 +65,11 @@ class TelephonyOutputHandler(DefaultOutputHandler):
                         }
                         mark_id = str(uuid.uuid4())
                         self.mark_event_meta_data.update_data(mark_id, pre_mark_event_meta_data)
+                        if (
+                            meta_info.get("message_category") == "agent_welcome_message"
+                            and self.mark_event_meta_data.welcome_pre_mark_id is None
+                        ):
+                            self.mark_event_meta_data.welcome_pre_mark_id = mark_id
                         logger.info(
                             "BOLNA_TRACE_TEL send_pre_mark mark_id=%s seq=%s turn=%s response_uid=%s group_uid=%s category=%s",
                             mark_id,

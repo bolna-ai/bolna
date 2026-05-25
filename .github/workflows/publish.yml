@@ -29,10 +29,11 @@ jobs:
       - name: Check if version needs publishing
         id: check
         run: |
-          VERSION=$(python -c "import re; m = re.search(r'__version__\s*=\s*\"(.+?)\"', open('bolna/__init__.py').read()); print(m.group(1))")
+          VERSION=$(grep -oP '(?<=__version__ = ")[^"]+' bolna/__init__.py)
           LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "0.0.0")
+          HIGHEST=$(printf '%s\n%s\n' "$VERSION" "$LATEST_TAG" | sort -V | tail -1)
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          if [ "$VERSION" != "$LATEST_TAG" ]; then
+          if [ "$VERSION" = "$HIGHEST" ] && [ "$VERSION" != "$LATEST_TAG" ]; then
             echo "publish=true" >> "$GITHUB_OUTPUT"
           else
             echo "publish=false" >> "$GITHUB_OUTPUT"

@@ -106,3 +106,10 @@ class MessageFormatAdapter:
                 }
             )
         return result
+
+    @staticmethod
+    def chat_tool_choice_to_responses(tool_choice):
+        """Flatten Chat-Completions tool_choice to the Responses API shape; pass strings/None through."""
+        if isinstance(tool_choice, dict) and tool_choice.get("type") == "function" and "function" in tool_choice:
+            return {"type": "function", "name": tool_choice["function"].get("name")}
+        return tool_choice

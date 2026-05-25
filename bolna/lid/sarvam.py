@@ -40,11 +40,12 @@ class SarvamLID(LIDBackend):
         self._sr = int(config.get("sampling_rate", 16000))
         self._input_sr = 8000 if self._telephony in ("twilio", "plivo") else self._sr
         self._encoding = "mulaw" if self._telephony == "twilio" else "linear16"
-        self._queue = asyncio.Queue(maxsize=200)
+        self._queue = asyncio.Queue(maxsize=20)
         self._ws = None
         self._sender_task = None
         self._receiver_task = None
         self._dead = False
+        self._resample_state = None
 
     def _build_url(self) -> str:
         params = {
@@ -61,7 +62,7 @@ class SarvamLID(LIDBackend):
             if self._encoding == "mulaw":
                 raw = audioop.ulaw2lin(raw, 2)
             if self._input_sr != self._sr:
-                raw, _ = audioop.ratecv(raw, 2, 1, self._input_sr, self._sr, None)
+                raw, self._resample_state = audioop.ratecv(raw, 2, 1, self._input_sr, self._sr, self._resample_state)
             buf = io.BytesIO()
             with wave.open(buf, "wb") as wf:
                 wf.setnchannels(1)
@@ -118,12 +119,24 @@ class SarvamLID(LIDBackend):
                     if data.get("type") == "data":
                         payload = data.get("data", {})
                         lang = payload.get("language_code", "")
-                        # Sarvam returns language_probability=None in unknown-language mode.
-                        conf = float(payload.get("language_probability") or 0.0)
+                        lang_prob = payload.get("language_probability")
+                        metrics = payload.get("metrics") or {}
+                        audio_duration = float(metrics.get("audio_duration") or 0.0)
+                        processing_latency = float(metrics.get("processing_latency") or 0.0)
+                        logger.info(
+                            f"SarvamLID raw: lang={lang!r} language_probability={lang_prob} "
+                            f"audio_duration={audio_duration:.3f}s processing_latency={processing_latency:.3f}s"
+                        )
+                        if lang_prob is None:
+                            logger.debug("SarvamLID: language_probability missing — skipping detection")
+                            continue
+                        conf = float(lang_prob)
                         if lang and lang != "unknown":
                             short = lang.split("-")[0].lower()
-                            logger.info(f"SarvamLID: detected {lang!r} (short={short!r}, conf={conf:.2f})")
-                            await self.on_language(short, conf)
+                            logger.info(
+                                f"SarvamLID: detected {lang!r} (short={short!r}, duration={audio_duration:.2f}s, conf={conf:.2f})"
+                            )
+                            asyncio.create_task(self.on_language(short, conf))
                 except Exception as e:
                     logger.error(f"SarvamLID receiver parse error: {e}")
         except asyncio.CancelledError:
@@ -134,7 +147,15 @@ class SarvamLID(LIDBackend):
             logger.warning("SarvamLID: receiver loop exited abnormally — LID inactive for remainder of call")
 
     async def stop(self):
-        self._queue.put_nowait(None)
+        try:
+            self._queue.put_nowait(None)
+        except asyncio.QueueFull:
+            while not self._queue.empty():
+                try:
+                    self._queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+            self._queue.put_nowait(None)
         for task in (self._sender_task, self._receiver_task):
             if task and not task.done():
                 task.cancel()

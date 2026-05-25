@@ -27,6 +27,7 @@ from bolna.constants import (
     SWITCH_LANGUAGE_TOOL_DEFINITION,
     END_CALL_FUNCTION_PREFIX,
     END_CALL_TOOL_DEFINITION,
+    GPT5_4_MODEL_PREFIX,
 )
 from bolna.helpers.function_calling_helpers import trigger_api, computed_api_response, prepare_api_request
 from bolna.helpers.conversation_history import ConversationHistory
@@ -108,6 +109,8 @@ class TaskManager(BaseManager):
         self.transcriber_error_events: list[dict] = []
         self.blocked_audio_events: list[dict] = []
         self._blocked_sequences: set = set()  # dedup: only record first block per sequence
+        self._sent_audio_sequences: set = set()
+        self._committed_assistant_sequences: set = set()
 
         self.task_config = task
 
@@ -171,6 +174,7 @@ class TaskManager(BaseManager):
         self.hangup_triggered = False
         self.hangup_triggered_at = None
         self.hangup_decision_at = None
+        self._hangup_processing = False
         self.dtmf_events: list[dict] = []
         self.non_fatal_llm_error_events: list[dict] = []
         self._agent_end_timestamps: dict = {}
@@ -341,7 +345,9 @@ class TaskManager(BaseManager):
                 if "thinking_budget" in self.llm_agent_config:
                     self.llm_config["thinking_budget"] = self.llm_agent_config["thinking_budget"]
 
-                if self.llm_agent_config.get("use_responses_api"):
+                if self.llm_agent_config.get("use_responses_api") or GPT5_4_MODEL_PREFIX in self.llm_config.get(
+                    "model", ""
+                ):
                     self.llm_config["use_responses_api"] = True
 
                 if self.llm_agent_config.get("compact_threshold"):
@@ -1096,11 +1102,11 @@ class TaskManager(BaseManager):
                             self.transcriber_provider = cfg.get("provider", cfg.get("model"))
 
                     # Audio LID tap.
-                    # LID_PROVIDER — which backend to use (default: "azure").
+                    # LID_PROVIDER — which backend to use (default: "sarvam").
                     # LID_MODE     — "shadow" (default) logs detections without switching;
                     #                "active" performs live transcriber/synthesizer/prompt swap.
                     #                Keep "shadow" until detection quality is validated.
-                    LID_PROVIDER = os.getenv("LID_PROVIDER", "azure")
+                    LID_PROVIDER = os.getenv("LID_PROVIDER", "sarvam")
                     _lid_config = {"telephony_provider": provider}
 
                     self.tools["transcriber"] = TranscriberPool(
@@ -2123,12 +2129,17 @@ class TaskManager(BaseManager):
             if first_item.get("text_synthesized") and first_item.get("is_final_chunk") is True:
                 break
 
-            pending_ends = [
-                v.get("sent_ts", 0) + v.get("duration", 0)
+            # Use time.time() + remaining audio duration rather than sent_ts + duration.
+            # sent_ts is when we buffered the chunk into Plivo, not when Plivo starts
+            # playing it. A 8s chunk sent at T=0 after 14s of preceding audio won't
+            # start playing until T=14 — so sent_ts+duration underestimates play_end by
+            # the length of all preceding queued chunks, firing the timeout too early.
+            remaining_durations = [
+                v.get("duration", 0)
                 for v in mark_events.values()
                 if v.get("type") != "pre_mark_message" and v.get("sent_ts")
             ]
-            expected_play_end = max(pending_ends) if pending_ends else time.time()
+            expected_play_end = (time.time() + sum(remaining_durations)) if remaining_durations else time.time()
             deadline = expected_play_end + self.hangup_mark_event_timeout
 
             remaining = deadline - time.time()
@@ -2467,7 +2478,6 @@ class TaskManager(BaseManager):
                 run_id=self.run_id,
             )
 
-            # Tool-result flow: feed result back to LLM so it generates a clean goodbye
             textual_response = resp.get("textual_response", None)
             tool_result = json.dumps(
                 {"status": "success", "message": "Call is ending now. Say a brief goodbye to the user."}
@@ -2478,22 +2488,33 @@ class TaskManager(BaseManager):
                 tool_result, meta_info, None, "function_call", direction="response", run_id=self.run_id
             )
 
-            messages = self.conversation_history.get_copy()
-            convert_to_request_log(
-                format_messages(messages, True),
-                meta_info,
-                self.llm_config["model"],
-                "llm",
-                direction="request",
-                run_id=self.run_id,
-            )
+            if textual_response:
+                # The LLM emitted the goodbye in the same response as the tool call;
+                # it has already been streamed to TTS. Skip the follow-up LLM to avoid
+                # generating a duplicate goodbye.
+                self._enter_hangup_state()
+                await self.wait_for_current_message()
+            else:
+                # No goodbye text in this turn. Feed the tool result back so the LLM
+                # generates one.
+                messages = self.conversation_history.get_copy()
+                convert_to_request_log(
+                    format_messages(messages, True),
+                    meta_info,
+                    self.llm_config["model"],
+                    "llm",
+                    direction="request",
+                    run_id=self.run_id,
+                )
 
-            # Generate goodbye with should_trigger_function_call=False to prevent recursion
-            followup_meta_info = self._spawn_followup_meta_info(meta_info)
-            await self.__do_llm_generation(messages, followup_meta_info, next_step, should_trigger_function_call=False)
-            await self.wait_for_current_message()
+                followup_meta_info = self._spawn_followup_meta_info(meta_info)
+                await self.__do_llm_generation(
+                    messages, followup_meta_info, next_step, should_trigger_function_call=False
+                )
+                self._enter_hangup_state()
+                await self.wait_for_current_message()
 
-            self.hangup_detail = "end_call_tool"
+            self.hangup_detail = HangupReason.END_CALL_TOOL
             self.call_hangup_message_config = None
             await self.process_call_hangup()
             return
@@ -3288,6 +3309,21 @@ class TaskManager(BaseManager):
         meta_info["llm_start_time"] = time.time()
         meta_info["_non_fatal_errors"] = []
 
+        # Eager stub so hung/cancelled LLM calls still appear in progression as llm_start.
+        # __do_llm_generation upserts by sequence_id on completion, replacing this entry.
+        _t_s = self.tools.get("transcriber")
+        if hasattr(_t_s, "transcribers") and hasattr(_t_s, "active_label"):
+            _t_s = _t_s.transcribers.get(_t_s.active_label, _t_s)
+        self.llm_latencies.turn_latencies.append(
+            {
+                "sequence_id": meta_info.get("sequence_id"),
+                "turn_id": meta_info.get("turn_id"),
+                "asr_turn_id": getattr(_t_s, "turn_counter", None),
+                "model": self.llm_config.get("model") if self.llm_config else None,
+                "llm_start_ms": round(meta_info["llm_start_time"] * 1000 - self.conversation_start_init_ts, 2),
+            }
+        )
+
         if self.turn_based_conversation:
             self.history.append({"role": "user", "content": message["data"]})
         messages = self.conversation_history.get_copy()
@@ -3381,18 +3417,19 @@ class TaskManager(BaseManager):
         self.llm_processed_request_ids.add(self.current_request_id)
         llm_response = ""
 
+    def _enter_hangup_state(self):
+        self.hangup_triggered = True
+        if self.hangup_decision_at is None:
+            self.hangup_decision_at = time.time()
+
     async def process_call_hangup(self):
         if self.hangup_decision_at is None:
             self.hangup_decision_at = time.time()
-        # Guard: Prevent multiple concurrent hangup attempts
-        if self.hangup_triggered or self.conversation_ended:
+        if self._hangup_processing or self.conversation_ended:
             logger.info(f"process_call_hangup: Hangup already in progress or conversation ended, skipping")
             return
 
-        # hangup_triggered flag set immediately to prevent user interruptions from cancelling hangup.
-        # hangup_triggered_at is stamped after the goodbye is queued for synthesis (not at playback end).
-        # For short goodbye messages this is close enough to playback start; use hangup_decision_at
-        # to get the earlier decision timestamp.
+        self._hangup_processing = True
         self.hangup_triggered = True
         message = self.call_hangup_message if not self.voicemail_handler.detected else ""
         if not message or message.strip() == "":
@@ -3504,12 +3541,19 @@ class TaskManager(BaseManager):
             response_uid,
             len(content),
         )
+        # Rescue commit: SEND already passed for this seq (e.g. text+tool_call turn
+        # where args stream after the spoken text), so SEND-time commit was a no-op.
+        if sequence_id in self._sent_audio_sequences and sequence_id not in self._blocked_sequences:
+            self._commit_staged_assistant_history(sequence_id)
 
     def _commit_staged_assistant_history(self, sequence_id):
+        if sequence_id in self._committed_assistant_sequences:
+            return
         staged = self._pending_assistant_history.pop(sequence_id, None)
         if staged is None:
             return
 
+        self._committed_assistant_sequences.add(sequence_id)
         self.conversation_history.append_assistant(
             staged["content"], turn_id=staged["turn_id"], response_uid=staged["response_uid"]
         )
@@ -3884,6 +3928,7 @@ class TaskManager(BaseManager):
                             eager_transcript
                             and self.tools["input"].welcome_message_played()
                             and not self.tools["input"].is_audio_being_played_to_user()
+                            and not self.response_in_pipeline
                         ):
                             logger.info(f"Starting speculative LLM task")
 
@@ -4438,6 +4483,8 @@ class TaskManager(BaseManager):
 
                     if status == "SEND":
                         # Audio approved - send it
+                        if sequence_id is not None:
+                            self._sent_audio_sequences.add(sequence_id)
                         self._commit_staged_assistant_history(sequence_id)
                         self.tools["input"].update_is_audio_being_played(True)
                         self.response_in_pipeline = False
@@ -5092,6 +5139,7 @@ class TaskManager(BaseManager):
                         ),
                         "user_bot_latencies": _user_bot_latencies,
                         "mark_tracking": self.mark_event_meta_data.get_mark_tracking_summary(),
+                        "synthesizer_chunk_marks": self.mark_event_meta_data.get_chunk_marks(),
                     },
                     "hangup_detail": self.hangup_detail,
                     "has_transfer": self.has_transfer,
@@ -5198,7 +5246,6 @@ class TaskManager(BaseManager):
                         "asr_start_ms",
                         "asr_finalized_ms",
                         "asr_turn_start_ms",
-                        "final_transcript",
                     ):
                         _t.pop(_f, None)
 
