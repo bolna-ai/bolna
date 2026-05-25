@@ -274,7 +274,7 @@ class TranscriberPool:
         to avoid the double-switch race where the transcriber flips before the
         synthesizer and prompt catch up.
         """
-        if confidence is not None and confidence < self._LID_CONFIDENCE_THRESHOLD:
+        if confidence < self._LID_CONFIDENCE_THRESHOLD:
             logger.debug(f"TranscriberPool LID: {lang} conf={confidence:.2f} below threshold — suppressed")
             self._record_lid_event(lang, confidence, None, False, "low_confidence")
             return
@@ -314,7 +314,7 @@ class TranscriberPool:
             self._lid_pending_count = 1
 
         logger.debug(
-            f"TranscriberPool LID: {lang} conf={confidence:.2f} "
+            f"TranscriberPool LID: {lang} conf={f'{confidence:.2f}' if confidence is not None else 'n/a'} "
             f"count={self._lid_pending_count}/{self._LID_DEBOUNCE_COUNT}"
         )
 
@@ -333,7 +333,7 @@ class TranscriberPool:
         if self._lid_mode == "shadow":
             logger.info(
                 f"TranscriberPool LID [shadow]: would switch {self.active_label} → {target_label} "
-                f"(lang={lang}, conf={confidence:.2f}, suppressed_reason=shadow_mode)"
+                f"(lang={lang}, conf={f'{confidence:.2f}' if confidence is not None else 'n/a'}, suppressed_reason=shadow_mode)"
             )
             self._lid_last_switch_time = now
             self._record_lid_event(
@@ -349,7 +349,7 @@ class TranscriberPool:
         # synthesizer, and system-prompt all flip atomically.
         logger.info(
             f"TranscriberPool LID [active]: switching {self.active_label} → {target_label} "
-            f"(lang={lang}, conf={confidence:.2f})"
+            f"(lang={lang}, conf={f'{confidence:.2f}' if confidence is not None else 'n/a'})"
         )
         self._lid_last_switch_time = now
         self._record_lid_event(

@@ -173,7 +173,7 @@ class ElevenLabsScribeLID(LIDBackend):
                             # Normalise to short ISO-639-1 (e.g. "eng" → "en", "hin" → "hi")
                             short = lang[:2].lower()
                             logger.info(f"ElevenLabsScribeLID: detected {lang!r} (short={short!r})")
-                            asyncio.create_task(self.on_language(short, None))
+                            await self.on_language(short, None)
 
                     elif msg_type == "commit_throttled":
                         logger.warning(f"ElevenLabsScribeLID commit throttled: {data.get('error')}")
