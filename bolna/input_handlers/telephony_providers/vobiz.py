@@ -1,3 +1,4 @@
+import json
 import os
 import requests
 from requests.auth import HTTPBasicAuth
@@ -40,6 +41,15 @@ class VobizInputHandler(TelephonyInputHandler):
     async def disconnect_stream(self):
         try:
             logger.info("Disconnecting vobiz stream for call: {}".format(self.call_sid))
+
+            if self.stream_sid and self.websocket is not None:
+                try:
+                    stop_message = {"event": "stop", "streamId": self.stream_sid}
+                    await self.websocket.send_text(json.dumps(stop_message))
+                    logger.info(f"Sent vobiz stop event for stream {self.stream_sid}")
+                except Exception as stop_err:
+                    logger.info(f"Could not send vobiz stop event: {stop_err}")
+
             api_key = os.getenv("VOBIZ_API_KEY")
             api_secret = os.getenv("VOBIZ_API_SECRET")
             call_uuid = self.call_sid
@@ -58,7 +68,6 @@ class VobizInputHandler(TelephonyInputHandler):
                     )
             else:
                 logger.warning("Cannot disconnect Vobiz call: VOBIZ_AUTH_ID or call_sid missing")
-            logger.info("Disconnecting vobiz stream for call: {}".format(self.call_sid))
         except Exception as e:
             logger.info("Error deleting vobiz stream: {}".format(str(e)))
 
