@@ -2841,12 +2841,8 @@ class TaskManager(BaseManager):
         tool_call_id = resp.get("tool_call_id", "")
         sequence_id = meta_info.get("sequence_id")
 
-        # Best-effort commit any staged assistant for this sequence so
-        # attach_tool_calls_to_turn finds a real parent. Without this, when
-        # the audio for the FC's textual_response hasn't been approved yet,
-        # attach would fall through to its content=None placeholder branch
-        # and a later _commit_staged_assistant_history would append a second
-        # assistant for the same turn_id.
+        # Commit staged assistant first so attach finds a real parent instead
+        # of appending a content=None placeholder that would later duplicate.
         if (
             turn_id is not None
             and self._turn_msg_map.get(turn_id) is None
@@ -2854,20 +2850,9 @@ class TaskManager(BaseManager):
         ):
             self._commit_staged_assistant_history(sequence_id)
 
-        # Pre-write the assistant.tool_calls + a pending tool placeholder
-        # BEFORE awaiting trigger_api. If the user barges in mid-HTTP, the
-        # placeholder stays adjacent to its assistant (any new user message
-        # gets appended at the tail, after the placeholder). The cancel
-        # handler then rewrites the same row to "interrupted_by_user" so the
-        # next LLM turn sees the attempt and won't blindly re-issue the
-        # call. Without this, the tool_result lands after the new user
-        # message, _sanitize_tool_messages strips the orphaned pair, and
-        # the LLM loops the same FC indefinitely.
+        # Pre-write tool_calls + pending tool placeholder BEFORE trigger_api so
+        # barge-in mid-HTTP keeps the assistant/tool pair adjacent through sanitize.
         self.conversation_history.attach_tool_calls_to_turn(turn_id, resp["model_response"])
-        # Only write a pending placeholder when we have a real tool_call_id to
-        # key the upsert on. Empty ids can't be disambiguated from each other,
-        # so two empty-id rows would both end up stripped by sanitize. In that
-        # legacy path we keep the old append-after-trigger_api semantics.
         if tool_call_id:
             self.conversation_history.upsert_tool_result(
                 tool_call_id,
@@ -2952,10 +2937,6 @@ class TaskManager(BaseManager):
             set_response_prompt = function_response
 
         textual_response = resp.get("textual_response", None)
-        # Overwrite the pending placeholder with the real body. attach_tool_calls
-        # was already done before trigger_api, so we don't repeat it here. For
-        # the empty-id legacy path no placeholder was written, so this still
-        # writes the single tool message (matching old append semantics).
         self.conversation_history.upsert_tool_result(tool_call_id, function_response)
 
         logger.info(f"Logging function call parameters ")
@@ -2969,15 +2950,14 @@ class TaskManager(BaseManager):
             run_id=self.run_id,
         )
 
-        # Defense-in-depth: if the user barged in right after trigger_api
-        # returned (but before this point), the sequence is invalidated and
-        # the new user turn already has its own LLM stream running. Don't
-        # spawn a stale followup that races it.
+        # Skip followup if the user barged in after trigger_api returned;
+        # the new user turn already has its own LLM stream running.
         if not self.interruption_manager.is_valid_sequence(sequence_id):
             logger.info(
                 "Skipping followup LLM generation: sequence_id=%s invalidated by user interruption",
                 sequence_id,
             )
+            self.check_if_user_online = self.conversation_config.get("check_if_user_online", True)
             self.execute_function_call_task = None
             return
 
