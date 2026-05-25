@@ -109,13 +109,7 @@ class TaskManager(BaseManager):
         self.transcriber_error_events: list[dict] = []
         self.blocked_audio_events: list[dict] = []
         self._blocked_sequences: set = set()  # dedup: only record first block per sequence
-        # Sequences whose audio passed __process_output_loop's SEND branch. Used to rescue
-        # late-staged assistant history (e.g. text+tool_call turns where the LLM stream
-        # finalizes, and thus stages, only after TTS chunks have already been sent).
         self._sent_audio_sequences: set = set()
-        # Sequences whose assistant content has already been appended to conversation_history.
-        # Guards against double-append when both SEND-time and late-stage commit fire, or when
-        # filler + main response stage under the same sequence_id.
         self._committed_assistant_sequences: set = set()
 
         self.task_config = task
@@ -3547,9 +3541,8 @@ class TaskManager(BaseManager):
             response_uid,
             len(content),
         )
-        # If audio for this sequence already passed SEND (and was not blocked), the
-        # SEND-time commit ran while _pending_assistant_history was still empty. Commit
-        # here so a later cleanup doesn't drop a message the user actually heard.
+        # Rescue commit: SEND already passed for this seq (e.g. text+tool_call turn
+        # where args stream after the spoken text), so SEND-time commit was a no-op.
         if sequence_id in self._sent_audio_sequences and sequence_id not in self._blocked_sequences:
             self._commit_staged_assistant_history(sequence_id)
 
