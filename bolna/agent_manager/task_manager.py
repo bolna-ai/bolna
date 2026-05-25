@@ -4680,11 +4680,8 @@ class TaskManager(BaseManager):
             # window as busy so we don't synthesize "are you still there" over the
             # upcoming follow-up response. hang_conversation_after intentionally remains
             # ungated so a truly hung task still triggers the inactivity hangup.
-            has_pending_generation = (
-                self.llm_task is not None and not self.llm_task.done()
-            ) or (
-                self.execute_function_call_task is not None
-                and not self.execute_function_call_task.done()
+            has_pending_generation = (self.llm_task is not None and not self.llm_task.done()) or (
+                self.execute_function_call_task is not None and not self.execute_function_call_task.done()
             )
 
             time_since_last_spoken_ai_word = time.time() - self.last_transmitted_timestamp
