@@ -4674,6 +4674,16 @@ class TaskManager(BaseManager):
             if self.tools["input"].is_audio_being_played_to_user() or self.response_in_pipeline:
                 continue
 
+            # An in-flight LLM task (including a tool-call API request + follow-up generation
+            # running inside it) means a response is still being produced even though
+            # response_in_pipeline has flipped False after the filler audio. Treat that
+            # window as busy so we don't synthesize "are you still there" over the
+            # upcoming follow-up response. hang_conversation_after intentionally remains
+            # ungated so a truly hung task still triggers the inactivity hangup.
+            has_pending_generation = (self.llm_task is not None and not self.llm_task.done()) or (
+                self.execute_function_call_task is not None and not self.execute_function_call_task.done()
+            )
+
             time_since_last_spoken_ai_word = time.time() - self.last_transmitted_timestamp
             time_since_user_last_spoke = (
                 (time.time() - self.time_since_last_spoken_human_word)
@@ -4686,6 +4696,7 @@ class TaskManager(BaseManager):
                 and time_since_last_spoken_ai_word > self.repeat_after_silence_seconds
                 and time_since_user_last_spoke > self.repeat_after_silence_seconds
                 and not self.response_in_pipeline
+                and not has_pending_generation
             ):
                 await self._inject_and_run_llm(
                     f"[silence] User was silent for {self.repeat_after_silence_seconds} seconds"
@@ -4708,6 +4719,7 @@ class TaskManager(BaseManager):
                 time_since_last_spoken_ai_word > self.trigger_user_online_message_after
                 and not self.asked_if_user_is_still_there
                 and time_since_user_last_spoke > self.trigger_user_online_message_after
+                and not has_pending_generation
             ):
                 logger.info(
                     f"Asking if the user is still there (agent silent for {time_since_last_spoken_ai_word:.2f}s, user silent for {time_since_user_last_spoke:.2f}s)"

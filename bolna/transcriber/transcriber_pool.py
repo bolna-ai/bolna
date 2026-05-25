@@ -275,7 +275,9 @@ class TranscriberPool:
         synthesizer and prompt catch up.
         """
         if confidence is not None and confidence < self._LID_CONFIDENCE_THRESHOLD:
-            logger.debug(f"TranscriberPool LID: {lang} conf={f'{confidence:.2f}' if confidence is not None else 'n/a'} below threshold — suppressed")
+            logger.debug(
+                f"TranscriberPool LID: {lang} conf={f'{confidence:.2f}' if confidence is not None else 'n/a'} below threshold — suppressed"
+            )
             self._record_lid_event(lang, confidence, None, False, "low_confidence")
             return
 
@@ -286,7 +288,9 @@ class TranscriberPool:
             self._record_lid_event(lang, confidence, None, False, "unsupported_language")
             return
 
-        logger.info(f"TranscriberPool LID: {lang} conf={f'{confidence:.2f}' if confidence is not None else 'n/a'} (provider={self._lid_provider_name})")
+        logger.info(
+            f"TranscriberPool LID: {lang} conf={f'{confidence:.2f}' if confidence is not None else 'n/a'} (provider={self._lid_provider_name})"
+        )
 
         _active_cfg = self._multilingual_config.get(self.active_label, {})
         active_lang = (

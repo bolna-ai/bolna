@@ -27,11 +27,12 @@ load_dotenv()
 sys.path.insert(0, ".")
 from bolna.lid.elevenlabs_scribe import ElevenLabsScribeLID
 
-CHUNK_DURATION_S = 0.100         # 100ms per chunk — matches Twilio 10×20ms batch size
+CHUNK_DURATION_S = 0.100  # 100ms per chunk — matches Twilio 10×20ms batch size
 TEST_AUDIO_PATH = "/tmp/test_elevenlabs_lid.wav"
 
 
 # ── Audio generation ──────────────────────────────────────────────────────────
+
 
 def generate_test_audio(path: str):
     """Generate mixed-language speech WAV using create_test_audio.py logic."""
@@ -64,6 +65,7 @@ def generate_test_audio(path: str):
 
 # ── WAV reader ────────────────────────────────────────────────────────────────
 
+
 def read_wav_chunks(path: str, chunk_duration_s: float):
     with wave.open(path, "rb") as wf:
         sr = wf.getframerate()
@@ -85,6 +87,7 @@ def read_wav_chunks(path: str, chunk_duration_s: float):
 
 
 # ── Main test ─────────────────────────────────────────────────────────────────
+
 
 async def run(fast: bool = False):
     print("\n=== ElevenLabs Scribe v2 Realtime LID Test ===\n")
