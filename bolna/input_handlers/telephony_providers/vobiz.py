@@ -60,7 +60,7 @@ class VobizInputHandler(TelephonyInputHandler):
                 if api_key and api_secret:
                     auth = HTTPBasicAuth(api_key, api_secret)
                 response = requests.delete(url, auth=auth)
-                if response.status_code == 200:
+                if response.status_code in (200, 204):
                     logger.info(f"Successfully disconnected Vobiz call: {call_uuid}")
                 else:
                     logger.warning(
