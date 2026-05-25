@@ -35,7 +35,7 @@ class TranscriberPool:
 
     # ── LID defaults ──────────────────────────────────────────────────────
     # Require this many consecutive same-language detections before switching.
-    _LID_DEBOUNCE_COUNT = 2
+    _LID_DEBOUNCE_COUNT = 1
     # Minimum confidence score to accept a LID detection.
     _LID_CONFIDENCE_THRESHOLD = 0.70
     # Seconds to wait after a switch before accepting new LID signals.
