@@ -118,25 +118,33 @@ class ElevenLabsScribeLID(LIDBackend):
                 # Byte-based accumulation means commit cadence is correct regardless of
                 # incoming chunk size (100ms from Twilio, 80ms from SIP, 100ms in tests).
                 should_commit = bytes_since_commit >= self.commit_threshold_bytes
-                await self.ws.send(json.dumps({
-                    "message_type": "input_audio_chunk",
-                    "audio_base_64": b64,
-                    "commit": should_commit,
-                    "sample_rate": self.sr,
-                    "previous_text": None,
-                }))
+                await self.ws.send(
+                    json.dumps(
+                        {
+                            "message_type": "input_audio_chunk",
+                            "audio_base_64": b64,
+                            "commit": should_commit,
+                            "sample_rate": self.sr,
+                            "previous_text": None,
+                        }
+                    )
+                )
                 if should_commit:
                     logger.debug(f"ElevenLabsScribeLID: committed segment after {bytes_since_commit} bytes")
                     bytes_since_commit = 0
 
             # Flush any pending audio — force VAD commit on whatever is buffered
             logger.info("ElevenLabsScribeLID: sending final commit flush")
-            await self.ws.send(json.dumps({
-                "message_type": "input_audio_chunk",
-                "audio_base_64": "",
-                "commit": True,
-                "sample_rate": self.sr,
-            }))
+            await self.ws.send(
+                json.dumps(
+                    {
+                        "message_type": "input_audio_chunk",
+                        "audio_base_64": "",
+                        "commit": True,
+                        "sample_rate": self.sr,
+                    }
+                )
+            )
         except asyncio.TimeoutError:
             logger.error("ElevenLabsScribeLID: timed out waiting for session_started")
             self.dead = True
@@ -166,9 +174,7 @@ class ElevenLabsScribeLID(LIDBackend):
                     elif msg_type == "committed_transcript_with_timestamps":
                         text = data.get("text", "").strip()
                         lang = data.get("language_code") or ""
-                        logger.info(
-                            f"ElevenLabsScribeLID: committed transcript text={text!r} language_code={lang!r}"
-                        )
+                        logger.info(f"ElevenLabsScribeLID: committed transcript text={text!r} language_code={lang!r}")
                         if lang:
                             # Normalise to short ISO-639-1 (e.g. "eng" → "en", "hin" → "hi")
                             short = lang[:2].lower()
