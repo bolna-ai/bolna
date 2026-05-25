@@ -78,6 +78,29 @@ class ConversationHistory:
             }
         )
 
+    def upsert_tool_result(self, tool_call_id: str, content: str):
+        """Update an existing tool message with this id, or append a new one.
+
+        Used by the function-call path to pre-write a "pending" placeholder
+        adjacent to its assistant.tool_calls before the API call is awaited,
+        then overwrite the same row with the real body (or an
+        "interrupted_by_user" marker on cancellation). Keeping the rewrite
+        in place preserves the assistant/tool adjacency that
+        _sanitize_tool_messages enforces, so a user barge-in mid-trigger_api
+        no longer leaves an orphaned tool record that gets stripped and
+        causes the LLM to re-issue the same call on the next turn.
+        """
+        if not tool_call_id:
+            logger.warning("upsert_tool_result called with empty tool_call_id; falling back to append")
+            self.append_tool_result(tool_call_id, content)
+            return
+        for i in range(len(self._messages) - 1, -1, -1):
+            m = self._messages[i]
+            if m.get("role") == ChatRole.TOOL and m.get("tool_call_id") == tool_call_id:
+                m["content"] = content
+                return
+        self.append_tool_result(tool_call_id, content)
+
     def attach_tool_calls_to_last_response(self, tool_calls: list):
         if self._messages and self._messages[-1].get("role") == ChatRole.ASSISTANT:
             self._messages[-1]["tool_calls"] = tool_calls

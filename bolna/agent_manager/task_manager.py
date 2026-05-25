@@ -2837,24 +2837,83 @@ class TaskManager(BaseManager):
             request_body=prepared_request["request_body"],
             api_params=prepared_request["api_params"],
         )
-        response = await trigger_api(
-            url=url,
-            method=method.lower(),
-            param=param,
-            api_token=api_token,
-            headers_data=headers,
-            meta_info=meta_info,
-            run_id=self.run_id,
-            return_response_metadata=True,
-            **resp,
+
+        tool_call_id = resp.get("tool_call_id", "")
+        sequence_id = meta_info.get("sequence_id")
+
+        # Best-effort commit any staged assistant for this sequence so
+        # attach_tool_calls_to_turn finds a real parent. Without this, when
+        # the audio for the FC's textual_response hasn't been approved yet,
+        # attach would fall through to its content=None placeholder branch
+        # and a later _commit_staged_assistant_history would append a second
+        # assistant for the same turn_id.
+        if (
+            turn_id is not None
+            and self._turn_msg_map.get(turn_id) is None
+            and sequence_id in self._pending_assistant_history
+        ):
+            self._commit_staged_assistant_history(sequence_id)
+
+        # Pre-write the assistant.tool_calls + a pending tool placeholder
+        # BEFORE awaiting trigger_api. If the user barges in mid-HTTP, the
+        # placeholder stays adjacent to its assistant (any new user message
+        # gets appended at the tail, after the placeholder). The cancel
+        # handler then rewrites the same row to "interrupted_by_user" so the
+        # next LLM turn sees the attempt and won't blindly re-issue the
+        # call. Without this, the tool_result lands after the new user
+        # message, _sanitize_tool_messages strips the orphaned pair, and
+        # the LLM loops the same FC indefinitely.
+        self.conversation_history.attach_tool_calls_to_turn(turn_id, resp["model_response"])
+        self.conversation_history.upsert_tool_result(
+            tool_call_id,
+            json.dumps({"status": "pending", "message": "Tool call in progress"}),
         )
-        self._finalize_api_call_detail(
-            function_call_log,
-            response=response.get("body"),
-            status_code=response.get("status_code"),
-            content_type=response.get("content_type"),
-            error=response.get("error"),
-        )
+
+        response = None
+        cancelled = False
+        try:
+            response = await trigger_api(
+                url=url,
+                method=method.lower(),
+                param=param,
+                api_token=api_token,
+                headers_data=headers,
+                meta_info=meta_info,
+                run_id=self.run_id,
+                return_response_metadata=True,
+                **resp,
+            )
+        except asyncio.CancelledError:
+            cancelled = True
+            self.conversation_history.upsert_tool_result(
+                tool_call_id,
+                json.dumps(
+                    {
+                        "status": "interrupted_by_user",
+                        "message": "Tool call interrupted by user mid-flight",
+                    }
+                ),
+            )
+            self.execute_function_call_task = None
+            raise
+        finally:
+            if cancelled:
+                self._finalize_api_call_detail(
+                    function_call_log,
+                    response=None,
+                    status_code=None,
+                    content_type=None,
+                    error="user_cancelled",
+                )
+            elif response is not None:
+                self._finalize_api_call_detail(
+                    function_call_log,
+                    response=response.get("body"),
+                    status_code=response.get("status_code"),
+                    content_type=response.get("content_type"),
+                    error=response.get("error"),
+                )
+
         function_response = str(response.get("body"))
         get_res_keys, get_res_values = await computed_api_response(function_response)
 
@@ -2887,8 +2946,9 @@ class TaskManager(BaseManager):
             set_response_prompt = function_response
 
         textual_response = resp.get("textual_response", None)
-        self.conversation_history.attach_tool_calls_to_turn(turn_id, resp["model_response"])
-        self.conversation_history.append_tool_result(resp.get("tool_call_id", ""), function_response)
+        # Overwrite the pending placeholder with the real body. attach_tool_calls
+        # was already done before trigger_api, so we don't repeat it here.
+        self.conversation_history.upsert_tool_result(tool_call_id, function_response)
 
         logger.info(f"Logging function call parameters ")
         convert_to_request_log(
@@ -2900,6 +2960,18 @@ class TaskManager(BaseManager):
             is_cached=False,
             run_id=self.run_id,
         )
+
+        # Defense-in-depth: if the user barged in right after trigger_api
+        # returned (but before this point), the sequence is invalidated and
+        # the new user turn already has its own LLM stream running. Don't
+        # spawn a stale followup that races it.
+        if not self.interruption_manager.is_valid_sequence(sequence_id):
+            logger.info(
+                "Skipping followup LLM generation: sequence_id=%s invalidated by user interruption",
+                sequence_id,
+            )
+            self.execute_function_call_task = None
+            return
 
         messages = self.conversation_history.get_copy()
         convert_to_request_log(
