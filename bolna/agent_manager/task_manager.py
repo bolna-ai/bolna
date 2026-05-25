@@ -109,6 +109,8 @@ class TaskManager(BaseManager):
         self.transcriber_error_events: list[dict] = []
         self.blocked_audio_events: list[dict] = []
         self._blocked_sequences: set = set()  # dedup: only record first block per sequence
+        self._sent_audio_sequences: set = set()
+        self._committed_assistant_sequences: set = set()
 
         self.task_config = task
 
@@ -3539,12 +3541,19 @@ class TaskManager(BaseManager):
             response_uid,
             len(content),
         )
+        # Rescue commit: SEND already passed for this seq (e.g. text+tool_call turn
+        # where args stream after the spoken text), so SEND-time commit was a no-op.
+        if sequence_id in self._sent_audio_sequences and sequence_id not in self._blocked_sequences:
+            self._commit_staged_assistant_history(sequence_id)
 
     def _commit_staged_assistant_history(self, sequence_id):
+        if sequence_id in self._committed_assistant_sequences:
+            return
         staged = self._pending_assistant_history.pop(sequence_id, None)
         if staged is None:
             return
 
+        self._committed_assistant_sequences.add(sequence_id)
         self.conversation_history.append_assistant(
             staged["content"], turn_id=staged["turn_id"], response_uid=staged["response_uid"]
         )
@@ -4474,6 +4483,8 @@ class TaskManager(BaseManager):
 
                     if status == "SEND":
                         # Audio approved - send it
+                        if sequence_id is not None:
+                            self._sent_audio_sequences.add(sequence_id)
                         self._commit_staged_assistant_history(sequence_id)
                         self.tools["input"].update_is_audio_being_played(True)
                         self.response_in_pipeline = False
