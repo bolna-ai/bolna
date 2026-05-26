@@ -4127,6 +4127,8 @@ class TaskManager(BaseManager):
             copied_meta_info["is_final_chunk_of_entire_response"] = True
 
         self.buffered_output_queue.put_nowait(create_ws_data_packet(chunk, copied_meta_info))
+        if self.output_task is None or self.output_task.done():
+            self.output_task = asyncio.create_task(self.__process_output_loop())
 
     def is_sequence_id_in_current_ids(self, sequence_id):
         """Check if sequence_id is valid. Delegates to InterruptionManager."""
