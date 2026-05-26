@@ -172,6 +172,12 @@ class StreamSynthesizer(BaseSynthesizer):
 
     def _stamp_turn_start(self, meta_info):
         """Only stamp on the first push of a new turn (don't re-stamp on subsequent chunks)."""
+        if meta_info.get("sequence_id") != self.current_sequence_id:
+            # New sequence starting — discard any stale meta_info entries left in text_queue
+            # by a previous interrupted sequence. Without this, _generate_ws_loop would pop
+            # the old sequence's meta_info for the new sequence's first audio chunk, causing
+            # __listen_synthesizer to see the wrong sequence_id and skip the audio entirely.
+            self.text_queue.clear()
         if self.current_turn_start_time is None:
             self.current_turn_start_time = time.perf_counter()
             self.ws_send_time = None
