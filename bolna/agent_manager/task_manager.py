@@ -391,7 +391,6 @@ class TaskManager(BaseManager):
             self.nitro = True
             self.conversation_config = task.get("task_config", {})
             logger.info(f"Conversation config {self.conversation_config}")
-            self.generate_precise_transcript = self.conversation_config.get("generate_precise_transcript", False)
 
             # Enable DTMF flow
             dtmf_enabled = self.conversation_config.get("dtmf_enabled", False)
@@ -1875,9 +1874,8 @@ class TaskManager(BaseManager):
         if not self.tools["input"].welcome_message_played():
             self.tools["input"].is_welcome_message_played = True
 
-        if self.generate_precise_transcript:
-            await self.sync_history(self.mark_event_meta_data.fetch_cleared_mark_event_data().items(), current_ts)
-            self.tools["input"].reset_response_heard_by_user()
+        await self.sync_history(self.mark_event_meta_data.fetch_cleared_mark_event_data().items(), current_ts)
+        self.tools["input"].reset_response_heard_by_user()
 
         self.interruption_manager.invalidate_pending_responses()
         self._drop_all_staged_assistant_history("cleanup_downstream_tasks")
@@ -2978,8 +2976,7 @@ class TaskManager(BaseManager):
         meta_info.pop("end_of_llm_stream", None)
 
         # Reset response tracking for new turn
-        if self.generate_precise_transcript:
-            self.tools["input"].reset_response_heard_by_user()
+        self.tools["input"].reset_response_heard_by_user()
 
         llm_response, function_tool, function_tool_message = "", "", ""
         actual_input_tokens, actual_output_tokens, actual_reasoning_tokens, actual_cached_tokens = (
@@ -4733,8 +4730,7 @@ class TaskManager(BaseManager):
                         self.check_user_online_message_config, self.language
                     )
 
-                    if self.generate_precise_transcript:
-                        self.tools["input"].reset_response_heard_by_user()
+                    self.tools["input"].reset_response_heard_by_user()
 
                     if self.should_record:
                         meta_info = {
@@ -5000,12 +4996,11 @@ class TaskManager(BaseManager):
                         if exc is not None:
                             raise cls(str(exc), provider=provider)
 
-                if self.generate_precise_transcript:
-                    has_pending_marks = len(self.mark_event_meta_data.mark_event_meta_data) > 0
-                    has_response_heard = bool(self.tools["input"].response_heard_by_user)
-                    if has_pending_marks or has_response_heard:
-                        await self.sync_history(self.mark_event_meta_data.mark_event_meta_data.items(), time.time())
-                    self.tools["input"].reset_response_heard_by_user()
+                has_pending_marks = len(self.mark_event_meta_data.mark_event_meta_data) > 0
+                has_response_heard = bool(self.tools["input"].response_heard_by_user)
+                if has_pending_marks or has_response_heard:
+                    await self.sync_history(self.mark_event_meta_data.mark_event_meta_data.items(), time.time())
+                self.tools["input"].reset_response_heard_by_user()
                 logger.info("Conversation completed")
                 self.conversation_ended = True
             else:
@@ -5137,9 +5132,7 @@ class TaskManager(BaseManager):
                 ]
 
                 output = {
-                    "messages": self._prepare_precise_transcript_messages(self.history)
-                    if self.generate_precise_transcript
-                    else self.history,
+                    "messages": self._prepare_precise_transcript_messages(self.history),
                     "conversation_time": time.time() - self.start_time,
                     "label_flow": self.label_flow,
                     "function_tool_api_call_details": copy.deepcopy(self.function_tool_api_call_details),
