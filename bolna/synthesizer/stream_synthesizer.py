@@ -173,6 +173,16 @@ class StreamSynthesizer(BaseSynthesizer):
     def _stamp_turn_start(self, meta_info):
         """Only stamp on the first push of a new turn (don't re-stamp on subsequent chunks)."""
         if self.current_turn_start_time is None:
+            # Drop leftover entries from a previous turn so this turn's first audio
+            # chunk doesn't pop a stale entry and inherit a dead sequence_id (which
+            # __listen_synthesizer would then filter out). Keep same-seq entries —
+            # they belong to this turn (sequence_ids are monotonic; only -1 repeats).
+            new_seq = meta_info.get("sequence_id")
+            if self.text_queue and any(m.get("sequence_id") != new_seq for m in self.text_queue):
+                kept = deque(m for m in self.text_queue if m.get("sequence_id") == new_seq)
+                dropped = len(self.text_queue) - len(kept)
+                self.text_queue = kept
+                logger.info(f"Dropped {dropped} stale text_queue entries on new turn start (seq={new_seq})")
             self.current_turn_start_time = time.perf_counter()
             self.ws_send_time = None
             self.current_turn_ttfb = None
