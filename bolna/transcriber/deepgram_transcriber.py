@@ -116,8 +116,6 @@ class DeepgramTranscriber(BaseTranscriber):
         _eot_threshold = kwargs.get("eot_threshold")
         self.eot_threshold = _eot_threshold if _eot_threshold is not None else DEEPGRAM_FLUX_EOT_THRESHOLD
         self.eager_eot_threshold = kwargs.get("eager_eot_threshold")
-        if self.eager_eot_threshold is None and self.is_flux_model:
-            self.eager_eot_threshold = DEEPGRAM_FLUX_EAGER_EOT_THRESHOLD
         _eot_timeout_ms = kwargs.get("eot_timeout_ms")
         self.eot_timeout_ms = _eot_timeout_ms if _eot_timeout_ms is not None else DEEPGRAM_FLUX_EOT_TIMEOUT_MS
         self.eager_transcript_pending = None
@@ -210,7 +208,7 @@ class DeepgramTranscriber(BaseTranscriber):
             "eot_timeout_ms": self.eot_timeout_ms,
         }
 
-        if self.eager_eot_threshold is not None:
+        if self.eager_eot_threshold:
             dg_params["eager_eot_threshold"] = self.eager_eot_threshold
 
         self.audio_frame_duration = 0.5
@@ -977,7 +975,7 @@ class DeepgramTranscriber(BaseTranscriber):
                             )
                         logger.info(f"Flux: EndOfTurn (confidence={eot_confidence}) transcript={transcript!r}")
 
-                        if transcript:
+                        if transcript and not self.is_transcript_sent_for_processing:
                             try:
                                 first_interim_to_final_ms, last_interim_to_final_ms = (
                                     self.calculate_interim_to_final_latencies(self.current_turn_interim_details)
@@ -1009,7 +1007,13 @@ class DeepgramTranscriber(BaseTranscriber):
 
                             yield create_ws_data_packet(data, self.meta_info)
                         else:
-                            logger.warning("Flux: EndOfTurn received with empty transcript")
+                            if transcript:
+                                logger.warning(
+                                    f"Flux: EndOfTurn suppressed — transcript already sent for processing "
+                                    f"(turn_id={self.current_turn_id}, transcript={transcript!r})"
+                                )
+                            else:
+                                logger.warning("Flux: EndOfTurn received with empty transcript")
                             if self.eager_transcript_pending is not None:
                                 # EagerEndOfTurn fired but the turn produced nothing — cancel speculative LLM
                                 logger.info("Flux: cancelling speculative LLM task via turn_resumed (empty EndOfTurn)")
@@ -1135,6 +1139,8 @@ class DeepgramTranscriber(BaseTranscriber):
                     self.heartbeat_task = asyncio.create_task(self.send_heartbeat_flux(deepgram_ws))
                 else:
                     self.heartbeat_task = asyncio.create_task(self.send_heartbeat(deepgram_ws))
+                    # Flux uses EndOfTurn events as the canonical finalization signal —
+                    # utterance timeout is only needed for Nova where UtteranceEnd can be unreliable.
                     self.utterance_timeout_task = asyncio.create_task(self.monitor_utterance_timeout())
 
                 receiver_method = self.receiver_flux if self.is_flux_model else self.receiver
