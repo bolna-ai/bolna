@@ -2127,17 +2127,16 @@ class TaskManager(BaseManager):
             if first_item.get("text_synthesized") and first_item.get("is_final_chunk") is True:
                 break
 
-            # Use time.time() + remaining audio duration rather than sent_ts + duration.
-            # sent_ts is when we buffered the chunk into Plivo, not when Plivo starts
-            # playing it. A 8s chunk sent at T=0 after 14s of preceding audio won't
-            # start playing until T=14 — so sent_ts+duration underestimates play_end by
-            # the length of all preceding queued chunks, firing the timeout too early.
+            # Use entry_time (not time.time()) so the deadline is a fixed point in the
+            # future rather than one that recedes with each iteration. Without this,
+            # `remaining = sum(durations) + hangup_mark_event_timeout` never reaches 0
+            # when Plivo stops ACKing marks, causing an indefinite spin.
             remaining_durations = [
                 v.get("duration", 0)
                 for v in mark_events.values()
                 if v.get("type") != "pre_mark_message" and v.get("sent_ts")
             ]
-            expected_play_end = (time.time() + sum(remaining_durations)) if remaining_durations else time.time()
+            expected_play_end = (entry_time + sum(remaining_durations)) if remaining_durations else entry_time
             deadline = expected_play_end + self.hangup_mark_event_timeout
 
             remaining = deadline - time.time()
@@ -2835,17 +2834,21 @@ class TaskManager(BaseManager):
             request_body=prepared_request["request_body"],
             api_params=prepared_request["api_params"],
         )
-        response = await trigger_api(
-            url=url,
-            method=method.lower(),
-            param=param,
-            api_token=api_token,
-            headers_data=headers,
-            meta_info=meta_info,
-            run_id=self.run_id,
-            return_response_metadata=True,
-            **resp,
-        )
+        try:
+            response = await trigger_api(
+                url=url,
+                method=method.lower(),
+                param=param,
+                api_token=api_token,
+                headers_data=headers,
+                meta_info=meta_info,
+                run_id=self.run_id,
+                return_response_metadata=True,
+                **resp,
+            )
+        except asyncio.CancelledError:
+            self._finalize_api_call_detail(function_call_log, error="cancelled")
+            raise
         self._finalize_api_call_detail(
             function_call_log,
             response=response.get("body"),
@@ -3921,7 +3924,15 @@ class TaskManager(BaseManager):
                         eot_confidence = message["data"].get("confidence")
                         logger.info(f"EagerEndOfTurn received (confidence={eot_confidence}): {eager_transcript}")
 
-                        if (
+                        transcriber = self.tools.get("transcriber")
+                        active_transcriber = transcriber.transcribers.get(transcriber.active_label, transcriber) if hasattr(transcriber, "transcribers") else transcriber
+                        eager_eot_threshold = getattr(active_transcriber, "eager_eot_threshold", None)
+
+                        if not eager_eot_threshold:
+                            logger.info(f"Skipping speculative LLM: EagerEOT disabled (eager_eot_threshold not set or zero)")
+                        elif eot_confidence is not None and eot_confidence < eager_eot_threshold:
+                            logger.info(f"Skipping speculative LLM: EagerEOT confidence {eot_confidence} below threshold {eager_eot_threshold}")
+                        elif (
                             eager_transcript
                             and self.tools["input"].welcome_message_played()
                             and not self.tools["input"].is_audio_being_played_to_user()
