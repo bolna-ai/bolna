@@ -3850,6 +3850,17 @@ class TaskManager(BaseManager):
                         interim_transcript_len += len(message["data"].get("content").strip().split(" "))
                         transcript_content = message["data"].get("content", "")
 
+                        # Deepgram sometimes delivers the real speech_final for an utterance
+                        # *after* our utterance timeout already force-finalized the same text
+                        # and started the LLM. Don't treat this late delivery as new user speech
+                        # — the LLM is already processing this exact transcript.
+                        if self.response_in_pipeline and self.conversation_history.is_duplicate_user(transcript_content):
+                            logger.info(
+                                "Skipping interruption: Deepgram late delivery of already-processing transcript: %s",
+                                transcript_content,
+                            )
+                            continue
+
                         if self.interruption_manager.should_trigger_interruption(
                             word_count=interim_transcript_len,
                             transcript=transcript_content,
