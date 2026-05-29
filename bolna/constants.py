@@ -168,6 +168,9 @@ SWITCH_LANGUAGE_TOOL_DEFINITION = {
     },
 }
 
+# Control marks carry no playback evidence and must not be used as a trim target.
+NON_EVIDENCE_MARK_TYPES = ("pre_mark_message", "backchanneling")
+
 END_CALL_FUNCTION_PREFIX = "end_call"
 
 END_CALL_TOOL_DEFINITION = {
