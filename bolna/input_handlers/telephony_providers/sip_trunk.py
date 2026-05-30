@@ -6,6 +6,7 @@ Ref: https://docs.asterisk.org/Configuration/Channel-Drivers/WebSocket/
 
 import asyncio
 import json
+import os
 import traceback
 from bolna.input_handlers.telephony import TelephonyInputHandler
 from bolna.helpers.utils import create_ws_data_packet
@@ -18,6 +19,18 @@ load_dotenv()
 
 # Asterisk ulaw: 160 bytes per 20ms frame
 ASTERISK_ULAW_OPTIMAL_FRAME_SIZE = 160
+
+# Forward inbound audio to the transcriber in ~80ms batches — enough context for
+# stable Deepgram transcripts without adding noticeable latency.
+AUDIO_BATCH_MS = 80
+
+# How long to wait after sending HANGUP before closing the WebSocket, giving Asterisk
+# time to act on it. Overridable via env.
+HANGUP_SETTLE_S = float(os.environ.get("SIP_HANGUP_SETTLE_S", "0.5"))
+
+# Submit accumulated DTMF digits after this much inter-digit silence (reset on each
+# keypress), or immediately when '#' is pressed. Overridable via env.
+DTMF_INTERDIGIT_TIMEOUT_S = float(os.environ.get("SIP_DTMF_INTERDIGIT_TIMEOUT_S", "3"))
 
 
 def _parse_asterisk_control_message(text: str) -> dict:
@@ -33,14 +46,16 @@ def _parse_asterisk_control_message(text: str) -> dict:
         if isinstance(obj, dict):
             result = obj
     except (json.JSONDecodeError, TypeError):
-        for part in text.split():
+        tokens = text.split()
+        for part in tokens:
             if ":" in part:
                 k, v = part.split(":", 1)
                 result[k.strip().lower()] = v.strip()
-        if " " in text:
-            first = text.split()[0]
-            if first not in result:
-                result["event"] = first
+        # The first whitespace-delimited token is the event name (e.g. "MEDIA_START",
+        # "DTMF_END digit:5"). Bare single-token frames like "MEDIA_XOFF"/"MEDIA_XON"/
+        # "QUEUE_DRAINED" have no space — guarding on `" " in text` dropped them entirely.
+        if tokens and ":" not in tokens[0] and "event" not in result:
+            result["event"] = tokens[0]
 
     event = (result.get("event") or result.get("command") or "").upper().replace(" ", "_")
     if event:
@@ -82,6 +97,7 @@ class SipTrunkInputHandler(TelephonyInputHandler):
         self.connection_id = None
         self.ptime = 20
         self._pending_stream_sid = None  # promoted to stream_sid on first audio frame
+        self._dtmf_timer_task = None  # inter-digit timeout for DTMF accumulation
 
         input_config = self._get_input_config()
         self._expected_format = (input_config.get("audio_format") or input_config.get("format") or "ulaw").lower()
@@ -107,6 +123,16 @@ class SipTrunkInputHandler(TelephonyInputHandler):
             pass
         return {}
 
+    def _audio_meta(self) -> dict:
+        """meta_info attached to each batch of inbound audio forwarded to the transcriber."""
+        return {
+            "io": self.io_provider,
+            "call_sid": self.call_sid,
+            "stream_sid": self.stream_sid,
+            "sequence": (self.input_types or {}).get("audio", 0),
+            "format": self._expected_format,
+        }
+
     async def disconnect_stream(self):
         """Send HANGUP to Asterisk so the channel and WebSocket close."""
         try:
@@ -121,8 +147,9 @@ class SipTrunkInputHandler(TelephonyInputHandler):
         """Stop and disconnect; Asterisk closes quickly after HANGUP."""
         logger.info(f"Stopping sip-trunk handler for channel {self.channel_id}")
         self.running = False
+        self._cancel_dtmf_timer()
         await self.disconnect_stream()
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(HANGUP_SETTLE_S)
         try:
             await self.websocket.close()
         except Exception as e:
@@ -168,10 +195,10 @@ class SipTrunkInputHandler(TelephonyInputHandler):
         self._initialize_from_media_start(packet)
 
     async def _listen(self):
-        """Receive TEXT (control) and BINARY (ulaw). Forward audio in ~80ms batches for balance of latency and transcript accuracy."""
+        """Receive TEXT (control) and BINARY (ulaw). Forward audio in ~AUDIO_BATCH_MS batches
+        for a balance of latency and transcript accuracy."""
         buffer = []
-        # ~80ms per batch (4 x 20ms frames) so Deepgram has enough context for stable transcripts
-        chunks_per_batch = max(2, 80 // self.ptime) if self.ptime else 4
+        chunks_per_batch = max(2, AUDIO_BATCH_MS // self.ptime) if self.ptime else 4
         message_count = 0
 
         while self.running:
@@ -197,14 +224,7 @@ class SipTrunkInputHandler(TelephonyInputHandler):
                         merged = b"".join(buffer)
                         buffer = []
                         message_count = 0
-                        meta_info = {
-                            "io": self.io_provider,
-                            "call_sid": self.call_sid,
-                            "stream_sid": self.stream_sid,
-                            "sequence": (self.input_types or {}).get("audio", 0),
-                            "format": self._expected_format,
-                        }
-                        await self.ingest_audio(merged, meta_info)
+                        await self.ingest_audio(merged, self._audio_meta())
 
                 elif "text" in message:
                     await self._handle_control_message(message["text"])
@@ -230,14 +250,7 @@ class SipTrunkInputHandler(TelephonyInputHandler):
         if buffer:
             merged = b"".join(buffer)
             if merged:
-                meta_info = {
-                    "io": self.io_provider,
-                    "call_sid": self.call_sid,
-                    "stream_sid": self.stream_sid,
-                    "sequence": (self.input_types or {}).get("audio", 0),
-                    "format": self._expected_format,
-                }
-                await self.ingest_audio(merged, meta_info)
+                await self.ingest_audio(merged, self._audio_meta())
 
         ws_data_packet = create_ws_data_packet(
             data=None,
@@ -245,6 +258,33 @@ class SipTrunkInputHandler(TelephonyInputHandler):
         )
         self.queues["transcriber"].put_nowait(ws_data_packet)
         logger.info(f"sip-trunk WebSocket closed for channel {self.channel_id}")
+
+    def _flush_dtmf(self):
+        """Enqueue the accumulated DTMF digits as one entry and clear the buffer."""
+        if self.dtmf_digits:
+            self.queues["dtmf"].put_nowait(self.dtmf_digits)
+            self.dtmf_digits = ""
+
+    def _cancel_dtmf_timer(self):
+        if self._dtmf_timer_task and not self._dtmf_timer_task.done():
+            self._dtmf_timer_task.cancel()
+        self._dtmf_timer_task = None
+
+    def _restart_dtmf_timer(self):
+        """(Re)arm the inter-digit timeout — reset on every keypress so multi-digit input
+        with short pauses still collects, then submits after DTMF_INTERDIGIT_TIMEOUT_S."""
+        self._cancel_dtmf_timer()
+        self._dtmf_timer_task = asyncio.create_task(self._dtmf_timeout())
+
+    async def _dtmf_timeout(self):
+        try:
+            await asyncio.sleep(DTMF_INTERDIGIT_TIMEOUT_S)
+        except asyncio.CancelledError:
+            return
+        self._dtmf_timer_task = None
+        if self.dtmf_digits:
+            logger.info(f"DTMF inter-digit timeout — submitting '{self.dtmf_digits}'")
+            self._flush_dtmf()
 
     async def _handle_control_message(self, text: str):
         """Handle Asterisk TEXT: MEDIA_START, DTMF_END, MEDIA_XOFF/XON, QUEUE_DRAINED, etc."""
@@ -257,7 +297,14 @@ class SipTrunkInputHandler(TelephonyInputHandler):
         if event == "DTMF_END":
             digit = parsed.get("digit", "")
             if digit and self.is_dtmf_active:
-                self.queues["dtmf"].put_nowait(digit)
+                # Accumulate digits; submit on the '#' terminator OR after an inter-digit
+                # timeout, so callers who don't press '#' still get their input through.
+                is_complete = await self._handle_dtmf_digit(digit)
+                if is_complete:
+                    self._cancel_dtmf_timer()
+                    self._flush_dtmf()
+                elif self.dtmf_digits:
+                    self._restart_dtmf_timer()
             return
         if event == "MEDIA_XOFF":
             self._media_xoff = True
