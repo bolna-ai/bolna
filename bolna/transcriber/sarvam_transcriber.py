@@ -49,6 +49,11 @@ class SarvamTranscriber(BaseTranscriber):
         self.model = model
         self.language = language
         self.target_language = target_language
+
+        # language="multi" triggers saaras:v3 auto-detect mode (language-code=unknown)
+        if self.language == "multi":
+            self.model = "saaras:v3"
+            self.language = "unknown"
         self.stream = stream
         self.encoding = encoding
         self.sampling_rate = int(sampling_rate)
