@@ -11,6 +11,18 @@ OPENAI_TRANSCRIBER_UTTERANCE_TIMEOUT_S = 0.5
 DEEPGRAM_FLUX_EOT_THRESHOLD = 0.7  # confidence to declare end-of-turn
 DEEPGRAM_FLUX_EAGER_EOT_THRESHOLD = 0.5  # confidence to trigger speculative LLM early
 DEEPGRAM_FLUX_EOT_TIMEOUT_MS = 500  # max silence before forcing end-of-turn
+# Client-side backstop: if a Flux turn opens but no Flux event arrives for this long,
+# the server has gone application-silent mid-turn and will never send the EndOfTurn
+# that resets callee_speaking. Derived from eot_timeout_ms so it always sits well past
+# a healthy end-of-turn wait (Flux emits Update events several times/sec while the user
+# is actually speaking), never preempting a real pause.
+DEEPGRAM_FLUX_TURN_STALL_FLOOR_S = 3.0
+
+# Absolute inactivity backstop for __check_for_completion: hangs up a call that has made
+# no forward progress (no agent audio, no user speech, nothing in flight) for this long,
+# even when the normal hangup_after_silence path is blocked by a wedged pipeline flag.
+# Floored well above hangup_after_silence so the normal path always wins when reachable.
+STALL_HANGUP_FLOOR_S = 20.0
 
 # Model prefixes
 GPT5_MODEL_PREFIX = "gpt-5"

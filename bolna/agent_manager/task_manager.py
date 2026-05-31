@@ -29,6 +29,7 @@ from bolna.constants import (
     END_CALL_FUNCTION_PREFIX,
     END_CALL_TOOL_DEFINITION,
     GPT5_4_MODEL_PREFIX,
+    STALL_HANGUP_FLOOR_S,
 )
 from bolna.helpers.function_calling_helpers import trigger_api, computed_api_response, prepare_api_request
 from bolna.helpers.conversation_history import ConversationHistory
@@ -4658,6 +4659,29 @@ class TaskManager(BaseManager):
             logger.info("Silence repeat generation cancelled by interruption")
             return
 
+    def _should_stall_hangup(
+        self, audio_playing, has_pending_generation, time_since_last_spoken_ai_word, time_since_user_last_spoke
+    ):
+        """Absolute inactivity backstop, evaluated above the audio/pipeline gate.
+
+        The normal inactivity hangup sits below a gate that skips the loop while audio is
+        playing OR a response is in the pipeline. If a flag wedges (e.g. a transcriber never
+        closes a turn → callee_speaking stuck True → audio held → response_in_pipeline never
+        clears) that gate `continue`s forever and the normal hangup is never reached → endless
+        call. This fires only when there is genuinely no forward progress: no audio playing,
+        nothing in flight, and both sides silent past a floor set well above hangup_after_silence
+        so the normal path always wins whenever it is reachable.
+        """
+        if self.hang_conversation_after <= 0:
+            return False
+        stall_timeout = max(self.hang_conversation_after, STALL_HANGUP_FLOOR_S)
+        return (
+            not audio_playing
+            and not has_pending_generation
+            and time_since_last_spoken_ai_word > stall_timeout
+            and time_since_user_last_spoke > stall_timeout
+        )
+
     async def __check_for_completion(self):
         logger.info(f"Starting task to check for completion")
         while True:
@@ -4697,9 +4721,6 @@ class TaskManager(BaseManager):
                         )
                 continue
 
-            if self.tools["input"].is_audio_being_played_to_user() or self.response_in_pipeline:
-                continue
-
             # An in-flight LLM task (including a tool-call API request + follow-up generation
             # running inside it) means a response is still being produced even though
             # response_in_pipeline has flipped False after the filler audio. Treat that
@@ -4716,6 +4737,31 @@ class TaskManager(BaseManager):
                 if self.time_since_last_spoken_human_word > 0
                 else float("inf")
             )
+
+            # Stall backstop: the gate below skips the loop while audio is playing OR a
+            # response is in the pipeline. A wedged flag (e.g. a transcriber that never
+            # closes a turn, leaving callee_speaking True so audio is held and
+            # response_in_pipeline never clears) makes that gate `continue` forever and the
+            # normal inactivity hangup below is never reached → endless call. This fires only
+            # when there is genuinely no forward progress: no audio playing, nothing in
+            # flight, and both sides silent past a floor well above hangup_after_silence.
+            if self._should_stall_hangup(
+                audio_playing=self.tools["input"].is_audio_being_played_to_user(),
+                has_pending_generation=has_pending_generation,
+                time_since_last_spoken_ai_word=time_since_last_spoken_ai_word,
+                time_since_user_last_spoke=time_since_user_last_spoke,
+            ):
+                logger.warning(
+                    f"Stall backstop: no forward progress for {time_since_last_spoken_ai_word:.1f}s "
+                    f"(audio_playing=False, no pending generation, response_in_pipeline={self.response_in_pipeline}) "
+                    f"- forcing hangup"
+                )
+                self.hangup_detail = HangupReason.INACTIVITY_TIMEOUT
+                await self.process_call_hangup()
+                break
+
+            if self.tools["input"].is_audio_being_played_to_user() or self.response_in_pipeline:
+                continue
 
             if (
                 self.repeat_after_silence_seconds
