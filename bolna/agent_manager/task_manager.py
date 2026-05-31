@@ -24,6 +24,7 @@ from bolna.constants import (
     DEFAULT_TIMEZONE,
     LANGUAGE_NAMES,
     LLM_DEFAULT_CONFIGS,
+    NON_EVIDENCE_MARK_TYPES,
     SWITCH_LANGUAGE_TOOL_DEFINITION,
     END_CALL_FUNCTION_PREFIX,
     END_CALL_TOOL_DEFINITION,
@@ -1597,6 +1598,8 @@ class TaskManager(BaseManager):
         latest_turn_id = None
         latest_counter = -1
         for _, mark_data in mark_events_data:
+            if mark_data.get("type") in NON_EVIDENCE_MARK_TYPES:
+                continue
             turn_id = mark_data.get("turn_id")
             if turn_id is None:
                 continue
@@ -1611,6 +1614,8 @@ class TaskManager(BaseManager):
         latest_response_uid = None
         latest_counter = -1
         for _, mark_data in mark_events_data:
+            if mark_data.get("type") in NON_EVIDENCE_MARK_TYPES:
+                continue
             response_uid = mark_data.get("response_uid")
             if response_uid is None:
                 continue
@@ -3844,6 +3849,17 @@ class TaskManager(BaseManager):
 
                         interim_transcript_len += len(message["data"].get("content").strip().split(" "))
                         transcript_content = message["data"].get("content", "")
+
+                        # Deepgram sometimes delivers the real speech_final for an utterance
+                        # *after* our utterance timeout already force-finalized the same text
+                        # and started the LLM. Don't treat this late delivery as new user speech
+                        # — the LLM is already processing this exact transcript.
+                        if self.response_in_pipeline and self.conversation_history.is_duplicate_user(transcript_content):
+                            logger.info(
+                                "Skipping interruption: Deepgram late delivery of already-processing transcript: %s",
+                                transcript_content,
+                            )
+                            continue
 
                         if self.interruption_manager.should_trigger_interruption(
                             word_count=interim_transcript_len,
