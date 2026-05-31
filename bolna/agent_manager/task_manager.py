@@ -4662,16 +4662,10 @@ class TaskManager(BaseManager):
     def _should_stall_hangup(
         self, audio_playing, has_pending_generation, time_since_last_spoken_ai_word, time_since_user_last_spoke
     ):
-        """Absolute inactivity backstop, evaluated above the audio/pipeline gate.
-
-        The normal inactivity hangup sits below a gate that skips the loop while audio is
-        playing OR a response is in the pipeline. If a flag wedges (e.g. a transcriber never
-        closes a turn → callee_speaking stuck True → audio held → response_in_pipeline never
-        clears) that gate `continue`s forever and the normal hangup is never reached → endless
-        call. This fires only when there is genuinely no forward progress: no audio playing,
-        nothing in flight, and both sides silent past a floor set well above hangup_after_silence
-        so the normal path always wins whenever it is reachable.
-        """
+        """Hang up when the call has made no forward progress at all: no audio playing, nothing
+        in flight, and both sides silent past the floor. Runs above the audio/pipeline gate so it
+        still applies when a pipeline flag is stuck. Floor stays above hangup_after_silence so the
+        normal inactivity path takes precedence whenever it is reachable."""
         if self.hang_conversation_after <= 0:
             return False
         stall_timeout = max(self.hang_conversation_after, STALL_HANGUP_FLOOR_S)
@@ -4738,13 +4732,7 @@ class TaskManager(BaseManager):
                 else float("inf")
             )
 
-            # Stall backstop: the gate below skips the loop while audio is playing OR a
-            # response is in the pipeline. A wedged flag (e.g. a transcriber that never
-            # closes a turn, leaving callee_speaking True so audio is held and
-            # response_in_pipeline never clears) makes that gate `continue` forever and the
-            # normal inactivity hangup below is never reached → endless call. This fires only
-            # when there is genuinely no forward progress: no audio playing, nothing in
-            # flight, and both sides silent past a floor well above hangup_after_silence.
+            # Must run above the audio/pipeline gate below (see method docstring).
             if self._should_stall_hangup(
                 audio_playing=self.tools["input"].is_audio_being_played_to_user(),
                 has_pending_generation=has_pending_generation,

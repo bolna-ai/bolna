@@ -119,8 +119,7 @@ class DeepgramTranscriber(BaseTranscriber):
         self.eager_eot_threshold = kwargs.get("eager_eot_threshold")
         _eot_timeout_ms = kwargs.get("eot_timeout_ms")
         self.eot_timeout_ms = _eot_timeout_ms if _eot_timeout_ms is not None else DEEPGRAM_FLUX_EOT_TIMEOUT_MS
-        # Stall backstop: fire only well past a healthy end-of-turn wait so a real pause
-        # (Flux waiting out eot_timeout_ms) is never mistaken for a server stall.
+        # Kept above the normal end-of-turn wait so an ordinary pause isn't treated as a stall.
         self.flux_turn_stall_timeout_s = max(DEEPGRAM_FLUX_TURN_STALL_FLOOR_S, (self.eot_timeout_ms / 1000.0) * 4)
         self.flux_watchdog_task = None
         self._last_flux_msg_time = None
@@ -426,44 +425,27 @@ class DeepgramTranscriber(BaseTranscriber):
             raise
 
     def _flux_turn_is_stalled(self, now):
-        """True if a Flux turn is open but no Flux event has arrived for the stall window.
-
-        A turn is "open" once we've seen any interim (last_interim_time set); it is disarmed
-        by _reset_turn_state on normal finalization. A healthy turn keeps _last_flux_msg_time
-        fresh (Flux emits Update events several times/sec while the user speaks), so this only
-        trips when the server has gone application-silent mid-turn.
-        """
+        """True if a turn is open (interim seen) but no Flux event arrived within the stall window."""
         if self.last_interim_time is None or self._last_flux_msg_time is None:
             return False
         return (now - self._last_flux_msg_time) > self.flux_turn_stall_timeout_s
 
     async def _release_stuck_flux_turn(self):
-        """Emit speech_ended to release a stalled turn, then disarm via _reset_turn_state.
-
-        speech_ended (not a phantom transcript) is the same signal Nova's UtteranceEnd path
-        uses to reset callee_speaking downstream without injecting a user turn or starting an
-        LLM. _reset_turn_state suppresses a late EndOfTurn for the abandoned turn via the
-        `not is_transcript_sent_for_processing` guard in receiver_flux.
-        """
+        # speech_ended ends the user turn downstream (resets callee_speaking) without injecting a
+        # transcript or LLM call; _reset_turn_state then drops any later finalization for this turn.
         await self.push_to_transcriber_queue(create_ws_data_packet({"type": "speech_ended"}, self.meta_info))
         self._reset_turn_state()
 
     async def monitor_flux_turn_timeout(self):
-        """Release a Flux turn that opened but never received a closing event.
-
-        Flux normally closes every turn with an EndOfTurn (which downstream maps to
-        on_user_speech_ended → resets callee_speaking). If the Flux server goes
-        application-silent mid-turn — no Update/EndOfTurn/LID for an extended period while
-        the websocket stays alive — that reset never arrives, callee_speaking stays True,
-        and the agent's audio is held in WAIT forever.
-        """
+        """Force-close a Flux turn that stays open without any closing event, so a missing
+        EndOfTurn cannot leave the user turn open and the agent's audio held indefinitely."""
         try:
             while True:
                 await asyncio.sleep(1.0)
                 if self._flux_turn_is_stalled(time.time()):
                     logger.warning(
-                        f"Flux turn stall: no Flux event for >{self.flux_turn_stall_timeout_s:.1f}s "
-                        f"(turn {self.current_turn_id}). Emitting speech_ended to release stuck turn."
+                        f"Flux turn stall: no event for >{self.flux_turn_stall_timeout_s:.1f}s "
+                        f"(turn {self.current_turn_id}), releasing via speech_ended."
                     )
                     await self._release_stuck_flux_turn()
         except asyncio.CancelledError:
@@ -907,9 +889,8 @@ class DeepgramTranscriber(BaseTranscriber):
             try:
                 msg = json.loads(msg)
 
-                # Any Flux message resets the stall watchdog. Keyed on "last message of any
-                # type" (not turn-state flags) so it also covers turns that only ever produced
-                # an Update with no StartOfTurn.
+                # Track liveness off every message (any type), so the stall watchdog also covers
+                # turns that only produced an Update and never a StartOfTurn.
                 self._last_flux_msg_time = time.time()
 
                 if self.connection_start_time is None:
@@ -1199,9 +1180,6 @@ class DeepgramTranscriber(BaseTranscriber):
 
                 if self.is_flux_model:
                     self.heartbeat_task = asyncio.create_task(self.send_heartbeat_flux(deepgram_ws))
-                    # Flux normally closes turns with EndOfTurn, but if the server goes
-                    # application-silent mid-turn that close never arrives and callee_speaking
-                    # stays stuck. This watchdog releases such turns.
                     self.flux_watchdog_task = asyncio.create_task(self.monitor_flux_turn_timeout())
                 else:
                     self.heartbeat_task = asyncio.create_task(self.send_heartbeat(deepgram_ws))
