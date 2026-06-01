@@ -19,6 +19,7 @@ from bolna.constants import (
     DEEPGRAM_FLUX_EOT_THRESHOLD,
     DEEPGRAM_FLUX_EAGER_EOT_THRESHOLD,
     DEEPGRAM_FLUX_EOT_TIMEOUT_MS,
+    DEEPGRAM_FLUX_TURN_STALL_FLOOR_S,
 )
 
 
@@ -118,6 +119,10 @@ class DeepgramTranscriber(BaseTranscriber):
         self.eager_eot_threshold = kwargs.get("eager_eot_threshold")
         _eot_timeout_ms = kwargs.get("eot_timeout_ms")
         self.eot_timeout_ms = _eot_timeout_ms if _eot_timeout_ms is not None else DEEPGRAM_FLUX_EOT_TIMEOUT_MS
+        # Kept above the normal end-of-turn wait so an ordinary pause isn't treated as a stall.
+        self.flux_turn_stall_timeout_s = max(DEEPGRAM_FLUX_TURN_STALL_FLOOR_S, (self.eot_timeout_ms / 1000.0) * 4)
+        self.flux_watchdog_task = None
+        self._last_flux_msg_time = None
         self.eager_transcript_pending = None
         self.language_hints = kwargs.get("language_hints")
         # ASR-native LID events (flux-general-multi only) — collected per turn and
@@ -419,6 +424,37 @@ class DeepgramTranscriber(BaseTranscriber):
             logger.error(f"Error in monitor_utterance_timeout: {e}")
             raise
 
+    def _flux_turn_is_stalled(self, now):
+        """True if a turn is open (interim seen) but no Flux event arrived within the stall window."""
+        if self.last_interim_time is None or self._last_flux_msg_time is None:
+            return False
+        return (now - self._last_flux_msg_time) > self.flux_turn_stall_timeout_s
+
+    async def _release_stuck_flux_turn(self):
+        # speech_ended ends the user turn downstream (resets callee_speaking) without injecting a
+        # transcript or LLM call; _reset_turn_state then drops any later finalization for this turn.
+        await self.push_to_transcriber_queue(create_ws_data_packet({"type": "speech_ended"}, self.meta_info))
+        self._reset_turn_state()
+
+    async def monitor_flux_turn_timeout(self):
+        """Force-close a Flux turn that stays open without any closing event, so a missing
+        EndOfTurn cannot leave the user turn open and the agent's audio held indefinitely."""
+        try:
+            while True:
+                await asyncio.sleep(1.0)
+                if self._flux_turn_is_stalled(time.time()):
+                    logger.warning(
+                        f"Flux turn stall: no event for >{self.flux_turn_stall_timeout_s:.1f}s "
+                        f"(turn {self.current_turn_id}), releasing via speech_ended."
+                    )
+                    await self._release_stuck_flux_turn()
+        except asyncio.CancelledError:
+            logger.info("Flux turn timeout monitoring task cancelled")
+            raise
+        except Exception as e:
+            logger.error(f"Error in monitor_flux_turn_timeout: {e}")
+            raise
+
     async def toggle_connection(self):
         self.connection_on = False
         if self.heartbeat_task is not None:
@@ -427,6 +463,8 @@ class DeepgramTranscriber(BaseTranscriber):
             self.sender_task.cancel()
         if self.utterance_timeout_task is not None:
             self.utterance_timeout_task.cancel()
+        if self.flux_watchdog_task is not None:
+            self.flux_watchdog_task.cancel()
 
         if self.websocket_connection is not None:
             try:
@@ -455,6 +493,7 @@ class DeepgramTranscriber(BaseTranscriber):
             ("heartbeat_task", getattr(self, "heartbeat_task", None)),
             ("sender_task", getattr(self, "sender_task", None)),
             ("utterance_timeout_task", getattr(self, "utterance_timeout_task", None)),
+            ("flux_watchdog_task", getattr(self, "flux_watchdog_task", None)),
             ("transcription_task", getattr(self, "transcription_task", None)),
         ]:
             if task is not None and not task.done():
@@ -850,6 +889,10 @@ class DeepgramTranscriber(BaseTranscriber):
             try:
                 msg = json.loads(msg)
 
+                # Track liveness off every message (any type), so the stall watchdog also covers
+                # turns that only produced an Update and never a StartOfTurn.
+                self._last_flux_msg_time = time.time()
+
                 if self.connection_start_time is None:
                     self.connection_start_time = time.time() - (self.num_frames * self.audio_frame_duration)
 
@@ -1137,10 +1180,10 @@ class DeepgramTranscriber(BaseTranscriber):
 
                 if self.is_flux_model:
                     self.heartbeat_task = asyncio.create_task(self.send_heartbeat_flux(deepgram_ws))
+                    self.flux_watchdog_task = asyncio.create_task(self.monitor_flux_turn_timeout())
                 else:
                     self.heartbeat_task = asyncio.create_task(self.send_heartbeat(deepgram_ws))
-                    # Flux uses EndOfTurn events as the canonical finalization signal —
-                    # utterance timeout is only needed for Nova where UtteranceEnd can be unreliable.
+                    # Nova relies on UtteranceEnd, which can be unreliable — force-finalize on timeout.
                     self.utterance_timeout_task = asyncio.create_task(self.monitor_utterance_timeout())
 
                 receiver_method = self.receiver_flux if self.is_flux_model else self.receiver
@@ -1199,6 +1242,8 @@ class DeepgramTranscriber(BaseTranscriber):
                 self.heartbeat_task.cancel()
             if hasattr(self, "utterance_timeout_task") and self.utterance_timeout_task is not None:
                 self.utterance_timeout_task.cancel()
+            if hasattr(self, "flux_watchdog_task") and self.flux_watchdog_task is not None:
+                self.flux_watchdog_task.cancel()
 
             # Use Deepgram's actual audio duration for billing
             if self.meta_info is not None and "deepgram_duration" in self.meta_info:

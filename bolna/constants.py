@@ -11,6 +11,10 @@ OPENAI_TRANSCRIBER_UTTERANCE_TIMEOUT_S = 0.5
 DEEPGRAM_FLUX_EOT_THRESHOLD = 0.7  # confidence to declare end-of-turn
 DEEPGRAM_FLUX_EAGER_EOT_THRESHOLD = 0.5  # confidence to trigger speculative LLM early
 DEEPGRAM_FLUX_EOT_TIMEOUT_MS = 500  # max silence before forcing end-of-turn
+# Min time a Flux turn may stay open with no transcriber events before it is force-closed.
+DEEPGRAM_FLUX_TURN_STALL_FLOOR_S = 3.0
+# Min idle time before the inactivity backstop hangs up; kept above hangup_after_silence.
+STALL_HANGUP_FLOOR_S = 20.0
 
 # Model prefixes
 GPT5_MODEL_PREFIX = "gpt-5"

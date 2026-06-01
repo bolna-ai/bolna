@@ -29,6 +29,7 @@ from bolna.constants import (
     END_CALL_FUNCTION_PREFIX,
     END_CALL_TOOL_DEFINITION,
     GPT5_4_MODEL_PREFIX,
+    STALL_HANGUP_FLOOR_S,
 )
 from bolna.helpers.function_calling_helpers import trigger_api, computed_api_response, prepare_api_request
 from bolna.helpers.conversation_history import ConversationHistory
@@ -3854,7 +3855,9 @@ class TaskManager(BaseManager):
                         # *after* our utterance timeout already force-finalized the same text
                         # and started the LLM. Don't treat this late delivery as new user speech
                         # — the LLM is already processing this exact transcript.
-                        if self.response_in_pipeline and self.conversation_history.is_duplicate_user(transcript_content):
+                        if self.response_in_pipeline and self.conversation_history.is_duplicate_user(
+                            transcript_content
+                        ):
                             logger.info(
                                 "Skipping interruption: Deepgram late delivery of already-processing transcript: %s",
                                 transcript_content,
@@ -3941,13 +3944,21 @@ class TaskManager(BaseManager):
                         logger.info(f"EagerEndOfTurn received (confidence={eot_confidence}): {eager_transcript}")
 
                         transcriber = self.tools.get("transcriber")
-                        active_transcriber = transcriber.transcribers.get(transcriber.active_label, transcriber) if hasattr(transcriber, "transcribers") else transcriber
+                        active_transcriber = (
+                            transcriber.transcribers.get(transcriber.active_label, transcriber)
+                            if hasattr(transcriber, "transcribers")
+                            else transcriber
+                        )
                         eager_eot_threshold = getattr(active_transcriber, "eager_eot_threshold", None)
 
                         if not eager_eot_threshold:
-                            logger.info(f"Skipping speculative LLM: EagerEOT disabled (eager_eot_threshold not set or zero)")
+                            logger.info(
+                                f"Skipping speculative LLM: EagerEOT disabled (eager_eot_threshold not set or zero)"
+                            )
                         elif eot_confidence is not None and eot_confidence < eager_eot_threshold:
-                            logger.info(f"Skipping speculative LLM: EagerEOT confidence {eot_confidence} below threshold {eager_eot_threshold}")
+                            logger.info(
+                                f"Skipping speculative LLM: EagerEOT confidence {eot_confidence} below threshold {eager_eot_threshold}"
+                            )
                         elif (
                             eager_transcript
                             and self.tools["input"].welcome_message_played()
@@ -4658,6 +4669,23 @@ class TaskManager(BaseManager):
             logger.info("Silence repeat generation cancelled by interruption")
             return
 
+    def _should_stall_hangup(
+        self, audio_playing, has_pending_generation, time_since_last_spoken_ai_word, time_since_user_last_spoke
+    ):
+        """Hang up when the call has made no forward progress at all: no audio playing, nothing
+        in flight, and both sides silent past the floor. Runs above the audio/pipeline gate so it
+        still applies when a pipeline flag is stuck. Floor stays above hangup_after_silence so the
+        normal inactivity path takes precedence whenever it is reachable."""
+        if self.hang_conversation_after <= 0:
+            return False
+        stall_timeout = max(self.hang_conversation_after, STALL_HANGUP_FLOOR_S)
+        return (
+            not audio_playing
+            and not has_pending_generation
+            and time_since_last_spoken_ai_word > stall_timeout
+            and time_since_user_last_spoke > stall_timeout
+        )
+
     async def __check_for_completion(self):
         logger.info(f"Starting task to check for completion")
         while True:
@@ -4697,9 +4725,6 @@ class TaskManager(BaseManager):
                         )
                 continue
 
-            if self.tools["input"].is_audio_being_played_to_user() or self.response_in_pipeline:
-                continue
-
             # An in-flight LLM task (including a tool-call API request + follow-up generation
             # running inside it) means a response is still being produced even though
             # response_in_pipeline has flipped False after the filler audio. Treat that
@@ -4716,6 +4741,25 @@ class TaskManager(BaseManager):
                 if self.time_since_last_spoken_human_word > 0
                 else float("inf")
             )
+
+            # Must run above the audio/pipeline gate below (see method docstring).
+            if self._should_stall_hangup(
+                audio_playing=self.tools["input"].is_audio_being_played_to_user(),
+                has_pending_generation=has_pending_generation,
+                time_since_last_spoken_ai_word=time_since_last_spoken_ai_word,
+                time_since_user_last_spoke=time_since_user_last_spoke,
+            ):
+                logger.warning(
+                    f"Stall backstop: no forward progress for {time_since_last_spoken_ai_word:.1f}s "
+                    f"(audio_playing=False, no pending generation, response_in_pipeline={self.response_in_pipeline}) "
+                    f"- forcing hangup"
+                )
+                self.hangup_detail = HangupReason.INACTIVITY_TIMEOUT
+                await self.process_call_hangup()
+                break
+
+            if self.tools["input"].is_audio_being_played_to_user() or self.response_in_pipeline:
+                continue
 
             if (
                 self.repeat_after_silence_seconds

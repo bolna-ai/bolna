@@ -237,9 +237,7 @@ class SipTrunkOutputHandler(TelephonyOutputHandler):
         self.mark_event_meta_data.update_data(
             mark_id,
             {
-                "text_synthesized": meta_info.get("text_synthesized", "")
-                if meta_info.get("sequence_id") != -1
-                else "",
+                "text_synthesized": meta_info.get("text_synthesized", "") if meta_info.get("sequence_id") != -1 else "",
                 "type": message_category,
                 "is_first_chunk": meta_info.get("is_first_chunk", False),
                 "is_final_chunk": is_final,
