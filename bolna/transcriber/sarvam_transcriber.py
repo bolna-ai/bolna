@@ -367,6 +367,13 @@ class SarvamTranscriber(BaseTranscriber):
                             transcript_data = {"type": "transcript", "content": transcript.strip()}
                             self.meta_info["transcriber_duration"] = metrics.get("audio_duration", 0)
 
+                            # Accumulate the turn's text so END_SPEECH can record it in
+                            # turn_latencies (observability/eval). Each Sarvam "data" message
+                            # is a finalized segment; join the segments within the turn.
+                            self.final_transcript = " ".join(
+                                filter(None, [self.final_transcript, transcript.strip()])
+                            )
+
                             self.last_vocal_frame_timestamp = now_timestamp
                             self.meta_info["last_vocal_frame_timestamp"] = self.last_vocal_frame_timestamp
 
@@ -385,6 +392,9 @@ class SarvamTranscriber(BaseTranscriber):
                             self.turn_counter += 1
                             self.current_turn_id = f"turn_{self.turn_counter}"
                             self.turn_first_result_latency = None
+                            # Reset the per-turn transcript so the final_transcript recorded
+                            # in turn_latencies (below) only holds this turn's text.
+                            self.final_transcript = ""
                             yield create_ws_data_packet("speech_started", self.meta_info)
 
                         elif vad.get("signal_type") == "END_SPEECH":
@@ -417,11 +427,10 @@ class SarvamTranscriber(BaseTranscriber):
                                 self._turn_start_epoch_ms = None
                                 self.current_turn_id = None
 
-                            if self.final_transcript:
-                                yield create_ws_data_packet(
-                                    {"type": "transcript", "content": self.final_transcript}, self.meta_info
-                                )
-                                self.final_transcript = ""
+                            # NOTE: the finalized transcript is delivered per-segment in the
+                            # "data" branch above (type=="transcript"); we intentionally do NOT
+                            # re-emit self.final_transcript here, which would duplicate the turn
+                            # in history. It is retained only for the turn_latencies record above.
 
                             yield create_ws_data_packet("speech_ended", self.meta_info)
 

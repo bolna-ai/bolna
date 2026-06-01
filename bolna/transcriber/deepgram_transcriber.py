@@ -930,29 +930,20 @@ class DeepgramTranscriber(BaseTranscriber):
                         # StartOfTurn is guaranteed non-empty — use it immediately for barge-in
                         # instead of waiting for the first Update (~0.25s later)
                         if transcript:
-                            self.last_interim_time = time.time()
+                            # Seed current_turn_interim_details so short turns (StartOfTurn → EndOfTurn
+                            # with no Update events) still produce first/last_interim_to_final_ms in
+                            # turn_latencies, which feeds voiceai.transcriber.* DD distributions.
+                            entry = self._build_interim_entry(transcript, words, msg)
+                            self.last_interim_time = entry["received_at"]
+                            self.current_turn_interim_details.append(entry)
                             data = {"type": "interim_transcript_received", "content": transcript}
                             yield create_ws_data_packet(data, self.meta_info)
 
                     elif event == "Update":
                         if transcript:
-                            self.last_interim_time = time.time()
-                            latency_ms = None
-                            if words and len(words) > 0:
-                                audio_window_end = msg.get("audio_window_end", 0)
-                                audio_sent_at = self._find_audio_send_timestamp(audio_window_end)
-                                if audio_sent_at:
-                                    result_received_at = timestamp_ms()
-                                    latency_ms = round(result_received_at - audio_sent_at, 5)
-
-                            self.current_turn_interim_details.append(
-                                {
-                                    "transcript": transcript,
-                                    "latency_ms": latency_ms,
-                                    "is_final": False,
-                                    "received_at": time.time(),
-                                }
-                            )
+                            entry = self._build_interim_entry(transcript, words, msg)
+                            self.last_interim_time = entry["received_at"]
+                            self.current_turn_interim_details.append(entry)
 
                             if languages:
                                 logger.info(f"Flux LID Update: languages={languages} hinted={languages_hinted}")
@@ -1031,7 +1022,7 @@ class DeepgramTranscriber(BaseTranscriber):
                                         "first_interim_to_final_ms": first_interim_to_final_ms,
                                         "last_interim_to_final_ms": last_interim_to_final_ms,
                                         "asr_start_epoch_ms": self.speech_start_time,
-                                        "asr_turn_start_epoch_ms": self._turn_first_speech_epoch_ms,
+                                        "asr_turn_start_epoch_ms": self.speech_start_time,
                                         "asr_finalized_epoch_ms": timestamp_ms(),
                                         "final_transcript": transcript,
                                     }
@@ -1137,6 +1128,15 @@ class DeepgramTranscriber(BaseTranscriber):
         else:
             logger.warning(f"Missing start or duration in Deepgram message, cannot update transcription cursor")
         return self.transcription_cursor
+
+    def _build_interim_entry(self, transcript, words, msg):
+        now = time.time()
+        latency_ms = None
+        if words:
+            audio_sent_at = self._find_audio_send_timestamp(msg.get("audio_window_end", 0))
+            if audio_sent_at:
+                latency_ms = round(now * 1000 - audio_sent_at, 5)
+        return {"transcript": transcript, "latency_ms": latency_ms, "is_final": False, "received_at": now}
 
     def _find_audio_send_timestamp(self, audio_position):
         """
