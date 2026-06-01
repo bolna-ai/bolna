@@ -3855,7 +3855,9 @@ class TaskManager(BaseManager):
                         # *after* our utterance timeout already force-finalized the same text
                         # and started the LLM. Don't treat this late delivery as new user speech
                         # — the LLM is already processing this exact transcript.
-                        if self.response_in_pipeline and self.conversation_history.is_duplicate_user(transcript_content):
+                        if self.response_in_pipeline and self.conversation_history.is_duplicate_user(
+                            transcript_content
+                        ):
                             logger.info(
                                 "Skipping interruption: Deepgram late delivery of already-processing transcript: %s",
                                 transcript_content,
@@ -3942,13 +3944,21 @@ class TaskManager(BaseManager):
                         logger.info(f"EagerEndOfTurn received (confidence={eot_confidence}): {eager_transcript}")
 
                         transcriber = self.tools.get("transcriber")
-                        active_transcriber = transcriber.transcribers.get(transcriber.active_label, transcriber) if hasattr(transcriber, "transcribers") else transcriber
+                        active_transcriber = (
+                            transcriber.transcribers.get(transcriber.active_label, transcriber)
+                            if hasattr(transcriber, "transcribers")
+                            else transcriber
+                        )
                         eager_eot_threshold = getattr(active_transcriber, "eager_eot_threshold", None)
 
                         if not eager_eot_threshold:
-                            logger.info(f"Skipping speculative LLM: EagerEOT disabled (eager_eot_threshold not set or zero)")
+                            logger.info(
+                                f"Skipping speculative LLM: EagerEOT disabled (eager_eot_threshold not set or zero)"
+                            )
                         elif eot_confidence is not None and eot_confidence < eager_eot_threshold:
-                            logger.info(f"Skipping speculative LLM: EagerEOT confidence {eot_confidence} below threshold {eager_eot_threshold}")
+                            logger.info(
+                                f"Skipping speculative LLM: EagerEOT confidence {eot_confidence} below threshold {eager_eot_threshold}"
+                            )
                         elif (
                             eager_transcript
                             and self.tools["input"].welcome_message_played()

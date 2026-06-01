@@ -62,7 +62,9 @@ def test_floor_applies_when_hangup_after_silence_small():
     # normal inactivity path wins whenever it is reachable).
     short = STALL_HANGUP_FLOOR_S - 5
     assert short > 0
-    assert _decide(5, audio_playing=False, has_pending_generation=False, ai_silent_s=short, user_silent_s=short) is False
+    assert (
+        _decide(5, audio_playing=False, has_pending_generation=False, ai_silent_s=short, user_silent_s=short) is False
+    )
     # Past the floor it does fire.
     assert _decide(5, audio_playing=False, has_pending_generation=False, ai_silent_s=AGED, user_silent_s=AGED) is True
 
