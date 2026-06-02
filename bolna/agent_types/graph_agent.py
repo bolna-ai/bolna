@@ -81,6 +81,7 @@ class GraphAgent(BaseAgent):
         self.routing_instructions = self.config.get("routing_instructions")  # Custom routing instructions
         self.routing_reasoning_effort = self.config.get("routing_reasoning_effort")
         self.routing_max_tokens = self.config.get("routing_max_tokens")
+        self.service_tier = self.config.get("service_tier")
         logger.info(
             f"GraphAgent routing_instructions loaded: {bool(self.routing_instructions)} (length: {len(self.routing_instructions) if self.routing_instructions else 0})"
         )
@@ -520,6 +521,10 @@ class GraphAgent(BaseAgent):
                 routing_kwargs["max_tokens"] = self.routing_max_tokens or 250
                 routing_kwargs["temperature"] = 0.0
 
+            # Groq uses a different service_tier vocabulary, so only forward it to OpenAI routing
+            if self.routing_provider == "openai" and self.service_tier:
+                routing_kwargs["service_tier"] = self.service_tier
+
             response = await asyncio.to_thread(self.routing_client.chat.completions.create, **routing_kwargs)
             latency_ms = (time.perf_counter() - start_time) * 1000
 
@@ -535,6 +540,7 @@ class GraphAgent(BaseAgent):
                     "cached_tokens": response.usage.prompt_tokens_details.cached_tokens
                     if response.usage.prompt_tokens_details
                     else None,
+                    "service_tier": getattr(response, "service_tier", None),
                 }
 
             # Extract the function call
