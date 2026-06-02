@@ -2,6 +2,7 @@ import asyncio
 import json
 
 import aiohttp
+import yarl
 from bolna.helpers.logger_config import configure_logger
 from bolna.enums import LogComponent, LogDirection
 from bolna.helpers.utils import convert_to_request_log, format_error_message
@@ -128,8 +129,18 @@ async def trigger_api(
         )
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
             if method.lower() == "get":
-                logger.info(f"Sending request {request_body}, {url}, {headers}")
-                async with session.get(url, params=api_params, headers=headers) as response:
+                # GET params may be embedded in the URL query as %(name)s placeholders; substitute
+                # them in place (targeted replace keeps literal %XX intact) and append only params
+                # not already present, so aiohttp doesn't create duplicate query keys.
+                for k, v in kwargs.items():
+                    if v is not None:
+                        url = url.replace(f"%({k})s", str(v))
+                target = yarl.URL(url, encoded=True)
+                extra = {k: v for k, v in (api_params or {}).items() if k not in target.query}
+                if extra:
+                    target = target.update_query(extra)
+                logger.info(f"Sending request {request_body}, {target}, {headers}")
+                async with session.get(target, headers=headers) as response:
                     response_text = await response.text()
             elif method.lower() == "post":
                 logger.info(f"Sending request {api_params}, {url}, {headers}")
