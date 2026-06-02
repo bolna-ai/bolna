@@ -115,6 +115,7 @@ def _make_task_manager():
     }
     tm.__process_output_loop = AsyncMock()
 
+    tm.sync_history = AsyncMock()
     tm._set_interruption_hint = TaskManager._set_interruption_hint.__get__(tm, TaskManager)
     tm._cancel_in_flight_llm_response = TaskManager._cancel_in_flight_llm_response.__get__(tm, TaskManager)
     tm._invalidate_response_chain = TaskManager._invalidate_response_chain.__get__(tm, TaskManager)
