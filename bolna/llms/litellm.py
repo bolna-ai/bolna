@@ -115,7 +115,7 @@ class LiteLLM(BaseLLM):
             logger.error(f"LiteLLM rate limit exceeded: {e}")
             raise
         except APIConnectionError as e:
-            logger.error(f"LiteLLM connection error: {e}")
+            logger.error(f"LiteLLM connection error: {e} | cause: {e.__cause__!r}")
             raise
         except APIError as e:
             logger.error(f"LiteLLM API error: {e}")
@@ -221,7 +221,7 @@ class LiteLLM(BaseLLM):
             logger.error(f"LiteLLM rate limit exceeded: {e}")
             raise
         except APIConnectionError as e:
-            logger.error(f"LiteLLM connection error: {e}")
+            logger.error(f"LiteLLM connection error: {e} | cause: {e.__cause__!r}")
             raise
         except APIError as e:
             logger.error(f"LiteLLM API error: {e}")

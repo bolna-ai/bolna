@@ -164,7 +164,7 @@ class AzureLLM(OpenAICompatibleLLM):
             logger.error(f"Azure OpenAI rate limit exceeded: {e}")
             raise
         except APIConnectionError as e:
-            logger.error(f"Azure OpenAI connection error: {e}")
+            logger.error(f"Azure OpenAI connection error: {e} | cause: {e.__cause__!r}")
             raise
         except APIError as e:
             logger.error(f"Azure OpenAI API error: {e}")
@@ -354,7 +354,7 @@ class AzureLLM(OpenAICompatibleLLM):
             logger.error(f"Azure OpenAI rate limit exceeded: {e}")
             raise
         except APIConnectionError as e:
-            logger.error(f"Azure OpenAI connection error: {e}")
+            logger.error(f"Azure OpenAI connection error: {e} | cause: {e.__cause__!r}")
             raise
         except APIError as e:
             logger.error(f"Azure OpenAI API error: {e}")
