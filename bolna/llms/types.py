@@ -19,6 +19,8 @@ class LatencyData(BaseModel):
     connection_latency_ms: Optional[float] = None
     service_tier: Optional[str] = None
     llm_host: Optional[str] = None
+    reasoning_effort: Optional[str] = None
+    verbosity: Optional[str] = None
 
 
 class FunctionCallPayload(BaseModel):

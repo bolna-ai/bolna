@@ -525,6 +525,8 @@ class GraphAgent(BaseAgent):
             if self.routing_provider == "openai" and self.service_tier:
                 routing_kwargs["service_tier"] = self.service_tier
 
+            self._routing_reasoning_effort_used = routing_kwargs.get("reasoning_effort")
+
             response = await asyncio.to_thread(self.routing_client.chat.completions.create, **routing_kwargs)
             latency_ms = (time.perf_counter() - start_time) * 1000
 
@@ -885,6 +887,7 @@ class GraphAgent(BaseAgent):
                     "routing_model": self.routing_model,
                     "routing_provider": getattr(self, "routing_provider", None),
                     "routing_latency_ms": round(routing_latency_ms, 1),
+                    "routing_reasoning_effort": getattr(self, "_routing_reasoning_effort_used", None),
                     "extracted_params": extracted_params or {},
                     "node_history": list(self.node_history),
                     "routing_messages": routing_messages,
