@@ -275,7 +275,7 @@ class OpenAiLLM(OpenAICompatibleLLM):
             logger.error(f"OpenAI rate limit exceeded: {e}")
             raise
         except APIConnectionError as e:
-            logger.error(f"OpenAI connection error: {e}")
+            logger.error(f"OpenAI connection error: {e} | cause: {e.__cause__!r}")
             raise
         except APIError as e:
             logger.error(f"OpenAI API error: {e}")
@@ -475,7 +475,7 @@ class OpenAiLLM(OpenAICompatibleLLM):
             logger.error(f"OpenAI rate limit exceeded: {e}")
             raise
         except APIConnectionError as e:
-            logger.error(f"OpenAI connection error: {e}")
+            logger.error(f"OpenAI connection error: {e} | cause: {e.__cause__!r}")
             raise
         except APIError as e:
             logger.error(f"OpenAI API error: {e}")
