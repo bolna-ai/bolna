@@ -3089,6 +3089,7 @@ class TaskManager(BaseManager):
                                 "output_tokens": routing_usage.get("output_tokens"),
                                 "reasoning_tokens": routing_usage.get("reasoning_tokens"),
                                 "cached_tokens": routing_usage.get("cached_tokens"),
+                                "service_tier": routing_usage.get("service_tier"),
                             }
                         )
 
