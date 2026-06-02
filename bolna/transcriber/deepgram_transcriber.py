@@ -1014,8 +1014,7 @@ class DeepgramTranscriber(BaseTranscriber):
                                 # Mark the last interim as final — equivalent to nova's is_final=True
                                 # on the last Results message. The dashboard FINAL column queries
                                 # voiceai.transcriber.interim_latency_ms{is_final:true}.
-                                if self.current_turn_interim_details:
-                                    self.current_turn_interim_details[-1]["is_final"] = True
+                                self.current_turn_interim_details[-1]["is_final"] = True
                                 first_interim_to_final_ms, last_interim_to_final_ms = (
                                     self.calculate_interim_to_final_latencies(self.current_turn_interim_details)
                                 )
@@ -1051,6 +1050,10 @@ class DeepgramTranscriber(BaseTranscriber):
                                     f"Flux: EndOfTurn suppressed — transcript already sent for processing "
                                     f"(turn_id={self.current_turn_id}, transcript={transcript!r})"
                                 )
+                                # Eager path already fired — still mark is_final so the DD FINAL metric
+                                # counts this turn.
+                                if self.current_turn_interim_details:
+                                    self.current_turn_interim_details[-1]["is_final"] = True
                             else:
                                 logger.warning("Flux: EndOfTurn received with empty transcript")
                             if self.eager_transcript_pending is not None:
