@@ -1011,6 +1011,11 @@ class DeepgramTranscriber(BaseTranscriber):
 
                         if transcript and not self.is_transcript_sent_for_processing:
                             try:
+                                # Mark the last interim as final — equivalent to nova's is_final=True
+                                # on the last Results message. The dashboard FINAL column queries
+                                # voiceai.transcriber.interim_latency_ms{is_final:true}.
+                                if self.current_turn_interim_details:
+                                    self.current_turn_interim_details[-1]["is_final"] = True
                                 first_interim_to_final_ms, last_interim_to_final_ms = (
                                     self.calculate_interim_to_final_latencies(self.current_turn_interim_details)
                                 )
