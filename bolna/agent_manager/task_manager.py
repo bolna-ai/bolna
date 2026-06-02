@@ -3079,6 +3079,7 @@ class TaskManager(BaseManager):
                                 "routing_end_ms": round(time.time() * 1000 - self.conversation_start_init_ts, 2),
                                 "routing_model": routing_info.get("routing_model"),
                                 "routing_provider": routing_info.get("routing_provider"),
+                                "routing_reasoning_effort": routing_info.get("routing_reasoning_effort"),
                                 "previous_node": routing_info.get("previous_node"),
                                 "current_node": routing_info.get("current_node"),
                                 "transitioned": routing_info.get("transitioned", False),

@@ -458,6 +458,8 @@ class OpenAICompatibleLLM(BaseLLM):
                     total_stream_duration_ms=None,
                     service_tier=service_tier,
                     llm_host=llm_host,
+                    reasoning_effort=self.model_args.get("reasoning_effort"),
+                    verbosity=self.model_args.get("verbosity"),
                 )
 
             if event.type == ResponseStreamEvent.OUTPUT_TEXT_DELTA:
