@@ -122,7 +122,6 @@ class AzureLLM(OpenAICompatibleLLM):
             "messages": messages,
             "stream": True,
             "stream_options": {"include_usage": True},
-            "user": f"{self.run_id}#{meta_info.get('turn_id', '')}" if meta_info else self.run_id,
         }
 
         if not self.model.startswith(GPT5_MODEL_PREFIX):

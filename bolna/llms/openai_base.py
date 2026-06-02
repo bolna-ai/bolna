@@ -171,6 +171,7 @@ class OpenAICompatibleLLM(BaseLLM):
         self.previous_response_id = None
         self._pending_call_ids: set[str] = set()
         self.compact_threshold = compact_threshold
+        self._interruption_hint: Optional[str] = None
 
     @property
     def _responses_client(self):
@@ -184,13 +185,14 @@ class OpenAICompatibleLLM(BaseLLM):
     def _build_responses_input(self, messages):
         """Build (instructions, input_items) for Responses API.
 
-        When previous_response_id is set, only sends new items since last
-        server response. Otherwise sends the full conversation.
-
-        Tool call guard: if the previous response made function calls whose
-        outputs are not yet in the history, fall back to full context to
-        avoid 400 errors from the server.
+        With previous_response_id set, only sends items after the last
+        assistant. Falls back to full history when pending tool outputs are
+        missing. Any pending interruption hint is consumed exactly once and
+        only prepended on the chain-alive happy path.
         """
+        hint = self._interruption_hint
+        self._interruption_hint = None
+
         if self.previous_response_id:
             if self._pending_call_ids:
                 completed = {m.get("tool_call_id") for m in messages if m.get("role") == ChatRole.TOOL}
@@ -198,21 +200,29 @@ class OpenAICompatibleLLM(BaseLLM):
                     logger.info("Pending tool call outputs missing, sending full context")
                     self.previous_response_id = None
                     return MessageFormatAdapter.chat_to_responses_input(messages)
-            return self._extract_new_input(messages)
+            instructions, input_items = self._extract_new_input(messages)
+            if hint is not None:
+                input_items = [self._build_interruption_hint_item(hint), *input_items]
+            return instructions, input_items
         return MessageFormatAdapter.chat_to_responses_input(messages)
 
+    @staticmethod
+    def _build_interruption_hint_item(heard_text: str) -> dict:
+        heard = (heard_text or "").strip()
+        return {
+            "type": ResponseItemType.MESSAGE,
+            "role": "developer",
+            "content": (
+                f'[Your previous response was interrupted. The user only heard: "{heard}". Adapt accordingly.]'
+            ),
+        }
+
+    def set_interruption_hint(self, heard_text: Optional[str]) -> None:
+        """Record what the user heard before barge-in. Consumed on next build."""
+        self._interruption_hint = "" if heard_text is None else heard_text
+
     def _extract_new_input(self, messages):
-        """Extract only new items since last server response.
-
-        The server already has all context up to its last output. We only
-        need to send:
-        - New user messages (after the last assistant message)
-        - Function call outputs (tool results)
-        """
-        instructions = ""
-        if messages and messages[0].get("role") == ChatRole.SYSTEM:
-            instructions = messages[0].get("content", "")
-
+        """Send only items after the last assistant; prior context (including system) lives on the chain."""
         last_assistant_idx = -1
         for i in range(len(messages) - 1, -1, -1):
             if messages[i].get("role") == ChatRole.ASSISTANT:
@@ -221,11 +231,11 @@ class OpenAICompatibleLLM(BaseLLM):
 
         if last_assistant_idx < 0:
             _, input_items = MessageFormatAdapter.chat_to_responses_input(messages)
-            return instructions, input_items
+            return "", input_items
 
         new_messages = messages[last_assistant_idx + 1 :]
         _, input_items = MessageFormatAdapter.chat_to_responses_input(new_messages)
-        return instructions, input_items
+        return "", input_items
 
     @staticmethod
     def _is_stale_response_error(error):
@@ -248,6 +258,7 @@ class OpenAICompatibleLLM(BaseLLM):
     def invalidate_response_chain(self):
         self.previous_response_id = None
         self._pending_call_ids = set()
+        self._interruption_hint = None
 
     def _build_function_call_chunk(
         self,
@@ -328,18 +339,16 @@ class OpenAICompatibleLLM(BaseLLM):
         self, messages, meta_info, request_json, tool_choice, *, store=True, stream=None
     ):
         """Build create kwargs common to both HTTP SSE and WebSocket streaming paths."""
-        instructions, input_items = self._build_responses_input(messages)
+        _, input_items = self._build_responses_input(messages)
         responses_tools = MessageFormatAdapter.chat_tools_to_responses_tools(self._parse_tools())
 
         create_kwargs = {
             "model": self.model,
-            "instructions": instructions or None,
             "input": input_items,
             "store": store,
             "truncation": "auto",
             "max_output_tokens": self.max_tokens,
             "temperature": self.temperature,
-            "user": f"{self.run_id}#{meta_info['turn_id']}" if meta_info else None,
         }
 
         if stream is not None:
@@ -363,6 +372,8 @@ class OpenAICompatibleLLM(BaseLLM):
             verbosity = self.model_args.get("verbosity")
             if verbosity:
                 create_kwargs.setdefault("text", {})["verbosity"] = verbosity
+            # Preserves reasoning across full-history fallbacks; no-op when chain is alive.
+            create_kwargs["include"] = ["reasoning.encrypted_content"]
 
         if self.previous_response_id:
             create_kwargs["previous_response_id"] = self.previous_response_id
@@ -567,11 +578,10 @@ class OpenAICompatibleLLM(BaseLLM):
         self.started_streaming = False
 
     async def _generate_responses(self, messages, request_json=False, ret_metadata=False, meta_info=None):
-        instructions, input_items = self._build_responses_input(messages)
+        _, input_items = self._build_responses_input(messages)
 
         create_kwargs = {
             "model": self.model,
-            "instructions": instructions or None,
             "input": input_items,
             "store": True,
             "truncation": "auto",
@@ -597,6 +607,7 @@ class OpenAICompatibleLLM(BaseLLM):
             verbosity = self.model_args.get("verbosity")
             if verbosity:
                 create_kwargs.setdefault("text", {})["verbosity"] = verbosity
+            create_kwargs["include"] = ["reasoning.encrypted_content"]
 
         if self.previous_response_id:
             create_kwargs["previous_response_id"] = self.previous_response_id
