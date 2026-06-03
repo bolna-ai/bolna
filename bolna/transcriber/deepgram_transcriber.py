@@ -1152,9 +1152,14 @@ class DeepgramTranscriber(BaseTranscriber):
 
     def _mark_last_interim_final(self, latency_ms=None):
         """Mark the last interim entry as final and optionally update its latency.
+        Clears prior is_final flags first — prevents double-counting on the
+        EagerEndOfTurn → TurnResumed → Updates → EndOfTurn path where an earlier
+        entry was already marked final by the eager handler.
         Called at every turn-finalization path so the DD FINAL metric fires consistently."""
         if not self.current_turn_interim_details:
             return
+        for entry in self.current_turn_interim_details:
+            entry["is_final"] = False
         last = self.current_turn_interim_details[-1]
         last["is_final"] = True
         if latency_ms is not None:
