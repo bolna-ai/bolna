@@ -2,10 +2,12 @@
 Asterisk WebSocket (chan_websocket) output handler for sip-trunk provider.
 
 Sends audio to Asterisk in bursts as it arrives from TTS (like Plivo/Twilio).
-START_MEDIA_BUFFERING once per call lets Asterisk reframe and retime for smooth
-RTP delivery. Server-side duration tracking knows when playback ends without
-relying on QUEUE_DRAINED. FLUSH_MEDIA on interrupt. Generation counter drops
-stale audio after interruption.
+Each response is bracketed START_MEDIA_BUFFERING … STOP_MEDIA_BUFFERING: START
+lets Asterisk reframe/retime for smooth RTP, STOP flushes the buffer to RTP so
+even a short isolated response (e.g. the welcome message) plays immediately
+instead of waiting for later audio. Server-side duration tracking knows when
+playback ends without relying on QUEUE_DRAINED. FLUSH_MEDIA on interrupt.
+Generation counter drops stale audio after interruption.
 
 Asterisk has no mark echo, so playback completion is duration-based: a finish
 timer is scheduled on the final chunk (first_send + total_audio_duration + settle).
@@ -323,6 +325,7 @@ class SipTrunkOutputHandler(TelephonyOutputHandler):
 
             if not self._local_audio_queue and self._pending_finish:
                 self._pending_finish = False
+                await self._flush_buffer(gen)
                 self._schedule_finish(self._flush_generation)
 
     # ------------------------------------------------------------------
@@ -343,6 +346,14 @@ class SipTrunkOutputHandler(TelephonyOutputHandler):
 
     async def flush_media(self):
         await self._send_control("FLUSH_MEDIA")
+
+    async def _flush_buffer(self, generation: int):
+        """Flush Asterisk's media buffer to RTP at the end of a response and re-arm START
+        for the next one. No id (avoids the asterisk#1384 hangup crash); skipped on a stale
+        generation so an interrupted response isn't replayed after FLUSH_MEDIA."""
+        if generation == self._flush_generation and self._start_buffering_sent:
+            await self._send_control("STOP_MEDIA_BUFFERING")
+            self._start_buffering_sent = False
 
     # sip-trunk sends audio as raw binary frames and acks marks via duration tracking,
     # so the JSON media/mark framing used by Twilio/Plivo is intentionally unused here.
@@ -403,7 +414,7 @@ class SipTrunkOutputHandler(TelephonyOutputHandler):
                     self._current_sequence_id = seq_id
                     self._reset_response_counters()
 
-                # Send START_MEDIA_BUFFERING once per call (or after FLUSH_MEDIA reset)
+                # Send START_MEDIA_BUFFERING once per response (re-armed after each STOP / FLUSH_MEDIA)
                 if not self._start_buffering_sent:
                     await self._send_control("START_MEDIA_BUFFERING")
                     self._start_buffering_sent = True
@@ -442,6 +453,7 @@ class SipTrunkOutputHandler(TelephonyOutputHandler):
                         logger.debug("sip-trunk: final chunk, XOFF audio pending; deferring finish")
                     else:
                         self._pending_finish = False
+                        await self._flush_buffer(gen)
                         self._schedule_finish(gen)
 
         except Exception as e:
