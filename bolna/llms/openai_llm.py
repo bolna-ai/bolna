@@ -170,7 +170,8 @@ class OpenAiLLM(OpenAICompatibleLLM):
 
         self.model_args["service_tier"] = kwargs.get("service_tier", "default")
 
-        http_client = get_shared_http_client(base_url=kwargs.get("base_url"), http2=True)
+        # http2=False: cancelled h2 requests leak streams until the connection pins at 100 (barge-in)
+        http_client = get_shared_http_client(base_url=kwargs.get("base_url"), http2=False)
 
         if kwargs.get("provider", "openai") == "custom":
             base_url = kwargs.get("base_url")
