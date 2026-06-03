@@ -362,6 +362,8 @@ class DeepgramTranscriber(BaseTranscriber):
 
         # Build turn latencies (same as UtteranceEnd logic)
         try:
+            self._mark_last_interim_final()
+
             first_interim_to_final_ms, last_interim_to_final_ms = self.calculate_interim_to_final_latencies(
                 self.current_turn_interim_details
             )
@@ -906,6 +908,7 @@ class DeepgramTranscriber(BaseTranscriber):
                     turn_index = msg.get("turn_index")
                     eot_confidence = msg.get("end_of_turn_confidence")
                     words = msg.get("words", [])
+                    audio_window_end = msg.get("audio_window_end")
                     # flux-general-multi: languages detected this turn, sorted by word count
                     languages = msg.get("languages")
                     languages_hinted = msg.get("languages_hinted")
@@ -981,6 +984,13 @@ class DeepgramTranscriber(BaseTranscriber):
                             self.eager_transcript_pending = transcript
                             self.last_interim_time = time.time()
 
+                            eager_latency_ms = None
+                            if words and audio_window_end:
+                                audio_sent_at = self._find_audio_send_timestamp(audio_window_end)
+                                if audio_sent_at:
+                                    eager_latency_ms = round(timestamp_ms() - audio_sent_at, 5)
+                            self._mark_last_interim_final(latency_ms=eager_latency_ms)
+
                             data = {"type": "eager_end_of_turn", "content": transcript, "confidence": eot_confidence}
                             yield create_ws_data_packet(data, self.meta_info)
                         else:
@@ -1011,10 +1021,12 @@ class DeepgramTranscriber(BaseTranscriber):
 
                         if transcript and not self.is_transcript_sent_for_processing:
                             try:
-                                # Mark the last interim as final — equivalent to nova's is_final=True
-                                # on the last Results message. The dashboard FINAL column queries
-                                # voiceai.transcriber.interim_latency_ms{is_final:true}.
-                                self.current_turn_interim_details[-1]["is_final"] = True
+                                if not self.current_turn_interim_details:
+                                    logger.warning(
+                                        "Flux: EndOfTurn has transcript but no interim_details to mark final "
+                                        "(turn_id=%s, transcript=%r)", self.current_turn_id, transcript
+                                    )
+                                self._mark_last_interim_final()
                                 first_interim_to_final_ms, last_interim_to_final_ms = (
                                     self.calculate_interim_to_final_latencies(self.current_turn_interim_details)
                                 )
@@ -1052,8 +1064,7 @@ class DeepgramTranscriber(BaseTranscriber):
                                 )
                                 # Eager path already fired — still mark is_final so the DD FINAL metric
                                 # counts this turn.
-                                if self.current_turn_interim_details:
-                                    self.current_turn_interim_details[-1]["is_final"] = True
+                                self._mark_last_interim_final()
                             else:
                                 logger.warning("Flux: EndOfTurn received with empty transcript")
                             if self.eager_transcript_pending is not None:
@@ -1136,6 +1147,16 @@ class DeepgramTranscriber(BaseTranscriber):
         else:
             logger.warning(f"Missing start or duration in Deepgram message, cannot update transcription cursor")
         return self.transcription_cursor
+
+    def _mark_last_interim_final(self, latency_ms=None):
+        """Mark the last interim entry as final and optionally update its latency.
+        Called at every turn-finalization path so the DD FINAL metric fires consistently."""
+        if not self.current_turn_interim_details:
+            return
+        last = self.current_turn_interim_details[-1]
+        last["is_final"] = True
+        if latency_ms is not None:
+            last["latency_ms"] = latency_ms
 
     def _build_interim_entry(self, transcript, words, msg):
         now = time.time()
