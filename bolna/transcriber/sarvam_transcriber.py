@@ -347,6 +347,13 @@ class SarvamTranscriber(BaseTranscriber):
                         if sarvam_request_id:
                             logger.info(f"Sarvam request_id: {sarvam_request_id}")
 
+                        # In auto-detect mode saaras returns the detected language per segment;
+                        # surface it so TTS can follow. Scoped to "unknown" to leave fixed-language agents alone.
+                        if self.language == "unknown":
+                            detected_language = payload.get("language_code")
+                            if detected_language and detected_language != "unknown":
+                                self.meta_info["detected_language_code"] = detected_language
+
                         if transcript and transcript.strip():
                             logger.debug(f"Sarvam transcript received: {transcript.strip()[:50]}...")
                             now_timestamp = time.time()
