@@ -1024,7 +1024,9 @@ class DeepgramTranscriber(BaseTranscriber):
                                 if not self.current_turn_interim_details:
                                     logger.warning(
                                         "Flux: EndOfTurn has transcript but no interim_details to mark final "
-                                        "(turn_id=%s, transcript=%r)", self.current_turn_id, transcript
+                                        "(turn_id=%s, transcript=%r)",
+                                        self.current_turn_id,
+                                        transcript,
                                     )
                                 self._mark_last_interim_final()
                                 first_interim_to_final_ms, last_interim_to_final_ms = (

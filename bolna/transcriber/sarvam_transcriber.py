@@ -370,9 +370,7 @@ class SarvamTranscriber(BaseTranscriber):
                             # Accumulate the turn's text so END_SPEECH can record it in
                             # turn_latencies (observability/eval). Each Sarvam "data" message
                             # is a finalized segment; join the segments within the turn.
-                            self.final_transcript = " ".join(
-                                filter(None, [self.final_transcript, transcript.strip()])
-                            )
+                            self.final_transcript = " ".join(filter(None, [self.final_transcript, transcript.strip()]))
 
                             self.last_vocal_frame_timestamp = now_timestamp
                             self.meta_info["last_vocal_frame_timestamp"] = self.last_vocal_frame_timestamp
