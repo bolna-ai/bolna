@@ -15,9 +15,9 @@ class LIDProvider:
     }
 
     @classmethod
-    def create(cls, provider, on_language, config, on_turn=None):
+    def create(cls, provider, on_language, config):
         klass = cls._PROVIDERS.get(provider.lower())
         if klass is None:
             logger.warning(f"LIDProvider: unknown provider '{provider}', falling back to sarvam")
             klass = SarvamLID
-        return klass(on_language=on_language, config=config, on_turn=on_turn)
+        return klass(on_language=on_language, config=config)

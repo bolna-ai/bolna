@@ -32,8 +32,8 @@ class SarvamLID(LIDBackend):
 
     _WS_BASE = "wss://{host}/speech-to-text/ws"
 
-    def __init__(self, on_language, config, on_turn=None):
-        super().__init__(on_language, config, on_turn)
+    def __init__(self, on_language, config):
+        super().__init__(on_language, config)
         self._api_key = config.get("sarvam_api_key") or os.getenv("SARVAM_API_KEY", "")
         self._host = config.get("sarvam_host") or os.getenv("SARVAM_HOST", "api.sarvam.ai")
         self._telephony = config.get("telephony_provider", "")
@@ -46,6 +46,30 @@ class SarvamLID(LIDBackend):
         self._receiver_task = None
         self._dead = False
         self._resample_state = None
+        # Rolling buffer of unbiased recognition for the current conversational turn.
+        # saaras emits one "data" message per VAD segment (several per turn), so we
+        # accumulate here and let the caller drain it once per turn via
+        # take_turn_transcript() — aligned to the main transcriber's turn boundary.
+        self._buffer_text = ""
+        self._buffer_lang = None
+
+    def _accumulate(self, transcript, lang):
+        """Append a recognized segment to the current-turn buffer."""
+        if transcript:
+            self._buffer_text = " ".join(filter(None, [self._buffer_text, transcript]))
+            if lang:
+                self._buffer_lang = lang
+
+    def take_turn_transcript(self):
+        """Return (transcript, detected_lang) accumulated so far and clear the buffer.
+
+        Called once per conversational turn by TranscriberPool/TaskManager.
+        """
+        text = self._buffer_text.strip()
+        lang = self._buffer_lang
+        self._buffer_text = ""
+        self._buffer_lang = None
+        return text, lang
 
     def _build_url(self) -> str:
         params = {
@@ -53,9 +77,8 @@ class SarvamLID(LIDBackend):
             "mode": "transcribe",
             "language-code": "unknown",
             "high_vad_sensitivity": "true",
-            # Matches the working sarvam_transcriber config. VAD events are
-            # observability-only here; on_turn fires from the "data" (transcript)
-            # message, which is saaras:v3's finalized-transcript channel.
+            # Matches the working sarvam_transcriber config. We read transcripts from
+            # the "data" messages and buffer them; VAD events are not relied upon.
             "vad_signals": "true",
         }
         qs = "&".join(f"{k}={v}" for k, v in params.items())
@@ -136,13 +159,10 @@ class SarvamLID(LIDBackend):
 
                         short = lang.split("-")[0].lower() if lang and lang != "unknown" else None
 
-                        # Each saaras:v3 "data" message is a finalized utterance segment —
-                        # this is the transcript-delivery channel (mirrors how
-                        # sarvam_transcriber yields type=="transcript" from this branch).
-                        # VAD END_SPEECH events are observability-only and not relied upon.
-                        if transcript and self.on_turn is not None:
-                            logger.info(f"SarvamLID turn: transcript={transcript[:80]!r} detected_lang={short!r}")
-                            asyncio.create_task(self.on_turn(transcript, short))
+                        # saaras emits one "data" message per VAD segment (multiple per
+                        # spoken turn). Accumulate into the rolling buffer; the caller
+                        # drains it once per conversational turn via take_turn_transcript().
+                        self._accumulate(transcript, short)
 
                         # Legacy per-segment language signal (kept for backends/telemetry
                         # that still consume on_language). Skipped when no confidence.

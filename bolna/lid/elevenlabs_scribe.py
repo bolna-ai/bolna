@@ -30,8 +30,8 @@ class ElevenLabsScribeLID(LIDBackend):
 
     _WS_PATH = "/v1/speech-to-text/realtime"
 
-    def __init__(self, on_language, config, on_turn=None):
-        super().__init__(on_language, config, on_turn)
+    def __init__(self, on_language, config):
+        super().__init__(on_language, config)
         self.api_key = config.get("elevenlabs_api_key") or os.getenv("ELEVENLABS_API_KEY", "")
         self.telephony = config.get("telephony_provider", "")
         self.sr = int(config.get("sampling_rate", 16000))
