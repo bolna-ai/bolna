@@ -25,9 +25,7 @@ def _make_switcher(generate_return, labels=("en", "hi")):
 
 @pytest.mark.asyncio
 async def test_decide_returns_target_when_llm_picks_supported_language():
-    switcher, fake_llm = _make_switcher(
-        json.dumps({"target_language": "hi", "reasoning": "caller spoke Hindi"})
-    )
+    switcher, fake_llm = _make_switcher(json.dumps({"target_language": "hi", "reasoning": "caller spoke Hindi"}))
     result = await switcher.decide("aap kaise hain", active_label="en")
     assert result == {"target_language": "hi", "reasoning": "caller spoke Hindi"}
     fake_llm.generate.assert_awaited_once()

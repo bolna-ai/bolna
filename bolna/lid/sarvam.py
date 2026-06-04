@@ -46,15 +46,6 @@ class SarvamLID(LIDBackend):
         self._receiver_task = None
         self._dead = False
         self._resample_state = None
-        # Per-turn accumulation for the on_turn callback: Sarvam delivers a turn's
-        # text across one or more "data" segments, then a VAD END_SPEECH event.
-        self._turn_transcript = ""
-        self._turn_detected_lang = None
-
-    def _reset_turn_state(self):
-        """Clear the per-turn transcript accumulator (on speech start and after a turn is emitted)."""
-        self._turn_transcript = ""
-        self._turn_detected_lang = None
 
     def _build_url(self) -> str:
         params = {
@@ -62,8 +53,9 @@ class SarvamLID(LIDBackend):
             "mode": "transcribe",
             "language-code": "unknown",
             "high_vad_sensitivity": "true",
-            # Emit START_SPEECH / END_SPEECH events so we can deliver a full-turn
-            # transcript to on_turn at end-of-speech (not per-segment).
+            # Matches the working sarvam_transcriber config. VAD events are
+            # observability-only here; on_turn fires from the "data" (transcript)
+            # message, which is saaras:v3's finalized-transcript channel.
             "vad_signals": "true",
         }
         qs = "&".join(f"{k}={v}" for k, v in params.items())
@@ -144,15 +136,13 @@ class SarvamLID(LIDBackend):
 
                         short = lang.split("-")[0].lower() if lang and lang != "unknown" else None
 
-                        # Accumulate this turn's transcript + latest detected language
-                        # for the on_turn callback fired at END_SPEECH.
-                        if self.on_turn is not None:
-                            if transcript:
-                                self._turn_transcript = " ".join(
-                                    filter(None, [self._turn_transcript, transcript])
-                                )
-                            if short:
-                                self._turn_detected_lang = short
+                        # Each saaras:v3 "data" message is a finalized utterance segment —
+                        # this is the transcript-delivery channel (mirrors how
+                        # sarvam_transcriber yields type=="transcript" from this branch).
+                        # VAD END_SPEECH events are observability-only and not relied upon.
+                        if transcript and self.on_turn is not None:
+                            logger.info(f"SarvamLID turn: transcript={transcript[:80]!r} detected_lang={short!r}")
+                            asyncio.create_task(self.on_turn(transcript, short))
 
                         # Legacy per-segment language signal (kept for backends/telemetry
                         # that still consume on_language). Skipped when no confidence.
@@ -162,21 +152,6 @@ class SarvamLID(LIDBackend):
                                 f"SarvamLID: detected {lang!r} (short={short!r}, duration={audio_duration:.2f}s, conf={conf:.2f})"
                             )
                             asyncio.create_task(self.on_language(short, conf))
-
-                    elif data.get("type") == "events":
-                        vad = data.get("data", {})
-                        signal = vad.get("signal_type")
-                        if signal == "START_SPEECH":
-                            self._reset_turn_state()
-                        elif signal == "END_SPEECH" and self.on_turn is not None:
-                            turn_text = self._turn_transcript.strip()
-                            detected_lang = self._turn_detected_lang
-                            self._reset_turn_state()
-                            if turn_text:
-                                logger.info(
-                                    f"SarvamLID turn: transcript={turn_text[:80]!r} detected_lang={detected_lang!r}"
-                                )
-                                asyncio.create_task(self.on_turn(turn_text, detected_lang))
                 except Exception as e:
                     logger.error(f"SarvamLID receiver parse error: {e}")
         except asyncio.CancelledError:
