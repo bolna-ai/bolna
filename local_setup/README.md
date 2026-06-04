@@ -54,4 +54,4 @@ Once the docker containers are up, you can now start to create your agents and i
 
 
 ## Example agents to create, use and start making calls
-Go to the [Bolna examples](https://examples.bolna.dev/) to try out sample agents.
+Check out the [examples/](../examples/) directory (e.g., `simple_assistant.py`, `text_only_assistant.py`) to try out sample agents.
