@@ -201,6 +201,7 @@ class LogComponent(str, Enum):
     LLM = "llm"
     LLM_HANGUP = "llm_hangup"
     LLM_LANGUAGE_DETECTION = "llm_language_detection"
+    LLM_LANGUAGE_SWITCH = "llm_language_switch"
     LLM_VOICEMAIL = "llm_voicemail"
     SYNTHESIZER = "synthesizer"
     TRANSCRIBER = "transcriber"
@@ -222,6 +223,7 @@ _DISPLAY_NAMES = {
     LogComponent.LLM_HANGUP: "LLM hangup check",
     LogComponent.LLM_VOICEMAIL: "LLM voicemail check",
     LogComponent.LLM_LANGUAGE_DETECTION: "LLM language detection",
+    LogComponent.LLM_LANGUAGE_SWITCH: "LLM language switch",
     LogComponent.FUNCTION_CALL: "Function call",
     LogComponent.GRAPH_ROUTING: "Graph routing",
 }

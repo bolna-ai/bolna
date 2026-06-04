@@ -41,6 +41,7 @@ from bolna.enums import TelephonyProvider, LogComponent, LogDirection, HangupRea
 from bolna.exceptions import BolnaComponentError, LLMError, SynthesizerError, TranscriberError
 from bolna.prompts import *
 from bolna.helpers.language_detector import LanguageDetector
+from bolna.helpers.language_switcher import LanguageSwitcher
 from bolna.transcriber.transcriber_pool import TranscriberPool
 from bolna.synthesizer.synthesizer_pool import SynthesizerPool
 from bolna.helpers.utils import (
@@ -370,9 +371,12 @@ class TaskManager(BaseManager):
 
         # Stores structured API call records for dashboard/backend persistence.
         self.function_tool_api_call_details = []
-        # Records every manual switch_language tool call — used post-call to
-        # compare against LID shadow detections (precision / latency analysis).
+        # Records every language switch — manual tool call (legacy) or LLM-driven
+        # (triggered_by="lid_llm") — used post-call for precision / latency analysis.
         self.language_switch_events: list[dict] = []
+        # Dedicated LLM that decides language switches from the unbiased detector
+        # transcript. Set up in __setup_transcriber only for gated multilingual agents.
+        self.language_switcher = None
         self.transfer_call_events: list[dict] = []
         self.hangup_task = None
 
@@ -558,8 +562,12 @@ class TaskManager(BaseManager):
         if not self.turn_based_conversation and task_id == 0:
             self.synthesizer_monitor_task = asyncio.create_task(self.tools["synthesizer"].monitor_connection())
 
-        # Auto-inject switch_language tool if multilingual pools are active
-        self.__inject_switch_language_tool()
+        # Language switching is handled by the dedicated Switch LLM (see
+        # handle_language_switch), driven by the unbiased Saaras v3 detector — the
+        # main conversational LLM no longer carries a switch_language tool. The
+        # handoff-message / agent-names config is still read for switch playback.
+        self.switch_handoff_messages = self.task_config.get("tools_config", {}).get("switch_handoff_messages") or {}
+        self.agent_names = self.task_config.get("tools_config", {}).get("agent_names") or {}
 
         # # setting llm
         # llm = self.__setup_llm(self.llm_config)
@@ -1118,13 +1126,23 @@ class TaskManager(BaseManager):
                         if label == active_label:
                             self.transcriber_provider = cfg.get("provider", cfg.get("model"))
 
-                    # Audio LID tap.
-                    # LID_PROVIDER — which backend to use (default: "sarvam").
-                    # LID_MODE     — "shadow" (default) logs detections without switching;
-                    #                "active" performs live transcriber/synthesizer/prompt swap.
-                    #                Keep "shadow" until detection quality is validated.
+                    # Unbiased Saaras v3 detector → LLM-driven language switching.
+                    # Gated per-agent (see __language_switch_enabled): only gated
+                    # agents run the parallel detector + Switch LLM. When disabled,
+                    # no detector runs and switching is inert.
                     LID_PROVIDER = os.getenv("LID_PROVIDER", "sarvam")
-                    _lid_config = {"telephony_provider": provider}
+                    lid_config = {"telephony_provider": provider}
+                    switch_enabled = self.__language_switch_enabled()
+                    if switch_enabled:
+                        self.language_switcher = LanguageSwitcher(
+                            available_labels=list(transcribers.keys()),
+                            run_id=self.run_id,
+                            llm_kwargs={
+                                k: v
+                                for k in ("llm_key", "base_url", "api_version")
+                                if (v := self.kwargs.get(k))
+                            },
+                        )
 
                     self.tools["transcriber"] = TranscriberPool(
                         transcribers=transcribers,
@@ -1132,13 +1150,14 @@ class TaskManager(BaseManager):
                         output_queue=self.transcriber_output_queue,
                         active_label=active_label,
                         multilingual_config=multilingual,
-                        lid_provider=LID_PROVIDER,
-                        lid_config=_lid_config,
-                        on_lid_switch=self.switch_language,
+                        lid_provider=LID_PROVIDER if switch_enabled else None,
+                        lid_config=lid_config,
+                        on_lid_transcript=self.handle_language_switch if switch_enabled else None,
                     )
                     logger.info(
                         f"TranscriberPool created with labels={list(transcribers.keys())}, "
-                        f"active='{active_label}', lid_provider={LID_PROVIDER!r}"
+                        f"active='{active_label}', language_switch_enabled={switch_enabled}, "
+                        f"lid_provider={LID_PROVIDER if switch_enabled else None!r}"
                     )
                     return
 
@@ -4208,15 +4227,68 @@ class TaskManager(BaseManager):
         """Get agent name for a language label from configured agent_names."""
         return self.agent_names.get(label, "")
 
-    async def switch_language(self, label, components=None, triggered_by: str = "manual"):
+    def __language_switch_enabled(self) -> bool:
+        """Per-agent gate for LLM-driven language switching (controlled rollout).
+
+        Enabled if LANGUAGE_SWITCH_LLM_ENABLED is truthy (global, for testing) or
+        this agent's assistant_id is in the LANGUAGE_SWITCH_ENABLED_AGENTS allowlist.
+        """
+        if os.getenv("LANGUAGE_SWITCH_LLM_ENABLED", "").strip().lower() in ("1", "true", "yes"):
+            return True
+        allowed = {a.strip() for a in os.getenv("LANGUAGE_SWITCH_ENABLED_AGENTS", "").split(",") if a.strip()}
+        return bool(self.assistant_id and self.assistant_id in allowed)
+
+    async def handle_language_switch(self, transcript: str, detected_lang: str = None) -> None:
+        """Decide + apply a language switch from the unbiased detector transcript.
+
+        Invoked once per finalized user turn (TranscriberPool → detector on_turn).
+        Runs the Switch LLM; if it picks a supported language different from the
+        active one, switches the pools + prompt (applies from the next turn). If the
+        picked language isn't supported by this agent, logs and does not switch.
+        Runs inside the detector's task, so it never blocks the current turn.
+        """
+        if not self.language_switcher:
+            return
+        pool = self.tools.get("transcriber")
+        labels = pool.labels if isinstance(pool, TranscriberPool) else []
+        active = self.language
+        if len(labels) < 2:
+            return
+
+        decision = await self.language_switcher.decide(transcript, active)
+        if not decision:
+            return
+        target = decision.get("target_language")
+        reasoning = (decision.get("reasoning") or "").strip()
+
+        if not target or target == active:
+            logger.info(f"LanguageSwitcher: stay on '{active}' (detected_lang={detected_lang}, reason={reasoning})")
+            return
+        if target not in labels:
+            logger.info(
+                f"LanguageSwitcher: target '{target}' not supported by agent {labels} — logged, no switch "
+                f"(transcript={transcript[:60]!r})"
+            )
+            return
+
+        context_note = (
+            f"## Language note:\nThe caller switched to '{target}'. "
+            f'Their latest message: "{transcript}". Reason: {reasoning}'
+        )
+        logger.info(f"LanguageSwitcher: switching '{active}' → '{target}' (reason={reasoning})")
+        await self.switch_language(target, triggered_by="lid_llm", context_note=context_note)
+
+    async def switch_language(self, label, components=None, triggered_by: str = "manual", context_note: str = None):
         """Switch the active language for multilingual pools.
 
         Args:
             label: language label to switch to (e.g. "hi", "en").
             components: list of component names to switch. Defaults to both.
-            triggered_by: "manual" (LLM tool call) or "lid" (automatic detection).
-                          Used in post-call telemetry to compare LID shadow detections
-                          against actual LLM-decided switches.
+            triggered_by: "manual" (legacy LLM tool call) or "lid_llm" (Switch LLM).
+                          Used in post-call telemetry.
+            context_note: optional one-line note (transcript + language + reasoning)
+                          appended to the swapped system prompt so the main LLM has
+                          context on why the language changed. Replaced on each switch.
         """
         components = components or ["transcriber", "synthesizer"]
 
@@ -4248,6 +4320,8 @@ class TaskManager(BaseManager):
 
         if label in self.multilingual_prompts:
             new_prompt = self.multilingual_prompts[label]
+            if context_note:
+                new_prompt = f"{new_prompt}\n\n{context_note}"
             self.conversation_history.update_system_prompt(new_prompt)
             self.system_prompt["content"] = new_prompt
             logger.info(f"Switched system prompt to language '{label}'")

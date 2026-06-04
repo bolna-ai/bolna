@@ -32,8 +32,8 @@ class SarvamLID(LIDBackend):
 
     _WS_BASE = "wss://{host}/speech-to-text/ws"
 
-    def __init__(self, on_language, config):
-        super().__init__(on_language, config)
+    def __init__(self, on_language, config, on_turn=None):
+        super().__init__(on_language, config, on_turn)
         self._api_key = config.get("sarvam_api_key") or os.getenv("SARVAM_API_KEY", "")
         self._host = config.get("sarvam_host") or os.getenv("SARVAM_HOST", "api.sarvam.ai")
         self._telephony = config.get("telephony_provider", "")
@@ -46,6 +46,15 @@ class SarvamLID(LIDBackend):
         self._receiver_task = None
         self._dead = False
         self._resample_state = None
+        # Per-turn accumulation for the on_turn callback: Sarvam delivers a turn's
+        # text across one or more "data" segments, then a VAD END_SPEECH event.
+        self._turn_transcript = ""
+        self._turn_detected_lang = None
+
+    def _reset_turn_state(self):
+        """Clear the per-turn transcript accumulator (on speech start and after a turn is emitted)."""
+        self._turn_transcript = ""
+        self._turn_detected_lang = None
 
     def _build_url(self) -> str:
         params = {
@@ -53,6 +62,9 @@ class SarvamLID(LIDBackend):
             "mode": "transcribe",
             "language-code": "unknown",
             "high_vad_sensitivity": "true",
+            # Emit START_SPEECH / END_SPEECH events so we can deliver a full-turn
+            # transcript to on_turn at end-of-speech (not per-segment).
+            "vad_signals": "true",
         }
         qs = "&".join(f"{k}={v}" for k, v in params.items())
         return f"{self._WS_BASE.format(host=self._host)}?{qs}"
@@ -118,6 +130,7 @@ class SarvamLID(LIDBackend):
                     data = json.loads(raw) if isinstance(raw, str) else {}
                     if data.get("type") == "data":
                         payload = data.get("data", {})
+                        transcript = (payload.get("transcript") or "").strip()
                         lang = payload.get("language_code", "")
                         lang_prob = payload.get("language_probability")
                         metrics = payload.get("metrics") or {}
@@ -125,18 +138,45 @@ class SarvamLID(LIDBackend):
                         processing_latency = float(metrics.get("processing_latency") or 0.0)
                         logger.info(
                             f"SarvamLID raw: lang={lang!r} language_probability={lang_prob} "
-                            f"audio_duration={audio_duration:.3f}s processing_latency={processing_latency:.3f}s"
+                            f"transcript={transcript[:60]!r} audio_duration={audio_duration:.3f}s "
+                            f"processing_latency={processing_latency:.3f}s"
                         )
-                        if lang_prob is None:
-                            logger.debug("SarvamLID: language_probability missing — skipping detection")
-                            continue
-                        conf = float(lang_prob)
-                        if lang and lang != "unknown":
-                            short = lang.split("-")[0].lower()
+
+                        short = lang.split("-")[0].lower() if lang and lang != "unknown" else None
+
+                        # Accumulate this turn's transcript + latest detected language
+                        # for the on_turn callback fired at END_SPEECH.
+                        if self.on_turn is not None:
+                            if transcript:
+                                self._turn_transcript = " ".join(
+                                    filter(None, [self._turn_transcript, transcript])
+                                )
+                            if short:
+                                self._turn_detected_lang = short
+
+                        # Legacy per-segment language signal (kept for backends/telemetry
+                        # that still consume on_language). Skipped when no confidence.
+                        if self.on_language is not None and lang_prob is not None and short:
+                            conf = float(lang_prob)
                             logger.info(
                                 f"SarvamLID: detected {lang!r} (short={short!r}, duration={audio_duration:.2f}s, conf={conf:.2f})"
                             )
                             asyncio.create_task(self.on_language(short, conf))
+
+                    elif data.get("type") == "events":
+                        vad = data.get("data", {})
+                        signal = vad.get("signal_type")
+                        if signal == "START_SPEECH":
+                            self._reset_turn_state()
+                        elif signal == "END_SPEECH" and self.on_turn is not None:
+                            turn_text = self._turn_transcript.strip()
+                            detected_lang = self._turn_detected_lang
+                            self._reset_turn_state()
+                            if turn_text:
+                                logger.info(
+                                    f"SarvamLID turn: transcript={turn_text[:80]!r} detected_lang={detected_lang!r}"
+                                )
+                                asyncio.create_task(self.on_turn(turn_text, detected_lang))
                 except Exception as e:
                     logger.error(f"SarvamLID receiver parse error: {e}")
         except asyncio.CancelledError:

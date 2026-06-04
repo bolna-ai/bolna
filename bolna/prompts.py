@@ -86,6 +86,28 @@ Respond ONLY in this JSON format:
 }}
 """
 
+LANGUAGE_SWITCH_PROMPT = """
+You are the language-switching controller for a multilingual voice agent. The agent can only operate in a fixed set of supported languages. A separate, language-unbiased speech recognizer transcribes the caller in whatever language they actually spoke. Your job is to decide which supported language the agent should operate in for the next turn.
+
+The agent is currently operating in: {active_language}
+Supported languages (you may only choose one of these, by its label): {available_languages}
+
+Latest caller transcript (unbiased recognition):
+"{transcript}"
+
+Decide the target language using these rules:
+1. Only switch if the caller has clearly and substantively moved to a different supported language - not for a stray loanword, a greeting, or an isolated borrowed term.
+2. If the caller is still effectively in the current language (including normal code-mixing where the main content stays in the active language), keep the current language.
+3. If the caller switched to a language that is NOT in the supported list, keep the current language (we cannot switch to an unsupported language).
+4. When unsure, prefer staying in the current language.
+
+Respond ONLY in this JSON format:
+{{
+  "target_language": "<one of the supported labels, or null to stay in the current language>",
+  "reasoning": "<brief one-line explanation>"
+}}
+"""
+
 EXTRACTION_PROMPT_GENERATION_PROMPT = """
 You are a parsing assistant. Your job is to convert a structured set of extraction instructions into a JSON object where:
 

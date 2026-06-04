@@ -51,6 +51,7 @@ class TranscriberPool:
         lid_provider: str = None,
         lid_config: dict = None,
         on_lid_switch: Optional[Callable[[str], Awaitable[None]]] = None,
+        on_lid_transcript: Optional[Callable[[str, Optional[str]], Awaitable[None]]] = None,
     ):
         """
         Args:
@@ -64,8 +65,15 @@ class TranscriberPool:
             multilingual_config: raw multilingual config dict from task_config
             lid_provider: "sarvam" | None (disables LID tap)
             lid_config: extra config forwarded to the LID backend
-            on_lid_switch: async callback(label) invoked when LID confirms a switch.
-                           Typically wired to TaskManager.switch_language().
+            on_lid_switch: async callback(label) invoked when the legacy LID
+                           heuristic confirms a switch. Typically wired to
+                           TaskManager.switch_language().
+            on_lid_transcript: async callback(transcript, detected_lang) invoked
+                           once per finalized user turn with the unbiased detector
+                           transcript. Wired to TaskManager.handle_language_switch,
+                           which runs the Switch LLM and decides whether to switch.
+                           When set, the detector drives this LLM path instead of
+                           the per-segment heuristic (on_language is left unwired).
         """
         self.transcribers = transcribers
         self.shared_input_queue = shared_input_queue
@@ -84,6 +92,7 @@ class TranscriberPool:
         self._lid: Optional[object] = None  # LIDProvider instance
         self._lid_task: Optional[asyncio.Task] = None
         self._on_lid_switch = on_lid_switch
+        self._on_lid_transcript = on_lid_transcript
         # "shadow" logs detections without switching; "active" performs live switch.
         self._lid_mode = _LID_MODE
         # Accumulates detection events during the call; flushed into task_output
@@ -218,16 +227,34 @@ class TranscriberPool:
     async def _start_lid_tap(self) -> None:
         """Instantiate and connect the configured LID provider."""
         try:
+            # When an LLM transcript handler is wired, the detector drives the
+            # per-turn LLM path (on_turn) and the per-segment heuristic
+            # (on_language) is left unwired. Otherwise fall back to the heuristic.
             self._lid = LIDProvider.create(
                 provider=self._lid_provider_name,
-                on_language=self._handle_lid_signal,
+                on_language=None if self._on_lid_transcript else self._handle_lid_signal,
                 config=self._lid_config,
+                on_turn=self._handle_turn_transcript if self._on_lid_transcript else None,
             )
             await self._lid.start()
             logger.info(f"TranscriberPool: LID tap started (provider={self._lid_provider_name})")
         except Exception as e:
             logger.error(f"TranscriberPool: failed to start LID tap: {e}")
             self._lid = None
+
+    async def _handle_turn_transcript(self, transcript: str, detected_lang: Optional[str]) -> None:
+        """Forward the detector's per-turn transcript to the Switch LLM handler.
+
+        Runs inside the detector's own task, so the LLM call here never blocks the
+        audio router or the active transcriber's turn → the switch it may trigger
+        naturally applies to a subsequent turn.
+        """
+        if not self._on_lid_transcript:
+            return
+        try:
+            await self._on_lid_transcript(transcript, detected_lang)
+        except Exception as e:
+            logger.error(f"TranscriberPool: on_lid_transcript callback error: {e}")
 
     def _record_lid_event(
         self,

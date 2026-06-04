@@ -36,8 +36,8 @@ class AzureLID(LIDBackend):
 
     _DEFAULT_LANGUAGES = ["hi-IN", "en-IN", "ta-IN", "te-IN", "kn-IN", "gu-IN", "bn-IN", "mr-IN"]
 
-    def __init__(self, on_language, config):
-        super().__init__(on_language, config)
+    def __init__(self, on_language, config, on_turn=None):
+        super().__init__(on_language, config, on_turn)
         self._key = config.get("azure_speech_key") or os.getenv("AZURE_SPEECH_KEY", "")
         self._region = config.get("azure_speech_region") or os.getenv("AZURE_SPEECH_REGION", "centralindia")
         self._languages = config.get("languages", self._DEFAULT_LANGUAGES)
