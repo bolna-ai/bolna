@@ -3804,6 +3804,16 @@ class TaskManager(BaseManager):
                 TranscriberError(connection_error, provider=provider), HangupReason.TRANSCRIBER_CONNECTION_ERROR
             )
 
+    async def _maybe_update_tts_language(self, meta_info):
+        """Point a single-connection Sarvam TTS at the language ASR auto-detected; no-op otherwise."""
+        detected = (meta_info or {}).get("detected_language_code")
+        if not detected:
+            return
+        set_language = getattr(self.tools.get("synthesizer"), "set_target_language", None)
+        if set_language is None:
+            return
+        await set_language(detected)
+
     async def _listen_transcriber(self):
         temp_transcriber_message = ""
         try:
@@ -4045,6 +4055,8 @@ class TaskManager(BaseManager):
                             user_stop_ts_wall=_meta.get("user_stop_ts_wall"),
                         )
                         temp_transcriber_message = ""
+
+                        await self._maybe_update_tts_language(meta_info)
 
                         if self.output_task is None:
                             logger.info(f"Output task was none and hence starting it")

@@ -14,7 +14,7 @@ from .stream_synthesizer import StreamSynthesizer
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.ssl_context import get_ssl_context
 from bolna.helpers.utils import create_ws_data_packet, get_synth_audio_format, resample, wav_bytes_to_pcm
-from bolna.constants import SARVAM_MODEL_SAMPLING_RATE_MAPPING
+from bolna.constants import SARVAM_MODEL_SAMPLING_RATE_MAPPING, SARVAM_TTS_SUPPORTED_LANGUAGES
 
 logger = configure_logger(__name__)
 
@@ -185,6 +185,38 @@ class SarvamSynthesizer(StreamSynthesizer):
     # Connection
     # ------------------------------------------------------------------
 
+    def _config_message(self):
+        return {
+            "type": "config",
+            "data": {
+                "target_language_code": self.language,
+                "speaker": self.voice_id,
+                "pitch": self.pitch,
+                "pace": self.pace,
+                "loudness": self.loudness,
+                "enable_preprocessing": self.enable_preprocessing,
+                "output_audio_codec": "wav",
+                "output_audio_bitrate": "32k",
+                "max_chunk_length": 250,
+                "min_buffer_size": self.buffer_size,
+            },
+        }
+
+    async def set_target_language(self, language):
+        """Switch TTS output language on the live socket via a fresh config message (no reconnect)."""
+        if not language or language == self.language:
+            return
+        if language not in SARVAM_TTS_SUPPORTED_LANGUAGES:
+            logger.info(f"Sarvam TTS: detected language {language!r} not supported, keeping {self.language!r}")
+            return
+        self.language = language
+        if self._is_ws_connected():
+            try:
+                await self._send_json(self._config_message())
+                logger.info(f"Sarvam TTS: switched target_language_code -> {language}")
+            except Exception as e:
+                logger.error(f"Sarvam TTS: failed to send config update for {language!r}: {e}")
+
     async def establish_connection(self):
         try:
             start_time = time.perf_counter()
@@ -196,22 +228,7 @@ class SarvamSynthesizer(StreamSynthesizer):
                 ),
                 timeout=10.0,
             )
-            bos_message = {
-                "type": "config",
-                "data": {
-                    "target_language_code": self.language,
-                    "speaker": self.voice_id,
-                    "pitch": self.pitch,
-                    "pace": self.pace,
-                    "loudness": self.loudness,
-                    "enable_preprocessing": self.enable_preprocessing,
-                    "output_audio_codec": "wav",
-                    "output_audio_bitrate": "32k",
-                    "max_chunk_length": 250,
-                    "min_buffer_size": self.buffer_size,
-                },
-            }
-            await websocket.send(json.dumps(bos_message))
+            await websocket.send(json.dumps(self._config_message()))
             if not self.connection_time:
                 self.connection_time = round((time.perf_counter() - start_time) * 1000)
             logger.info(f"Connected to {self.ws_url}")

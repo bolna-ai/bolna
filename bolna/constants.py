@@ -202,6 +202,11 @@ SARVAM_MODEL_SAMPLING_RATE_MAPPING = {
     "bulbul:v3": 22050,  # NOTE: Documentation claims 24000, but WAV header shows 22050
 }
 
+# bulbul TTS requires a concrete target_language_code (no "unknown"/auto).
+SARVAM_TTS_SUPPORTED_LANGUAGES = {
+    "en-IN", "hi-IN", "bn-IN", "ta-IN", "te-IN", "kn-IN", "ml-IN", "mr-IN", "gu-IN", "pa-IN", "od-IN",
+}
+
 MODEL_REASONING_EFFORT_MAP = {
     "gpt-5": [RE.MINIMAL, RE.LOW, RE.MEDIUM, RE.HIGH],
     "gpt-5-mini": [RE.MINIMAL, RE.LOW, RE.MEDIUM, RE.HIGH],
