@@ -44,15 +44,29 @@ class LanguageSwitcher:
         )
         try:
             start_time = time.time()
-            response = await self._llm.generate([{"role": "system", "content": prompt}], request_json=True)
+            # Must be a "user" message: Anthropic/Claude requires at least one user
+            # turn. A system-only messages list gets emptied by litellm (system is
+            # lifted to the top-level `system` param) → "list index out of range".
+            # We don't force response_format (Claude doesn't reliably support
+            # json_object via litellm); the prompt mandates JSON and we parse robustly.
+            response = await self._llm.generate([{"role": "user", "content": prompt}])
             self.latency_ms = (time.time() - start_time) * 1000
-            result = json.loads(response)
+            result = self._parse_json(response)
             logger.info(f"LanguageSwitcher decision: {result} (latency_ms={self.latency_ms:.0f})")
             self._log_decision(transcript, result)
             return result
         except Exception as e:
             logger.error(f"LanguageSwitcher decision error: {e}")
             return None
+
+    @staticmethod
+    def _parse_json(text: str) -> dict:
+        """Parse the model's JSON reply, tolerating markdown fences or surrounding prose."""
+        text = (text or "").strip()
+        start, end = text.find("{"), text.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            text = text[start : end + 1]
+        return json.loads(text)
 
     def _log_decision(self, transcript: str, result: dict):
         meta_info = {"request_id": str(uuid.uuid4())}

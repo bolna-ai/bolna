@@ -59,6 +59,24 @@ async def test_decide_bad_json_returns_none():
 
 
 @pytest.mark.asyncio
+async def test_decide_tolerates_markdown_fenced_json():
+    # Claude often wraps JSON in ```json ... ``` fences; we must still parse it.
+    fenced = '```json\n{"target_language": "hi", "reasoning": "switched"}\n```'
+    switcher, _ = _make_switcher(fenced)
+    result = await switcher.decide("kuch baat", active_label="en")
+    assert result == {"target_language": "hi", "reasoning": "switched"}
+
+
+@pytest.mark.asyncio
+async def test_decide_sends_user_role_message():
+    # Anthropic requires a user message; a system-only list errors. Guard the role.
+    switcher, fake_llm = _make_switcher(json.dumps({"target_language": None}))
+    await switcher.decide("hello", active_label="en")
+    sent_messages = fake_llm.generate.await_args.args[0]
+    assert sent_messages[0]["role"] == "user"
+
+
+@pytest.mark.asyncio
 async def test_default_model_is_sonnet():
     switcher, _ = _make_switcher(json.dumps({"target_language": None}))
     assert switcher.model == "claude-sonnet-4-6"
