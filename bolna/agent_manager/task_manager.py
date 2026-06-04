@@ -3770,11 +3770,11 @@ class TaskManager(BaseManager):
             # back to sequence_ids, causing all audio to be BLOCKed permanently.
             self.interruption_manager.revalidate_sequence_id(meta_info["sequence_id"])
             self.response_in_pipeline = True
-            # Once-per-turn language-switch decision on the unbiased detector transcript
-            # (aligned to this turn boundary). Background task so it never delays the
-            # main LLM; any switch it makes applies from the next turn.
+            # Once-per-turn language-switch decision, fed BOTH transcripts: the unbiased
+            # detector (buffered in the pool) and this live language-locked transcript.
+            # Background task so it never delays the main LLM; any switch applies next turn.
             if self.language_switcher is not None:
-                asyncio.create_task(self.handle_language_switch())
+                asyncio.create_task(self.handle_language_switch(transcriber_message))
             self.llm_task = asyncio.create_task(self._run_llm_task(transcriber_package))
 
         elif next_task == "synthesizer":
@@ -4254,15 +4254,16 @@ class TaskManager(BaseManager):
         allowed = {a.strip() for a in os.getenv("LANGUAGE_SWITCH_ENABLED_AGENTS", "").split(",") if a.strip()}
         return bool(self.assistant_id and self.assistant_id in allowed)
 
-    async def handle_language_switch(self) -> None:
-        """Decide + apply a language switch from the unbiased detector's per-turn transcript.
+    async def handle_language_switch(self, active_transcript: str = "") -> None:
+        """Decide + apply a language switch from BOTH transcripts of the current turn.
 
         Fired once per conversational turn (from _handle_transcriber_output, aligned to
-        the main transcriber's turn boundary). Drains the unbiased transcript buffered by
-        the detector, runs the Switch LLM, and switches if it picks a supported language
-        different from the current one (applies from the next turn). If the picked language
-        isn't supported by this agent, logs and does not switch. Runs as a background task,
-        so it never blocks the main LLM for the current turn.
+        the main transcriber's turn boundary). Feeds the Switch LLM both the unbiased
+        detector transcript (drained from the pool buffer) and the live language-locked
+        transcript (active_transcript). The model returns a per-language confidence
+        distribution + a target; we switch if the target is a supported language ≠ the
+        current one and its confidence clears LANGUAGE_SWITCH_MIN_CONFIDENCE. Runs as a
+        background task, so it never blocks the main LLM for the current turn.
         """
         if not self.language_switcher:
             return
@@ -4273,35 +4274,53 @@ class TaskManager(BaseManager):
         if len(labels) < 2:
             return
 
-        transcript, detected_lang = pool.take_lid_transcript()
-        if not transcript:
+        detector_transcript, detected_lang = pool.take_lid_transcript()
+        if not detector_transcript:
             return
         active = self.language
 
-        decision = await self.language_switcher.decide(transcript, active)
+        decision = await self.language_switcher.decide(detector_transcript, active_transcript, active)
         if not decision:
             return
         target = decision.get("target_language")
         reasoning = (decision.get("reasoning") or "").strip()
+        languages = decision.get("languages") or []
 
         # Re-read the live language: a prior turn's decision may have switched during
         # this (~1-2s) LLM call, so compare against the current language, not the snapshot.
         current = self.language
         if not target or target == current:
-            logger.info(f"LanguageSwitcher: stay on '{current}' (detected_lang={detected_lang}, reason={reasoning})")
+            logger.info(
+                f"LanguageSwitcher: stay on '{current}' (detected_lang={detected_lang}, langs={languages}, reason={reasoning})"
+            )
             return
         if target not in labels:
             logger.info(
                 f"LanguageSwitcher: target '{target}' not supported by agent {labels} — logged, no switch "
-                f"(transcript={transcript[:60]!r})"
+                f"(detector={detector_transcript[:60]!r})"
+            )
+            return
+
+        # Confidence gate: don't flip the language on a low-confidence detection.
+        min_conf = float(os.getenv("LANGUAGE_SWITCH_MIN_CONFIDENCE", "0.6"))
+        target_conf = next(
+            (lang.get("confidence") for lang in languages if isinstance(lang, dict) and lang.get("language") == target),
+            None,
+        )
+        if target_conf is not None and target_conf < min_conf:
+            logger.info(
+                f"LanguageSwitcher: target '{target}' confidence {target_conf} < {min_conf} — no switch "
+                f"(reason={reasoning})"
             )
             return
 
         context_note = (
             f"## Language note:\nThe caller switched to '{target}'. "
-            f'Their latest message: "{transcript}". Reason: {reasoning}'
+            f'Their latest message: "{detector_transcript}". Reason: {reasoning}'
         )
-        logger.info(f"LanguageSwitcher: switching '{current}' → '{target}' (reason={reasoning})")
+        logger.info(
+            f"LanguageSwitcher: switching '{current}' → '{target}' (confidence={target_conf}, langs={languages}, reason={reasoning})"
+        )
         await self.switch_language(target, triggered_by="lid_llm", context_note=context_note)
 
     async def switch_language(self, label, components=None, triggered_by: str = "manual", context_note: str = None):

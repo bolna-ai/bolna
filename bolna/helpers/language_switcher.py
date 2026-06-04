@@ -32,15 +32,25 @@ class LanguageSwitcher:
         self.latency_ms = None
         self._llm = LiteLLM(model=self.model, max_tokens=200, temperature=0.0, **(llm_kwargs or {}))
 
-    async def decide(self, transcript: str, active_label: str) -> dict | None:
-        """Return {"target_language": <label|None>, "reasoning": str} or None on failure."""
-        if not transcript or not transcript.strip():
+    async def decide(self, detector_transcript: str, active_transcript: str, active_label: str) -> dict | None:
+        """Decide the language from both transcripts.
+
+        Args:
+            detector_transcript: unbiased recognizer transcript (primary signal).
+            active_transcript: live (language-locked) recognizer transcript for the turn.
+            active_label: the currently-active language label.
+
+        Returns {"languages": [{"language","confidence"}...], "target_language": <label|None>,
+        "reasoning": str} or None on failure.
+        """
+        if not detector_transcript or not detector_transcript.strip():
             return None
 
         prompt = LANGUAGE_SWITCH_PROMPT.format(
             active_language=active_label,
             available_languages=", ".join(self.available_labels),
-            transcript=transcript.strip(),
+            detector_transcript=detector_transcript.strip(),
+            active_transcript=(active_transcript or "").strip(),
         )
         try:
             start_time = time.time()
@@ -53,7 +63,7 @@ class LanguageSwitcher:
             self.latency_ms = (time.time() - start_time) * 1000
             result = self._parse_json(response)
             logger.info(f"LanguageSwitcher decision: {result} (latency_ms={self.latency_ms:.0f})")
-            self._log_decision(transcript, result)
+            self._log_decision(detector_transcript, result)
             return result
         except Exception as e:
             logger.error(f"LanguageSwitcher decision error: {e}")

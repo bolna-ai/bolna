@@ -24,29 +24,38 @@ def _make_switcher(generate_return, labels=("en", "hi")):
 
 
 @pytest.mark.asyncio
-async def test_decide_returns_target_when_llm_picks_supported_language():
-    switcher, fake_llm = _make_switcher(json.dumps({"target_language": "hi", "reasoning": "caller spoke Hindi"}))
-    result = await switcher.decide("aap kaise hain", active_label="en")
-    assert result == {"target_language": "hi", "reasoning": "caller spoke Hindi"}
+async def test_decide_returns_target_and_confidence_list():
+    payload = json.dumps(
+        {
+            "languages": [{"language": "hi", "confidence": 0.9}, {"language": "en", "confidence": 0.1}],
+            "target_language": "hi",
+            "reasoning": "caller spoke Hindi",
+        }
+    )
+    switcher, fake_llm = _make_switcher(payload)
+    result = await switcher.decide("aap kaise hain", "up cause an", active_label="en")
+    assert result["target_language"] == "hi"
+    assert result["languages"][0] == {"language": "hi", "confidence": 0.9}
     fake_llm.generate.assert_awaited_once()
-    # The decision prompt must carry the transcript + active language.
-    sent_messages = fake_llm.generate.await_args.args[0]
-    prompt_text = sent_messages[0]["content"]
-    assert "aap kaise hain" in prompt_text
+    # Both transcripts + active language must reach the prompt.
+    prompt_text = fake_llm.generate.await_args.args[0][0]["content"]
+    assert "aap kaise hain" in prompt_text  # unbiased detector transcript
+    assert "up cause an" in prompt_text  # live language-locked transcript
     assert "en" in prompt_text
 
 
 @pytest.mark.asyncio
 async def test_decide_returns_null_target_to_stay():
-    switcher, _ = _make_switcher(json.dumps({"target_language": None, "reasoning": "still English"}))
-    result = await switcher.decide("hello there", active_label="en")
+    switcher, _ = _make_switcher(json.dumps({"languages": [], "target_language": None, "reasoning": "still English"}))
+    result = await switcher.decide("hello there", "hello there", active_label="en")
     assert result["target_language"] is None
 
 
 @pytest.mark.asyncio
-async def test_decide_empty_transcript_skips_llm():
+async def test_decide_empty_detector_transcript_skips_llm():
     switcher, fake_llm = _make_switcher(json.dumps({"target_language": "hi"}))
-    result = await switcher.decide("   ", active_label="en")
+    # Empty unbiased transcript → no decision even if the live transcript has content.
+    result = await switcher.decide("   ", "some live text", active_label="en")
     assert result is None
     fake_llm.generate.assert_not_awaited()
 
@@ -54,7 +63,7 @@ async def test_decide_empty_transcript_skips_llm():
 @pytest.mark.asyncio
 async def test_decide_bad_json_returns_none():
     switcher, _ = _make_switcher("not-json")
-    result = await switcher.decide("something", active_label="en")
+    result = await switcher.decide("something", "something", active_label="en")
     assert result is None
 
 
@@ -63,7 +72,7 @@ async def test_decide_tolerates_markdown_fenced_json():
     # Claude often wraps JSON in ```json ... ``` fences; we must still parse it.
     fenced = '```json\n{"target_language": "hi", "reasoning": "switched"}\n```'
     switcher, _ = _make_switcher(fenced)
-    result = await switcher.decide("kuch baat", active_label="en")
+    result = await switcher.decide("kuch baat", "", active_label="en")
     assert result == {"target_language": "hi", "reasoning": "switched"}
 
 
@@ -71,7 +80,7 @@ async def test_decide_tolerates_markdown_fenced_json():
 async def test_decide_sends_user_role_message():
     # Anthropic requires a user message; a system-only list errors. Guard the role.
     switcher, fake_llm = _make_switcher(json.dumps({"target_language": None}))
-    await switcher.decide("hello", active_label="en")
+    await switcher.decide("hello", "", active_label="en")
     sent_messages = fake_llm.generate.await_args.args[0]
     assert sent_messages[0]["role"] == "user"
 
