@@ -645,6 +645,63 @@ class TaskManager(BaseManager):
         excluded_keys = {"model_response", "textual_response"}
         return {key: copy.deepcopy(value) for key, value in resp.items() if key not in excluded_keys}
 
+    def fire_pre_call_webhook(self, webhook_url, called_fun, resp, meta_info):
+        """Fire-and-forget POST to a custom tool's ``pre_call_webhook_url``.
+
+        Notifies an external system before the tool's main request runs (e.g. the
+        reason for a transfer, before the custom transfer POST). Sends the LLM-provided
+        tool arguments plus call context. Generic — not transfer-specific; it forwards
+        whatever arguments the LLM filled in for the tool. Never blocks or fails the
+        main tool call: it is scheduled as a background task and all errors are swallowed.
+        """
+        excluded = {"model_response", "textual_response", "tool_call_id", "resp"}
+        llm_args = {key: copy.deepcopy(value) for key, value in resp.items() if key not in excluded}
+        recipient_data = (self.context_data or {}).get("recipient_data") or {}
+        # Source call_sid the same way transfer_call does: prefer the telephony
+        # provider's authoritative live value, falling back to self.call_sid.
+        call_sid = self.call_sid
+        try:
+            if self.tools["input"].io_provider != "default":
+                call_sid = self.tools["input"].get_call_sid()
+        except Exception:
+            pass
+        payload = {
+            "execution_id": self.run_id,
+            "call_sid": call_sid,
+            "from_number": recipient_data.get("from_number"),
+            "provider": self.tools["input"].io_provider,
+            "stream_sid": self.stream_sid,
+            "tool_name": called_fun,
+            **llm_args,
+        }
+
+        async def send():
+            try:
+                convert_to_request_log(
+                    str(payload),
+                    meta_info,
+                    None,
+                    LogComponent.FUNCTION_CALL,
+                    direction=LogDirection.REQUEST,
+                    run_id=self.run_id,
+                )
+                async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
+                    async with session.post(webhook_url, json=payload) as response:
+                        response_text = await response.text()
+                        logger.info(f"pre_call_webhook response ({response.status}): {response_text}")
+                        convert_to_request_log(
+                            str(response_text),
+                            meta_info,
+                            None,
+                            LogComponent.FUNCTION_CALL,
+                            direction=LogDirection.RESPONSE,
+                            run_id=self.run_id,
+                        )
+            except Exception as exc:
+                logger.warning(f"pre_call_webhook to {webhook_url} failed (ignored): {exc}")
+
+        asyncio.create_task(send())
+
     def _start_api_call_detail(
         self,
         *,
@@ -2835,6 +2892,14 @@ class TaskManager(BaseManager):
                 f"__execute_function_call: Aborting before API call — hangup_triggered={self.hangup_triggered}, conversation_ended={self.conversation_ended}"
             )
             return
+
+        # Optional pre-call webhook: notify an external system before the tool's main
+        # request runs (e.g. a transfer reason before a custom transfer POST). Fired
+        # fire-and-forget so a webhook outage never blocks or delays the main call.
+        tool_conf = self.kwargs.get("api_tools", {}).get("tools_params", {}).get(called_fun, {})
+        pre_call_webhook_url = tool_conf.get("pre_call_webhook_url")
+        if pre_call_webhook_url:
+            self.fire_pre_call_webhook(pre_call_webhook_url, called_fun, resp, meta_info)
 
         runtime_args = self._extract_api_call_runtime_args(resp)
         try:
