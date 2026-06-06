@@ -645,6 +645,29 @@ class TaskManager(BaseManager):
         excluded_keys = {"model_response", "textual_response"}
         return {key: copy.deepcopy(value) for key, value in resp.items() if key not in excluded_keys}
 
+    def _build_call_context(self):
+        """Live call/session context, shared by the pre-call webhook and custom-tool
+        param substitution. Mirrors what the transfer_call branch builds so a custom
+        tool can drive bolna's transfer service (/process_transfer) itself.
+
+        Sources call_sid the same way transfer_call does: prefer the telephony
+        provider's authoritative live value, falling back to self.call_sid.
+        """
+        recipient_data = (self.context_data or {}).get("recipient_data") or {}
+        call_sid = self.call_sid
+        try:
+            if self.tools["input"].io_provider != "default":
+                call_sid = self.tools["input"].get_call_sid()
+        except Exception:
+            pass
+        return {
+            "call_sid": call_sid,
+            "provider": self.tools["input"].io_provider,
+            "stream_sid": self.stream_sid,
+            "from_number": recipient_data.get("from_number"),
+            "execution_id": self.run_id,
+        }
+
     def fire_pre_call_webhook(self, webhook_url, called_fun, resp, meta_info):
         """Fire-and-forget POST to a custom tool's ``pre_call_webhook_url``.
 
@@ -656,21 +679,8 @@ class TaskManager(BaseManager):
         """
         excluded = {"model_response", "textual_response", "tool_call_id", "resp"}
         llm_args = {key: copy.deepcopy(value) for key, value in resp.items() if key not in excluded}
-        recipient_data = (self.context_data or {}).get("recipient_data") or {}
-        # Source call_sid the same way transfer_call does: prefer the telephony
-        # provider's authoritative live value, falling back to self.call_sid.
-        call_sid = self.call_sid
-        try:
-            if self.tools["input"].io_provider != "default":
-                call_sid = self.tools["input"].get_call_sid()
-        except Exception:
-            pass
         payload = {
-            "execution_id": self.run_id,
-            "call_sid": call_sid,
-            "from_number": recipient_data.get("from_number"),
-            "provider": self.tools["input"].io_provider,
-            "stream_sid": self.stream_sid,
+            **self._build_call_context(),
             "tool_name": called_fun,
             **llm_args,
         }
@@ -2900,6 +2910,12 @@ class TaskManager(BaseManager):
         pre_call_webhook_url = tool_conf.get("pre_call_webhook_url")
         if pre_call_webhook_url:
             self.fire_pre_call_webhook(pre_call_webhook_url, called_fun, resp, meta_info)
+
+        # Expose live call context as substitution variables (e.g. %(call_sid)s,
+        # %(stream_sid)s, %(provider)s, %(execution_id)s, %(from_number)s) so a custom
+        # tool can drive bolna's transfer service itself. System values are authoritative
+        # (the LLM can't know stream_sid), so they override any same-named tool arg.
+        resp.update(self._build_call_context())
 
         runtime_args = self._extract_api_call_runtime_args(resp)
         try:
