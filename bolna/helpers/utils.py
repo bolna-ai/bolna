@@ -921,6 +921,12 @@ def structure_system_prompt(
         if call_sid:
             default_variables["call_sid"] = call_sid
 
+        # Surface agent-declared SIP header pass-through variables (names in context_data, values in recipient_data).
+        recipient_data = context_data.get("recipient_data", {}) or {}
+        for variable_name in context_data.get("sip_header_variables") or []:
+            if variable_name and variable_name not in default_variables:
+                default_variables[variable_name] = recipient_data.get(variable_name)
+
         final_prompt = f"{final_prompt}\n\n## Call information:\n\n### Variables:\n"
         for k, v in default_variables.items():
             if v:
