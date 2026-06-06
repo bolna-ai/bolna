@@ -2917,6 +2917,12 @@ class TaskManager(BaseManager):
         # (the LLM can't know stream_sid), so they override any same-named tool arg.
         resp.update(self._build_call_context())
 
+        # If a custom tool has no url configured, fall back to the internal transfer
+        # service (same env var the transfer_call branch uses). Lets a custom transfer
+        # tool work with just a number + pre_call_webhook_url — no URL to set.
+        if not url:
+            url = os.getenv("CALL_TRANSFER_WEBHOOK_URL")
+
         runtime_args = self._extract_api_call_runtime_args(resp)
         try:
             prepared_request = prepare_api_request(param, api_token, headers, **runtime_args)
