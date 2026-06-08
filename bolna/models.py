@@ -55,6 +55,16 @@ class ElevenLabsConfig(BaseModel):
     style: Optional[float] = 0.0
 
 
+class SixtyDBConfig(BaseModel):
+    voice: str
+    voice_id: str
+    model: Optional[str] = None
+    speed: Optional[float] = 1.0
+    stability: Optional[float] = 50
+    similarity: Optional[float] = 75
+    enhance: Optional[bool] = True
+
+
 class OpenAIConfig(BaseModel):
     voice: str
     model: str
@@ -152,6 +162,7 @@ class Synthesizer(BaseModel):
         CartesiaConfig,
         DeepgramConfig,
         OpenAIConfig,
+        SixtyDBConfig,
     ] = Field(union_mode="smart")
     stream: bool = False
     buffer_size: Optional[int] = 40  # 40 characters in a buffer
@@ -195,6 +206,11 @@ class Synthesizer(BaseModel):
         elif provider == "rime":
             if isinstance(config, dict):
                 values["provider_config"] = RimeConfig(**config)
+        elif provider == "60db":
+            if not config.get("voice") or not config.get("voice_id"):
+                raise ValueError("60db config requires 'voice' and 'voice_id'.")
+            if isinstance(config, dict):
+                values["provider_config"] = SixtyDBConfig(**config)
 
         return values
 
