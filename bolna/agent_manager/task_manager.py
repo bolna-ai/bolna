@@ -249,6 +249,9 @@ class TaskManager(BaseManager):
         self.eager_meta_info = None
         self.llm_queue_task = None
         self.execute_function_call_task = None
+        # Strong references to fire-and-forget tasks (e.g. pre_call_webhook) so the event
+        # loop doesn't GC them mid-flight; discarded via done-callback on completion.
+        self.background_tasks = set()
         self.synthesizer_tasks = []
         self.synthesizer_task = None
         self._component_error = None
@@ -668,6 +671,24 @@ class TaskManager(BaseManager):
             "execution_id": self.run_id,
         }
 
+    @staticmethod
+    def _resolve_custom_tool_url(url, param):
+        """Resolve the URL a custom tool should POST to.
+
+        Transfer-intent tools — those whose ``param`` carries a ``call_transfer_number``
+        — with no url configured fall back to the internal transfer service (the same
+        ``CALL_TRANSFER_WEBHOOK_URL`` the transfer_call branch uses), so they work with
+        just a number + ``pre_call_webhook_url`` and no URL to set. The fallback is gated
+        on transfer intent: a non-transfer custom tool with an empty url is left as-is
+        (it still errors as before, rather than silently hitting the transfer service).
+        """
+        if url not in (None, ""):
+            return url
+        param_text = param if isinstance(param, str) else json.dumps(param or {})
+        if "call_transfer_number" in (param_text or ""):
+            return os.getenv("CALL_TRANSFER_WEBHOOK_URL")
+        return url
+
     def fire_pre_call_webhook(self, webhook_url, called_fun, resp, meta_info):
         """Fire-and-forget POST to a custom tool's ``pre_call_webhook_url``.
 
@@ -679,10 +700,12 @@ class TaskManager(BaseManager):
         """
         excluded = {"model_response", "textual_response", "tool_call_id", "resp"}
         llm_args = {key: copy.deepcopy(value) for key, value in resp.items() if key not in excluded}
+        # System context + tool_name spread LAST so they win over any same-named LLM arg
+        # (the model can't know call_sid/stream_sid). Consistent with the resp.update path.
         payload = {
+            **llm_args,
             **self._build_call_context(),
             "tool_name": called_fun,
-            **llm_args,
         }
 
         async def send():
@@ -710,7 +733,11 @@ class TaskManager(BaseManager):
             except Exception as exc:
                 logger.warning(f"pre_call_webhook to {webhook_url} failed (ignored): {exc}")
 
-        asyncio.create_task(send())
+        # Keep a strong reference so the task isn't garbage-collected before the POST
+        # finishes (the loop only holds a weak ref); drop it once done.
+        task = asyncio.create_task(send())
+        self.background_tasks.add(task)
+        task.add_done_callback(self.background_tasks.discard)
 
     def _start_api_call_detail(
         self,
@@ -2917,11 +2944,9 @@ class TaskManager(BaseManager):
         # (the LLM can't know stream_sid), so they override any same-named tool arg.
         resp.update(self._build_call_context())
 
-        # If a custom tool has no url configured, fall back to the internal transfer
-        # service (same env var the transfer_call branch uses). Lets a custom transfer
-        # tool work with just a number + pre_call_webhook_url — no URL to set.
-        if not url:
-            url = os.getenv("CALL_TRANSFER_WEBHOOK_URL")
+        # Transfer-intent custom tools with no url fall back to the internal transfer
+        # service (gated so non-transfer tools with an empty url still error as before).
+        url = self._resolve_custom_tool_url(url, param)
 
         runtime_args = self._extract_api_call_runtime_args(resp)
         try:
