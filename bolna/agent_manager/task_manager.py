@@ -708,6 +708,20 @@ class TaskManager(BaseManager):
             "tool_name": called_fun,
         }
 
+        # Record in function_tool_api_call_details so the pre-call webhook lands in the
+        # same per-call S3 record as the other API/tool calls.
+        api_call_detail = self._start_api_call_detail(
+            called_fun=f"{called_fun}:pre_call_webhook",
+            url=webhook_url,
+            method="POST",
+            param=None,
+            headers={"Content-Type": "application/json"},
+            meta_info=meta_info,
+            runtime_args={"tool_call_id": resp.get("tool_call_id", "")},
+            request_body=json.dumps(payload),
+            api_params=payload,
+        )
+
         async def send():
             try:
                 convert_to_request_log(
@@ -730,8 +744,15 @@ class TaskManager(BaseManager):
                             direction=LogDirection.RESPONSE,
                             run_id=self.run_id,
                         )
+                        self._finalize_api_call_detail(
+                            api_call_detail,
+                            response=response_text,
+                            status_code=response.status,
+                            content_type=response.headers.get("Content-Type"),
+                        )
             except Exception as exc:
                 logger.warning(f"pre_call_webhook to {webhook_url} failed (ignored): {exc}")
+                self._finalize_api_call_detail(api_call_detail, error=exc)
 
         # Keep a strong reference so the task isn't garbage-collected before the POST
         # finishes (the loop only holds a weak ref); drop it once done.

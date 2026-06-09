@@ -27,14 +27,19 @@ def _make_self():
         context_data={"recipient_data": {"from_number": "+15551112222"}},
         tools={"input": inp},
         background_tasks=set(),
+        function_tool_api_call_details=[],
     )
-    # Bind the real _build_call_context so fire_pre_call_webhook exercises it.
+    # Bind the real methods so fire_pre_call_webhook exercises them.
     me._build_call_context = types.MethodType(TaskManager._build_call_context, me)
+    me._start_api_call_detail = types.MethodType(TaskManager._start_api_call_detail, me)
+    me._finalize_api_call_detail = TaskManager._finalize_api_call_detail
+    me._sanitize_api_call_headers = TaskManager._sanitize_api_call_headers
     return me
 
 
 class _FakeResponse:
     status = 200
+    headers = {"Content-Type": "application/json"}
 
     async def text(self):
         return "ok"
@@ -130,6 +135,30 @@ async def test_pre_call_webhook_system_context_overrides_llm_args():
     assert body["call_sid"] == "call-abc"      # system value wins, not the fabricated one
     assert body["provider"] == "plivo"
     assert body["reason"] == "transfer me"     # genuine LLM arg preserved
+
+
+@pytest.mark.asyncio
+async def test_pre_call_webhook_recorded_in_api_call_details():
+    """The pre-call webhook must be appended to function_tool_api_call_details so it
+    lands in the same per-call S3 record as the other API/tool calls."""
+    me = _make_self()
+
+    with (
+        patch("bolna.agent_manager.task_manager.aiohttp.ClientSession", _FakeSession),
+        patch("bolna.agent_manager.task_manager.convert_to_request_log"),
+    ):
+        TaskManager.fire_pre_call_webhook(
+            me, "https://hook.example/notify", "custom_task_transfer", {"reason": "x"}, {"turn_id": 1}
+        )
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+    assert len(me.function_tool_api_call_details) == 1
+    detail = me.function_tool_api_call_details[0]
+    assert detail["tool_name"] == "custom_task_transfer:pre_call_webhook"
+    assert detail["url"] == "https://hook.example/notify"
+    assert detail["status"] == "completed"        # finalized after the POST
+    assert detail["response_status_code"] == 200
 
 
 @pytest.mark.asyncio
