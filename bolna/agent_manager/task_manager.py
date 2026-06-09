@@ -4274,6 +4274,15 @@ class TaskManager(BaseManager):
         if len(labels) < 2:
             return
 
+        # The unbiased detector is a separate socket with its own latency, so at this
+        # (main transcriber's) turn boundary its buffer may still be missing the tail of
+        # this turn. Let it settle briefly so we drain a complete turn rather than a
+        # partial one. This is off the response path (background task, switch applies next
+        # turn), so the delay is invisible to the caller.
+        settle_ms = int(os.getenv("LANGUAGE_SWITCH_SETTLE_MS", "300"))
+        if settle_ms > 0:
+            await asyncio.sleep(settle_ms / 1000)
+
         detector_transcript, detected_lang = pool.take_lid_transcript()
         if not detector_transcript:
             return
@@ -4301,17 +4310,43 @@ class TaskManager(BaseManager):
             )
             return
 
-        # Confidence gate: don't flip the language on a low-confidence detection.
+        # Confidence gate (fail-closed): don't flip the language unless the model is
+        # confident enough. Prefer the model's explicit target_confidence; fall back to
+        # the per-language list (normalized match on the short code). If neither yields a
+        # number, treat it as below threshold and stay — a missing confidence signal is
+        # exactly the "when unsure, stay" case.
         min_conf = float(os.getenv("LANGUAGE_SWITCH_MIN_CONFIDENCE", "0.6"))
-        target_conf = next(
-            (lang.get("confidence") for lang in languages if isinstance(lang, dict) and lang.get("language") == target),
-            None,
-        )
-        if target_conf is not None and target_conf < min_conf:
-            logger.info(
-                f"LanguageSwitcher: target '{target}' confidence {target_conf} < {min_conf} — no switch "
-                f"(reason={reasoning})"
+        target_conf = decision.get("target_confidence")
+        if target_conf is None:
+            short_target = (target or "").split("-")[0].lower()
+            target_conf = next(
+                (
+                    lang.get("confidence")
+                    for lang in languages
+                    if isinstance(lang, dict)
+                    and str(lang.get("language") or "").split("-")[0].lower() == short_target
+                ),
+                None,
             )
+        if target_conf is None or target_conf < min_conf:
+            logger.info(
+                f"LanguageSwitcher: target '{target}' confidence {target_conf} below {min_conf} (or missing) — "
+                f"no switch (reason={reasoning})"
+            )
+            return
+
+        # Flush the current turn's response before swapping the pools. switch_language
+        # → SynthesizerPool.switch() cancels the in-flight generate task and reroutes
+        # remaining chunks to the new-language synth; doing that mid-utterance truncates
+        # the current sentence or finishes it in the wrong voice. Waiting for the audio to
+        # drain also realizes the intended "applies next turn" behavior. Mirrors the legacy
+        # tool path, which awaited wait_for_current_message() before switching.
+        await self.wait_for_current_message()
+
+        # Re-read after the flush: a concurrent turn's decision may have switched while we
+        # waited, so re-check against the live language before applying.
+        current = self.language
+        if target == current:
             return
 
         context_note = (

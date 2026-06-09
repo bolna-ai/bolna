@@ -108,6 +108,7 @@ Respond ONLY in this JSON format:
 {{
   "languages": [{{"language": "<language detected in the speech>", "confidence": <0.0-1.0>}}, ...],
   "target_language": "<one of the supported labels, or null to stay in the current language>",
+  "target_confidence": <0.0-1.0 — your confidence that the agent should operate in target_language; use 0 when target_language is null>,
   "reasoning": "<brief one-line explanation>"
 }}
 
