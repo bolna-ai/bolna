@@ -4850,7 +4850,7 @@ class TaskManager(BaseManager):
                             "end_of_llm_stream": True,
                         }
                         await self._synthesize(create_ws_data_packet(user_online_message, meta_info=meta_info))
-                    self.conversation_history.append_assistant(user_online_message, exclude_from_llm=True)
+                    self.conversation_history.append_assistant(user_online_message)
 
                 # Just in case we need to clear messages sent before
                 await self.tools["output"].handle_interruption()
