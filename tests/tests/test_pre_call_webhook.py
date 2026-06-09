@@ -199,9 +199,8 @@ async def test_pre_call_webhook_swallows_errors():
         await asyncio.sleep(0)
 
 
-def test_build_call_context_exposes_transfer_fields():
-    """Call context must carry the fields /process_transfer needs, so a custom tool
-    can drive the transfer itself via %(...)s substitution."""
+def test_build_call_context_has_expected_fields():
+    """The pre-call webhook payload's call context carries the expected fields."""
     me = _make_self()
     ctx = TaskManager._build_call_context(me)
     assert ctx["call_sid"] == "call-abc"  # from get_call_sid() for non-default provider
@@ -209,47 +208,3 @@ def test_build_call_context_exposes_transfer_fields():
     assert ctx["stream_sid"] == "stream-xyz"
     assert ctx["from_number"] == "+15551112222"
     assert ctx["execution_id"] == "exec-123"
-
-
-def test_build_call_context_injected_into_resp_overrides():
-    """resp.update(call_context) makes the fields available for param substitution,
-    and system values win over any same-named LLM arg (the LLM can't know stream_sid)."""
-    me = _make_self()
-    resp = {"reason": "user asked", "stream_sid": "llm-guessed-wrong", "tool_call_id": "tc-1"}
-    resp.update(TaskManager._build_call_context(me))
-    assert resp["stream_sid"] == "stream-xyz"  # system value wins
-    assert resp["call_sid"] == "call-abc"
-    assert resp["reason"] == "user asked"  # LLM arg preserved
-
-
-def test_resolve_custom_tool_url_keeps_explicit_url():
-    """An explicitly configured url is never overridden by the fallback."""
-    assert (
-        TaskManager._resolve_custom_tool_url("https://my.endpoint/x", {"call_transfer_number": "+1"})
-        == "https://my.endpoint/x"
-    )
-
-
-def test_resolve_custom_tool_url_transfer_intent_falls_back(monkeypatch):
-    """Transfer-intent tool (param has call_transfer_number) with empty url falls back
-    to the internal transfer service. Works for both dict and string params."""
-    monkeypatch.setenv("CALL_TRANSFER_WEBHOOK_URL", "https://ts.example/process_transfer")
-    for empty in (None, ""):
-        assert (
-            TaskManager._resolve_custom_tool_url(empty, {"call_transfer_number": "+917691021365"})
-            == "https://ts.example/process_transfer"
-        )
-    # string param form
-    assert (
-        TaskManager._resolve_custom_tool_url(None, '{"call_transfer_number": "+1"}')
-        == "https://ts.example/process_transfer"
-    )
-
-
-def test_resolve_custom_tool_url_non_transfer_not_redirected(monkeypatch):
-    """A non-transfer custom tool with an empty url is left untouched — it must NOT
-    silently get pointed at the transfer service (regression guard for the review note)."""
-    monkeypatch.setenv("CALL_TRANSFER_WEBHOOK_URL", "https://ts.example/process_transfer")
-    assert TaskManager._resolve_custom_tool_url(None, {"order_id": "%(order_id)s"}) is None
-    assert TaskManager._resolve_custom_tool_url("", {}) == ""
-    assert TaskManager._resolve_custom_tool_url("", None) == ""

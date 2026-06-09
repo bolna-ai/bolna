@@ -649,9 +649,7 @@ class TaskManager(BaseManager):
         return {key: copy.deepcopy(value) for key, value in resp.items() if key not in excluded_keys}
 
     def _build_call_context(self):
-        """Live call/session context, shared by the pre-call webhook and custom-tool
-        param substitution. Mirrors what the transfer_call branch builds so a custom
-        tool can drive bolna's transfer service (/process_transfer) itself.
+        """Live call/session context included in the pre-call webhook payload.
 
         Sources call_sid the same way transfer_call does: prefer the telephony
         provider's authoritative live value, falling back to self.call_sid.
@@ -670,24 +668,6 @@ class TaskManager(BaseManager):
             "from_number": recipient_data.get("from_number"),
             "execution_id": self.run_id,
         }
-
-    @staticmethod
-    def _resolve_custom_tool_url(url, param):
-        """Resolve the URL a custom tool should POST to.
-
-        Transfer-intent tools — those whose ``param`` carries a ``call_transfer_number``
-        — with no url configured fall back to the internal transfer service (the same
-        ``CALL_TRANSFER_WEBHOOK_URL`` the transfer_call branch uses), so they work with
-        just a number + ``pre_call_webhook_url`` and no URL to set. The fallback is gated
-        on transfer intent: a non-transfer custom tool with an empty url is left as-is
-        (it still errors as before, rather than silently hitting the transfer service).
-        """
-        if url not in (None, ""):
-            return url
-        param_text = param if isinstance(param, str) else json.dumps(param or {})
-        if "call_transfer_number" in (param_text or ""):
-            return os.getenv("CALL_TRANSFER_WEBHOOK_URL")
-        return url
 
     def fire_pre_call_webhook(self, webhook_url, called_fun, resp, meta_info):
         """Fire-and-forget POST to a custom tool's ``pre_call_webhook_url``.
@@ -2958,16 +2938,6 @@ class TaskManager(BaseManager):
         pre_call_webhook_url = tool_conf.get("pre_call_webhook_url")
         if pre_call_webhook_url:
             self.fire_pre_call_webhook(pre_call_webhook_url, called_fun, resp, meta_info)
-
-        # Expose live call context as substitution variables (e.g. %(call_sid)s,
-        # %(stream_sid)s, %(provider)s, %(execution_id)s, %(from_number)s) so a custom
-        # tool can drive bolna's transfer service itself. System values are authoritative
-        # (the LLM can't know stream_sid), so they override any same-named tool arg.
-        resp.update(self._build_call_context())
-
-        # Transfer-intent custom tools with no url fall back to the internal transfer
-        # service (gated so non-transfer tools with an empty url still error as before).
-        url = self._resolve_custom_tool_url(url, param)
 
         runtime_args = self._extract_api_call_runtime_args(resp)
         try:
