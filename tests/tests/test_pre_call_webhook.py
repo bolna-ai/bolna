@@ -119,7 +119,7 @@ async def test_pre_call_webhook_system_context_overrides_llm_args():
     me = _make_self()
     resp = {
         "reason": "transfer me",
-        "call_sid": "MODEL-MADE-UP-SID",   # LLM fabricated — must be overridden
+        "call_sid": "MODEL-MADE-UP-SID",  # LLM fabricated — must be overridden
         "provider": "bogus",
     }
 
@@ -132,9 +132,9 @@ async def test_pre_call_webhook_system_context_overrides_llm_args():
         await asyncio.sleep(0)
 
     body = _FakeSession.last_post["json"]
-    assert body["call_sid"] == "call-abc"      # system value wins, not the fabricated one
+    assert body["call_sid"] == "call-abc"  # system value wins, not the fabricated one
     assert body["provider"] == "plivo"
-    assert body["reason"] == "transfer me"     # genuine LLM arg preserved
+    assert body["reason"] == "transfer me"  # genuine LLM arg preserved
 
 
 @pytest.mark.asyncio
@@ -157,7 +157,7 @@ async def test_pre_call_webhook_recorded_in_api_call_details():
     detail = me.function_tool_api_call_details[0]
     assert detail["tool_name"] == "custom_task_transfer:pre_call_webhook"
     assert detail["url"] == "https://hook.example/notify"
-    assert detail["status"] == "completed"        # finalized after the POST
+    assert detail["status"] == "completed"  # finalized after the POST
     assert detail["response_status_code"] == 200
 
 
