@@ -4323,8 +4323,7 @@ class TaskManager(BaseManager):
                 (
                     lang.get("confidence")
                     for lang in languages
-                    if isinstance(lang, dict)
-                    and str(lang.get("language") or "").split("-")[0].lower() == short_target
+                    if isinstance(lang, dict) and str(lang.get("language") or "").split("-")[0].lower() == short_target
                 ),
                 None,
             )
