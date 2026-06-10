@@ -22,9 +22,10 @@ def _make_self():
     inp.get_call_sid = MagicMock(return_value="call-abc")
     me = SimpleNamespace(
         run_id="exec-123",
+        assistant_id="agent-1",
         call_sid="call-abc",
         stream_sid="stream-xyz",
-        context_data={"recipient_data": {"from_number": "+15551112222"}},
+        context_data={"recipient_data": {"from_number": "+15551112222", "to_number": "+15553334444"}},
         tools={"input": inp},
         background_tasks=set(),
         function_tool_api_call_details=[],
@@ -97,14 +98,17 @@ async def test_pre_call_webhook_payload_and_target():
     sent = _FakeSession.last_post
     assert sent["url"] == "https://hook.example/notify"
     body = sent["json"]
-    # call context
+    # common call-state fields
     assert body["execution_id"] == "exec-123"
+    assert body["agent_id"] == "agent-1"
     assert body["call_sid"] == "call-abc"
-    assert body["stream_sid"] == "stream-xyz"
     assert body["provider"] == "plivo"
     assert body["from_number"] == "+15551112222"
-    assert body["tool_name"] == "custom_task_transfer"
-    # LLM args forwarded
+    assert body["to_number"] == "+15553334444"
+    # transfer-specific fields must NOT be present
+    assert "stream_sid" not in body
+    assert "tool_name" not in body
+    # LLM args (params) forwarded
     assert body["reason"] == "customer asked for billing"
     assert body["call_transfer_number"] == "+15559998888"
     # internal keys excluded
@@ -199,12 +203,14 @@ async def test_pre_call_webhook_swallows_errors():
         await asyncio.sleep(0)
 
 
-def test_build_call_context_has_expected_fields():
-    """The pre-call webhook payload's call context carries the expected fields."""
+def test_build_call_context_has_common_fields_only():
+    """Call context carries the common call-state fields — and NO transfer-specific ones."""
     me = _make_self()
     ctx = TaskManager._build_call_context(me)
+    assert ctx["execution_id"] == "exec-123"
+    assert ctx["agent_id"] == "agent-1"
     assert ctx["call_sid"] == "call-abc"  # from get_call_sid() for non-default provider
     assert ctx["provider"] == "plivo"
-    assert ctx["stream_sid"] == "stream-xyz"
     assert ctx["from_number"] == "+15551112222"
-    assert ctx["execution_id"] == "exec-123"
+    assert ctx["to_number"] == "+15553334444"
+    assert "stream_sid" not in ctx          # transfer-specific — removed

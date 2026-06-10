@@ -249,9 +249,6 @@ class TaskManager(BaseManager):
         self.eager_meta_info = None
         self.llm_queue_task = None
         self.execute_function_call_task = None
-        # Strong references to fire-and-forget tasks (e.g. pre_call_webhook) so the event
-        # loop doesn't GC them mid-flight; discarded via done-callback on completion.
-        self.background_tasks = set()
         self.synthesizer_tasks = []
         self.synthesizer_task = None
         self._component_error = None
@@ -649,10 +646,12 @@ class TaskManager(BaseManager):
         return {key: copy.deepcopy(value) for key, value in resp.items() if key not in excluded_keys}
 
     def _build_call_context(self):
-        """Live call/session context included in the pre-call webhook payload.
+        """Common call-state fields included in the pre-call webhook payload.
 
-        Sources call_sid the same way transfer_call does: prefer the telephony
-        provider's authoritative live value, falling back to self.call_sid.
+        These mirror the identifiers carried by the platform's call-state event
+        webhooks (execution_id/agent_id/call_sid/provider/numbers) — NOT the
+        transfer-specific fields. Sources call_sid the same way transfer_call does:
+        prefer the telephony provider's authoritative live value, else self.call_sid.
         """
         recipient_data = (self.context_data or {}).get("recipient_data") or {}
         call_sid = self.call_sid
@@ -662,11 +661,12 @@ class TaskManager(BaseManager):
         except Exception:
             pass
         return {
+            "execution_id": self.run_id,
+            "agent_id": self.assistant_id,
             "call_sid": call_sid,
             "provider": self.tools["input"].io_provider,
-            "stream_sid": self.stream_sid,
             "from_number": recipient_data.get("from_number"),
-            "execution_id": self.run_id,
+            "to_number": recipient_data.get("to_number"),
         }
 
     def fire_pre_call_webhook(self, webhook_url, called_fun, resp, meta_info):
@@ -680,12 +680,12 @@ class TaskManager(BaseManager):
         """
         excluded = {"model_response", "textual_response", "tool_call_id", "resp"}
         llm_args = {key: copy.deepcopy(value) for key, value in resp.items() if key not in excluded}
-        # System context + tool_name spread LAST so they win over any same-named LLM arg
-        # (the model can't know call_sid/stream_sid). Consistent with the resp.update path.
+        # Payload = the tool's params (LLM args) + the common call-state fields. Common
+        # fields spread LAST so they win over any same-named LLM arg (the model can't
+        # know call_sid/execution_id). No transfer-specific fields.
         payload = {
             **llm_args,
             **self._build_call_context(),
-            "tool_name": called_fun,
         }
 
         # Record in function_tool_api_call_details so the pre-call webhook lands in the
