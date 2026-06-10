@@ -74,28 +74,19 @@ def prepare_api_request(param, api_token, headers_data, **kwargs):
             request_body = json.dumps(api_params)
             logger.info("Using $var marker substitution for param")
         else:
+            # LEGACY FORMAT: String template with %(field)s placeholders
+            if isinstance(param, dict):
+                param = json.dumps(param)
+
             # JSON-serialize complex values (lists, dicts) for proper string substitution
             # Python's % formatting uses repr() which produces single quotes,
             # but JSON requires double quotes for valid JSON output
             json_kwargs = {k: json.dumps(v) if isinstance(v, (list, dict)) else v for k, v in kwargs.items()}
 
-            tool_literals, tool_placeholders = {}, {}
-            for k, v in param.items():
-                if isinstance(v, str) and v.startswith('%('):
-                    tool_placeholders[k] = v
-                else:
-                    tool_literals[k] = v
-
-            # LEGACY FORMAT: String template with %(field)s placeholders
-            if isinstance(tool_placeholders, dict):
-                tool_placeholders = json.dumps(tool_placeholders)
-
-            code = compile(tool_placeholders % json_kwargs, "<string>", "exec")
+            code = compile(param % json_kwargs, "<string>", "exec")
             exec(code, globals(), json_kwargs)
-            injected_placeholders = json.loads(tool_placeholders % json_kwargs)
-
-            api_params = {**tool_literals, **injected_placeholders}
-            request_body = json.dumps(api_params)
+            request_body = param % json_kwargs
+            api_params = json.loads(request_body)
 
     headers = {"Content-Type": "application/json"}
     content_type = "json"
