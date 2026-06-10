@@ -128,7 +128,7 @@ async def trigger_api(
         )
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
             if method.lower() == "get":
-                logger.info(f"Sending request {request_body}, {url}, {headers}")
+                logger.info(f"Sending request {api_params}, {url}, {headers}")
                 async with session.get(url, params=api_params, headers=headers) as response:
                     response_text = await response.text()
             elif method.lower() == "post":
@@ -140,6 +140,9 @@ async def trigger_api(
                     normalized_api_params = normalize_for_form(api_params)
                     async with session.post(url, data=normalized_api_params, headers=headers) as response:
                         response_text = await response.text()
+
+            if response:
+                logger.info(f"Final URL: {response.url}")
 
             if return_response_metadata:
                 return {
