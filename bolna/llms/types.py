@@ -11,6 +11,7 @@ class APIParams(BaseModel):
     headers: Optional[Union[str, dict]] = None
     pre_call_message: Optional[Union[str, dict]] = None
     pre_call_webhook_url: Optional[str] = None
+    pre_call_webhook_param: Optional[Union[str, dict]] = None
 
 
 class LatencyData(BaseModel):

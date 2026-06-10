@@ -648,43 +648,48 @@ class TaskManager(BaseManager):
     def _build_call_context(self):
         """Common call-state fields included in the pre-call webhook payload.
 
-        These mirror the identifiers carried by the platform's call-state event
-        webhooks (execution_id/agent_id/call_sid/provider/numbers) — NOT the
-        transfer-specific fields. Sources call_sid the same way transfer_call does:
-        prefer the telephony provider's authoritative live value, else self.call_sid.
+        These mirror the identifiers carried by the platform's customer-facing
+        call-state event webhooks (execution_id/agent_id/provider/numbers) — NOT the
+        transfer-specific or internal fields (call_sid/stream_sid are excluded there).
         """
         recipient_data = (self.context_data or {}).get("recipient_data") or {}
-        call_sid = self.call_sid
-        try:
-            if self.tools["input"].io_provider != "default":
-                call_sid = self.tools["input"].get_call_sid()
-        except Exception:
-            pass
         return {
             "execution_id": self.run_id,
             "agent_id": self.assistant_id,
-            "call_sid": call_sid,
             "provider": self.tools["input"].io_provider,
             "from_number": recipient_data.get("from_number"),
             "to_number": recipient_data.get("to_number"),
         }
 
-    def fire_pre_call_webhook(self, webhook_url, called_fun, resp, meta_info):
+    def fire_pre_call_webhook(self, webhook_url, called_fun, resp, meta_info, webhook_param=None):
         """Fire-and-forget POST to a custom tool's ``pre_call_webhook_url``.
 
-        Notifies an external system before the tool's main request runs (e.g. the
-        reason for a transfer, before the custom transfer POST). Sends the LLM-provided
-        tool arguments plus call context. Generic — not transfer-specific; it forwards
-        whatever arguments the LLM filled in for the tool. Never blocks or fails the
-        main tool call: it is scheduled as a background task and all errors are swallowed.
+        Notifies an external system before the tool's main request runs. The body is:
+        the webhook param (``pre_call_webhook_param`` template substituted with the LLM
+        args) if configured, else nothing — PLUS the common call-state fields (always).
+        ``pre_call_webhook_param`` lets the webhook body be defined independently of the
+        function call's own ``param`` (the LLM args are not dumped wholesale). Never
+        blocks or fails the main tool call: scheduled as a background task, errors swallowed.
         """
         excluded = {"model_response", "textual_response", "tool_call_id", "resp"}
         llm_args = {key: copy.deepcopy(value) for key, value in resp.items() if key not in excluded}
-        # Payload = the tool's params (LLM args) + the common call-state fields. Common
-        # fields spread LAST so they win over any same-named LLM arg (the model can't
-        # know call_sid/execution_id). No transfer-specific fields.
+
+        # Webhook body = ONLY what the pre_call_webhook_param template specifies
+        # (substituted with the LLM args). If no template is configured, send nothing
+        # extra — just the common call-state fields. The LLM args are NOT dumped wholesale.
+        body = {}
+        if webhook_param:
+            try:
+                prepared = prepare_api_request(webhook_param, None, None, **llm_args)
+                if prepared.get("api_params") is not None:
+                    body = prepared["api_params"]
+            except Exception as exc:
+                logger.warning(f"pre_call_webhook_param substitution failed: {exc}")
+
+        # Common call-state fields spread LAST so they win over any same-named field
+        # (the model can't know execution_id/agent_id).
         payload = {
-            **llm_args,
+            **body,
             **self._build_call_context(),
         }
 
@@ -2937,7 +2942,9 @@ class TaskManager(BaseManager):
         tool_conf = self.kwargs.get("api_tools", {}).get("tools_params", {}).get(called_fun, {})
         pre_call_webhook_url = tool_conf.get("pre_call_webhook_url")
         if pre_call_webhook_url:
-            self.fire_pre_call_webhook(pre_call_webhook_url, called_fun, resp, meta_info)
+            self.fire_pre_call_webhook(
+                pre_call_webhook_url, called_fun, resp, meta_info, tool_conf.get("pre_call_webhook_param")
+            )
 
         runtime_args = self._extract_api_call_runtime_args(resp)
         try:

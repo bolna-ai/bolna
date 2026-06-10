@@ -72,12 +72,13 @@ class _FakeSession:
 
 
 @pytest.mark.asyncio
-async def test_pre_call_webhook_payload_and_target():
+async def test_pre_call_webhook_no_template_sends_common_only():
+    """With no pre_call_webhook_param template, the webhook sends ONLY the common
+    call-state fields — the LLM args are NOT dumped into it."""
     me = _make_self()
     resp = {
         "reason": "customer asked for billing",
         "call_transfer_number": "+15559998888",
-        # internal keys that must NOT be forwarded:
         "model_response": [{"x": 1}],
         "textual_response": "sure",
         "tool_call_id": "tc-1",
@@ -91,54 +92,73 @@ async def test_pre_call_webhook_payload_and_target():
         TaskManager.fire_pre_call_webhook(
             me, "https://hook.example/notify", "custom_task_transfer", resp, {"turn_id": 1}
         )
-        # let the background task run
         await asyncio.sleep(0)
         await asyncio.sleep(0)
 
     sent = _FakeSession.last_post
     assert sent["url"] == "https://hook.example/notify"
     body = sent["json"]
-    # common call-state fields
+    # common call-state fields present
     assert body["execution_id"] == "exec-123"
     assert body["agent_id"] == "agent-1"
-    assert body["call_sid"] == "call-abc"
     assert body["provider"] == "plivo"
     assert body["from_number"] == "+15551112222"
     assert body["to_number"] == "+15553334444"
-    # transfer-specific fields must NOT be present
-    assert "stream_sid" not in body
-    assert "tool_name" not in body
-    # LLM args (params) forwarded
-    assert body["reason"] == "customer asked for billing"
-    assert body["call_transfer_number"] == "+15559998888"
-    # internal keys excluded
-    for k in ("model_response", "textual_response", "tool_call_id", "resp"):
+    # NO LLM args / internal keys / excluded fields
+    for k in ("reason", "call_transfer_number", "model_response", "textual_response",
+              "tool_call_id", "resp", "stream_sid", "tool_name", "call_sid"):
         assert k not in body
 
 
 @pytest.mark.asyncio
-async def test_pre_call_webhook_system_context_overrides_llm_args():
-    """A model-fabricated call_sid/provider in the LLM args must NOT leak into the
-    webhook — system context wins (regression guard for the payload-order review note)."""
+async def test_pre_call_webhook_param_template_controls_body():
+    """A pre_call_webhook_param template defines the webhook body independently of the
+    function-call param: only its fields are sent (+ common call-state fields)."""
     me = _make_self()
-    resp = {
-        "reason": "transfer me",
-        "call_sid": "MODEL-MADE-UP-SID",  # LLM fabricated — must be overridden
-        "provider": "bogus",
-    }
+    resp = {"reason": "billing", "customer_name": "Alice", "tool_call_id": "tc-1"}
+    webhook_param = {"who": "%(customer_name)s", "channel": "voice"}  # template, not the function param
 
     with (
         patch("bolna.agent_manager.task_manager.aiohttp.ClientSession", _FakeSession),
         patch("bolna.agent_manager.task_manager.convert_to_request_log"),
     ):
-        TaskManager.fire_pre_call_webhook(me, "https://hook.example/notify", "custom_task_transfer", resp, {})
+        TaskManager.fire_pre_call_webhook(
+            me, "https://hook.example/notify", "custom_task_x", resp, {}, webhook_param
+        )
         await asyncio.sleep(0)
         await asyncio.sleep(0)
 
     body = _FakeSession.last_post["json"]
-    assert body["call_sid"] == "call-abc"  # system value wins, not the fabricated one
-    assert body["provider"] == "plivo"
-    assert body["reason"] == "transfer me"  # genuine LLM arg preserved
+    assert body["who"] == "Alice"          # templated from LLM arg
+    assert body["channel"] == "voice"      # static value in template
+    assert body["execution_id"] == "exec-123"   # common fields still added
+    assert body["agent_id"] == "agent-1"
+    assert "reason" not in body            # not in the template → not sent
+    assert "customer_name" not in body
+
+
+@pytest.mark.asyncio
+async def test_pre_call_webhook_common_fields_win_over_template():
+    """If the template sets a field that collides with a common call-state field,
+    the system value wins (common fields are spread last)."""
+    me = _make_self()
+    resp = {"reason": "transfer me"}
+    webhook_param = {"provider": "bogus", "agent_id": "fake", "note": "%(reason)s"}
+
+    with (
+        patch("bolna.agent_manager.task_manager.aiohttp.ClientSession", _FakeSession),
+        patch("bolna.agent_manager.task_manager.convert_to_request_log"),
+    ):
+        TaskManager.fire_pre_call_webhook(
+            me, "https://hook.example/notify", "custom_task_transfer", resp, {}, webhook_param
+        )
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+    body = _FakeSession.last_post["json"]
+    assert body["provider"] == "plivo"     # common wins over template
+    assert body["agent_id"] == "agent-1"   # common wins over template
+    assert body["note"] == "transfer me"   # templated from LLM arg
 
 
 @pytest.mark.asyncio
@@ -209,8 +229,8 @@ def test_build_call_context_has_common_fields_only():
     ctx = TaskManager._build_call_context(me)
     assert ctx["execution_id"] == "exec-123"
     assert ctx["agent_id"] == "agent-1"
-    assert ctx["call_sid"] == "call-abc"  # from get_call_sid() for non-default provider
     assert ctx["provider"] == "plivo"
     assert ctx["from_number"] == "+15551112222"
     assert ctx["to_number"] == "+15553334444"
     assert "stream_sid" not in ctx          # transfer-specific — removed
+    assert "call_sid" not in ctx            # excluded from customer call-event webhooks
