@@ -249,9 +249,6 @@ class TaskManager(BaseManager):
         self.eager_meta_info = None
         self.llm_queue_task = None
         self.execute_function_call_task = None
-        # Strong references to fire-and-forget tasks (e.g. pre_call_webhook) so the event
-        # loop doesn't GC them mid-flight; discarded via done-callback on completion.
-        self.background_tasks = set()
         self.synthesizer_tasks = []
         self.synthesizer_task = None
         self._component_error = None
@@ -647,118 +644,6 @@ class TaskManager(BaseManager):
     def _extract_api_call_runtime_args(resp):
         excluded_keys = {"model_response", "textual_response"}
         return {key: copy.deepcopy(value) for key, value in resp.items() if key not in excluded_keys}
-
-    def _build_call_context(self):
-        """Live call/session context, shared by the pre-call webhook and custom-tool
-        param substitution. Mirrors what the transfer_call branch builds so a custom
-        tool can drive bolna's transfer service (/process_transfer) itself.
-
-        Sources call_sid the same way transfer_call does: prefer the telephony
-        provider's authoritative live value, falling back to self.call_sid.
-        """
-        recipient_data = (self.context_data or {}).get("recipient_data") or {}
-        call_sid = self.call_sid
-        try:
-            if self.tools["input"].io_provider != "default":
-                call_sid = self.tools["input"].get_call_sid()
-        except Exception:
-            pass
-        return {
-            "call_sid": call_sid,
-            "provider": self.tools["input"].io_provider,
-            "stream_sid": self.stream_sid,
-            "from_number": recipient_data.get("from_number"),
-            "execution_id": self.run_id,
-        }
-
-    @staticmethod
-    def _resolve_custom_tool_url(url, param):
-        """Resolve the URL a custom tool should POST to.
-
-        Transfer-intent tools — those whose ``param`` carries a ``call_transfer_number``
-        — with no url configured fall back to the internal transfer service (the same
-        ``CALL_TRANSFER_WEBHOOK_URL`` the transfer_call branch uses), so they work with
-        just a number + ``pre_call_webhook_url`` and no URL to set. The fallback is gated
-        on transfer intent: a non-transfer custom tool with an empty url is left as-is
-        (it still errors as before, rather than silently hitting the transfer service).
-        """
-        if url not in (None, ""):
-            return url
-        param_text = param if isinstance(param, str) else json.dumps(param or {})
-        if "call_transfer_number" in (param_text or ""):
-            return os.getenv("CALL_TRANSFER_WEBHOOK_URL")
-        return url
-
-    def fire_pre_call_webhook(self, webhook_url, called_fun, resp, meta_info):
-        """Fire-and-forget POST to a custom tool's ``pre_call_webhook_url``.
-
-        Notifies an external system before the tool's main request runs (e.g. the
-        reason for a transfer, before the custom transfer POST). Sends the LLM-provided
-        tool arguments plus call context. Generic — not transfer-specific; it forwards
-        whatever arguments the LLM filled in for the tool. Never blocks or fails the
-        main tool call: it is scheduled as a background task and all errors are swallowed.
-        """
-        excluded = {"model_response", "textual_response", "tool_call_id", "resp"}
-        llm_args = {key: copy.deepcopy(value) for key, value in resp.items() if key not in excluded}
-        # System context + tool_name spread LAST so they win over any same-named LLM arg
-        # (the model can't know call_sid/stream_sid). Consistent with the resp.update path.
-        payload = {
-            **llm_args,
-            **self._build_call_context(),
-            "tool_name": called_fun,
-        }
-
-        # Record in function_tool_api_call_details so the pre-call webhook lands in the
-        # same per-call S3 record as the other API/tool calls.
-        api_call_detail = self._start_api_call_detail(
-            called_fun=f"{called_fun}:pre_call_webhook",
-            url=webhook_url,
-            method="POST",
-            param=None,
-            headers={"Content-Type": "application/json"},
-            meta_info=meta_info,
-            runtime_args={"tool_call_id": resp.get("tool_call_id", "")},
-            request_body=json.dumps(payload),
-            api_params=payload,
-        )
-
-        async def send():
-            try:
-                convert_to_request_log(
-                    str(payload),
-                    meta_info,
-                    None,
-                    LogComponent.FUNCTION_CALL,
-                    direction=LogDirection.REQUEST,
-                    run_id=self.run_id,
-                )
-                async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
-                    async with session.post(webhook_url, json=payload) as response:
-                        response_text = await response.text()
-                        logger.info(f"pre_call_webhook response ({response.status}): {response_text}")
-                        convert_to_request_log(
-                            str(response_text),
-                            meta_info,
-                            None,
-                            LogComponent.FUNCTION_CALL,
-                            direction=LogDirection.RESPONSE,
-                            run_id=self.run_id,
-                        )
-                        self._finalize_api_call_detail(
-                            api_call_detail,
-                            response=response_text,
-                            status_code=response.status,
-                            content_type=response.headers.get("Content-Type"),
-                        )
-            except Exception as exc:
-                logger.warning(f"pre_call_webhook to {webhook_url} failed (ignored): {exc}")
-                self._finalize_api_call_detail(api_call_detail, error=exc)
-
-        # Keep a strong reference so the task isn't garbage-collected before the POST
-        # finishes (the loop only holds a weak ref); drop it once done.
-        task = asyncio.create_task(send())
-        self.background_tasks.add(task)
-        task.add_done_callback(self.background_tasks.discard)
 
     def _start_api_call_detail(
         self,
@@ -2950,24 +2835,6 @@ class TaskManager(BaseManager):
                 f"__execute_function_call: Aborting before API call — hangup_triggered={self.hangup_triggered}, conversation_ended={self.conversation_ended}"
             )
             return
-
-        # Optional pre-call webhook: notify an external system before the tool's main
-        # request runs (e.g. a transfer reason before a custom transfer POST). Fired
-        # fire-and-forget so a webhook outage never blocks or delays the main call.
-        tool_conf = self.kwargs.get("api_tools", {}).get("tools_params", {}).get(called_fun, {})
-        pre_call_webhook_url = tool_conf.get("pre_call_webhook_url")
-        if pre_call_webhook_url:
-            self.fire_pre_call_webhook(pre_call_webhook_url, called_fun, resp, meta_info)
-
-        # Expose live call context as substitution variables (e.g. %(call_sid)s,
-        # %(stream_sid)s, %(provider)s, %(execution_id)s, %(from_number)s) so a custom
-        # tool can drive bolna's transfer service itself. System values are authoritative
-        # (the LLM can't know stream_sid), so they override any same-named tool arg.
-        resp.update(self._build_call_context())
-
-        # Transfer-intent custom tools with no url fall back to the internal transfer
-        # service (gated so non-transfer tools with an empty url still error as before).
-        url = self._resolve_custom_tool_url(url, param)
 
         runtime_args = self._extract_api_call_runtime_args(resp)
         try:
