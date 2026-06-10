@@ -206,6 +206,52 @@ async def test_pre_call_webhook_keeps_strong_task_reference():
 
 
 @pytest.mark.asyncio
+async def test_pre_call_webhook_dispatch_mode(monkeypatch):
+    """With PRE_CALL_WEBHOOK_DISPATCH_URL set, bolna POSTs {execution_id, webhook_url,
+    params} to the dispatch endpoint (the backend enriches with the full record)."""
+    monkeypatch.setenv("PRE_CALL_WEBHOOK_DISPATCH_URL", "https://ts.example/dispatch_pre_call_webhook")
+    me = _make_self()
+    resp = {"customer_name": "Alice"}
+    webhook_param = {"who": "%(customer_name)s"}
+
+    with (
+        patch("bolna.agent_manager.task_manager.aiohttp.ClientSession", _FakeSession),
+        patch("bolna.agent_manager.task_manager.convert_to_request_log"),
+    ):
+        TaskManager.fire_pre_call_webhook(me, "https://customer/notify", "custom_task_x", resp, {}, webhook_param)
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+    sent = _FakeSession.last_post
+    assert sent["url"] == "https://ts.example/dispatch_pre_call_webhook"  # → dispatch endpoint
+    body = sent["json"]
+    assert body["execution_id"] == "exec-123"
+    assert body["webhook_url"] == "https://customer/notify"  # customer URL passed through
+    assert body["params"] == {"who": "Alice"}                # substituted template
+    assert "provider" not in body                            # common fields added by backend, not here
+
+
+@pytest.mark.asyncio
+async def test_pre_call_webhook_lazy_inits_background_tasks():
+    """fire_pre_call_webhook must work even if __init__ never set background_tasks
+    (regression guard: prod hit 'TaskManager has no attribute background_tasks' after a
+    merge dropped the init line)."""
+    me = _make_self()
+    delattr(me, "background_tasks")  # simulate __init__ not initializing it
+
+    with (
+        patch("bolna.agent_manager.task_manager.aiohttp.ClientSession", _FakeSession),
+        patch("bolna.agent_manager.task_manager.convert_to_request_log"),
+    ):
+        # must NOT raise AttributeError
+        TaskManager.fire_pre_call_webhook(me, "https://hook.example/notify", "custom_task_x", {"reason": "x"}, {})
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+    assert hasattr(me, "background_tasks")
+
+
+@pytest.mark.asyncio
 async def test_pre_call_webhook_swallows_errors():
     me = _make_self()
 

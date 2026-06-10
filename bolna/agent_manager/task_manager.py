@@ -662,42 +662,45 @@ class TaskManager(BaseManager):
         }
 
     def fire_pre_call_webhook(self, webhook_url, called_fun, resp, meta_info, webhook_param=None):
-        """Fire-and-forget POST to a custom tool's ``pre_call_webhook_url``.
+        """Fire-and-forget pre-call webhook before the tool's main request runs.
 
-        Notifies an external system before the tool's main request runs. The body is:
-        the webhook param (``pre_call_webhook_param`` template substituted with the LLM
-        args) if configured, else nothing — PLUS the common call-state fields (always).
-        ``pre_call_webhook_param`` lets the webhook body be defined independently of the
-        function call's own ``param`` (the LLM args are not dumped wholesale). Never
-        blocks or fails the main tool call: scheduled as a background task, errors swallowed.
+        ``params`` = the ``pre_call_webhook_param`` template substituted with the LLM args
+        (else empty). Two delivery modes:
+          * If ``PRE_CALL_WEBHOOK_DISPATCH_URL`` is set, POST {execution_id, webhook_url,
+            params} to it; the backend enriches with the full execution record + params and
+            forwards to the customer's webhook_url.
+          * Otherwise (fallback), POST directly to the customer's webhook_url with
+            params + the common call-state fields.
+        Never blocks or fails the main tool call: background task, errors swallowed.
         """
         excluded = {"model_response", "textual_response", "tool_call_id", "resp"}
         llm_args = {key: copy.deepcopy(value) for key, value in resp.items() if key not in excluded}
 
-        # Webhook body = ONLY what the pre_call_webhook_param template specifies
-        # (substituted with the LLM args). If no template is configured, send nothing
-        # extra — just the common call-state fields. The LLM args are NOT dumped wholesale.
-        body = {}
+        # Build params from the webhook template (substituted with the LLM args), else {}.
+        params = {}
         if webhook_param:
             try:
                 prepared = prepare_api_request(webhook_param, None, None, **llm_args)
                 if prepared.get("api_params") is not None:
-                    body = prepared["api_params"]
+                    params = prepared["api_params"]
             except Exception as exc:
                 logger.warning(f"pre_call_webhook_param substitution failed: {exc}")
 
-        # Common call-state fields spread LAST so they win over any same-named field
-        # (the model can't know execution_id/agent_id).
-        payload = {
-            **body,
-            **self._build_call_context(),
-        }
+        dispatch_url = os.getenv("PRE_CALL_WEBHOOK_DISPATCH_URL")
+        if dispatch_url:
+            # Backend dispatch: it fetches the execution record and merges params.
+            target_url = dispatch_url
+            payload = {"execution_id": self.run_id, "webhook_url": webhook_url, "params": params}
+        else:
+            # Fallback: post directly to the customer URL with params + common call-state fields.
+            target_url = webhook_url
+            payload = {**params, **self._build_call_context()}
 
         # Record in function_tool_api_call_details so the pre-call webhook lands in the
         # same per-call S3 record as the other API/tool calls.
         api_call_detail = self._start_api_call_detail(
             called_fun=f"{called_fun}:pre_call_webhook",
-            url=webhook_url,
+            url=target_url,
             method="POST",
             param=None,
             headers={"Content-Type": "application/json"},
@@ -718,7 +721,7 @@ class TaskManager(BaseManager):
                     run_id=self.run_id,
                 )
                 async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
-                    async with session.post(webhook_url, json=payload) as response:
+                    async with session.post(target_url, json=payload) as response:
                         response_text = await response.text()
                         logger.info(f"pre_call_webhook response ({response.status}): {response_text}")
                         convert_to_request_log(
@@ -736,11 +739,14 @@ class TaskManager(BaseManager):
                             content_type=response.headers.get("Content-Type"),
                         )
             except Exception as exc:
-                logger.warning(f"pre_call_webhook to {webhook_url} failed (ignored): {exc}")
+                logger.warning(f"pre_call_webhook to {target_url} failed (ignored): {exc}")
                 self._finalize_api_call_detail(api_call_detail, error=exc)
 
         # Keep a strong reference so the task isn't garbage-collected before the POST
-        # finishes (the loop only holds a weak ref); drop it once done.
+        # finishes (the loop only holds a weak ref); drop it once done. Lazy-init the set
+        # so this never depends on __init__ (robust to merge churn).
+        if not hasattr(self, "background_tasks"):
+            self.background_tasks = set()
         task = asyncio.create_task(send())
         self.background_tasks.add(task)
         task.add_done_callback(self.background_tasks.discard)
