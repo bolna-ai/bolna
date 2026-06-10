@@ -67,10 +67,10 @@ class ElevenlabsSynthesizer(StreamSynthesizer):
         )
         self.api_url = f"https://{self.elevenlabs_host}/v1/text-to-speech/{self.voice}/stream?optimize_streaming_latency=2&output_format="
 
-        # Per-turn context_id so frames from an interrupted turn can be dropped.
+        # One context per conversation segment, rotated only on interruption so
+        # the interrupted turn's frames can be dropped without leaking contexts
+        # (ElevenLabs caps a connection at 5 concurrent contexts).
         self.context_id = None
-        self.turn_id = 0
-        self.sequence_id = 0
         self.context_ids_to_ignore = set()
         self.ws_send_time = None
         self.ws_trace_id = None
@@ -96,14 +96,7 @@ class ElevenlabsSynthesizer(StreamSynthesizer):
 
     def _on_push(self, meta_info, text):
         if not self.context_id:
-            self._update_context(meta_info)
-        elif self.turn_id != meta_info.get("turn_id", 0) or self.sequence_id != meta_info.get("sequence_id", 0):
-            self._update_context(meta_info)
-
-    def _update_context(self, meta_info):
-        self.context_id = str(uuid.uuid4())
-        self.turn_id = meta_info.get("turn_id", 0)
-        self.sequence_id = meta_info.get("sequence_id", 0)
+            self.context_id = str(uuid.uuid4())
 
     # ------------------------------------------------------------------
     # Format helper
