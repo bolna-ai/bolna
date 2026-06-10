@@ -2951,6 +2951,9 @@ class TaskManager(BaseManager):
             self.fire_pre_call_webhook(
                 pre_call_webhook_url, called_fun, resp, meta_info, tool_conf.get("pre_call_webhook_param")
             )
+            # Give the fire-and-forget dispatch a head start so the pre-call webhook
+            # reaches the backend before the tool's main request proceeds.
+            await asyncio.sleep(0.3)
 
         runtime_args = self._extract_api_call_runtime_args(resp)
         try:
