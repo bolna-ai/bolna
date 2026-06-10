@@ -25,12 +25,25 @@ class LanguageSwitcher:
     and returns a target language (or None to stay).
     """
 
-    def __init__(self, available_labels, run_id=None, model=None, llm_kwargs=None):
+    def __init__(self, available_labels, run_id=None, model=None):
         self.available_labels = list(available_labels or [])
         self.run_id = run_id
         self.model = model or LANGUAGE_SWITCH_LLM
         self.latency_ms = None
-        self._llm = LiteLLM(model=self.model, max_tokens=200, temperature=0.0, **(llm_kwargs or {}))
+        # The Switch LLM is infrastructure (always Claude), independent of the agent's
+        # configured LLM. It uses dedicated Anthropic credentials and must NOT inherit
+        # the agent's llm_key/base_url — otherwise an agent on Azure/OpenAI would route
+        # claude-sonnet to its own endpoint and 404. base_url/api_version default to ""
+        # to bypass LiteLLM's global LITELLM_MODEL_API_* env fallback and hit native
+        # Anthropic with ANTHROPIC_API_KEY.
+        self._llm = LiteLLM(
+            model=self.model,
+            max_tokens=200,
+            temperature=0.0,
+            llm_key=os.getenv("LANGUAGE_SWITCH_LLM_API_KEY") or os.getenv("ANTHROPIC_API_KEY") or "",
+            base_url=os.getenv("LANGUAGE_SWITCH_LLM_API_BASE", ""),
+            api_version=os.getenv("LANGUAGE_SWITCH_LLM_API_VERSION", ""),
+        )
 
     async def decide(self, detector_transcript: str, active_transcript: str, active_label: str) -> dict | None:
         """Decide the language from both transcripts.

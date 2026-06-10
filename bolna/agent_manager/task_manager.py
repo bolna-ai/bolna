@@ -1141,12 +1141,12 @@ class TaskManager(BaseManager):
                     lid_config = {"telephony_provider": provider}
                     switch_enabled = self.__language_switch_enabled()
                     if switch_enabled:
+                        # The Switch LLM uses its own dedicated Anthropic credentials
+                        # (see LanguageSwitcher) — deliberately NOT the agent's llm_key/
+                        # base_url, which may point at Azure/OpenAI and would 404 on Claude.
                         self.language_switcher = LanguageSwitcher(
                             available_labels=list(transcribers.keys()),
                             run_id=self.run_id,
-                            llm_kwargs={
-                                k: v for k in ("llm_key", "base_url", "api_version") if (v := self.kwargs.get(k))
-                            },
                         )
 
                     self.tools["transcriber"] = TranscriberPool(
