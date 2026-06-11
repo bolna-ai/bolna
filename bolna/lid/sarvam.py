@@ -65,23 +65,33 @@ class SarvamLID(LIDBackend):
         self._buffer_text = ""
         self._buffer_lang = None
         self._buffer_lang_streak = 0
+        self._buffer_max_segment_s = 0.0
         self._buffer_last_segment_ts = None
         # Set whenever a segment lands; cleared on drain. Lets the idle-flush watcher
         # sleep until speech actually arrives instead of polling on a fixed grid.
         self._buffer_event = asyncio.Event()
 
-    def _accumulate(self, transcript, lang):
+    def _accumulate(self, transcript, lang, audio_s: float = 0.0):
         """Append a recognized segment to the current-turn buffer."""
         if transcript:
             self._buffer_text = " ".join(filter(None, [self._buffer_text, transcript]))
             self._buffer_last_segment_ts = time.monotonic()
             self._buffer_event.set()
+            # Longest single segment in the buffer — acknowledgment-length audio
+            # (<~1s) is where saaras mis-tags languages (e.g. Tamil 'ஆமா' heard as
+            # Hindi 'हाँ'), so switch decisions gate on having at least one
+            # substantive segment.
+            self._buffer_max_segment_s = max(self._buffer_max_segment_s, audio_s or 0.0)
             if lang:
                 # Consecutive same-language segments = saaras double-confirmation;
                 # the watcher uses the streak to fire the decision without waiting
                 # out the idle window.
                 self._buffer_lang_streak = self._buffer_lang_streak + 1 if lang == self._buffer_lang else 1
                 self._buffer_lang = lang
+
+    def buffer_max_segment_seconds(self) -> float:
+        """Duration of the longest buffered segment (peek, no drain)."""
+        return self._buffer_max_segment_s
 
     def buffer_event(self):
         """asyncio.Event that is set while undrained speech sits in the buffer."""
@@ -121,6 +131,7 @@ class SarvamLID(LIDBackend):
         self._buffer_text = ""
         self._buffer_lang = None
         self._buffer_lang_streak = 0
+        self._buffer_max_segment_s = 0.0
         self._buffer_last_segment_ts = None
         self._buffer_event.clear()
         return text, lang
@@ -216,7 +227,7 @@ class SarvamLID(LIDBackend):
                         # saaras emits one "data" message per VAD segment (multiple per
                         # spoken turn). Accumulate into the rolling buffer; the caller
                         # drains it once per conversational turn via take_turn_transcript().
-                        self._accumulate(transcript, short)
+                        self._accumulate(transcript, short, audio_duration)
 
                         # Legacy per-segment language signal (kept for backends/telemetry
                         # that still consume on_language). Skipped when no confidence.

@@ -106,13 +106,15 @@ Decide using these rules:
 3. A complete question or request phrased in one supported language is substantive even if short. A stray name, greeting, or isolated borrowed phrase is not.
 4. CLOSELY RELATED LANGUAGES (same script or mutually intelligible — e.g. Hindi/Marathi/Maithili/Konkani, Hindi/Urdu, Bengali/Assamese): a clean LIVE transcript is WEAK evidence the caller speaks the active language (the locked recognizer decodes the sibling plausibly), and the unbiased tag itself may confuse siblings. Decide from distinctive function words (Marathi आहे/तुम्ही/आपण vs Hindi है/आप) rather than either signal alone.
 5. Judge the language by the words, not the script — speech may be transcribed romanized ("mera order kahan hai" is Hindi) or mis-scripted.
-6. If the dominant spoken language is NOT in the supported list, or you are unsure, stay (target_language = null).
+6. Short acknowledgments and yes/no words ("हाँ", "ஆமா", "haan", "aama", "okay", "sari") are acoustically confusable across Indian languages and frequently MIS-TAGGED by the recognizer — never treat acknowledgment-length speech alone as evidence of a language change.
+7. If the dominant spoken language is NOT in the supported list, or you are unsure, stay (target_language = null).
 
 Respond with raw JSON only — no markdown fences, no surrounding text:
 {{
   "languages": [{{"language": "<ISO 639-1 code, e.g. en, hi, ta, te>", "confidence": <0.0-1.0>}}, ...],
   "target_language": "<one of the supported labels, or null to stay in the current language>",
   "target_confidence": <0.0-1.0 — your confidence that SWITCHING the agent to target_language is the right action (not merely that the language is present); use 0 when target_language is null>,
+  "explicit_request": <true|false — true ONLY if the caller explicitly asked to speak target_language (rule 1)>,
   "reasoning": "<brief explanation, 12 words maximum>"
 }}
 

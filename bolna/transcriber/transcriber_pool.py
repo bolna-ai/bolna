@@ -247,6 +247,12 @@ class TranscriberPool:
             return 0
         return self._lid.buffer_language_streak()
 
+    def lid_buffer_max_segment_seconds(self) -> float:
+        """Duration of the longest buffered detector segment (0.0 if absent)."""
+        if self._lid is None or not hasattr(self._lid, "buffer_max_segment_seconds"):
+            return 0.0
+        return self._lid.buffer_max_segment_seconds()
+
     async def switch(self, label):
         """Switch which transcriber receives audio.
 

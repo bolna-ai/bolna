@@ -4347,6 +4347,7 @@ class TaskManager(BaseManager):
         if settle_ms > 0 and active_transcript:
             await asyncio.sleep(settle_ms / 1000)
 
+        buffered_max_segment_s = pool.lid_buffer_max_segment_seconds()
         detector_transcript, detected_lang = pool.take_lid_transcript()
         if not detector_transcript:
             return
@@ -4462,6 +4463,20 @@ class TaskManager(BaseManager):
             logger.info(
                 f"LanguageSwitcher: target '{target}' confidence {target_conf} below {min_conf} (or missing) — "
                 f"no switch (reason={reasoning})"
+            )
+            return
+
+        # Substance gate (fail-closed): acknowledgment-length audio is where saaras
+        # mis-tags languages (QA call 75ef1aee: two Tamil 'yes'-fragments of 0.54s/0.96s
+        # were tagged Hindi with prob 1.0 and flipped the call ta→hi). A non-explicit
+        # switch needs at least one substantive segment; explicit requests ("Tamil में
+        # बात करो") are legitimately short and bypass via the model's explicit_request.
+        min_segment_s = float(os.getenv("LANGUAGE_SWITCH_MIN_SEGMENT_AUDIO_S", "1.0"))
+        if not decision.get("explicit_request") and buffered_max_segment_s < min_segment_s:
+            logger.info(
+                f"LanguageSwitcher: target '{target}' but longest segment "
+                f"{buffered_max_segment_s:.2f}s < {min_segment_s}s and not an explicit request — "
+                f"no switch (short audio is unreliable LID evidence; reason={reasoning})"
             )
             return
 

@@ -92,6 +92,26 @@ def test_language_streak_counts_consecutive_and_resets():
     assert d.buffer_language_streak() == 0
 
 
+def test_max_segment_tracks_longest_and_resets():
+    d = _detector()
+    assert d.buffer_max_segment_seconds() == 0.0
+    d._accumulate("हाँ", "hi", 0.544)
+    d._accumulate("हां, बैठ ला मैं", "hi", 0.960)
+    # Two short fragments: longest is still below the 1.0s substance gate.
+    assert d.buffer_max_segment_seconds() == 0.960
+    d._accumulate("మీరు ఏం మాట్లాడుతున్నారో", "te", 1.92)
+    assert d.buffer_max_segment_seconds() == 1.92
+    d.take_turn_transcript()
+    assert d.buffer_max_segment_seconds() == 0.0
+
+
+def test_accumulate_backward_compatible_without_duration():
+    d = _detector()
+    d._accumulate("hello", "en")  # older call shape — duration defaults to 0.0
+    assert d.buffer_max_segment_seconds() == 0.0
+    assert d.take_turn_transcript() == ("hello", "en")
+
+
 def test_buffer_event_set_on_segment_cleared_on_drain():
     d = _detector()
     assert not d.buffer_event().is_set()
