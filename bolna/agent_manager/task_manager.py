@@ -3844,6 +3844,13 @@ class TaskManager(BaseManager):
 
                     # Handling of transcriber events
                     if message["data"] == "speech_started":
+                        # VAD proof the user is acoustically active even though no transcript
+                        # exists yet (Deepgram can fire SpeechStarted with dg_turn=None and never
+                        # commit a turn). Refresh the user-silence timer so the is_user_online
+                        # probe / inactivity hangup don't fire mid-utterance — the probe's own
+                        # audio then gates the user's transcript as a false interruption
+                        # (call 8f6c45d4: probe fired 1s into user's reply, ate "नया नया").
+                        self.time_since_last_spoken_human_word = time.time()
                         if not self.tools["input"].welcome_message_played() and self.discard_pre_welcome_utterance:
                             self._speech_started_before_welcome = True
                         if self.tools["input"].welcome_message_played():

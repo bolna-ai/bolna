@@ -154,15 +154,23 @@ class StreamSynthesizer(BaseSynthesizer):
     async def _push_stream(self, message):
         meta_info = message.get("meta_info")
         text = message.get("data")
-        self.current_text = text
         self.synthesized_characters += len(text) if text else 0
         self.current_sequence_chars += len(text) if text else 0
         end_of_llm_stream = meta_info.get("end_of_llm_stream", False)
         self.meta_info = copy.deepcopy(meta_info)
         meta_info["text"] = text
 
-        # Stamp turn start on first push of a new turn
+        # Stamp turn start on first push of a new turn (also resets current_text)
         self._stamp_turn_start(meta_info)
+
+        # Accumulate the full turn text, not just the last chunk: the ElevenLabs
+        # end-of-turn check compares the alignment tail against current_text via
+        # endswith — if current_text held only the final chunk and that chunk is
+        # shorter than the 4-word tail, the match can never succeed, the turn never
+        # closes, and audio_playing stays stuck True (call b8982c6f seq=8: final
+        # chunk was the single word "रहेगा?").
+        if text:
+            self.current_text += text
 
         # Provider-specific pre-push hook (e.g. update context_id)
         self._on_push(meta_info, text)
@@ -186,6 +194,8 @@ class StreamSynthesizer(BaseSynthesizer):
             self.current_turn_start_time = time.perf_counter()
             self.ws_send_time = None
             self.current_turn_ttfb = None
+            # New turn — start accumulating this turn's text from scratch
+            self.current_text = ""
             # Anchor tts_start_ms to the first push — re-pushes of speculative responses
             # (e.g. after a tool call confirms the eager response) would overwrite this
             # to a later timestamp, making tts_start appear after agent_speech_start.

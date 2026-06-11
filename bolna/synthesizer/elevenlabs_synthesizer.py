@@ -235,7 +235,9 @@ class ElevenlabsSynthesizer(StreamSynthesizer):
                         response_text = "".join(response_chars)
                         last_four = " ".join(response_text.split(" ")[-4:]).replace('"', "").strip()
                         current_norm = self.normalize_text(self.current_text.strip()).replace('"', "").strip()
-                        logger.info(f"Last four char - {last_four} | current text - {current_norm}")
+                        # current_text now holds the full accumulated turn (can be ~2KB) and this
+                        # fires per alignment message — log only the tail the endswith compares.
+                        logger.info(f"Last four char - {last_four} | current text tail - {current_norm[-80:]}")
 
                         # Skip punctuation-only chunks (e.g. ".", ",") that match trivially.
                         has_alnum = any(c.isalnum() for c in last_four)
