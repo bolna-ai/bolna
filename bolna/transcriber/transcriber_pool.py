@@ -241,6 +241,12 @@ class TranscriberPool:
             return None
         return self._lid.buffer_event()
 
+    def lid_buffer_language_streak(self):
+        """Consecutive same-language segment count in the detector buffer (0 if absent)."""
+        if self._lid is None or not hasattr(self._lid, "buffer_language_streak"):
+            return 0
+        return self._lid.buffer_language_streak()
+
     async def switch(self, label):
         """Switch which transcriber receives audio.
 

@@ -64,6 +64,7 @@ class SarvamLID(LIDBackend):
         # take_turn_transcript() — aligned to the main transcriber's turn boundary.
         self._buffer_text = ""
         self._buffer_lang = None
+        self._buffer_lang_streak = 0
         self._buffer_last_segment_ts = None
         # Set whenever a segment lands; cleared on drain. Lets the idle-flush watcher
         # sleep until speech actually arrives instead of polling on a fixed grid.
@@ -76,6 +77,10 @@ class SarvamLID(LIDBackend):
             self._buffer_last_segment_ts = time.monotonic()
             self._buffer_event.set()
             if lang:
+                # Consecutive same-language segments = saaras double-confirmation;
+                # the watcher uses the streak to fire the decision without waiting
+                # out the idle window.
+                self._buffer_lang_streak = self._buffer_lang_streak + 1 if lang == self._buffer_lang else 1
                 self._buffer_lang = lang
 
     def buffer_event(self):
@@ -102,6 +107,10 @@ class SarvamLID(LIDBackend):
         """
         return self._buffer_lang
 
+    def buffer_language_streak(self):
+        """How many consecutive buffered segments carried the current buffer_language."""
+        return self._buffer_lang_streak
+
     def take_turn_transcript(self):
         """Return (transcript, detected_lang) accumulated so far and clear the buffer.
 
@@ -111,6 +120,7 @@ class SarvamLID(LIDBackend):
         lang = self._buffer_lang
         self._buffer_text = ""
         self._buffer_lang = None
+        self._buffer_lang_streak = 0
         self._buffer_last_segment_ts = None
         self._buffer_event.clear()
         return text, lang

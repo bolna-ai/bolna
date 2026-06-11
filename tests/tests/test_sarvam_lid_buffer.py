@@ -78,6 +78,20 @@ def test_buffer_language_peeks_without_drain():
     assert d.buffer_language() is None
 
 
+def test_language_streak_counts_consecutive_and_resets():
+    d = _detector()
+    assert d.buffer_language_streak() == 0
+    d._accumulate("hello", "en")
+    assert d.buffer_language_streak() == 1
+    d._accumulate("are you there", "en")
+    assert d.buffer_language_streak() == 2
+    # A different language resets the streak to 1 (not 0 — it's one segment of the new lang).
+    d._accumulate("नमस्ते", "hi")
+    assert d.buffer_language_streak() == 1
+    d.take_turn_transcript()
+    assert d.buffer_language_streak() == 0
+
+
 def test_buffer_event_set_on_segment_cleared_on_drain():
     d = _detector()
     assert not d.buffer_event().is_set()
