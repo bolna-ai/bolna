@@ -65,14 +65,22 @@ class SarvamLID(LIDBackend):
         self._buffer_text = ""
         self._buffer_lang = None
         self._buffer_last_segment_ts = None
+        # Set whenever a segment lands; cleared on drain. Lets the idle-flush watcher
+        # sleep until speech actually arrives instead of polling on a fixed grid.
+        self._buffer_event = asyncio.Event()
 
     def _accumulate(self, transcript, lang):
         """Append a recognized segment to the current-turn buffer."""
         if transcript:
             self._buffer_text = " ".join(filter(None, [self._buffer_text, transcript]))
             self._buffer_last_segment_ts = time.monotonic()
+            self._buffer_event.set()
             if lang:
                 self._buffer_lang = lang
+
+    def buffer_event(self):
+        """asyncio.Event that is set while undrained speech sits in the buffer."""
+        return self._buffer_event
 
     def buffer_age_seconds(self):
         """Seconds since the last buffered segment, or None if the buffer is empty.
@@ -104,6 +112,7 @@ class SarvamLID(LIDBackend):
         self._buffer_text = ""
         self._buffer_lang = None
         self._buffer_last_segment_ts = None
+        self._buffer_event.clear()
         return text, lang
 
     def _build_url(self) -> str:

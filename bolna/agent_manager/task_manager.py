@@ -1109,6 +1109,8 @@ class TaskManager(BaseManager):
                             available_labels=list(transcribers.keys()),
                             run_id=self.run_id,
                         )
+                        # Pay the Anthropic TLS handshake now, not on the first real decision.
+                        self.language_switcher.prewarm()
 
                     self.tools["transcriber"] = TranscriberPool(
                         transcribers=transcribers,
@@ -4224,12 +4226,24 @@ class TaskManager(BaseManager):
         mismatch_idle_flush_s = float(os.getenv("LANGUAGE_SWITCH_MISMATCH_IDLE_FLUSH_S", "1.2"))
         try:
             while not self.conversation_ended:
-                await asyncio.sleep(0.25)
                 pool = self.tools.get("transcriber")
                 if not isinstance(pool, TranscriberPool):
+                    await asyncio.sleep(0.5)
                     continue
                 age = pool.lid_buffer_age()
                 if age is None:
+                    # Nothing buffered — sleep until speech actually arrives (event set
+                    # on each detector segment) instead of polling. The timeout keeps
+                    # the conversation_ended check alive and covers backends without
+                    # the event (feature is inert on those anyway).
+                    buffer_event = pool.lid_buffer_event()
+                    if buffer_event is None:
+                        await asyncio.sleep(0.5)
+                        continue
+                    try:
+                        await asyncio.wait_for(buffer_event.wait(), timeout=2.0)
+                    except asyncio.TimeoutError:
+                        pass
                     continue
                 buffered_lang = pool.lid_buffer_language()
                 active_short = (self.language or "").split("-")[0].lower()
@@ -4243,6 +4257,10 @@ class TaskManager(BaseManager):
                         f"running switch decision"
                     )
                     await self.handle_language_switch(spawn_language=self.language)
+                    continue
+                # Buffered but not idle long enough — sleep exactly the remaining time;
+                # a new segment during the sleep resets the age and we recompute.
+                await asyncio.sleep(max(threshold - age, 0.05))
         except asyncio.CancelledError:
             pass
         except Exception as e:

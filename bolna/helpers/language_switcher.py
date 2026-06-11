@@ -1,3 +1,4 @@
+import asyncio
 import os
 import json
 import time
@@ -11,9 +12,11 @@ from bolna.helpers.logger_config import configure_logger
 
 logger = configure_logger(__name__)
 
-# Decision model for language switching. Defaults to Claude Sonnet 4.6 (V0),
-# overridable via env to swap models without a deploy (mirrors LANGUAGE_DETECTION_LLM).
-LANGUAGE_SWITCH_LLM = os.getenv("LANGUAGE_SWITCH_LLM", "claude-sonnet-4-6")
+# Default decision model (Claude Sonnet 4.6, V0). The LANGUAGE_SWITCH_LLM env var is
+# resolved at CONSTRUCTION time, not import time — the host app's load_dotenv() runs
+# after bolna modules are imported, so an import-time os.getenv freezes this default
+# and silently ignores .env (observed in QA: .env had haiku, calls still used sonnet).
+DEFAULT_LANGUAGE_SWITCH_LLM = "claude-sonnet-4-6"
 
 
 class LanguageSwitcher:
@@ -28,7 +31,7 @@ class LanguageSwitcher:
     def __init__(self, available_labels, run_id=None, model=None):
         self.available_labels = list(available_labels or [])
         self.run_id = run_id
-        self.model = model or LANGUAGE_SWITCH_LLM
+        self.model = model or os.getenv("LANGUAGE_SWITCH_LLM", DEFAULT_LANGUAGE_SWITCH_LLM)
         self.latency_ms = None
         # The Switch LLM is infrastructure (always Claude), independent of the agent's
         # configured LLM. It uses dedicated Anthropic credentials and must NOT inherit
@@ -55,6 +58,22 @@ class LanguageSwitcher:
             base_url=os.getenv("LANGUAGE_SWITCH_LLM_API_BASE", ""),
             api_version=os.getenv("LANGUAGE_SWITCH_LLM_API_VERSION", ""),
         )
+
+    def prewarm(self):
+        """Fire-and-forget a tiny request so the first real decision doesn't pay the
+        TLS/connection handshake to api.anthropic.com (~0.3s from India). Failures
+        are irrelevant — the real decide() path handles its own errors."""
+
+        async def _warm():
+            try:
+                await asyncio.wait_for(
+                    self._llm.generate([{"role": "user", "content": "Reply with exactly: ok"}]), timeout=5
+                )
+                logger.info("LanguageSwitcher: connection prewarmed")
+            except Exception as e:
+                logger.debug(f"LanguageSwitcher: prewarm skipped: {e}")
+
+        asyncio.create_task(_warm())
 
     async def decide(self, detector_transcript: str, active_transcript: str, active_label: str) -> dict | None:
         """Decide the language from both transcripts.

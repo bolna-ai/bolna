@@ -89,3 +89,19 @@ async def test_decide_sends_user_role_message():
 async def test_default_model_is_sonnet():
     switcher, _ = _make_switcher(json.dumps({"target_language": None}))
     assert switcher.model == "claude-sonnet-4-6"
+
+
+@pytest.mark.asyncio
+async def test_prewarm_fires_one_llm_call_and_swallows_errors():
+    import asyncio
+
+    switcher, fake_llm = _make_switcher("ok")
+    switcher.prewarm()
+    await asyncio.sleep(0)  # let the fire-and-forget task run
+    fake_llm.generate.assert_awaited_once()
+
+    # A failing prewarm must never propagate.
+    switcher2, fake_llm2 = _make_switcher("ok")
+    fake_llm2.generate.side_effect = RuntimeError("boom")
+    switcher2.prewarm()
+    await asyncio.sleep(0)

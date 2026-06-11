@@ -235,6 +235,12 @@ class TranscriberPool:
             return None
         return self._lid.buffer_language()
 
+    def lid_buffer_event(self):
+        """The detector's buffer event (set while undrained speech exists), or None."""
+        if self._lid is None or not hasattr(self._lid, "buffer_event"):
+            return None
+        return self._lid.buffer_event()
+
     async def switch(self, label):
         """Switch which transcriber receives audio.
 

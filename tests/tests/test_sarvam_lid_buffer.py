@@ -66,3 +66,26 @@ def test_buffer_age_none_for_blank_only_segments():
     d = _detector()
     d._accumulate("", "en")
     assert d.buffer_age_seconds() is None
+
+
+def test_buffer_language_peeks_without_drain():
+    d = _detector()
+    assert d.buffer_language() is None
+    d._accumulate("Hello there", "en")
+    assert d.buffer_language() == "en"
+    # Peek must not drain — the transcript is still claimable afterwards.
+    assert d.take_turn_transcript() == ("Hello there", "en")
+    assert d.buffer_language() is None
+
+
+def test_buffer_event_set_on_segment_cleared_on_drain():
+    d = _detector()
+    assert not d.buffer_event().is_set()
+    d._accumulate("Hello", "en")
+    assert d.buffer_event().is_set()
+    d.take_turn_transcript()
+    # Cleared on drain so the watcher sleeps until NEW speech arrives.
+    assert not d.buffer_event().is_set()
+    # Blank segments must not wake the watcher.
+    d._accumulate("", "en")
+    assert not d.buffer_event().is_set()
