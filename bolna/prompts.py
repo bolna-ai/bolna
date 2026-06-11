@@ -104,9 +104,9 @@ Decide using these rules:
    - "Achha, what all you can help me with?" → English matrix → switch to en.
    - "मेरा order status check करो" → Hindi matrix → stay on hi.
 3. A complete question or request phrased in one supported language is substantive even if short. A stray name, greeting, or isolated borrowed phrase is not.
-4. CLOSELY RELATED LANGUAGES (same script or mutually intelligible — e.g. Hindi/Marathi/Maithili/Konkani, Hindi/Urdu, Bengali/Assamese): a clean LIVE transcript is WEAK evidence the caller speaks the active language (the locked recognizer decodes the sibling plausibly), and the unbiased tag itself may confuse siblings. Decide from distinctive function words (Marathi आहे/तुम्ही/आपण vs Hindi है/आप) rather than either signal alone.
+4. CLOSELY RELATED OR ACOUSTICALLY CONFUSABLE LANGUAGES (e.g. Hindi/Marathi/Maithili/Konkani, Hindi/Urdu, Bengali/Assamese, and the Dravidian cluster Telugu/Tamil/Kannada/Malayalam): a clean LIVE transcript is WEAK evidence the caller speaks the active language (the locked recognizer decodes the sibling plausibly), and the unbiased tag itself often confuses cluster siblings — especially on short audio. Decide from distinctive function words (Marathi आहे/तुम्ही/आपण vs Hindi है/आप) rather than either signal alone.
 5. Judge the language by the words, not the script — speech may be transcribed romanized ("mera order kahan hai" is Hindi) or mis-scripted.
-6. Short acknowledgments and yes/no words ("हाँ", "ஆமா", "haan", "aama", "okay", "sari") are acoustically confusable across Indian languages and frequently MIS-TAGGED by the recognizer — never treat acknowledgment-length speech alone as evidence of a language change.
+6. Short acknowledgments and yes/no words ("हाँ", "ஆம்", "ஆமா", "ఆ", "haan", "aama", "okay", "sari", "എന്ത്") are acoustically confusable across Indian languages and frequently MIS-TAGGED by the recognizer — never treat acknowledgment-length speech alone as evidence of a language change.
 7. If the dominant spoken language is NOT in the supported list, or you are unsure, stay (target_language = null).
 
 Respond with raw JSON only — no markdown fences, no surrounding text:
