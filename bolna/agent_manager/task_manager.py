@@ -1654,6 +1654,28 @@ class TaskManager(BaseManager):
                 return True
         return False
 
+    def _inflight_response_activity(self, exclude_sequence_id=None) -> dict:
+        """Snapshot of the signals that mean an assistant response is in flight.
+
+        Single definition shared by the barge-in path (_handle_transcriber_output)
+        and the language-switch path so the meaning of "response in flight" can't
+        drift between them. The truthiness of the dict's values is the answer
+        (gate with any(activity.values())); the dict itself is log-friendly.
+
+        exclude_sequence_id: the barge-in path passes the current turn's
+        sequence_id so the fresh turn's own response isn't counted; the
+        language-switch path passes None because on a confirmed switch every
+        pending response is stale old-language output.
+        """
+        return {
+            "response_in_pipeline": self.response_in_pipeline,
+            "audio_playing": self.tools["input"].is_audio_being_played_to_user(),
+            "pending_marks": self._has_interruptible_mark_activity(),
+            "pending_sequences": self.interruption_manager.has_pending_responses_excluding(exclude_sequence_id),
+            "pending_generation": (self.llm_task is not None and not self.llm_task.done())
+            or (self.execute_function_call_task is not None and not self.execute_function_call_task.done()),
+        }
+
     async def sync_history(self, mark_events_data, interruption_processed_at):
         """Sync history to reflect only what was actually spoken. Uses confirmed text or falls back to pending marks."""
         try:
@@ -3584,30 +3606,19 @@ class TaskManager(BaseManager):
 
         await self.language_detector.collect_transcript(transcriber_message)
 
-        has_live_assistant_audio = self.tools["input"].is_audio_being_played_to_user()
-        has_pending_marks = self._has_interruptible_mark_activity()
         current_sequence_id = meta_info.get("sequence_id")
-        has_pending_sequences = self.interruption_manager.has_pending_responses_excluding(current_sequence_id)
-        has_pending_generation = (self.llm_task is not None and not self.llm_task.done()) or (
-            self.execute_function_call_task is not None and not self.execute_function_call_task.done()
-        )
-        if next_task == "llm" and (
-            self.response_in_pipeline
-            or has_live_assistant_audio
-            or has_pending_marks
-            or has_pending_sequences
-            or has_pending_generation
-        ):
+        activity = self._inflight_response_activity(exclude_sequence_id=current_sequence_id)
+        if next_task == "llm" and any(activity.values()):
             logger.info(
                 "BOLNA_TRACE_TM cleanup_before_user_append seq=%s turn=%s response_uid=%s response_in_pipeline=%s audio_playing=%s pending_marks=%s pending_sequences=%s pending_generation=%s",
                 meta_info.get("sequence_id"),
                 meta_info.get("turn_id"),
                 meta_info.get("response_uid"),
-                self.response_in_pipeline,
-                has_live_assistant_audio,
-                has_pending_marks,
-                has_pending_sequences,
-                has_pending_generation,
+                activity["response_in_pipeline"],
+                activity["audio_playing"],
+                activity["pending_marks"],
+                activity["pending_sequences"],
+                activity["pending_generation"],
             )
             original_message = transcriber_message
             transcriber_message = self.conversation_history.pop_and_merge_user(transcriber_message)
@@ -3662,7 +3673,8 @@ class TaskManager(BaseManager):
             self.interruption_manager.revalidate_sequence_id(meta_info["sequence_id"])
             self.response_in_pipeline = True
             # Once-per-turn language-switch decision (no-op unless gated on); background
-            # task so it never delays the main LLM — any switch applies next turn.
+            # task so it never delays the main LLM. A confirmed switch truncates any
+            # in-flight old-language reply and answers immediately in the new language.
             self._spawn_language_switch_decision(transcriber_message, meta_info)
             self.llm_task = asyncio.create_task(self._run_llm_task(transcriber_package))
 
@@ -4183,9 +4195,10 @@ class TaskManager(BaseManager):
                 followup = await self.__run_language_switch(active_transcript, meta_info)
             # Generate the follow-up OUTSIDE the lock: a streamed response can take
             # several seconds, and holding the lock through it would needlessly queue
-            # the next turn's decision. Ordering stays safe — any queued decision
-            # awaits wait_for_current_message() before switching, which flushes this
-            # follow-up's audio first.
+            # the next turn's decision. Ordering comes from the lock (decisions are
+            # serial) plus truncate-on-switch: if a later confirmed switch finds this
+            # follow-up still playing, it truncates it by design — at that point the
+            # follow-up is old-language audio to the caller.
             if followup is not None:
                 await self.__generate_switch_followup(*followup)
         except Exception as e:
@@ -4233,9 +4246,9 @@ class TaskManager(BaseManager):
         # The unbiased detector is a separate socket with its own latency, so at this
         # (main transcriber's) turn boundary its buffer may still be missing the tail of
         # this turn. Let it settle briefly so we drain a complete turn rather than a
-        # partial one. This is off the response path (background task, switch applies next
-        # turn), so the delay is invisible to the caller. Skipped on the idle-flush path
-        # (no active_transcript): the buffer is already ≥ the idle threshold old, so
+        # partial one. This runs in a background task while the main LLM already answers,
+        # so the delay never blocks the caller-facing pipeline. Skipped on the idle-flush
+        # path (no active_transcript): the buffer is already ≥ the idle threshold old, so
         # settling would only extend the lock hold for nothing.
         settle_ms = int(os.getenv("LANGUAGE_SWITCH_SETTLE_MS", "300"))
         if settle_ms > 0 and active_transcript:
@@ -4315,16 +4328,20 @@ class TaskManager(BaseManager):
             )
             return
 
-        # Flush the current turn's response before swapping the pools. switch_language
-        # → SynthesizerPool.switch() cancels the in-flight generate task and reroutes
-        # remaining chunks to the new-language synth; doing that mid-utterance truncates
-        # the current sentence or finishes it in the wrong voice. Waiting for the audio to
-        # drain also realizes the intended "applies next turn" behavior. Mirrors the legacy
-        # tool path, which awaited wait_for_current_message() before switching.
-        await self.wait_for_current_message()
+        # A confirmed switch means any in-flight response is in a language the caller
+        # just demonstrated they don't follow — every extra second of it is noise (a
+        # long old-language reply can otherwise play out fully, ~12s observed in QA).
+        # Truncate it with the standard barge-in cleanup (clears output + synth audio,
+        # syncs history to the part actually heard, cancels the in-flight LLM) instead
+        # of draining it. Nothing in flight → switch immediately. Stay decisions never
+        # reach this point, so normal turns are never truncated.
+        activity = self._inflight_response_activity()
+        if any(activity.values()):
+            logger.info(f"LanguageSwitcher: truncating in-flight old-language response before switch ({activity})")
+            await self.__cleanup_downstream_tasks()
 
-        # Re-read after the flush: a concurrent turn's decision may have switched while we
-        # waited, so re-check against the live language before applying.
+        # Re-read after the truncate: a concurrent decision may have switched while we
+        # were clearing, so re-check against the live language before applying.
         current = self.language
         if target == current:
             return
@@ -4378,18 +4395,14 @@ class TaskManager(BaseManager):
     async def __generate_switch_followup(self, messages, followup_meta_info, next_step):
         """Generate the post-switch follow-up response (runs outside language_switch_lock).
 
-        The garbled turn's audio has already flushed (wait_for_current_message ran before
-        the switch) — if its LLM task is somehow still streaming, late chunks would
-        collide with this follow-up, so cancel it first, mirroring
-        _handle_transcriber_output's cancel pattern.
+        No llm_task cancel here, on purpose: by this point the switch path has either
+        truncated the old turn via __cleanup_downstream_tasks (which cancelled and
+        nulled llm_task) or skipped truncation because nothing was in flight — so any
+        non-done llm_task seen here can only belong to a NEWER concurrent turn, and
+        cancelling that would kill the wrong response.
         """
-        if self.llm_task is not None and not self.llm_task.done():
-            logger.info("LanguageSwitcher: cancelling in-flight llm_task before switch follow-up")
-            self.llm_task.cancel()
-            self.llm_task = None
-            self.interruption_manager.invalidate_pending_responses()
-        # Always revalidate the follow-up's sequence_id — invalidate (above or from the
-        # interruption path) would otherwise leave its audio permanently BLOCKed.
+        # Revalidate the follow-up's sequence_id — the truncate path's
+        # invalidate_pending_responses would otherwise leave its audio permanently BLOCKed.
         self.interruption_manager.revalidate_sequence_id(followup_meta_info["sequence_id"])
         self.response_in_pipeline = True
         await self.__do_llm_generation(
