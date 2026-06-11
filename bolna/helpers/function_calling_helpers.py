@@ -127,6 +127,8 @@ async def trigger_api(
             run_id=run_id,
         )
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
+            response = None
+            response_text = None
             if method.lower() == "get":
                 logger.info(f"Sending request {api_params}, {url}, {headers}")
                 async with session.get(url, params=api_params, headers=headers) as response:
@@ -140,18 +142,27 @@ async def trigger_api(
                     normalized_api_params = normalize_for_form(api_params)
                     async with session.post(url, data=normalized_api_params, headers=headers) as response:
                         response_text = await response.text()
+                else:
+                    raise ValueError(
+                        f"Unsupported Content-Type for POST: {headers.get('Content-Type')!r}. "
+                        "Only 'application/json' and 'application/x-www-form-urlencoded' are supported."
+                    )
+            else:
+                raise ValueError(
+                    f"Unsupported HTTP method: {method!r}. Only 'GET' and 'POST' are supported."
+                )
 
-            if response:
+            if response is not None:
                 logger.info(f"Final URL: {response.url}")
 
             if return_response_metadata:
                 return {
                     "status_code": response.status if response is not None else None,
-                    "body": response_text,
+                    "body": response_text if response_text is not None else "",
                     "content_type": response.headers.get("Content-Type") if response is not None else None,
                 }
 
-            return response_text
+            return response_text if response_text is not None else ""
     except asyncio.TimeoutError:
         message = f"ERROR CALLING API: Request to {url} timed out after 5 seconds"
         logger.debug(message)
