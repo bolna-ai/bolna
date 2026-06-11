@@ -25,7 +25,6 @@ from bolna.constants import (
     LANGUAGE_NAMES,
     LLM_DEFAULT_CONFIGS,
     NON_EVIDENCE_MARK_TYPES,
-    # SWITCH_LANGUAGE_TOOL_DEFINITION,  # legacy main-LLM switch tool — disabled, see commented code below
     END_CALL_FUNCTION_PREFIX,
     END_CALL_TOOL_DEFINITION,
     GPT5_4_MODEL_PREFIX,
@@ -182,8 +181,6 @@ class TaskManager(BaseManager):
         self.non_fatal_llm_error_events: list[dict] = []
         self._agent_end_timestamps: dict = {}
         self.hangup_message_queued = False
-        self.switch_handoff_messages = {}
-        self.agent_names = {}
         self._end_of_conversation_in_progress = False
         self._turn_audio_flushed = asyncio.Event()
         self._turn_audio_flushed.set()
@@ -573,10 +570,7 @@ class TaskManager(BaseManager):
 
         # Language switching is handled by the dedicated Switch LLM (see
         # handle_language_switch), driven by the unbiased Saaras v3 detector — the
-        # main conversational LLM no longer carries a switch_language tool. The
-        # handoff-message / agent-names config is still read for switch playback.
-        self.switch_handoff_messages = self.task_config.get("tools_config", {}).get("switch_handoff_messages") or {}
-        self.agent_names = self.task_config.get("tools_config", {}).get("agent_names") or {}
+        # main conversational LLM does not carry a switch_language tool.
 
         # # setting llm
         # llm = self.__setup_llm(self.llm_config)
@@ -1053,48 +1047,6 @@ class TaskManager(BaseManager):
             logger.error(f"Exception in __forced_first_message {str(e)}")
 
         return
-
-    # ── LEGACY: main-LLM switch_language tool (DISABLED 2026-06-04) ──────────
-    # Language switching is now handled by the dedicated Switch LLM
-    # (see handle_language_switch, driven by the unbiased Saaras v3 detector).
-    # The conversational LLM no longer carries a switch_language tool, so this
-    # injector is no longer called. Kept commented for reference.
-    #
-    # def __inject_switch_language_tool(self):
-    #     """Auto-inject switch_language tool when multilingual pools are active."""
-    #     has_pool = isinstance(self.tools.get("transcriber"), TranscriberPool) or isinstance(
-    #         self.tools.get("synthesizer"), SynthesizerPool
-    #     )
-    #     if not has_pool:
-    #         return
-    #
-    #     # Collect available labels from pools
-    #     labels = set()
-    #     if isinstance(self.tools.get("transcriber"), TranscriberPool):
-    #         labels.update(self.tools["transcriber"].labels)
-    #     if isinstance(self.tools.get("synthesizer"), SynthesizerPool):
-    #         labels.update(self.tools["synthesizer"].labels)
-    #
-    #     # Enrich the tool schema with available labels in the description
-    #     tool_def = copy.deepcopy(SWITCH_LANGUAGE_TOOL_DEFINITION)
-    #     custom_description = self.task_config.get("tools_config", {}).get("switch_tool_description")
-    #     if custom_description:
-    #         tool_def["function"]["description"] = custom_description
-    #     lang_prop = tool_def["function"]["parameters"]["properties"]["language"]
-    #     lang_prop["enum"] = sorted(labels)
-    #     lang_prop["description"] = f"Language to switch to. Available: {sorted(labels)}"
-    #
-    #     if self.kwargs.get("api_tools") is None:
-    #         self.kwargs["api_tools"] = {"tools": [], "tools_params": {}}
-    #
-    #     self.kwargs["api_tools"]["tools"].append(tool_def)
-    #     # Entry must exist in tools_params so ToolCallAccumulator.build_api_payload
-    #     # doesn't drop the call, but no pre_call_message — the switch is silent.
-    #     self.kwargs["api_tools"]["tools_params"]["switch_language"] = {}
-    #
-    #     self.switch_handoff_messages = self.task_config.get("tools_config", {}).get("switch_handoff_messages") or {}
-    #     self.agent_names = self.task_config.get("tools_config", {}).get("agent_names") or {}
-    # ─────────────────────────────────────────────────────────────────────────
 
     def __setup_transcriber(self):
         try:
@@ -2785,93 +2737,6 @@ class TaskManager(BaseManager):
                         )
                 return
 
-        # ── LEGACY: main-LLM switch_language tool-call handler (DISABLED 2026-06-04) ──
-        # Replaced by the dedicated Switch LLM (handle_language_switch), driven by the
-        # unbiased Saaras v3 detector. The conversational LLM no longer carries a
-        # switch_language tool, so this branch can never be reached. Kept commented
-        # for reference; the switch_language() method below is still used by the new path.
-        #
-        # if called_fun == "switch_language":
-        #     language_label = resp.get("language", "")
-        #
-        #     # If the requested language is already active, skip handoff and switch entirely
-        #     if language_label == self.language:
-        #         logger.info(
-        #             f"switch_language: '{language_label}' is already the active language, skipping handoff and switch"
-        #         )
-        #         function_response = f"Already speaking in {language_label}, no switch needed"
-        #
-        #         textual_response = resp.get("textual_response", None)
-        #         self.conversation_history.attach_tool_calls_to_turn(turn_id, resp["model_response"])
-        #         self.conversation_history.append_tool_result(resp.get("tool_call_id", ""), function_response)
-        #         convert_to_request_log(
-        #             function_response, meta_info, None, "function_call", direction="response", run_id=self.run_id
-        #         )
-        #
-        #         messages = self.conversation_history.get_copy()
-        #         followup_meta_info = self._spawn_followup_meta_info(meta_info)
-        #         await self.__do_llm_generation(
-        #             messages,
-        #             followup_meta_info,
-        #             next_step,
-        #             should_bypass_synth=False,
-        #             should_trigger_function_call=True,
-        #         )
-        #         self.execute_function_call_task = None
-        #         return
-        #
-        #     # Only wait if audio is currently playing
-        #     if not self._turn_audio_flushed.is_set():
-        #         await self.wait_for_current_message()
-        #
-        #     # Synthesize handoff message with CURRENT voice before switching
-        #     handoff_template = self.switch_handoff_messages.get(self.language, "")
-        #     if handoff_template:
-        #         target_agent_name = self._get_voice_name_for_label(language_label)
-        #         language_display = LANGUAGE_NAMES.get(language_label, language_label)
-        #         handoff_text = handoff_template.replace("{agent_name}", target_agent_name).replace(
-        #             "{language}", language_display
-        #         )
-        #         meta_info_handoff = {
-        #             "io": self.tools["output"].get_provider(),
-        #             "request_id": str(uuid.uuid4()),
-        #             "cached": False,
-        #             "sequence_id": -1,
-        #             "format": "pcm",
-        #             "message_category": "handoff",
-        #             "end_of_llm_stream": True,
-        #             "text": handoff_text,
-        #         }
-        #         self._turn_audio_flushed.clear()
-        #         await self._synthesize(create_ws_data_packet(handoff_text, meta_info=meta_info_handoff))
-        #         await self.wait_for_current_message()
-        #         self.conversation_history.append_assistant(handoff_text, turn_id=turn_id, response_uid=response_uid)
-        #         if turn_id is not None:
-        #             self._turn_msg_map[turn_id] = self.conversation_history.messages[-1]
-        #
-        #     try:
-        #         await self.switch_language(language_label)
-        #         function_response = f"Switched to {language_label}"
-        #     except ValueError as e:
-        #         function_response = f"Failed to switch language: {e}"
-        #
-        #     textual_response = resp.get("textual_response", None)
-        #     self.check_if_user_online = self.conversation_config.get("check_if_user_online", True)
-        #     self.conversation_history.attach_tool_calls_to_turn(turn_id, resp["model_response"])
-        #     self.conversation_history.append_tool_result(resp.get("tool_call_id", ""), function_response)
-        #     convert_to_request_log(
-        #         function_response, meta_info, None, "function_call", direction="response", run_id=self.run_id
-        #     )
-        #
-        #     messages = self.conversation_history.get_copy()
-        #     followup_meta_info = self._spawn_followup_meta_info(meta_info)
-        #     await self.__do_llm_generation(
-        #         messages, followup_meta_info, next_step, should_bypass_synth=False, should_trigger_function_call=True
-        #     )
-        #     self.execute_function_call_task = None
-        #     return
-        # ─────────────────────────────────────────────────────────────────────────────
-
         await self.wait_for_current_message()
 
         if self.hangup_triggered or self.conversation_ended:
@@ -4267,10 +4132,6 @@ class TaskManager(BaseManager):
                 events.extend(getattr(transcriber, "flux_lid_events", []))
             return events
         return list(getattr(t, "flux_lid_events", []))
-
-    def _get_voice_name_for_label(self, label):
-        """Get agent name for a language label from configured agent_names."""
-        return self.agent_names.get(label, "")
 
     def __language_switch_enabled(self) -> bool:
         """Per-agent gate for LLM-driven language switching (controlled rollout).
