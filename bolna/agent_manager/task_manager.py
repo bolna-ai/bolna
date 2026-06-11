@@ -4363,8 +4363,14 @@ class TaskManager(BaseManager):
         # owned by handle_language_switch's finally.
         spec_task = None
         spec_target = None
+        # Speculation runs generate() concurrently with any in-flight main generation
+        # on the SAME agent instance. Only simple_llm_agent is reentrant-safe (per-call
+        # local state); graph/custom agents mutate shared routing state
+        # (current_node_id, node_history) and would corrupt under concurrency.
+        spec_agent_type = self.task_config["tools_config"]["llm_agent"].get("agent_type", "simple_llm_agent")
         if (
             speculate
+            and spec_agent_type == "simple_llm_agent"
             and detected_lang
             and detected_lang != active
             and detected_lang in labels
@@ -4518,8 +4524,13 @@ class TaskManager(BaseManager):
             try:
                 spec_text = await asyncio.wait_for(spec_task, timeout=6.0)
             except asyncio.CancelledError:
-                if not spec_task.cancelled():
-                    raise  # this handler was cancelled, not the speculation
+                # Always re-raise: wait_for cancels spec_task BEFORE raising, so a
+                # cancelled spec_task is the signature of THIS handler being cancelled
+                # (teardown) — swallowing it would keep a cancelled handler running.
+                # The timeout fallback is the separate TimeoutError path below.
+                raise
+            except asyncio.TimeoutError:
+                logger.info("LanguageSwitcher: speculative follow-up timed out — falling back")
             except Exception as e:
                 logger.info(f"LanguageSwitcher: speculative follow-up unavailable ({e!r}) — falling back")
             self._spec_followup_task = None
@@ -4663,6 +4674,17 @@ class TaskManager(BaseManager):
         self.time_since_last_spoken_human_word = time.time()
         self.asked_if_user_is_still_there = False
         logger.info(f"Language switched to '{label}'")
+
+        # Poke the idle watcher: a switch changes the mismatch threshold for any speech
+        # already sitting in the detector buffer, so wake it to recompute instead of
+        # letting it sleep out a schedule computed for the previous language. Only when
+        # speech is actually buffered — setting the event with an empty buffer would
+        # busy-loop the watcher's empty-branch wait (it relies on unset-while-empty).
+        poke_pool = self.tools.get("transcriber")
+        if isinstance(poke_pool, TranscriberPool) and poke_pool.lid_buffer_age() is not None:
+            poke_event = poke_pool.lid_buffer_event()
+            if poke_event is not None:
+                poke_event.set()
 
         if label in self.multilingual_prompts:
             new_prompt = self.multilingual_prompts[label]

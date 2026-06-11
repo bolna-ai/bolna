@@ -49,10 +49,12 @@ class LanguageSwitcher:
             )
         self._llm = LiteLLM(
             model=self.model,
-            # Output size drives decide latency (~50 tok/s): top-3 languages + target
-            # + 12-word reasoning fits in ~110 tokens; 150 leaves slack without
-            # letting verbose reasoning add seconds.
-            max_tokens=150,
+            # Output size drives decide latency (~50 tok/s): the 12-word reasoning cap
+            # in the prompt is what keeps output short. 200 (not 150) so verbose
+            # language names in the top-3 list can't truncate mid-JSON (which parses
+            # as failure → fail-closed missed switch); a ceiling costs nothing when
+            # the actual output stays ~100 tokens.
+            max_tokens=200,
             temperature=0.0,
             llm_key=switch_llm_key,
             base_url=os.getenv("LANGUAGE_SWITCH_LLM_API_BASE", ""),
