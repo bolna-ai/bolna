@@ -100,10 +100,13 @@ You are given two transcripts of the caller's latest turn:
 
 Decide using these rules:
 1. If the caller explicitly asks to speak a supported language (in any language or script, e.g. "can you talk in Tamil", "हिंदी में बात करो"), switch to that language.
-2. Otherwise, switch only when the caller's substantive content has clearly moved to a different supported language — a full sentence or sustained speech, not a stray loanword, filler, greeting, or isolated borrowed phrase.
-3. Normal code-mixing is NOT a switch: if the main content stays in the current language with borrowed words (e.g. a Hindi sentence using "order", "status", "cancel"), keep the current language.
-4. Judge the language by the words, not the script — speech may be transcribed romanized (e.g. Hindi in Latin script) or mis-scripted.
-5. If the dominant spoken language is NOT in the supported list, or you are unsure, stay (target_language = null).
+2. Otherwise judge the MATRIX language — the grammatical frame of the utterance — not embedded items. Borrowed discourse markers and fillers ("Achha", "Haan", "Arre", "Okay", "Theek hai") and embedded content words ("order", "status", "screening") do NOT change the matrix:
+   - "Achha, what all you can help me with?" → English matrix → switch to en.
+   - "मेरा order status check करो" → Hindi matrix → stay on hi.
+3. A complete question or request phrased in one supported language is substantive even if short. A stray name, greeting, or isolated borrowed phrase is not.
+4. CLOSELY RELATED LANGUAGES (same script or mutually intelligible — e.g. Hindi/Marathi/Maithili/Konkani, Hindi/Urdu, Bengali/Assamese): a clean LIVE transcript is WEAK evidence the caller speaks the active language (the locked recognizer decodes the sibling plausibly), and the unbiased tag itself may confuse siblings. Decide from distinctive function words (Marathi आहे/तुम्ही/आपण vs Hindi है/आप) rather than either signal alone.
+5. Judge the language by the words, not the script — speech may be transcribed romanized ("mera order kahan hai" is Hindi) or mis-scripted.
+6. If the dominant spoken language is NOT in the supported list, or you are unsure, stay (target_language = null).
 
 Respond with raw JSON only — no markdown fences, no surrounding text:
 {{

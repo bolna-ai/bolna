@@ -3308,9 +3308,7 @@ class TaskManager(BaseManager):
             cancelled_seq = meta_info.get("sequence_id")
             for latency_entry in reversed(self.llm_latencies.turn_latencies):
                 if latency_entry.get("sequence_id") == cancelled_seq:
-                    latency_entry["cancelled_at_ms"] = round(
-                        time.time() * 1000 - self.conversation_start_init_ts, 2
-                    )
+                    latency_entry["cancelled_at_ms"] = round(time.time() * 1000 - self.conversation_start_init_ts, 2)
                     break
             raise
 
@@ -4379,9 +4377,7 @@ class TaskManager(BaseManager):
             spec_synth = self.tools.get("synthesizer")
             if not isinstance(spec_synth, SynthesizerPool) or detected_lang in spec_synth.labels:
                 spec_target = detected_lang
-                spec_task = asyncio.create_task(
-                    self.__speculative_followup_text(spec_target, detector_transcript)
-                )
+                spec_task = asyncio.create_task(self.__speculative_followup_text(spec_target, detector_transcript))
                 self._spec_followup_task = spec_task
                 logger.info(f"LanguageSwitcher: speculative follow-up started for '{spec_target}'")
 
@@ -4513,8 +4509,7 @@ class TaskManager(BaseManager):
         else:
             self.conversation_history.append_user(detector_transcript)
             logger.info(
-                f"LanguageSwitcher: idle-flush — appended detector transcript as user turn "
-                f"{detector_transcript[:80]!r}"
+                f"LanguageSwitcher: idle-flush — appended detector transcript as user turn {detector_transcript[:80]!r}"
             )
 
         # Commit the speculative follow-up if it matches the confirmed target — it has
