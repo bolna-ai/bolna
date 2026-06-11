@@ -4167,9 +4167,11 @@ class TaskManager(BaseManager):
             return
         snapshot = dict(meta_info)
         self._last_turn_meta_info = snapshot
-        asyncio.create_task(self.handle_language_switch(transcriber_message, snapshot))
+        asyncio.create_task(self.handle_language_switch(transcriber_message, snapshot, spawn_language=self.language))
 
-    async def handle_language_switch(self, active_transcript: str = "", meta_info: dict | None = None) -> None:
+    async def handle_language_switch(
+        self, active_transcript: str = "", meta_info: dict | None = None, spawn_language: str | None = None
+    ) -> None:
         """Decide + apply a language switch from BOTH transcripts of the current turn.
 
         Fired once per conversational turn (from _handle_transcriber_output or the eager
@@ -4192,7 +4194,7 @@ class TaskManager(BaseManager):
         """
         try:
             async with self.language_switch_lock:
-                followup = await self.__run_language_switch(active_transcript, meta_info)
+                followup = await self.__run_language_switch(active_transcript, meta_info, spawn_language)
             # Generate the follow-up OUTSIDE the lock: a streamed response can take
             # several seconds, and holding the lock through it would needlessly queue
             # the next turn's decision. Ordering comes from the lock (decisions are
@@ -4227,13 +4229,15 @@ class TaskManager(BaseManager):
                         f"LanguageSwitcher: idle-flush — detector speech idle {age:.1f}s with no main turn "
                         f"(locked ASR likely couldn't decode it); running switch decision"
                     )
-                    await self.handle_language_switch()
+                    await self.handle_language_switch(spawn_language=self.language)
         except asyncio.CancelledError:
             pass
         except Exception as e:
             logger.error(f"LanguageSwitcher: idle watcher error: {e}\n{traceback.format_exc()}")
 
-    async def __run_language_switch(self, active_transcript: str, meta_info: dict | None) -> tuple | None:
+    async def __run_language_switch(
+        self, active_transcript: str, meta_info: dict | None, spawn_language: str | None = None
+    ) -> tuple | None:
         if not self.language_switcher:
             return
         pool = self.tools.get("transcriber")
@@ -4242,6 +4246,21 @@ class TaskManager(BaseManager):
         labels = pool.labels
         if len(labels) < 2:
             return
+
+        # Stale-decision guard: if the language changed while this decision waited on
+        # the lock, its inputs are invalid — the LIVE transcript and buffered detector
+        # speech were produced by the PRE-switch recognizer, but the prompt would label
+        # them as the new language's output. Acting on that mislabeled context is what
+        # caused the mr→hi→mr ping-pong in QA call 1a16da82 (the model saw clean
+        # Marathi attributed to the "hi-locked" ASR and switched back). Drop the
+        # decision and discard the stale buffered speech with it.
+        if spawn_language is not None and spawn_language != self.language:
+            discarded, _ = pool.take_lid_transcript()
+            logger.info(
+                f"LanguageSwitcher: language changed since capture ('{spawn_language}' → '{self.language}') — "
+                f"dropping stale decision (discarded buffer={discarded[:60]!r})"
+            )
+            return None
 
         # The unbiased detector is a separate socket with its own latency, so at this
         # (main transcriber's) turn boundary its buffer may still be missing the tail of
