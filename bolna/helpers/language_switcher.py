@@ -46,7 +46,10 @@ class LanguageSwitcher:
             )
         self._llm = LiteLLM(
             model=self.model,
-            max_tokens=200,
+            # Output size drives decide latency (~50 tok/s): top-3 languages + target
+            # + 12-word reasoning fits in ~110 tokens; 150 leaves slack without
+            # letting verbose reasoning add seconds.
+            max_tokens=150,
             temperature=0.0,
             llm_key=switch_llm_key,
             base_url=os.getenv("LANGUAGE_SWITCH_LLM_API_BASE", ""),

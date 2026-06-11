@@ -4217,17 +4217,30 @@ class TaskManager(BaseManager):
         the buffered transcript.
         """
         idle_flush_s = float(os.getenv("LANGUAGE_SWITCH_IDLE_FLUSH_S", "2.0"))
+        # When saaras has already tagged the buffered speech as a DIFFERENT language
+        # than the active one, the long accumulate window is pointless caution — the
+        # mismatch itself is the signal. Use a shorter threshold (still above typical
+        # 0.3-0.8s inter-segment gaps so we don't fire mid-utterance).
+        mismatch_idle_flush_s = float(os.getenv("LANGUAGE_SWITCH_MISMATCH_IDLE_FLUSH_S", "1.2"))
         try:
             while not self.conversation_ended:
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(0.25)
                 pool = self.tools.get("transcriber")
                 if not isinstance(pool, TranscriberPool):
                     continue
                 age = pool.lid_buffer_age()
-                if age is not None and age >= idle_flush_s:
+                if age is None:
+                    continue
+                buffered_lang = pool.lid_buffer_language()
+                active_short = (self.language or "").split("-")[0].lower()
+                threshold = (
+                    mismatch_idle_flush_s if buffered_lang and buffered_lang != active_short else idle_flush_s
+                )
+                if age >= threshold:
                     logger.info(
                         f"LanguageSwitcher: idle-flush — detector speech idle {age:.1f}s with no main turn "
-                        f"(locked ASR likely couldn't decode it); running switch decision"
+                        f"(buffered_lang={buffered_lang!r}, active={self.language!r}, threshold={threshold}s); "
+                        f"running switch decision"
                     )
                     await self.handle_language_switch(spawn_language=self.language)
         except asyncio.CancelledError:

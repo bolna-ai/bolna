@@ -229,6 +229,12 @@ class TranscriberPool:
             return None
         return self._lid.buffer_age_seconds()
 
+    def lid_buffer_language(self):
+        """Latest detected language of the buffered detector speech (peek, no drain)."""
+        if self._lid is None or not hasattr(self._lid, "buffer_language"):
+            return None
+        return self._lid.buffer_language()
+
     async def switch(self, label):
         """Switch which transcriber receives audio.
 

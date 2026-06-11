@@ -85,6 +85,15 @@ class SarvamLID(LIDBackend):
             return None
         return time.monotonic() - self._buffer_last_segment_ts
 
+    def buffer_language(self):
+        """Latest detected language of the buffered speech (peek, no drain).
+
+        Lets the idle-flush watcher use a shorter idle threshold when the caller is
+        audibly NOT speaking the active language — no reason to wait the full
+        accumulate window when saaras has already tagged the speech as different.
+        """
+        return self._buffer_lang
+
     def take_turn_transcript(self):
         """Return (transcript, detected_lang) accumulated so far and clear the buffer.
 
