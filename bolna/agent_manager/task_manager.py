@@ -4383,12 +4383,23 @@ class TaskManager(BaseManager):
         # _spawn_followup_meta_info allocates a fresh sequence_id/turn_id anyway.
         if meta_info is None and self._last_turn_meta_info is not None:
             meta_info = dict(self._last_turn_meta_info)
-        if meta_info is None or self.conversation_ended or self.hangup_triggered:
-            if meta_info is None:
-                logger.info("LanguageSwitcher: no meta_info template available — switched without follow-up response")
+        if meta_info is None:
+            # First-utterance switch: the locked ASR never completed a turn, so no
+            # template exists. Fall back to the transcriber's meta_info — the same
+            # base __get_updated_meta_info(None) uses for other silence-driven
+            # responses. Without this the agent switches and then sits silent until
+            # the user-online check fires (QA call f338090b: switch → 11s silence →
+            # "are you still there" → hangup).
+            meta_info = dict(pool.get_meta_info() or {})
+            logger.info("LanguageSwitcher: no turn meta_info template — using transcriber meta_info for follow-up")
+        if self.conversation_ended or self.hangup_triggered:
             return None
         messages = self.conversation_history.get_copy()
         followup_meta_info = self._spawn_followup_meta_info(meta_info)
+        # A transcriber-meta template has no response_uid lineage, which would leave
+        # response_group_uid None — re-anchor it to the freshly allocated response_uid.
+        if not followup_meta_info.get("response_group_uid"):
+            followup_meta_info["response_group_uid"] = followup_meta_info.get("response_uid")
         next_step = self._get_next_step(meta_info.get("sequence", 0), "llm")
         return messages, followup_meta_info, next_step
 
