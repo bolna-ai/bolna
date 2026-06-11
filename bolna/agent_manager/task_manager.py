@@ -4278,7 +4278,22 @@ class TaskManager(BaseManager):
             return
         active = self.language
 
-        decision = await self.language_switcher.decide(detector_transcript, active_transcript, active)
+        # Timeout strictly around the LLM call (NOT the switch itself — cancelling
+        # mid-switch could leave the pools half-switched). The litellm default is
+        # minutes; a hung decide would hold language_switch_lock that entire time,
+        # silently killing switching for the rest of the call. Timeout = no decision
+        # = stay (fail-safe), and wait_for cancels the underlying request.
+        decide_timeout_s = float(os.getenv("LANGUAGE_SWITCH_DECIDE_TIMEOUT_S", "8"))
+        try:
+            decision = await asyncio.wait_for(
+                self.language_switcher.decide(detector_transcript, active_transcript, active),
+                timeout=decide_timeout_s,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                f"LanguageSwitcher: decide() timed out after {decide_timeout_s}s — skipping decision, lock released"
+            )
+            return None
         if not decision:
             return
         target = decision.get("target_language")
