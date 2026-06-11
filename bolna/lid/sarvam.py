@@ -4,6 +4,7 @@ import base64
 import io
 import json
 import os
+import time
 import wave
 
 from dotenv import load_dotenv
@@ -63,13 +64,26 @@ class SarvamLID(LIDBackend):
         # take_turn_transcript() — aligned to the main transcriber's turn boundary.
         self._buffer_text = ""
         self._buffer_lang = None
+        self._buffer_last_segment_ts = None
 
     def _accumulate(self, transcript, lang):
         """Append a recognized segment to the current-turn buffer."""
         if transcript:
             self._buffer_text = " ".join(filter(None, [self._buffer_text, transcript]))
+            self._buffer_last_segment_ts = time.monotonic()
             if lang:
                 self._buffer_lang = lang
+
+    def buffer_age_seconds(self):
+        """Seconds since the last buffered segment, or None if the buffer is empty.
+
+        Used by the idle-flush fallback: a non-empty buffer that has gone quiet with
+        no main-transcriber turn means the active (locked) ASR couldn't decode the
+        caller's speech.
+        """
+        if not self._buffer_text.strip() or self._buffer_last_segment_ts is None:
+            return None
+        return time.monotonic() - self._buffer_last_segment_ts
 
     def take_turn_transcript(self):
         """Return (transcript, detected_lang) accumulated so far and clear the buffer.
@@ -80,6 +94,7 @@ class SarvamLID(LIDBackend):
         lang = self._buffer_lang
         self._buffer_text = ""
         self._buffer_lang = None
+        self._buffer_last_segment_ts = None
         return text, lang
 
     def _build_url(self) -> str:

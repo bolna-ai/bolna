@@ -46,3 +46,23 @@ def test_blank_segments_ignored():
     d._accumulate("", "en")
     d._accumulate("   ", None)
     assert d.take_turn_transcript() == ("", None)
+
+
+def test_buffer_age_none_when_empty():
+    assert _detector().buffer_age_seconds() is None
+
+
+def test_buffer_age_tracks_last_segment_and_clears_on_drain():
+    d = _detector()
+    d._accumulate("Can you talk in English?", "en")
+    age = d.buffer_age_seconds()
+    assert age is not None and 0 <= age < 1.0
+    d.take_turn_transcript()
+    # Drained → age resets so the idle-flush watcher won't refire on consumed speech.
+    assert d.buffer_age_seconds() is None
+
+
+def test_buffer_age_none_for_blank_only_segments():
+    d = _detector()
+    d._accumulate("", "en")
+    assert d.buffer_age_seconds() is None

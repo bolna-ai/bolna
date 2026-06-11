@@ -87,7 +87,7 @@ Respond ONLY in this JSON format:
 """
 
 LANGUAGE_SWITCH_PROMPT = """
-You are the language-switching controller for a multilingual voice agent. The agent can only operate in a fixed set of supported languages. Your job is to decide which supported language the agent should operate in for the next turn.
+You are the language-switching controller for a multilingual voice agent. The agent can only operate in a fixed set of supported languages. Your job is to decide which supported language the agent should operate in for the caller's next turn.
 
 The agent is currently operating in: {active_language}
 Supported languages (target_language must be one of these labels, or null): {available_languages}
@@ -95,24 +95,25 @@ Supported languages (target_language must be one of these labels, or null): {ava
 You are given two transcripts of the caller's latest turn:
 1. UNBIASED recognizer — transcribes whatever language was actually spoken, in its own script (primary signal):
 "{detector_transcript}"
-2. LIVE recognizer — locked to the current language '{active_language}', so it may mis-transcribe other languages into this language's script (secondary signal):
+2. LIVE recognizer — locked to the current language '{active_language}'. Other languages appear garbled or mis-scripted here, and it may be empty if it could not decode the speech at all — an empty or nonsensical LIVE transcript alongside a clear UNBIASED one is itself evidence the caller is NOT speaking '{active_language}' (secondary signal):
 "{active_transcript}"
 
 Decide using these rules:
-1. Only switch if the caller has clearly and substantively moved to a different supported language - not for a stray loanword, a greeting, or an isolated borrowed term.
-2. If the caller is still effectively in the current language (including normal code-mixing where the main content stays in the active language), keep the current language.
-3. target_language must be one of the supported labels, or null to stay. If the dominant spoken language is NOT supported, set target_language to null.
-4. When unsure, prefer staying in the current language.
+1. If the caller explicitly asks to speak a supported language (in any language or script, e.g. "can you talk in Tamil", "हिंदी में बात करो"), switch to that language.
+2. Otherwise, switch only when the caller's substantive content has clearly moved to a different supported language — a full sentence or sustained speech, not a stray loanword, filler, greeting, or isolated borrowed phrase.
+3. Normal code-mixing is NOT a switch: if the main content stays in the current language with borrowed words (e.g. a Hindi sentence using "order", "status", "cancel"), keep the current language.
+4. Judge the language by the words, not the script — speech may be transcribed romanized (e.g. Hindi in Latin script) or mis-scripted.
+5. If the dominant spoken language is NOT in the supported list, or you are unsure, stay (target_language = null).
 
-Respond ONLY in this JSON format:
+Respond with raw JSON only — no markdown fences, no surrounding text:
 {{
-  "languages": [{{"language": "<language detected in the speech>", "confidence": <0.0-1.0>}}, ...],
+  "languages": [{{"language": "<ISO 639-1 code, e.g. en, hi, ta, te>", "confidence": <0.0-1.0>}}, ...],
   "target_language": "<one of the supported labels, or null to stay in the current language>",
-  "target_confidence": <0.0-1.0 — your confidence that the agent should operate in target_language; use 0 when target_language is null>,
+  "target_confidence": <0.0-1.0 — your confidence that SWITCHING the agent to target_language is the right action (not merely that the language is present); use 0 when target_language is null>,
   "reasoning": "<brief one-line explanation>"
 }}
 
-In "languages", list the TOP 3 most likely languages in the caller's speech, ranked by confidence (highest first). These may include languages the agent does not support — list them anyway for visibility. Confidences should reflect how much of the substantive content is in each language. If fewer than 3 languages are present, list only those.
+In "languages", list the TOP 3 most likely languages in the caller's speech, ranked by confidence (highest first), using ISO 639-1 codes. Include languages the agent does not support — list them anyway for visibility. Confidences should reflect how much of the substantive content is in each language. If fewer than 3 languages are present, list only those.
 """
 
 EXTRACTION_PROMPT_GENERATION_PROMPT = """

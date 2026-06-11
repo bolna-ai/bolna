@@ -36,11 +36,19 @@ class LanguageSwitcher:
         # claude-sonnet to its own endpoint and 404. base_url/api_version default to ""
         # to bypass LiteLLM's global LITELLM_MODEL_API_* env fallback and hit native
         # Anthropic with ANTHROPIC_API_KEY.
+        switch_llm_key = os.getenv("LANGUAGE_SWITCH_LLM_API_KEY") or os.getenv("ANTHROPIC_API_KEY") or ""
+        if not switch_llm_key.strip():
+            # Don't raise — that would kill call setup. But shout: without a key every
+            # decide() call fails and language switching is silently inert.
+            logger.error(
+                "LanguageSwitcher: neither LANGUAGE_SWITCH_LLM_API_KEY nor ANTHROPIC_API_KEY is set — "
+                "every switch decision will fail and language switching is effectively disabled"
+            )
         self._llm = LiteLLM(
             model=self.model,
             max_tokens=200,
             temperature=0.0,
-            llm_key=os.getenv("LANGUAGE_SWITCH_LLM_API_KEY") or os.getenv("ANTHROPIC_API_KEY") or "",
+            llm_key=switch_llm_key,
             base_url=os.getenv("LANGUAGE_SWITCH_LLM_API_BASE", ""),
             api_version=os.getenv("LANGUAGE_SWITCH_LLM_API_VERSION", ""),
         )

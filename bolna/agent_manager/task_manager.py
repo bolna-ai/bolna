@@ -377,6 +377,15 @@ class TaskManager(BaseManager):
         # Dedicated LLM that decides language switches from the unbiased detector
         # transcript. Set up in __setup_transcriber only for gated multilingual agents.
         self.language_switcher = None
+        # Serializes switch decisions so overlapping turns can't interleave two
+        # switch+follow-up sequences. Background-only: the caller-facing pipeline
+        # (ASR -> main LLM -> TTS) never waits on this lock.
+        self.language_switch_lock = asyncio.Lock()
+        # Copy of the most recent turn's meta_info — template for the idle-flush
+        # fallback's follow-up generation, where no main turn (and thus no meta_info)
+        # exists because the locked ASR couldn't decode the caller's speech.
+        self._last_turn_meta_info = None
+        self._lid_idle_watcher_task = None
         self.transfer_call_events: list[dict] = []
         self.hangup_task = None
 
@@ -1163,6 +1172,11 @@ class TaskManager(BaseManager):
                         f"active='{active_label}', language_switch_enabled={switch_enabled}, "
                         f"lid_provider={LID_PROVIDER if switch_enabled else None!r}"
                     )
+                    if switch_enabled:
+                        # Idle-flush fallback: recovers the stuck-language deadlock where
+                        # the locked ASR can't decode the caller's speech, so no main turn
+                        # ever fires and the switch decision would otherwise never run.
+                        self._lid_idle_watcher_task = asyncio.create_task(self.__lid_idle_watcher())
                     return
 
                 # --- Single transcriber path (unchanged) ---
@@ -3394,7 +3408,19 @@ class TaskManager(BaseManager):
                 run_id=self.run_id,
             )
 
-        await self.__do_llm_generation(messages, meta_info, next_step, should_bypass_synth)
+        try:
+            await self.__do_llm_generation(messages, meta_info, next_step, should_bypass_synth)
+        except asyncio.CancelledError:
+            # Stamp cancellation on this sequence's latency entry (eager stub or completed entry)
+            # so hung/cancelled LLM calls are distinguishable from still-running ones in progression.
+            cancelled_seq = meta_info.get("sequence_id")
+            for latency_entry in reversed(self.llm_latencies.turn_latencies):
+                if latency_entry.get("sequence_id") == cancelled_seq:
+                    latency_entry["cancelled_at_ms"] = round(
+                        time.time() * 1000 - self.conversation_start_init_ts, 2
+                    )
+                    break
+            raise
 
         for _err in meta_info.get("_non_fatal_errors", []):
             self.non_fatal_llm_error_events.append(_err)
@@ -3770,11 +3796,9 @@ class TaskManager(BaseManager):
             # back to sequence_ids, causing all audio to be BLOCKed permanently.
             self.interruption_manager.revalidate_sequence_id(meta_info["sequence_id"])
             self.response_in_pipeline = True
-            # Once-per-turn language-switch decision, fed BOTH transcripts: the unbiased
-            # detector (buffered in the pool) and this live language-locked transcript.
-            # Background task so it never delays the main LLM; any switch applies next turn.
-            if self.language_switcher is not None:
-                asyncio.create_task(self.handle_language_switch(transcriber_message))
+            # Once-per-turn language-switch decision (no-op unless gated on); background
+            # task so it never delays the main LLM — any switch applies next turn.
+            self._spawn_language_switch_decision(transcriber_message, meta_info)
             self.llm_task = asyncio.create_task(self._run_llm_task(transcriber_package))
 
         elif next_task == "synthesizer":
@@ -4125,6 +4149,11 @@ class TaskManager(BaseManager):
                                 # and without this call all audio from the eager task would be BLOCKed.
                                 self.interruption_manager.revalidate_sequence_id(self.eager_meta_info["sequence_id"])
                                 self.response_in_pipeline = True
+                                # Mirror the once-per-turn language-switch hook from
+                                # _handle_transcriber_output — the eager path skips that
+                                # method, and without this Flux agents would never run
+                                # the switch decision on eager turns.
+                                self._spawn_language_switch_decision(transcriber_message, meta_info)
                             self.llm_task = self.eager_llm_task
                             self.eager_llm_task = None
                             self.eager_meta_info = None
@@ -4254,17 +4283,83 @@ class TaskManager(BaseManager):
         allowed = {a.strip() for a in os.getenv("LANGUAGE_SWITCH_ENABLED_AGENTS", "").split(",") if a.strip()}
         return bool(self.assistant_id and self.assistant_id in allowed)
 
-    async def handle_language_switch(self, active_transcript: str = "") -> None:
+    def _spawn_language_switch_decision(self, transcriber_message: str, meta_info: dict) -> None:
+        """Fire the once-per-turn language-switch decision as a background task.
+
+        Single home for the hook so the turn-boundary and eager call sites can't
+        drift: snapshots meta_info once (it doubles as the idle-flush follow-up
+        template) and spawns the decision. No-op when switching isn't gated on.
+        """
+        if self.language_switcher is None:
+            return
+        snapshot = dict(meta_info)
+        self._last_turn_meta_info = snapshot
+        asyncio.create_task(self.handle_language_switch(transcriber_message, snapshot))
+
+    async def handle_language_switch(self, active_transcript: str = "", meta_info: dict | None = None) -> None:
         """Decide + apply a language switch from BOTH transcripts of the current turn.
 
-        Fired once per conversational turn (from _handle_transcriber_output, aligned to
-        the main transcriber's turn boundary). Feeds the Switch LLM both the unbiased
-        detector transcript (drained from the pool buffer) and the live language-locked
-        transcript (active_transcript). The model returns a per-language confidence
-        distribution + a target; we switch if the target is a supported language ≠ the
-        current one and its confidence clears LANGUAGE_SWITCH_MIN_CONFIDENCE. Runs as a
-        background task, so it never blocks the main LLM for the current turn.
+        Fired once per conversational turn (from _handle_transcriber_output or the eager
+        Flux path), or by the idle-flush watcher with no arguments when the locked ASR
+        couldn't decode the caller's speech and no main turn fired. Feeds the Switch LLM
+        both the unbiased detector transcript (drained from the pool buffer) and the live
+        language-locked transcript (active_transcript). The model returns a per-language
+        confidence distribution + a target; we switch if the target is supported by BOTH
+        pools, ≠ the current language, and clears LANGUAGE_SWITCH_MIN_CONFIDENCE.
+
+        On a switch, the locked-pool transcript of this turn is garbled (wrong-language
+        ASR) or absent, so after switching we put the unbiased detector transcript into
+        conversation history (replacing the garbled turn, or appending it in the
+        idle-flush case) and spawn a follow-up response — the agent then answers what
+        the caller actually said, in the new language.
+
+        Decisions are serialized via language_switch_lock — background-only, the
+        caller-facing ASR→LLM→TTS pipeline never waits on it; worst case a second
+        decision queues ~2s behind the first.
         """
+        try:
+            async with self.language_switch_lock:
+                followup = await self.__run_language_switch(active_transcript, meta_info)
+            # Generate the follow-up OUTSIDE the lock: a streamed response can take
+            # several seconds, and holding the lock through it would needlessly queue
+            # the next turn's decision. Ordering stays safe — any queued decision
+            # awaits wait_for_current_message() before switching, which flushes this
+            # follow-up's audio first.
+            if followup is not None:
+                await self.__generate_switch_followup(*followup)
+        except Exception as e:
+            logger.error(f"LanguageSwitcher: handler error: {e}\n{traceback.format_exc()}")
+
+    async def __lid_idle_watcher(self):
+        """Recover the stuck-language deadlock.
+
+        The switch decision normally fires at the main transcriber's turn boundary —
+        but a language-locked ASR yields NO turn for speech it can't decode, so the
+        decision would never run and the agent stays stuck. The unbiased detector still
+        hears that speech: if its buffer has content that has gone idle (caller finished
+        speaking) and no main turn drained it within the threshold, run the decision on
+        the buffered transcript.
+        """
+        idle_flush_s = float(os.getenv("LANGUAGE_SWITCH_IDLE_FLUSH_S", "2.0"))
+        try:
+            while not self.conversation_ended:
+                await asyncio.sleep(0.5)
+                pool = self.tools.get("transcriber")
+                if not isinstance(pool, TranscriberPool):
+                    continue
+                age = pool.lid_buffer_age()
+                if age is not None and age >= idle_flush_s:
+                    logger.info(
+                        f"LanguageSwitcher: idle-flush — detector speech idle {age:.1f}s with no main turn "
+                        f"(locked ASR likely couldn't decode it); running switch decision"
+                    )
+                    await self.handle_language_switch()
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.error(f"LanguageSwitcher: idle watcher error: {e}\n{traceback.format_exc()}")
+
+    async def __run_language_switch(self, active_transcript: str, meta_info: dict | None) -> tuple | None:
         if not self.language_switcher:
             return
         pool = self.tools.get("transcriber")
@@ -4278,9 +4373,11 @@ class TaskManager(BaseManager):
         # (main transcriber's) turn boundary its buffer may still be missing the tail of
         # this turn. Let it settle briefly so we drain a complete turn rather than a
         # partial one. This is off the response path (background task, switch applies next
-        # turn), so the delay is invisible to the caller.
+        # turn), so the delay is invisible to the caller. Skipped on the idle-flush path
+        # (no active_transcript): the buffer is already ≥ the idle threshold old, so
+        # settling would only extend the lock hold for nothing.
         settle_ms = int(os.getenv("LANGUAGE_SWITCH_SETTLE_MS", "300"))
-        if settle_ms > 0:
+        if settle_ms > 0 and active_transcript:
             await asyncio.sleep(settle_ms / 1000)
 
         detector_transcript, detected_lang = pool.take_lid_transcript()
@@ -4309,6 +4406,16 @@ class TaskManager(BaseManager):
                 f"(detector={detector_transcript[:60]!r})"
             )
             return
+        # The synthesizer pool must also have this language — otherwise switch_language
+        # would flip the transcriber and then fail on the voice, leaving the agent
+        # half-switched (new-language ears, old-language mouth).
+        synth_pool = self.tools.get("synthesizer")
+        if isinstance(synth_pool, SynthesizerPool) and target not in synth_pool.labels:
+            logger.info(
+                f"LanguageSwitcher: target '{target}' has no synthesizer voice configured "
+                f"(synth labels={synth_pool.labels}) — no switch"
+            )
+            return
 
         # Confidence gate (fail-closed): don't flip the language unless the model is
         # confident enough. Prefer the model's explicit target_confidence; fall back to
@@ -4316,16 +4423,29 @@ class TaskManager(BaseManager):
         # number, treat it as below threshold and stay — a missing confidence signal is
         # exactly the "when unsure, stay" case.
         min_conf = float(os.getenv("LANGUAGE_SWITCH_MIN_CONFIDENCE", "0.6"))
-        target_conf = decision.get("target_confidence")
+
+        def as_float(value):
+            # LLM JSON can drift (e.g. "0.78" as a string); unparseable → None,
+            # which the gate below treats as below-threshold (fail-closed) instead
+            # of crashing the decision on a TypeError.
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return None
+
+        target_conf = as_float(decision.get("target_confidence"))
         if target_conf is None:
             short_target = (target or "").split("-")[0].lower()
-            target_conf = next(
-                (
-                    lang.get("confidence")
-                    for lang in languages
-                    if isinstance(lang, dict) and str(lang.get("language") or "").split("-")[0].lower() == short_target
-                ),
-                None,
+            target_conf = as_float(
+                next(
+                    (
+                        lang.get("confidence")
+                        for lang in languages
+                        if isinstance(lang, dict)
+                        and str(lang.get("language") or "").split("-")[0].lower() == short_target
+                    ),
+                    None,
+                )
             )
         if target_conf is None or target_conf < min_conf:
             logger.info(
@@ -4356,6 +4476,64 @@ class TaskManager(BaseManager):
             f"LanguageSwitcher: switching '{current}' → '{target}' (confidence={target_conf}, langs={languages}, reason={reasoning})"
         )
         await self.switch_language(target, triggered_by="lid_llm", context_note=context_note)
+
+        # Put the caller's actual words into conversation history. Turn-boundary path:
+        # the locked-pool ASR garbled this turn, so replace it with the unbiased
+        # transcript — guarded on the original content so a newer turn that arrived
+        # during the decision is never overwritten. Idle-flush path: the locked ASR
+        # produced no turn at all, so append the detector transcript as the user turn.
+        if active_transcript:
+            replaced = self.conversation_history.replace_last_user(active_transcript, detector_transcript)
+            if not replaced:
+                logger.info(
+                    "LanguageSwitcher: skipped transcript correction (newer user turn arrived or no match) — "
+                    "no follow-up response"
+                )
+                return
+            logger.info(f"LanguageSwitcher: corrected user turn to detector transcript {detector_transcript[:80]!r}")
+        else:
+            self.conversation_history.append_user(detector_transcript)
+            logger.info(
+                f"LanguageSwitcher: idle-flush — appended detector transcript as user turn "
+                f"{detector_transcript[:80]!r}"
+            )
+
+        # Prepare the follow-up that answers what the caller actually said, in the new
+        # language (generated by the caller AFTER the lock is released). Mirrors the
+        # legacy switch tool's follow-up. In the idle-flush case there is no turn
+        # meta_info, so reuse the most recent turn's as a template — fine because
+        # _spawn_followup_meta_info allocates a fresh sequence_id/turn_id anyway.
+        if meta_info is None and self._last_turn_meta_info is not None:
+            meta_info = dict(self._last_turn_meta_info)
+        if meta_info is None or self.conversation_ended or self.hangup_triggered:
+            if meta_info is None:
+                logger.info("LanguageSwitcher: no meta_info template available — switched without follow-up response")
+            return None
+        messages = self.conversation_history.get_copy()
+        followup_meta_info = self._spawn_followup_meta_info(meta_info)
+        next_step = self._get_next_step(meta_info.get("sequence", 0), "llm")
+        return messages, followup_meta_info, next_step
+
+    async def __generate_switch_followup(self, messages, followup_meta_info, next_step):
+        """Generate the post-switch follow-up response (runs outside language_switch_lock).
+
+        The garbled turn's audio has already flushed (wait_for_current_message ran before
+        the switch) — if its LLM task is somehow still streaming, late chunks would
+        collide with this follow-up, so cancel it first, mirroring
+        _handle_transcriber_output's cancel pattern.
+        """
+        if self.llm_task is not None and not self.llm_task.done():
+            logger.info("LanguageSwitcher: cancelling in-flight llm_task before switch follow-up")
+            self.llm_task.cancel()
+            self.llm_task = None
+            self.interruption_manager.invalidate_pending_responses()
+        # Always revalidate the follow-up's sequence_id — invalidate (above or from the
+        # interruption path) would otherwise leave its audio permanently BLOCKed.
+        self.interruption_manager.revalidate_sequence_id(followup_meta_info["sequence_id"])
+        self.response_in_pipeline = True
+        await self.__do_llm_generation(
+            messages, followup_meta_info, next_step, should_bypass_synth=False, should_trigger_function_call=True
+        )
 
     async def switch_language(self, label, components=None, triggered_by: str = "manual", context_note: str = None):
         """Switch the active language for multilingual pools.
@@ -5312,6 +5490,7 @@ class TaskManager(BaseManager):
             tasks_to_cancel.append(
                 process_task_cancellation(self.execute_function_call_task, "execute_function_call_task")
             )
+            tasks_to_cancel.append(process_task_cancellation(self._lid_idle_watcher_task, "lid_idle_watcher_task"))
             if "synthesizer" in self.tools and self.synthesizer_task is not None:
                 tasks_to_cancel.append(process_task_cancellation(self.synthesizer_task, "synthesizer_task"))
                 tasks_to_cancel.append(

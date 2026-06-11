@@ -192,6 +192,17 @@ class TranscriberPool:
                 on_language=None,
                 config=self._lid_config,
             )
+            # Language switching consumes the detector through the per-turn buffer API
+            # (take_turn_transcript / buffer_age_seconds). Backends without it (azure,
+            # elevenlabs_scribe) make the whole feature silently inert — every drain
+            # returns empty and the idle-flush never fires — so shout now, at setup,
+            # instead of leaving a mute mystery in call logs.
+            if not hasattr(self._lid, "take_turn_transcript"):
+                logger.error(
+                    f"TranscriberPool: LID provider '{self._lid_provider_name}' has no per-turn buffer API — "
+                    f"language switching will be INERT (no transcripts drained, no idle-flush). "
+                    f"Use LID_PROVIDER=sarvam or implement take_turn_transcript/buffer_age_seconds on this backend."
+                )
             await self._lid.start()
             logger.info(f"TranscriberPool: LID tap started (provider={self._lid_provider_name})")
         except Exception as e:
@@ -207,6 +218,16 @@ class TranscriberPool:
         if self._lid is None or not hasattr(self._lid, "take_turn_transcript"):
             return "", None
         return self._lid.take_turn_transcript()
+
+    def lid_buffer_age(self):
+        """Seconds since the detector last buffered a segment, or None if empty/absent.
+
+        Used by TaskManager's idle-flush watcher to detect speech the active (locked)
+        transcriber could not decode (buffered detector text but no main turn).
+        """
+        if self._lid is None or not hasattr(self._lid, "buffer_age_seconds"):
+            return None
+        return self._lid.buffer_age_seconds()
 
     async def switch(self, label):
         """Switch which transcriber receives audio.
