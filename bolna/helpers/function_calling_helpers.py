@@ -148,9 +148,7 @@ async def trigger_api(
                         "Only 'application/json' and 'application/x-www-form-urlencoded' are supported."
                     )
             else:
-                raise ValueError(
-                    f"Unsupported HTTP method: {method!r}. Only 'GET' and 'POST' are supported."
-                )
+                raise ValueError(f"Unsupported HTTP method: {method!r}. Only 'GET' and 'POST' are supported.")
 
             if response is not None:
                 logger.info(f"Final URL: {response.url}")
