@@ -4062,6 +4062,15 @@ class TaskManager(BaseManager):
                             if self.tools["transcriber"].is_active_transcriber_alive():
                                 logger.info(f"TranscriberPool: standby transcriber closed, continuing")
                                 continue
+                            # The active socket can die mid-call (sarvam drops connections
+                            # within seconds — QA calls disconnected 3-9s after a language
+                            # switch). Reconnect in place; end the call only when it is
+                            # already over (real hangup) or the reconnect fails.
+                            if (
+                                not (self.conversation_ended or self.hangup_triggered)
+                                and await self.tools["transcriber"].reconnect_active()
+                            ):
+                                continue
                             logger.info(f"TranscriberPool: active transcriber closed, ending call")
                         await self._log_transcriber_connection_error(
                             (message.get("meta_info") or {}).get("connection_error")
@@ -4079,6 +4088,15 @@ class TaskManager(BaseManager):
                         if isinstance(self.tools.get("transcriber"), TranscriberPool):
                             if self.tools["transcriber"].is_active_transcriber_alive():
                                 logger.info(f"TranscriberPool: standby transcriber closed, continuing")
+                                continue
+                            # The active socket can die mid-call (sarvam drops connections
+                            # within seconds — QA calls disconnected 3-9s after a language
+                            # switch). Reconnect in place; end the call only when it is
+                            # already over (real hangup) or the reconnect fails.
+                            if (
+                                not (self.conversation_ended or self.hangup_triggered)
+                                and await self.tools["transcriber"].reconnect_active()
+                            ):
                                 continue
                             logger.info(f"TranscriberPool: active transcriber closed, ending call")
                         await self._log_transcriber_connection_error(

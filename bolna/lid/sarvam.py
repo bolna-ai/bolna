@@ -33,6 +33,12 @@ class SarvamLID(LIDBackend):
 
     _WS_BASE = "wss://{host}/speech-to-text/ws"
 
+    # Mid-call reconnects allowed when saaras closes the socket on us (observed
+    # in QA: server-side graceful close left the detector silently mute for the
+    # whole call). Bounded so a rejecting server can't loop us.
+    _MAX_RECONNECTS = 2
+    _RECONNECT_DELAY_S = 0.5
+
     def __init__(self, on_language, config):
         super().__init__(on_language, config)
         self._api_key = config.get("sarvam_api_key") or os.getenv("SARVAM_API_KEY", "")
@@ -57,6 +63,10 @@ class SarvamLID(LIDBackend):
         self._sender_task = None
         self._receiver_task = None
         self._dead = False
+        self._stopping = False
+        self._reconnecting = False
+        self._reconnect_attempts = 0
+        self._dead_drop_logged = False
         self._resample_state = None
         # Rolling buffer of unbiased recognition for the current conversational turn.
         # saaras emits one "data" message per VAD segment (several per turn), so we
@@ -179,7 +189,11 @@ class SarvamLID(LIDBackend):
 
     def feed(self, audio_bytes):
         if self._dead:
-            logger.warning("SarvamLID: feed() called but WS is dead — chunk dropped (LID inactive)")
+            # Log the first drop loudly, then go quiet — at ~50 chunks/s a
+            # per-chunk warning floods the call log while a reconnect runs.
+            if not self._dead_drop_logged:
+                logger.warning("SarvamLID: feed() called but WS is dead — dropping chunks until reconnected")
+                self._dead_drop_logged = True
             return
         try:
             self._queue.put_nowait(audio_bytes)
@@ -200,8 +214,7 @@ class SarvamLID(LIDBackend):
             pass
         except Exception as e:
             logger.error(f"SarvamLID sender error: {e}")
-            self._dead = True
-            logger.warning("SarvamLID: sender loop exited abnormally — LID inactive for remainder of call")
+            self._schedule_reconnect("sender error")
 
     async def _receiver_loop(self):
         try:
@@ -240,13 +253,61 @@ class SarvamLID(LIDBackend):
                 except Exception as e:
                     logger.error(f"SarvamLID receiver parse error: {e}")
         except asyncio.CancelledError:
-            pass
+            return
         except Exception as e:
             logger.error(f"SarvamLID receiver error: {e}")
-            self._dead = True
-            logger.warning("SarvamLID: receiver loop exited abnormally — LID inactive for remainder of call")
+        # Reached on BOTH a server-side graceful close (the async-for simply ends,
+        # no exception raised) and receive errors. The graceful case previously
+        # exited silently — detector mute for the rest of the call with zero log
+        # lines (QA call edbdb998: 0 segments in 21s, Tamil never detected).
+        self._schedule_reconnect("receiver closed")
+
+    def _schedule_reconnect(self, source: str):
+        """Mark the socket dead and kick off one reconnect task (idempotent)."""
+        if self._stopping:
+            return
+        self._dead = True
+        if self._reconnecting:
+            return
+        self._reconnecting = True
+        logger.error(f"SarvamLID: socket dead ({source}) — detector mute, attempting reconnect")
+        asyncio.create_task(self._reconnect())
+
+    async def _reconnect(self):
+        try:
+            if self._reconnect_attempts >= self._MAX_RECONNECTS:
+                logger.error(
+                    f"SarvamLID: reconnect cap ({self._MAX_RECONNECTS}) reached — LID inactive for remainder of call"
+                )
+                return
+            self._reconnect_attempts += 1
+            # Tear down whatever is left of the old connection. Cancelling the old
+            # receiver here matters on the sender-triggered path: otherwise it would
+            # observe the close of the OLD socket after we have already reconnected
+            # and schedule a spurious second reconnect against the healthy one.
+            for task in (self._sender_task, self._receiver_task):
+                if task and not task.done():
+                    task.cancel()
+            if self._ws:
+                try:
+                    await self._ws.close()
+                except Exception:
+                    pass
+            self._resample_state = None
+            await asyncio.sleep(self._RECONNECT_DELAY_S)
+            try:
+                await self.start()
+            except Exception as e:
+                logger.error(f"SarvamLID: reconnect attempt {self._reconnect_attempts} failed: {e}")
+                return
+            self._dead = False
+            self._dead_drop_logged = False
+            logger.info(f"SarvamLID: reconnected (attempt {self._reconnect_attempts}/{self._MAX_RECONNECTS})")
+        finally:
+            self._reconnecting = False
 
     async def stop(self):
+        self._stopping = True
         try:
             self._queue.put_nowait(None)
         except asyncio.QueueFull:

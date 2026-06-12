@@ -1,8 +1,13 @@
-"""Unit tests for SarvamLID's per-turn transcript buffer.
+"""Unit tests for SarvamLID's per-turn transcript buffer and socket liveness.
 
 saaras emits one "data" message per VAD segment (several per spoken turn); the
 detector accumulates them and the caller drains once per conversational turn.
 """
+
+import asyncio
+from unittest.mock import AsyncMock
+
+import pytest
 
 from bolna.lid.sarvam import SarvamLID
 
@@ -123,3 +128,90 @@ def test_buffer_event_set_on_segment_cleared_on_drain():
     # Blank segments must not wake the watcher.
     d._accumulate("", "en")
     assert not d.buffer_event().is_set()
+
+
+# ── Socket liveness: graceful server-side close must not leave a mute detector ──
+
+
+class _GracefullyClosedWS:
+    """A websocket whose message iterator ends immediately (server closed 1000)."""
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        raise StopAsyncIteration
+
+
+@pytest.mark.asyncio
+async def test_graceful_close_marks_dead_and_schedules_reconnect():
+    d = _detector()
+    d._ws = _GracefullyClosedWS()
+    d._reconnect = AsyncMock()
+    await d._receiver_loop()
+    await asyncio.sleep(0)  # let the scheduled reconnect task run
+    # Previously the async-for just ended: no _dead flag, no log, silent mute.
+    assert d._dead is True
+    d._reconnect.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_graceful_close_during_stop_does_not_reconnect():
+    d = _detector()
+    d._ws = _GracefullyClosedWS()
+    d._reconnect = AsyncMock()
+    d._stopping = True
+    await d._receiver_loop()
+    await asyncio.sleep(0)
+    assert d._dead is False
+    d._reconnect.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_schedule_reconnect_is_idempotent_while_in_flight():
+    d = _detector()
+    d._reconnect = AsyncMock()
+    d._schedule_reconnect("receiver closed")
+    d._schedule_reconnect("sender error")  # second trigger while first in flight
+    await asyncio.sleep(0)
+    d._reconnect.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_reconnect_restores_liveness_and_resets_state(monkeypatch):
+    monkeypatch.setattr(SarvamLID, "_RECONNECT_DELAY_S", 0)
+    d = _detector()
+    d._dead = True
+    d._reconnecting = True
+    d._dead_drop_logged = True
+    d.start = AsyncMock()
+    await d._reconnect()
+    d.start.assert_awaited_once()
+    assert d._dead is False
+    assert d._dead_drop_logged is False
+    assert d._reconnecting is False
+    assert d._reconnect_attempts == 1
+
+
+@pytest.mark.asyncio
+async def test_reconnect_cap_stops_retrying(monkeypatch):
+    monkeypatch.setattr(SarvamLID, "_RECONNECT_DELAY_S", 0)
+    d = _detector()
+    d._dead = True
+    d._reconnect_attempts = SarvamLID._MAX_RECONNECTS
+    d.start = AsyncMock()
+    await d._reconnect()
+    d.start.assert_not_awaited()
+    assert d._dead is True
+
+
+@pytest.mark.asyncio
+async def test_reconnect_failure_keeps_detector_dead(monkeypatch):
+    monkeypatch.setattr(SarvamLID, "_RECONNECT_DELAY_S", 0)
+    d = _detector()
+    d._dead = True
+    d._reconnecting = True
+    d.start = AsyncMock(side_effect=RuntimeError("403"))
+    await d._reconnect()
+    assert d._dead is True
+    assert d._reconnecting is False  # a later trigger may try the remaining budget

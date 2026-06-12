@@ -22,8 +22,15 @@ class TranscriberPool:
 
     # Interval between silence keepalives to standby transcribers (seconds).
     # Deepgram closes connections after ~45s with no audio even when KeepAlive
-    # heartbeats are being sent.  10s gives a comfortable safety margin.
-    _KEEPALIVE_INTERVAL = 10
+    # heartbeats are being sent, and sarvam saarika has been observed dropping
+    # standby sockets well under 10s (QA standbys died ~5-7s after pool start,
+    # before the first 10s keepalive ever fired).  4s with an immediate first
+    # round covers both.
+    _KEEPALIVE_INTERVAL = 4
+
+    # Cap on mid-call reconnects (switch-time + active-death) so a provider
+    # rejecting connections can't put the call in a reconnect loop.
+    _MAX_RECONNECTS_PER_CALL = 5
 
     def __init__(
         self,
@@ -161,7 +168,6 @@ class TranscriberPool:
         """
         try:
             while True:
-                await asyncio.sleep(self._KEEPALIVE_INTERVAL)
                 for label, transcriber in self.transcribers.items():
                     if label == self.active_label:
                         continue
@@ -178,6 +184,9 @@ class TranscriberPool:
                             "meta_info": {},
                         }
                     )
+                # Sleep AFTER sending so the first keepalive round goes out
+                # immediately at pool start, not _KEEPALIVE_INTERVAL later.
+                await asyncio.sleep(self._KEEPALIVE_INTERVAL)
         except asyncio.CancelledError:
             logger.info("TranscriberPool: standby keepalive cancelled")
 
@@ -252,6 +261,37 @@ class TranscriberPool:
         if self._lid is None or not hasattr(self._lid, "buffer_max_segment_seconds"):
             return 0.0
         return self._lid.buffer_max_segment_seconds()
+
+    async def reconnect_active(self) -> bool:
+        """Reconnect the ACTIVE transcriber in place after its connection died.
+
+        Sarvam saarika drops sockets mid-call (observed 3-9s after a language
+        switch in QA, even with keepalives flowing) — without this, the pool's
+        'active transcriber closed → end call' policy hangs up an otherwise
+        healthy call. Audio queued in the transcriber's private input_queue
+        while the socket was down is flushed to the new connection.
+
+        Returns True on success; False if the reconnect cap is hit or the
+        provider connection fails (caller should then end the call).
+        """
+        if self.reconnect_count >= self._MAX_RECONNECTS_PER_CALL:
+            logger.error(
+                f"TranscriberPool: reconnect cap ({self._MAX_RECONNECTS_PER_CALL}) reached — "
+                f"not reconnecting active '{self.active_label}'"
+            )
+            return False
+        active = self.transcribers[self.active_label]
+        try:
+            await active.run()
+        except Exception as e:
+            logger.error(f"TranscriberPool: reconnect of active '{self.active_label}' failed: {e}")
+            return False
+        self.reconnect_count += 1
+        logger.info(
+            f"TranscriberPool: active transcriber '{self.active_label}' reconnected "
+            f"(reconnect {self.reconnect_count}/{self._MAX_RECONNECTS_PER_CALL})"
+        )
+        return True
 
     async def switch(self, label):
         """Switch which transcriber receives audio.
