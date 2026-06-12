@@ -104,6 +104,10 @@ class DeepgramTranscriber(BaseTranscriber):
         self._turn_pending = False  # True after SpeechStarted until first real interim confirms speech
         self.current_turn_interim_details = []
         self.audio_frame_timestamps = []  # List of (frame_start, frame_end, send_timestamp)
+        # Wall-clock epoch-ms send time of the audio behind the latest transcript content
+        # in the current flux turn — per-turn proxy for "user stopped speaking" (flux has
+        # no per-word timestamps). Read at EndOfTurn for user_speech_end_epoch_ms.
+        self.last_transcript_audio_sent_at = None
         self.turn_counter = 0
         # Timeout tracking for stuck utterances
         self.last_interim_time = None
@@ -339,6 +343,7 @@ class DeepgramTranscriber(BaseTranscriber):
         self._turn_pending = False
         self.last_interim_time = None
         self.current_turn_interim_details = []
+        self.last_transcript_audio_sent_at = None
         self.current_turn_start_time = None
         self.current_turn_id = None
         self.final_transcript = ""
@@ -919,6 +924,7 @@ class DeepgramTranscriber(BaseTranscriber):
                         self.current_turn_id = self.turn_counter
                         self.speech_start_time = timestamp_ms()
                         self.current_turn_interim_details = []
+                        self.last_transcript_audio_sent_at = None
                         self.is_transcript_sent_for_processing = False
                         self.final_transcript = ""
                         # Eager stub — captured even if turn is never finalized
@@ -1032,6 +1038,7 @@ class DeepgramTranscriber(BaseTranscriber):
                                 first_interim_to_final_ms, last_interim_to_final_ms = (
                                     self.calculate_interim_to_final_latencies(self.current_turn_interim_details)
                                 )
+                                asr_finalized_epoch_ms = timestamp_ms()
                                 turn_latency = {
                                     "turn_id": self.current_turn_id,
                                     "sequence_id": self.current_turn_id,
@@ -1040,17 +1047,18 @@ class DeepgramTranscriber(BaseTranscriber):
                                     "last_interim_to_final_ms": last_interim_to_final_ms,
                                     "asr_start_epoch_ms": self.speech_start_time,
                                     "asr_turn_start_epoch_ms": self.speech_start_time,
-                                    "asr_finalized_epoch_ms": timestamp_ms(),
+                                    "asr_finalized_epoch_ms": asr_finalized_epoch_ms,
                                     "final_transcript": transcript,
                                 }
-                                # Observability only: flux words carry no per-word timestamps
-                                # (unlike nova's last-word-end), so the closest proxy for "user
-                                # stopped speaking" is the audio_window_end of the last
-                                # transcript-bearing event, mapped back to the wall-clock time
-                                # that audio was sent. asr_finalized_epoch_ms minus this measures
-                                # flux's end-of-turn detection delay.
-                                user_speech_end_epoch_ms = self.compute_flux_user_speech_end_epoch_ms()
-                                if user_speech_end_epoch_ms is not None:
+                                # Observability only: asr_finalized minus user_speech_end measures
+                                # flux's end-of-turn detection delay. Omit when missing or out of
+                                # order (frame-mapping anomaly, e.g. post-reconnect) — absent beats
+                                # wrong for a latency metric.
+                                user_speech_end_epoch_ms = self.last_transcript_audio_sent_at
+                                if (
+                                    user_speech_end_epoch_ms is not None
+                                    and user_speech_end_epoch_ms <= asr_finalized_epoch_ms
+                                ):
                                     turn_latency["user_speech_end_epoch_ms"] = user_speech_end_epoch_ms
                                 self._upsert_turn_latency(turn_latency)
                             except Exception as e:
@@ -1180,34 +1188,8 @@ class DeepgramTranscriber(BaseTranscriber):
             audio_sent_at = self._find_audio_send_timestamp(msg.get("audio_window_end", 0))
             if audio_sent_at:
                 latency_ms = round(now * 1000 - audio_sent_at, 5)
-        return {
-            "transcript": transcript,
-            "latency_ms": latency_ms,
-            "is_final": False,
-            "received_at": now,
-            "audio_window_end": msg.get("audio_window_end"),
-        }
-
-    def compute_flux_user_speech_end_epoch_ms(self):
-        """Epoch-ms proxy for when the user stopped speaking in a flux turn, or None.
-
-        Uses the audio_window_end of the last transcript-bearing TurnInfo event —
-        the stream position right after the final transcribed content — mapped to
-        the wall-clock time that audio frame was sent. Falls back to
-        connection_start_time + offset when the frame lookup misses (e.g. after a
-        reconnect cleared audio_frame_timestamps).
-        """
-        if not self.current_turn_interim_details:
-            return None
-        last_window_end = self.current_turn_interim_details[-1].get("audio_window_end")
-        if not last_window_end:
-            return None
-        audio_sent_at = self._find_audio_send_timestamp(last_window_end)
-        if audio_sent_at is not None:
-            return audio_sent_at
-        if self.connection_start_time is not None:
-            return (self.connection_start_time + last_window_end) * 1000
-        return None
+                self.last_transcript_audio_sent_at = audio_sent_at
+        return {"transcript": transcript, "latency_ms": latency_ms, "is_final": False, "received_at": now}
 
     def _find_audio_send_timestamp(self, audio_position):
         """
@@ -1233,6 +1215,14 @@ class DeepgramTranscriber(BaseTranscriber):
 
     async def transcribe(self):
         deepgram_ws = None
+        # Per-connection stream state: Deepgram audio positions (audio_window_end,
+        # word offsets) restart at 0 on every new websocket, so the local frame
+        # bookkeeping must restart with them. A pool reconnect re-runs transcribe()
+        # on the same instance — stale values from the previous connection would
+        # map new positions onto old wall-clock times.
+        self.num_frames = 0
+        self.audio_frame_timestamps = []
+        self.connection_start_time = None
         try:
             start_time = timestamp_ms()
             try:
