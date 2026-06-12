@@ -67,11 +67,12 @@ class ElevenlabsSynthesizer(StreamSynthesizer):
         )
         self.api_url = f"https://{self.elevenlabs_host}/v1/text-to-speech/{self.voice}/stream?optimize_streaming_latency=2&output_format="
 
-        # One context per conversation segment, rotated only on interruption so
-        # the interrupted turn's frames can be dropped without leaking contexts
-        # (ElevenLabs caps a connection at 5 concurrent contexts).
+        # One context per turn: closed at end_of_llm_stream and on interruption, so each
+        # turn gets a fresh context_id. Closing frees the slot, staying well under
+        # ElevenLabs' 5-concurrent-context cap.
         self.context_id = None
         self.context_ids_to_ignore = set()
+        self._eos_context_id = None  # context the last end-of-stream was emitted for
         self.ws_send_time = None
         self.ws_trace_id = None
         self.current_turn_ttfb = None
@@ -157,6 +158,12 @@ class ElevenlabsSynthesizer(StreamSynthesizer):
                 self.last_text_sent = True
                 try:
                     await self.websocket.send(json.dumps({"text": "", "context_id": self.context_id, "flush": True}))
+                    # Closing the context makes ElevenLabs emit isFinal, which the receiver uses
+                    # as end-of-stream. The context's remaining frames are still delivered. The
+                    # next turn opens a fresh context; voice_settings carry over from the connection BOS.
+                    if self.context_id:
+                        await self.websocket.send(json.dumps({"context_id": self.context_id, "close_context": True}))
+                        self.context_id = None
                 except Exception as e:
                     logger.info(f"Error sending end-of-stream signal: {e}")
                     self.connection_error = str(e)
@@ -196,7 +203,8 @@ class ElevenlabsSynthesizer(StreamSynthesizer):
                 recv_duration = (time.perf_counter() - recv_start) * 1000
                 data = json.loads(response)
 
-                if data.get("contextId") in self.context_ids_to_ignore:
+                ctx = data.get("contextId")
+                if ctx in self.context_ids_to_ignore:
                     continue
 
                 if "audio" in data and data["audio"] and self.ws_send_time is not None:
@@ -223,11 +231,12 @@ class ElevenlabsSynthesizer(StreamSynthesizer):
                         text_spoken = ""
                     yield chunk, text_spoken
 
+                emit_eos = False
                 if "isFinal" in data and data["isFinal"]:
                     logger.info(f"WS recv isFinal trace_id={self.ws_trace_id}")
                     audio_chunk_count = 0
                     last_recv_time = None
-                    yield b"\x00", ""
+                    emit_eos = True
 
                 elif self.last_text_sent:
                     try:
@@ -245,12 +254,18 @@ class ElevenlabsSynthesizer(StreamSynthesizer):
                         current_cmp = re.sub(r"\s+", "", current_norm)
                         if last_four_cmp and has_alnum and current_cmp.endswith(last_four_cmp):
                             logger.info("send end_of_synthesizer_stream")
-                            yield b"\x00", ""
+                            emit_eos = True
                     except Exception as e:
                         logger.error(f"Error getting chars from response - {e}")
-                        yield b"\x00", ""
+                        emit_eos = True
                 else:
                     logger.info("No audio data in the response")
+
+                # isFinal and the text-match can both fire within one turn; emit end-of-stream
+                # only once per context.
+                if emit_eos and not (ctx is not None and ctx == self._eos_context_id):
+                    self._eos_context_id = ctx
+                    yield b"\x00", ""
 
             except websockets.exceptions.ConnectionClosed:
                 break
