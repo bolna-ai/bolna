@@ -32,6 +32,13 @@ class LanguageSwitcher:
         self.available_labels = list(available_labels or [])
         self.run_id = run_id
         self.model = model or os.getenv("LANGUAGE_SWITCH_LLM", DEFAULT_LANGUAGE_SWITCH_LLM)
+        # Bare Claude names rely on litellm's model registry for provider inference,
+        # which breaks whenever the pinned litellm predates the model (QA f962f0f6:
+        # litellm 1.65.0 + 'claude-haiku-4-5-20251001' → "LLM Provider NOT provided"
+        # on every decide — no switches the whole call). An explicit anthropic/
+        # prefix routes by namespace on any litellm version.
+        if self.model.startswith("claude") and "/" not in self.model:
+            self.model = f"anthropic/{self.model}"
         self.latency_ms = None
         # The Switch LLM is infrastructure (always Claude), independent of the agent's
         # configured LLM. It uses dedicated Anthropic credentials and must NOT inherit

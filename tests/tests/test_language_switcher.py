@@ -86,9 +86,31 @@ async def test_decide_sends_user_role_message():
 
 
 @pytest.mark.asyncio
-async def test_default_model_is_sonnet():
+async def test_default_model_is_sonnet_with_provider_prefix():
+    # Bare claude-* names break on litellm versions whose registry predates the
+    # model ("LLM Provider NOT provided") — the switcher must namespace them.
     switcher, _ = _make_switcher(json.dumps({"target_language": None}))
-    assert switcher.model == "claude-sonnet-4-6"
+    assert switcher.model == "anthropic/claude-sonnet-4-6"
+
+
+@pytest.mark.asyncio
+async def test_bare_claude_model_gets_anthropic_prefix():
+    from bolna.helpers.language_switcher import LanguageSwitcher
+
+    with patch(f"{MOD}.LiteLLM", return_value=MagicMock()):
+        switcher = LanguageSwitcher(available_labels=["en"], model="claude-haiku-4-5-20251001")
+    assert switcher.model == "anthropic/claude-haiku-4-5-20251001"
+
+
+@pytest.mark.asyncio
+async def test_provider_prefixed_model_left_untouched():
+    from bolna.helpers.language_switcher import LanguageSwitcher
+
+    with patch(f"{MOD}.LiteLLM", return_value=MagicMock()):
+        prefixed = LanguageSwitcher(available_labels=["en"], model="anthropic/claude-haiku-4-5-20251001")
+        non_claude = LanguageSwitcher(available_labels=["en"], model="azure/gpt-4.1-mini")
+    assert prefixed.model == "anthropic/claude-haiku-4-5-20251001"
+    assert non_claude.model == "azure/gpt-4.1-mini"
 
 
 @pytest.mark.asyncio
