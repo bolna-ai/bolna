@@ -5315,6 +5315,8 @@ class TaskManager(BaseManager):
                         _turn["asr_finalized_ms"] = round(_turn.pop("asr_finalized_epoch_ms") - _call_start_ms, 2)
                     if _turn.get("asr_turn_start_epoch_ms") is not None:
                         _turn["asr_turn_start_ms"] = round(_turn.pop("asr_turn_start_epoch_ms") - _call_start_ms, 2)
+                    if _turn.get("user_speech_end_epoch_ms") is not None:
+                        _turn["user_speech_end_ms"] = round(_turn.pop("user_speech_end_epoch_ms") - _call_start_ms, 2)
 
                 # Collect language detection latency if available
                 if hasattr(self, "language_detector") and self.language_detector.latency_data:
@@ -5480,6 +5482,7 @@ class TaskManager(BaseManager):
                         "asr_start_ms",
                         "asr_finalized_ms",
                         "asr_turn_start_ms",
+                        "user_speech_end_ms",
                     ):
                         _t.pop(_f, None)
 

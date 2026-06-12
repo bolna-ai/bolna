@@ -1,7 +1,9 @@
 import asyncio
 import json
+from urllib.parse import quote
 
 import aiohttp
+from yarl import URL
 from bolna.helpers.logger_config import configure_logger
 from bolna.enums import LogComponent, LogDirection
 from bolna.helpers.utils import convert_to_request_log, format_error_message
@@ -108,6 +110,24 @@ def prepare_api_request(param, api_token, headers_data, **kwargs):
     }
 
 
+def build_get_url(url, api_params):
+    """Assemble the final GET URL, treating the base url as already in wire form.
+
+    The base url is sent verbatim (encoded=True) so a pre-encoded value such as a nested
+    callback URL (e.g. an Ozonetel appURL) keeps its %3F/%3A/%2F instead of being decoded
+    to a literal ?/:/ that receivers truncate at. Param values are percent-encoded once and
+    appended, so plain values are unchanged and any param that is itself a URL is encoded
+    correctly rather than left with a query-splitting literal '?'.
+    """
+    final_url = url
+    if api_params:
+        sep = "&" if "?" in url else "?"
+        final_url = url + sep + "&".join(
+            f"{quote(str(k), safe='')}={quote(str(v), safe='')}" for k, v in api_params.items()
+        )
+    return URL(final_url, encoded=True)
+
+
 async def trigger_api(
     url, method, param, api_token, headers_data, meta_info, run_id, return_response_metadata=False, **kwargs
 ):
@@ -127,9 +147,12 @@ async def trigger_api(
             run_id=run_id,
         )
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
+            response = None
+            response_text = None
             if method.lower() == "get":
-                logger.info(f"Sending request {request_body}, {url}, {headers}")
-                async with session.get(url, params=api_params, headers=headers) as response:
+                get_url = build_get_url(url, api_params)
+                logger.info(f"Sending request {request_body}, {get_url}, {headers}")
+                async with session.get(get_url, headers=headers) as response:
                     response_text = await response.text()
             elif method.lower() == "post":
                 logger.info(f"Sending request {api_params}, {url}, {headers}")
@@ -140,15 +163,25 @@ async def trigger_api(
                     normalized_api_params = normalize_for_form(api_params)
                     async with session.post(url, data=normalized_api_params, headers=headers) as response:
                         response_text = await response.text()
+                else:
+                    raise ValueError(
+                        f"Unsupported Content-Type for POST: {headers.get('Content-Type')!r}. "
+                        "Only 'application/json' and 'application/x-www-form-urlencoded' are supported."
+                    )
+            else:
+                raise ValueError(f"Unsupported HTTP method: {method!r}. Only 'GET' and 'POST' are supported.")
+
+            if response is not None:
+                logger.info(f"Final URL: {response.url}")
 
             if return_response_metadata:
                 return {
                     "status_code": response.status if response is not None else None,
-                    "body": response_text,
+                    "body": response_text if response_text is not None else "",
                     "content_type": response.headers.get("Content-Type") if response is not None else None,
                 }
 
-            return response_text
+            return response_text if response_text is not None else ""
     except asyncio.TimeoutError:
         message = f"ERROR CALLING API: Request to {url} timed out after 5 seconds"
         logger.debug(message)
