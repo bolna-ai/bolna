@@ -4516,10 +4516,7 @@ class TaskManager(BaseManager):
         if target == current:
             return
 
-        context_note = (
-            f"## Language note:\nThe caller switched to '{target}'. "
-            f'Their latest message: "{detector_transcript}". Reason: {reasoning}'
-        )
+        context_note = self.__switch_context_note(target, detector_transcript, reasoning)
         logger.info(
             f"LanguageSwitcher: switching '{current}' → '{target}' (confidence={target_conf}, langs={languages}, reason={reasoning})"
         )
@@ -4609,6 +4606,28 @@ class TaskManager(BaseManager):
         next_step = self._get_next_step(meta_info.get("sequence", 0), "llm")
         return messages, followup_meta_info, next_step
 
+    def __switch_context_note(self, target: str, detector_transcript: str, reasoning: str = None) -> str:
+        """Build the language note installed in the system prompt on a switch.
+
+        Must be a DIRECTIVE, not a description: with history dominated by the old
+        language (and customer prompts often written in one language), the main LLM
+        follows conversation momentum and keeps replying in the OLD language unless
+        explicitly ordered (QA 16db0968: pipeline switched hi→en but every reply
+        stayed Hindi). Shared by the real switch path and the speculative follow-up
+        so the committed speculation obeys the same directive. The reasoning line is
+        omitted on the speculative path — the decision hasn't returned yet there.
+        """
+        target_name = LANGUAGE_NAMES.get(target, target)
+        note = (
+            f"## Language note:\nThe caller is now speaking {target_name} ('{target}'). "
+            f"From this point, respond ONLY in {target_name} — every reply must be in {target_name}, "
+            f"regardless of the language of earlier conversation turns or the language these "
+            f'instructions are written in. Their latest message: "{detector_transcript}".'
+        )
+        if reasoning:
+            note += f" Reason: {reasoning}"
+        return note
+
     async def __speculative_followup_text(self, target_label: str, detector_transcript: str) -> str:
         """Generate the post-switch reply text speculatively, BEFORE the decide confirms.
 
@@ -4621,6 +4640,8 @@ class TaskManager(BaseManager):
         """
         messages = self.conversation_history.get_copy()
         target_prompt = self.multilingual_prompts.get(target_label)
+        note = self.__switch_context_note(target_label, detector_transcript)
+        target_prompt = f"{target_prompt}\n\n{note}" if target_prompt else note
         if messages and messages[0].get("role") == "system":
             messages[0]["content"] = target_prompt
         else:
