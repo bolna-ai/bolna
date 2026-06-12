@@ -340,3 +340,68 @@ We love all types of contributions: whether big or small helping in improving th
 1. There are a number of [open issues present](https://github.com/bolna-ai/bolna/issues) which can be good ones to start with
 2. If you have suggestions for enhancements, wish to contribute a simple fix such as correcting a typo, or want to address an apparent bug, please feel free to initiate a new issue or submit a pull request
 2. If you're contemplating a larger change or addition to this repository, be it in terms of its structure or the features, kindly begin by creating a new issue [open a new issue :octocat:](https://github.com/bolna-ai/bolna/issues/new) and outline your proposed changes. This will allow us to engage in a discussion before you dedicate a significant amount of time or effort. Your cooperation and understanding are appreciated
+
+## FAQ
+
+### What is Bolna?
+
+**Bolna** is an end-to-end open-source platform for building production-ready **voice-driven conversational AI applications**. It orchestrates voice conversations using ASR (speech recognition), LLMs (language models), and TTS (speech synthesis) over WebSocket connections.
+
+### Key Features
+
+| Feature | Description |
+|---------|-------------|
+| **Voice Agents** | Build conversational assistants that can initiate phone calls, transcribe conversations, and respond via synthesized voice |
+| **Multi-Provider Support** | Works with Twilio/Plivo telephony, Deepgram/Azure ASR, OpenAI/DeepSeek/Llama LLMs, ElevenLabs/AWS Polly/Deepgram TTS |
+| **WebSocket Streaming** | Real-time bi-directional streaming for natural conversations |
+| **Local & Cloud** | Docker-based local setup or hosted APIs at docs.bolna.ai |
+| **No-Code UI** | Platform playground at platform.bolna.ai for quick prototyping |
+| **Python SDK** | Programmatic usage with `Assistant` class and streaming pipelines |
+
+### How to Get Started
+
+1. **Quick Start (Docker)**:
+   ```bash
+   cd local_setup && chmod +x start.sh && ./start.sh
+   ```
+
+2. **Programmatic Usage (Python)**:
+   ```python
+   from bolna.assistant import Assistant
+   from bolna.models import Transcriber, Synthesizer, LlmAgent
+   
+   assistant = Assistant(name="demo_agent")
+   # Configure transcriber, LLM, synthesizer...
+   async for chunk in assistant.execute():
+       print(chunk)
+   ```
+
+3. **Environment Variables**: Add your provider keys to `.env` file (OpenAI, Deepgram, ElevenLabs, Twilio/Plivo)
+
+### Supported Providers
+
+| Category | Providers |
+|----------|-----------|
+| **Telephony** | Twilio, Plivo (Exotel/Vonage coming soon) |
+| **ASR** | Deepgram, Azure |
+| **LLM** | OpenAI, DeepSeek, Llama, Cohere, Mistral (via LiteLLM) |
+| **TTS** | ElevenLabs, AWS Polly, Deepgram, OpenAI, Azure, Cartesia, Smallest |
+
+### How Can I Contribute?
+
+- Check [open issues](https://github.com/bolna-ai/bolna/issues) for good starting points
+- Submit pull requests for fixes, enhancements, or new telephony providers
+- For larger changes, open an issue first to discuss
+
+### Help Resources
+
+| Resource | Link |
+|----------|------|
+| **Documentation** | https://docs.bolna.ai |
+| **Discord Community** | https://discord.gg/59kQWGgnm8 |
+| **Website** | https://bolna.ai |
+| **Example Agents** | https://examples.bolna.dev |
+
+### License
+
+MIT License - Open source and free to use.
