@@ -97,6 +97,9 @@ class CartesiaSynthesizer(StreamSynthesizer):
                 logger.info(f"handle_interruption: {interrupt_message}")
                 await self.websocket.send(json.dumps(interrupt_message))
                 self.context_id = None
+                # The interrupted context's end-of-stream is now dropped, so the
+                # next turn must be re-detected as new to clear stale queue entries.
+                self.current_turn_start_time = None
         except Exception as e:
             logger.error(f"Error in handle_interruption: {e}")
 

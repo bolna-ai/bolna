@@ -67,7 +67,11 @@ class ElevenlabsSynthesizer(StreamSynthesizer):
         )
         self.api_url = f"https://{self.elevenlabs_host}/v1/text-to-speech/{self.voice}/stream?optimize_streaming_latency=2&output_format="
 
+        # One context per conversation segment, rotated only on interruption so
+        # the interrupted turn's frames can be dropped without leaking contexts
+        # (ElevenLabs caps a connection at 5 concurrent contexts).
         self.context_id = None
+        self.context_ids_to_ignore = set()
         self.ws_send_time = None
         self.ws_trace_id = None
         self.current_turn_ttfb = None
@@ -108,9 +112,13 @@ class ElevenlabsSynthesizer(StreamSynthesizer):
     async def handle_interruption(self):
         try:
             if self.context_id:
+                self.context_ids_to_ignore.add(self.context_id)
                 interrupt_message = {"context_id": self.context_id, "close_context": True}
-                self.context_id = str(uuid.uuid4())
                 await self.websocket.send(json.dumps(interrupt_message))
+                self.context_id = None
+                # The interrupted context's end-of-stream is now dropped, so the
+                # next turn must be re-detected as new to clear stale queue entries.
+                self.current_turn_start_time = None
         except Exception:
             pass
 
@@ -139,7 +147,7 @@ class ElevenlabsSynthesizer(StreamSynthesizer):
                         if self.ws_send_time is None:
                             self.ws_send_time = time.perf_counter()
                             logger.info(f"WS send trace_id={self.ws_trace_id} first_text_sent")
-                        await self.websocket.send(json.dumps({"text": text_chunk}))
+                        await self.websocket.send(json.dumps({"text": text_chunk, "context_id": self.context_id}))
                     except Exception as e:
                         logger.info(f"Error sending chunk: {e}")
                         self.connection_error = str(e)
@@ -147,9 +155,8 @@ class ElevenlabsSynthesizer(StreamSynthesizer):
 
             if end_of_llm_stream:
                 self.last_text_sent = True
-                self.context_id = str(uuid.uuid4())
                 try:
-                    await self.websocket.send(json.dumps({"text": "", "flush": True}))
+                    await self.websocket.send(json.dumps({"text": "", "context_id": self.context_id, "flush": True}))
                 except Exception as e:
                     logger.info(f"Error sending end-of-stream signal: {e}")
                     self.connection_error = str(e)
@@ -188,6 +195,9 @@ class ElevenlabsSynthesizer(StreamSynthesizer):
                 response = await self.websocket.recv()
                 recv_duration = (time.perf_counter() - recv_start) * 1000
                 data = json.loads(response)
+
+                if data.get("contextId") in self.context_ids_to_ignore:
+                    continue
 
                 if "audio" in data and data["audio"] and self.ws_send_time is not None:
                     audio_chunk_count += 1
