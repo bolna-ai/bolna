@@ -83,6 +83,13 @@ class TranscriberPool:
         # (e.g. provider inactivity timeout on a transcriber that never received audio).
         self.reconnect_count: int = 0
 
+        # Set when the input stream ends (eos packet from the telephony handler on
+        # user hangup / stop event). The active transcriber closing AFTER eos is the
+        # call's normal teardown trigger — reconnecting it then resurrects a zombie
+        # call (QA f544513a: 33 min of post-hangup switches, LLM replies to nobody,
+        # and sarvam connection churn).
+        self.call_ended: bool = False
+
     # ------------------------------------------------------------------
     # Properties that delegate to the active transcriber
     # ------------------------------------------------------------------
@@ -143,6 +150,10 @@ class TranscriberPool:
         try:
             while True:
                 packet = await self.shared_input_queue.get()
+                meta = packet.get("meta_info") if isinstance(packet, dict) else None
+                if meta and meta.get("eos") is True:
+                    self.call_ended = True
+                    logger.info("TranscriberPool: eos received — call ended, reconnects disabled")
                 active = self.active_label
                 self.transcribers[active].input_queue.put_nowait(packet)
 
@@ -271,9 +282,15 @@ class TranscriberPool:
         healthy call. Audio queued in the transcriber's private input_queue
         while the socket was down is flushed to the new connection.
 
-        Returns True on success; False if the reconnect cap is hit or the
-        provider connection fails (caller should then end the call).
+        Returns True on success; False if the call already ended, the reconnect
+        cap is hit, or the provider connection fails (caller should then end
+        the call).
         """
+        if self.call_ended:
+            # The active transcriber closed BECAUSE the input stream ended (eos on
+            # hangup) — this closure is the teardown trigger, not a socket fault.
+            logger.info("TranscriberPool: input stream ended (eos) — not reconnecting active transcriber")
+            return False
         if self.reconnect_count >= self._MAX_RECONNECTS_PER_CALL:
             logger.error(
                 f"TranscriberPool: reconnect cap ({self._MAX_RECONNECTS_PER_CALL}) reached — "
@@ -312,10 +329,12 @@ class TranscriberPool:
 
         old = self.active_label
 
-        # Reconnect if the target transcriber's connection has dropped
+        # Reconnect if the target transcriber's connection has dropped — but never
+        # after eos: a switch decision landing post-hangup must not resurrect
+        # connections on a call that is tearing down.
         target = self.transcribers[label]
         transcription_task = getattr(target, "transcription_task", None)
-        if transcription_task is not None and transcription_task.done():
+        if transcription_task is not None and transcription_task.done() and not self.call_ended:
             logger.info(f"TranscriberPool: transcriber '{label}' connection dropped, reconnecting")
             await target.run()
             self.reconnect_count += 1
