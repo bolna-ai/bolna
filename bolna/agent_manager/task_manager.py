@@ -4527,15 +4527,26 @@ class TaskManager(BaseManager):
         # transcript — guarded on the original content so a newer turn that arrived
         # during the decision is never overwritten. Idle-flush path: the locked ASR
         # produced no turn at all, so append the detector transcript as the user turn.
+        transcript_corrected = True
         if active_transcript:
             replaced = self.conversation_history.replace_last_user(active_transcript, detector_transcript)
             if not replaced:
+                # A newer user turn landed during the decide. Do NOT touch history —
+                # but the truncate above just cancelled that turn's in-flight
+                # generation, so skipping the follow-up here leaves the caller with
+                # NO reply at all (QA 746c08f1: switch landed, both generations
+                # cancelled, silence → online-check → hangup). Generate the
+                # follow-up over the untouched history instead — it answers the
+                # caller's newest turn in the new language.
+                transcript_corrected = False
                 logger.info(
-                    "LanguageSwitcher: skipped transcript correction (newer user turn arrived or no match) — "
-                    "no follow-up response"
+                    "LanguageSwitcher: newer user turn arrived during decision — skipping transcript "
+                    "correction, generating follow-up for the latest turn"
                 )
-                return
-            logger.info(f"LanguageSwitcher: corrected user turn to detector transcript {detector_transcript[:80]!r}")
+            else:
+                logger.info(
+                    f"LanguageSwitcher: corrected user turn to detector transcript {detector_transcript[:80]!r}"
+                )
         else:
             self.conversation_history.append_user(detector_transcript)
             logger.info(
@@ -4544,7 +4555,10 @@ class TaskManager(BaseManager):
 
         # Commit the speculative follow-up if it matches the confirmed target — it has
         # been generating throughout the decide, so it's ready or nearly ready now.
-        if spec_task is not None and spec_target == target:
+        # Not when a newer turn superseded the transcript it was generated against:
+        # the speculation answers stale content, so fall through to fresh generation
+        # (the caller's finally discards the unconsumed task).
+        if spec_task is not None and spec_target == target and transcript_corrected:
             spec_text = ""
             try:
                 spec_text = await asyncio.wait_for(spec_task, timeout=6.0)
