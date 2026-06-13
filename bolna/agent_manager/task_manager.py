@@ -184,6 +184,7 @@ class TaskManager(BaseManager):
         self.switch_handoff_messages = {}
         self.agent_names = {}
         self._end_of_conversation_in_progress = False
+        self._end_call_in_progress = False
         self._turn_audio_flushed = asyncio.Event()
         self._turn_audio_flushed.set()
         self.hangup_mark_event_timeout = 10
@@ -2588,6 +2589,9 @@ class TaskManager(BaseManager):
             resp["execution_id"] = self.run_id
 
         if called_fun.startswith(END_CALL_FUNCTION_PREFIX):
+            # Lock out barge-in before the goodbye is generated, otherwise an interruption
+            # cancels the turn task and the disconnect never runs.
+            self._end_call_in_progress = True
             reason = resp.get("reason", "")
 
             if self.end_call_experiment is not None and not self.end_call_experiment["end_call_invoked"]:
@@ -3566,6 +3570,9 @@ class TaskManager(BaseManager):
         if self.hangup_decision_at is None:
             self.hangup_decision_at = time.time()
 
+    def _should_ignore_transcriber_input(self) -> bool:
+        return self.hangup_triggered or self._end_call_in_progress
+
     async def process_call_hangup(self):
         if self.hangup_decision_at is None:
             self.hangup_decision_at = time.time()
@@ -3940,7 +3947,7 @@ class TaskManager(BaseManager):
                 message = await self.transcriber_output_queue.get()
                 logger.info(f"Message from the transcriber class {message}")
 
-                if self.hangup_triggered:
+                if self._should_ignore_transcriber_input():
                     if message["data"] == "transcriber_connection_closed":
                         logger.info(f"Transcriber connection has been closed")
                         self.transcriber_duration += (
