@@ -154,6 +154,27 @@ LLM_DEFAULT_CONFIGS = {
     "google": {"model": "gemini-2.5-flash", "provider": "google"},
 }
 
+# Legacy language-switch tool, injected into the main LLM on multilingual agents
+# when the LLM-driven switch flow is NOT enabled (tools_config["llm_language_switch"]
+# false/absent) — restored from master for the feature-flag fallback path.
+SWITCH_LANGUAGE_TOOL_DEFINITION = {
+    "type": "function",
+    "function": {
+        "name": "switch_language",
+        "description": "Switch the conversation language for speech recognition and synthesis. Call this when the user speaks in or requests a different language.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "language": {
+                    "type": "string",
+                    "description": "The language label to switch to (e.g. 'hi' for Hindi, 'en' for English)",
+                }
+            },
+            "required": ["language"],
+        },
+    },
+}
+
 # Control marks carry no playback evidence and must not be used as a trim target.
 NON_EVIDENCE_MARK_TYPES = ("pre_mark_message", "backchanneling")
 

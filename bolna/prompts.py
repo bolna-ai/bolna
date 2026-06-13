@@ -111,14 +111,11 @@ Decide using these rules:
 
 Respond with raw JSON only — no markdown fences, no surrounding text:
 {{
-  "languages": [{{"language": "<ISO 639-1 code, e.g. en, hi, ta, te>", "confidence": <0.0-1.0>}}, ...],
   "target_language": "<one of the supported labels, or null to stay in the current language>",
   "target_confidence": <0.0-1.0 — your confidence that SWITCHING the agent to target_language is the right action (not merely that the language is present); use 0 when target_language is null>,
   "explicit_request": <true|false — true ONLY if the caller explicitly asked to speak target_language (rule 1)>,
   "reasoning": "<brief explanation, 12 words maximum>"
 }}
-
-In "languages", list the TOP 3 most likely languages in the caller's speech, ranked by confidence (highest first), using ISO 639-1 codes. Include languages the agent does not support — list them anyway for visibility. Confidences should reflect how much of the substantive content is in each language. If fewer than 3 languages are present, list only those.
 """
 
 EXTRACTION_PROMPT_GENERATION_PROMPT = """
