@@ -5218,6 +5218,11 @@ class TaskManager(BaseManager):
                         if exc is not None:
                             raise cls(str(exc), provider=provider)
 
+                # _listen_transcriber can exit (transcriber idle-closes) while a hangup
+                # goodbye is still playing in llm_task; let it drain before trimming.
+                if self.hangup_triggered and not self.conversation_ended:
+                    await self.wait_for_current_message()
+
                 has_pending_marks = len(self.mark_event_meta_data.mark_event_meta_data) > 0
                 has_response_heard = bool(self.tools["input"].response_heard_by_user)
                 if has_pending_marks or has_response_heard:
