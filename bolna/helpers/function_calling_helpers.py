@@ -122,8 +122,8 @@ def build_get_url(url, api_params):
     final_url = url
     if api_params:
         sep = "&" if "?" in url else "?"
-        final_url = url + sep + "&".join(
-            f"{quote(str(k), safe='')}={quote(str(v), safe='')}" for k, v in api_params.items()
+        final_url = (
+            url + sep + "&".join(f"{quote(str(k), safe='')}={quote(str(v), safe='')}" for k, v in api_params.items())
         )
     return URL(final_url, encoded=True)
 
