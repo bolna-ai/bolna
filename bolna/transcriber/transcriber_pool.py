@@ -88,6 +88,11 @@ class TranscriberPool:
         self._router_task = None
         self._keepalive_task = None
         self._multilingual_config = multilingual_config
+        # Serializes switch() — it has an await (reconnecting a dropped standby)
+        # between reading and writing active_label, so concurrent switches (e.g.
+        # overlapping LLM switch_language cycles) could interleave. Mirrors the
+        # SynthesizerPool lock so transcriber/synthesizer stay consistent.
+        self.switch_lock = asyncio.Lock()
 
         # ── Unbiased detector (LID tap) state ──────────────────────────────
         self._lid_provider_name = lid_provider
@@ -495,38 +500,44 @@ class TranscriberPool:
         If the target transcriber's connection has dropped (e.g. provider-side
         inactivity timeout on a standby that never received audio), we
         transparently reconnect it before routing audio to it.
+
+        Serialized by switch_lock so concurrent switches can't interleave across
+        the reconnect await and leave active_label inconsistent.
         """
-        if label == self.active_label:
-            logger.info(f"TranscriberPool: already active on '{label}', no-op")
-            return
+        async with self.switch_lock:
+            # Re-check inside the lock — a switch we were queued behind may have
+            # already made this label active.
+            if label == self.active_label:
+                logger.info(f"TranscriberPool: already active on '{label}', no-op")
+                return
 
-        if label not in self.transcribers:
-            raise ValueError(f"Unknown transcriber label '{label}'. Available: {list(self.transcribers.keys())}")
+            if label not in self.transcribers:
+                raise ValueError(f"Unknown transcriber label '{label}'. Available: {list(self.transcribers.keys())}")
 
-        old = self.active_label
+            old = self.active_label
 
-        # Reconnect if the target transcriber's connection has dropped — but never
-        # after eos: a switch decision landing post-hangup must not resurrect
-        # connections on a call that is tearing down.
-        target = self.transcribers[label]
-        transcription_task = getattr(target, "transcription_task", None)
-        if transcription_task is not None and transcription_task.done() and not self.call_ended:
-            logger.info(f"TranscriberPool: transcriber '{label}' connection dropped, reconnecting")
-            await target.run()
-            self.reconnect_count += 1
+            # Reconnect if the target transcriber's connection has dropped — but never
+            # after eos: a switch decision landing post-hangup must not resurrect
+            # connections on a call that is tearing down.
+            target = self.transcribers[label]
+            transcription_task = getattr(target, "transcription_task", None)
+            if transcription_task is not None and transcription_task.done() and not self.call_ended:
+                logger.info(f"TranscriberPool: transcriber '{label}' connection dropped, reconnecting")
+                await target.run()
+                self.reconnect_count += 1
 
-        # Carry turn_counter forward so the incoming transcriber continues
-        # the turn sequence rather than restarting from 0. The next speech
-        # event on the new transcriber will increment the counter normally.
-        old_transcriber = self.transcribers[old]
-        inherited_turn_counter = getattr(old_transcriber, "turn_counter", 0)
-        if hasattr(target, "turn_counter"):
-            target.turn_counter = inherited_turn_counter
-        if hasattr(target, "current_turn_id") and getattr(old_transcriber, "current_turn_id", None) is not None:
-            target.current_turn_id = old_transcriber.current_turn_id
+            # Carry turn_counter forward so the incoming transcriber continues
+            # the turn sequence rather than restarting from 0. The next speech
+            # event on the new transcriber will increment the counter normally.
+            old_transcriber = self.transcribers[old]
+            inherited_turn_counter = getattr(old_transcriber, "turn_counter", 0)
+            if hasattr(target, "turn_counter"):
+                target.turn_counter = inherited_turn_counter
+            if hasattr(target, "current_turn_id") and getattr(old_transcriber, "current_turn_id", None) is not None:
+                target.current_turn_id = old_transcriber.current_turn_id
 
-        self.active_label = label
-        logger.info(f"TranscriberPool: switched {old} -> {label} (inherited turn_counter={inherited_turn_counter})")
+            self.active_label = label
+            logger.info(f"TranscriberPool: switched {old} -> {label} (inherited turn_counter={inherited_turn_counter})")
 
     async def toggle_connection(self):
         """Stop all transcriber connections."""
