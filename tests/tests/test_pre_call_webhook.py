@@ -105,8 +105,17 @@ async def test_pre_call_webhook_no_template_sends_common_only():
     assert body["from_number"] == "+15551112222"
     assert body["to_number"] == "+15553334444"
     # NO LLM args / internal keys / excluded fields
-    for k in ("reason", "call_transfer_number", "model_response", "textual_response",
-              "tool_call_id", "resp", "stream_sid", "tool_name", "call_sid"):
+    for k in (
+        "reason",
+        "call_transfer_number",
+        "model_response",
+        "textual_response",
+        "tool_call_id",
+        "resp",
+        "stream_sid",
+        "tool_name",
+        "call_sid",
+    ):
         assert k not in body
 
 
@@ -122,18 +131,16 @@ async def test_pre_call_webhook_param_template_controls_body():
         patch("bolna.agent_manager.task_manager.aiohttp.ClientSession", _FakeSession),
         patch("bolna.agent_manager.task_manager.convert_to_request_log"),
     ):
-        TaskManager.fire_pre_call_webhook(
-            me, "https://hook.example/notify", "custom_task_x", resp, {}, webhook_param
-        )
+        TaskManager.fire_pre_call_webhook(me, "https://hook.example/notify", "custom_task_x", resp, {}, webhook_param)
         await asyncio.sleep(0)
         await asyncio.sleep(0)
 
     body = _FakeSession.last_post["json"]
-    assert body["who"] == "Alice"          # templated from LLM arg
-    assert body["channel"] == "voice"      # static value in template
-    assert body["execution_id"] == "exec-123"   # common fields still added
+    assert body["who"] == "Alice"  # templated from LLM arg
+    assert body["channel"] == "voice"  # static value in template
+    assert body["execution_id"] == "exec-123"  # common fields still added
     assert body["agent_id"] == "agent-1"
-    assert "reason" not in body            # not in the template → not sent
+    assert "reason" not in body  # not in the template → not sent
     assert "customer_name" not in body
 
 
@@ -156,9 +163,9 @@ async def test_pre_call_webhook_common_fields_win_over_template():
         await asyncio.sleep(0)
 
     body = _FakeSession.last_post["json"]
-    assert body["provider"] == "plivo"     # common wins over template
-    assert body["agent_id"] == "agent-1"   # common wins over template
-    assert body["note"] == "transfer me"   # templated from LLM arg
+    assert body["provider"] == "plivo"  # common wins over template
+    assert body["agent_id"] == "agent-1"  # common wins over template
+    assert body["note"] == "transfer me"  # templated from LLM arg
 
 
 @pytest.mark.asyncio
@@ -227,8 +234,8 @@ async def test_pre_call_webhook_dispatch_mode(monkeypatch):
     body = sent["json"]
     assert body["execution_id"] == "exec-123"
     assert body["webhook_url"] == "https://customer/notify"  # customer URL passed through
-    assert body["params"] == {"who": "Alice"}                # substituted template
-    assert "provider" not in body                            # common fields added by backend, not here
+    assert body["params"] == {"who": "Alice"}  # substituted template
+    assert "provider" not in body  # common fields added by backend, not here
 
 
 @pytest.mark.asyncio
@@ -278,5 +285,5 @@ def test_build_call_context_has_common_fields_only():
     assert ctx["provider"] == "plivo"
     assert ctx["from_number"] == "+15551112222"
     assert ctx["to_number"] == "+15553334444"
-    assert "stream_sid" not in ctx          # transfer-specific — removed
-    assert "call_sid" not in ctx            # excluded from customer call-event webhooks
+    assert "stream_sid" not in ctx  # transfer-specific — removed
+    assert "call_sid" not in ctx  # excluded from customer call-event webhooks
