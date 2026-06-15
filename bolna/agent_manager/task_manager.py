@@ -4431,6 +4431,12 @@ class TaskManager(BaseManager):
             mismatch_streak_fire = 10**9
         try:
             while not self.conversation_ended:
+                # Stop firing switch decisions once a hangup is underway — a switch
+                # mid-teardown truncates the agent_hangup goodbye and deadlocks
+                # __process_end_of_conversation (QA 67f7b856).
+                if self.hangup_triggered:
+                    await asyncio.sleep(0.5)
+                    continue
                 pool = self.tools.get("transcriber")
                 if not isinstance(pool, TranscriberPool):
                     await asyncio.sleep(0.5)
@@ -4507,6 +4513,15 @@ class TaskManager(BaseManager):
     ) -> tuple | None:
         if not self.language_switcher:
             return
+        # A hangup may already be tearing the call down. Switching past this point
+        # truncates in-flight audio — including a queued agent_hangup goodbye chunk —
+        # which leaves __process_end_of_conversation waiting forever for a chunk that
+        # no longer exists (QA 67f7b856: switch decided ~3s after hangup cleared the
+        # agent_hangup marks → call stuck 11.5 min). A switch is meaningless once the
+        # call is ending, so abandon it.
+        if self.hangup_triggered or self.conversation_ended:
+            logger.info("LanguageSwitcher: hangup/teardown in progress — abandoning switch (pre-decide)")
+            return None
         pool = self.tools.get("transcriber")
         if not isinstance(pool, TranscriberPool):
             return
@@ -4595,6 +4610,12 @@ class TaskManager(BaseManager):
             return None
         if not decision:
             return
+        # The decide can take seconds (Anthropic tail); a hangup may have been triggered
+        # and queued its agent_hangup audio while we waited. Re-check before the truncate
+        # below clears it and deadlocks teardown (QA 67f7b856).
+        if self.hangup_triggered or self.conversation_ended:
+            logger.info("LanguageSwitcher: hangup/teardown in progress — abandoning switch (post-decide)")
+            return None
         target = decision.get("target_language")
         reasoning = (decision.get("reasoning") or "").strip()
         languages = decision.get("languages") or []
