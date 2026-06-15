@@ -38,9 +38,7 @@ class FakeSynth:
             if self.recv_in_progress:
                 # Two coroutines reading the same synth's websocket — the bug.
                 self.tracker["violations"] += 1
-                raise RuntimeError(
-                    "cannot call recv while another coroutine is already running recv"
-                )
+                raise RuntimeError("cannot call recv while another coroutine is already running recv")
             self.recv_in_progress = True
             try:
                 await asyncio.sleep(0)  # simulate the recv() await / yield point

@@ -4557,9 +4557,23 @@ class TaskManager(BaseManager):
         caller-facing ASR→LLM→TTS pipeline never waits on it; worst case a second
         decision queues ~2s behind the first.
         """
+        spec = None
         try:
-            async with self.language_switch_lock:
-                followup = await self.__run_language_switch(active_transcript, meta_info, spawn_language, speculate)
+            try:
+                async with self.language_switch_lock:
+                    followup = await self.__run_language_switch(active_transcript, meta_info, spawn_language, speculate)
+            finally:
+                # Claim THIS invocation's speculative task the instant our decision
+                # unwinds (returned OR raised). The lock is released but no await has run
+                # since (asyncio.Lock.__aexit__ doesn't suspend), so a concurrent handler
+                # can't have overwritten the slot yet — and __run_language_switch's commit
+                # path, if taken, already nulled it. We cancel our OWN handle in the outer
+                # finally; we must NOT re-read the shared slot after follow-up generation
+                # (which runs outside the lock), by which point the next turn's decision
+                # may have stored its own task there — cancelling that would kill its
+                # in-flight speculation while leaking ours.
+                spec = self._spec_followup_task
+                self._spec_followup_task = None
             # Generate the follow-up OUTSIDE the lock: a streamed response can take
             # several seconds, and holding the lock through it would needlessly queue
             # the next turn's decision. Ordering comes from the lock (decisions are
@@ -4574,8 +4588,6 @@ class TaskManager(BaseManager):
             # Discard any unconsumed speculative generation — covers every exit path
             # (stay decisions, gate rejections, timeouts, exceptions) without littering
             # the run with per-return cancels.
-            spec = self._spec_followup_task
-            self._spec_followup_task = None
             if spec is not None and not spec.done():
                 spec.cancel()
                 logger.info("LanguageSwitcher: speculative follow-up discarded")
@@ -4760,7 +4772,9 @@ class TaskManager(BaseManager):
             spec_synth = self.tools.get("synthesizer")
             if not isinstance(spec_synth, SynthesizerPool) or detected_lang in spec_synth.labels:
                 spec_target = detected_lang
-                spec_task = asyncio.create_task(self.__speculative_followup_text(spec_target, detector_transcript))
+                spec_task = asyncio.create_task(
+                    self.__speculative_followup_text(spec_target, detector_transcript, active_transcript)
+                )
                 self._spec_followup_task = spec_task
                 logger.info(f"LanguageSwitcher: speculative follow-up started for '{spec_target}'")
 
@@ -5164,7 +5178,9 @@ class TaskManager(BaseManager):
             note += f" Reason: {reasoning}"
         return note
 
-    async def __speculative_followup_text(self, target_label: str, detector_transcript: str) -> str:
+    async def __speculative_followup_text(
+        self, target_label: str, detector_transcript: str, active_transcript: str = ""
+    ) -> str:
         """Generate the post-switch reply text speculatively, BEFORE the decide confirms.
 
         Runs the agent's MAIN conversational LLM over a COPY of history with the target
@@ -5182,7 +5198,28 @@ class TaskManager(BaseManager):
             messages[0]["content"] = target_prompt
         else:
             messages.insert(0, {"role": "system", "content": target_prompt})
-        messages.append({"role": "user", "content": detector_transcript})
+        # Mirror the real path's history correction on this deep COPY (it then commits the
+        # spec only if both paths agree). Turn-boundary: _handle_transcriber_output already
+        # append_user-ed the garbled (wrong-language) turn before this spawned, so replace
+        # THAT turn — found content-guarded, the same way replace_last_user does — with the
+        # unbiased detector transcript. Content-guarding (not just "is messages[-1] a user
+        # turn") is what tells the garbled current turn apart from an older turn: by the
+        # time this copy is taken the main reply may already trail the garbled turn, and
+        # the idle-flush case (no current user turn at all) leaves an OLDER user turn last —
+        # overwriting either would corrupt the prompt or append a second consecutive user
+        # turn (which alternating-role LLMs reject → spec errors out → never helps). A clean
+        # replacement dict also drops the garbled turn's stale turn_id/response_uid. If no
+        # turn matches (a newer turn arrived during the decide), leave history untouched and
+        # answer the newest turn — exactly as the real path does (transcript_corrected=False).
+        if active_transcript:
+            for i in range(len(messages) - 1, -1, -1):
+                if messages[i].get("role") == "user":
+                    if messages[i].get("content", "").strip() == active_transcript.strip():
+                        messages[i] = {"role": "user", "content": detector_transcript}
+                    break
+        else:
+            # Idle-flush: the locked ASR produced no turn, so append the detector transcript.
+            messages.append({"role": "user", "content": detector_transcript})
         spec_meta = {
             "request_id": str(uuid.uuid4()),
             "sequence_id": -1,
