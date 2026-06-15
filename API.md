@@ -82,6 +82,81 @@ Creates a new agent with specified configuration.
 }
 ```
 
+#### Resemble Detect API tool example
+
+Bolna agents can call external HTTP APIs through `tools_config.api_tools`. Use
+this pattern when the caller provides a media URL that should be checked for
+synthetic speech or manipulated audio before the agent makes a trust decision.
+
+Add the tool definition inside a task's `tools_config`:
+
+```json
+{
+  "api_tools": {
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "resemble_submit_detection",
+          "description": "Submit a public HTTPS media URL to Resemble Detect for synthetic speech or manipulated media analysis. Use this when a caller provides a recording URL or another media artifact that should be verified.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "url": {
+                "type": "string",
+                "description": "Public HTTPS URL for the audio, image, or video to analyze."
+              },
+              "reason": {
+                "type": "string",
+                "description": "Short reason this media should be verified."
+              }
+            },
+            "required": ["url"],
+            "additionalProperties": false
+          },
+          "strict": true
+        }
+      }
+    ],
+    "tools_params": {
+      "resemble_submit_detection": {
+        "url": "https://app.resemble.ai/api/v2/detect",
+        "method": "POST",
+        "api_token": "Bearer <RESEMBLE_API_KEY>",
+        "headers": {
+          "Accept": "application/json",
+          "Content-Type": "application/json"
+        },
+        "param": {
+          "url": {
+            "$var": "url"
+          },
+          "intelligence": true,
+          "audio_source_tracing": true,
+          "zero_retention_mode": true,
+          "callback_url": "<OPTIONAL_DETECTION_RESULT_WEBHOOK_URL>"
+        },
+        "pre_call_message": "I will verify that media before making a trust decision."
+      }
+    }
+  }
+}
+```
+
+Store the Resemble API key in your deployment secrets and inject it into
+`api_token` at deploy time. If you use `callback_url`, handle the completed
+Detect result in that webhook; the generic API tool executor sends one HTTP
+request and does not poll `GET /detect/{uuid}` during the call.
+
+Suggested system prompt:
+
+```text
+When the caller provides a media URL that affects a trust or fraud decision,
+call resemble_submit_detection before deciding. Treat the result as a risk
+signal. If the callback later reports synthetic speech, watermark evidence, or
+suspicious source tracing, follow this agent's escalation policy.
+```
+
 ### Edit Agent
 Updates an existing agent's configuration.
 
