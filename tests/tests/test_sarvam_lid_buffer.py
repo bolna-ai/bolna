@@ -196,6 +196,9 @@ async def test_reconnect_restores_liveness_and_resets_state(monkeypatch):
 @pytest.mark.asyncio
 async def test_reconnect_cap_stops_retrying(monkeypatch):
     monkeypatch.setattr(SarvamLID, "_RECONNECT_DELAY_S", 0)
+    # Huge reset window so the per-incident reset never fires — this is the
+    # rapid-loop case the cap must still stop.
+    monkeypatch.setattr(SarvamLID, "_RECONNECT_RESET_WINDOW_S", 10**9)
     d = _detector()
     d._dead = True
     d._reconnect_attempts = SarvamLID._MAX_RECONNECTS
@@ -203,6 +206,22 @@ async def test_reconnect_cap_stops_retrying(monkeypatch):
     await d._reconnect()
     d.start.assert_not_awaited()
     assert d._dead is True
+
+
+@pytest.mark.asyncio
+async def test_reconnect_cap_resets_for_spread_out_drops(monkeypatch):
+    # A drop long after the previous reconnect is a fresh incident, not a loop —
+    # the counter resets and it reconnects even if it had hit the cap before.
+    monkeypatch.setattr(SarvamLID, "_RECONNECT_DELAY_S", 0)
+    monkeypatch.setattr(SarvamLID, "_RECONNECT_RESET_WINDOW_S", 0)  # any gap counts as spread-out
+    d = _detector()
+    d._dead = True
+    d._reconnect_attempts = SarvamLID._MAX_RECONNECTS  # previously capped
+    d.start = AsyncMock()
+    await d._reconnect()
+    d.start.assert_awaited_once()  # reset → reconnects
+    assert d._dead is False
+    assert d._reconnect_attempts == 1
 
 
 @pytest.mark.asyncio

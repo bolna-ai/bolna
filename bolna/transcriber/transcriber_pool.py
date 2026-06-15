@@ -36,8 +36,10 @@ class TranscriberPool:
     # round covers both.
     _KEEPALIVE_INTERVAL = 4
 
-    # Cap on mid-call reconnects (switch-time + active-death) so a provider
-    # rejecting connections can't put the call in a reconnect loop.
+    # Cap on ACTIVE-transcriber-death reconnects (the loop-prone path) so a provider
+    # rejecting connections can't put the call in a reconnect loop. Switch-time
+    # reconnects are not gated by this — they're bounded by the number of switch
+    # decisions in the call — and only bump the reconnect_count telemetry total.
     _MAX_RECONNECTS_PER_CALL = 5
 
     # ── Legacy LID heuristic defaults (flag-off flow only) ────────────────
@@ -125,7 +127,13 @@ class TranscriberPool:
 
         # Counts how many times a standby transcriber was reconnected mid-call
         # (e.g. provider inactivity timeout on a transcriber that never received audio).
+        # Telemetry total across BOTH switch-time and active-death reconnects.
         self.reconnect_count: int = 0
+        # Separate budget for ACTIVE-transcriber-death reconnects (the loop-prone path:
+        # socket dies → listener reconnects → dies → ...). Kept distinct from switch-time
+        # reconnects so legitimate per-switch standby reconnects can't starve it and end
+        # an otherwise-healthy call on the first active death.
+        self.active_reconnect_count: int = 0
 
         # Set when the input stream ends (eos packet from the telephony handler on
         # user hangup / stop event). The active transcriber closing AFTER eos is the
@@ -466,30 +474,36 @@ class TranscriberPool:
         Returns True on success; False if the call already ended, the reconnect
         cap is hit, or the provider connection fails (caller should then end
         the call).
+
+        Runs under switch_lock: it reads active_label and awaits run(), so without
+        the lock a concurrent switch() (which mutates active_label under the same
+        lock) could make us reconnect the wrong/standby transcriber.
         """
-        if self.call_ended:
-            # The active transcriber closed BECAUSE the input stream ended (eos on
-            # hangup) — this closure is the teardown trigger, not a socket fault.
-            logger.info("TranscriberPool: input stream ended (eos) — not reconnecting active transcriber")
-            return False
-        if self.reconnect_count >= self._MAX_RECONNECTS_PER_CALL:
-            logger.error(
-                f"TranscriberPool: reconnect cap ({self._MAX_RECONNECTS_PER_CALL}) reached — "
-                f"not reconnecting active '{self.active_label}'"
+        async with self.switch_lock:
+            if self.call_ended:
+                # The active transcriber closed BECAUSE the input stream ended (eos on
+                # hangup) — this closure is the teardown trigger, not a socket fault.
+                logger.info("TranscriberPool: input stream ended (eos) — not reconnecting active transcriber")
+                return False
+            if self.active_reconnect_count >= self._MAX_RECONNECTS_PER_CALL:
+                logger.error(
+                    f"TranscriberPool: active-reconnect cap ({self._MAX_RECONNECTS_PER_CALL}) reached — "
+                    f"not reconnecting active '{self.active_label}'"
+                )
+                return False
+            active = self.transcribers[self.active_label]
+            try:
+                await active.run()
+            except Exception as e:
+                logger.error(f"TranscriberPool: reconnect of active '{self.active_label}' failed: {e}")
+                return False
+            self.active_reconnect_count += 1
+            self.reconnect_count += 1
+            logger.info(
+                f"TranscriberPool: active transcriber '{self.active_label}' reconnected "
+                f"(active reconnect {self.active_reconnect_count}/{self._MAX_RECONNECTS_PER_CALL})"
             )
-            return False
-        active = self.transcribers[self.active_label]
-        try:
-            await active.run()
-        except Exception as e:
-            logger.error(f"TranscriberPool: reconnect of active '{self.active_label}' failed: {e}")
-            return False
-        self.reconnect_count += 1
-        logger.info(
-            f"TranscriberPool: active transcriber '{self.active_label}' reconnected "
-            f"(reconnect {self.reconnect_count}/{self._MAX_RECONNECTS_PER_CALL})"
-        )
-        return True
+            return True
 
     async def switch(self, label):
         """Switch which transcriber receives audio.

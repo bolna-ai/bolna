@@ -79,6 +79,52 @@ from .voicemail_handler import VoicemailHandler
 logger = configure_logger(__name__)
 
 
+def build_lid_decision_record(
+    *,
+    outcome,
+    fired_at,
+    now,
+    speculate,
+    active_transcript,
+    active,
+    detector_transcript,
+    detector_lang_tag,
+    decision,
+    buffered_max_segment_s,
+    speculation_started,
+    switched_to=None,
+    context_note=None,
+):
+    """Build one telemetry record for a Switch-LLM firing (switch / stay / gated).
+
+    Persisted (via task_output → lid_shadow_events.lid_detection_events JSONB) for
+    accuracy/latency metrics. Pure + module-level so the record contract is unit-tested
+    independently of TaskManager. `flow=llm_switch` discriminates these from the legacy
+    heuristic shape that shares the column.
+    """
+    dec = decision or {}
+    return {
+        "flow": "llm_switch",
+        "fired_at": fired_at,
+        "decide_latency_ms": round((now - fired_at) * 1000, 1),
+        "path": "streak" if speculate else ("turn_boundary" if active_transcript else "idle_flush"),
+        "active_language": active,
+        "detector_transcript": detector_transcript,
+        "detector_lang_tag": detector_lang_tag,
+        "active_transcript": active_transcript,
+        "target_language": dec.get("target_language"),
+        "target_confidence": dec.get("target_confidence"),
+        "explicit_request": dec.get("explicit_request"),
+        "reasoning": (dec.get("reasoning") or "").strip(),
+        "buffered_max_segment_s": round(buffered_max_segment_s, 3),
+        "speculation_started": speculation_started,
+        "outcome": outcome,
+        "switched_to": switched_to,
+        "context_note_sent": context_note,
+        "context_note_sent_at": now if context_note else None,
+    }
+
+
 class TaskManager(BaseManager):
     def __init__(
         self,
@@ -4592,6 +4638,37 @@ class TaskManager(BaseManager):
                 self._spec_followup_task = spec_task
                 logger.info(f"LanguageSwitcher: speculative follow-up started for '{spec_target}'")
 
+        # Telemetry: record EVERY Switch-LLM firing (switch, stay, or gated) into the
+        # pool's lid_detection_events list — surfaced in task_output and persisted by the
+        # backend into lid_shadow_events.lid_detection_events (JSONB). That column is
+        # empty in the LLM-driven flow, so we reuse it (no schema change); a
+        # "flow":"llm_switch" discriminator keeps these records distinct from the legacy
+        # heuristic shape for aggregation. Captures fired-time, decide latency, BOTH ASR
+        # transcripts (unbiased detector + locked main), the decision, the outcome, and
+        # the context note + timestamp handed to the main LLM.
+        decide_started_at = time.time()
+        decision = None
+
+        def emit_lid_decision(outcome, switched_to=None, context_note=None):
+            # pool is a confirmed TranscriberPool here (guarded at function entry).
+            pool.lid_detection_events.append(
+                build_lid_decision_record(
+                    outcome=outcome,
+                    fired_at=decide_started_at,
+                    now=time.time(),
+                    speculate=speculate,
+                    active_transcript=active_transcript,
+                    active=active,
+                    detector_transcript=detector_transcript,
+                    detector_lang_tag=detected_lang,
+                    decision=decision,
+                    buffered_max_segment_s=buffered_max_segment_s,
+                    speculation_started=spec_task is not None,
+                    switched_to=switched_to,
+                    context_note=context_note,
+                )
+            )
+
         # Timeout strictly around the LLM call (NOT the switch itself — cancelling
         # mid-switch could leave the pools half-switched). The litellm default is
         # minutes; a hung decide would hold language_switch_lock that entire time,
@@ -4607,14 +4684,17 @@ class TaskManager(BaseManager):
             logger.warning(
                 f"LanguageSwitcher: decide() timed out after {decide_timeout_s}s — skipping decision, lock released"
             )
+            emit_lid_decision("timeout")
             return None
         if not decision:
+            emit_lid_decision("no_decision")
             return
         # The decide can take seconds (Anthropic tail); a hangup may have been triggered
         # and queued its agent_hangup audio while we waited. Re-check before the truncate
         # below clears it and deadlocks teardown (QA 67f7b856).
         if self.hangup_triggered or self.conversation_ended:
             logger.info("LanguageSwitcher: hangup/teardown in progress — abandoning switch (post-decide)")
+            emit_lid_decision("gated:hangup")
             return None
         target = decision.get("target_language")
         reasoning = (decision.get("reasoning") or "").strip()
@@ -4627,12 +4707,14 @@ class TaskManager(BaseManager):
             logger.info(
                 f"LanguageSwitcher: stay on '{current}' (detected_lang={detected_lang}, langs={languages}, reason={reasoning})"
             )
+            emit_lid_decision("stay")
             return
         if target not in labels:
             logger.info(
                 f"LanguageSwitcher: target '{target}' not supported by agent {labels} — logged, no switch "
                 f"(detector={detector_transcript[:60]!r})"
             )
+            emit_lid_decision("gated:unsupported")
             return
         # The synthesizer pool must also have this language — otherwise switch_language
         # would flip the transcriber and then fail on the voice, leaving the agent
@@ -4643,6 +4725,7 @@ class TaskManager(BaseManager):
                 f"LanguageSwitcher: target '{target}' has no synthesizer voice configured "
                 f"(synth labels={synth_pool.labels}) — no switch"
             )
+            emit_lid_decision("gated:no_synth")
             return
 
         # Confidence gate (fail-closed): don't flip the language unless the model is
@@ -4680,6 +4763,7 @@ class TaskManager(BaseManager):
                 f"LanguageSwitcher: target '{target}' confidence {target_conf} below {min_conf} (or missing) — "
                 f"no switch (reason={reasoning})"
             )
+            emit_lid_decision("gated:low_confidence")
             return
 
         # Substance gate (fail-closed): acknowledgment-length audio is where saaras
@@ -4694,6 +4778,7 @@ class TaskManager(BaseManager):
                 f"{buffered_max_segment_s:.2f}s < {min_segment_s}s and not an explicit request — "
                 f"no switch (short audio is unreliable LID evidence; reason={reasoning})"
             )
+            emit_lid_decision("gated:short_audio")
             return
 
         # A confirmed switch means any in-flight response is in a language the caller
@@ -4712,6 +4797,7 @@ class TaskManager(BaseManager):
         # were clearing, so re-check against the live language before applying.
         current = self.language
         if target == current:
+            emit_lid_decision("gated:concurrent_switch")
             return
 
         context_note = self.__switch_context_note(target, detector_transcript, reasoning)
@@ -4719,6 +4805,7 @@ class TaskManager(BaseManager):
             f"LanguageSwitcher: switching '{current}' → '{target}' (confidence={target_conf}, langs={languages}, reason={reasoning})"
         )
         await self.switch_language(target, triggered_by="lid_llm", context_note=context_note)
+        emit_lid_decision("switched", switched_to=target, context_note=context_note)
 
         # Mid-speech silent switch (streak-fired fast path): a FRESH detector segment
         # (<1s old) has landed since the decision drained the buffer — the caller is
@@ -4800,6 +4887,13 @@ class TaskManager(BaseManager):
             except Exception as e:
                 logger.info(f"LanguageSwitcher: speculative follow-up unavailable ({e!r}) — falling back")
             self._spec_followup_task = None
+            # switch_language + the up-to-6s spec await above can straddle a hangup that
+            # queued its agent_hangup goodbye. _synthesize only guards conversation_ended
+            # (not hangup_triggered), so synthesizing here would truncate that goodbye and
+            # re-open the __process_end_of_conversation deadlock (QA 67f7b856). Re-check.
+            if self.hangup_triggered or self.conversation_ended:
+                logger.info("LanguageSwitcher: hangup during speculation — not speaking follow-up")
+                return None
             if spec_text:
                 self.conversation_history.append_assistant(spec_text)
                 synth_meta = {
@@ -4897,6 +4991,11 @@ class TaskManager(BaseManager):
         generation gap after a switch — spoken by the NEW voice (pools already
         switched), sequence_id=-1 so it's always-valid background audio (same as
         the legacy handoff), and appended to history so transcripts show it."""
+        # Don't synthesize into a tearing-down pipeline — would truncate a queued
+        # agent_hangup goodbye and deadlock teardown (QA 67f7b856). _synthesize only
+        # guards conversation_ended, so check hangup_triggered explicitly.
+        if self.hangup_triggered or self.conversation_ended:
+            return
         handoff_template = self.switch_handoff_messages.get(target, "")
         if not handoff_template:
             return

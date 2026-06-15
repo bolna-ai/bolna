@@ -36,8 +36,14 @@ class SarvamLID(LIDBackend):
     # Mid-call reconnects allowed when saaras closes the socket on us (observed
     # in QA: server-side graceful close left the detector silently mute for the
     # whole call). Bounded so a rejecting server can't loop us.
+    # Cap is per-INCIDENT, not per-call: the attempt counter resets when the previous
+    # reconnect was long enough ago (_RECONNECT_RESET_WINDOW_S) that this is a fresh,
+    # unrelated drop rather than a tight reject loop. So saaras periodically closing an
+    # idle socket over a long call always recovers, while a server rejecting every
+    # connect within seconds is still stopped after _MAX_RECONNECTS.
     _MAX_RECONNECTS = 2
     _RECONNECT_DELAY_S = 0.5
+    _RECONNECT_RESET_WINDOW_S = 30.0
 
     def __init__(self, on_language, config):
         super().__init__(on_language, config)
@@ -66,6 +72,7 @@ class SarvamLID(LIDBackend):
         self._stopping = False
         self._reconnecting = False
         self._reconnect_attempts = 0
+        self._last_reconnect_at = 0.0
         self._dead_drop_logged = False
         self._resample_state = None
         # Rolling buffer of unbiased recognition for the current conversational turn.
@@ -275,9 +282,18 @@ class SarvamLID(LIDBackend):
 
     async def _reconnect(self):
         try:
+            # Reset the per-incident counter if the last reconnect was long ago — a
+            # drop spread well apart from the previous one is a fresh incident, not a
+            # loop. Keeps a long healthy call recovering from periodic idle-closes
+            # while still capping a rapid reject loop.
+            now = time.monotonic()
+            if now - self._last_reconnect_at > self._RECONNECT_RESET_WINDOW_S:
+                self._reconnect_attempts = 0
+            self._last_reconnect_at = now
             if self._reconnect_attempts >= self._MAX_RECONNECTS:
                 logger.error(
-                    f"SarvamLID: reconnect cap ({self._MAX_RECONNECTS}) reached — LID inactive for remainder of call"
+                    f"SarvamLID: reconnect cap ({self._MAX_RECONNECTS}) reached in "
+                    f"{self._RECONNECT_RESET_WINDOW_S:.0f}s — LID inactive until the next spread-out drop"
                 )
                 return
             self._reconnect_attempts += 1

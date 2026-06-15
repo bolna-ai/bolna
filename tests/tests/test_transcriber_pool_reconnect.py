@@ -37,6 +37,7 @@ async def test_reconnect_active_success_restarts_and_counts():
     transcribers["ta"].run.assert_awaited_once()
     # Only the ACTIVE transcriber is touched — standbys reconnect at switch time.
     transcribers["hi"].run.assert_not_awaited()
+    assert pool.active_reconnect_count == 1
     assert pool.reconnect_count == 1
 
 
@@ -46,15 +47,28 @@ async def test_reconnect_active_provider_failure_returns_false():
     transcribers["ta"].run.side_effect = RuntimeError("connect refused")
     assert await pool.reconnect_active() is False
     # A failed attempt must not consume reconnect budget.
-    assert pool.reconnect_count == 0
+    assert pool.active_reconnect_count == 0
 
 
 @pytest.mark.asyncio
 async def test_reconnect_active_respects_per_call_cap():
+    # The cap gates on the ACTIVE-death counter only — switch-time reconnects
+    # (reconnect_count) must NOT starve it.
     pool, transcribers = _pool()
-    pool.reconnect_count = TranscriberPool._MAX_RECONNECTS_PER_CALL
+    pool.active_reconnect_count = TranscriberPool._MAX_RECONNECTS_PER_CALL
     assert await pool.reconnect_active() is False
     transcribers["ta"].run.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_switch_time_reconnects_do_not_starve_active_budget():
+    # Switch-time reconnects bump reconnect_count (telemetry) but NOT
+    # active_reconnect_count, so the first active death can still reconnect.
+    pool, transcribers = _pool()
+    pool.reconnect_count = TranscriberPool._MAX_RECONNECTS_PER_CALL  # as if many switches reconnected standbys
+    assert await pool.reconnect_active() is True
+    transcribers["ta"].run.assert_awaited_once()
+    assert pool.active_reconnect_count == 1
 
 
 @pytest.mark.asyncio
