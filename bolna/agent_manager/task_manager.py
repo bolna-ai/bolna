@@ -229,6 +229,7 @@ class TaskManager(BaseManager):
         self._agent_end_timestamps: dict = {}
         self.hangup_message_queued = False
         self._end_of_conversation_in_progress = False
+        self._end_call_in_progress = False
         self._turn_audio_flushed = asyncio.Event()
         self._turn_audio_flushed.set()
         self.hangup_mark_event_timeout = 10
@@ -726,6 +727,112 @@ class TaskManager(BaseManager):
     def _extract_api_call_runtime_args(resp):
         excluded_keys = {"model_response", "textual_response"}
         return {key: copy.deepcopy(value) for key, value in resp.items() if key not in excluded_keys}
+
+    def _build_call_context(self):
+        """Common call-state fields included in the pre-call webhook payload.
+
+        These mirror the identifiers carried by the platform's customer-facing
+        call-state event webhooks (execution_id/agent_id/provider/numbers) — NOT the
+        transfer-specific or internal fields (call_sid/stream_sid are excluded there).
+        """
+        recipient_data = (self.context_data or {}).get("recipient_data") or {}
+        return {
+            "execution_id": self.run_id,
+            "agent_id": self.assistant_id,
+            "provider": self.tools["input"].io_provider,
+            "from_number": recipient_data.get("from_number"),
+            "to_number": recipient_data.get("to_number"),
+        }
+
+    def fire_pre_call_webhook(self, webhook_url, called_fun, resp, meta_info, webhook_param=None):
+        """Fire-and-forget pre-call webhook before the tool's main request runs.
+
+        ``params`` = the ``pre_call_webhook_param`` template substituted with the LLM args
+        (else empty). Two delivery modes:
+          * If ``PRE_CALL_WEBHOOK_DISPATCH_URL`` is set, POST {execution_id, webhook_url,
+            params} to it; the backend enriches with the full execution record + params and
+            forwards to the customer's webhook_url.
+          * Otherwise (fallback), POST directly to the customer's webhook_url with
+            params + the common call-state fields.
+        Never blocks or fails the main tool call: background task, errors swallowed.
+        """
+        excluded = {"model_response", "textual_response", "tool_call_id", "resp"}
+        llm_args = {key: copy.deepcopy(value) for key, value in resp.items() if key not in excluded}
+
+        # Build params from the webhook template (substituted with the LLM args), else {}.
+        params = {}
+        if webhook_param:
+            try:
+                prepared = prepare_api_request(webhook_param, None, None, **llm_args)
+                if prepared.get("api_params") is not None:
+                    params = prepared["api_params"]
+            except Exception as exc:
+                logger.warning(f"pre_call_webhook_param substitution failed: {exc}")
+
+        dispatch_url = os.getenv("PRE_CALL_WEBHOOK_DISPATCH_URL")
+        if dispatch_url:
+            # Backend dispatch: it fetches the execution record and merges params.
+            target_url = dispatch_url
+            payload = {"execution_id": self.run_id, "webhook_url": webhook_url, "params": params}
+        else:
+            # Fallback: post directly to the customer URL with params + common call-state fields.
+            target_url = webhook_url
+            payload = {**params, **self._build_call_context()}
+
+        # Record in function_tool_api_call_details so the pre-call webhook lands in the
+        # same per-call S3 record as the other API/tool calls.
+        api_call_detail = self._start_api_call_detail(
+            called_fun=f"{called_fun}:pre_call_webhook",
+            url=target_url,
+            method="POST",
+            param=None,
+            headers={"Content-Type": "application/json"},
+            meta_info=meta_info,
+            runtime_args={"tool_call_id": resp.get("tool_call_id", "")},
+            request_body=json.dumps(payload),
+            api_params=payload,
+        )
+
+        async def send():
+            try:
+                convert_to_request_log(
+                    str(payload),
+                    meta_info,
+                    None,
+                    LogComponent.FUNCTION_CALL,
+                    direction=LogDirection.REQUEST,
+                    run_id=self.run_id,
+                )
+                async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
+                    async with session.post(target_url, json=payload) as response:
+                        response_text = await response.text()
+                        logger.info(f"pre_call_webhook response ({response.status}): {response_text}")
+                        convert_to_request_log(
+                            str(response_text),
+                            meta_info,
+                            None,
+                            LogComponent.FUNCTION_CALL,
+                            direction=LogDirection.RESPONSE,
+                            run_id=self.run_id,
+                        )
+                        self._finalize_api_call_detail(
+                            api_call_detail,
+                            response=response_text,
+                            status_code=response.status,
+                            content_type=response.headers.get("Content-Type"),
+                        )
+            except Exception as exc:
+                logger.warning(f"pre_call_webhook to {target_url} failed (ignored): {exc}")
+                self._finalize_api_call_detail(api_call_detail, error=exc)
+
+        # Keep a strong reference so the task isn't garbage-collected before the POST
+        # finishes (the loop only holds a weak ref); drop it once done. Lazy-init the set
+        # so this never depends on __init__ (robust to merge churn).
+        if not hasattr(self, "background_tasks"):
+            self.background_tasks = set()
+        task = asyncio.create_task(send())
+        self.background_tasks.add(task)
+        task.add_done_callback(self.background_tasks.discard)
 
     def _start_api_call_detail(
         self,
@@ -2609,6 +2716,9 @@ class TaskManager(BaseManager):
             resp["execution_id"] = self.run_id
 
         if called_fun.startswith(END_CALL_FUNCTION_PREFIX):
+            # Lock out barge-in before the goodbye is generated, otherwise an interruption
+            # cancels the turn task and the disconnect never runs.
+            self._end_call_in_progress = True
             reason = resp.get("reason", "")
 
             if self.end_call_experiment is not None and not self.end_call_experiment["end_call_invoked"]:
@@ -2964,6 +3074,19 @@ class TaskManager(BaseManager):
                 f"__execute_function_call: Aborting before API call — hangup_triggered={self.hangup_triggered}, conversation_ended={self.conversation_ended}"
             )
             return
+
+        # Optional pre-call webhook: notify an external system before the tool's main
+        # request runs (e.g. a transfer reason before a custom transfer POST). Fired
+        # fire-and-forget so a webhook outage never blocks or delays the main call.
+        tool_conf = self.kwargs.get("api_tools", {}).get("tools_params", {}).get(called_fun, {})
+        pre_call_webhook_url = tool_conf.get("pre_call_webhook_url")
+        if pre_call_webhook_url:
+            self.fire_pre_call_webhook(
+                pre_call_webhook_url, called_fun, resp, meta_info, tool_conf.get("pre_call_webhook_param")
+            )
+            # Give the fire-and-forget dispatch a head start so the pre-call webhook
+            # reaches the backend before the tool's main request proceeds.
+            await asyncio.sleep(0.3)
 
         runtime_args = self._extract_api_call_runtime_args(resp)
         try:
@@ -3586,6 +3709,9 @@ class TaskManager(BaseManager):
         if self.hangup_decision_at is None:
             self.hangup_decision_at = time.time()
 
+    def _should_ignore_transcriber_input(self) -> bool:
+        return self.hangup_triggered or self._end_call_in_progress
+
     async def process_call_hangup(self):
         if self.hangup_decision_at is None:
             self.hangup_decision_at = time.time()
@@ -3975,7 +4101,7 @@ class TaskManager(BaseManager):
                 message = await self.transcriber_output_queue.get()
                 logger.info(f"Message from the transcriber class {message}")
 
-                if self.hangup_triggered:
+                if self._should_ignore_transcriber_input():
                     if message["data"] == "transcriber_connection_closed":
                         logger.info(f"Transcriber connection has been closed")
                         self.transcriber_duration += (
@@ -5993,6 +6119,11 @@ class TaskManager(BaseManager):
                         if exc is not None:
                             raise cls(str(exc), provider=provider)
 
+                # _listen_transcriber can exit (transcriber idle-closes) while a hangup
+                # goodbye is still playing in llm_task; let it drain before trimming.
+                if self.hangup_triggered and not self.conversation_ended:
+                    await self.wait_for_current_message()
+
                 has_pending_marks = len(self.mark_event_meta_data.mark_event_meta_data) > 0
                 has_response_heard = bool(self.tools["input"].response_heard_by_user)
                 if has_pending_marks or has_response_heard:
@@ -6101,6 +6232,8 @@ class TaskManager(BaseManager):
                         _turn["asr_finalized_ms"] = round(_turn.pop("asr_finalized_epoch_ms") - _call_start_ms, 2)
                     if _turn.get("asr_turn_start_epoch_ms") is not None:
                         _turn["asr_turn_start_ms"] = round(_turn.pop("asr_turn_start_epoch_ms") - _call_start_ms, 2)
+                    if _turn.get("user_speech_end_epoch_ms") is not None:
+                        _turn["user_speech_end_ms"] = round(_turn.pop("user_speech_end_epoch_ms") - _call_start_ms, 2)
 
                 # Collect language detection latency if available
                 if hasattr(self, "language_detector") and self.language_detector.latency_data:
@@ -6266,6 +6399,7 @@ class TaskManager(BaseManager):
                         "asr_start_ms",
                         "asr_finalized_ms",
                         "asr_turn_start_ms",
+                        "user_speech_end_ms",
                     ):
                         _t.pop(_f, None)
 
