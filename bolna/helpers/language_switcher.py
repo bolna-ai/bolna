@@ -71,7 +71,9 @@ class LanguageSwitcher:
     def prewarm(self):
         """Fire-and-forget a tiny request so the first real decision doesn't pay the
         TLS/connection handshake to api.anthropic.com (~0.3s from India). Failures
-        are irrelevant — the real decide() path handles its own errors."""
+        are irrelevant — the real decide() path handles its own errors. Returns the
+        created task so callers (and tests) can await completion if they want; the
+        normal path ignores it and lets it run in the background."""
 
         async def _warm():
             try:
@@ -82,7 +84,7 @@ class LanguageSwitcher:
             except Exception as e:
                 logger.debug(f"LanguageSwitcher: prewarm skipped: {e}")
 
-        asyncio.create_task(_warm())
+        return asyncio.create_task(_warm())
 
     async def decide(self, detector_transcript: str, active_transcript: str, active_label: str) -> dict | None:
         """Decide the language from both transcripts.

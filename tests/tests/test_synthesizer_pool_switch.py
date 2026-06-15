@@ -40,3 +40,20 @@ async def test_concurrent_switch_starts_single_receiver():
     assert pool.active_label == "hi"
 
     pool._gen_task.cancel()
+
+
+@pytest.mark.asyncio
+async def test_switch_to_active_label_is_noop():
+    """Switching to the already-active label must not cancel/restart the generate task."""
+    synths = {"en": _FakeSynth(), "hi": _FakeSynth()}
+    pool = SynthesizerPool(synths, "en", {})
+    pool._gen_task = asyncio.create_task(pool._run_generate("en"))
+    await asyncio.sleep(0.02)
+
+    first_task = pool._gen_task
+    await pool.switch("en")  # already active
+
+    assert pool._gen_task is first_task  # no new task started
+    assert pool.active_label == "en"
+
+    pool._gen_task.cancel()
