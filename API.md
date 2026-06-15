@@ -82,11 +82,12 @@ Creates a new agent with specified configuration.
 }
 ```
 
-#### Resemble Detect API tool example
+#### Resemble Detect and Signal API tool example
 
 Bolna agents can call external HTTP APIs through `tools_config.api_tools`. Use
 this pattern when the caller provides a media URL that should be checked for
-synthetic speech or manipulated audio before the agent makes a trust decision.
+synthetic speech or manipulated audio, or when caller-provided text should be
+scored for fraud or scam intent before the agent makes a trust decision.
 
 Add the tool definition inside a task's `tools_config`:
 
@@ -116,6 +117,29 @@ Add the tool definition inside a task's `tools_config`:
           },
           "strict": true
         }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "resemble_score_signal",
+          "description": "Score caller-provided text with Resemble Signal for fraud or scam intent. Use this before sharing reset codes, changing account details, initiating transfers, or acting on urgent payment requests.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "text": {
+                "type": "string",
+                "description": "Caller-provided text or transcript excerpt to score."
+              },
+              "reason": {
+                "type": "string",
+                "description": "Short reason this request should be scored."
+              }
+            },
+            "required": ["text"],
+            "additionalProperties": false
+          },
+          "strict": true
+        }
       }
     ],
     "tools_params": {
@@ -137,6 +161,21 @@ Add the tool definition inside a task's `tools_config`:
           "callback_url": "<OPTIONAL_DETECTION_RESULT_WEBHOOK_URL>"
         },
         "pre_call_message": "I will verify that media before making a trust decision."
+      },
+      "resemble_score_signal": {
+        "url": "https://app.resemble.ai/api/v2/signal",
+        "method": "POST",
+        "api_token": "Bearer <RESEMBLE_API_KEY>",
+        "headers": {
+          "Accept": "application/json",
+          "Content-Type": "application/json"
+        },
+        "param": {
+          "text": {
+            "$var": "text"
+          }
+        },
+        "pre_call_message": "I will check whether this request matches a fraud pattern before continuing."
       }
     }
   }
@@ -146,15 +185,19 @@ Add the tool definition inside a task's `tools_config`:
 Store the Resemble API key in your deployment secrets and inject it into
 `api_token` at deploy time. If you use `callback_url`, handle the completed
 Detect result in that webhook; the generic API tool executor sends one HTTP
-request and does not poll `GET /detect/{uuid}` during the call.
+request and does not poll `GET /detect/{uuid}` during the call. Signal text
+scoring returns synchronously from `POST /signal`.
 
 Suggested system prompt:
 
 ```text
 When the caller provides a media URL that affects a trust or fraud decision,
-call resemble_submit_detection before deciding. Treat the result as a risk
-signal. If the callback later reports synthetic speech, watermark evidence, or
-suspicious source tracing, follow this agent's escalation policy.
+call resemble_submit_detection before deciding. When the caller asks for a
+reset code, credential, wire transfer, urgent payment, or account change, call
+resemble_score_signal before deciding. Treat both responses as risk signals. If
+Detect reports synthetic speech, watermark evidence, or suspicious source
+tracing, or Signal returns suspicious/fraud, follow this agent's escalation
+policy.
 ```
 
 ### Edit Agent
