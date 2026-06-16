@@ -251,15 +251,45 @@ class RerankerConfig(BaseModel):
 
 
 class LanceDBProviderConfig(BaseModel):
-    vector_id: str
+    # extra="allow" keeps call-time enrichment fields (chunk_size, overlapping) that the
+    # backend injects into provider_config before sending the config to the engine.
+    model_config = {"extra": "allow"}
+
+    vector_id: Optional[str] = None
+    vector_ids: Optional[List[str]] = None
     similarity_top_k: Optional[int] = 5
     score_threshold: Optional[float] = 0.1
     reranker: Optional[RerankerConfig] = RerankerConfig()  # Default to disabled reranker
 
+    @model_validator(mode="after")
+    def require_vector_identifier(self):
+        if not self.vector_id and not self.vector_ids:
+            raise ValueError("Either vector_id or vector_ids must be provided")
+        return self
+
 
 class VectorStore(BaseModel):
     provider: str
-    provider_config: Union[LanceDBProviderConfig, MongoDBProviderConfig]
+    provider_config: Union[LanceDBProviderConfig, MongoDBProviderConfig] = Field(union_mode="left_to_right")
+
+
+class UsedSource(BaseModel):
+    rag_id: Optional[str] = None
+    vector_id: Optional[str] = None
+    source: Optional[str] = None
+
+
+class RagConfig(BaseModel):
+    """Canonical knowledge-base config shared by the knowledgebase agent, graph agents
+    (global) and graph nodes. used_sources is populated server-side at call time.
+    """
+
+    # extra="allow" preserves server-injected enrichment keys and any node-level extras.
+    model_config = {"extra": "allow"}
+
+    vector_store: VectorStore
+    similarity_top_k: Optional[int] = None
+    used_sources: Optional[List[UsedSource]] = None
 
 
 class Llm(BaseModel):
@@ -355,15 +385,6 @@ class GraphEdge(BaseModel):
     priority: Optional[int] = None  # lower = evaluated first. Defaults: expression/unconditional=0, llm=100
 
 
-class GraphNodeRAGConfig(BaseModel):
-    """RAG configuration for Graph Agent nodes."""
-
-    vector_store: VectorStore
-    temperature: Optional[float] = 0.7
-    model: Optional[str] = "gpt-4"
-    max_tokens: Optional[int] = 150
-
-
 class GraphNode(BaseModel):
     id: str
     description: Optional[str] = None
@@ -375,7 +396,7 @@ class GraphNode(BaseModel):
     edges: List[GraphEdge] = Field(default_factory=list)
     function_call: Optional[str] = None
     completion_check: Optional[Callable[[List[dict]], bool]] = None
-    rag_config: Optional[GraphNodeRAGConfig] = None
+    rag_config: Optional[RagConfig] = None
 
 
 class GraphAgentConfig(Llm):
@@ -383,6 +404,8 @@ class GraphAgentConfig(Llm):
     nodes: List[GraphNode]
     current_node_id: str
     context_data: Optional[dict] = None
+    # Global knowledge base. Nodes without their own rag_config fall back to this at retrieval time.
+    rag_config: Optional[RagConfig] = None
     # Routing configuration
     routing_model: Optional[str] = None  # Model for routing decisions (default: same as main model)
     routing_provider: Optional[str] = None  # Provider for routing (e.g., "groq" for fast inference)
