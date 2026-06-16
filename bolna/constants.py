@@ -154,6 +154,9 @@ LLM_DEFAULT_CONFIGS = {
     "google": {"model": "gemini-2.5-flash", "provider": "google"},
 }
 
+# Legacy language-switch tool, injected into the main LLM on multilingual agents
+# when the LLM-driven switch flow is NOT enabled (tools_config["llm_language_switch"]
+# false/absent) — restored from master for the feature-flag fallback path.
 SWITCH_LANGUAGE_TOOL_DEFINITION = {
     "type": "function",
     "function": {

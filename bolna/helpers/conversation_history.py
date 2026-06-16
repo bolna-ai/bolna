@@ -30,6 +30,24 @@ class ConversationHistory:
     def append_user(self, content: str):
         self._messages.append({"role": ChatRole.USER, "content": content})
 
+    def replace_last_user(self, expected_content: str, new_content: str) -> bool:
+        """Replace the most recent user message's content, but only if it still matches
+        expected_content — guards against correcting the wrong turn when a newer user
+        message arrived while the caller was running.
+
+        Used by TaskManager's language-switch path to swap a garbled (wrong-language
+        ASR) turn for the unbiased detector transcript; the content match is what makes
+        that safe against the ~2-3s concurrent decision window. Keep the guard if you
+        reuse this elsewhere.
+        """
+        for i in range(len(self._messages) - 1, -1, -1):
+            if self._messages[i].get("role") == ChatRole.USER:
+                if self._messages[i].get("content", "").strip() == (expected_content or "").strip():
+                    self._messages[i]["content"] = new_content
+                    return True
+                return False
+        return False
+
     def append_assistant(self, content: str, tool_calls: list | None = None, **kwargs):
         if self._messages:
             last = self._messages[-1]

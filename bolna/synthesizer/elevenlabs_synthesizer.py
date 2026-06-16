@@ -178,6 +178,13 @@ class ElevenlabsSynthesizer(StreamSynthesizer):
         audio_chunk_count = 0
         last_recv_time = None
         not_connected_since = None
+        # Bail out instead of busy-spinning on a persistent recv() error. A stuck
+        # recv (e.g. "cannot call recv while another coroutine is already running
+        # recv" when two coroutines race the same websocket) would otherwise loop
+        # here every few ms with no sleep, flooding logs and starving the event
+        # loop so the call never tears down.
+        consecutive_errors = 0
+        max_consecutive_errors = 10
         while True:
             try:
                 if self.conversation_ended:
@@ -202,6 +209,7 @@ class ElevenlabsSynthesizer(StreamSynthesizer):
                 response = await self.websocket.recv()
                 recv_duration = (time.perf_counter() - recv_start) * 1000
                 data = json.loads(response)
+                consecutive_errors = 0  # successful recv — reset the error backoff
 
                 ctx = data.get("contextId")
                 if ctx in self.context_ids_to_ignore:
@@ -270,7 +278,16 @@ class ElevenlabsSynthesizer(StreamSynthesizer):
             except websockets.exceptions.ConnectionClosed:
                 break
             except Exception as e:
+                consecutive_errors += 1
                 logger.error(f"Error occurred in receiver - {e}")
+                if consecutive_errors >= max_consecutive_errors:
+                    logger.error(
+                        f"ElevenLabs receiver: {consecutive_errors} consecutive errors, giving up to avoid busy-spin."
+                    )
+                    self.connection_error = self.connection_error or str(e)
+                    return
+                # Back off so a persistent error can't peg the event loop.
+                await asyncio.sleep(0.1)
 
     # ------------------------------------------------------------------
     # Connection

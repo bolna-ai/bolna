@@ -139,6 +139,10 @@ class SynthesizerPool:
         2. Set the new active label.
         3. Start a new _run_generate task for the new synth.
         4. Push SENTINEL so pool.generate() returns → __listen_synthesizer re-enters.
+
+        Serialized by switch_lock: the await on the old task's cancellation is a
+        suspension point, so without the lock two concurrent switches could both
+        start a _run_generate for the same label and double-recv() the websocket.
         """
         # Serialize: concurrent switches would each start a _run_generate (dual recv on one ws).
         async with self._switch_lock:

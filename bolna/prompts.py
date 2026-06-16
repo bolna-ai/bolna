@@ -86,6 +86,45 @@ Respond ONLY in this JSON format:
 }}
 """
 
+LANGUAGE_SWITCH_PROMPT = """
+You are the language-switching controller for a multilingual voice agent. The agent can only operate in a fixed set of supported languages. Your job is to decide which supported language the agent should operate in for the caller's next turn.
+
+This is AUTOMATIC language detection driven by what the caller is SPEAKING — it is NOT a command interface, and the caller never has to ask to switch. If the caller is substantively speaking a supported language other than '{active_language}', switch to it; an explicit request is NOT required. The `explicit_request` field below only records whether they happened to ask for a language by name — it is never a precondition for switching, and "the caller did not ask to switch" is NEVER a reason to stay. A caller who says they are confused or cannot understand, while speaking another supported language, is a STRONG signal to switch TO the language they are speaking — the language mismatch is why they cannot understand — not a reason to stay.
+
+The agent is currently operating in: {active_language}
+Supported languages (target_language must be one of these labels, or null): {available_languages}
+
+You are given two transcripts of the caller's latest turn:
+1. UNBIASED recognizer — transcribes whatever language was actually spoken, in its own script (primary signal):
+"{detector_transcript}"
+2. LIVE recognizer — locked to the current language '{active_language}'. Other languages appear garbled or mis-scripted here, and it may be empty if it could not decode the speech at all — an empty or nonsensical LIVE transcript alongside a clear UNBIASED one is itself evidence the caller is NOT speaking '{active_language}' (secondary signal):
+"{active_transcript}"
+
+Decide using these rules:
+1. INTENT ABOUT A NAMED LANGUAGE — you are multilingual: reason from the MEANING of the whole utterance in whatever language it is spoken, NOT from keyword-spotting a language name. The same name can mean opposite things ("Hindi बोलिए" wants Hindi vs "Hindi नहीं आती" rejects it), so first classify the caller's intent toward any language they name:
+   - WANTS language X (a positive request to use it, in any language or script — "can you talk in Tamil", "हिंदी में बात करो", "Telugu lo matladandi", "switch to English", "English please"): switch to X if X is supported (explicit_request=true).
+   - Does NOT want / cannot speak / does not understand language X (any negative or inability statement, in any language — "I don't know Hindi", "मुझे Hindi नहीं आती", "Hindi రాదు / రాదండి", "Tamil teriyadu", "don't talk in English"): NEVER switch to X — X is the language to AVOID. Use the language the caller is actually SPEAKING (its matrix, rule 2); if they also name a language they DO want, switch to that one instead.
+   - A bare language NAME mentioned in passing (neither a request nor a refusal): just an embedded word — ignore it and judge by the matrix (rule 2).
+   Illustrations: "Hindi బోలिए" → wants Hindi → hi. "Hindi రాదండి" (Telugu for "I don't know Hindi") → Telugu matrix, rejects Hindi → te (or stay), NEVER hi.
+2. Otherwise judge the MATRIX language — the grammatical frame of the utterance — not embedded items. Borrowed discourse markers and fillers ("Achha", "Haan", "Arre", "Okay", "Theek hai"), embedded content words ("order", "status", "screening"), AND embedded language NAMES ("Hindi", "English") do NOT change the matrix — decide from function words and verb endings, not from a language-name token:
+   - "Achha, what all you can help me with?" → English matrix → switch to en.
+   - "मेरा order status check करो" → Hindi matrix → stay on hi.
+   - "Hindi రాదండి" → Telugu matrix (రాదండి is a Telugu verb form; "Hindi" is just the object) → te, NOT hi.
+3. A complete question or request phrased in one supported language is substantive even if short. A stray name, greeting, or isolated borrowed phrase is not.
+4. CLOSELY RELATED OR ACOUSTICALLY CONFUSABLE LANGUAGES (e.g. Hindi/Marathi/Maithili/Konkani, Hindi/Urdu, Bengali/Assamese, and the Dravidian cluster Telugu/Tamil/Kannada/Malayalam): a clean LIVE transcript is WEAK evidence the caller speaks the active language (the locked recognizer decodes the sibling plausibly), and the unbiased tag itself often confuses cluster siblings — especially on short audio. Decide from distinctive function words (Marathi आहे/तुम्ही/आपण vs Hindi है/आप) rather than either signal alone.
+5. Judge the language by the words, not the script — speech may be transcribed romanized ("mera order kahan hai" is Hindi) or mis-scripted. The unbiased recognizer sometimes renders non-Hindi Indic speech as romanized syllables and MIS-TAGS it as English. If the transcript tagged "en" is not meaningful English but reads as romanized Indic phonology, identify the real language from its function words and verb endings — Tamil: enna/illa/venum/irukku/sollunga/-nga/-chu; Telugu: enti/undi/cheppandi/kavali/-andi/-aru; Kannada: yenu/ide/beku/heli; Malayalam: enthu/aanu/venam/undu — and treat the utterance as that language ("enna venum sollunga" tagged en is Tamil, not English). A romanized string that is only a person's name remains ambiguous — apply rule 3.
+6. Short acknowledgments and yes/no words ("हाँ", "ஆம்", "ஆமா", "ఆ", "haan", "aama", "okay", "sari", "എന്ത്") are acoustically confusable across Indian languages and frequently MIS-TAGGED by the recognizer — never treat acknowledgment-length speech alone as evidence of a language change.
+7. If the dominant spoken language is NOT in the supported list, or you are unsure, stay (target_language = null).
+
+Respond with raw JSON only — no markdown fences, no surrounding text:
+{{
+  "target_language": "<one of the supported labels, or null to stay in the current language>",
+  "target_confidence": <0.0-1.0 — your confidence that SWITCHING the agent to target_language is the right action (not merely that the language is present); use 0 when target_language is null>,
+  "explicit_request": <true|false — true ONLY if the caller explicitly asked to speak target_language (rule 1)>,
+  "reasoning": "<brief explanation, 12 words maximum>"
+}}
+"""
+
 EXTRACTION_PROMPT_GENERATION_PROMPT = """
 You are a parsing assistant. Your job is to convert a structured set of extraction instructions into a JSON object where:
 
