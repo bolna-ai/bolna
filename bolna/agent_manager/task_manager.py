@@ -2812,6 +2812,12 @@ class TaskManager(BaseManager):
                 return
 
             self.has_transfer = True
+            # After a transfer the call is bridged to the transfer target at the telephony
+            # layer. The bot must not tear the call down on teardown — for VoBiz,
+            # disconnect_stream() issues DELETE /Call/{sid} which would hang up the now-bridged
+            # original caller. Flag the input handler so it skips that delete.
+            if "input" in self.tools and self.tools["input"] is not None:
+                setattr(self.tools["input"], "call_transferred", True)
             # Record the transfer in conversation history so the LLM knows it has already
             # handed the call off and will not re-trigger on the next turn. Recorded here
             # (before the POST) because an exception from the webhook usually means the call

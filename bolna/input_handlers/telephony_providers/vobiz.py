@@ -31,6 +31,11 @@ class VobizInputHandler(TelephonyInputHandler):
             observable_variables=observable_variables,
         )
         self.io_provider = "vobiz"
+        # Set True by the task manager once a transfer has been initiated. After a
+        # transfer the call is bridged to the transfer target at the telephony layer,
+        # so the bot must NOT delete the VoBiz call on teardown — doing so would hang
+        # up the now-bridged original caller.
+        self.call_transferred = False
 
     async def call_start(self, packet):
         logger.info("Vobiz call started: {}".format(packet))
@@ -40,6 +45,19 @@ class VobizInputHandler(TelephonyInputHandler):
 
     async def disconnect_stream(self):
         try:
+            # After a transfer the call is bridged to the transfer target and is owned by
+            # the telephony layer (process_transfer / VoBiz). Deleting it here would hang up
+            # the original caller mid-conversation. Unlike Plivo (which only deletes the
+            # bot's audio stream), VoBiz disconnect_stream issues DELETE on the whole call,
+            # so we must skip it entirely when a transfer has occurred. The bot's websocket
+            # is still closed by stop_handler, which only detaches the bot, not the call.
+            if self.call_transferred:
+                logger.info(
+                    f"Skipping vobiz disconnect_stream for call {self.call_sid}: a transfer occurred, "
+                    "the call is now bridged to the transfer target and must not be deleted by the bot."
+                )
+                return
+
             logger.info("Disconnecting vobiz stream for call: {}".format(self.call_sid))
 
             if self.stream_sid and self.websocket is not None:
