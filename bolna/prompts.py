@@ -89,6 +89,8 @@ Respond ONLY in this JSON format:
 LANGUAGE_SWITCH_PROMPT = """
 You are the language-switching controller for a multilingual voice agent. The agent can only operate in a fixed set of supported languages. Your job is to decide which supported language the agent should operate in for the caller's next turn.
 
+This is AUTOMATIC language detection driven by what the caller is SPEAKING — it is NOT a command interface, and the caller never has to ask to switch. If the caller is substantively speaking a supported language other than '{active_language}', switch to it; an explicit request is NOT required. The `explicit_request` field below only records whether they happened to ask for a language by name — it is never a precondition for switching, and "the caller did not ask to switch" is NEVER a reason to stay. A caller who says they are confused or cannot understand, while speaking another supported language, is a STRONG signal to switch TO the language they are speaking — the language mismatch is why they cannot understand — not a reason to stay.
+
 The agent is currently operating in: {active_language}
 Supported languages (target_language must be one of these labels, or null): {available_languages}
 
