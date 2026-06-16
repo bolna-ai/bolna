@@ -2586,6 +2586,20 @@ class TaskManager(BaseManager):
             self.llm_task.cancel()
             self.llm_task = None
 
+        # For a turn-based (dashboard/web) chat agent, the client clears its "waiting"
+        # indicator only when it receives the <end_of_stream> turn-end marker that
+        # _listen_llm_input_queue normally sends after each turn. When the conversation
+        # ends mid-turn (e.g. the end_call tool, awaited inline), close() below runs
+        # before that trailing eos is sent, so handle() silently drops it and the chat
+        # UI spins forever. Flush the marker here, while the websocket is still open and
+        # the handler not yet closed, mirroring the normal per-turn eos.
+        if self.turn_based_conversation and "output" in self.tools and self.tools["output"] is not None:
+            try:
+                eos_meta_info = {"type": "text", "sequence_id": -1, "request_id": str(uuid.uuid4())}
+                await self.tools["output"].handle(create_ws_data_packet("<end_of_stream>", eos_meta_info))
+            except Exception as e:
+                logger.warning(f"Failed to flush end_of_stream marker before closing chat output handler: {e}")
+
         # Close output handler to prevent sends after websocket close
         if "output" in self.tools and self.tools["output"] is not None:
             self.tools["output"].close()
