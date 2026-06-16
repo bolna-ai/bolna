@@ -27,9 +27,10 @@ async def test_disconnect_stream_skips_call_delete_after_transfer():
     handler = _make_handler()
     handler.call_transferred = True
 
-    with patch.dict(
-        "os.environ", {"VOBIZ_API_KEY": "key", "VOBIZ_API_SECRET": "secret"}
-    ), patch("bolna.input_handlers.telephony_providers.vobiz.requests") as mock_requests:
+    with (
+        patch.dict("os.environ", {"VOBIZ_API_KEY": "key", "VOBIZ_API_SECRET": "secret"}),
+        patch("bolna.input_handlers.telephony_providers.vobiz.requests") as mock_requests,
+    ):
         await handler.disconnect_stream()
 
     # No DELETE to the VoBiz API, and no stop event on the websocket — the call is
@@ -44,9 +45,10 @@ async def test_disconnect_stream_deletes_call_on_normal_end():
     handler = _make_handler()
     assert handler.call_transferred is False  # default
 
-    with patch.dict(
-        "os.environ", {"VOBIZ_API_KEY": "key", "VOBIZ_API_SECRET": "secret"}
-    ), patch("bolna.input_handlers.telephony_providers.vobiz.requests") as mock_requests:
+    with (
+        patch.dict("os.environ", {"VOBIZ_API_KEY": "key", "VOBIZ_API_SECRET": "secret"}),
+        patch("bolna.input_handlers.telephony_providers.vobiz.requests") as mock_requests,
+    ):
         mock_requests.delete.return_value = MagicMock(status_code=204)
         await handler.disconnect_stream()
 
