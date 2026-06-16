@@ -2777,7 +2777,41 @@ class TaskManager(BaseManager):
             return
 
         if called_fun.startswith("transfer_call"):
+            # A transfer hands the call off at the telephony layer, but the bot's media
+            # leg can stay connected (e.g. VoBiz redirect). The caller often keeps talking
+            # ("hello?") while the transfer connects, producing fresh LLM turns that re-emit
+            # this tool. Because the transfer branch returns early it never recorded the
+            # tool call/result in conversation history (unlike the end_call and normal API
+            # paths), so the LLM had no memory it already transferred and looped — firing
+            # process_transfer repeatedly until the call dropped. Guard on has_transfer so
+            # the transfer fires exactly once; record the result so the LLM stops re-triggering.
+            if self.has_transfer:
+                logger.info(f"transfer_call already initiated for run_id={self.run_id}; ignoring duplicate trigger")
+                duplicate_tool_result = json.dumps(
+                    {
+                        "status": "success",
+                        "message": "Call transfer already in progress. Wait silently for the user to be connected; do not transfer again.",
+                    }
+                )
+                self.conversation_history.attach_tool_calls_to_turn(turn_id, resp["model_response"])
+                self.conversation_history.append_tool_result(resp.get("tool_call_id", ""), duplicate_tool_result)
+                return
+
             self.has_transfer = True
+            # Record the transfer in conversation history so the LLM knows it has already
+            # handed the call off and will not re-trigger on the next turn. Recorded here
+            # (before the POST) because an exception from the webhook usually means the call
+            # was already redirected — see the "call likely redirected" handler below.
+            self.conversation_history.attach_tool_calls_to_turn(turn_id, resp["model_response"])
+            self.conversation_history.append_tool_result(
+                resp.get("tool_call_id", ""),
+                json.dumps(
+                    {
+                        "status": "success",
+                        "message": "Call transfer initiated. Wait silently for the user to be connected; do not transfer again.",
+                    }
+                ),
+            )
             await asyncio.sleep(2)
             try:
                 from_number = self.context_data["recipient_data"]["from_number"]
