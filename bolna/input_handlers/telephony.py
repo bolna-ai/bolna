@@ -159,11 +159,14 @@ class TelephonyInputHandler(DefaultInputHandler):
                     break
 
             except WebSocketDisconnect as e:
-                if e.code in (1000, 1001, 1006):
-                    pass
+                if e.code in (1000, 1001):
+                    logger.info(f"{self.io_provider} websocket closed normally: code={e.code}")
                 else:
-                    logger.error(
-                        f"WebSocket disconnected unexpectedly: code={e.code}, reason={getattr(e, 'reason', None)}"
+                    # 1006 (abnormal closure, no close frame) and any other code mean the media
+                    # stream dropped mid-call rather than ending gracefully.
+                    logger.warning(
+                        f"{self.io_provider} websocket disconnected abnormally: code={e.code}, "
+                        f"reason={getattr(e, 'reason', None)}, stream_sid={self.stream_sid}, call_sid={self.call_sid}"
                     )
 
             except Exception as e:
