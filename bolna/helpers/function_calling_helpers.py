@@ -48,10 +48,13 @@ async def validate_outbound_url(url):
     rebind-after-check window remains; closing it fully needs connect-time
     pinning, which we can layer on later.)
     """
-    if not url or not isinstance(url, str):
+    if not isinstance(url, str):
+        raise SSRFError("Missing or invalid request URL")
+    url = url.strip()
+    if not url:
         raise SSRFError("Missing or invalid request URL")
 
-    parsed = urlsplit(url.strip())
+    parsed = urlsplit(url)
     scheme = parsed.scheme.lower()
     if scheme not in ALLOWED_URL_SCHEMES:
         raise SSRFError(f"Blocked URL scheme {scheme!r}; only http/https are allowed")
@@ -67,7 +70,9 @@ async def validate_outbound_url(url):
 
     loop = asyncio.get_running_loop()
     try:
-        infos = await loop.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+        infos = await asyncio.wait_for(loop.getaddrinfo(host, port, type=socket.SOCK_STREAM), timeout=5)
+    except asyncio.TimeoutError:
+        raise SSRFError(f"DNS resolution for host {host!r} timed out")
     except socket.gaierror as exc:
         raise SSRFError(f"Could not resolve host {host!r}: {exc}")
 

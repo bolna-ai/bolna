@@ -40,7 +40,7 @@ async def test_blocks_non_http_schemes(url):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("url", ["", None, "http:///nopath", "https://"])
+@pytest.mark.parametrize("url", ["", "   ", None, "http:///nopath", "https://"])
 async def test_blocks_missing_or_invalid_url(url):
     with pytest.raises(SSRFError):
         await validate_outbound_url(url)
