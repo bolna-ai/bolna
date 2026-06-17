@@ -108,3 +108,35 @@ def evaluate_edge_expression(edge: dict, context_data: dict) -> bool:
         return False
 
     return evaluate_expression_group(expression, context_data)
+
+
+def describe_condition(condition: dict, context_data: dict) -> str:
+    """Trace one condition for routing logs: "variable operator value (actual=<resolved>) -> <result>"."""
+    variable = condition.get("variable", "")
+    operator = condition.get("operator", "")
+    actual = resolve_variable(context_data, variable)
+    actual_repr = "<missing>" if actual is _MISSING else repr(actual)
+    result = evaluate_condition(condition, context_data)
+
+    if operator in (ExpressionOperator.EXISTS, ExpressionOperator.NOT_EXISTS):
+        return f"{variable} {operator} (actual={actual_repr}) -> {result}"
+    return f"{variable} {operator} {condition.get('value')!r} (actual={actual_repr}) -> {result}"
+
+
+def describe_edge_expression(edge: dict, context_data: dict) -> str:
+    """Trace an edge's deterministic evaluation (variable/operator/expected vs actual) for routing logs."""
+    condition_type = edge.get("condition_type")
+
+    if condition_type == EdgeConditionType.UNCONDITIONAL:
+        return "unconditional"
+    if condition_type != EdgeConditionType.EXPRESSION:
+        return f"{condition_type} (non-deterministic)"
+
+    expression = edge.get("expression") or {}
+    conditions = expression.get("conditions", [])
+    if not conditions:
+        return "expression (no conditions)"
+
+    logic = expression.get("logic") or "and"
+    separator = f" {logic.upper()} "
+    return separator.join(describe_condition(c, context_data) for c in conditions)

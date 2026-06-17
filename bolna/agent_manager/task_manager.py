@@ -3365,6 +3365,18 @@ class TaskManager(BaseManager):
                             direction=LogDirection.REQUEST,
                             run_id=self.run_id,
                         )
+                    elif routing_info.get("routing_type") == "deterministic":
+                        expression_trace = (
+                            routing_info.get("routing_expression") or routing_info.get("reasoning") or "matched"
+                        )
+                        convert_to_request_log(
+                            message=f"Deterministic routing on node '{routing_info.get('previous_node', '?')}'\n{expression_trace}",
+                            meta_info=meta_info,
+                            model="deterministic",
+                            component=LogComponent.GRAPH_ROUTING,
+                            direction=LogDirection.REQUEST,
+                            run_id=self.run_id,
+                        )
 
                     # Build routing response data
                     if routing_info.get("transitioned"):

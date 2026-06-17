@@ -19,7 +19,7 @@ from bolna.helpers.utils import (
     DictWithMissing,
     get_md5_hash,
 )
-from bolna.helpers.expression_evaluator import evaluate_edge_expression
+from bolna.helpers.expression_evaluator import evaluate_edge_expression, describe_edge_expression
 from bolna.enums import EdgeConditionType, NodeType
 from bolna.llms.types import LLMStreamChunk, LatencyData
 from bolna.llms import OpenAiLLM
@@ -68,6 +68,7 @@ class GraphAgent(BaseAgent):
         self.current_node_entry_index = 0
         self._silence_repeats = 0
         self._event_triggered_generation = False
+        self._last_deterministic_eval = None
         self.rag_configs = self.initialize_rag_configs()
         self.global_rag_config = self._initialize_global_rag_config()
         self.rag_server_url = os.getenv("RAG_SERVER_URL", "http://localhost:8000")
@@ -396,12 +397,17 @@ class GraphAgent(BaseAgent):
         llm.sort(key=lambda e: e["priority"] if e.get("priority") is not None else 100)
         return deterministic, llm
 
-    def _evaluate_deterministic_edges(self, edges: list) -> Optional[dict]:
-        """Return first matching deterministic edge, or None."""
+    def _evaluate_deterministic_edges(self, edges: list) -> Tuple[Optional[dict], List[str]]:
+        """Return (first matching deterministic edge or None, per-edge evaluation traces)."""
+        evaluations = []
         for edge in edges:
-            if evaluate_edge_expression(edge, self.context_data):
-                return edge
-        return None
+            is_match = evaluate_edge_expression(edge, self.context_data)
+            evaluations.append(
+                f"-> {edge.get('to_node_id')}: {describe_edge_expression(edge, self.context_data)} | matched={is_match}"
+            )
+            if is_match:
+                return edge, evaluations
+        return None, evaluations
 
     def process_event(self, event: dict) -> dict:
         """Process an external event. Merges properties into context_data
@@ -635,6 +641,7 @@ class GraphAgent(BaseAgent):
     ]:
         """Two-phase routing: deterministic expressions first, then LLM fallback."""
         start_time = time.perf_counter()
+        self._last_deterministic_eval = None
 
         current_node = self.get_node_by_id(self.current_node_id)
         if not current_node:
@@ -664,15 +671,23 @@ class GraphAgent(BaseAgent):
 
         # Phase 1: deterministic (0ms)
         if deterministic_edges:
-            matched_edge = self._evaluate_deterministic_edges(deterministic_edges)
+            matched_edge, det_evaluations = self._evaluate_deterministic_edges(deterministic_edges)
+            self._last_deterministic_eval = "; ".join(det_evaluations)
             if matched_edge:
                 latency_ms = (time.perf_counter() - start_time) * 1000
                 ct = matched_edge.get("condition_type", EdgeConditionType.EXPRESSION)
                 reasoning = f"{_DETERMINISTIC_REASONING_PREFIX}{ct}:{matched_edge.get('condition', ct)}"
                 logger.info(
-                    f"Routing decision (deterministic): -> {matched_edge['to_node_id']} | {reasoning} (latency: {latency_ms:.1f}ms)"
+                    f"Routing decision (deterministic) on node '{self.current_node_id}': "
+                    f"-> {matched_edge['to_node_id']} | {self._last_deterministic_eval} (latency: {latency_ms:.1f}ms)"
                 )
                 return matched_edge["to_node_id"], None, latency_ms, None, None, reasoning, 1.0, None
+
+            logger.info(
+                f"No deterministic edge matched on node '{self.current_node_id}' "
+                f"({'falling back to LLM routing' if llm_edges else 'staying on node'}): "
+                f"{self._last_deterministic_eval}"
+            )
 
         # Phase 2: LLM
         if llm_edges:
@@ -934,6 +949,7 @@ class GraphAgent(BaseAgent):
                     "routing_messages": routing_messages,
                     "routing_tools": routing_tools,
                     "reasoning": reasoning,
+                    "routing_expression": self._last_deterministic_eval,
                     "confidence": confidence,
                     "routing_usage": routing_usage,
                     "node_type": node_type,
