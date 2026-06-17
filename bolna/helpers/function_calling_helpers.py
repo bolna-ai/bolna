@@ -63,7 +63,7 @@ async def validate_outbound_url(url):
     try:
         port = parsed.port
     except ValueError:
-        port = None
+        raise SSRFError("Request URL has an invalid port")
 
     loop = asyncio.get_running_loop()
     try:
@@ -256,11 +256,14 @@ async def trigger_api(
 
             return response_text if response_text is not None else ""
     except SSRFError as e:
-        message = f"ERROR CALLING API: blocked outbound request: {e}"
-        logger.warning(message)
+        # Log the full reason server-side, but return a generic message: the resolved
+        # IP/host in the SSRFError text would otherwise flow back to the LLM and hand a
+        # non-blind SSRF probe the exact internal address it was trying to discover.
+        logger.warning(f"Blocked outbound request to {url}: {e}")
+        message = "ERROR CALLING API: request blocked by outbound URL policy"
         if run_id:
             convert_to_request_log(
-                format_error_message("function_call", url, str(e)),
+                format_error_message("function_call", url, "blocked by outbound URL policy"),
                 meta_info,
                 model=None,
                 component=LogComponent.WARNING,
@@ -273,7 +276,7 @@ async def trigger_api(
                 "status_code": None,
                 "body": message,
                 "content_type": None,
-                "error": str(e),
+                "error": "blocked by outbound URL policy",
             }
         return message
     except asyncio.TimeoutError:

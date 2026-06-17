@@ -15,6 +15,20 @@ import pytest
 from bolna.agent_manager.task_manager import TaskManager
 
 
+@pytest.fixture(autouse=True)
+def _bypass_ssrf_validation():
+    """The fallback pre-call webhook now SSRF-validates its target via a real DNS
+    lookup. These tests exercise payload/bookkeeping logic with non-resolving
+    placeholder hosts, so stub the validator out here; the validator's own
+    behaviour is covered in test_ssrf_validation.py."""
+
+    async def _noop(url):
+        return None
+
+    with patch("bolna.agent_manager.task_manager.validate_outbound_url", _noop):
+        yield
+
+
 def _make_self():
     """Minimal stand-in exposing only the attributes fire_pre_call_webhook reads."""
     inp = MagicMock()
