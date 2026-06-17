@@ -7,6 +7,7 @@ from yarl import URL
 from bolna.helpers.logger_config import configure_logger
 from bolna.enums import LogComponent, LogDirection
 from bolna.helpers.utils import convert_to_request_log, format_error_message
+from bolna.helpers.url_security import SSRFError, guarded_connector, validate_outbound_url
 
 logger = configure_logger(__name__)
 
@@ -130,6 +131,7 @@ async def trigger_api(
     url, method, param, api_token, headers_data, meta_info, run_id, return_response_metadata=False, **kwargs
 ):
     try:
+        validate_outbound_url(url)
         prepared_request = prepare_api_request(param, api_token, headers_data, **kwargs)
         request_body = prepared_request["request_body"]
         api_params = prepared_request["api_params"]
@@ -144,7 +146,9 @@ async def trigger_api(
             is_cached=False,
             run_id=run_id,
         )
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
+        async with aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=10), connector=guarded_connector()
+        ) as session:
             response = None
             response_text = None
             if method.lower() == "get":
@@ -180,6 +184,27 @@ async def trigger_api(
                 }
 
             return response_text if response_text is not None else ""
+    except SSRFError as e:
+        message = f"ERROR CALLING API: blocked request to a disallowed URL: {e}"
+        logger.warning(message)
+        if run_id:
+            convert_to_request_log(
+                format_error_message("function_call", url, str(e)),
+                meta_info,
+                model=None,
+                component=LogComponent.WARNING,
+                direction=LogDirection.WARNING,
+                is_cached=False,
+                run_id=run_id,
+            )
+        if return_response_metadata:
+            return {
+                "status_code": None,
+                "body": message,
+                "content_type": None,
+                "error": str(e),
+            }
+        return message
     except asyncio.TimeoutError:
         message = f"ERROR CALLING API: Request to {url} timed out after 5 seconds"
         logger.debug(message)

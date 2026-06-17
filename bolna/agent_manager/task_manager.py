@@ -32,6 +32,7 @@ from bolna.constants import (
     STALL_HANGUP_FLOOR_S,
 )
 from bolna.helpers.function_calling_helpers import trigger_api, computed_api_response, prepare_api_request
+from bolna.helpers.url_security import guarded_connector, validate_outbound_url
 from bolna.helpers.conversation_history import ConversationHistory
 from .base_manager import BaseManager
 from .interruption_manager import InterruptionManager
@@ -772,12 +773,16 @@ class TaskManager(BaseManager):
         dispatch_url = os.getenv("PRE_CALL_WEBHOOK_DISPATCH_URL")
         if dispatch_url:
             # Backend dispatch: it fetches the execution record and merges params.
+            # Operator-configured internal endpoint: trusted, so not SSRF-guarded.
             target_url = dispatch_url
             payload = {"execution_id": self.run_id, "webhook_url": webhook_url, "params": params}
+            enforce_url_guard = False
         else:
             # Fallback: post directly to the customer URL with params + common call-state fields.
+            # Customer-supplied URL: apply the SSRF guard.
             target_url = webhook_url
             payload = {**params, **self._build_call_context()}
+            enforce_url_guard = True
 
         # Record in function_tool_api_call_details so the pre-call webhook lands in the
         # same per-call S3 record as the other API/tool calls.
@@ -795,6 +800,8 @@ class TaskManager(BaseManager):
 
         async def send():
             try:
+                if enforce_url_guard:
+                    validate_outbound_url(target_url)
                 convert_to_request_log(
                     str(payload),
                     meta_info,
@@ -803,7 +810,10 @@ class TaskManager(BaseManager):
                     direction=LogDirection.REQUEST,
                     run_id=self.run_id,
                 )
-                async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
+                connector = guarded_connector() if enforce_url_guard else None
+                async with aiohttp.ClientSession(
+                    timeout=aiohttp.ClientTimeout(total=10), connector=connector
+                ) as session:
                     async with session.post(target_url, json=payload) as response:
                         response_text = await response.text()
                         logger.info(f"pre_call_webhook response ({response.status}): {response_text}")
