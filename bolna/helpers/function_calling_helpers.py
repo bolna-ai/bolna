@@ -85,8 +85,6 @@ def prepare_api_request(param, api_token, headers_data, **kwargs):
             # but JSON requires double quotes for valid JSON output
             json_kwargs = {k: json.dumps(v) if isinstance(v, (list, dict)) else v for k, v in kwargs.items()}
 
-            code = compile(param % json_kwargs, "<string>", "exec")
-            exec(code, globals(), json_kwargs)
             request_body = param % json_kwargs
             api_params = json.loads(request_body)
 
