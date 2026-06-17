@@ -1,6 +1,8 @@
 import asyncio
+import ipaddress
 import json
-from urllib.parse import quote
+import socket
+from urllib.parse import quote, urlsplit
 
 import aiohttp
 from yarl import URL
@@ -9,6 +11,74 @@ from bolna.enums import LogComponent, LogDirection
 from bolna.helpers.utils import convert_to_request_log, format_error_message
 
 logger = configure_logger(__name__)
+
+ALLOWED_URL_SCHEMES = ("http", "https")
+
+
+class SSRFError(ValueError):
+    """Raised when an outbound request targets a non-public address."""
+
+
+def _is_disallowed_ip(ip):
+    """True if ``ip`` (an ``ipaddress`` object) is not safe to connect to."""
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+        ip = ip.ipv4_mapped
+    # ``is_global`` is the authoritative "publicly routable" check; the explicit
+    # flags are belt-and-suspenders across Python/ipaddress versions.
+    return (
+        not ip.is_global
+        or ip.is_private
+        or ip.is_loopback
+        or ip.is_link_local  # 169.254.0.0/16 (AWS/GCP metadata) and fe80::/10
+        or ip.is_reserved
+        or ip.is_multicast
+        or ip.is_unspecified
+    )
+
+
+async def validate_outbound_url(url):
+    """SSRF guard for user-supplied URLs.
+
+    Rejects non-http(s) schemes and any host that resolves to a non-public
+    address (loopback, RFC-1918, link-local incl. the 169.254.169.254 cloud
+    metadata endpoint, reserved, etc.). Raises ``SSRFError`` on a blocked URL.
+
+    Resolution happens here rather than only checking the literal string so that
+    a hostname pointing at an internal address is also rejected. (A short
+    rebind-after-check window remains; closing it fully needs connect-time
+    pinning, which we can layer on later.)
+    """
+    if not url or not isinstance(url, str):
+        raise SSRFError("Missing or invalid request URL")
+
+    parsed = urlsplit(url.strip())
+    scheme = parsed.scheme.lower()
+    if scheme not in ALLOWED_URL_SCHEMES:
+        raise SSRFError(f"Blocked URL scheme {scheme!r}; only http/https are allowed")
+
+    host = parsed.hostname
+    if not host:
+        raise SSRFError("Request URL has no host")
+
+    try:
+        port = parsed.port
+    except ValueError:
+        port = None
+
+    loop = asyncio.get_running_loop()
+    try:
+        infos = await loop.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    except socket.gaierror as exc:
+        raise SSRFError(f"Could not resolve host {host!r}: {exc}")
+
+    for info in infos:
+        addr = info[4][0]
+        try:
+            ip = ipaddress.ip_address(addr)
+        except ValueError:
+            raise SSRFError(f"Could not validate resolved address {addr!r} for host {host!r}")
+        if _is_disallowed_ip(ip):
+            raise SSRFError(f"Blocked request to non-public address {addr} (resolved from {host})")
 
 
 def _contains_var_markers(obj):
@@ -130,6 +200,7 @@ async def trigger_api(
     url, method, param, api_token, headers_data, meta_info, run_id, return_response_metadata=False, **kwargs
 ):
     try:
+        await validate_outbound_url(url)
         prepared_request = prepare_api_request(param, api_token, headers_data, **kwargs)
         request_body = prepared_request["request_body"]
         api_params = prepared_request["api_params"]
@@ -150,16 +221,20 @@ async def trigger_api(
             if method.lower() == "get":
                 get_url = build_get_url(url, api_params)
                 logger.info(f"Sending request {request_body}, {get_url}, {headers}")
-                async with session.get(get_url, headers=headers) as response:
+                # allow_redirects=False: the URL is validated pre-flight, but a redirect
+                # hop is not re-validated and would reopen the SSRF path (e.g. 302 -> IMDS).
+                async with session.get(get_url, headers=headers, allow_redirects=False) as response:
                     response_text = await response.text()
             elif method.lower() == "post":
                 logger.info(f"Sending request {api_params}, {url}, {headers}")
                 if content_type == "json":
-                    async with session.post(url, json=api_params, headers=headers) as response:
+                    async with session.post(url, json=api_params, headers=headers, allow_redirects=False) as response:
                         response_text = await response.text()
                 elif content_type == "form":
                     normalized_api_params = normalize_for_form(api_params)
-                    async with session.post(url, data=normalized_api_params, headers=headers) as response:
+                    async with session.post(
+                        url, data=normalized_api_params, headers=headers, allow_redirects=False
+                    ) as response:
                         response_text = await response.text()
                 else:
                     raise ValueError(
@@ -180,6 +255,27 @@ async def trigger_api(
                 }
 
             return response_text if response_text is not None else ""
+    except SSRFError as e:
+        message = f"ERROR CALLING API: blocked outbound request: {e}"
+        logger.warning(message)
+        if run_id:
+            convert_to_request_log(
+                format_error_message("function_call", url, str(e)),
+                meta_info,
+                model=None,
+                component=LogComponent.WARNING,
+                direction=LogDirection.WARNING,
+                is_cached=False,
+                run_id=run_id,
+            )
+        if return_response_metadata:
+            return {
+                "status_code": None,
+                "body": message,
+                "content_type": None,
+                "error": str(e),
+            }
+        return message
     except asyncio.TimeoutError:
         message = f"ERROR CALLING API: Request to {url} timed out after 5 seconds"
         logger.debug(message)

@@ -31,7 +31,12 @@ from bolna.constants import (
     GPT5_4_MODEL_PREFIX,
     STALL_HANGUP_FLOOR_S,
 )
-from bolna.helpers.function_calling_helpers import trigger_api, computed_api_response, prepare_api_request
+from bolna.helpers.function_calling_helpers import (
+    trigger_api,
+    computed_api_response,
+    prepare_api_request,
+    validate_outbound_url,
+)
 from bolna.helpers.conversation_history import ConversationHistory
 from .base_manager import BaseManager
 from .interruption_manager import InterruptionManager
@@ -795,6 +800,10 @@ class TaskManager(BaseManager):
 
         async def send():
             try:
+                # ``target_url`` is user-controlled only on the direct fallback path;
+                # the dispatch URL is operator-set env config and may be internal.
+                if not dispatch_url:
+                    await validate_outbound_url(target_url)
                 convert_to_request_log(
                     str(payload),
                     meta_info,
@@ -804,7 +813,9 @@ class TaskManager(BaseManager):
                     run_id=self.run_id,
                 )
                 async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
-                    async with session.post(target_url, json=payload) as response:
+                    # allow_redirects=False: a redirect hop is not re-validated and would
+                    # reopen the SSRF path past the pre-flight check above.
+                    async with session.post(target_url, json=payload, allow_redirects=False) as response:
                         response_text = await response.text()
                         logger.info(f"pre_call_webhook response ({response.status}): {response_text}")
                         convert_to_request_log(
