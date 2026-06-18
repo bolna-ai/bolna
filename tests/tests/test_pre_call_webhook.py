@@ -161,6 +161,36 @@ async def test_pre_call_webhook_param_template_controls_body():
 
 
 @pytest.mark.asyncio
+async def test_pre_call_webhook_missing_placeholder_defaults_empty():
+    """A %(field)s referencing a key absent from the LLM args must NOT crash the whole
+    substitution (which would send an empty body). The missing field becomes "" and the
+    static + available fields still come through."""
+    me = _make_self()
+    resp = {"call_sid": "call-abc", "tool_call_id": "tc-1"}  # no 'reason', no 'call_transfer_number'
+    webhook_param = {
+        "event": "transfer_initiated",
+        "reason": "%(reason)s",  # missing -> ""
+        "transfer_to": "%(call_transfer_number)s",  # missing -> ""
+        "sid": "%(call_sid)s",  # present
+    }
+
+    with (
+        patch("bolna.agent_manager.task_manager.aiohttp.ClientSession", _FakeSession),
+        patch("bolna.agent_manager.task_manager.convert_to_request_log"),
+    ):
+        TaskManager.fire_pre_call_webhook(me, "https://hook.example/notify", "transfer_call", resp, {}, webhook_param)
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+    body = _FakeSession.last_post["json"]
+    assert body["event"] == "transfer_initiated"  # static field survives
+    assert body["sid"] == "call-abc"  # present arg substituted
+    assert body["reason"] == ""  # missing -> empty, not a crash
+    assert body["transfer_to"] == ""  # missing -> empty
+    assert body["execution_id"] == "exec-123"  # common fields still added
+
+
+@pytest.mark.asyncio
 async def test_pre_call_webhook_common_fields_win_over_template():
     """If the template sets a field that collides with a common call-state field,
     the system value wins (common fields are spread last)."""
@@ -370,6 +400,9 @@ async def test_transfer_call_fires_pre_call_webhook_when_configured():
     assert args[0] == "https://hook.example/notify"  # webhook_url
     assert args[1] == "transfer_call"  # called_fun
     assert args[4] == {"note": "%(reason)s"}  # webhook_param
+    # call_transfer_number (a static config value, not an LLM arg) is injected into the args
+    # so %(call_transfer_number)s can resolve in the webhook template.
+    assert args[2].get("call_transfer_number") == "+15559998888"
 
 
 @pytest.mark.asyncio
