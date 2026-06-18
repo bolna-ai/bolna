@@ -2833,6 +2833,15 @@ class TaskManager(BaseManager):
                     }
                 ),
             )
+            # Fire the optional pre-call webhook before the transfer POST. The transfer
+            # branch returns early (never reaching the generic fire site below), so it is
+            # fired here; the existing sleep(2) gives the webhook a head start.
+            tool_conf = self.kwargs.get("api_tools", {}).get("tools_params", {}).get(called_fun, {})
+            transfer_pre_call_webhook_url = tool_conf.get("pre_call_webhook_url")
+            if transfer_pre_call_webhook_url:
+                self.fire_pre_call_webhook(
+                    transfer_pre_call_webhook_url, called_fun, resp, meta_info, tool_conf.get("pre_call_webhook_param")
+                )
             await asyncio.sleep(2)
             try:
                 from_number = self.context_data["recipient_data"]["from_number"]

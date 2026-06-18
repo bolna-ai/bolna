@@ -6,9 +6,11 @@ raises (fire-and-forget) when the webhook endpoint fails.
 """
 
 import asyncio
+import inspect
+import json
 import types
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -301,3 +303,88 @@ def test_build_call_context_has_common_fields_only():
     assert ctx["to_number"] == "+15553334444"
     assert "stream_sid" not in ctx  # transfer-specific — removed
     assert "call_sid" not in ctx  # excluded from customer call-event webhooks
+
+
+def _make_transfer_self(tool_conf):
+    """Minimal stand-in for driving __execute_function_call down the transfer_call
+    branch (default io_provider = self-contained mock path that returns without aiohttp)."""
+    inp = MagicMock()
+    inp.io_provider = "default"
+    out = SimpleNamespace(handle=AsyncMock())
+    me = SimpleNamespace(
+        check_if_user_online=True,
+        run_id="exec-123",
+        has_transfer=False,
+        kwargs={"api_tools": {"tools_params": {"transfer_call": tool_conf}}},
+        fire_pre_call_webhook=MagicMock(),
+        context_data={"recipient_data": {"from_number": "+15551112222"}},
+        tools={"input": inp, "output": out},
+        stream_sid="stream-xyz",
+        transfer_call_params=None,
+        transfer_call_events=[],
+        conversation_start_init_ts=0,
+        conversation_history=MagicMock(),
+        end_call_experiment=None,
+        _start_api_call_detail=MagicMock(return_value={"latency_ms": 1.0}),
+        _extract_api_call_runtime_args=MagicMock(return_value={}),
+        _finalize_api_call_detail=MagicMock(),
+    )
+    return me
+
+
+async def _drive_transfer(me):
+    with (
+        patch("bolna.agent_manager.task_manager.asyncio.sleep", new=AsyncMock()),
+        patch("bolna.agent_manager.task_manager.convert_to_request_log"),
+        patch("bolna.agent_manager.task_manager.create_ws_data_packet"),
+    ):
+        await TaskManager._TaskManager__execute_function_call(
+            me,
+            None,  # url -> falls back to CALL_TRANSFER_WEBHOOK_URL
+            "POST",
+            json.dumps({"call_transfer_number": "+15559998888"}),
+            None,  # api_token
+            None,  # headers
+            {},  # model_args
+            {"turn_id": 1, "sequence_id": 1},  # meta_info
+            "llm",  # next_step
+            "transfer_call",  # called_fun
+            model_response=[{"x": 1}],
+            tool_call_id="tc-1",
+            reason="billing question",
+            textual_response=None,
+        )
+
+
+@pytest.mark.asyncio
+async def test_transfer_call_fires_pre_call_webhook_when_configured():
+    """transfer_call returns early (never hits the generic fire site), so the pre-call
+    webhook must be fired inside the transfer branch when the tool has a URL."""
+    me = _make_transfer_self(
+        {"pre_call_webhook_url": "https://hook.example/notify", "pre_call_webhook_param": {"note": "%(reason)s"}}
+    )
+    await _drive_transfer(me)
+
+    me.fire_pre_call_webhook.assert_called_once()
+    args = me.fire_pre_call_webhook.call_args.args
+    assert args[0] == "https://hook.example/notify"  # webhook_url
+    assert args[1] == "transfer_call"  # called_fun
+    assert args[4] == {"note": "%(reason)s"}  # webhook_param
+
+
+@pytest.mark.asyncio
+async def test_transfer_call_skips_pre_call_webhook_when_no_url():
+    """No pre_call_webhook_url on the transfer tool -> no webhook fired."""
+    me = _make_transfer_self({"pre_call_webhook_param": {"note": "x"}})  # param but no URL
+    await _drive_transfer(me)
+    me.fire_pre_call_webhook.assert_not_called()
+
+
+def test_transfer_branch_fires_before_transfer_post():
+    """Source guard: the transfer_call branch must call fire_pre_call_webhook, and do so
+    before the transfer POST (session.post), so the webhook genuinely precedes the transfer."""
+    src = inspect.getsource(TaskManager._TaskManager__execute_function_call)
+    transfer_idx = src.index('if called_fun.startswith("transfer_call")')
+    fire_idx = src.index("fire_pre_call_webhook", transfer_idx)
+    post_idx = src.index("session.post", transfer_idx)
+    assert transfer_idx < fire_idx < post_idx, "pre-call webhook must fire inside transfer branch, before the POST"
