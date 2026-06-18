@@ -1,6 +1,7 @@
 import asyncio
 import ipaddress
 import json
+import os
 import socket
 from urllib.parse import quote, urlsplit
 
@@ -13,6 +14,12 @@ from bolna.helpers.utils import convert_to_request_log, format_error_message
 logger = configure_logger(__name__)
 
 ALLOWED_URL_SCHEMES = ("http", "https")
+
+# Hosts in BOLNA_TOOL_URL_HOST_ALLOWLIST (comma-separated) bypass the SSRF block,
+# for deployments that legitimately call an internal endpoint from a tool.
+_ALLOWLISTED_HOSTS = frozenset(
+    h.strip().lower() for h in os.getenv("BOLNA_TOOL_URL_HOST_ALLOWLIST", "").split(",") if h.strip()
+)
 
 
 class SSRFError(ValueError):
@@ -62,6 +69,9 @@ async def validate_outbound_url(url):
     host = parsed.hostname
     if not host:
         raise SSRFError("Request URL has no host")
+
+    if host.lower() in _ALLOWLISTED_HOSTS:
+        return
 
     try:
         port = parsed.port
