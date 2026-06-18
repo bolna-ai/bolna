@@ -2856,7 +2856,11 @@ class TaskManager(BaseManager):
                 except Exception as exc:
                     logger.warning(f"could not extract call_transfer_number for pre_call_webhook: {exc}")
                 self.fire_pre_call_webhook(
-                    transfer_pre_call_webhook_url, called_fun, webhook_resp, meta_info, tool_conf.get("pre_call_webhook_param")
+                    transfer_pre_call_webhook_url,
+                    called_fun,
+                    webhook_resp,
+                    meta_info,
+                    tool_conf.get("pre_call_webhook_param"),
                 )
             await asyncio.sleep(2)
             try:
