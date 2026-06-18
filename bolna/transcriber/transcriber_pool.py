@@ -465,6 +465,18 @@ class TranscriberPool:
             return 0
         return self._lid.buffer_language_streak()
 
+    def lid_buffer_language_confidence(self):
+        """Detector's confidence for the buffered language (None if absent). Peek, no drain."""
+        if self._lid is None or not hasattr(self._lid, "buffer_language_confidence"):
+            return None
+        return self._lid.buffer_language_confidence()
+
+    def lid_buffer_segments(self):
+        """Per-segment detector detections [{lang, prob, text, audio_s}] (peek, no drain)."""
+        if self._lid is None or not hasattr(self._lid, "buffer_segments"):
+            return []
+        return self._lid.buffer_segments()
+
     def lid_buffer_max_segment_seconds(self) -> float:
         """Duration of the longest buffered detector segment (0.0 if absent)."""
         if self._lid is None or not hasattr(self._lid, "buffer_max_segment_seconds"):

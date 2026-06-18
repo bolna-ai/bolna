@@ -99,6 +99,8 @@ def build_lid_decision_record(
     speculation_started,
     switched_to=None,
     context_note=None,
+    detector_lang_confidence=None,
+    detector_segments=None,
 ):
     """Build one telemetry record for a Switch-LLM firing (switch / stay / gated).
 
@@ -116,7 +118,16 @@ def build_lid_decision_record(
         "active_language": active,
         "detector_transcript": detector_transcript,
         "detector_lang_tag": detector_lang_tag,
+        # Sarvam's confidence for the detected language + every per-segment detection
+        # (a turn can span multiple languages); the winning tag above is just the latest.
+        "detector_lang_confidence": detector_lang_confidence,
+        "detector_segments": detector_segments or [],
         "active_transcript": active_transcript,
+        # What the Switch-LLM believes the caller is speaking + its confidence in that
+        # identification, INDEPENDENT of support — populated even when the language is
+        # unsupported or the action is "stay" (target below is the gated, actionable view).
+        "detected_language": dec.get("detected_language"),
+        "detection_confidence": dec.get("detection_confidence"),
         "target_language": dec.get("target_language"),
         "target_confidence": dec.get("target_confidence"),
         "explicit_request": dec.get("explicit_request"),
@@ -4797,6 +4808,10 @@ class TaskManager(BaseManager):
             await asyncio.sleep(settle_ms / 1000)
 
         buffered_max_segment_s = pool.lid_buffer_max_segment_seconds()
+        # Peek Sarvam's confidence + per-segment detections BEFORE take_lid_transcript()
+        # drains the buffer (no await between, so the snapshot matches what we drain).
+        detector_lang_confidence = pool.lid_buffer_language_confidence()
+        detector_segments = pool.lid_buffer_segments()
         detector_transcript, detected_lang = pool.take_lid_transcript()
         if not detector_transcript:
             return
@@ -4858,6 +4873,8 @@ class TaskManager(BaseManager):
                     active=active,
                     detector_transcript=detector_transcript,
                     detector_lang_tag=detected_lang,
+                    detector_lang_confidence=detector_lang_confidence,
+                    detector_segments=detector_segments,
                     decision=decision,
                     buffered_max_segment_s=buffered_max_segment_s,
                     speculation_started=spec_task is not None,

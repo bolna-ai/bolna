@@ -118,6 +118,8 @@ Decide using these rules:
 
 Respond with raw JSON only — no markdown fences, no surrounding text:
 {{
+  "detected_language": "<ISO code of the language the caller is ACTUALLY speaking, e.g. 'ta','te','pa','en' — judged by rules 1-6; report it even if it is NOT in the supported list; never null>",
+  "detection_confidence": <0.0-1.0 — your confidence in detected_language, INDEPENDENT of whether it is supported or whether you switch; this is a pure language-identification confidence>,
   "target_language": "<one of the supported labels, or null to stay in the current language>",
   "target_confidence": <0.0-1.0 — your confidence that SWITCHING the agent to target_language is the right action (not merely that the language is present); use 0 when target_language is null>,
   "explicit_request": <true|false — true ONLY if the caller explicitly asked to speak target_language (rule 1)>,
