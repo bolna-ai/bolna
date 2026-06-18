@@ -311,6 +311,10 @@ class TaskManager(BaseManager):
         self.eager_meta_info = None
         self.llm_queue_task = None
         self.execute_function_call_task = None
+        # True while a tool call (e.g. a transfer the caller requested) is executing for
+        # the current turn. The LID switch checks this so it never truncates an in-flight
+        # action — it switches in parallel and lets the action complete (QA 8166592d).
+        self.function_call_in_flight = False
         self.synthesizer_tasks = []
         self.synthesizer_task = None
         self._component_error = None
@@ -3511,6 +3515,9 @@ class TaskManager(BaseManager):
                     actual_reasoning_content = llm_message.reasoning_content
 
                 if trigger_function_call:
+                    # Mark a tool call in flight so a parallel LID language switch won't
+                    # truncate this turn and drop the action (cleared in the finally below).
+                    self.function_call_in_flight = True
                     logger.info(f"Triggering function call for {data}")
                     # Stamp total_stream_duration_ms before early return — function call chunk carries the final latency
                     if latency:
@@ -3544,7 +3551,10 @@ class TaskManager(BaseManager):
                             cached_tokens=actual_cached_tokens,
                             reasoning_content=actual_reasoning_content,
                         )
-                    await self.__execute_function_call(next_step=next_step, **data.model_dump())
+                    try:
+                        await self.__execute_function_call(next_step=next_step, **data.model_dump())
+                    finally:
+                        self.function_call_in_flight = False
                     return
 
                 if latency:
@@ -5002,6 +5012,24 @@ class TaskManager(BaseManager):
         # syncs history to the part actually heard, cancels the in-flight LLM) instead
         # of draining it. Nothing in flight → switch immediately. Stay decisions never
         # reach this point, so normal turns are never truncated.
+        # An in-flight tool call (e.g. a transfer the caller just asked for) is an ACTION —
+        # never truncate it for a language switch (QA 8166592d: the transfer was cancelled
+        # mid-flight, has_transfer=False, the pre-call webhook never fired). Switch in
+        # PARALLEL: apply the language/pool switch and let the action run to completion. No
+        # follow-up is generated — the tool call IS this turn's response. (Tool RESULTS for
+        # non-transfer tools are then spoken in the new language, since self.language is now
+        # the target; the pre-call filler already streamed in the old language to cover
+        # latency before this decision landed.)
+        if self.function_call_in_flight:
+            logger.info("LanguageSwitcher: in-flight function call — switching in parallel, not truncating the action")
+            if target != self.language:
+                context_note = self.__switch_context_note(target, detector_transcript, reasoning)
+                await self.switch_language(target, triggered_by="lid_llm", context_note=context_note)
+                emit_lid_decision("switched", switched_to=target, context_note=context_note)
+            else:
+                emit_lid_decision("gated:concurrent_switch")
+            return None
+
         activity = self._inflight_response_activity()
         if any(activity.values()):
             logger.info(f"LanguageSwitcher: truncating in-flight old-language response before switch ({activity})")
