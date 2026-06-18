@@ -85,3 +85,42 @@ def test_timeout_record_tolerates_missing_decision():
     assert r["target_language"] is None
     assert r["target_confidence"] is None
     assert r["reasoning"] == ""
+
+
+def test_captures_sarvam_confidence_and_per_segment_languages():
+    segs = [
+        {"lang": "en", "prob": 0.97, "text": "hello", "audio_s": 1.2},
+        {"lang": "ta", "prob": 0.91, "text": "நன்றி", "audio_s": 0.8},
+    ]
+    r = _record(detector_lang_confidence=0.91, detector_segments=segs)
+    assert r["detector_lang_confidence"] == 0.91
+    assert r["detector_segments"] == segs  # all languages in the turn, with confidence
+
+
+def test_captures_llm_detection_independent_of_support():
+    # The LLM is confident the caller spoke Punjabi (unsupported) — that confidence is
+    # recorded in detected_language/detection_confidence, NOT swallowed by the support
+    # gate. The actionable target stays null/0.
+    r = _record(
+        outcome="gated:unsupported",
+        decision={
+            "detected_language": "pa",
+            "detection_confidence": 0.95,
+            "target_language": None,
+            "target_confidence": 0.0,
+            "explicit_request": False,
+            "reasoning": "Punjabi spoken; unsupported.",
+        },
+    )
+    assert r["detected_language"] == "pa"
+    assert r["detection_confidence"] == 0.95
+    assert r["target_language"] is None
+    assert r["target_confidence"] == 0.0
+
+
+def test_detector_and_llm_extras_default_when_absent():
+    r = _record(decision={})
+    assert r["detector_lang_confidence"] is None
+    assert r["detector_segments"] == []
+    assert r["detected_language"] is None
+    assert r["detection_confidence"] is None
