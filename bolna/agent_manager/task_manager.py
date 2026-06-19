@@ -775,10 +775,8 @@ class TaskManager(BaseManager):
         excluded = {"model_response", "textual_response", "tool_call_id", "resp"}
         llm_args = {key: copy.deepcopy(value) for key, value in resp.items() if key not in excluded}
 
-        # Build params from the webhook template (substituted with the LLM args), else {}.
-        # Default any %(name)s placeholder that isn't in the args to "" so a single missing
-        # field (e.g. a reason the model didn't supply) can't crash the whole substitution
-        # and wipe the payload — static fields and available fields still come through.
+        # Default missing %(name)s placeholders to "" so one absent field doesn't crash the
+        # whole substitution and wipe the payload.
         params = {}
         if webhook_param:
             template_str = webhook_param if isinstance(webhook_param, str) else json.dumps(webhook_param)
@@ -2840,14 +2838,11 @@ class TaskManager(BaseManager):
                     }
                 ),
             )
-            # Fire the optional pre-call webhook before the transfer POST. The transfer
-            # branch returns early (never reaching the generic fire site below), so it is
-            # fired here; the existing sleep(2) gives the webhook a head start.
+            # Transfer returns early, so fire the pre-call webhook here (before the POST).
             tool_conf = self.kwargs.get("api_tools", {}).get("tools_params", {}).get(called_fun, {})
             transfer_pre_call_webhook_url = tool_conf.get("pre_call_webhook_url")
             if transfer_pre_call_webhook_url:
-                # call_transfer_number is a static config value (in the tool param), not an LLM
-                # arg — inject it so %(call_transfer_number)s resolves in the webhook template.
+                # call_transfer_number is config, not an LLM arg — inject it for the template.
                 webhook_resp = dict(resp)
                 try:
                     transfer_param = json.loads(param) if isinstance(param, str) else (param or {})
