@@ -3,7 +3,7 @@ from collections import defaultdict
 import os
 import re
 import time
-from openai import OpenAI
+from openai import OpenAI, AzureOpenAI
 from dotenv import load_dotenv
 import json
 
@@ -234,6 +234,17 @@ class GraphAgent(BaseAgent):
                 self.routing_client = self.openai
                 self.routing_provider = "openai"
                 self.routing_model = os.getenv("DEFAULT_ROUTING_MODEL_OPENAI", "gpt-4.1-mini")
+        elif self.routing_provider == "azure":
+            azure_endpoint = self.base_url or os.getenv("AZURE_OPENAI_ENDPOINT")
+            api_version = self.config.get("api_version") or os.getenv("AZURE_OPENAI_API_VERSION", "2024-12-01-preview")
+            self.routing_client = AzureOpenAI(
+                azure_endpoint=azure_endpoint, api_key=self.llm_key, api_version=api_version
+            )
+            if self.routing_model:
+                self.routing_model = self.routing_model.split("/", 1)[-1]
+            else:
+                self.routing_model = os.getenv("DEFAULT_ROUTING_MODEL_AZURE", "gpt-4.1-mini")
+            logger.info(f"Routing initialized with Azure ({self.routing_model})")
         else:
             self.routing_client = self.openai
             if not self.routing_model:
@@ -560,8 +571,7 @@ class GraphAgent(BaseAgent):
                 routing_kwargs["max_tokens"] = self.routing_max_tokens or 250
                 routing_kwargs["temperature"] = 0.0
 
-            # Groq uses a different service_tier vocabulary, so only forward it to OpenAI routing
-            if self.routing_provider == "openai" and self.service_tier:
+            if self.routing_provider in ("openai", "azure") and self.service_tier:
                 routing_kwargs["service_tier"] = self.service_tier
 
             self._routing_reasoning_effort_used = routing_kwargs.get("reasoning_effort")
