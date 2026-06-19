@@ -58,6 +58,12 @@ class CartesiaSynthesizer(StreamSynthesizer):
         self.sequence_id = 0
         self.context_ids_to_ignore = set()
         self.ws_request_id = None
+        # True once end_of_llm_stream has been pushed for the current context. Cartesia
+        # finalizes a context on end_of_llm_stream and ignores further text on it, so the
+        # NEXT utterance must open a fresh context even if turn_id/sequence_id are unchanged
+        # (e.g. switch handoff + reply, both sequence_id=-1 → otherwise the reply is starved,
+        # QA 927536ad).
+        self.context_finalized = False
 
     def get_sleep_time(self):
         return 0.01
@@ -71,11 +77,19 @@ class CartesiaSynthesizer(StreamSynthesizer):
         return "mulaw"
 
     def _on_push(self, meta_info, text):
-        """Update context_id when turn or sequence changes."""
+        """Update context_id when turn/sequence changes, OR when the previous context was
+        already finalized (end_of_llm_stream sent). The latter covers two back-to-back
+        utterances that share turn_id/sequence_id — e.g. the language-switch handoff and the
+        reply, both sequence_id=-1: without a fresh context the reply lands on Cartesia's
+        already-closed context and is starved to ~0s (QA 927536ad)."""
         if not self.context_id:
+            self._update_context(meta_info)
+        elif self.context_finalized:
             self._update_context(meta_info)
         elif self.turn_id != meta_info.get("turn_id", 0) or self.sequence_id != meta_info.get("sequence_id", 0):
             self._update_context(meta_info)
+        # Remember whether THIS push closes the context, so the NEXT push opens a fresh one.
+        self.context_finalized = meta_info.get("end_of_llm_stream", False)
 
     def _update_context(self, meta_info):
         self.context_id = str(uuid.uuid4())
