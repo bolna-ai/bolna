@@ -4,6 +4,7 @@ from datetime import datetime
 import math
 import os
 import random
+import re
 import traceback
 import time
 import json
@@ -774,11 +775,15 @@ class TaskManager(BaseManager):
         excluded = {"model_response", "textual_response", "tool_call_id", "resp"}
         llm_args = {key: copy.deepcopy(value) for key, value in resp.items() if key not in excluded}
 
-        # Build params from the webhook template (substituted with the LLM args), else {}.
+        # Default missing %(name)s placeholders to "" so one absent field doesn't crash the
+        # whole substitution and wipe the payload.
         params = {}
         if webhook_param:
+            template_str = webhook_param if isinstance(webhook_param, str) else json.dumps(webhook_param)
+            substitution_args = {name: "" for name in re.findall(r"%\((\w+)\)s", template_str)}
+            substitution_args.update(llm_args)
             try:
-                prepared = prepare_api_request(webhook_param, None, None, **llm_args)
+                prepared = prepare_api_request(webhook_param, None, None, **substitution_args)
                 if prepared.get("api_params") is not None:
                     params = prepared["api_params"]
             except Exception as exc:
@@ -2833,6 +2838,25 @@ class TaskManager(BaseManager):
                     }
                 ),
             )
+            # Transfer returns early, so fire the pre-call webhook here (before the POST).
+            tool_conf = self.kwargs.get("api_tools", {}).get("tools_params", {}).get(called_fun, {})
+            transfer_pre_call_webhook_url = tool_conf.get("pre_call_webhook_url")
+            if transfer_pre_call_webhook_url:
+                # call_transfer_number is config, not an LLM arg — inject it for the template.
+                webhook_resp = dict(resp)
+                try:
+                    transfer_param = json.loads(param) if isinstance(param, str) else (param or {})
+                    if transfer_param.get("call_transfer_number"):
+                        webhook_resp.setdefault("call_transfer_number", transfer_param["call_transfer_number"])
+                except Exception as exc:
+                    logger.warning(f"could not extract call_transfer_number for pre_call_webhook: {exc}")
+                self.fire_pre_call_webhook(
+                    transfer_pre_call_webhook_url,
+                    called_fun,
+                    webhook_resp,
+                    meta_info,
+                    tool_conf.get("pre_call_webhook_param"),
+                )
             await asyncio.sleep(2)
             try:
                 from_number = self.context_data["recipient_data"]["from_number"]
