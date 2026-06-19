@@ -99,6 +99,8 @@ def build_lid_decision_record(
     speculation_started,
     switched_to=None,
     context_note=None,
+    detector_lang_confidence=None,
+    detector_segments=None,
 ):
     """Build one telemetry record for a Switch-LLM firing (switch / stay / gated).
 
@@ -116,7 +118,13 @@ def build_lid_decision_record(
         "active_language": active,
         "detector_transcript": detector_transcript,
         "detector_lang_tag": detector_lang_tag,
+        # Per-segment detections (a turn can span languages); the tag above is just the latest.
+        "detector_lang_confidence": detector_lang_confidence,
+        "detector_segments": detector_segments or [],
         "active_transcript": active_transcript,
+        # What the caller is speaking, independent of support (set even when staying).
+        "detected_language": dec.get("detected_language"),
+        "detection_confidence": dec.get("detection_confidence"),
         "target_language": dec.get("target_language"),
         "target_confidence": dec.get("target_confidence"),
         "explicit_request": dec.get("explicit_request"),
@@ -300,6 +308,8 @@ class TaskManager(BaseManager):
         self.eager_meta_info = None
         self.llm_queue_task = None
         self.execute_function_call_task = None
+        # Set while a tool call is executing so the LID switch never truncates it (QA 8166592d).
+        self.function_call_in_flight = False
         self.synthesizer_tasks = []
         self.synthesizer_task = None
         self._component_error = None
@@ -3500,6 +3510,7 @@ class TaskManager(BaseManager):
                     actual_reasoning_content = llm_message.reasoning_content
 
                 if trigger_function_call:
+                    self.function_call_in_flight = True  # so a parallel LID switch won't truncate it
                     logger.info(f"Triggering function call for {data}")
                     # Stamp total_stream_duration_ms before early return — function call chunk carries the final latency
                     if latency:
@@ -3533,7 +3544,10 @@ class TaskManager(BaseManager):
                             cached_tokens=actual_cached_tokens,
                             reasoning_content=actual_reasoning_content,
                         )
-                    await self.__execute_function_call(next_step=next_step, **data.model_dump())
+                    try:
+                        await self.__execute_function_call(next_step=next_step, **data.model_dump())
+                    finally:
+                        self.function_call_in_flight = False
                     return
 
                 if latency:
@@ -4797,6 +4811,9 @@ class TaskManager(BaseManager):
             await asyncio.sleep(settle_ms / 1000)
 
         buffered_max_segment_s = pool.lid_buffer_max_segment_seconds()
+        # Peek confidence + segments before take_lid_transcript() drains the buffer.
+        detector_lang_confidence = pool.lid_buffer_language_confidence()
+        detector_segments = pool.lid_buffer_segments()
         detector_transcript, detected_lang = pool.take_lid_transcript()
         if not detector_transcript:
             return
@@ -4858,6 +4875,8 @@ class TaskManager(BaseManager):
                     active=active,
                     detector_transcript=detector_transcript,
                     detector_lang_tag=detected_lang,
+                    detector_lang_confidence=detector_lang_confidence,
+                    detector_segments=detector_segments,
                     decision=decision,
                     buffered_max_segment_s=buffered_max_segment_s,
                     speculation_started=spec_task is not None,
@@ -4985,6 +5004,18 @@ class TaskManager(BaseManager):
         # syncs history to the part actually heard, cancels the in-flight LLM) instead
         # of draining it. Nothing in flight → switch immediately. Stay decisions never
         # reach this point, so normal turns are never truncated.
+        # Don't truncate an in-flight tool call for a switch (QA 8166592d): switch the
+        # language/pool in parallel and let the action finish — the tool call is the turn's reply.
+        if self.function_call_in_flight:
+            logger.info("LanguageSwitcher: in-flight function call — switching in parallel, not truncating the action")
+            if target != self.language:
+                context_note = self.__switch_context_note(target, detector_transcript, reasoning)
+                await self.switch_language(target, triggered_by="lid_llm", context_note=context_note)
+                emit_lid_decision("switched", switched_to=target, context_note=context_note)
+            else:
+                emit_lid_decision("gated:concurrent_switch")
+            return None
+
         activity = self._inflight_response_activity()
         if any(activity.values()):
             logger.info(f"LanguageSwitcher: truncating in-flight old-language response before switch ({activity})")
@@ -5057,12 +5088,9 @@ class TaskManager(BaseManager):
                 f"LanguageSwitcher: idle-flush — appended detector transcript as user turn {detector_transcript[:80]!r}"
             )
 
-        # Cover the switch → follow-up generation gap (~1-2s of silence) with the
-        # configured handoff message. Skipped when a speculative follow-up is in
-        # flight for this target — that text is ready (or nearly), so a filler
-        # would only delay it; the speculation-empty fallthrough plays it instead.
-        if not (spec_task is not None and spec_target == target):
-            await self.__play_switch_handoff(target)
+        # Handoff first (no-op if none configured), then the reply — it masks the
+        # reply-generation gap when the speculative follow-up isn't ready yet.
+        await self.__play_switch_handoff(target)
 
         # Commit the speculative follow-up if it matches the confirmed target — it has
         # been generating throughout the decide, so it's ready or nearly ready now.
@@ -5109,8 +5137,7 @@ class TaskManager(BaseManager):
                 await self._synthesize(create_ws_data_packet(spec_text, meta_info=synth_meta))
                 return None
             # Empty text (tool-call abort / generation error) — fall through to the
-            # normal follow-up below; play the handoff now to cover its generation.
-            await self.__play_switch_handoff(target)
+            # normal follow-up below (the handoff already played above).
 
         # Prepare the follow-up that answers what the caller actually said, in the new
         # language (generated by the caller AFTER the lock is released).

@@ -152,10 +152,19 @@ class TranscriberPool:
 
     @property
     def turn_latencies(self):
-        """Aggregate turn latencies from all transcribers."""
+        """Aggregate turn latencies from all transcribers, in true turn order.
+
+        Each per-language transcriber instance only accumulates the turns it was active
+        for, so after a mid-call language switch the turns are spread across instances.
+        Iterating by dict (label) order interleaves them out of turn order (e.g. a switch
+        produced turn_3 from the new instance before turn_1/turn_2 from the old one),
+        which mis-pairs the user transcript with the wrong agent turn downstream. Sort by
+        ASR start time so the latency dict always reflects the real conversation order.
+        """
         all_latencies = []
         for t in self.transcribers.values():
             all_latencies.extend(t.turn_latencies)
+        all_latencies.sort(key=lambda d: d.get("asr_start_epoch_ms") or 0)
         return all_latencies
 
     @property
@@ -455,6 +464,18 @@ class TranscriberPool:
         if self._lid is None or not hasattr(self._lid, "buffer_language_streak"):
             return 0
         return self._lid.buffer_language_streak()
+
+    def lid_buffer_language_confidence(self):
+        """Detector's confidence for the buffered language (None if absent). Peek, no drain."""
+        if self._lid is None or not hasattr(self._lid, "buffer_language_confidence"):
+            return None
+        return self._lid.buffer_language_confidence()
+
+    def lid_buffer_segments(self):
+        """Per-segment detector detections [{lang, prob, text, audio_s}] (peek, no drain)."""
+        if self._lid is None or not hasattr(self._lid, "buffer_segments"):
+            return []
+        return self._lid.buffer_segments()
 
     def lid_buffer_max_segment_seconds(self) -> float:
         """Duration of the longest buffered detector segment (0.0 if absent)."""

@@ -1259,11 +1259,15 @@ class DeepgramTranscriber(BaseTranscriber):
                             if not self.is_flux_model:
                                 # Nova sends a Metadata message after CloseStream — drain it for billing duration
                                 logger.info("closing the deepgram connection, waiting for Metadata")
+
+                                async def drain_metadata():
+                                    async for _ in self.receiver(deepgram_ws):
+                                        if "deepgram_duration" in self.meta_info:
+                                            return
+
                                 try:
-                                    async with asyncio.timeout(5):
-                                        async for _ in self.receiver(deepgram_ws):
-                                            if "deepgram_duration" in self.meta_info:
-                                                break
+                                    # wait_for, not asyncio.timeout (3.11+, crashes on the 3.10 runtime).
+                                    await asyncio.wait_for(drain_metadata(), timeout=5)
                                 except asyncio.TimeoutError:
                                     logger.warning("Timeout waiting for Deepgram Metadata after CloseStream")
                             break

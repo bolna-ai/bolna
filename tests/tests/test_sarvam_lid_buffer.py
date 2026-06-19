@@ -117,6 +117,36 @@ def test_accumulate_backward_compatible_without_duration():
     assert d.take_turn_transcript() == ("hello", "en")
 
 
+def test_captures_confidence_and_per_segment_languages():
+    d = _detector()
+    d._accumulate("hello", "en", 1.2, 0.97)
+    d._accumulate("நன்றி", "ta", 0.8, 0.91)
+    # buffer_language is the latest; its confidence travels with it.
+    assert d.buffer_language() == "ta"
+    assert d.buffer_language_confidence() == 0.91
+    segs = d.buffer_segments()
+    assert [s["lang"] for s in segs] == ["en", "ta"]
+    assert [s["prob"] for s in segs] == [0.97, 0.91]
+    assert segs[0]["text"] == "hello" and segs[0]["audio_s"] == 1.2
+    # buffer_segments is a peek — drain has not happened.
+    assert d.buffer_segments() == segs
+
+
+def test_confidence_and_segments_clear_on_drain():
+    d = _detector()
+    d._accumulate("hello", "en", 1.0, 0.9)
+    d.take_turn_transcript()
+    assert d.buffer_language_confidence() is None
+    assert d.buffer_segments() == []
+
+
+def test_segment_prob_is_none_when_not_provided():
+    d = _detector()
+    d._accumulate("hello", "en")  # no prob (back-compat call shape)
+    assert d.buffer_language_confidence() is None
+    assert d.buffer_segments()[0]["prob"] is None
+
+
 def test_buffer_event_set_on_segment_cleared_on_drain():
     d = _detector()
     assert not d.buffer_event().is_set()
