@@ -1265,10 +1265,7 @@ class DeepgramTranscriber(BaseTranscriber):
                                             return
 
                                 try:
-                                    # asyncio.wait_for, NOT asyncio.timeout: the latter is Python 3.11+ and
-                                    # raised AttributeError on the 3.10 runtime, which bubbled to run() and
-                                    # cut the call (QA 6525d51a / b33ac72c). wait_for cancels the drain on
-                                    # timeout identically and works on 3.10+.
+                                    # wait_for, not asyncio.timeout (3.11+, crashes on the 3.10 runtime).
                                     await asyncio.wait_for(drain_metadata(), timeout=5)
                                 except asyncio.TimeoutError:
                                     logger.warning("Timeout waiting for Deepgram Metadata after CloseStream")

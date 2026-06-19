@@ -98,9 +98,7 @@ def test_captures_sarvam_confidence_and_per_segment_languages():
 
 
 def test_captures_llm_detection_independent_of_support():
-    # The LLM is confident the caller spoke Punjabi (unsupported) — that confidence is
-    # recorded in detected_language/detection_confidence, NOT swallowed by the support
-    # gate. The actionable target stays null/0.
+    # Unsupported language: detected_language/detection_confidence still recorded; target stays null/0.
     r = _record(
         outcome="gated:unsupported",
         decision={

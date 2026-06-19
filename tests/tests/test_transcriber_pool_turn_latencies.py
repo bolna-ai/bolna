@@ -31,9 +31,7 @@ def _pool(transcribers, active):
 
 
 def test_turn_latencies_sorted_across_switched_instances():
-    # 'hi' was active for turns 1 & 2, then the call switched to 'en' which recorded
-    # turn 3. Dict order lists 'en' first, so without the sort the aggregate would be
-    # turn_3, turn_1, turn_2 (the bug observed on QA 4c3dd300).
+    # Post-switch, 'en' holds turn_3 and 'hi' turns 1-2; dict order would give 3,1,2 (QA 4c3dd300).
     transcribers = {
         "en": FakeTranscriber([{"turn_id": "turn_3", "asr_start_epoch_ms": 3000}]),
         "hi": FakeTranscriber(
@@ -48,8 +46,7 @@ def test_turn_latencies_sorted_across_switched_instances():
 
 
 def test_turn_latencies_missing_asr_start_does_not_crash():
-    # A turn without asr_start_epoch_ms (e.g. final_transcript never finalized) sorts as
-    # 0 rather than raising on the None comparison.
+    # A turn missing asr_start_epoch_ms sorts as 0 instead of raising on a None comparison.
     transcribers = {
         "hi": FakeTranscriber(
             [

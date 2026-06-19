@@ -84,11 +84,8 @@ class SarvamLID(LIDBackend):
         self._buffer_lang_streak = 0
         self._buffer_max_segment_s = 0.0
         self._buffer_last_segment_ts = None
-        # Sarvam's language_probability for the current buffer_lang (latest segment).
-        self._buffer_lang_prob = None
-        # Per-segment detections for the turn: one {lang, prob, text, audio_s} per VAD
-        # segment. saaras can tag different languages across a turn, so this captures
-        # ALL of them (with confidence) for telemetry, not just the winning one.
+        self._buffer_lang_prob = None  # language_probability of the latest segment
+        # Per-segment {lang, prob, text, audio_s} for the turn (a turn can span languages).
         self._buffer_segments: list[dict] = []
         # Set whenever a segment lands; cleared on drain. Lets the idle-flush watcher
         # sleep until speech actually arrives instead of polling on a fixed grid.

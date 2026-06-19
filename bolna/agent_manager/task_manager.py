@@ -118,14 +118,11 @@ def build_lid_decision_record(
         "active_language": active,
         "detector_transcript": detector_transcript,
         "detector_lang_tag": detector_lang_tag,
-        # Sarvam's confidence for the detected language + every per-segment detection
-        # (a turn can span multiple languages); the winning tag above is just the latest.
+        # Per-segment detections (a turn can span languages); the tag above is just the latest.
         "detector_lang_confidence": detector_lang_confidence,
         "detector_segments": detector_segments or [],
         "active_transcript": active_transcript,
-        # What the Switch-LLM believes the caller is speaking + its confidence in that
-        # identification, INDEPENDENT of support — populated even when the language is
-        # unsupported or the action is "stay" (target below is the gated, actionable view).
+        # What the caller is speaking, independent of support (set even when staying).
         "detected_language": dec.get("detected_language"),
         "detection_confidence": dec.get("detection_confidence"),
         "target_language": dec.get("target_language"),
@@ -311,9 +308,7 @@ class TaskManager(BaseManager):
         self.eager_meta_info = None
         self.llm_queue_task = None
         self.execute_function_call_task = None
-        # True while a tool call (e.g. a transfer the caller requested) is executing for
-        # the current turn. The LID switch checks this so it never truncates an in-flight
-        # action — it switches in parallel and lets the action complete (QA 8166592d).
+        # Set while a tool call is executing so the LID switch never truncates it (QA 8166592d).
         self.function_call_in_flight = False
         self.synthesizer_tasks = []
         self.synthesizer_task = None
@@ -3515,9 +3510,7 @@ class TaskManager(BaseManager):
                     actual_reasoning_content = llm_message.reasoning_content
 
                 if trigger_function_call:
-                    # Mark a tool call in flight so a parallel LID language switch won't
-                    # truncate this turn and drop the action (cleared in the finally below).
-                    self.function_call_in_flight = True
+                    self.function_call_in_flight = True  # so a parallel LID switch won't truncate it
                     logger.info(f"Triggering function call for {data}")
                     # Stamp total_stream_duration_ms before early return — function call chunk carries the final latency
                     if latency:
@@ -4818,8 +4811,7 @@ class TaskManager(BaseManager):
             await asyncio.sleep(settle_ms / 1000)
 
         buffered_max_segment_s = pool.lid_buffer_max_segment_seconds()
-        # Peek Sarvam's confidence + per-segment detections BEFORE take_lid_transcript()
-        # drains the buffer (no await between, so the snapshot matches what we drain).
+        # Peek confidence + segments before take_lid_transcript() drains the buffer.
         detector_lang_confidence = pool.lid_buffer_language_confidence()
         detector_segments = pool.lid_buffer_segments()
         detector_transcript, detected_lang = pool.take_lid_transcript()
@@ -5012,14 +5004,8 @@ class TaskManager(BaseManager):
         # syncs history to the part actually heard, cancels the in-flight LLM) instead
         # of draining it. Nothing in flight → switch immediately. Stay decisions never
         # reach this point, so normal turns are never truncated.
-        # An in-flight tool call (e.g. a transfer the caller just asked for) is an ACTION —
-        # never truncate it for a language switch (QA 8166592d: the transfer was cancelled
-        # mid-flight, has_transfer=False, the pre-call webhook never fired). Switch in
-        # PARALLEL: apply the language/pool switch and let the action run to completion. No
-        # follow-up is generated — the tool call IS this turn's response. (Tool RESULTS for
-        # non-transfer tools are then spoken in the new language, since self.language is now
-        # the target; the pre-call filler already streamed in the old language to cover
-        # latency before this decision landed.)
+        # Don't truncate an in-flight tool call for a switch (QA 8166592d): switch the
+        # language/pool in parallel and let the action finish — the tool call is the turn's reply.
         if self.function_call_in_flight:
             logger.info("LanguageSwitcher: in-flight function call — switching in parallel, not truncating the action")
             if target != self.language:
@@ -5102,10 +5088,7 @@ class TaskManager(BaseManager):
                 f"LanguageSwitcher: idle-flush — appended detector transcript as user turn {detector_transcript[:80]!r}"
             )
 
-        # Always play the configured handoff first, THEN the new-language reply
-        # (speculative or freshly generated). __play_switch_handoff is a no-op when no
-        # handoff is configured for the target, so in that case the reply plays directly.
-        # The handoff is a fixed template (synthesized immediately) and also masks the
+        # Handoff first (no-op if none configured), then the reply — it masks the
         # reply-generation gap when the speculative follow-up isn't ready yet.
         await self.__play_switch_handoff(target)
 

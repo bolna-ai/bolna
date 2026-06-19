@@ -1,11 +1,6 @@
-"""Cartesia opens a fresh context_id for each finalized utterance.
-
-QA 927536ad: on a language switch the handoff and the reply are pushed back-to-back, both
-with sequence_id=-1 (and no turn_id). Cartesia finalizes a context on end_of_llm_stream and
-ignores further text on it, so the reply — reusing the handoff's just-closed context — was
-starved to ~0.7s ("Cartesia recv done" 6ms after send) and never heard. `_on_push` now mints
-a new context when the previous one was finalized, even if turn_id/sequence_id are unchanged.
-"""
+"""Cartesia opens a fresh context_id for each finalized utterance — else back-to-back
+utterances sharing turn/seq (switch handoff+reply, both seq=-1) reuse a closed context and
+the second is starved (QA 927536ad)."""
 
 from unittest.mock import MagicMock
 
@@ -40,8 +35,7 @@ def test_fresh_context_for_back_to_back_eot_utterances():
 
 
 def test_reuses_context_within_a_streaming_turn():
-    # A normal multi-chunk turn (only the last chunk is end_of_llm_stream) keeps ONE context,
-    # then the next turn opens a new one.
+    # A streaming turn (only the last chunk is end_of_llm_stream) keeps one context; next turn gets a new one.
     s = _synth()
     _push(s, {"sequence_id": 1, "turn_id": 1, "end_of_llm_stream": False})
     c1 = s.context_id
@@ -54,8 +48,7 @@ def test_reuses_context_within_a_streaming_turn():
 
 
 def test_turn_change_still_opens_new_context_midstream():
-    # Pre-existing behavior preserved: a turn/sequence change opens a new context even when
-    # the previous context wasn't finalized.
+    # A turn/sequence change still opens a new context even if the previous wasn't finalized.
     s = _synth()
     _push(s, {"sequence_id": 1, "turn_id": 1, "end_of_llm_stream": False})
     c1 = s.context_id
