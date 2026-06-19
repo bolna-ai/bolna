@@ -27,6 +27,7 @@ import traceback
 import audioop
 from collections import deque
 from bolna.output_handlers.telephony import TelephonyOutputHandler
+from bolna.helpers.async_utils import create_tracked_task
 from bolna.helpers.logger_config import configure_logger
 from dotenv import load_dotenv
 
@@ -466,7 +467,7 @@ class SipTrunkOutputHandler(TelephonyOutputHandler):
     def set_hangup_sent(self):
         super().set_hangup_sent()
         try:
-            asyncio.create_task(self.send_hangup())
+            create_tracked_task(self.send_hangup(), name="sip-trunk-send-hangup")
         except Exception as e:
             logger.error(f"sip-trunk send_hangup: {e}")
 

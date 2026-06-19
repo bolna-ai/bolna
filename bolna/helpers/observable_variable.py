@@ -1,5 +1,6 @@
 import asyncio
 import inspect
+from bolna.helpers.async_utils import create_tracked_task
 from bolna.helpers.logger_config import configure_logger
 
 logger = configure_logger(__name__)
@@ -37,9 +38,12 @@ class ObservableVariable:
         for observer in self._observers:
             if inspect.iscoroutinefunction(observer):
                 try:
-                    # If an event loop is already running, schedule the async observer
-                    loop = asyncio.get_running_loop()
-                    loop.create_task(observer(new_value))
+                    # If an event loop is already running, schedule the async observer.
+                    # get_running_loop() raises RuntimeError (handled below) when there
+                    # is none; create_tracked_task keeps a strong ref so the observer
+                    # isn't garbage-collected before it runs.
+                    asyncio.get_running_loop()
+                    create_tracked_task(observer(new_value))
                 except RuntimeError:
                     # No running loop; run the async function in a temporary event loop
                     asyncio.run(observer(new_value))

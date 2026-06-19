@@ -22,6 +22,7 @@ from enum import Enum
 from dotenv import load_dotenv
 from pydantic import create_model
 from .logger_config import configure_logger
+from bolna.helpers.async_utils import create_tracked_task
 from bolna.constants import PREPROCESS_DIR, PRE_FUNCTION_CALL_MESSAGE, TRANSFERING_CALL_FILLER, END_CALL_FUNCTION_PREFIX
 from bolna.enums import LogComponent, LogDirection, UsageSource
 from bolna.prompts import DATE_PROMPT
@@ -818,7 +819,7 @@ def convert_to_request_log(
                 )
                 log["llm_metadata"] = llm_metadata
     log["engine"] = engine
-    asyncio.create_task(write_request_logs(log, run_id))
+    create_tracked_task(write_request_logs(log, run_id), name="write-request-logs")
 
 
 async def process_task_cancellation(asyncio_task, task_name):

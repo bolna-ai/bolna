@@ -6,6 +6,7 @@ import json
 from starlette.websockets import WebSocketDisconnect
 from dotenv import load_dotenv
 from bolna.helpers.utils import create_ws_data_packet
+from bolna.helpers.async_utils import create_tracked_task
 from bolna.helpers.logger_config import configure_logger
 
 logger = configure_logger(__name__)
@@ -67,7 +68,7 @@ class TelephonyInputHandler(DefaultInputHandler):
         logger.info("stopping handler")
         self.running = False
         # Fire and forget disconnect_stream - don't block the disconnection flow
-        asyncio.create_task(self._safe_disconnect_stream())
+        create_tracked_task(self._safe_disconnect_stream(), name="telephony-disconnect-stream")
         logger.info("sleeping for 2 seconds so that whatever needs to pass is passed")
         await asyncio.sleep(2)
         try:
