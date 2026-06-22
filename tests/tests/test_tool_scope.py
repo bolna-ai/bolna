@@ -149,9 +149,7 @@ def test_tools_for_node_handles_str_tools_and_no_function_calling():
     nodes = [{"id": "n1", "edges": []}]
     agent = _make_graph_agent(nodes)
     # str tools list with a node-scoped tool absent here.
-    agent.llm = _StubLLM(
-        json.dumps([_tool("g"), _tool("s")]), {"g": {}, "s": {"scope": "node", "nodes": ["other"]}}
-    )
+    agent.llm = _StubLLM(json.dumps([_tool("g"), _tool("s")]), {"g": {}, "s": {"scope": "node", "nodes": ["other"]}})
     assert _names(agent._tools_for_node(agent.get_node_by_id("n1"))) == ["g"]
     # trigger_function_call False -> no override.
     agent.llm.trigger_function_call = False

@@ -51,7 +51,6 @@ from bolna.enums import (
     NodeType,
     ChatRole,
     ToolScope,
-    LLMProvider,
 )
 from bolna.exceptions import BolnaComponentError, LLMError, SynthesizerError, TranscriberError
 from bolna.prompts import *
@@ -579,14 +578,6 @@ class TaskManager(BaseManager):
                         )
                 self.check_for_completion_llm = os.getenv("CHECK_FOR_COMPLETION_LLM")
 
-                # Explicit end_call_scope wins over the A/B experiment for graph agents.
-                end_call_scope = self.conversation_config.get("end_call_scope")
-                if end_call_scope is not None and end_call_scope not in (
-                    ToolScope.GLOBAL.value,
-                    ToolScope.NODE.value,
-                ):
-                    logger.warning(f"Ignoring invalid end_call_scope '{end_call_scope}'")
-                    end_call_scope = None
                 cancellation_prompt = self.conversation_config.get("call_cancellation_prompt")
                 end_call_description = (
                     (
@@ -597,33 +588,27 @@ class TaskManager(BaseManager):
                     else None
                 )
 
-                if self.__is_graph_agent() and end_call_scope:
-                    scope = ToolScope(end_call_scope)
+                # Graph agents: end_call tool scope follows the hangup toggle. With hangup_after_LLMCall
+                # OFF, end_call is restricted to nodes that opt in via function_call="end_call" (dormant
+                # if none do); with it ON, the experiment block below injects end_call globally.
+                if self.__is_graph_agent() and not self.use_llm_to_determine_hangup:
                     llm_config = self.task_config["tools_config"]["llm_agent"].get("llm_config", {}) or {}
-                    graph_nodes = llm_config.get("nodes", []) or []
                     end_call_nodes = [
                         n.get("id")
-                        for n in graph_nodes
+                        for n in (llm_config.get("nodes") or [])
                         if n.get("function_call") == END_CALL_FUNCTION_PREFIX and n.get("id")
                     ]
-                    self.kwargs["api_tools"] = _inject_end_call_tool(
-                        self.kwargs.get("api_tools"),
-                        scope=scope,
-                        nodes=end_call_nodes,
-                        description=end_call_description,
-                    )
-                    if scope == ToolScope.NODE and not end_call_nodes:
-                        logger.warning(
-                            "end_call_scope=node but no node declares function_call=end_call; end_call will be dormant"
+                    if end_call_nodes:
+                        self.kwargs["api_tools"] = _inject_end_call_tool(
+                            self.kwargs.get("api_tools"),
+                            scope=ToolScope.NODE,
+                            nodes=end_call_nodes,
+                            description=end_call_description,
                         )
-                    if llm_config.get("provider") == LLMProvider.GOOGLE.value:
-                        logger.warning(
-                            "Gemini does not enforce per-node tool scoping; end_call stays visible on all nodes"
-                        )
-                    logger.info(f"end_call tool injected for graph agent with scope={scope.value}")
+                        logger.info(f"end_call tool injected node-scoped on nodes={end_call_nodes}")
 
-                # A/B experiment: end_call tool as primary hangup, hangup_after_LLMCall as shadow.
-                elif (
+                # A/B experiment: end_call tool as primary (global) hangup, hangup_after_LLMCall as shadow.
+                if (
                     self.conversation_config.get("end_call_tool_mode") == "primary_with_shadow_hangup"
                     and self.use_llm_to_determine_hangup
                     and cancellation_prompt

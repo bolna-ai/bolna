@@ -13,7 +13,6 @@ from .enums import (
     ExpressionLogic,
     EdgeConditionType,
     NodeType,
-    ToolScope,
 )
 from .constants import MODEL_REASONING_EFFORT_MAP
 
@@ -554,8 +553,6 @@ class ConversationConfig(BaseModel):
     voicemail_detection_duration: Optional[float] = 30.0  # Time window in seconds
     voicemail_check_interval: Optional[float] = 7.0  # Min time between interim checks
     voicemail_min_transcript_length: Optional[int] = 7  # Min words for interim check
-    # Graph agents: end_call tool scope. None == no injection (legacy/experiment path).
-    end_call_scope: Optional[ToolScope] = None
 
     @field_validator("hangup_after_silence", mode="before")
     def set_hangup_after_silence(cls, v):

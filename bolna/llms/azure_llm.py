@@ -132,8 +132,7 @@ class AzureLLM(OpenAICompatibleLLM):
             model_args["stop"] = ["User:"]
 
         if self.trigger_function_call:
-            _tools = tools if tools is not None else self.tools
-            _tools = json.loads(_tools) if isinstance(_tools, str) else _tools
+            _tools = self._parse_tools(tools)
             if _tools:  # omit tools when none are visible this turn (an empty array is a 400)
                 model_args["tools"] = _tools
                 model_args["tool_choice"] = tool_choice or "auto"
