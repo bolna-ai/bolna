@@ -2612,6 +2612,15 @@ class TaskManager(BaseManager):
             self.llm_task.cancel()
             self.llm_task = None
 
+        # Turn-based chat clears its spinner only on the <end_of_stream> marker. When the
+        # conversation ends mid-turn, close() below would drop it, so flush it first.
+        if self.turn_based_conversation and "output" in self.tools and self.tools["output"] is not None:
+            try:
+                eos_meta_info = {"type": "text", "sequence_id": -1, "request_id": str(uuid.uuid4())}
+                await self.tools["output"].handle(create_ws_data_packet("<end_of_stream>", eos_meta_info))
+            except Exception as e:
+                logger.warning(f"Failed to flush end_of_stream marker before closing chat output handler: {e}")
+
         # Close output handler to prevent sends after websocket close
         if "output" in self.tools and self.tools["output"] is not None:
             self.tools["output"].close()
