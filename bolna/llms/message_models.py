@@ -37,14 +37,24 @@ class ChatToolDefinition(BaseModel):
 class MessageFormatAdapter:
     @staticmethod
     def chat_to_responses_input(messages: list[dict]) -> tuple[str, list[dict]]:
-        """Chat Completions messages -> (instructions, Responses API input items)."""
+        """Chat Completions messages -> (instructions, Responses API input items).
+
+        System is emitted as a role=system input item, not as `instructions`,
+        because the instructions field breaks prompt-cache hashing.
+        """
         instructions = ""
         input_items = []
 
         parsed = [ChatMessage(**msg) for msg in messages]
         for msg in parsed:
             if msg.role == ChatRole.SYSTEM:
-                instructions = msg.content or ""
+                input_items.append(
+                    {
+                        "type": ResponseItemType.MESSAGE,
+                        "role": ChatRole.SYSTEM,
+                        "content": msg.content or "",
+                    }
+                )
 
             elif msg.role == ChatRole.USER:
                 input_items.append(

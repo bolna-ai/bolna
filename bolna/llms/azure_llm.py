@@ -122,7 +122,6 @@ class AzureLLM(OpenAICompatibleLLM):
             "messages": messages,
             "stream": True,
             "stream_options": {"include_usage": True},
-            "user": f"{self.run_id}#{meta_info.get('turn_id', '')}" if meta_info else self.run_id,
         }
 
         if not self.model.startswith(GPT5_MODEL_PREFIX):
@@ -165,7 +164,7 @@ class AzureLLM(OpenAICompatibleLLM):
             logger.error(f"Azure OpenAI rate limit exceeded: {e}")
             raise
         except APIConnectionError as e:
-            logger.error(f"Azure OpenAI connection error: {e}")
+            logger.error(f"Azure OpenAI connection error: {e} | cause: {e.__cause__!r}")
             raise
         except APIError as e:
             logger.error(f"Azure OpenAI API error: {e}")
@@ -355,7 +354,7 @@ class AzureLLM(OpenAICompatibleLLM):
             logger.error(f"Azure OpenAI rate limit exceeded: {e}")
             raise
         except APIConnectionError as e:
-            logger.error(f"Azure OpenAI connection error: {e}")
+            logger.error(f"Azure OpenAI connection error: {e} | cause: {e.__cause__!r}")
             raise
         except APIError as e:
             logger.error(f"Azure OpenAI API error: {e}")

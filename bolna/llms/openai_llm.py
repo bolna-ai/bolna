@@ -106,21 +106,15 @@ class OpenAIWSConnection:
                     return
 
     async def cancel_response(self, response_id: str):
-        """Cancel an in-flight response. Best-effort, errors are non-critical."""
-        if self._ws is None:
+        """Best-effort cancel: signal the server to terminate the in-flight
+        response. We do not drain events here — the concurrent stream_response
+        loop is the sole recv consumer and will see the resulting terminal
+        event itself. Holding the lock would block the cancel until the
+        stream completes naturally, defeating its purpose."""
+        if self._ws is None or self._ws.state is not WSState.OPEN:
             return
         try:
-            await self._ws.send(
-                json.dumps(
-                    {
-                        "type": ResponseStreamEvent.CANCEL,
-                        "response_id": response_id,
-                    }
-                )
-            )
-            async for raw_msg in self._ws:
-                if json.loads(raw_msg).get("type") in self.TERMINAL_EVENTS:
-                    break
+            await self._ws.send(json.dumps({"type": ResponseStreamEvent.CANCEL, "response_id": response_id}))
         except Exception:
             pass
 
@@ -176,7 +170,8 @@ class OpenAiLLM(OpenAICompatibleLLM):
 
         self.model_args["service_tier"] = kwargs.get("service_tier", "default")
 
-        http_client = get_shared_http_client(base_url=kwargs.get("base_url"), http2=True)
+        # http2=False: cancelled h2 requests leak streams until the connection pins at 100 (barge-in)
+        http_client = get_shared_http_client(base_url=kwargs.get("base_url"), http2=False)
 
         if kwargs.get("provider", "openai") == "custom":
             base_url = kwargs.get("base_url")
@@ -241,7 +236,6 @@ class OpenAiLLM(OpenAICompatibleLLM):
             "messages": messages,
             "stream": True,
             "stream_options": {"include_usage": True},
-            "user": f"{self.run_id}#{meta_info['turn_id']}",
         }
 
         if not self.model.startswith(GPT5_MODEL_PREFIX):
@@ -282,7 +276,7 @@ class OpenAiLLM(OpenAICompatibleLLM):
             logger.error(f"OpenAI rate limit exceeded: {e}")
             raise
         except APIConnectionError as e:
-            logger.error(f"OpenAI connection error: {e}")
+            logger.error(f"OpenAI connection error: {e} | cause: {e.__cause__!r}")
             raise
         except APIError as e:
             logger.error(f"OpenAI API error: {e}")
@@ -482,7 +476,7 @@ class OpenAiLLM(OpenAICompatibleLLM):
             logger.error(f"OpenAI rate limit exceeded: {e}")
             raise
         except APIConnectionError as e:
-            logger.error(f"OpenAI connection error: {e}")
+            logger.error(f"OpenAI connection error: {e} | cause: {e.__cause__!r}")
             raise
         except APIError as e:
             logger.error(f"OpenAI API error: {e}")
@@ -504,9 +498,10 @@ class OpenAiLLM(OpenAICompatibleLLM):
         if not messages:
             raise ValueError("No messages provided")
 
-        # store=False: WS previous_response_id uses connection-local cache, not server storage
+        # store=True activates server-side prompt-cache (cached_tokens in usage)
+        # on top of the WS connection-local cache. Storage is free per OpenAI.
         create_params, responses_tools = self._build_responses_create_kwargs(
-            messages, meta_info, request_json, tool_choice, store=False
+            messages, meta_info, request_json, tool_choice, store=True
         )
 
         # WS endpoint silently closes on float temperature — coerce to int
@@ -707,11 +702,10 @@ class OpenAiLLM(OpenAICompatibleLLM):
 
         self.started_streaming = False
 
-    def invalidate_response_chain(self):
-        response_id = self.previous_response_id
-        super().invalidate_response_chain()
-        if self._ws_transport and response_id:
-            asyncio.ensure_future(self._ws_transport.cancel_response(response_id))
+    def cancel_in_flight_response(self):
+        """Cancel the in-flight WS response; keeps previous_response_id alive."""
+        if self._ws_transport and self.previous_response_id:
+            asyncio.ensure_future(self._ws_transport.cancel_response(self.previous_response_id))
 
     async def close(self):
         # httpx client is shared via pool, don't close it here

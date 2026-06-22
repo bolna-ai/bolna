@@ -58,6 +58,8 @@ class CartesiaSynthesizer(StreamSynthesizer):
         self.sequence_id = 0
         self.context_ids_to_ignore = set()
         self.ws_request_id = None
+        # end_of_llm_stream sent on the current context → the next push must open a fresh one.
+        self.context_finalized = False
 
     def get_sleep_time(self):
         return 0.01
@@ -71,11 +73,15 @@ class CartesiaSynthesizer(StreamSynthesizer):
         return "mulaw"
 
     def _on_push(self, meta_info, text):
-        """Update context_id when turn or sequence changes."""
+        """New context_id on turn/sequence change, or after the previous context was finalized
+        (back-to-back utterances sharing turn/seq, e.g. switch handoff+reply, must not reuse it)."""
         if not self.context_id:
+            self._update_context(meta_info)
+        elif self.context_finalized:
             self._update_context(meta_info)
         elif self.turn_id != meta_info.get("turn_id", 0) or self.sequence_id != meta_info.get("sequence_id", 0):
             self._update_context(meta_info)
+        self.context_finalized = meta_info.get("end_of_llm_stream", False)
 
     def _update_context(self, meta_info):
         self.context_id = str(uuid.uuid4())
@@ -97,6 +103,9 @@ class CartesiaSynthesizer(StreamSynthesizer):
                 logger.info(f"handle_interruption: {interrupt_message}")
                 await self.websocket.send(json.dumps(interrupt_message))
                 self.context_id = None
+                # The interrupted context's end-of-stream is now dropped, so the
+                # next turn must be re-detected as new to clear stale queue entries.
+                self.current_turn_start_time = None
         except Exception as e:
             logger.error(f"Error in handle_interruption: {e}")
 

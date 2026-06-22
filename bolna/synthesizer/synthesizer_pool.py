@@ -40,6 +40,7 @@ class SynthesizerPool:
         self._gen_task = None  # current _run_generate task
         self._monitor_tasks = {}  # label -> monitor task
         self._multilingual_config = multilingual_config
+        self._switch_lock = asyncio.Lock()
 
     # ------------------------------------------------------------------
     # Properties
@@ -138,34 +139,36 @@ class SynthesizerPool:
         2. Set the new active label.
         3. Start a new _run_generate task for the new synth.
         4. Push SENTINEL so pool.generate() returns → __listen_synthesizer re-enters.
+
+        Serialized by switch_lock: the await on the old task's cancellation is a
+        suspension point, so without the lock two concurrent switches could both
+        start a _run_generate for the same label and double-recv() the websocket.
         """
-        if label == self.active_label:
-            logger.info(f"SynthesizerPool: already active on '{label}', no-op")
-            return
+        # Serialize: concurrent switches would each start a _run_generate (dual recv on one ws).
+        async with self._switch_lock:
+            if label == self.active_label:
+                logger.info(f"SynthesizerPool: already active on '{label}', no-op")
+                return
 
-        if label not in self.synthesizers:
-            raise ValueError(f"Unknown synthesizer label '{label}'. Available: {list(self.synthesizers.keys())}")
+            if label not in self.synthesizers:
+                raise ValueError(f"Unknown synthesizer label '{label}'. Available: {list(self.synthesizers.keys())}")
 
-        old = self.active_label
+            old = self.active_label
 
-        # Cancel old generate task
-        if self._gen_task and not self._gen_task.done():
-            self._gen_task.cancel()
-            try:
-                await self._gen_task
-            except asyncio.CancelledError:
-                pass
-            logger.info(f"SynthesizerPool: cancelled generate task for '{old}'")
+            if self._gen_task and not self._gen_task.done():
+                self._gen_task.cancel()
+                try:
+                    await self._gen_task
+                except asyncio.CancelledError:
+                    pass
+                logger.info(f"SynthesizerPool: cancelled generate task for '{old}'")
 
-        self.active_label = label
+            self.active_label = label
+            self._gen_task = asyncio.create_task(self._run_generate(label))
+            logger.info(f"SynthesizerPool: started generate task for '{label}'")
 
-        # Start new generate task
-        self._gen_task = asyncio.create_task(self._run_generate(label))
-        logger.info(f"SynthesizerPool: started generate task for '{label}'")
-
-        # Push sentinel so the current generate() iteration returns
-        self._output_queue.put_nowait(_SWITCH_SENTINEL)
-        logger.info(f"SynthesizerPool: switched {old} -> {label}")
+            self._output_queue.put_nowait(_SWITCH_SENTINEL)
+            logger.info(f"SynthesizerPool: switched {old} -> {label}")
 
     # ------------------------------------------------------------------
     # Active synth info

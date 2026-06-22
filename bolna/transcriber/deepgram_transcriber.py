@@ -104,6 +104,10 @@ class DeepgramTranscriber(BaseTranscriber):
         self._turn_pending = False  # True after SpeechStarted until first real interim confirms speech
         self.current_turn_interim_details = []
         self.audio_frame_timestamps = []  # List of (frame_start, frame_end, send_timestamp)
+        # Wall-clock epoch-ms send time of the audio behind the latest transcript content
+        # in the current flux turn — per-turn proxy for "user stopped speaking" (flux has
+        # no per-word timestamps). Read at EndOfTurn for user_speech_end_epoch_ms.
+        self.last_transcript_audio_sent_at = None
         self.turn_counter = 0
         # Timeout tracking for stuck utterances
         self.last_interim_time = None
@@ -339,6 +343,7 @@ class DeepgramTranscriber(BaseTranscriber):
         self._turn_pending = False
         self.last_interim_time = None
         self.current_turn_interim_details = []
+        self.last_transcript_audio_sent_at = None
         self.current_turn_start_time = None
         self.current_turn_id = None
         self.final_transcript = ""
@@ -362,6 +367,8 @@ class DeepgramTranscriber(BaseTranscriber):
 
         # Build turn latencies (same as UtteranceEnd logic)
         try:
+            self._mark_last_interim_final()
+
             first_interim_to_final_ms, last_interim_to_final_ms = self.calculate_interim_to_final_latencies(
                 self.current_turn_interim_details
             )
@@ -906,6 +913,7 @@ class DeepgramTranscriber(BaseTranscriber):
                     turn_index = msg.get("turn_index")
                     eot_confidence = msg.get("end_of_turn_confidence")
                     words = msg.get("words", [])
+                    audio_window_end = msg.get("audio_window_end")
                     # flux-general-multi: languages detected this turn, sorted by word count
                     languages = msg.get("languages")
                     languages_hinted = msg.get("languages_hinted")
@@ -916,6 +924,7 @@ class DeepgramTranscriber(BaseTranscriber):
                         self.current_turn_id = self.turn_counter
                         self.speech_start_time = timestamp_ms()
                         self.current_turn_interim_details = []
+                        self.last_transcript_audio_sent_at = None
                         self.is_transcript_sent_for_processing = False
                         self.final_transcript = ""
                         # Eager stub — captured even if turn is never finalized
@@ -930,29 +939,20 @@ class DeepgramTranscriber(BaseTranscriber):
                         # StartOfTurn is guaranteed non-empty — use it immediately for barge-in
                         # instead of waiting for the first Update (~0.25s later)
                         if transcript:
-                            self.last_interim_time = time.time()
+                            # Seed current_turn_interim_details so short turns (StartOfTurn → EndOfTurn
+                            # with no Update events) still produce first/last_interim_to_final_ms in
+                            # turn_latencies, which feeds voiceai.transcriber.* DD distributions.
+                            entry = self._build_interim_entry(transcript, words, msg)
+                            self.last_interim_time = entry["received_at"]
+                            self.current_turn_interim_details.append(entry)
                             data = {"type": "interim_transcript_received", "content": transcript}
                             yield create_ws_data_packet(data, self.meta_info)
 
                     elif event == "Update":
                         if transcript:
-                            self.last_interim_time = time.time()
-                            latency_ms = None
-                            if words and len(words) > 0:
-                                audio_window_end = msg.get("audio_window_end", 0)
-                                audio_sent_at = self._find_audio_send_timestamp(audio_window_end)
-                                if audio_sent_at:
-                                    result_received_at = timestamp_ms()
-                                    latency_ms = round(result_received_at - audio_sent_at, 5)
-
-                            self.current_turn_interim_details.append(
-                                {
-                                    "transcript": transcript,
-                                    "latency_ms": latency_ms,
-                                    "is_final": False,
-                                    "received_at": time.time(),
-                                }
-                            )
+                            entry = self._build_interim_entry(transcript, words, msg)
+                            self.last_interim_time = entry["received_at"]
+                            self.current_turn_interim_details.append(entry)
 
                             if languages:
                                 logger.info(f"Flux LID Update: languages={languages} hinted={languages_hinted}")
@@ -990,6 +990,13 @@ class DeepgramTranscriber(BaseTranscriber):
                             self.eager_transcript_pending = transcript
                             self.last_interim_time = time.time()
 
+                            eager_latency_ms = None
+                            if words and audio_window_end:
+                                audio_sent_at = self._find_audio_send_timestamp(audio_window_end)
+                                if audio_sent_at:
+                                    eager_latency_ms = round(timestamp_ms() - audio_sent_at, 5)
+                            self._mark_last_interim_final(latency_ms=eager_latency_ms)
+
                             data = {"type": "eager_end_of_turn", "content": transcript, "confidence": eot_confidence}
                             yield create_ws_data_packet(data, self.meta_info)
                         else:
@@ -1020,22 +1027,40 @@ class DeepgramTranscriber(BaseTranscriber):
 
                         if transcript and not self.is_transcript_sent_for_processing:
                             try:
+                                if not self.current_turn_interim_details:
+                                    logger.warning(
+                                        "Flux: EndOfTurn has transcript but no interim_details to mark final "
+                                        "(turn_id=%s, transcript=%r)",
+                                        self.current_turn_id,
+                                        transcript,
+                                    )
+                                self._mark_last_interim_final()
                                 first_interim_to_final_ms, last_interim_to_final_ms = (
                                     self.calculate_interim_to_final_latencies(self.current_turn_interim_details)
                                 )
-                                self._upsert_turn_latency(
-                                    {
-                                        "turn_id": self.current_turn_id,
-                                        "sequence_id": self.current_turn_id,
-                                        "interim_details": self.current_turn_interim_details,
-                                        "first_interim_to_final_ms": first_interim_to_final_ms,
-                                        "last_interim_to_final_ms": last_interim_to_final_ms,
-                                        "asr_start_epoch_ms": self.speech_start_time,
-                                        "asr_turn_start_epoch_ms": self._turn_first_speech_epoch_ms,
-                                        "asr_finalized_epoch_ms": timestamp_ms(),
-                                        "final_transcript": transcript,
-                                    }
-                                )
+                                asr_finalized_epoch_ms = timestamp_ms()
+                                turn_latency = {
+                                    "turn_id": self.current_turn_id,
+                                    "sequence_id": self.current_turn_id,
+                                    "interim_details": self.current_turn_interim_details,
+                                    "first_interim_to_final_ms": first_interim_to_final_ms,
+                                    "last_interim_to_final_ms": last_interim_to_final_ms,
+                                    "asr_start_epoch_ms": self.speech_start_time,
+                                    "asr_turn_start_epoch_ms": self.speech_start_time,
+                                    "asr_finalized_epoch_ms": asr_finalized_epoch_ms,
+                                    "final_transcript": transcript,
+                                }
+                                # Observability only: asr_finalized minus user_speech_end measures
+                                # flux's end-of-turn detection delay. Omit when missing or out of
+                                # order (frame-mapping anomaly, e.g. post-reconnect) — absent beats
+                                # wrong for a latency metric.
+                                user_speech_end_epoch_ms = self.last_transcript_audio_sent_at
+                                if (
+                                    user_speech_end_epoch_ms is not None
+                                    and user_speech_end_epoch_ms <= asr_finalized_epoch_ms
+                                ):
+                                    turn_latency["user_speech_end_epoch_ms"] = user_speech_end_epoch_ms
+                                self._upsert_turn_latency(turn_latency)
                             except Exception as e:
                                 logger.error(f"Error building turn latencies: {e}")
 
@@ -1055,6 +1080,9 @@ class DeepgramTranscriber(BaseTranscriber):
                                     f"Flux: EndOfTurn suppressed — transcript already sent for processing "
                                     f"(turn_id={self.current_turn_id}, transcript={transcript!r})"
                                 )
+                                # Eager path already fired — still mark is_final so the DD FINAL metric
+                                # counts this turn.
+                                self._mark_last_interim_final()
                             else:
                                 logger.warning("Flux: EndOfTurn received with empty transcript")
                             if self.eager_transcript_pending is not None:
@@ -1138,6 +1166,31 @@ class DeepgramTranscriber(BaseTranscriber):
             logger.warning(f"Missing start or duration in Deepgram message, cannot update transcription cursor")
         return self.transcription_cursor
 
+    def _mark_last_interim_final(self, latency_ms=None):
+        """Mark the last interim entry as final and optionally update its latency.
+        Clears prior is_final flags first — prevents double-counting on the
+        EagerEndOfTurn → TurnResumed → Updates → EndOfTurn path where an earlier
+        entry was already marked final by the eager handler.
+        Called at every turn-finalization path so the DD FINAL metric fires consistently."""
+        if not self.current_turn_interim_details:
+            return
+        for entry in self.current_turn_interim_details:
+            entry["is_final"] = False
+        last = self.current_turn_interim_details[-1]
+        last["is_final"] = True
+        if latency_ms is not None:
+            last["latency_ms"] = latency_ms
+
+    def _build_interim_entry(self, transcript, words, msg):
+        now = time.time()
+        latency_ms = None
+        if words:
+            audio_sent_at = self._find_audio_send_timestamp(msg.get("audio_window_end", 0))
+            if audio_sent_at:
+                latency_ms = round(now * 1000 - audio_sent_at, 5)
+                self.last_transcript_audio_sent_at = audio_sent_at
+        return {"transcript": transcript, "latency_ms": latency_ms, "is_final": False, "received_at": now}
+
     def _find_audio_send_timestamp(self, audio_position):
         """
         Find when the audio frame containing this position was sent to Deepgram.
@@ -1162,6 +1215,14 @@ class DeepgramTranscriber(BaseTranscriber):
 
     async def transcribe(self):
         deepgram_ws = None
+        # Per-connection stream state: Deepgram audio positions (audio_window_end,
+        # word offsets) restart at 0 on every new websocket, so the local frame
+        # bookkeeping must restart with them. A pool reconnect re-runs transcribe()
+        # on the same instance — stale values from the previous connection would
+        # map new positions onto old wall-clock times.
+        self.num_frames = 0
+        self.audio_frame_timestamps = []
+        self.connection_start_time = None
         try:
             start_time = timestamp_ms()
             try:
@@ -1198,11 +1259,15 @@ class DeepgramTranscriber(BaseTranscriber):
                             if not self.is_flux_model:
                                 # Nova sends a Metadata message after CloseStream — drain it for billing duration
                                 logger.info("closing the deepgram connection, waiting for Metadata")
+
+                                async def drain_metadata():
+                                    async for _ in self.receiver(deepgram_ws):
+                                        if "deepgram_duration" in self.meta_info:
+                                            return
+
                                 try:
-                                    async with asyncio.timeout(5):
-                                        async for _ in self.receiver(deepgram_ws):
-                                            if "deepgram_duration" in self.meta_info:
-                                                break
+                                    # wait_for, not asyncio.timeout (3.11+, crashes on the 3.10 runtime).
+                                    await asyncio.wait_for(drain_metadata(), timeout=5)
                                 except asyncio.TimeoutError:
                                     logger.warning("Timeout waiting for Deepgram Metadata after CloseStream")
                             break

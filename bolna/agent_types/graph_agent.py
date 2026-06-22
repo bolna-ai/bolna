@@ -3,7 +3,7 @@ from collections import defaultdict
 import os
 import re
 import time
-from openai import OpenAI
+from openai import OpenAI, AzureOpenAI
 from dotenv import load_dotenv
 import json
 
@@ -19,7 +19,7 @@ from bolna.helpers.utils import (
     DictWithMissing,
     get_md5_hash,
 )
-from bolna.helpers.expression_evaluator import evaluate_edge_expression
+from bolna.helpers.expression_evaluator import evaluate_edge_expression, describe_edge_expression
 from bolna.enums import EdgeConditionType, NodeType
 from bolna.llms.types import LLMStreamChunk, LatencyData
 from bolna.llms import OpenAiLLM
@@ -68,7 +68,9 @@ class GraphAgent(BaseAgent):
         self.current_node_entry_index = 0
         self._silence_repeats = 0
         self._event_triggered_generation = False
+        self._last_deterministic_eval = None
         self.rag_configs = self.initialize_rag_configs()
+        self.global_rag_config = self._initialize_global_rag_config()
         self.rag_server_url = os.getenv("RAG_SERVER_URL", "http://localhost:8000")
 
         # Cache transition tools per node for faster routing (bounded to prevent unbounded growth)
@@ -137,46 +139,78 @@ class GraphAgent(BaseAgent):
             logger.error(f"Failed to create LLM: {e}, falling back to default OpenAiLLM")
             return OpenAiLLM(model=self.llm_model or "gpt-4o-mini", llm_key=self.llm_key or os.getenv("OPENAI_API_KEY"))
 
+    @staticmethod
+    def _extract_rag_collections(rag_config: Dict) -> List[str]:
+        """Extract collection/vector IDs from a rag_config dict, supporting all known formats."""
+        collections = []
+        legacy_pc = rag_config.get("provider_config") if isinstance(rag_config.get("provider_config"), dict) else {}
+        provider_config = (rag_config.get("vector_store") or {}).get("provider_config") or {}
+        # Prefer the first location that actually carries a vector id; a present-but-empty
+        # field (e.g. top-level "vector_ids": []) must not shadow a valid vector_store.
+        if isinstance(rag_config.get("vector_ids"), list) and rag_config["vector_ids"]:
+            collections.extend(rag_config["vector_ids"])
+        elif rag_config.get("vector_id"):
+            collections.append(rag_config["vector_id"])
+        elif legacy_pc.get("vector_id"):
+            collections.append(legacy_pc["vector_id"])
+        elif isinstance(provider_config.get("vector_ids"), list) and provider_config["vector_ids"]:
+            collections.extend(provider_config["vector_ids"])
+        elif provider_config.get("vector_id"):
+            collections.append(provider_config["vector_id"])
+        return [c for c in collections if c]
+
+    @staticmethod
+    def _extract_similarity_top_k(rag_config: Dict, default: int = 10) -> int:
+        provider_config = (rag_config.get("vector_store") or {}).get("provider_config") or {}
+        return rag_config.get("similarity_top_k") or provider_config.get("similarity_top_k") or default
+
     def initialize_rag_configs(self) -> Dict[str, Dict]:
         """Initialize RAG configurations for each node."""
         rag_configs = {}
         for node in self.config.get("nodes", []):
             rag_config = node.get("rag_config")
-            if rag_config:
-                # Extract collection/vector IDs
-                collections = []
-                # Legacy: direct vector_id on rag_config
-                if "vector_id" in rag_config:
-                    collections.append(rag_config["vector_id"])
-                # Legacy: rag_config.provider_config.vector_id
-                elif (
-                    "provider_config" in rag_config
-                    and isinstance(rag_config.get("provider_config"), dict)
-                    and "vector_id" in rag_config["provider_config"]
-                ):
-                    collections.append(rag_config["provider_config"]["vector_id"])
-                # New: rag_config.vector_store.provider_config.vector_id
-                else:
-                    try:
-                        vector_store = rag_config.get("vector_store") or {}
-                        provider_config = vector_store.get("provider_config") or {}
-                        vs_vector_id = provider_config.get("vector_id")
-                        if vs_vector_id:
-                            collections.append(vs_vector_id)
-                    except Exception:
-                        pass
+            if not rag_config:
+                continue
 
-                rag_configs[node["id"]] = {
-                    "collections": collections,
-                    "similarity_top_k": rag_config.get("similarity_top_k", 10),
-                    "temperature": rag_config.get("temperature", 0.7),
-                    "model": rag_config.get("model", "gpt-4o"),
-                    "max_tokens": rag_config.get("max_tokens", 150),
-                }
+            collections = self._extract_rag_collections(rag_config)
+            # Nodes without resolvable collections fall back to the global rag_config
+            if not collections:
+                continue
 
-                logger.info(f"Initialized RAG config for node {node['id']} with collections: {collections}")
+            rag_configs[node["id"]] = {
+                "collections": collections,
+                "similarity_top_k": self._extract_similarity_top_k(rag_config),
+            }
+
+            logger.info(f"Initialized RAG config for node {node['id']} with collections: {collections}")
 
         return rag_configs
+
+    def _initialize_global_rag_config(self) -> Dict:
+        """Initialize the agent-level RAG config (same shape as KnowledgeBaseAgent's rag_config)."""
+        rag_config = self.config.get("rag_config")
+        if not rag_config:
+            return {}
+
+        collections = []
+        used_sources = rag_config.get("used_sources")
+        if used_sources:
+            collections = [
+                source["vector_id"] for source in used_sources if isinstance(source, dict) and source.get("vector_id")
+            ]
+        if not collections:
+            collections = self._extract_rag_collections(rag_config)
+
+        if not collections:
+            logger.warning("Global rag_config present but no collections resolved")
+            return {}
+
+        logger.info(f"Initialized global RAG config with collections: {collections}")
+        return {
+            "collections": collections,
+            "similarity_top_k": self._extract_similarity_top_k(rag_config),
+            "used_sources": used_sources or [],
+        }
 
     def _init_routing_client(self):
         """Initialize routing client. Uses Groq if available, else OpenAI."""
@@ -200,6 +234,17 @@ class GraphAgent(BaseAgent):
                 self.routing_client = self.openai
                 self.routing_provider = "openai"
                 self.routing_model = os.getenv("DEFAULT_ROUTING_MODEL_OPENAI", "gpt-4.1-mini")
+        elif self.routing_provider == "azure":
+            azure_endpoint = self.base_url or os.getenv("AZURE_OPENAI_ENDPOINT")
+            api_version = self.config.get("api_version") or os.getenv("AZURE_OPENAI_API_VERSION", "2024-12-01-preview")
+            self.routing_client = AzureOpenAI(
+                azure_endpoint=azure_endpoint, api_key=self.llm_key, api_version=api_version
+            )
+            if self.routing_model:
+                self.routing_model = self.routing_model.split("/", 1)[-1]
+            else:
+                self.routing_model = os.getenv("DEFAULT_ROUTING_MODEL_AZURE", "gpt-4.1-mini")
+            logger.info(f"Routing initialized with Azure ({self.routing_model})")
         else:
             self.routing_client = self.openai
             if not self.routing_model:
@@ -363,12 +408,17 @@ class GraphAgent(BaseAgent):
         llm.sort(key=lambda e: e["priority"] if e.get("priority") is not None else 100)
         return deterministic, llm
 
-    def _evaluate_deterministic_edges(self, edges: list) -> Optional[dict]:
-        """Return first matching deterministic edge, or None."""
+    def _evaluate_deterministic_edges(self, edges: list) -> Tuple[Optional[dict], List[str]]:
+        """Return (first matching deterministic edge or None, per-edge evaluation traces)."""
+        evaluations = []
         for edge in edges:
-            if evaluate_edge_expression(edge, self.context_data):
-                return edge
-        return None
+            is_match = evaluate_edge_expression(edge, self.context_data)
+            evaluations.append(
+                f"-> {edge.get('to_node_id')}: {describe_edge_expression(edge, self.context_data)} | matched={is_match}"
+            )
+            if is_match:
+                return edge, evaluations
+        return None, evaluations
 
     def process_event(self, event: dict) -> dict:
         """Process an external event. Merges properties into context_data
@@ -521,8 +571,7 @@ class GraphAgent(BaseAgent):
                 routing_kwargs["max_tokens"] = self.routing_max_tokens or 250
                 routing_kwargs["temperature"] = 0.0
 
-            # Groq uses a different service_tier vocabulary, so only forward it to OpenAI routing
-            if self.routing_provider == "openai" and self.service_tier:
+            if self.routing_provider in ("openai", "azure") and self.service_tier:
                 routing_kwargs["service_tier"] = self.service_tier
 
             self._routing_reasoning_effort_used = routing_kwargs.get("reasoning_effort")
@@ -602,6 +651,7 @@ class GraphAgent(BaseAgent):
     ]:
         """Two-phase routing: deterministic expressions first, then LLM fallback."""
         start_time = time.perf_counter()
+        self._last_deterministic_eval = None
 
         current_node = self.get_node_by_id(self.current_node_id)
         if not current_node:
@@ -631,15 +681,23 @@ class GraphAgent(BaseAgent):
 
         # Phase 1: deterministic (0ms)
         if deterministic_edges:
-            matched_edge = self._evaluate_deterministic_edges(deterministic_edges)
+            matched_edge, det_evaluations = self._evaluate_deterministic_edges(deterministic_edges)
+            self._last_deterministic_eval = "; ".join(det_evaluations)
             if matched_edge:
                 latency_ms = (time.perf_counter() - start_time) * 1000
                 ct = matched_edge.get("condition_type", EdgeConditionType.EXPRESSION)
                 reasoning = f"{_DETERMINISTIC_REASONING_PREFIX}{ct}:{matched_edge.get('condition', ct)}"
                 logger.info(
-                    f"Routing decision (deterministic): -> {matched_edge['to_node_id']} | {reasoning} (latency: {latency_ms:.1f}ms)"
+                    f"Routing decision (deterministic) on node '{self.current_node_id}': "
+                    f"-> {matched_edge['to_node_id']} | {self._last_deterministic_eval} (latency: {latency_ms:.1f}ms)"
                 )
                 return matched_edge["to_node_id"], None, latency_ms, None, None, reasoning, 1.0, None
+
+            logger.info(
+                f"No deterministic edge matched on node '{self.current_node_id}' "
+                f"({'falling back to LLM routing' if llm_edges else 'staying on node'}): "
+                f"{self._last_deterministic_eval}"
+            )
 
         # Phase 2: LLM
         if llm_edges:
@@ -730,7 +788,7 @@ class GraphAgent(BaseAgent):
             return False
         return any(msg.get("role") == "tool" and msg.get("tool_call_id") in call_ids_for_fn for msg in node_history)
 
-    async def _build_messages(self, history: List[dict]) -> List[dict]:
+    async def _build_messages(self, history: List[dict], meta_info: Optional[dict] = None) -> List[dict]:
         """Build messages array: system prompt (+ optional RAG) + conversation history."""
         current_node = self.get_node_by_id(self.current_node_id)
         if not current_node:
@@ -753,8 +811,8 @@ class GraphAgent(BaseAgent):
         else:
             prompt = node_prompt
 
-        # Try RAG if configured for this node
-        rag_config = self.rag_configs.get(self.current_node_id)
+        # Try RAG: node-level config wins, otherwise fall back to the global (agent-level) config
+        rag_config = self.rag_configs.get(self.current_node_id) or self.global_rag_config
         if rag_config and rag_config.get("collections"):
             try:
                 client = await RAGServiceClientSingleton.get_client(self.rag_server_url)
@@ -765,6 +823,14 @@ class GraphAgent(BaseAgent):
                     max_results=rag_config.get("similarity_top_k", 10),
                     similarity_threshold=0.0,
                 )
+                if meta_info is not None:
+                    meta_info["rag_latency"] = {
+                        "sequence_id": meta_info.get("sequence_id"),
+                        "total_query_time_ms": rag_response.total_query_time_ms,
+                        "server_processing_time_ms": rag_response.server_processing_time_ms,
+                        "collections_count": len(rag_config["collections"]),
+                        "results_count": rag_response.total_results,
+                    }
                 if rag_response.contexts:
                     rag_context = await client.format_context_for_prompt(rag_response.contexts)
                     prompt = f"{prompt}\n\nKnowledge base:\n{rag_context}\n\nUse this information naturally."
@@ -827,7 +893,7 @@ class GraphAgent(BaseAgent):
                         }
                     return
 
-                messages = await self._build_messages(message)
+                messages = await self._build_messages(message, meta_info=meta_info)
                 # Inject ephemeral event hint (NOT persisted in conversation_history)
                 event_name = self.context_data.get("_last_event", "")
                 messages.append(
@@ -893,6 +959,7 @@ class GraphAgent(BaseAgent):
                     "routing_messages": routing_messages,
                     "routing_tools": routing_tools,
                     "reasoning": reasoning,
+                    "routing_expression": self._last_deterministic_eval,
                     "confidence": confidence,
                     "routing_usage": routing_usage,
                     "node_type": node_type,
@@ -911,7 +978,7 @@ class GraphAgent(BaseAgent):
                     }
                 return
 
-            messages = await self._build_messages(message)
+            messages = await self._build_messages(message, meta_info=meta_info)
             yield {"messages": messages}
             tool_choice = self._get_tool_choice_for_node(history=message)
             async for chunk in self.llm.generate_stream(

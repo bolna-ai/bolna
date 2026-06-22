@@ -4,6 +4,7 @@ import base64
 import io
 import json
 import os
+import time
 import wave
 
 from dotenv import load_dotenv
@@ -32,20 +33,142 @@ class SarvamLID(LIDBackend):
 
     _WS_BASE = "wss://{host}/speech-to-text/ws"
 
+    # Mid-call reconnects allowed when saaras closes the socket on us (observed
+    # in QA: server-side graceful close left the detector silently mute for the
+    # whole call). Bounded so a rejecting server can't loop us.
+    # Cap is per-INCIDENT, not per-call: the attempt counter resets when the previous
+    # reconnect was long enough ago (_RECONNECT_RESET_WINDOW_S) that this is a fresh,
+    # unrelated drop rather than a tight reject loop. So saaras periodically closing an
+    # idle socket over a long call always recovers, while a server rejecting every
+    # connect within seconds is still stopped after _MAX_RECONNECTS.
+    _MAX_RECONNECTS = 2
+    _RECONNECT_DELAY_S = 0.5
+    _RECONNECT_RESET_WINDOW_S = 30.0
+
     def __init__(self, on_language, config):
         super().__init__(on_language, config)
         self._api_key = config.get("sarvam_api_key") or os.getenv("SARVAM_API_KEY", "")
         self._host = config.get("sarvam_host") or os.getenv("SARVAM_HOST", "api.sarvam.ai")
         self._telephony = config.get("telephony_provider", "")
+        # Target rate Saaras receives (it wants 16k). Per-provider INPUT rate/encoding
+        # must mirror sarvam_transcriber._configure_audio_params — telephony providers
+        # stream 8kHz, so we resample 8k→16k. Getting this wrong (e.g. treating vobiz's
+        # 8kHz as 16kHz) feeds garbled audio to Saaras → no transcripts → no detection.
         self._sr = int(config.get("sampling_rate", 16000))
-        self._input_sr = 8000 if self._telephony in ("twilio", "plivo") else self._sr
-        self._encoding = "mulaw" if self._telephony == "twilio" else "linear16"
+        if self._telephony in ("plivo", "vobiz", "exotel"):
+            self._encoding = "linear16"
+            self._input_sr = 8000
+        elif self._telephony == "twilio":
+            self._encoding = "mulaw"
+            self._input_sr = 8000
+        else:
+            self._encoding = "linear16"
+            self._input_sr = self._sr
         self._queue = asyncio.Queue(maxsize=20)
         self._ws = None
         self._sender_task = None
         self._receiver_task = None
         self._dead = False
+        self._stopping = False
+        self._reconnecting = False
+        self._reconnect_attempts = 0
+        self._last_reconnect_at = 0.0
+        self._dead_drop_logged = False
         self._resample_state = None
+        # Rolling buffer of unbiased recognition for the current conversational turn.
+        # saaras emits one "data" message per VAD segment (several per turn), so we
+        # accumulate here and let the caller drain it once per turn via
+        # take_turn_transcript() — aligned to the main transcriber's turn boundary.
+        self._buffer_text = ""
+        self._buffer_lang = None
+        self._buffer_lang_streak = 0
+        self._buffer_max_segment_s = 0.0
+        self._buffer_last_segment_ts = None
+        self._buffer_lang_prob = None  # language_probability of the latest segment
+        # Per-segment {lang, prob, text, audio_s} for the turn (a turn can span languages).
+        self._buffer_segments: list[dict] = []
+        # Set whenever a segment lands; cleared on drain. Lets the idle-flush watcher
+        # sleep until speech actually arrives instead of polling on a fixed grid.
+        self._buffer_event = asyncio.Event()
+
+    def _accumulate(self, transcript, lang, audio_s: float = 0.0, prob=None):
+        """Append a recognized segment to the current-turn buffer."""
+        if transcript:
+            self._buffer_text = " ".join(filter(None, [self._buffer_text, transcript]))
+            self._buffer_last_segment_ts = time.monotonic()
+            self._buffer_event.set()
+            self._buffer_segments.append(
+                {"lang": lang, "prob": prob, "text": transcript, "audio_s": round(audio_s or 0.0, 3)}
+            )
+            # Longest single segment in the buffer — acknowledgment-length audio
+            # (<~1s) is where saaras mis-tags languages (e.g. Tamil 'ஆமா' heard as
+            # Hindi 'हाँ'), so switch decisions gate on having at least one
+            # substantive segment.
+            self._buffer_max_segment_s = max(self._buffer_max_segment_s, audio_s or 0.0)
+            if lang:
+                # Consecutive same-language segments = saaras double-confirmation;
+                # the watcher uses the streak to fire the decision without waiting
+                # out the idle window.
+                self._buffer_lang_streak = self._buffer_lang_streak + 1 if lang == self._buffer_lang else 1
+                self._buffer_lang = lang
+                self._buffer_lang_prob = prob
+
+    def buffer_max_segment_seconds(self) -> float:
+        """Duration of the longest buffered segment (peek, no drain)."""
+        return self._buffer_max_segment_s
+
+    def buffer_event(self):
+        """asyncio.Event that is set while undrained speech sits in the buffer."""
+        return self._buffer_event
+
+    def buffer_age_seconds(self):
+        """Seconds since the last buffered segment, or None if the buffer is empty.
+
+        Used by the idle-flush fallback: a non-empty buffer that has gone quiet with
+        no main-transcriber turn means the active (locked) ASR couldn't decode the
+        caller's speech.
+        """
+        if not self._buffer_text.strip() or self._buffer_last_segment_ts is None:
+            return None
+        return time.monotonic() - self._buffer_last_segment_ts
+
+    def buffer_language(self):
+        """Latest detected language of the buffered speech (peek, no drain).
+
+        Lets the idle-flush watcher use a shorter idle threshold when the caller is
+        audibly NOT speaking the active language — no reason to wait the full
+        accumulate window when saaras has already tagged the speech as different.
+        """
+        return self._buffer_lang
+
+    def buffer_language_streak(self):
+        """How many consecutive buffered segments carried the current buffer_language."""
+        return self._buffer_lang_streak
+
+    def buffer_language_confidence(self):
+        """Sarvam's language_probability for the current buffer_language (peek, no drain)."""
+        return self._buffer_lang_prob
+
+    def buffer_segments(self):
+        """Per-segment detections {lang, prob, text, audio_s} for the turn (peek, no drain)."""
+        return list(self._buffer_segments)
+
+    def take_turn_transcript(self):
+        """Return (transcript, detected_lang) accumulated so far and clear the buffer.
+
+        Called once per conversational turn by TranscriberPool/TaskManager.
+        """
+        text = self._buffer_text.strip()
+        lang = self._buffer_lang
+        self._buffer_text = ""
+        self._buffer_lang = None
+        self._buffer_lang_streak = 0
+        self._buffer_lang_prob = None
+        self._buffer_segments = []
+        self._buffer_max_segment_s = 0.0
+        self._buffer_last_segment_ts = None
+        self._buffer_event.clear()
+        return text, lang
 
     def _build_url(self) -> str:
         params = {
@@ -53,6 +176,9 @@ class SarvamLID(LIDBackend):
             "mode": "transcribe",
             "language-code": "unknown",
             "high_vad_sensitivity": "true",
+            # Matches the working sarvam_transcriber config. We read transcripts from
+            # the "data" messages and buffer them; VAD events are not relied upon.
+            "vad_signals": "true",
         }
         qs = "&".join(f"{k}={v}" for k, v in params.items())
         return f"{self._WS_BASE.format(host=self._host)}?{qs}"
@@ -87,7 +213,11 @@ class SarvamLID(LIDBackend):
 
     def feed(self, audio_bytes):
         if self._dead:
-            logger.warning("SarvamLID: feed() called but WS is dead — chunk dropped (LID inactive)")
+            # Log the first drop loudly, then go quiet — at ~50 chunks/s a
+            # per-chunk warning floods the call log while a reconnect runs.
+            if not self._dead_drop_logged:
+                logger.warning("SarvamLID: feed() called but WS is dead — dropping chunks until reconnected")
+                self._dead_drop_logged = True
             return
         try:
             self._queue.put_nowait(audio_bytes)
@@ -108,8 +238,7 @@ class SarvamLID(LIDBackend):
             pass
         except Exception as e:
             logger.error(f"SarvamLID sender error: {e}")
-            self._dead = True
-            logger.warning("SarvamLID: sender loop exited abnormally — LID inactive for remainder of call")
+            self._schedule_reconnect("sender error")
 
     async def _receiver_loop(self):
         try:
@@ -118,6 +247,7 @@ class SarvamLID(LIDBackend):
                     data = json.loads(raw) if isinstance(raw, str) else {}
                     if data.get("type") == "data":
                         payload = data.get("data", {})
+                        transcript = (payload.get("transcript") or "").strip()
                         lang = payload.get("language_code", "")
                         lang_prob = payload.get("language_probability")
                         metrics = payload.get("metrics") or {}
@@ -125,14 +255,22 @@ class SarvamLID(LIDBackend):
                         processing_latency = float(metrics.get("processing_latency") or 0.0)
                         logger.info(
                             f"SarvamLID raw: lang={lang!r} language_probability={lang_prob} "
-                            f"audio_duration={audio_duration:.3f}s processing_latency={processing_latency:.3f}s"
+                            f"transcript={transcript[:60]!r} audio_duration={audio_duration:.3f}s "
+                            f"processing_latency={processing_latency:.3f}s"
                         )
-                        if lang_prob is None:
-                            logger.debug("SarvamLID: language_probability missing — skipping detection")
-                            continue
-                        conf = float(lang_prob)
-                        if lang and lang != "unknown":
-                            short = lang.split("-")[0].lower()
+
+                        short = lang.split("-")[0].lower() if lang and lang != "unknown" else None
+
+                        # saaras emits one "data" message per VAD segment (multiple per
+                        # spoken turn). Accumulate into the rolling buffer; the caller
+                        # drains it once per conversational turn via take_turn_transcript().
+                        seg_prob = float(lang_prob) if lang_prob is not None else None
+                        self._accumulate(transcript, short, audio_duration, seg_prob)
+
+                        # Legacy per-segment language signal (kept for backends/telemetry
+                        # that still consume on_language). Skipped when no confidence.
+                        if self.on_language is not None and lang_prob is not None and short:
+                            conf = float(lang_prob)
                             logger.info(
                                 f"SarvamLID: detected {lang!r} (short={short!r}, duration={audio_duration:.2f}s, conf={conf:.2f})"
                             )
@@ -140,13 +278,70 @@ class SarvamLID(LIDBackend):
                 except Exception as e:
                     logger.error(f"SarvamLID receiver parse error: {e}")
         except asyncio.CancelledError:
-            pass
+            return
         except Exception as e:
             logger.error(f"SarvamLID receiver error: {e}")
-            self._dead = True
-            logger.warning("SarvamLID: receiver loop exited abnormally — LID inactive for remainder of call")
+        # Reached on BOTH a server-side graceful close (the async-for simply ends,
+        # no exception raised) and receive errors. The graceful case previously
+        # exited silently — detector mute for the rest of the call with zero log
+        # lines (QA call edbdb998: 0 segments in 21s, Tamil never detected).
+        self._schedule_reconnect("receiver closed")
+
+    def _schedule_reconnect(self, source: str):
+        """Mark the socket dead and kick off one reconnect task (idempotent)."""
+        if self._stopping:
+            return
+        self._dead = True
+        if self._reconnecting:
+            return
+        self._reconnecting = True
+        logger.error(f"SarvamLID: socket dead ({source}) — detector mute, attempting reconnect")
+        asyncio.create_task(self._reconnect())
+
+    async def _reconnect(self):
+        try:
+            # Reset the per-incident counter if the last reconnect was long ago — a
+            # drop spread well apart from the previous one is a fresh incident, not a
+            # loop. Keeps a long healthy call recovering from periodic idle-closes
+            # while still capping a rapid reject loop.
+            now = time.monotonic()
+            if now - self._last_reconnect_at > self._RECONNECT_RESET_WINDOW_S:
+                self._reconnect_attempts = 0
+            self._last_reconnect_at = now
+            if self._reconnect_attempts >= self._MAX_RECONNECTS:
+                logger.error(
+                    f"SarvamLID: reconnect cap ({self._MAX_RECONNECTS}) reached in "
+                    f"{self._RECONNECT_RESET_WINDOW_S:.0f}s — LID inactive until the next spread-out drop"
+                )
+                return
+            self._reconnect_attempts += 1
+            # Tear down whatever is left of the old connection. Cancelling the old
+            # receiver here matters on the sender-triggered path: otherwise it would
+            # observe the close of the OLD socket after we have already reconnected
+            # and schedule a spurious second reconnect against the healthy one.
+            for task in (self._sender_task, self._receiver_task):
+                if task and not task.done():
+                    task.cancel()
+            if self._ws:
+                try:
+                    await self._ws.close()
+                except Exception:
+                    pass
+            self._resample_state = None
+            await asyncio.sleep(self._RECONNECT_DELAY_S)
+            try:
+                await self.start()
+            except Exception as e:
+                logger.error(f"SarvamLID: reconnect attempt {self._reconnect_attempts} failed: {e}")
+                return
+            self._dead = False
+            self._dead_drop_logged = False
+            logger.info(f"SarvamLID: reconnected (attempt {self._reconnect_attempts}/{self._MAX_RECONNECTS})")
+        finally:
+            self._reconnecting = False
 
     async def stop(self):
+        self._stopping = True
         try:
             self._queue.put_nowait(None)
         except asyncio.QueueFull:
