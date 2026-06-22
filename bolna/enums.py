@@ -273,6 +273,13 @@ class NodeType(str, Enum):
     STATIC = "static"
 
 
+class ToolScope(str, Enum):
+    """Where a graph-agent tool is exposed: GLOBAL (every node) or NODE (only its listed nodes)."""
+
+    GLOBAL = "global"
+    NODE = "node"
+
+
 class UsageSource(str, Enum):
     """Indicates whether token counts came from the API or text estimation."""
 

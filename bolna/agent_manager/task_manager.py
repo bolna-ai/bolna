@@ -43,7 +43,16 @@ from .base_manager import BaseManager
 from .interruption_manager import InterruptionManager
 from bolna.agent_types import *
 from bolna.providers import *
-from bolna.enums import TelephonyProvider, LogComponent, LogDirection, HangupReason, NodeType, ChatRole
+from bolna.enums import (
+    TelephonyProvider,
+    LogComponent,
+    LogDirection,
+    HangupReason,
+    NodeType,
+    ChatRole,
+    ToolScope,
+    LLMProvider,
+)
 from bolna.exceptions import BolnaComponentError, LLMError, SynthesizerError, TranscriberError
 from bolna.prompts import *
 from bolna.helpers.language_detector import LanguageDetector
@@ -83,6 +92,28 @@ from .models import ComponentLatencies
 from .voicemail_handler import VoicemailHandler
 
 logger = configure_logger(__name__)
+
+
+def _inject_end_call_tool(api_tools, *, scope, nodes, description=None):
+    """Add the internal end_call tool (with scope/nodes) to api_tools; no-op if already present."""
+    if api_tools is None:
+        api_tools = {"tools": [], "tools_params": {}}
+    if END_CALL_FUNCTION_PREFIX in api_tools.get("tools_params", {}):
+        return api_tools  # already injected by the experiment path or a prior call
+    tool_def = copy.deepcopy(END_CALL_TOOL_DEFINITION)
+    if description:
+        tool_def["function"]["description"] = description
+    tools_list = api_tools.get("tools", [])
+    if isinstance(tools_list, str):
+        tools_list = json.loads(tools_list)
+    tools_list.append(tool_def)
+    api_tools["tools"] = tools_list
+    api_tools.setdefault("tools_params", {})[END_CALL_FUNCTION_PREFIX] = {
+        "pre_call_message": None,
+        "scope": scope.value if scope else None,
+        "nodes": list(nodes or []),
+    }
+    return api_tools
 
 
 def build_lid_decision_record(
@@ -548,29 +579,61 @@ class TaskManager(BaseManager):
                         )
                 self.check_for_completion_llm = os.getenv("CHECK_FOR_COMPLETION_LLM")
 
+                # Explicit end_call_scope wins over the A/B experiment for graph agents.
+                end_call_scope = self.conversation_config.get("end_call_scope")
+                if end_call_scope is not None and end_call_scope not in (
+                    ToolScope.GLOBAL.value,
+                    ToolScope.NODE.value,
+                ):
+                    logger.warning(f"Ignoring invalid end_call_scope '{end_call_scope}'")
+                    end_call_scope = None
+                cancellation_prompt = self.conversation_config.get("call_cancellation_prompt")
+                end_call_description = (
+                    (
+                        f"End the current call. Always say your goodbye message before calling this function.\n"
+                        f"Criteria for when to end: {cancellation_prompt}"
+                    )
+                    if cancellation_prompt
+                    else None
+                )
+
+                if self.__is_graph_agent() and end_call_scope:
+                    scope = ToolScope(end_call_scope)
+                    llm_config = self.task_config["tools_config"]["llm_agent"].get("llm_config", {}) or {}
+                    graph_nodes = llm_config.get("nodes", []) or []
+                    end_call_nodes = [
+                        n.get("id")
+                        for n in graph_nodes
+                        if n.get("function_call") == END_CALL_FUNCTION_PREFIX and n.get("id")
+                    ]
+                    self.kwargs["api_tools"] = _inject_end_call_tool(
+                        self.kwargs.get("api_tools"),
+                        scope=scope,
+                        nodes=end_call_nodes,
+                        description=end_call_description,
+                    )
+                    if scope == ToolScope.NODE and not end_call_nodes:
+                        logger.warning(
+                            "end_call_scope=node but no node declares function_call=end_call; end_call will be dormant"
+                        )
+                    if llm_config.get("provider") == LLMProvider.GOOGLE.value:
+                        logger.warning(
+                            "Gemini does not enforce per-node tool scoping; end_call stays visible on all nodes"
+                        )
+                    logger.info(f"end_call tool injected for graph agent with scope={scope.value}")
+
                 # A/B experiment: end_call tool as primary hangup, hangup_after_LLMCall as shadow.
-                if (
+                elif (
                     self.conversation_config.get("end_call_tool_mode") == "primary_with_shadow_hangup"
                     and self.use_llm_to_determine_hangup
-                    and self.conversation_config.get("call_cancellation_prompt")
+                    and cancellation_prompt
                 ):
-                    api_tools = self.kwargs.get("api_tools")
-                    if api_tools is None:
-                        api_tools = {"tools": [], "tools_params": {}}
-                        self.kwargs["api_tools"] = api_tools
-                    if END_CALL_FUNCTION_PREFIX not in api_tools.get("tools_params", {}):
-                        tool_def = copy.deepcopy(END_CALL_TOOL_DEFINITION)
-                        cancellation_criteria = self.conversation_config["call_cancellation_prompt"]
-                        tool_def["function"]["description"] = (
-                            f"End the current call. Always say your goodbye message before calling this function.\n"
-                            f"Criteria for when to end: {cancellation_criteria}"
-                        )
-                        tools_list = api_tools.get("tools", [])
-                        if isinstance(tools_list, str):
-                            tools_list = json.loads(tools_list)
-                        tools_list.append(tool_def)
-                        api_tools["tools"] = tools_list
-                        api_tools["tools_params"][END_CALL_FUNCTION_PREFIX] = {"pre_call_message": None}
+                    self.kwargs["api_tools"] = _inject_end_call_tool(
+                        self.kwargs.get("api_tools"),
+                        scope=ToolScope.GLOBAL,
+                        nodes=[],
+                        description=end_call_description,
+                    )
                     self.end_call_experiment = {
                         "end_call_invoked": False,
                         "end_call_reason": None,
