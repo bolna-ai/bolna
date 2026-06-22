@@ -3805,9 +3805,6 @@ class TaskManager(BaseManager):
             self.hangup_decision_at = time.time()
 
     def _should_ignore_transcriber_input(self) -> bool:
-        # A transfer hands the call off, so further user speech must not spawn new
-        # turns; otherwise the fresh audio keeps is_audio_being_played_to_user() True
-        # and the transfer POST, which waits for audio to drain, never fires.
         return self.hangup_triggered or self._end_call_in_progress or self.has_transfer
 
     async def process_call_hangup(self):
