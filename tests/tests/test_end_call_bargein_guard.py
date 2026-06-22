@@ -22,8 +22,12 @@ import pytest
 from bolna.agent_manager.task_manager import TaskManager
 
 
-def _ignore(hangup_triggered, end_call_in_progress):
-    fake = SimpleNamespace(hangup_triggered=hangup_triggered, _end_call_in_progress=end_call_in_progress)
+def _ignore(hangup_triggered, end_call_in_progress, has_transfer=False):
+    fake = SimpleNamespace(
+        hangup_triggered=hangup_triggered,
+        _end_call_in_progress=end_call_in_progress,
+        has_transfer=has_transfer,
+    )
     return TaskManager._should_ignore_transcriber_input(fake)
 
 
@@ -53,6 +57,7 @@ def _make_tm(*, end_call_in_progress, hangup_triggered):
     tm = MagicMock()
     tm.hangup_triggered = hangup_triggered
     tm._end_call_in_progress = end_call_in_progress
+    tm.has_transfer = False
     tm.stream = True
     tm.response_in_pipeline = False
     tm.transcriber_output_queue = asyncio.Queue()

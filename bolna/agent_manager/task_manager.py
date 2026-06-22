@@ -3805,7 +3805,7 @@ class TaskManager(BaseManager):
             self.hangup_decision_at = time.time()
 
     def _should_ignore_transcriber_input(self) -> bool:
-        return self.hangup_triggered or self._end_call_in_progress
+        return self.hangup_triggered or self._end_call_in_progress or self.has_transfer
 
     async def process_call_hangup(self):
         if self.hangup_decision_at is None:
