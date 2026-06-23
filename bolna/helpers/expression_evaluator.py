@@ -72,9 +72,12 @@ def _coerce_value(value: Any, declared_type: VariableType) -> Any:
     raise ValueError(f"unsupported variable type: {declared_type!r}")
 
 
-def _resolve_declared_type(variable: str, variable_types: Optional[dict]) -> Optional[VariableType]:
+def _resolve_declared_type(
+    variable: str, variable_types: Optional[dict], log_unknown: bool = True
+) -> Optional[VariableType]:
     """Resolve a variable's declared type. Keys match the condition's variable path
-    exactly. An unrecognized type name falls back to inference with a warning.
+    exactly. An unrecognized type name falls back to inference, warning once when
+    log_unknown (the trace/describe pass passes False to avoid duplicate warnings).
     """
     if not variable_types:
         return None
@@ -84,7 +87,8 @@ def _resolve_declared_type(variable: str, variable_types: Optional[dict]) -> Opt
     try:
         return VariableType(raw)
     except ValueError:
-        logger.warning(f"Unknown variable type {raw!r} for {variable!r}; falling back to inference")
+        if log_unknown:
+            logger.warning(f"Unknown variable type {raw!r} for {variable!r}; falling back to inference")
         return None
 
 
@@ -135,7 +139,7 @@ def evaluate_condition(
     if actual is _MISSING:
         return False
 
-    declared_type = _resolve_declared_type(variable, variable_types)
+    declared_type = _resolve_declared_type(variable, variable_types, log_unknown=log_failures)
     try:
         actual, expected = _coerce_operands(actual, expected, operator, declared_type)
     except (TypeError, ValueError):
@@ -201,7 +205,7 @@ def describe_condition(condition: dict, context_data: dict, variable_types: Opti
     actual = resolve_variable(context_data, variable)
     actual_repr = "<missing>" if actual is _MISSING else repr(actual)
     result = evaluate_condition(condition, context_data, variable_types, log_failures=False)
-    declared = _resolve_declared_type(variable, variable_types)
+    declared = _resolve_declared_type(variable, variable_types, log_unknown=False)
     type_note = f", as {declared.value}" if declared else ""
 
     if operator in (ExpressionOperator.EXISTS, ExpressionOperator.NOT_EXISTS):

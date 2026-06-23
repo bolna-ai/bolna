@@ -782,3 +782,12 @@ class TestVariableTypesThreading:
             matched, _ = agent._evaluate_deterministic_edges([self._age_edge()])
         assert matched is None
         assert mock_logger.warning.call_count == 1
+
+    def test_unknown_type_warns_once_per_edge(self):
+        # an invalid declared type warns once per edge, not once per evaluate + describe resolve
+        agent = _make_agent()
+        agent.variable_types = {"recipient_data.age": "int"}  # not a valid VariableType
+        agent.context_data = {"recipient_data": {"age": "21"}}
+        with patch("bolna.helpers.expression_evaluator.logger") as mock_logger:
+            agent._evaluate_deterministic_edges([self._age_edge()])
+        assert mock_logger.warning.call_count == 1
