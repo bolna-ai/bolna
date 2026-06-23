@@ -13,6 +13,7 @@ from .enums import (
     ExpressionLogic,
     EdgeConditionType,
     NodeType,
+    VariableType,
 )
 from .constants import MODEL_REASONING_EFFORT_MAP
 
@@ -404,6 +405,9 @@ class GraphAgentConfig(Llm):
     nodes: List[GraphNode]
     current_node_id: str
     context_data: Optional[dict] = None
+    # Variable path -> declared type, used to coerce expression-routing comparisons into
+    # the right domain. Keys match the condition's variable exactly (e.g. "recipient_data.age").
+    variable_types: Optional[Dict[str, VariableType]] = None
     # Global knowledge base. Nodes without their own rag_config fall back to this at retrieval time.
     rag_config: Optional[RagConfig] = None
     # Routing configuration

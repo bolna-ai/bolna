@@ -261,6 +261,12 @@ class ExpressionLogic(str, Enum):
     OR = "or"
 
 
+class VariableType(str, Enum):
+    STRING = "string"
+    NUMBER = "number"
+    BOOLEAN = "boolean"
+
+
 class EdgeConditionType(str, Enum):
     LLM = "llm"
     EXPRESSION = "expression"
