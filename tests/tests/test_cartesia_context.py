@@ -1,5 +1,5 @@
 """Cartesia context_id rules: a finalized utterance closes its context, next push opens a fresh
-one (QA 927536ad) — except the handoff doesn't finalize, so the reply continues it (QA e965b274)."""
+one — except the handoff doesn't finalize, so the reply continues it."""
 
 from unittest.mock import MagicMock
 

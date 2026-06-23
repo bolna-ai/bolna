@@ -74,7 +74,7 @@ class CartesiaSynthesizer(StreamSynthesizer):
 
     def _on_push(self, meta_info, text):
         """Fresh context_id on turn/sequence change or after the previous finalized. The handoff
-        doesn't finalize — the reply continues its context, avoiding parallel-context overlap (QA e965b274)."""
+        doesn't finalize — the reply continues its context, avoiding parallel-context overlap."""
         if meta_info.get("message_category") == "handoff" and meta_info.get("end_of_llm_stream"):
             meta_info["end_of_llm_stream"] = False
         if not self.context_id:
