@@ -157,16 +157,17 @@ class StreamSynthesizer(BaseSynthesizer):
         self.current_text = text
         self.synthesized_characters += len(text) if text else 0
         self.current_sequence_chars += len(text) if text else 0
-        end_of_llm_stream = meta_info.get("end_of_llm_stream", False)
         self.meta_info = copy.deepcopy(meta_info)
         meta_info["text"] = text
 
         # Stamp turn start on first push of a new turn
         self._stamp_turn_start(meta_info)
 
-        # Provider-specific pre-push hook (e.g. update context_id)
+        # Provider-specific pre-push hook (e.g. update context_id). Cartesia may defer the
+        # handoff's end_of_llm_stream here, so read it after the hook runs.
         self._on_push(meta_info, text)
 
+        end_of_llm_stream = meta_info.get("end_of_llm_stream", False)
         self.sender_task = asyncio.create_task(self.sender(text, meta_info.get("sequence_id"), end_of_llm_stream))
         self.text_queue.append(meta_info)
 
