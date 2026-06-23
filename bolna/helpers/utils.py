@@ -228,7 +228,8 @@ async def get_raw_audio_bytes(
 
 
 def get_md5_hash(text):
-    return hashlib.md5(text.encode()).hexdigest()
+    # Non-security hash (cache keys / ids); usedforsecurity=False documents that and clears bandit B324.
+    return hashlib.md5(text.encode(), usedforsecurity=False).hexdigest()
 
 
 def is_valid_md5(hash_string):
