@@ -207,24 +207,28 @@ class OpenAiLLM(OpenAICompatibleLLM):
             self._ws_transport = OpenAIWSConnection(api_key=api_key)
             self._ws_transport.start_connect()
 
-    async def generate_stream(self, messages, synthesize=True, request_json=False, meta_info=None, tool_choice=None):
+    async def generate_stream(
+        self, messages, synthesize=True, request_json=False, meta_info=None, tool_choice=None, tools=None
+    ):
         if self.use_responses_api:
             if self._ws_transport:
                 async for chunk in self._generate_stream_ws_responses(
-                    messages, synthesize, request_json, meta_info, tool_choice
+                    messages, synthesize, request_json, meta_info, tool_choice, tools
                 ):
                     yield chunk
             else:
                 async for chunk in self._generate_stream_responses(
-                    messages, synthesize, request_json, meta_info, tool_choice
+                    messages, synthesize, request_json, meta_info, tool_choice, tools
                 ):
                     yield chunk
         else:
-            async for chunk in self._generate_stream_chat(messages, synthesize, request_json, meta_info, tool_choice):
+            async for chunk in self._generate_stream_chat(
+                messages, synthesize, request_json, meta_info, tool_choice, tools
+            ):
                 yield chunk
 
     async def _generate_stream_chat(
-        self, messages, synthesize=True, request_json=False, meta_info=None, tool_choice=None
+        self, messages, synthesize=True, request_json=False, meta_info=None, tool_choice=None, tools=None
     ):
         if not messages or len(messages) == 0:
             raise Exception("No messages provided")
@@ -242,9 +246,11 @@ class OpenAiLLM(OpenAICompatibleLLM):
             model_args["stop"] = ["User:"]
 
         if self.trigger_function_call:
-            model_args["tools"] = json.loads(self.tools) if isinstance(self.tools, str) else self.tools
-            model_args["tool_choice"] = tool_choice or "auto"
-            model_args["parallel_tool_calls"] = False
+            _tools = self._parse_tools(tools)
+            if _tools:  # omit tools when none are visible this turn (an empty array is a 400)
+                model_args["tools"] = _tools
+                model_args["tool_choice"] = tool_choice or "auto"
+                model_args["parallel_tool_calls"] = False
 
         answer, buffer = "", ""
         tools = model_args.get("tools", [])
@@ -492,7 +498,7 @@ class OpenAiLLM(OpenAICompatibleLLM):
             return {"type": "text"}
 
     async def _generate_stream_ws_responses(
-        self, messages, synthesize=True, request_json=False, meta_info=None, tool_choice=None
+        self, messages, synthesize=True, request_json=False, meta_info=None, tool_choice=None, tools=None
     ):
         """Stream via persistent WebSocket — same interface as _generate_stream_responses."""
         if not messages:
@@ -501,7 +507,7 @@ class OpenAiLLM(OpenAICompatibleLLM):
         # store=True activates server-side prompt-cache (cached_tokens in usage)
         # on top of the WS connection-local cache. Storage is free per OpenAI.
         create_params, responses_tools = self._build_responses_create_kwargs(
-            messages, meta_info, request_json, tool_choice, store=True
+            messages, meta_info, request_json, tool_choice, store=True, tools=tools
         )
 
         # WS endpoint silently closes on float temperature — coerce to int

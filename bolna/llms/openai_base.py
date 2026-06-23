@@ -116,6 +116,14 @@ class OpenAICompatibleLLM(BaseLLM):
             logger.warning(f"Text tool call rescue: '{func_name}' not in api_params, falling back to TTS")
             return None
 
+        # Respect per-call tool visibility (node scoping): only rescue a tool offered this turn.
+        offered = model_args.get("tools") or []
+        if isinstance(offered, str):
+            offered = json.loads(offered)
+        if not any(t.get("function", {}).get("name") == func_name for t in offered):
+            logger.warning(f"Text tool call rescue: '{func_name}' not offered this turn, falling back to TTS")
+            return None
+
         func_conf = self.api_params[func_name]
         method = func_conf.get("method")
 
@@ -141,8 +149,7 @@ class OpenAICompatibleLLM(BaseLLM):
         )
 
         # Mirror ToolCallAccumulator.build_api_payload: validate required keys against the tool spec
-        tools_list = json.loads(self.tools) if isinstance(self.tools, str) else (self.tools or [])
-        tool_spec = next((t for t in tools_list if t.get("function", {}).get("name") == func_name), None)
+        tool_spec = next((t for t in offered if t.get("function", {}).get("name") == func_name), None)
 
         try:
             parsed_args = json.loads(args_str)
@@ -249,11 +256,12 @@ class OpenAICompatibleLLM(BaseLLM):
         """
         return isinstance(error, BadRequestError)
 
-    def _parse_tools(self):
-        """Parse tools from string or list format."""
+    def _parse_tools(self, tools=None):
+        """Parse tools from string or list format. ``tools`` overrides ``self.tools`` when given."""
         if not self.trigger_function_call:
             return []
-        return json.loads(self.tools) if isinstance(self.tools, str) else self.tools
+        src = tools if tools is not None else self.tools
+        return json.loads(src) if isinstance(src, str) else src
 
     def invalidate_response_chain(self):
         self.previous_response_id = None
@@ -336,11 +344,11 @@ class OpenAICompatibleLLM(BaseLLM):
         return LLMStreamChunk(data=api_call_payload, end_of_stream=False, latency=latency_data, is_function_call=True)
 
     def _build_responses_create_kwargs(
-        self, messages, meta_info, request_json, tool_choice, *, store=True, stream=None
+        self, messages, meta_info, request_json, tool_choice, *, store=True, stream=None, tools=None
     ):
         """Build create kwargs common to both HTTP SSE and WebSocket streaming paths."""
         _, input_items = self._build_responses_input(messages)
-        responses_tools = MessageFormatAdapter.chat_tools_to_responses_tools(self._parse_tools())
+        responses_tools = MessageFormatAdapter.chat_tools_to_responses_tools(self._parse_tools(tools))
 
         create_kwargs = {
             "model": self.model,
@@ -389,13 +397,13 @@ class OpenAICompatibleLLM(BaseLLM):
         return create_kwargs, responses_tools
 
     async def _generate_stream_responses(
-        self, messages, synthesize=True, request_json=False, meta_info=None, tool_choice=None
+        self, messages, synthesize=True, request_json=False, meta_info=None, tool_choice=None, tools=None
     ):
         if not messages:
             raise ValueError("No messages provided")
 
         create_kwargs, responses_tools = self._build_responses_create_kwargs(
-            messages, meta_info, request_json, tool_choice, store=True, stream=True
+            messages, meta_info, request_json, tool_choice, store=True, stream=True, tools=tools
         )
 
         answer, buffer = "", ""
@@ -424,7 +432,7 @@ class OpenAICompatibleLLM(BaseLLM):
                     )
                 self.previous_response_id = None
                 async for chunk in self._generate_stream_responses(
-                    messages, synthesize, request_json, meta_info, tool_choice
+                    messages, synthesize, request_json, meta_info, tool_choice, tools
                 ):
                     yield chunk
                 return

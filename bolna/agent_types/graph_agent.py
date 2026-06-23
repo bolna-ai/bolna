@@ -20,7 +20,7 @@ from bolna.helpers.utils import (
     get_md5_hash,
 )
 from bolna.helpers.expression_evaluator import evaluate_edge_expression, describe_edge_expression
-from bolna.enums import EdgeConditionType, NodeType
+from bolna.enums import EdgeConditionType, NodeType, ToolScope
 from bolna.llms.types import LLMStreamChunk, LatencyData
 from bolna.llms import OpenAiLLM
 from bolna.providers import SUPPORTED_LLM_PROVIDERS
@@ -758,6 +758,41 @@ class GraphAgent(BaseAgent):
         logger.info(f"Node '{self.current_node_id}' forcing specific function: {fn}")
         return {"type": "function", "function": {"name": fn}}
 
+    def _tools_for_node(self, node: Optional[dict], forced_name: Optional[str] = None) -> Optional[List[dict]]:
+        """Tools visible on this node (global + node-scoped + forced), or None to use the full set.
+
+        forced_name is the tool the resolved tool_choice forces this turn (or None); a forced tool
+        must stay visible for the tool_choice to be valid, but only when the force actually survives.
+        """
+        if not self.llm or not getattr(self.llm, "trigger_function_call", False):
+            return None
+        raw = getattr(self.llm, "tools", None)
+        if not raw:
+            return None
+        full = json.loads(raw) if isinstance(raw, str) else raw
+        if not full:
+            return None
+
+        api_params = getattr(self.llm, "api_params", {}) or {}
+        node_id = node.get("id") if node else None
+        forced = forced_name
+
+        subset = []
+        for tool in full:
+            name = tool.get("function", {}).get("name")
+            params = api_params.get(name, {}) or {}
+            if name == forced:
+                subset.append(tool)  # must stay visible so the forced tool_choice is valid
+            elif params.get("scope") == ToolScope.NODE.value:
+                if node_id is not None and node_id in (params.get("nodes") or []):
+                    subset.append(tool)
+            else:
+                subset.append(tool)
+
+        if len(subset) == len(full):
+            return None  # nothing filtered -> let generate_stream use self.tools
+        return subset
+
     def _missing_forced_function_vars(self, node: dict, fn: str) -> List[str]:
         tools = getattr(self.llm, "tools", None) or []
         if isinstance(tools, str):
@@ -904,8 +939,10 @@ class GraphAgent(BaseAgent):
                 )
                 yield {"messages": messages}
                 tool_choice = self._get_tool_choice_for_node(history=message)
+                forced_name = tool_choice["function"]["name"] if tool_choice else None
+                node_tools = self._tools_for_node(current_node, forced_name)
                 async for chunk in self.llm.generate_stream(
-                    messages, synthesize=synthesize, meta_info=meta_info, tool_choice=tool_choice
+                    messages, synthesize=synthesize, meta_info=meta_info, tool_choice=tool_choice, tools=node_tools
                 ):
                     yield chunk
                 return
@@ -981,8 +1018,10 @@ class GraphAgent(BaseAgent):
             messages = await self._build_messages(message, meta_info=meta_info)
             yield {"messages": messages}
             tool_choice = self._get_tool_choice_for_node(history=message)
+            forced_name = tool_choice["function"]["name"] if tool_choice else None
+            node_tools = self._tools_for_node(current_node, forced_name)
             async for chunk in self.llm.generate_stream(
-                messages, synthesize=synthesize, meta_info=meta_info, tool_choice=tool_choice
+                messages, synthesize=synthesize, meta_info=meta_info, tool_choice=tool_choice, tools=node_tools
             ):
                 yield chunk
 
