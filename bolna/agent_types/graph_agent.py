@@ -51,6 +51,7 @@ class GraphAgent(BaseAgent):
         self.agent_information = self.config.get("agent_information")
         self.current_node_id = self.config.get("current_node_id")
         self.context_data = self.config.get("context_data") or {}
+        self.variable_types = self.config.get("variable_types") or {}
         self.llm_model = self.config.get("model")
 
         # Get credentials from config (injected by task_manager) or fall back to env vars
@@ -412,9 +413,9 @@ class GraphAgent(BaseAgent):
         """Return (first matching deterministic edge or None, per-edge evaluation traces)."""
         evaluations = []
         for edge in edges:
-            is_match = evaluate_edge_expression(edge, self.context_data)
+            is_match = evaluate_edge_expression(edge, self.context_data, self.variable_types)
             evaluations.append(
-                f"-> {edge.get('to_node_id')}: {describe_edge_expression(edge, self.context_data)} | matched={is_match}"
+                f"-> {edge.get('to_node_id')}: {describe_edge_expression(edge, self.context_data, self.variable_types)} | matched={is_match}"
             )
             if is_match:
                 return edge, evaluations
