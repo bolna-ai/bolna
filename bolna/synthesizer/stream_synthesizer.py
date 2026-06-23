@@ -163,8 +163,7 @@ class StreamSynthesizer(BaseSynthesizer):
         # Stamp turn start on first push of a new turn
         self._stamp_turn_start(meta_info)
 
-        # Provider-specific pre-push hook (e.g. update context_id). Cartesia may defer the
-        # handoff's end_of_llm_stream here, so read it after the hook runs.
+        # Pre-push hook (e.g. context_id); Cartesia may defer end_of_llm_stream, so read it after.
         self._on_push(meta_info, text)
 
         end_of_llm_stream = meta_info.get("end_of_llm_stream", False)

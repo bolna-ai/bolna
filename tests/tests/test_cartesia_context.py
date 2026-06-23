@@ -1,9 +1,5 @@
-"""Cartesia context_id rules:
-- A finalized utterance closes its context; the next push opens a fresh one (else a reply on a
-  closed context is starved, QA 927536ad).
-- EXCEPT the switch handoff, which is immediately followed by the reply (both seq=-1): the
-  handoff must NOT finalize — the reply continues the same context, so the two render
-  sequentially in one stream instead of as two parallel contexts that interleave (QA e965b274)."""
+"""Cartesia context_id rules: a finalized utterance closes its context, next push opens a fresh
+one (QA 927536ad) — except the handoff doesn't finalize, so the reply continues it (QA e965b274)."""
 
 from unittest.mock import MagicMock
 
@@ -27,21 +23,18 @@ def _push(s, meta):
 
 
 def test_handoff_defers_finalize_so_reply_continues_same_context():
-    # Handoff (message_category="handoff", eot) then reply — both seq=-1. The handoff must NOT
-    # finalize its context; the reply continues it so they render sequentially (no overlap).
     s = _synth()
     handoff_meta = {"sequence_id": -1, "end_of_llm_stream": True, "message_category": "handoff"}
     _push(s, handoff_meta)
     ctx_handoff = s.context_id
-    assert handoff_meta["end_of_llm_stream"] is False  # finalize deferred to the reply
+    assert handoff_meta["end_of_llm_stream"] is False  # deferred
     assert s.context_finalized is False
     _push(s, {"sequence_id": -1, "end_of_llm_stream": True, "message_category": "language_switch_followup"})
-    assert s.context_id == ctx_handoff  # reply continues the SAME context
-    assert s.context_finalized is True  # reply finalizes it
+    assert s.context_id == ctx_handoff  # reply continues the same context
+    assert s.context_finalized is True
 
 
 def test_non_handoff_back_to_back_eot_gets_fresh_context():
-    # Two finalized utterances that aren't the handoff still get separate contexts (QA 927536ad).
     s = _synth()
     _push(s, {"sequence_id": -1, "end_of_llm_stream": True})
     ctx_a = s.context_id
