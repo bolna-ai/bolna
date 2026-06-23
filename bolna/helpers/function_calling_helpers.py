@@ -214,6 +214,7 @@ def build_get_url(url, api_params):
 async def trigger_api(
     url, method, param, api_token, headers_data, meta_info, run_id, return_response_metadata=False, **kwargs
 ):
+    timeout_seconds = 10
     try:
         await validate_outbound_url(url)
         prepared_request = prepare_api_request(param, api_token, headers_data, **kwargs)
@@ -230,7 +231,7 @@ async def trigger_api(
             is_cached=False,
             run_id=run_id,
         )
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=timeout_seconds)) as session:
             response = None
             response_text = None
             if method.lower() == "get":
@@ -295,11 +296,11 @@ async def trigger_api(
             }
         return message
     except asyncio.TimeoutError:
-        message = f"ERROR CALLING API: Request to {url} timed out after 10 seconds"
+        message = f"ERROR CALLING API: Request to {url} timed out after {timeout_seconds} seconds"
         logger.debug(message)
         if run_id:
             convert_to_request_log(
-                format_error_message("function_call", url, "Timed out after 10 seconds"),
+                format_error_message("function_call", url, f"Timed out after {timeout_seconds} seconds"),
                 meta_info,
                 model=None,
                 component=LogComponent.WARNING,
@@ -312,7 +313,7 @@ async def trigger_api(
                 "status_code": None,
                 "body": message,
                 "content_type": None,
-                "error": "Timed out after 10 seconds",
+                "error": f"Timed out after {timeout_seconds} seconds",
             }
         return message
     except Exception as e:
