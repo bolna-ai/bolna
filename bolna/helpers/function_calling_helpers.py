@@ -295,11 +295,11 @@ async def trigger_api(
             }
         return message
     except asyncio.TimeoutError:
-        message = f"ERROR CALLING API: Request to {url} timed out after 5 seconds"
+        message = f"ERROR CALLING API: Request to {url} timed out after 10 seconds"
         logger.debug(message)
         if run_id:
             convert_to_request_log(
-                format_error_message("function_call", url, "Timed out after 5 seconds"),
+                format_error_message("function_call", url, "Timed out after 10 seconds"),
                 meta_info,
                 model=None,
                 component=LogComponent.WARNING,
@@ -312,7 +312,7 @@ async def trigger_api(
                 "status_code": None,
                 "body": message,
                 "content_type": None,
-                "error": "Timed out after 5 seconds",
+                "error": "Timed out after 10 seconds",
             }
         return message
     except Exception as e:
