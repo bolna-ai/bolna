@@ -43,6 +43,18 @@ logger = configure_logger(__name__)
 _DETERMINISTIC_REASONING_PREFIX = "deterministic:"
 _PROMPT_VAR_PATTERN = re.compile(r"\{([a-zA-Z_][a-zA-Z0-9_]*)\}")
 
+# Time variables frozen per call for the conversation prompt; see _prompt_context.
+_TIME_VAR_KEYS = (
+    "current_date",
+    "current_time",
+    "current_hour",
+    "current_minute",
+    "current_weekday",
+    "current_day",
+    "current_month",
+    "current_year",
+)
+
 
 class GraphAgent(BaseAgent):
     def __init__(self, config: GraphAgentConfig):
@@ -70,6 +82,7 @@ class GraphAgent(BaseAgent):
         self._silence_repeats = 0
         self._event_triggered_generation = False
         self._last_deterministic_eval = None
+        self._frozen_time_vars: Optional[Dict[str, Any]] = None
         self.rag_configs = self.initialize_rag_configs()
         self.global_rag_config = self._initialize_global_rag_config()
         self.rag_server_url = os.getenv("RAG_SERVER_URL", "http://localhost:8000")
@@ -824,8 +837,27 @@ class GraphAgent(BaseAgent):
             return False
         return any(msg.get("role") == "tool" and msg.get("tool_call_id") in call_ids_for_fn for msg in node_history)
 
+    def _prompt_context(self) -> Optional[dict]:
+        """Context for prompt substitution with time frozen at call start.
+
+        Routing re-enriches time live each turn for expression edges; the prompt
+        freezes it so its text stays identical across turns and the prompt cache
+        keeps hitting, matching normal agents which render time once at setup.
+        """
+        if not self.context_data or not isinstance(self.context_data.get("recipient_data"), dict):
+            return self.context_data
+        recipient = self.context_data["recipient_data"]
+        if self._frozen_time_vars is None:
+            timezone_str = recipient.get("timezone")
+            if timezone_str:
+                enrich_context_with_time_variables(self.context_data, timezone_str)
+            self._frozen_time_vars = {k: recipient[k] for k in _TIME_VAR_KEYS if k in recipient}
+        if not self._frozen_time_vars:
+            return self.context_data
+        return {**self.context_data, "recipient_data": {**recipient, **self._frozen_time_vars}}
+
     async def _build_messages(self, history: List[dict], meta_info: Optional[dict] = None) -> List[dict]:
-        """Build messages array: system prompt (+ optional RAG) + conversation history."""
+        """Build messages array: system prompt + conversation history (+ optional trailing RAG)."""
         current_node = self.get_node_by_id(self.current_node_id)
         if not current_node:
             raise ValueError("Current node not found.")
@@ -833,21 +865,21 @@ class GraphAgent(BaseAgent):
         detected_lang = self.context_data.get("detected_language")  # None if not yet detected
         node_prompt = self._get_prompt_with_example(current_node, detected_lang)
 
-        if self.context_data:
-            timezone_str = self.context_data.get("recipient_data", {}).get("timezone")
-            if timezone_str:
-                enrich_context_with_time_variables(self.context_data, timezone_str)
-            node_prompt = update_prompt_with_context(node_prompt, self.context_data)
+        prompt_context = self._prompt_context()
+        if prompt_context:
+            node_prompt = update_prompt_with_context(node_prompt, prompt_context)
 
         if self.agent_information:
             agent_info = self.agent_information
-            if self.context_data:
-                agent_info = update_prompt_with_context(agent_info, self.context_data)
+            if prompt_context:
+                agent_info = update_prompt_with_context(agent_info, prompt_context)
             prompt = f"{agent_info}\n\n{node_prompt}"
         else:
             prompt = node_prompt
 
-        # Try RAG: node-level config wins, otherwise fall back to the global (agent-level) config
+        # RAG depends on the latest message, so it goes in a trailing message rather
+        # than the system prompt, keeping [system + history] a cacheable prefix.
+        rag_message = None
         rag_config = self.rag_configs.get(self.current_node_id) or self.global_rag_config
         if rag_config and rag_config.get("collections"):
             try:
@@ -869,7 +901,10 @@ class GraphAgent(BaseAgent):
                     }
                 if rag_response.contexts:
                     rag_context = await client.format_context_for_prompt(rag_response.contexts)
-                    prompt = f"{prompt}\n\nKnowledge base:\n{rag_context}\n\nUse this information naturally."
+                    rag_message = {
+                        "role": "system",
+                        "content": f"Knowledge base for the latest user message:\n{rag_context}\n\nUse this information naturally.",
+                    }
             except Exception as e:
                 logger.error(f"RAG error for node {self.current_node_id}: {e}")
 
@@ -878,7 +913,10 @@ class GraphAgent(BaseAgent):
 
         # Pass conversation history as-is to preserve tool_calls/tool_call_id fields
         conversation = [msg for msg in history_subset if msg.get("role") != "system"]
-        return [{"role": "system", "content": prompt}] + conversation
+        messages = [{"role": "system", "content": prompt}] + conversation
+        if rag_message:
+            messages.append(rag_message)
+        return messages
 
     async def generate(self, message: List[dict], **kwargs) -> AsyncGenerator:
         meta_info = kwargs.get("meta_info", {})
