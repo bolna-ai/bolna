@@ -16,9 +16,29 @@ class StreamingContextualAgent(BaseAgent):
     def __init__(self, llm):
         super().__init__()
         self.llm = llm
-        self.conversation_completion_llm = OpenAiLLM(model=os.getenv("CHECK_FOR_COMPLETION_LLM", llm.model))
+        self.conversation_completion_llm = self._build_completion_llm(llm)
         self.voicemail_llm = OpenAiLLM(model=os.getenv("VOICEMAIL_DETECTION_LLM", "gpt-4.1-mini"))
         self.history = [{"content": ""}]
+
+    @staticmethod
+    def _build_completion_llm(llm):
+        """Build the hangup/completion-check LLM using the SAME provider as the main LLM.
+
+        Hard-coding OpenAiLLM here sent non-OpenAI credentials (e.g. a Groq key routed
+        through LiteLLM) to the OpenAI API, so check_for_completion failed with a 401 and
+        the agent never replied (bolna-ai/bolna#224, #742). We rebuild with the main LLM's
+        provider class and carry over its resolved credentials so the right endpoint is hit.
+        """
+        completion_model = os.getenv("CHECK_FOR_COMPLETION_LLM", llm.model)
+        kwargs = {"model": completion_model}
+        # Carry over credentials that the main LLM resolved (LiteLLM stores these).
+        if getattr(llm, "api_key", None):
+            kwargs["llm_key"] = llm.api_key
+        if getattr(llm, "api_base", None):
+            kwargs["base_url"] = llm.api_base
+        if getattr(llm, "api_version", None):
+            kwargs["api_version"] = llm.api_version
+        return type(llm)(**kwargs)
 
     async def check_for_completion(self, messages, check_for_completion_prompt, meta_info=None):
         try:
