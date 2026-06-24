@@ -354,7 +354,7 @@ def _make_transfer_self(tool_conf):
         transfer_call_events=[],
         conversation_start_init_ts=0,
         conversation_history=MagicMock(),
-        end_call_experiment=None,
+        end_call_primary=False,
         _start_api_call_detail=MagicMock(return_value={"latency_ms": 1.0}),
         _extract_api_call_runtime_args=MagicMock(return_value={}),
         _finalize_api_call_detail=MagicMock(),
