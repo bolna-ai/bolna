@@ -4484,9 +4484,7 @@ class TaskManager(BaseManager):
                         # Starting a new turn here cancels the in-flight tool call before its result is
                         # recorded, so the LLM re-emits the same tool and the side effect runs twice.
                         if self.function_call_in_flight:
-                            logger.info(
-                                f"Tool call in flight; deferring barge-in transcript {transcript_content!r}"
-                            )
+                            logger.info(f"Tool call in flight; deferring barge-in transcript {transcript_content!r}")
                             self.interruption_manager.on_user_speech_ended(update_utterance_time=False)
                             continue
 
