@@ -73,8 +73,10 @@ class CartesiaSynthesizer(StreamSynthesizer):
         return "mulaw"
 
     def _on_push(self, meta_info, text):
-        """New context_id on turn/sequence change, or after the previous context was finalized
-        (back-to-back utterances sharing turn/seq, e.g. switch handoff+reply, must not reuse it)."""
+        """Fresh context_id on turn/sequence change or after the previous finalized. The handoff
+        doesn't finalize — the reply continues its context, avoiding parallel-context overlap."""
+        if meta_info.get("message_category") == "handoff" and meta_info.get("end_of_llm_stream"):
+            meta_info["end_of_llm_stream"] = False
         if not self.context_id:
             self._update_context(meta_info)
         elif self.context_finalized:
