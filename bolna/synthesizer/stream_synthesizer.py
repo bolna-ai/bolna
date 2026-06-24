@@ -255,6 +255,9 @@ class StreamSynthesizer(BaseSynthesizer):
             if audio == b"\x00":
                 logger.info(f"{self.provider_name}: end of stream")
                 self.meta_info["end_of_synthesizer_stream"] = True
+                # eos may pop a non-final chunk's meta; carry end_of_llm_stream so is_final_chunk fires
+                if self.last_text_sent:
+                    self.meta_info["end_of_llm_stream"] = True
                 self.first_chunk_generated = False
                 self._record_turn_latency()
             else:
