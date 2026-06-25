@@ -311,6 +311,11 @@ class Llm(BaseModel):
     verbosity: Optional[Verbosity] = None
     use_responses_api: Optional[bool] = False
     compact_threshold: Optional[int] = None
+    # Variable path -> declared type. Coerces values into the right domain for typed state
+    # seeding, the pinned state block, and expression-routing comparisons. Keys are exact
+    # dot-notation paths (e.g. "recipient_data.age", "state.otp_verified"). Available on
+    # every agent type (graph and simple) since it lives on the base Llm config.
+    variable_types: Optional[Dict[str, VariableType]] = None
 
     @model_validator(mode="after")
     def validate_reasoning_effort_for_model(self):
@@ -405,9 +410,7 @@ class GraphAgentConfig(Llm):
     nodes: List[GraphNode]
     current_node_id: str
     context_data: Optional[dict] = None
-    # Variable path -> declared type, used to coerce expression-routing comparisons into
-    # the right domain. Keys match the condition's variable exactly (e.g. "recipient_data.age").
-    variable_types: Optional[Dict[str, VariableType]] = None
+    # variable_types is inherited from the base Llm config.
     # Global knowledge base. Nodes without their own rag_config fall back to this at retrieval time.
     rag_config: Optional[RagConfig] = None
     # Routing configuration

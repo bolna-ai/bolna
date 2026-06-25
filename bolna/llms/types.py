@@ -1,4 +1,4 @@
-from typing import Any, List, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 
 from pydantic import BaseModel, ConfigDict
 
@@ -17,6 +17,10 @@ class APIParams(BaseModel):
     # Graph-agent tool scope; None == GLOBAL. NODE limits visibility to ``nodes``.
     scope: Optional[ToolScope] = None
     nodes: Optional[List[str]] = None
+    # Typed-state write path: maps a state path (e.g. "state.credit_limit") to a
+    # dot-notation field in this tool's JSON response. Applied and type-coerced after
+    # the tool returns, writing into context_data["state"].
+    response_assignments: Optional[Dict[str, str]] = None
 
 
 class LatencyData(BaseModel):

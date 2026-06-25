@@ -13,6 +13,7 @@ from bolna.helpers.logger_config import configure_logger
 logger = configure_logger(__name__)
 
 _MISSING = object()
+MISSING = _MISSING  # public alias so sibling modules can test for "path not found"
 
 _COMPARISON_OPS = {
     ExpressionOperator.EQ: op.eq,
@@ -33,6 +34,20 @@ def resolve_variable(context_data: dict, path: str) -> Any:
         else:
             return _MISSING
     return current
+
+
+def set_variable(context_data: dict, path: str, value: Any) -> None:
+    """Dot-notation setter (the write twin of resolve_variable), creating intermediate
+    dicts as needed."""
+    segments = path.split(".")
+    current = context_data
+    for segment in segments[:-1]:
+        nxt = current.get(segment)
+        if not isinstance(nxt, dict):
+            nxt = {}
+            current[segment] = nxt
+        current = nxt
+    current[segments[-1]] = value
 
 
 _TRUE_TOKENS = {"true", "1", "yes"}
@@ -90,6 +105,13 @@ def _resolve_declared_type(
         if log_unknown:
             logger.warning(f"Unknown variable type {raw!r} for {variable!r}; falling back to inference")
         return None
+
+
+def coerce_to_type(value: Any, variable: str, variable_types: Optional[dict]) -> Any:
+    """Coerce value to the type declared for `variable`, or return it unchanged if no
+    known type is declared. Raises TypeError/ValueError if coercion fails."""
+    declared = _resolve_declared_type(variable, variable_types, log_unknown=False)
+    return _coerce_value(value, declared) if declared is not None else value
 
 
 def _coerce_operands(actual: Any, expected: Any, operator: str, declared_type: Optional[VariableType]):
