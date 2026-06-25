@@ -907,6 +907,28 @@ def timestamp_ms() -> float:
     return time.time() * 1000
 
 
+# Matches leaked internal-id tool fragments a model may echo into spoken text, e.g.
+# "{call_sid:6646c0f7-...}" or '{"call_sid": "..."}' (also stream_sid). These are never
+# legitimate speech and must be stripped before reaching the synthesizer.
+CALL_IDENTIFIER_LEAK_PATTERN = re.compile(r"""\{\s*["']?(?:call_sid|stream_sid)["']?\s*[:=][^{}]*\}""")
+
+
+def redact_call_identifiers(text):
+    """Strip leaked internal call identifiers (call_sid/stream_sid) from text headed to TTS.
+
+    Defense-in-depth for the agent-reads-the-call-sid-aloud bug: the primary fix removes
+    call_sid from the prompt, but a model can still hallucinate such a fragment. Returns the
+    input unchanged when it isn't a string or contains no such fragment.
+    """
+    if not text or not isinstance(text, str) or "sid" not in text:
+        return text
+    if not CALL_IDENTIFIER_LEAK_PATTERN.search(text):
+        return text
+    cleaned = CALL_IDENTIFIER_LEAK_PATTERN.sub("", text)
+    # Collapse the double/dangling space left where the fragment was removed.
+    return re.sub(r"[ \t]{2,}", " ", cleaned).strip()
+
+
 def structure_system_prompt(
     system_prompt, run_id, assistant_id, call_sid, context_data, timezone, is_web_based_call=False
 ):
@@ -921,8 +943,10 @@ def structure_system_prompt(
         if not is_web_based_call:
             final_prompt = update_prompt_with_context(system_prompt, context_data)
 
-        if call_sid:
-            default_variables["call_sid"] = call_sid
+        # call_sid is deliberately NOT exposed as a prompt variable: the model would echo it
+        # into spoken text (and into the required transfer_call call_sid arg), yet the real sid
+        # is always injected server-side in __execute_function_call via get_call_sid(). Exposing
+        # it only risks the agent reading the internal id aloud during a transfer.
 
         final_prompt = f"{final_prompt}\n\n## Call information:\n\n### Variables:\n"
         for k, v in default_variables.items():
