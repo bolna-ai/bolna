@@ -70,6 +70,7 @@ class TranscriberProvider(str, Enum):
     ELEVENLABS = "elevenlabs"
     SMALLEST = "smallest"
     OPENAI = "openai"
+    SONIOX = "soniox"
 
     @classmethod
     def all_values(cls):
