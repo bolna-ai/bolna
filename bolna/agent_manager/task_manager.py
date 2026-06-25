@@ -100,15 +100,9 @@ logger = configure_logger(__name__)
 
 
 def _state_json_type(declared) -> str:
-    """Map a declared variable type (bare type, value string, or spec) to a JSON-schema
-    scalar type. Enum maps to string; its allowed set is attached separately."""
-    if isinstance(declared, dict):
-        value = declared.get("type")
-    elif hasattr(declared, "type"):  # a VariableSpec instance
-        value = declared.type
-    else:
-        value = declared
-    value = value.value if hasattr(value, "value") else value
+    """Map a declared variable type (bare type or spec dict) to a JSON-schema scalar
+    type. Enum maps to string; its allowed set is attached separately."""
+    value = declared.get("type") if isinstance(declared, dict) else declared
     return value if value in ("number", "boolean") else "string"
 
 

@@ -322,7 +322,8 @@ class Llm(BaseModel):
     # state block, write coercion, and expression-routing comparisons. Keys are exact
     # dot-notation paths (e.g. "recipient_data.age", "state.otp_verified"). A value is
     # either a bare type ("boolean") or a VariableSpec ({"type": "enum", "values": [...]})
-    # for enum-constrained variables. Available on every agent type since it lives on Llm.
+    # for enum-constrained variables. VariableSpec validates the spec shape at the config
+    # boundary; the runtime reads the raw values. Available on every agent type via Llm.
     variable_types: Optional[Dict[str, Union[VariableType, VariableSpec]]] = None
 
     @model_validator(mode="after")
