@@ -60,7 +60,6 @@ from bolna.transcriber.transcriber_pool import TranscriberPool
 from bolna.synthesizer.synthesizer_pool import SynthesizerPool
 from bolna.helpers.utils import (
     structure_system_prompt,
-    redact_call_identifiers,
     compute_function_pre_call_message,
     select_message_by_language,
     get_date_time_from_timezone,
@@ -5645,14 +5644,6 @@ class TaskManager(BaseManager):
     async def _synthesize(self, message):
         meta_info = message["meta_info"]
         text = message["data"]
-        # Strip leaked internal ids (e.g. {call_sid:...}) before TTS — never read them aloud.
-        # Skip md5-hashed/preprocessed audio refs, whose "data" is a hash, not speakable text.
-        if isinstance(text, str) and not meta_info.get("is_md5_hash"):
-            redacted = redact_call_identifiers(text)
-            if redacted != text:
-                logger.warning(f"Redacted leaked call identifier from synthesizer text for run_id={self.run_id}")
-                text = redacted
-                message["data"] = text
         meta_info["type"] = "audio"
         meta_info["synthesizer_start_time"] = time.time()
         meta_info["tts_start_ms"] = round(

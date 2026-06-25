@@ -1,3 +1,4 @@
+import copy
 import json
 import re
 from typing import Optional
@@ -6,7 +7,12 @@ from openai import BadRequestError, APIError
 
 from bolna.constants import GPT5_MODEL_PREFIX
 from bolna.enums import ChatRole, ResponseStreamEvent, ResponseItemType, LogComponent, LogDirection
-from bolna.helpers.utils import convert_to_request_log, compute_function_pre_call_message, now_ms
+from bolna.helpers.utils import (
+    convert_to_request_log,
+    compute_function_pre_call_message,
+    now_ms,
+    SERVER_OWNED_CALL_IDENTIFIERS,
+)
 from .llm import BaseLLM
 from .message_models import MessageFormatAdapter
 from .types import APIParams, LLMStreamChunk, LatencyData, FunctionCallPayload
@@ -19,6 +25,25 @@ def _clean_rescue_answer(answer: str) -> str | None:
     """Strip leftover 'functions' / 'functions.xxx' tokens from a rescue textual_response."""
     cleaned = re.sub(r"\bfunctions(\.\w+)?\b", "", answer).strip()
     return cleaned if cleaned else None
+
+
+def _strip_server_injected_params(tools):
+    """Drop server-owned ids (call_sid/stream_sid) from each tool schema so the model can't echo them."""
+    cleaned = []
+    for tool in tools:
+        params = tool.get("function", {}).get("parameters")
+        props = params.get("properties") if isinstance(params, dict) else None
+        if not props or not any(k in props for k in SERVER_OWNED_CALL_IDENTIFIERS):
+            cleaned.append(tool)
+            continue
+        tool = copy.deepcopy(tool)
+        params = tool["function"]["parameters"]
+        for key in SERVER_OWNED_CALL_IDENTIFIERS:
+            params["properties"].pop(key, None)
+            if isinstance(params.get("required"), list) and key in params["required"]:
+                params["required"].remove(key)
+        cleaned.append(tool)
+    return cleaned
 
 
 class OpenAICompatibleLLM(BaseLLM):
@@ -79,6 +104,8 @@ class OpenAICompatibleLLM(BaseLLM):
         raw = text[start:end]
         if raw.startswith("("):
             raw = raw[1:-1].strip()
+        if not raw:
+            return func_name, "{}"
 
         try:
             json.loads(raw)
@@ -107,10 +134,15 @@ class OpenAICompatibleLLM(BaseLLM):
             return None
 
         parsed = self._parse_text_tool_call(text)
-        if not parsed:
-            return None
-
-        func_name, args_str = parsed
+        if parsed:
+            func_name, args_str = parsed
+            args_recovered = False
+        else:
+            # Args unparseable (e.g. truncated call): recover the name, fire only if no required args.
+            m = re.search(r"functions\.(\w+)", text)
+            if not m:
+                return None
+            func_name, args_str, args_recovered = m.group(1), "{}", True
 
         if func_name not in self.api_params:
             logger.warning(f"Text tool call rescue: '{func_name}' not in api_params, falling back to TTS")
@@ -120,8 +152,13 @@ class OpenAICompatibleLLM(BaseLLM):
         offered = model_args.get("tools") or []
         if isinstance(offered, str):
             offered = json.loads(offered)
-        if not any(t.get("function", {}).get("name") == func_name for t in offered):
+        tool_spec = next((t for t in offered if t.get("function", {}).get("name") == func_name), None)
+        if tool_spec is None:
             logger.warning(f"Text tool call rescue: '{func_name}' not offered this turn, falling back to TTS")
+            return None
+
+        if args_recovered and (tool_spec["function"].get("parameters") or {}).get("required"):
+            logger.warning(f"Text tool call rescue: '{func_name}' truncated with required args, dropping")
             return None
 
         func_conf = self.api_params[func_name]
@@ -149,8 +186,6 @@ class OpenAICompatibleLLM(BaseLLM):
         )
 
         # Mirror ToolCallAccumulator.build_api_payload: validate required keys against the tool spec
-        tool_spec = next((t for t in offered if t.get("function", {}).get("name") == func_name), None)
-
         try:
             parsed_args = json.loads(args_str)
             if tool_spec and tool_spec["function"].get("parameters") is not None:
@@ -261,7 +296,8 @@ class OpenAICompatibleLLM(BaseLLM):
         if not self.trigger_function_call:
             return []
         src = tools if tools is not None else self.tools
-        return json.loads(src) if isinstance(src, str) else src
+        parsed = json.loads(src) if isinstance(src, str) else src
+        return _strip_server_injected_params(parsed)
 
     def invalidate_response_chain(self):
         self.previous_response_id = None
