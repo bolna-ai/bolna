@@ -84,27 +84,52 @@ def _coerce_value(value: Any, declared_type: VariableType) -> Any:
         return float(value)
     if declared_type == VariableType.BOOLEAN:
         return _to_bool(value)
+    if declared_type == VariableType.ENUM:
+        # Enum values are strings; compare/store in string form. Membership against the
+        # allowed set is enforced at write time and via the update_state tool schema.
+        return str(value)
     raise ValueError(f"unsupported variable type: {declared_type!r}")
 
 
-def _resolve_declared_type(
-    variable: str, variable_types: Optional[dict], log_unknown: bool = True
-) -> Optional[VariableType]:
-    """Resolve a variable's declared type. Keys match the condition's variable path
-    exactly. An unrecognized type name falls back to inference, warning once when
-    log_unknown (the trace/describe pass passes False to avoid duplicate warnings).
-    """
+def _resolve_spec(variable: str, variable_types: Optional[dict], log_unknown: bool = True):
+    """Resolve a variable's declared (type, enum_values). A value is either a bare type
+    ("boolean") or a spec carrying allowed values ({"type": "enum", "values": [...]}, or
+    a VariableSpec). Returns None when no known type is declared."""
     if not variable_types:
         return None
     raw = variable_types.get(variable)
     if raw is None:
         return None
+    if isinstance(raw, dict):
+        type_raw, values = raw.get("type"), raw.get("values")
+    elif hasattr(raw, "type"):  # a VariableSpec instance
+        type_raw, values = raw.type, getattr(raw, "values", None)
+    else:
+        type_raw, values = raw, None
     try:
-        return VariableType(raw)
-    except ValueError:
+        return VariableType(type_raw), values
+    except (ValueError, TypeError):
         if log_unknown:
-            logger.warning(f"Unknown variable type {raw!r} for {variable!r}; falling back to inference")
+            logger.warning(f"Unknown variable type {type_raw!r} for {variable!r}; falling back to inference")
         return None
+
+
+def _resolve_declared_type(
+    variable: str, variable_types: Optional[dict], log_unknown: bool = True
+) -> Optional[VariableType]:
+    """Resolve a variable's declared type (the type half of its spec), or None to fall
+    back to inference. log_unknown is False on the trace/describe pass to avoid duplicate
+    warnings."""
+    spec = _resolve_spec(variable, variable_types, log_unknown)
+    return spec[0] if spec else None
+
+
+def enum_values(variable: str, variable_types: Optional[dict]) -> Optional[list]:
+    """Return the allowed values for an enum-typed variable, else None."""
+    spec = _resolve_spec(variable, variable_types, log_unknown=False)
+    if spec and spec[0] == VariableType.ENUM:
+        return spec[1] or []
+    return None
 
 
 def coerce_to_type(value: Any, variable: str, variable_types: Optional[dict]) -> Any:

@@ -293,6 +293,13 @@ class RagConfig(BaseModel):
     used_sources: Optional[List[UsedSource]] = None
 
 
+class VariableSpec(BaseModel):
+    """Declared type for a variable. `values` is the allowed set when type is enum."""
+
+    type: VariableType
+    values: Optional[List[str]] = None
+
+
 class Llm(BaseModel):
     model: Optional[str] = "gpt-3.5-turbo"
     max_tokens: Optional[int] = 100
@@ -311,11 +318,12 @@ class Llm(BaseModel):
     verbosity: Optional[Verbosity] = None
     use_responses_api: Optional[bool] = False
     compact_threshold: Optional[int] = None
-    # Variable path -> declared type. Coerces values into the right domain for typed state
-    # seeding, the pinned state block, and expression-routing comparisons. Keys are exact
-    # dot-notation paths (e.g. "recipient_data.age", "state.otp_verified"). Available on
-    # every agent type (graph and simple) since it lives on the base Llm config.
-    variable_types: Optional[Dict[str, VariableType]] = None
+    # Variable path -> declared type. Coerces values into the right domain for the typed
+    # state block, write coercion, and expression-routing comparisons. Keys are exact
+    # dot-notation paths (e.g. "recipient_data.age", "state.otp_verified"). A value is
+    # either a bare type ("boolean") or a VariableSpec ({"type": "enum", "values": [...]})
+    # for enum-constrained variables. Available on every agent type since it lives on Llm.
+    variable_types: Optional[Dict[str, Union[VariableType, VariableSpec]]] = None
 
     @model_validator(mode="after")
     def validate_reasoning_effort_for_model(self):
