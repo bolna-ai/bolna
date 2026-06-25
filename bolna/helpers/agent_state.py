@@ -9,7 +9,7 @@ and coercion primitives from expression_evaluator so they stay defined once.
 
 from typing import Any, Optional
 
-from bolna.helpers.expression_evaluator import MISSING, coerce_to_type, resolve_variable, set_variable
+from bolna.helpers.expression_evaluator import MISSING, coerce_to_type, enum_values, resolve_variable, set_variable
 from bolna.helpers.logger_config import configure_logger
 
 logger = configure_logger(__name__)
@@ -81,9 +81,14 @@ def apply_state_updates(
 
 
 def _coerce_for_state(value: Any, path: str, variable_types: Optional[dict]) -> Any:
-    """Coerce value to the type declared for path; store raw (and warn) on failure."""
+    """Coerce value to the type declared for path; store raw (and warn) on failure.
+    For enum-typed variables, warn if the value is outside the allowed set."""
     try:
-        return coerce_to_type(value, path, variable_types)
+        coerced = coerce_to_type(value, path, variable_types)
     except (TypeError, ValueError):
         logger.warning(f"State coercion failed: {path}={value!r}; storing raw")
         return value
+    allowed = enum_values(path, variable_types)
+    if allowed is not None and coerced not in allowed:
+        logger.warning(f"State {path}={coerced!r} not in allowed values {allowed}; storing anyway")
+    return coerced

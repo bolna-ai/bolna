@@ -39,6 +39,7 @@ from bolna.helpers.function_calling_helpers import (
     validate_outbound_url,
 )
 from bolna.helpers.conversation_history import ConversationHistory
+from bolna.helpers.expression_evaluator import enum_values
 from bolna.helpers.agent_state import (
     format_state_block,
     apply_state_assignments,
@@ -99,9 +100,16 @@ logger = configure_logger(__name__)
 
 
 def _state_json_type(declared) -> str:
-    """Map a declared VariableType (or its raw value) to a JSON-schema type."""
-    value = declared.value if hasattr(declared, "value") else str(declared)
-    return value if value in ("string", "number", "boolean") else "string"
+    """Map a declared variable type (bare type, value string, or spec) to a JSON-schema
+    scalar type. Enum maps to string; its allowed set is attached separately."""
+    if isinstance(declared, dict):
+        value = declared.get("type")
+    elif hasattr(declared, "type"):  # a VariableSpec instance
+        value = declared.type
+    else:
+        value = declared
+    value = value.value if hasattr(value, "value") else value
+    return value if value in ("number", "boolean") else "string"
 
 
 def _inject_end_call_tool(api_tools, *, scope, nodes, description=None):
@@ -1361,18 +1369,20 @@ class TaskManager(BaseManager):
         (otp_verified after a read-back, a computed total). Mirrors the switch_language
         injection: registered in api_tools so the accumulator keeps the call and routes
         it through __execute_function_call. No-op without writable vars."""
-        writable = {
-            path[len("state.") :]: vtype
-            for path, vtype in (self.variable_types or {}).items()
-            if path.startswith("state.")
-        }
-        if not writable:
+        writable_paths = [p for p in (self.variable_types or {}) if p.startswith("state.")]
+        if not writable_paths:
             return
         if self.kwargs.get("api_tools") is None:
             self.kwargs["api_tools"] = {"tools": [], "tools_params": {}}
         if "update_state" in self.kwargs["api_tools"].get("tools_params", {}):
             return
-        properties = {name: {"type": _state_json_type(vtype)} for name, vtype in writable.items()}
+        properties = {}
+        for path in writable_paths:
+            prop = {"type": _state_json_type(self.variable_types[path])}
+            allowed = enum_values(path, self.variable_types)
+            if allowed:
+                prop["enum"] = allowed
+            properties[path[len("state.") :]] = prop
         tool_def = {
             "type": "function",
             "function": {
@@ -1391,7 +1401,7 @@ class TaskManager(BaseManager):
         tools_list.append(tool_def)
         self.kwargs["api_tools"]["tools"] = tools_list
         self.kwargs["api_tools"].setdefault("tools_params", {})["update_state"] = {}
-        logger.info(f"Injected update_state tool (vars={list(writable)})")
+        logger.info(f"Injected update_state tool (vars={list(properties)})")
 
     def _inject_state_block(self, messages):
         """Append the pinned typed-state block as a trailing system message for non-graph

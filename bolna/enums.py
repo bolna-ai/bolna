@@ -266,6 +266,7 @@ class VariableType(str, Enum):
     STRING = "string"
     NUMBER = "number"
     BOOLEAN = "boolean"
+    ENUM = "enum"
 
 
 class EdgeConditionType(str, Enum):
