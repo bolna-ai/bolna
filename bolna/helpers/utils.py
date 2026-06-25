@@ -530,10 +530,12 @@ async def write_request_logs(message, run_id):
         LogComponent.LLM_HANGUP,
         LogComponent.LLM_VOICEMAIL,
         LogComponent.LLM_LANGUAGE_DETECTION,
+        LogComponent.LLM_LANGUAGE_SWITCH,
     ):
-        # Convert dict to string if necessary
+        # ensure_ascii=False so non-Latin scripts (Hindi/Telugu/…) stay readable in the trace
+        # Data column instead of rendering as \uXXXX escapes.
         if isinstance(message_data, dict):
-            message_data = json.dumps(message_data)
+            message_data = json.dumps(message_data, ensure_ascii=False)
         component_details = [
             message_data,
             message.get("input_tokens", 0),
@@ -593,7 +595,7 @@ async def write_request_logs(message, run_id):
 
     metadata_str = None
     if metadata:
-        metadata_str = json.dumps(metadata)
+        metadata_str = json.dumps(metadata, ensure_ascii=False)
     row = row + component_details + [metadata_str]
 
     header = "Time,Component,Direction,Leg ID,Sequence ID,Model,Data,Input Tokens,Output Tokens,Characters,Latency,Cached,Final Transcript,Engine,Metadata\n"
