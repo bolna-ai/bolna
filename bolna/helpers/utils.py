@@ -44,6 +44,10 @@ class DictWithMissing(dict):
         return ""
 
 
+# Server-owned telephony ids; never exposed to the model (prompt var, {placeholder}, or tool param).
+SERVER_OWNED_CALL_IDENTIFIERS = frozenset({"call_sid", "stream_sid"})
+
+
 def load_file(file_path, is_json=False):
     data = None
     with open(file_path, "r") as f:
@@ -314,7 +318,11 @@ def update_prompt_with_context(prompt, context_data):
     try:
         if not context_data or not isinstance(context_data.get("recipient_data"), dict):
             return prompt.format_map(DictWithMissing({}))
-        return prompt.format_map(DictWithMissing(context_data.get("recipient_data", {})))
+        # A {call_sid}/{stream_sid} template renders empty instead of leaking the real id.
+        recipient_data = {
+            k: v for k, v in context_data["recipient_data"].items() if k not in SERVER_OWNED_CALL_IDENTIFIERS
+        }
+        return prompt.format_map(DictWithMissing(recipient_data))
     except Exception as e:
         return prompt
 
@@ -905,28 +913,6 @@ def now_ms() -> float:
 
 def timestamp_ms() -> float:
     return time.time() * 1000
-
-
-# Matches leaked internal-id tool fragments a model may echo into spoken text, e.g.
-# "{call_sid:6646c0f7-...}" or '{"call_sid": "..."}' (also stream_sid). These are never
-# legitimate speech and must be stripped before reaching the synthesizer.
-CALL_IDENTIFIER_LEAK_PATTERN = re.compile(r"""\{\s*["']?(?:call_sid|stream_sid)["']?\s*[:=][^{}]*\}""")
-
-
-def redact_call_identifiers(text):
-    """Strip leaked internal call identifiers (call_sid/stream_sid) from text headed to TTS.
-
-    Defense-in-depth for the agent-reads-the-call-sid-aloud bug: the primary fix removes
-    call_sid from the prompt, but a model can still hallucinate such a fragment. Returns the
-    input unchanged when it isn't a string or contains no such fragment.
-    """
-    if not text or not isinstance(text, str) or "sid" not in text:
-        return text
-    if not CALL_IDENTIFIER_LEAK_PATTERN.search(text):
-        return text
-    cleaned = CALL_IDENTIFIER_LEAK_PATTERN.sub("", text)
-    # Collapse the double/dangling space left where the fragment was removed.
-    return re.sub(r"[ \t]{2,}", " ", cleaned).strip()
 
 
 def structure_system_prompt(

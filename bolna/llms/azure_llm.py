@@ -277,8 +277,8 @@ class AzureLLM(OpenAICompatibleLLM):
             if rescue_chunk:
                 yield rescue_chunk
             else:
-                logger.warning("Text tool call rescue failed, falling back to TTS")
-                buffer += captured_tool_text
+                # A functions.<name>(...) fragment is never speech; drop it rather than speak ids aloud.
+                logger.warning(f"Text tool call rescue failed, dropping fragment: {captured_tool_text[:80]!r}")
 
         if accumulator and accumulator.final_tool_calls:
             api_call_payload = accumulator.build_api_payload(model_args, meta_info, answer)
