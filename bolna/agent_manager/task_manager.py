@@ -500,7 +500,7 @@ class TaskManager(BaseManager):
             provider_config = self.task_config["tools_config"]["synthesizer"].get("provider_config")
             self.synthesizer_voice = provider_config["voice"]
             self.hangup_detail = None
-            self.end_call_experiment = None  # set below if task_config opts in
+            self.end_call_primary = False  # set below if task_config opts in
 
             self.handle_accumulated_message_task = None
             # self.initial_silence_task = None
@@ -588,10 +588,21 @@ class TaskManager(BaseManager):
                     else None
                 )
 
-                # Graph agents: end_call tool scope follows the hangup toggle. With hangup_after_LLMCall
-                # OFF, end_call is restricted to nodes that opt in via function_call="end_call" (dormant
-                # if none do); with it ON, the experiment block below injects end_call globally.
-                if self.__is_graph_agent() and not self.use_llm_to_determine_hangup:
+                self.end_call_primary = (
+                    self.conversation_config.get("end_call_tool_mode") in ("primary", "primary_with_shadow_hangup")
+                    and self.use_llm_to_determine_hangup
+                    and cancellation_prompt
+                )
+                if self.end_call_primary:
+                    self.kwargs["api_tools"] = _inject_end_call_tool(
+                        self.kwargs.get("api_tools"),
+                        scope=ToolScope.GLOBAL,
+                        nodes=[],
+                        description=end_call_description,
+                    )
+                    logger.info("end_call tool active as primary hangup")
+                elif self.__is_graph_agent():
+                    # a node opting in via function_call="end_call" needs the tool regardless of the hangup toggle
                     llm_config = self.task_config["tools_config"]["llm_agent"].get("llm_config", {}) or {}
                     end_call_nodes = [
                         n.get("id")
@@ -606,26 +617,6 @@ class TaskManager(BaseManager):
                             description=end_call_description,
                         )
                         logger.info(f"end_call tool injected node-scoped on nodes={end_call_nodes}")
-
-                # A/B experiment: end_call tool as primary (global) hangup, hangup_after_LLMCall as shadow.
-                if (
-                    self.conversation_config.get("end_call_tool_mode") == "primary_with_shadow_hangup"
-                    and self.use_llm_to_determine_hangup
-                    and cancellation_prompt
-                ):
-                    self.kwargs["api_tools"] = _inject_end_call_tool(
-                        self.kwargs.get("api_tools"),
-                        scope=ToolScope.GLOBAL,
-                        nodes=[],
-                        description=end_call_description,
-                    )
-                    self.end_call_experiment = {
-                        "end_call_invoked": False,
-                        "end_call_reason": None,
-                        "shadow_hangup_decision": None,
-                        "actual_hangup_reason": None,
-                    }
-                    logger.info("end_call_tool experiment active: tool primary, hangup_after_LLMCall shadow")
 
                 # Voicemail detection (time-based)
                 output_tool_available = (
@@ -2804,10 +2795,6 @@ class TaskManager(BaseManager):
             self._end_call_in_progress = True
             reason = resp.get("reason", "")
 
-            if self.end_call_experiment is not None and not self.end_call_experiment["end_call_invoked"]:
-                self.end_call_experiment["end_call_invoked"] = True
-                self.end_call_experiment["end_call_reason"] = reason
-
             logger.info(f"end_call tool invoked, reason: {reason}")
             convert_to_request_log(
                 json.dumps({"called_fun": called_fun, "reason": reason}),
@@ -3785,8 +3772,9 @@ class TaskManager(BaseManager):
 
         # TODO : Write a better check for completion prompt
 
-        # Hangup detection - now supported for all agent types including graph_agent
-        if self.use_llm_to_determine_hangup and not self.turn_based_conversation:
+        # Hangup detection - now supported for all agent types including graph_agent.
+        # Skipped when end_call is the primary hangup; those agents hang up via the tool.
+        if self.use_llm_to_determine_hangup and not self.turn_based_conversation and not self.end_call_primary:
             completion_res, metadata = await self.tools["llm_agent"].check_for_completion(
                 messages, self.check_for_completion_prompt, meta_info=meta_info
             )
@@ -3835,15 +3823,6 @@ class TaskManager(BaseManager):
                 reasoning_tokens=metadata.get("reasoning_tokens"),
                 cached_tokens=metadata.get("cached_tokens"),
             )
-
-            if self.end_call_experiment is not None:
-                # Shadow mode: log decision, do not actually hang up. end_call tool drives real hangup.
-                self.end_call_experiment["shadow_hangup_decision"] = bool(should_hangup)
-                logger.info(
-                    f"end_call_tool experiment shadow: hangup_after_LLMCall={should_hangup}, "
-                    f"seq={meta_info.get('sequence_id')}"
-                )
-                return
 
             if should_hangup:
                 if self.hangup_triggered or self.conversation_ended:
@@ -4479,6 +4458,13 @@ class TaskManager(BaseManager):
                             )
                             self.interruption_manager.on_user_speech_ended(update_utterance_time=False)
                             self._speech_started_before_welcome = False
+                            continue
+
+                        # Starting a new turn here cancels the in-flight tool call before its result is
+                        # recorded, so the LLM re-emits the same tool and the side effect runs twice.
+                        if self.function_call_in_flight:
+                            logger.info(f"Tool call in flight; deferring barge-in transcript {transcript_content!r}")
+                            self.interruption_manager.on_user_speech_ended(update_utterance_time=False)
                             continue
 
                         _meta = message.get("meta_info") or {}
@@ -6498,13 +6484,6 @@ class TaskManager(BaseManager):
                     "hangup_detail": self.hangup_detail,
                     "has_transfer": self.has_transfer,
                 }
-
-                if self.end_call_experiment is not None:
-                    self.end_call_experiment["actual_hangup_reason"] = (
-                        str(self.hangup_detail) if self.hangup_detail else None
-                    )
-                    output["end_call_experiment"] = self.end_call_experiment
-                    logger.info(f"end_call_tool experiment outcome: {json.dumps(self.end_call_experiment)}")
 
                 try:
                     if welcome_message_sent_ts:
