@@ -102,8 +102,6 @@ def _resolve_spec(variable: str, variable_types: Optional[dict], log_unknown: bo
         return None
     if isinstance(raw, dict):
         type_raw, values = raw.get("type"), raw.get("values")
-    elif hasattr(raw, "type"):  # a VariableSpec instance
-        type_raw, values = raw.type, getattr(raw, "values", None)
     else:
         type_raw, values = raw, None
     try:
