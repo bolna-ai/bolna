@@ -56,11 +56,15 @@ class OpenAICompatibleLLM(BaseLLM):
 
     @staticmethod
     def _find_tool_call_end(text):
-        """Return the index after the closing brace/paren of a text-based tool call, or -1 if incomplete."""
+        """Return the index after the closing brace/paren of a text tool call
+        (functions.x(...) or a bare {...} object), or -1 if incomplete."""
         m = re.search(r"functions\.\w+\s*[({]", text)
-        if not m:
+        if m:
+            start = m.end() - 1
+        elif text.lstrip().startswith("{"):
+            start = text.index("{")
+        else:
             return -1
-        start = m.end() - 1
         depth = 0
         for i in range(start, len(text)):
             if text[i] in "({":
@@ -73,6 +77,36 @@ class OpenAICompatibleLLM(BaseLLM):
                         end += 1
                     return end
         return -1
+
+    @staticmethod
+    def _find_offered_tool_name(text, offered):
+        """Earliest offered tool name appearing as a substring in text, or None. Tool names are
+        underscored ids (e.g. transfer_call_911206480701) that don't occur in natural speech."""
+        best, best_i = None, len(text) + 1
+        for t in offered or []:
+            name = (t.get("function") or {}).get("name")
+            if name and (i := text.find(name)) != -1 and i < best_i:
+                best, best_i = name, i
+        return best
+
+    @staticmethod
+    def _find_text_tool_call_start(text, offered):
+        """Earliest index where a narrated tool call begins: a `functions.` prefix or a wrapped/bare
+        offered tool name (e.g. {type:transfer_call_..}). Backs up to a '{' within 25 chars so the
+        wrapper is held out of TTS. Returns -1 if none."""
+        idx = -1
+        m = re.search(r"functions\.\w", text)
+        if m:
+            idx = m.start()
+        for t in offered or []:
+            name = (t.get("function") or {}).get("name")
+            if not name or (i := text.find(name)) == -1:
+                continue
+            brace = text.rfind("{", max(0, i - 25), i)
+            start = brace if brace != -1 else i
+            if idx == -1 or start < idx:
+                idx = start
+        return idx
 
     @staticmethod
     def _parse_text_tool_call(text):
@@ -133,32 +167,35 @@ class OpenAICompatibleLLM(BaseLLM):
         if not self.trigger_function_call:
             return None
 
+        # Respect per-call tool visibility (node scoping): only rescue a tool offered this turn.
+        offered = model_args.get("tools") or []
+        if isinstance(offered, str):
+            offered = json.loads(offered)
+
         parsed = self._parse_text_tool_call(text)
         if parsed:
             func_name, args_str = parsed
             args_recovered = False
         else:
-            # Args unparseable (e.g. truncated call): recover the name, fire only if no required args.
-            m = re.search(r"functions\.(\w+)", text)
-            if not m:
+            # No functions.NAME(...) form — e.g. a {type:transfer_call_..} shape, a truncated call,
+            # or a mangled wrapper. Recover by matching any offered tool name; fire only if it needs
+            # no model args (the required-args gate below).
+            func_name = self._find_offered_tool_name(text, offered)
+            if not func_name:
                 return None
-            func_name, args_str, args_recovered = m.group(1), "{}", True
+            args_str, args_recovered = "{}", True
 
         if func_name not in self.api_params:
             logger.warning(f"Text tool call rescue: '{func_name}' not in api_params, falling back to TTS")
             return None
 
-        # Respect per-call tool visibility (node scoping): only rescue a tool offered this turn.
-        offered = model_args.get("tools") or []
-        if isinstance(offered, str):
-            offered = json.loads(offered)
         tool_spec = next((t for t in offered if t.get("function", {}).get("name") == func_name), None)
         if tool_spec is None:
             logger.warning(f"Text tool call rescue: '{func_name}' not offered this turn, falling back to TTS")
             return None
 
         if args_recovered and (tool_spec["function"].get("parameters") or {}).get("required"):
-            logger.warning(f"Text tool call rescue: '{func_name}' truncated with required args, dropping")
+            logger.warning(f"Text tool call rescue: '{func_name}' recovered by name but needs model args, dropping")
             return None
 
         func_conf = self.api_params[func_name]
