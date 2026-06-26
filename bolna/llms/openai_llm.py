@@ -357,9 +357,8 @@ class OpenAiLLM(OpenAICompatibleLLM):
                         text_tool_buffer = None
                         answer += remainder
                         buffer = remainder
-                elif re.search(r"functions\.\w", buffer + content):
+                elif (idx := self._find_text_tool_call_start(buffer + content, tools)) != -1:
                     combined = buffer + content
-                    idx = combined.find("functions.")
                     before = combined[:idx]
                     after = combined[idx:]
                     if before:
