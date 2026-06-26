@@ -3194,11 +3194,7 @@ class TaskManager(BaseManager):
         # write lands inside the function_call_in_flight guard, so a barge-in defers and
         # the commit is not lost or doubled.
         if called_fun == "update_state":
-            writable = {
-                path[len("state.") :]
-                for path in (self.variable_types or {})
-                if path.startswith("state.")
-            }
+            writable = {path[len("state.") :] for path in (self.variable_types or {}) if path.startswith("state.")}
             # Read the model's arguments from the tool call itself, not from **resp:
             # FunctionCallPayload field names (url, headers, ...) would otherwise shadow
             # same-named state variables.
@@ -3415,9 +3411,7 @@ class TaskManager(BaseManager):
                 if self.context_data is None:
                     self.context_data = {}
                 self.context_data.setdefault("state", {})
-                written = apply_state_assignments(
-                    self.context_data, assignments, assign_source, self.variable_types
-                )
+                written = apply_state_assignments(self.context_data, assignments, assign_source, self.variable_types)
                 if written:
                     logger.info(f"Tool {called_fun} wrote state {written}")
             else:
