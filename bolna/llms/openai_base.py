@@ -80,20 +80,23 @@ class OpenAICompatibleLLM(BaseLLM):
 
     @staticmethod
     def _find_offered_tool_name(text, offered):
-        """Earliest offered tool name appearing as a substring in text, or None. Tool names are
-        underscored ids (e.g. transfer_call_911206480701) that don't occur in natural speech."""
+        """Earliest offered tool name in text (longest wins on a tie, to prefer the most specific),
+        or None. Used to recover which tool a captured narration fragment refers to."""
         best, best_i = None, len(text) + 1
         for t in offered or []:
             name = (t.get("function") or {}).get("name")
-            if name and (i := text.find(name)) != -1 and i < best_i:
+            if not name or (i := text.find(name)) == -1:
+                continue
+            if i < best_i or (i == best_i and len(name) > len(best or "")):
                 best, best_i = name, i
         return best
 
     @staticmethod
     def _find_text_tool_call_start(text, offered):
-        """Earliest index where a narrated tool call begins: a `functions.` prefix or a wrapped/bare
-        offered tool name (e.g. {type:transfer_call_..}). Backs up to a '{' within 25 chars so the
-        wrapper is held out of TTS. Returns -1 if none."""
+        """Earliest index where a narrated tool call begins: a `functions.` prefix, or an offered
+        tool name that sits inside an unclosed { } wrapper (e.g. {type:transfer_call_..}). A bare
+        tool name in plain text is left as speech, so a tool named like a common word ('book') never
+        triggers on an ordinary sentence. Returns -1 if none."""
         idx = -1
         m = re.search(r"functions\.\w", text)
         if m:
@@ -102,10 +105,11 @@ class OpenAICompatibleLLM(BaseLLM):
             name = (t.get("function") or {}).get("name")
             if not name or (i := text.find(name)) == -1:
                 continue
-            brace = text.rfind("{", max(0, i - 25), i)
-            start = brace if brace != -1 else i
-            if idx == -1 or start < idx:
-                idx = start
+            brace = text.rfind("{", 0, i)
+            if brace == -1 or "}" in text[brace:i]:
+                continue  # not inside a { } wrapper -> ordinary speech, not a tool call
+            if idx == -1 or brace < idx:
+                idx = brace
         return idx
 
     @staticmethod
