@@ -13,17 +13,15 @@ from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.ssl_context import get_ssl_context
 from bolna.helpers.utils import create_ws_data_packet, timestamp_ms
 from bolna.enums import TelephonyProvider
+from bolna.constants import (
+    SONIOX_AUTO_LANGUAGE_VALUES,
+    SONIOX_DEFAULT_MULTILINGUAL_HINTS,
+    SONIOX_ENDPOINT_TOKEN,
+    SONIOX_WEBSOCKET_HOST,
+)
 
 logger = configure_logger(__name__)
 load_dotenv()
-
-SONIOX_WEBSOCKET_HOST = "stt-rt.soniox.com"
-SONIOX_ENDPOINT_TOKEN = "<end>"
-# Hinted when the agent is configured for multilingual auto-detect. Soniox identifies and
-# code-switches across these in a single stream; hinting the relevant set sharpens accuracy
-# over fully-open auto. Soniox has no real-time Assamese/Odia support, so they are absent.
-SONIOX_DEFAULT_MULTILINGUAL_HINTS = ["en", "hi", "ta", "te", "kn", "ml", "mr", "bn", "gu", "pa", "ur"]
-_AUTO_LANGUAGE_VALUES = {"", "multi", "auto", "multilingual", "unknown"}
 
 
 class SonioxTranscriber(BaseTranscriber):
@@ -50,18 +48,12 @@ class SonioxTranscriber(BaseTranscriber):
         self.model = model
         self.stream = stream
         self.language = language
-        self.endpointing = endpointing
-        try:
-            self.endpointing_ms = int(endpointing)
-        except (TypeError, ValueError):
-            self.endpointing_ms = 400
         self.encoding = encoding
         self.sampling_rate = int(sampling_rate) if isinstance(sampling_rate, (str, int)) else 16000
         self.keywords = keywords
         self.language_hints = language_hints
         self.transcriber_output_queue = output_queue
         self.connected_via_dashboard = kwargs.get("enforce_streaming", True)
-        self.run_id = kwargs.get("run_id")
 
         self.api_key = kwargs.get("transcriber_key", os.getenv("SONIOX_API_KEY"))
         self.soniox_host = os.getenv("SONIOX_HOST", SONIOX_WEBSOCKET_HOST)
@@ -88,9 +80,10 @@ class SonioxTranscriber(BaseTranscriber):
 
         # Per-stream audio bookkeeping (reset on each (re)connect in transcribe())
         self.audio_submitted = False
-        self.audio_submission_time = None
         self.num_frames = 0
         self.connection_start_time = None
+        # (frame_start_s, frame_end_s, send_ts_ms) per audio frame — maps a token's audio
+        # position back to when that audio was sent, for per-result transcriber latency.
         self.audio_frame_timestamps = []
 
         # Per-turn transcript state
@@ -130,7 +123,7 @@ class SonioxTranscriber(BaseTranscriber):
         if self.language_hints:
             return [h for h in self.language_hints if h]
         lang = (self.language or "").lower()
-        if lang in _AUTO_LANGUAGE_VALUES:
+        if lang in SONIOX_AUTO_LANGUAGE_VALUES:
             return SONIOX_DEFAULT_MULTILINGUAL_HINTS
         return [self.language]
 
@@ -203,7 +196,6 @@ class SonioxTranscriber(BaseTranscriber):
                 if not self.audio_submitted:
                     self.meta_info = ws_data_packet.get("meta_info")
                     self.audio_submitted = True
-                    self.audio_submission_time = time.time()
                     self.current_request_id = self.generate_request_id()
                     self.meta_info["request_id"] = self.current_request_id
 
@@ -290,6 +282,13 @@ class SonioxTranscriber(BaseTranscriber):
             }
         )
 
+    def _find_audio_send_timestamp(self, audio_position_s):
+        """Send-time (epoch ms) of the audio frame containing this position (seconds), or None."""
+        for frame_start, frame_end, send_timestamp in self.audio_frame_timestamps:
+            if frame_start <= audio_position_s <= frame_end:
+                return send_timestamp
+        return None
+
     async def receiver(self, ws: ClientConnection):
         """Parse the Soniox token stream into speech_started / interim / transcript events."""
         async for message in ws:
@@ -307,6 +306,7 @@ class SonioxTranscriber(BaseTranscriber):
                 endpoint_hit = False
                 new_final_text = ""
                 non_final_text = ""
+                latest_end_ms = None
                 for token in res.get("tokens", []):
                     text = token.get("text", "")
                     if not text:
@@ -316,6 +316,9 @@ class SonioxTranscriber(BaseTranscriber):
                         continue
                     if token.get("language"):
                         self._last_detected_language = token.get("language")
+                    end_ms = token.get("end_ms")
+                    if end_ms is not None:
+                        latest_end_ms = end_ms if latest_end_ms is None else max(latest_end_ms, end_ms)
                     if token.get("is_final"):
                         new_final_text += text
                     else:
@@ -333,11 +336,16 @@ class SonioxTranscriber(BaseTranscriber):
                 if has_content:
                     running = (self.final_transcript + non_final_text).strip()
                     if running:
+                        latency_ms = None
+                        if latest_end_ms is not None:
+                            audio_sent_at = self._find_audio_send_timestamp(latest_end_ms / 1000.0)
+                            if audio_sent_at:
+                                latency_ms = round(timestamp_ms() - audio_sent_at, 5)
                         self.last_interim_time = time.time()
                         self.current_turn_interim_details.append(
                             {
                                 "transcript": running,
-                                "latency_ms": None,
+                                "latency_ms": latency_ms,
                                 "is_final": False,
                                 "received_at": time.time(),
                             }
