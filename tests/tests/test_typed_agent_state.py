@@ -174,7 +174,9 @@ class TestUpdateStateToolInjection:
         return stub.kwargs.get("api_tools")
 
     def test_injects_typed_tool_for_writable_vars(self):
-        api_tools = self._inject({"state.otp_verified": "boolean", "state.total": "number", "recipient_data.age": "number"})
+        api_tools = self._inject(
+            {"state.otp_verified": "boolean", "state.total": "number", "recipient_data.age": "number"}
+        )
         assert "update_state" in api_tools["tools_params"]
         tool = next(t for t in api_tools["tools"] if t["function"]["name"] == "update_state")
         props = tool["function"]["parameters"]["properties"]
