@@ -4298,6 +4298,11 @@ class TaskManager(BaseManager):
                             )
                             continue
 
+                        # Defer interim barge-ins while a tool call is in flight (same as speech_final path).
+                        if self.function_call_in_flight:
+                            logger.info(f"Tool call in flight; deferring interim barge-in {transcript_content!r}")
+                            continue
+
                         if self.interruption_manager.should_trigger_interruption(
                             word_count=interim_transcript_len,
                             transcript=transcript_content,
