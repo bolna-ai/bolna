@@ -60,7 +60,7 @@ graph LR;
 1. Initiating a phone call using telephony providers like `Twilio`, `Plivo`, `Exotel` (coming soon), `Vonage` (coming soon) etc.
 2. Transcribing the conversations using `Deepgram`, `Azure` etc.
 3. Using LLMs like `OpenAI`, `DeepSeek`, `Llama`, `Cohere`, `Mistral`,  etc to handle conversations
-4. Synthesizing LLM responses back to telephony using `AWS Polly`, `ElevenLabs`, `Deepgram`, `OpenAI`, `Azure`, `Cartesia`, `Smallest` etc.
+4. Synthesizing LLM responses back to telephony using `AWS Polly`, `ElevenLabs`, `Deepgram`, `OpenAI`, `Azure`, `Cartesia`, `Smallest`, `60db` etc.
 
 
 Refer to the [docs](https://docs.bolna.ai/providers) for a deepdive into all supported providers.
@@ -186,6 +186,30 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
+To use [60db](https://60db.ai) for TTS instead, set `SIXTYDB_API_KEY` in your `.env` and swap the synthesizer:
+
+```python
+from bolna.models import Synthesizer, SixtyDBConfig
+
+synthesizer = Synthesizer(
+    provider="60db",
+    provider_config=SixtyDBConfig(
+        voice="myvoice", voice_id="fbb75ed2-975a-40c7-9e06-38e30524a9a1", model="60db Fast"
+    ),
+    stream=True,
+)
+```
+
+Look up your available `voice_id`s with the `/myvoices` helper:
+
+```python
+from bolna.synthesizer import fetch_sixtydb_voices
+
+voices = await fetch_sixtydb_voices()  # reads SIXTYDB_API_KEY
+for v in voices:
+    print(v["voice_id"], v["name"], v["model"])
+```
+
 How to run:
 
 ```bash
@@ -298,6 +322,7 @@ https://github.com/bolna-ai/bolna/blob/c8a0d1428793d4df29133119e354bc2f85a7ca76/
 | Deepgram   | `DEEPGRAM_AUTH_TOKEN`                            |
 | Cartesia   | `CARTESIA_API_KEY`                            |
 | Smallest   | `SMALLEST_API_KEY`                            |
+| 60db       | `SIXTYDB_API_KEY`                            |
 
 </details>
 &nbsp;<br>
