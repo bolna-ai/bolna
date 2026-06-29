@@ -297,6 +297,11 @@ class TaskManager(BaseManager):
         self.preloaded_welcome_audio = (
             base64.b64decode(self.welcome_message_audio) if self.welcome_message_audio else None
         )
+        # Cached welcome is 8kHz PCM; web plays at 24kHz, so upsample or the first audio is pitched.
+        if self.is_web_based_call and self.preloaded_welcome_audio:
+            self.preloaded_welcome_audio = resample(
+                self.preloaded_welcome_audio, target_sample_rate=24000, format="pcm", original_sample_rate=8000
+            )
         self.observable_variables = {}
         self.output_handler_set = False
         # IO HANDLERS
@@ -1365,6 +1370,9 @@ class TaskManager(BaseManager):
                         if is_sip:
                             cfg["encoding"] = "mulaw"
                             cfg["sampling_rate"] = 8000
+                        elif provider == "web_based_call":
+                            cfg["encoding"] = "linear16"
+                            cfg["sampling_rate"] = 16000
                         if self.turn_based_conversation:
                             cfg["stream"] = True if self.enforce_streaming else False
 
@@ -1436,6 +1444,10 @@ class TaskManager(BaseManager):
                     transcriber_config["encoding"] = "mulaw"
                     transcriber_config["sampling_rate"] = 8000
                     logger.info(f"Configured transcriber for Asterisk sip-trunk with mulaw encoding @ 8kHz")
+                elif provider == "web_based_call":
+                    # Web streams linear16 PCM @16kHz; coerce here so all ASR providers get it, not just Deepgram.
+                    transcriber_config["encoding"] = "linear16"
+                    transcriber_config["sampling_rate"] = 16000
 
                 # Checking models for backwards compatibility
                 if (
@@ -1491,6 +1503,13 @@ class TaskManager(BaseManager):
                     caching = cfg.pop("caching", True)
                     provider_name = cfg.pop("provider")
                     provider_config = cfg.pop("provider_config")
+
+                    # Web plays raw PCM at a fixed 24kHz; force every language synth to match
+                    # (telephony/chat untouched). Else non-24k languages drift (e.g. Hindi too slow).
+                    if self.is_web_based_call:
+                        provider_config = dict(provider_config)  # don't mutate the cached agent config
+                        provider_config["sampling_rate"] = 24000
+                        cfg.pop("sampling_rate", None)  # avoid passing sampling_rate twice to the synth
 
                     if self.turn_based_conversation:
                         cfg["audio_format"] = "mp3"
