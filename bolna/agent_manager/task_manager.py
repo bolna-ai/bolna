@@ -39,6 +39,12 @@ from bolna.helpers.function_calling_helpers import (
     validate_outbound_url,
 )
 from bolna.helpers.conversation_history import ConversationHistory
+from bolna.helpers.expression_evaluator import enum_values
+from bolna.helpers.agent_state import (
+    format_state_block,
+    apply_state_assignments,
+    apply_state_updates,
+)
 from .base_manager import BaseManager
 from .interruption_manager import InterruptionManager
 from bolna.agent_types import *
@@ -91,6 +97,13 @@ from .models import ComponentLatencies
 from .voicemail_handler import VoicemailHandler
 
 logger = configure_logger(__name__)
+
+
+def _state_json_type(declared) -> str:
+    """Map a declared variable type (bare type or spec dict) to a JSON-schema scalar
+    type. Enum maps to string; its allowed set is attached separately."""
+    value = declared.get("type") if isinstance(declared, dict) else declared
+    return value if value in ("number", "boolean") else "string"
 
 
 def _inject_end_call_tool(api_tools, *, scope, nodes, description=None):
@@ -390,6 +403,9 @@ class TaskManager(BaseManager):
         self.is_local = False
         self.llm_config = None
         self.agent_type = None
+        # Typed agent state schema: dot-path -> declared type. Populated from the llm
+        # config below; empty when the agent does not use typed state.
+        self.variable_types = {}
 
         self.llm_config_map = {}
         self.llm_agent_map = {}
@@ -432,6 +448,18 @@ class TaskManager(BaseManager):
                         "provider": self.llm_agent_config["provider"],
                         "temperature": self.llm_agent_config["temperature"],
                     }
+
+                # Typed agent state schema lives on the llm_agent config (simple agents)
+                # or nested under llm_config (graph/knowledge agents).
+                self.variable_types = (
+                    (self.llm_agent_config or {}).get("variable_types")
+                    or (self.llm_agent_config or {}).get("llm_config", {}).get("variable_types")
+                    or {}
+                )
+                if self.variable_types:
+                    if self.context_data is None:
+                        self.context_data = {}
+                    self.context_data.setdefault("state", {})
 
                 if "reasoning_effort" in self.llm_agent_config:
                     self.llm_config["reasoning_effort"] = self.llm_agent_config["reasoning_effort"]
@@ -698,6 +726,8 @@ class TaskManager(BaseManager):
         self.agent_names = self.task_config.get("tools_config", {}).get("agent_names") or {}
         if not self.__language_switch_enabled():
             self.__inject_switch_language_tool()
+
+        self.__inject_update_state_tool()
 
         # # setting llm
         # llm = self.__setup_llm(self.llm_config)
@@ -1326,6 +1356,57 @@ class TaskManager(BaseManager):
         # setup call site, before this injection.)
         self.kwargs["api_tools"]["tools_params"]["switch_language"] = {}
         logger.info(f"Injected legacy switch_language tool (labels={sorted(labels)})")
+
+    def __inject_update_state_tool(self):
+        """Expose the built-in update_state tool when writable ``state.*`` variables are
+        declared, so the LLM can commit typed flags/values that no API tool produces
+        (otp_verified after a read-back, a computed total). Mirrors the switch_language
+        injection: registered in api_tools so the accumulator keeps the call and routes
+        it through __execute_function_call. No-op without writable vars."""
+        writable_paths = [p for p in (self.variable_types or {}) if p.startswith("state.")]
+        if not writable_paths:
+            return
+        if self.kwargs.get("api_tools") is None:
+            self.kwargs["api_tools"] = {"tools": [], "tools_params": {}}
+        if "update_state" in self.kwargs["api_tools"].get("tools_params", {}):
+            return
+        properties = {}
+        for path in writable_paths:
+            prop = {"type": _state_json_type(self.variable_types[path])}
+            allowed = enum_values(path, self.variable_types)
+            if allowed:
+                prop["enum"] = allowed
+            properties[path[len("state.") :]] = prop
+        tool_def = {
+            "type": "function",
+            "function": {
+                "name": "update_state",
+                "description": (
+                    "Record internal call state. Call this the moment a tracked value becomes "
+                    "known or changes (a verification result, a computed total, a decision). "
+                    "Pass only the fields that changed. This does not speak to the user."
+                ),
+                "parameters": {"type": "object", "properties": properties, "required": []},
+            },
+        }
+        tools_list = self.kwargs["api_tools"].get("tools", [])
+        if isinstance(tools_list, str):
+            tools_list = json.loads(tools_list)
+        tools_list.append(tool_def)
+        self.kwargs["api_tools"]["tools"] = tools_list
+        self.kwargs["api_tools"].setdefault("tools_params", {})["update_state"] = {}
+        logger.info(f"Injected update_state tool (vars={list(properties)})")
+
+    def _inject_state_block(self, messages):
+        """Append the pinned typed-state block as a trailing system message for non-graph
+        agents (graph agents inject their own inside _build_messages). No-op without
+        declared variable_types."""
+        if self.agent_type == "graph_agent" or not self.variable_types:
+            return messages
+        block = format_state_block(self.context_data, self.variable_types)
+        if block:
+            return messages + [{"role": "system", "content": block}]
+        return messages
 
     def _get_voice_name_for_label(self, label):
         """Get agent name for a language label from configured agent_names."""
@@ -3108,6 +3189,47 @@ class TaskManager(BaseManager):
                         )
                 return
 
+        # Built-in update_state tool: the model commits typed flags/values into the
+        # state namespace. URL-less internal tool, handled here (not the HTTP path). The
+        # write lands inside the function_call_in_flight guard, so a barge-in defers and
+        # the commit is not lost or doubled.
+        if called_fun == "update_state":
+            writable = {path[len("state.") :] for path in (self.variable_types or {}) if path.startswith("state.")}
+            # Read the model's arguments from the tool call itself, not from **resp:
+            # FunctionCallPayload field names (url, headers, ...) would otherwise shadow
+            # same-named state variables.
+            raw_args = {}
+            tool_calls = resp.get("model_response") or []
+            if tool_calls:
+                try:
+                    raw_args = json.loads(tool_calls[0]["function"]["arguments"] or "{}")
+                except (json.JSONDecodeError, KeyError, TypeError):
+                    raw_args = {}
+            updates = {name: value for name, value in raw_args.items() if name in writable}
+            dropped = [name for name in raw_args if name not in writable]
+            if dropped:
+                logger.warning(f"update_state ignoring undeclared keys: {dropped}")
+            if self.context_data is None:
+                self.context_data = {}
+            self.context_data.setdefault("state", {})
+            written = apply_state_updates(self.context_data, updates, self.variable_types)
+            logger.info(f"update_state wrote {written}")
+            function_response = json.dumps({"status": "success", "updated": written})
+
+            self.conversation_history.attach_tool_calls_to_turn(turn_id, resp["model_response"])
+            self.conversation_history.append_tool_result(resp.get("tool_call_id", ""), function_response)
+            convert_to_request_log(
+                function_response, meta_info, None, "function_call", direction="response", run_id=self.run_id
+            )
+
+            messages = self.conversation_history.get_copy()
+            followup_meta_info = self._spawn_followup_meta_info(meta_info)
+            await self.__do_llm_generation(
+                messages, followup_meta_info, next_step, should_bypass_synth=False, should_trigger_function_call=True
+            )
+            self.execute_function_call_task = None
+            return
+
         # LEGACY flow handler (flag-off): the switch_language tool injected by
         # __inject_switch_language_tool. Restored from master for the feature-flag
         # fallback path — unreachable when the LLM-driven flow is enabled (the tool
@@ -3274,6 +3396,28 @@ class TaskManager(BaseManager):
                     logger.info(f"Merged API response into context_data: {list(response_data.keys())}")
             except (json.JSONDecodeError, TypeError) as e:
                 logger.debug(f"Could not parse API response as JSON for context merge: {e}")
+
+        # Typed state assignment (write path A): map declared response fields into the
+        # state namespace, coerced to declared types. Inside the function_call_in_flight guard.
+        assignments = tool_conf.get("response_assignments")
+        if assignments:
+            try:
+                assign_source = (
+                    json.loads(function_response) if isinstance(function_response, str) else function_response
+                )
+            except (json.JSONDecodeError, TypeError):
+                assign_source = None
+            if isinstance(assign_source, dict):
+                if self.context_data is None:
+                    self.context_data = {}
+                self.context_data.setdefault("state", {})
+                written = apply_state_assignments(self.context_data, assignments, assign_source, self.variable_types)
+                if written:
+                    logger.info(f"Tool {called_fun} wrote state {written}")
+            else:
+                logger.warning(
+                    f"Tool {called_fun} has response_assignments but its response is not a JSON object; no state written"
+                )
         if called_fun.startswith("check_availability_of_slots") and (
             not get_res_values or (len(get_res_values) == 1 and len(get_res_values[0]) == 0)
         ):
@@ -3393,6 +3537,10 @@ class TaskManager(BaseManager):
 
         # Inject language instruction if detection complete
         messages = self._inject_language_instruction(messages)
+
+        # Inject the pinned typed-state block for non-graph agents (graph agents add
+        # their own inside _build_messages).
+        messages = self._inject_state_block(messages)
 
         # Pass detected language to LLM for pre_call_message selection
         meta_info["detected_language"] = self.language
@@ -6488,6 +6636,10 @@ class TaskManager(BaseManager):
                     },
                     "hangup_detail": self.hangup_detail,
                     "has_transfer": self.has_transfer,
+                    # Typed agent state at call end; persisted to executions.agent_state.
+                    # Gated on variable_types so a stray "state" key merged from a tool
+                    # response never masquerades as agent state for a non-typed agent.
+                    "agent_state": ((self.context_data or {}).get("state") or None) if self.variable_types else None,
                 }
 
                 try:

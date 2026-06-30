@@ -20,6 +20,7 @@ from bolna.helpers.utils import (
     get_md5_hash,
 )
 from bolna.helpers.expression_evaluator import evaluate_edge_expression, describe_edge_expression
+from bolna.helpers.agent_state import format_state_block
 from bolna.enums import EdgeConditionType, NodeType, ToolScope
 from bolna.llms.types import LLMStreamChunk, LatencyData
 from bolna.llms import OpenAiLLM
@@ -916,6 +917,9 @@ class GraphAgent(BaseAgent):
         messages = [{"role": "system", "content": prompt}] + conversation
         if rag_message:
             messages.append(rag_message)
+        state_block = format_state_block(self.context_data, self.variable_types)
+        if state_block:
+            messages.append({"role": "system", "content": state_block})
         return messages
 
     async def generate(self, message: List[dict], **kwargs) -> AsyncGenerator:
