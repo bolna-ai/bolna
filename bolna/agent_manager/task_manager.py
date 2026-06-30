@@ -84,6 +84,7 @@ from bolna.helpers.utils import (
     format_error_message,
     enrich_context_with_time_variables,
 )
+from bolna.helpers.async_utils import create_tracked_task
 from bolna.helpers.logger_config import configure_logger
 from ..helpers.mark_event_meta_data import MarkEventMetaData
 from ..helpers.observable_variable import ObservableVariable
@@ -4671,7 +4672,10 @@ class TaskManager(BaseManager):
             return
         snapshot = dict(meta_info)
         self._last_turn_meta_info = snapshot
-        asyncio.create_task(self.handle_language_switch(transcriber_message, snapshot, spawn_language=self.language))
+        create_tracked_task(
+            self.handle_language_switch(transcriber_message, snapshot, spawn_language=self.language),
+            name="language-switch-decision",
+        )
 
     async def handle_language_switch(
         self,

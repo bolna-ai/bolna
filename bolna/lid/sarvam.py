@@ -9,6 +9,7 @@ import wave
 
 from dotenv import load_dotenv
 
+from bolna.helpers.async_utils import create_tracked_task
 from bolna.helpers.logger_config import configure_logger
 
 from .base import LIDBackend
@@ -274,7 +275,7 @@ class SarvamLID(LIDBackend):
                             logger.info(
                                 f"SarvamLID: detected {lang!r} (short={short!r}, duration={audio_duration:.2f}s, conf={conf:.2f})"
                             )
-                            asyncio.create_task(self.on_language(short, conf))
+                            create_tracked_task(self.on_language(short, conf), name="sarvam-lid-on-language")
                 except Exception as e:
                     logger.error(f"SarvamLID receiver parse error: {e}")
         except asyncio.CancelledError:
@@ -296,7 +297,7 @@ class SarvamLID(LIDBackend):
             return
         self._reconnecting = True
         logger.error(f"SarvamLID: socket dead ({source}) — detector mute, attempting reconnect")
-        asyncio.create_task(self._reconnect())
+        create_tracked_task(self._reconnect(), name="sarvam-lid-reconnect")
 
     async def _reconnect(self):
         try:
