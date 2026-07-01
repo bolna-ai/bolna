@@ -162,6 +162,17 @@ class TestRouterNodeValidation:
         with pytest.raises(ValidationError, match="cycle"):
             GraphAgentConfig(**_base_config(nodes, "r1"))
 
+    def test_router_edge_to_unknown_node_rejected(self):
+        nodes = [
+            {
+                "id": "r1",
+                "node_type": "router",
+                "edges": [{"to_node_id": "does_not_exist", "condition_type": "unconditional"}],
+            },
+        ]
+        with pytest.raises(ValidationError, match="unknown node"):
+            GraphAgentConfig(**_base_config(nodes, "r1"))
+
     def test_router_chain_terminating_ok(self):
         nodes = [
             {
@@ -373,6 +384,30 @@ class TestGenerateWithRouter:
         assert any(r["current_node"] == "hindi" and r["routing_type"] == "deterministic" for r in routing)
         # the terminal (speaking) node produced a messages payload, i.e. it did not stay silent
         assert any(isinstance(o, dict) and "messages" in o for o in out)
+
+    @pytest.mark.asyncio
+    async def test_unresolvable_router_stays_silent(self):
+        # A router that matches no expression and has no catch-all (built as a raw
+        # dict, bypassing validation) must not fall through to speaking.
+        nodes = [
+            {
+                "id": "dispatch",
+                "node_type": "router",
+                "edges": [
+                    {
+                        "to_node_id": "hindi",
+                        "condition_type": "expression",
+                        "expression": _expr("detected_language", "eq", "hi"),
+                    },
+                ],
+            },
+            {"id": "hindi", "prompt": "Hindi.", "edges": []},
+        ]
+        agent = _make_agent(_base_config(nodes, "dispatch", context_data={"detected_language": "fr"}))
+
+        out = await _collect(agent.generate([{"role": "user", "content": "hi"}]))
+        assert agent.current_node_id == "dispatch"  # never left the router
+        assert not any(isinstance(o, dict) and "messages" in o for o in out)  # did not speak
 
     @pytest.mark.asyncio
     async def test_entry_router_resolves_on_first_generate(self):

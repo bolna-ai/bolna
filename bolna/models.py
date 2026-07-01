@@ -454,18 +454,21 @@ class GraphAgentConfig(Llm):
         return self
 
     @model_validator(mode="after")
-    def validate_no_router_cycle(self):
-        """Router nodes that only route into other router nodes must terminate.
-        A cycle among router nodes would never reach a speaking node."""
-        router_ids = {n.id for n in self.nodes if n.node_type == NodeType.ROUTER}
-        if not router_ids:
+    def validate_router_graph(self):
+        """Router edges must target existing nodes, and routers must not cycle among
+        themselves (either would leave the chain unable to reach a speaking node)."""
+        router_nodes = [n for n in self.nodes if n.node_type == NodeType.ROUTER]
+        if not router_nodes:
             return self
 
-        adjacency = {
-            n.id: [e.to_node_id for e in n.edges if e.to_node_id in router_ids]
-            for n in self.nodes
-            if n.node_type == NodeType.ROUTER
-        }
+        node_ids = {n.id for n in self.nodes}
+        for node in router_nodes:
+            for edge in node.edges:
+                if edge.to_node_id not in node_ids:
+                    raise ValueError(f"Router node '{node.id}' routes to unknown node '{edge.to_node_id}'.")
+
+        router_ids = {n.id for n in router_nodes}
+        adjacency = {n.id: [e.to_node_id for e in n.edges if e.to_node_id in router_ids] for n in router_nodes}
 
         WHITE, GRAY, BLACK = 0, 1, 2
         color = {rid: WHITE for rid in router_ids}

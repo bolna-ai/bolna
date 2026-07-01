@@ -41,6 +41,7 @@ load_dotenv()
 logger = configure_logger(__name__)
 
 _DETERMINISTIC_REASONING_PREFIX = "deterministic:"
+_ROUTER_REASONING_PREFIX = f"{_DETERMINISTIC_REASONING_PREFIX}router:"
 _PROMPT_VAR_PATTERN = re.compile(r"\{([a-zA-Z_][a-zA-Z0-9_]*)\}")
 
 # Time variables frozen per call for the conversation prompt; see _prompt_context.
@@ -496,8 +497,7 @@ class GraphAgent(BaseAgent):
         return node_turns, total_turns
 
     def _enrich_routing_context(self, history: list) -> None:
-        """Inject live time variables and turn counts into context_data so
-        expression edges evaluate against the current state."""
+        """Refresh time variables and turn counts in context_data for expression evaluation."""
         recipient_data = self.context_data.get("recipient_data")
         timezone_str = recipient_data.get("timezone") if isinstance(recipient_data, dict) else None
         if timezone_str:
@@ -508,25 +508,53 @@ class GraphAgent(BaseAgent):
         self.context_data["_total_turns"] = total_turns
         self.context_data["_silence_repeats"] = self._silence_repeats
 
-    def _resolve_router_chain(self, history: list) -> List[dict]:
-        """Resolve a chain of router nodes without speaking.
+    @staticmethod
+    def _node_type_of(node: Optional[dict]) -> str:
+        return node.get("node_type", NodeType.LLM) if node else NodeType.LLM
 
-        A router node emits nothing: on entry it evaluates its deterministic
-        edges and transitions again, within the same turn, until it lands on a
-        node that speaks. Expression edges are checked in priority order; the
-        unconditional catch-all is taken only if no expression matched. The
-        visited-set bounds the chain to the number of router nodes, so it always
-        terminates. Returns one routing_info dict per hop for the caller to emit.
-        """
+    def _select_router_edge(self, node: dict) -> Tuple[Optional[dict], str]:
+        """Matching expression edge (priority order) if any, else the unconditional catch-all."""
+        deterministic_edges, _ = self._classify_edges(node.get("edges", []))
+        expression_edges = [e for e in deterministic_edges if e.get("condition_type") == EdgeConditionType.EXPRESSION]
+
+        matched_edge, evaluations = self._evaluate_deterministic_edges(expression_edges)
+        if matched_edge is None:
+            matched_edge = next(
+                (e for e in deterministic_edges if e.get("condition_type") == EdgeConditionType.UNCONDITIONAL),
+                None,
+            )
+        trace = "; ".join(evaluations) or "no expression edge matched"
+        return matched_edge, trace
+
+    def _router_hop_info(self, previous_node: str, edge: dict, eval_trace: str, latency_ms: float) -> dict:
+        condition = edge.get("condition") or edge.get("condition_type", "router")
+        return {
+            "previous_node": previous_node,
+            "current_node": self.current_node_id,
+            "transitioned": True,
+            "routing_type": "deterministic",
+            "routing_model": None,
+            "routing_provider": None,
+            "routing_latency_ms": round(latency_ms, 1),
+            "extracted_params": {},
+            "node_history": list(self.node_history),
+            "routing_messages": None,
+            "routing_tools": None,
+            "reasoning": f"{_ROUTER_REASONING_PREFIX}{condition}",
+            "routing_expression": eval_trace,
+            "confidence": 1.0,
+            "routing_usage": None,
+            "node_type": self._node_type_of(self.get_node_by_id(self.current_node_id)),
+            "is_silence_trigger": False,
+        }
+
+    def _resolve_router_chain(self, history: list) -> List[dict]:
+        """Hop silently through router nodes until a speaking node is reached, one
+        routing_info per hop. The visited-set bounds the chain, so it always terminates."""
         hops = []
         visited = set()
 
-        while True:
-            node = self.get_node_by_id(self.current_node_id)
-            node_type = node.get("node_type", NodeType.LLM) if node else NodeType.LLM
-            if node_type != NodeType.ROUTER:
-                break
-
+        while self._node_type_of(self.get_node_by_id(self.current_node_id)) == NodeType.ROUTER:
             if self.current_node_id in visited:
                 logger.error(
                     f"Router cycle detected at '{self.current_node_id}', stopping chain. "
@@ -537,20 +565,10 @@ class GraphAgent(BaseAgent):
 
             hop_start = time.perf_counter()
             self._enrich_routing_context(history)
+            router_node = self.get_node_by_id(self.current_node_id)
+            edge, eval_trace = self._select_router_edge(router_node)
 
-            deterministic_edges, _ = self._classify_edges(node.get("edges", []))
-            expression_edges = [
-                e for e in deterministic_edges if e.get("condition_type") == EdgeConditionType.EXPRESSION
-            ]
-            matched_edge, det_evaluations = self._evaluate_deterministic_edges(expression_edges)
-            if matched_edge is None:
-                matched_edge = next(
-                    (e for e in deterministic_edges if e.get("condition_type") == EdgeConditionType.UNCONDITIONAL),
-                    None,
-                )
-            eval_trace = "; ".join(det_evaluations) or "no expression edge matched"
-
-            if matched_edge is None:
+            if edge is None:
                 logger.error(
                     f"Router node '{self.current_node_id}' has no matching edge and no catch-all, "
                     f"stopping chain. Evaluations: {eval_trace}"
@@ -558,46 +576,23 @@ class GraphAgent(BaseAgent):
                 break
 
             previous_node = self.current_node_id
+            self._advance_to_node(edge["to_node_id"], entry_index=len(history))
             latency_ms = (time.perf_counter() - hop_start) * 1000
-            self.current_node_id = matched_edge["to_node_id"]
-            self.current_node_entry_index = len(history)
-            self._silence_repeats = 0
-
-            if not self.node_history or self.node_history[-1] != self.current_node_id:
-                self.node_history.append(self.current_node_id)
-
-            target_node = self.get_node_by_id(self.current_node_id)
-            target_type = target_node.get("node_type", NodeType.LLM) if target_node else NodeType.LLM
-            condition = matched_edge.get("condition") or matched_edge.get("condition_type", "router")
 
             logger.info(
                 f"Router dispatch on node '{previous_node}': -> {self.current_node_id} "
                 f"| {eval_trace} (latency: {latency_ms:.1f}ms)"
             )
-
-            hops.append(
-                {
-                    "previous_node": previous_node,
-                    "current_node": self.current_node_id,
-                    "transitioned": True,
-                    "routing_type": "deterministic",
-                    "routing_model": None,
-                    "routing_provider": None,
-                    "routing_latency_ms": round(latency_ms, 1),
-                    "extracted_params": {},
-                    "node_history": list(self.node_history),
-                    "routing_messages": None,
-                    "routing_tools": None,
-                    "reasoning": f"{_DETERMINISTIC_REASONING_PREFIX}router:{condition}",
-                    "routing_expression": eval_trace,
-                    "confidence": 1.0,
-                    "routing_usage": None,
-                    "node_type": target_type,
-                    "is_silence_trigger": False,
-                }
-            )
+            hops.append(self._router_hop_info(previous_node, edge, eval_trace, latency_ms))
 
         return hops
+
+    def _advance_to_node(self, node_id: str, entry_index: int) -> None:
+        self.current_node_id = node_id
+        self.current_node_entry_index = entry_index
+        self._silence_repeats = 0
+        if not self.node_history or self.node_history[-1] != self.current_node_id:
+            self.node_history.append(self.current_node_id)
 
     async def _decide_next_node_llm(
         self, node: dict, llm_edges: list, history: List[dict], start_time: float
@@ -1053,7 +1048,10 @@ class GraphAgent(BaseAgent):
                     for hop in self._resolve_router_chain(message):
                         yield {"routing_info": hop}
                     current_node = self.get_node_by_id(self.current_node_id)
-                    node_type = current_node.get("node_type", NodeType.LLM) if current_node else NodeType.LLM
+                    node_type = self._node_type_of(current_node)
+                    if node_type == NodeType.ROUTER:
+                        logger.error(f"Router '{self.current_node_id}' did not resolve to a speaking node")
+                        return
 
                 if node_type == NodeType.STATIC:
                     static_text = current_node.get("static_message", "") if current_node else ""
@@ -1091,8 +1089,7 @@ class GraphAgent(BaseAgent):
 
             # Entry-node dispatch: if the turn begins on a router node (a router
             # start node, first turn), resolve it to a speaking node before routing.
-            entry_node = self.get_node_by_id(self.current_node_id)
-            if entry_node and entry_node.get("node_type") == NodeType.ROUTER:
+            if self._node_type_of(self.get_node_by_id(self.current_node_id)) == NodeType.ROUTER:
                 for hop in self._resolve_router_chain(message):
                     yield {"routing_info": hop}
 
@@ -1155,7 +1152,10 @@ class GraphAgent(BaseAgent):
                 for hop in self._resolve_router_chain(message):
                     yield {"routing_info": hop}
                 current_node = self.get_node_by_id(self.current_node_id)
-                node_type = current_node.get("node_type", NodeType.LLM) if current_node else NodeType.LLM
+                node_type = self._node_type_of(current_node)
+                if node_type == NodeType.ROUTER:
+                    logger.error(f"Router '{self.current_node_id}' did not resolve to a speaking node")
+                    return
 
             if node_type == NodeType.STATIC:
                 static_text = current_node.get("static_message", "") if current_node else ""
