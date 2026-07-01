@@ -399,6 +399,30 @@ class GraphNode(BaseModel):
     completion_check: Optional[Callable[[List[dict]], bool]] = None
     rag_config: Optional[RagConfig] = None
 
+    @model_validator(mode="after")
+    def validate_router_node(self):
+        """A router node dispatches silently: it never speaks, routes only on
+        deterministic edges, and must have a catch-all so it always advances."""
+        if self.node_type != NodeType.ROUTER:
+            return self
+
+        if self.prompt or self.static_message:
+            raise ValueError(f"Router node '{self.id}' must not set a prompt or static_message; it never speaks.")
+
+        allowed = {EdgeConditionType.EXPRESSION, EdgeConditionType.UNCONDITIONAL}
+        for edge in self.edges:
+            if edge.condition_type not in allowed:
+                raise ValueError(
+                    f"Router node '{self.id}' edge to '{edge.to_node_id}' must be an expression or unconditional edge; "
+                    f"intent/LLM and event edges are not allowed on router nodes."
+                )
+
+        if not any(edge.condition_type == EdgeConditionType.UNCONDITIONAL for edge in self.edges):
+            raise ValueError(
+                f"Router node '{self.id}' must have one unconditional catch-all edge so it always advances."
+            )
+        return self
+
 
 class GraphAgentConfig(Llm):
     agent_information: str
@@ -427,6 +451,38 @@ class GraphAgentConfig(Llm):
             target_model = self.routing_model or self.model
             if target_model is not None:
                 validate_reasoning_effort_for_model(target_model, effort_value)
+        return self
+
+    @model_validator(mode="after")
+    def validate_no_router_cycle(self):
+        """Router nodes that only route into other router nodes must terminate.
+        A cycle among router nodes would never reach a speaking node."""
+        router_ids = {n.id for n in self.nodes if n.node_type == NodeType.ROUTER}
+        if not router_ids:
+            return self
+
+        adjacency = {
+            n.id: [e.to_node_id for e in n.edges if e.to_node_id in router_ids]
+            for n in self.nodes
+            if n.node_type == NodeType.ROUTER
+        }
+
+        WHITE, GRAY, BLACK = 0, 1, 2
+        color = {rid: WHITE for rid in router_ids}
+
+        def has_cycle(rid):
+            color[rid] = GRAY
+            for nxt in adjacency.get(rid, []):
+                if color[nxt] == GRAY or (color[nxt] == WHITE and has_cycle(nxt)):
+                    return True
+            color[rid] = BLACK
+            return False
+
+        for rid in router_ids:
+            if color[rid] == WHITE and has_cycle(rid):
+                raise ValueError(
+                    f"Router nodes form a cycle involving '{rid}'; a router chain must terminate at a non-router node."
+                )
         return self
 
 
