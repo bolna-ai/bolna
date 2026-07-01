@@ -44,6 +44,10 @@ class DictWithMissing(dict):
         return ""
 
 
+# Server-owned telephony ids; never exposed to the model (prompt var, {placeholder}, or tool param).
+SERVER_OWNED_CALL_IDENTIFIERS = frozenset({"call_sid", "stream_sid"})
+
+
 def load_file(file_path, is_json=False):
     data = None
     with open(file_path, "r") as f:
@@ -228,7 +232,8 @@ async def get_raw_audio_bytes(
 
 
 def get_md5_hash(text):
-    return hashlib.md5(text.encode()).hexdigest()
+    # Non-security hash (cache keys / ids); usedforsecurity=False documents that and clears bandit B324.
+    return hashlib.md5(text.encode(), usedforsecurity=False).hexdigest()
 
 
 def is_valid_md5(hash_string):
@@ -313,7 +318,11 @@ def update_prompt_with_context(prompt, context_data):
     try:
         if not context_data or not isinstance(context_data.get("recipient_data"), dict):
             return prompt.format_map(DictWithMissing({}))
-        return prompt.format_map(DictWithMissing(context_data.get("recipient_data", {})))
+        # A {call_sid}/{stream_sid} template renders empty instead of leaking the real id.
+        recipient_data = {
+            k: v for k, v in context_data["recipient_data"].items() if k not in SERVER_OWNED_CALL_IDENTIFIERS
+        }
+        return prompt.format_map(DictWithMissing(recipient_data))
     except Exception as e:
         return prompt
 
@@ -529,10 +538,12 @@ async def write_request_logs(message, run_id):
         LogComponent.LLM_HANGUP,
         LogComponent.LLM_VOICEMAIL,
         LogComponent.LLM_LANGUAGE_DETECTION,
+        LogComponent.LLM_LANGUAGE_SWITCH,
     ):
-        # Convert dict to string if necessary
+        # ensure_ascii=False so non-Latin scripts (Hindi/Telugu/…) stay readable in the trace
+        # Data column instead of rendering as \uXXXX escapes.
         if isinstance(message_data, dict):
-            message_data = json.dumps(message_data)
+            message_data = json.dumps(message_data, ensure_ascii=False)
         component_details = [
             message_data,
             message.get("input_tokens", 0),
@@ -592,7 +603,7 @@ async def write_request_logs(message, run_id):
 
     metadata_str = None
     if metadata:
-        metadata_str = json.dumps(metadata)
+        metadata_str = json.dumps(metadata, ensure_ascii=False)
     row = row + component_details + [metadata_str]
 
     header = "Time,Component,Direction,Leg ID,Sequence ID,Model,Data,Input Tokens,Output Tokens,Characters,Latency,Cached,Final Transcript,Engine,Metadata\n"
@@ -918,8 +929,10 @@ def structure_system_prompt(
         if not is_web_based_call:
             final_prompt = update_prompt_with_context(system_prompt, context_data)
 
-        if call_sid:
-            default_variables["call_sid"] = call_sid
+        # call_sid is deliberately NOT exposed as a prompt variable: the model would echo it
+        # into spoken text (and into the required transfer_call call_sid arg), yet the real sid
+        # is always injected server-side in __execute_function_call via get_call_sid(). Exposing
+        # it only risks the agent reading the internal id aloud during a transfer.
 
         final_prompt = f"{final_prompt}\n\n## Call information:\n\n### Variables:\n"
         for k, v in default_variables.items():

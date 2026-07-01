@@ -70,6 +70,7 @@ class TranscriberProvider(str, Enum):
     ELEVENLABS = "elevenlabs"
     SMALLEST = "smallest"
     OPENAI = "openai"
+    SONIOX = "soniox"
 
     @classmethod
     def all_values(cls):
@@ -261,6 +262,12 @@ class ExpressionLogic(str, Enum):
     OR = "or"
 
 
+class VariableType(str, Enum):
+    STRING = "string"
+    NUMBER = "number"
+    BOOLEAN = "boolean"
+
+
 class EdgeConditionType(str, Enum):
     LLM = "llm"
     EXPRESSION = "expression"
@@ -271,6 +278,13 @@ class EdgeConditionType(str, Enum):
 class NodeType(str, Enum):
     LLM = "llm"
     STATIC = "static"
+
+
+class ToolScope(str, Enum):
+    """Where a graph-agent tool is exposed: GLOBAL (every node) or NODE (only its listed nodes)."""
+
+    GLOBAL = "global"
+    NODE = "node"
 
 
 class UsageSource(str, Enum):

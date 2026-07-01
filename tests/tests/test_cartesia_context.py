@@ -1,6 +1,5 @@
-"""Cartesia opens a fresh context_id for each finalized utterance — else back-to-back
-utterances sharing turn/seq (switch handoff+reply, both seq=-1) reuse a closed context and
-the second is starved (QA 927536ad)."""
+"""Cartesia context_id rules: a finalized utterance closes its context, next push opens a fresh
+one — except the handoff doesn't finalize, so the reply continues it."""
 
 from unittest.mock import MagicMock
 
@@ -23,15 +22,26 @@ def _push(s, meta):
     CartesiaSynthesizer._on_push.__get__(s, CartesiaSynthesizer)(meta, meta.get("text", "x"))
 
 
-def test_fresh_context_for_back_to_back_eot_utterances():
-    # Handoff then reply — both sequence_id=-1, no turn_id, both end_of_llm_stream=True.
+def test_handoff_defers_finalize_so_reply_continues_same_context():
     s = _synth()
-    _push(s, {"sequence_id": -1, "end_of_llm_stream": True})  # handoff
+    handoff_meta = {"sequence_id": -1, "end_of_llm_stream": True, "message_category": "handoff"}
+    _push(s, handoff_meta)
     ctx_handoff = s.context_id
-    _push(s, {"sequence_id": -1, "end_of_llm_stream": True})  # reply (same seq/turn)
-    ctx_reply = s.context_id
-    assert ctx_handoff and ctx_reply
-    assert ctx_handoff != ctx_reply  # reply gets a fresh, un-finalized context
+    assert handoff_meta["end_of_llm_stream"] is False  # deferred
+    assert s.context_finalized is False
+    _push(s, {"sequence_id": -1, "end_of_llm_stream": True, "message_category": "language_switch_followup"})
+    assert s.context_id == ctx_handoff  # reply continues the same context
+    assert s.context_finalized is True
+
+
+def test_non_handoff_back_to_back_eot_gets_fresh_context():
+    s = _synth()
+    _push(s, {"sequence_id": -1, "end_of_llm_stream": True})
+    ctx_a = s.context_id
+    _push(s, {"sequence_id": -1, "end_of_llm_stream": True})
+    ctx_b = s.context_id
+    assert ctx_a and ctx_b
+    assert ctx_a != ctx_b
 
 
 def test_reuses_context_within_a_streaming_turn():

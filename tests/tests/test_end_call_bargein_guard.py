@@ -22,8 +22,12 @@ import pytest
 from bolna.agent_manager.task_manager import TaskManager
 
 
-def _ignore(hangup_triggered, end_call_in_progress):
-    fake = SimpleNamespace(hangup_triggered=hangup_triggered, _end_call_in_progress=end_call_in_progress)
+def _ignore(hangup_triggered, end_call_in_progress, has_transfer=False):
+    fake = SimpleNamespace(
+        hangup_triggered=hangup_triggered,
+        _end_call_in_progress=end_call_in_progress,
+        has_transfer=has_transfer,
+    )
     return TaskManager._should_ignore_transcriber_input(fake)
 
 
@@ -49,10 +53,12 @@ _INTERIM_BARGEIN = {
 }
 
 
-def _make_tm(*, end_call_in_progress, hangup_triggered):
+def _make_tm(*, end_call_in_progress, hangup_triggered, function_call_in_flight=False):
     tm = MagicMock()
     tm.hangup_triggered = hangup_triggered
     tm._end_call_in_progress = end_call_in_progress
+    tm.function_call_in_flight = function_call_in_flight
+    tm.has_transfer = False
     tm.stream = True
     tm.response_in_pipeline = False
     tm.transcriber_output_queue = asyncio.Queue()
@@ -92,6 +98,15 @@ async def test_bargein_cancels_turn_during_normal_conversation():
     tm = _make_tm(end_call_in_progress=False, hangup_triggered=False)
     await _drive_with_bargein(tm)
     tm._TaskManager__cleanup_downstream_tasks.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_bargein_does_not_cancel_turn_during_tool_call():
+    # A tool call is in flight: interim barge-in must be deferred, else the call is
+    # cancelled before its result is recorded and the pre-call filler loops.
+    tm = _make_tm(end_call_in_progress=False, hangup_triggered=False, function_call_in_flight=True)
+    await _drive_with_bargein(tm)
+    tm._TaskManager__cleanup_downstream_tasks.assert_not_called()
 
 
 class TestSourceGuards:

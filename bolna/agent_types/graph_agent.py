@@ -20,7 +20,7 @@ from bolna.helpers.utils import (
     get_md5_hash,
 )
 from bolna.helpers.expression_evaluator import evaluate_edge_expression, describe_edge_expression
-from bolna.enums import EdgeConditionType, NodeType
+from bolna.enums import EdgeConditionType, NodeType, ToolScope
 from bolna.llms.types import LLMStreamChunk, LatencyData
 from bolna.llms import OpenAiLLM
 from bolna.providers import SUPPORTED_LLM_PROVIDERS
@@ -43,6 +43,18 @@ logger = configure_logger(__name__)
 _DETERMINISTIC_REASONING_PREFIX = "deterministic:"
 _PROMPT_VAR_PATTERN = re.compile(r"\{([a-zA-Z_][a-zA-Z0-9_]*)\}")
 
+# Time variables frozen per call for the conversation prompt; see _prompt_context.
+_TIME_VAR_KEYS = (
+    "current_date",
+    "current_time",
+    "current_hour",
+    "current_minute",
+    "current_weekday",
+    "current_day",
+    "current_month",
+    "current_year",
+)
+
 
 class GraphAgent(BaseAgent):
     def __init__(self, config: GraphAgentConfig):
@@ -51,6 +63,7 @@ class GraphAgent(BaseAgent):
         self.agent_information = self.config.get("agent_information")
         self.current_node_id = self.config.get("current_node_id")
         self.context_data = self.config.get("context_data") or {}
+        self.variable_types = self.config.get("variable_types") or {}
         self.llm_model = self.config.get("model")
 
         # Get credentials from config (injected by task_manager) or fall back to env vars
@@ -69,6 +82,7 @@ class GraphAgent(BaseAgent):
         self._silence_repeats = 0
         self._event_triggered_generation = False
         self._last_deterministic_eval = None
+        self._frozen_time_vars: Optional[Dict[str, Any]] = None
         self.rag_configs = self.initialize_rag_configs()
         self.global_rag_config = self._initialize_global_rag_config()
         self.rag_server_url = os.getenv("RAG_SERVER_URL", "http://localhost:8000")
@@ -412,9 +426,9 @@ class GraphAgent(BaseAgent):
         """Return (first matching deterministic edge or None, per-edge evaluation traces)."""
         evaluations = []
         for edge in edges:
-            is_match = evaluate_edge_expression(edge, self.context_data)
+            is_match = evaluate_edge_expression(edge, self.context_data, self.variable_types)
             evaluations.append(
-                f"-> {edge.get('to_node_id')}: {describe_edge_expression(edge, self.context_data)} | matched={is_match}"
+                f"-> {edge.get('to_node_id')}: {describe_edge_expression(edge, self.context_data, self.variable_types)} | matched={is_match}"
             )
             if is_match:
                 return edge, evaluations
@@ -758,6 +772,41 @@ class GraphAgent(BaseAgent):
         logger.info(f"Node '{self.current_node_id}' forcing specific function: {fn}")
         return {"type": "function", "function": {"name": fn}}
 
+    def _tools_for_node(self, node: Optional[dict], forced_name: Optional[str] = None) -> Optional[List[dict]]:
+        """Tools visible on this node (global + node-scoped + forced), or None to use the full set.
+
+        forced_name is the tool the resolved tool_choice forces this turn (or None); a forced tool
+        must stay visible for the tool_choice to be valid, but only when the force actually survives.
+        """
+        if not self.llm or not getattr(self.llm, "trigger_function_call", False):
+            return None
+        raw = getattr(self.llm, "tools", None)
+        if not raw:
+            return None
+        full = json.loads(raw) if isinstance(raw, str) else raw
+        if not full:
+            return None
+
+        api_params = getattr(self.llm, "api_params", {}) or {}
+        node_id = node.get("id") if node else None
+        forced = forced_name
+
+        subset = []
+        for tool in full:
+            name = tool.get("function", {}).get("name")
+            params = api_params.get(name, {}) or {}
+            if name == forced:
+                subset.append(tool)  # must stay visible so the forced tool_choice is valid
+            elif params.get("scope") == ToolScope.NODE.value:
+                if node_id is not None and node_id in (params.get("nodes") or []):
+                    subset.append(tool)
+            else:
+                subset.append(tool)
+
+        if len(subset) == len(full):
+            return None  # nothing filtered -> let generate_stream use self.tools
+        return subset
+
     def _missing_forced_function_vars(self, node: dict, fn: str) -> List[str]:
         tools = getattr(self.llm, "tools", None) or []
         if isinstance(tools, str):
@@ -788,8 +837,27 @@ class GraphAgent(BaseAgent):
             return False
         return any(msg.get("role") == "tool" and msg.get("tool_call_id") in call_ids_for_fn for msg in node_history)
 
+    def _prompt_context(self) -> Optional[dict]:
+        """Context for prompt substitution with time frozen at call start.
+
+        Routing re-enriches time live each turn for expression edges; the prompt
+        freezes it so its text stays identical across turns and the prompt cache
+        keeps hitting, matching normal agents which render time once at setup.
+        """
+        if not self.context_data or not isinstance(self.context_data.get("recipient_data"), dict):
+            return self.context_data
+        recipient = self.context_data["recipient_data"]
+        if self._frozen_time_vars is None:
+            timezone_str = recipient.get("timezone")
+            if timezone_str:
+                enrich_context_with_time_variables(self.context_data, timezone_str)
+            self._frozen_time_vars = {k: recipient[k] for k in _TIME_VAR_KEYS if k in recipient}
+        if not self._frozen_time_vars:
+            return self.context_data
+        return {**self.context_data, "recipient_data": {**recipient, **self._frozen_time_vars}}
+
     async def _build_messages(self, history: List[dict], meta_info: Optional[dict] = None) -> List[dict]:
-        """Build messages array: system prompt (+ optional RAG) + conversation history."""
+        """Build messages array: system prompt + conversation history (+ optional trailing RAG)."""
         current_node = self.get_node_by_id(self.current_node_id)
         if not current_node:
             raise ValueError("Current node not found.")
@@ -797,21 +865,21 @@ class GraphAgent(BaseAgent):
         detected_lang = self.context_data.get("detected_language")  # None if not yet detected
         node_prompt = self._get_prompt_with_example(current_node, detected_lang)
 
-        if self.context_data:
-            timezone_str = self.context_data.get("recipient_data", {}).get("timezone")
-            if timezone_str:
-                enrich_context_with_time_variables(self.context_data, timezone_str)
-            node_prompt = update_prompt_with_context(node_prompt, self.context_data)
+        prompt_context = self._prompt_context()
+        if prompt_context:
+            node_prompt = update_prompt_with_context(node_prompt, prompt_context)
 
         if self.agent_information:
             agent_info = self.agent_information
-            if self.context_data:
-                agent_info = update_prompt_with_context(agent_info, self.context_data)
+            if prompt_context:
+                agent_info = update_prompt_with_context(agent_info, prompt_context)
             prompt = f"{agent_info}\n\n{node_prompt}"
         else:
             prompt = node_prompt
 
-        # Try RAG: node-level config wins, otherwise fall back to the global (agent-level) config
+        # RAG depends on the latest message, so it goes in a trailing message rather
+        # than the system prompt, keeping [system + history] a cacheable prefix.
+        rag_message = None
         rag_config = self.rag_configs.get(self.current_node_id) or self.global_rag_config
         if rag_config and rag_config.get("collections"):
             try:
@@ -833,7 +901,10 @@ class GraphAgent(BaseAgent):
                     }
                 if rag_response.contexts:
                     rag_context = await client.format_context_for_prompt(rag_response.contexts)
-                    prompt = f"{prompt}\n\nKnowledge base:\n{rag_context}\n\nUse this information naturally."
+                    rag_message = {
+                        "role": "system",
+                        "content": f"Knowledge base for the latest user message:\n{rag_context}\n\nUse this information naturally.",
+                    }
             except Exception as e:
                 logger.error(f"RAG error for node {self.current_node_id}: {e}")
 
@@ -842,7 +913,10 @@ class GraphAgent(BaseAgent):
 
         # Pass conversation history as-is to preserve tool_calls/tool_call_id fields
         conversation = [msg for msg in history_subset if msg.get("role") != "system"]
-        return [{"role": "system", "content": prompt}] + conversation
+        messages = [{"role": "system", "content": prompt}] + conversation
+        if rag_message:
+            messages.append(rag_message)
+        return messages
 
     async def generate(self, message: List[dict], **kwargs) -> AsyncGenerator:
         meta_info = kwargs.get("meta_info", {})
@@ -904,8 +978,10 @@ class GraphAgent(BaseAgent):
                 )
                 yield {"messages": messages}
                 tool_choice = self._get_tool_choice_for_node(history=message)
+                forced_name = tool_choice["function"]["name"] if tool_choice else None
+                node_tools = self._tools_for_node(current_node, forced_name)
                 async for chunk in self.llm.generate_stream(
-                    messages, synthesize=synthesize, meta_info=meta_info, tool_choice=tool_choice
+                    messages, synthesize=synthesize, meta_info=meta_info, tool_choice=tool_choice, tools=node_tools
                 ):
                     yield chunk
                 return
@@ -981,8 +1057,10 @@ class GraphAgent(BaseAgent):
             messages = await self._build_messages(message, meta_info=meta_info)
             yield {"messages": messages}
             tool_choice = self._get_tool_choice_for_node(history=message)
+            forced_name = tool_choice["function"]["name"] if tool_choice else None
+            node_tools = self._tools_for_node(current_node, forced_name)
             async for chunk in self.llm.generate_stream(
-                messages, synthesize=synthesize, meta_info=meta_info, tool_choice=tool_choice
+                messages, synthesize=synthesize, meta_info=meta_info, tool_choice=tool_choice, tools=node_tools
             ):
                 yield chunk
 
