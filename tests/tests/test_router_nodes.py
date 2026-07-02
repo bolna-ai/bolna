@@ -105,19 +105,19 @@ class TestRouterNodeValidation:
                 edges=[{"to_node_id": "a", "condition_type": "unconditional"}],
             )
 
-    def test_router_with_llm_edge_rejected(self):
-        with pytest.raises(ValidationError, match="expression or unconditional"):
-            GraphNode(
-                id="dispatch",
-                node_type=NodeType.ROUTER,
-                edges=[
-                    {"to_node_id": "a", "condition": "user wants a"},  # no condition_type -> llm
-                    {"to_node_id": "b", "condition_type": "unconditional"},
-                ],
-            )
+    def test_router_with_intent_edge_allowed(self):
+        node = GraphNode(
+            id="dispatch",
+            node_type=NodeType.ROUTER,
+            edges=[
+                {"to_node_id": "a", "condition": "user wants a"},  # no condition_type -> llm/intent
+                {"to_node_id": "b", "condition_type": "unconditional"},
+            ],
+        )
+        assert node.node_type == NodeType.ROUTER
 
     def test_router_with_event_edge_rejected(self):
-        with pytest.raises(ValidationError, match="expression or unconditional"):
+        with pytest.raises(ValidationError, match="event edge"):
             GraphNode(
                 id="dispatch",
                 node_type=NodeType.ROUTER,
@@ -219,9 +219,10 @@ def _router_agent(current="dispatch", **ctx):
 
 
 class TestResolveRouterChain:
-    def test_single_hop_expression_match(self):
+    @pytest.mark.asyncio
+    async def test_single_hop_expression_match(self):
         agent = _router_agent(detected_language="hi")
-        hops = agent._resolve_router_chain([])
+        hops = await agent._resolve_router_chain([])
         assert agent.current_node_id == "hindi"
         assert len(hops) == 1
         assert hops[0]["previous_node"] == "dispatch"
@@ -231,14 +232,16 @@ class TestResolveRouterChain:
         assert hops[0]["confidence"] == 1.0
         assert hops[0]["node_type"] == NodeType.LLM
 
-    def test_catch_all_fallback_when_no_expression_matches(self):
+    @pytest.mark.asyncio
+    async def test_catch_all_fallback_when_no_expression_matches(self):
         agent = _router_agent(detected_language="fr")
-        hops = agent._resolve_router_chain([])
+        hops = await agent._resolve_router_chain([])
         assert agent.current_node_id == "english"
         assert len(hops) == 1
         assert hops[0]["current_node"] == "english"
 
-    def test_catch_all_wins_even_if_listed_first(self):
+    @pytest.mark.asyncio
+    async def test_catch_all_wins_even_if_listed_first(self):
         # The unconditional is listed BEFORE the expression; it must still be a
         # fallback, not pre-empt a matching expression edge.
         nodes = [
@@ -259,10 +262,11 @@ class TestResolveRouterChain:
             {"id": "vip", "prompt": "v", "edges": []},
         ]
         agent = _make_agent(_base_config(nodes, "dispatch", context_data={"tier": "vip"}))
-        agent._resolve_router_chain([])
+        await agent._resolve_router_chain([])
         assert agent.current_node_id == "vip"
 
-    def test_expression_priority_order(self):
+    @pytest.mark.asyncio
+    async def test_expression_priority_order(self):
         nodes = [
             {
                 "id": "dispatch",
@@ -288,10 +292,11 @@ class TestResolveRouterChain:
             {"id": "default", "prompt": "d", "edges": []},
         ]
         agent = _make_agent(_base_config(nodes, "dispatch", context_data={"flag": "on"}))
-        agent._resolve_router_chain([])
+        await agent._resolve_router_chain([])
         assert agent.current_node_id == "high"  # lower priority number wins
 
-    def test_multi_hop_chain(self):
+    @pytest.mark.asyncio
+    async def test_multi_hop_chain(self):
         nodes = [
             {
                 "id": "r1",
@@ -306,12 +311,13 @@ class TestResolveRouterChain:
             {"id": "leaf", "prompt": "done", "edges": []},
         ]
         agent = _make_agent(_base_config(nodes, "r1"))
-        hops = agent._resolve_router_chain([])
+        hops = await agent._resolve_router_chain([])
         assert agent.current_node_id == "leaf"
         assert [h["current_node"] for h in hops] == ["r2", "leaf"]
         assert agent.node_history[-1] == "leaf"
 
-    def test_runtime_cycle_is_bounded(self):
+    @pytest.mark.asyncio
+    async def test_runtime_cycle_is_bounded(self):
         # Build a cyclic router graph directly as a dict (bypasses Pydantic
         # validation) to prove the visited-set prevents an infinite loop.
         nodes = [
@@ -327,13 +333,14 @@ class TestResolveRouterChain:
             },
         ]
         agent = _make_agent(_base_config(nodes, "r1"))
-        hops = agent._resolve_router_chain([])  # must return, not hang
+        hops = await agent._resolve_router_chain([])  # must return, not hang
         assert len(hops) == 2  # r1->r2, r2->r1, then r1 already visited -> stop
 
-    def test_no_hops_when_current_not_router(self):
+    @pytest.mark.asyncio
+    async def test_no_hops_when_current_not_router(self):
         nodes = [{"id": "leaf", "prompt": "hi", "edges": []}]
         agent = _make_agent(_base_config(nodes, "leaf"))
-        hops = agent._resolve_router_chain([])
+        hops = await agent._resolve_router_chain([])
         assert hops == []
         assert agent.current_node_id == "leaf"
 
@@ -435,3 +442,116 @@ class TestGenerateWithRouter:
 
         assert agent.current_node_id == "vip"
         assert any(r["previous_node"] == "entry" and r["current_node"] == "vip" for r in routing)
+
+
+# ---------------------------------------------------------------------------
+# Intent edges on routers
+# ---------------------------------------------------------------------------
+
+
+def _intent_router_agent(**ctx):
+    nodes = [
+        {
+            "id": "dispatch",
+            "node_type": "router",
+            "description": "Route the caller to the right department.",
+            "edges": [
+                {
+                    "to_node_id": "hindi",
+                    "condition_type": "expression",
+                    "expression": _expr("detected_language", "eq", "hi"),
+                },
+                {"to_node_id": "billing", "condition": "user asks about billing", "function_name": "go_to_billing"},
+                {"to_node_id": "support", "condition": "user needs technical support"},
+                {"to_node_id": "general", "condition_type": "unconditional"},
+            ],
+        },
+        {"id": "hindi", "prompt": "Hindi.", "edges": []},
+        {"id": "billing", "prompt": "Billing.", "edges": []},
+        {"id": "support", "prompt": "Support.", "edges": []},
+        {"id": "general", "prompt": "General.", "edges": []},
+    ]
+    return _make_agent(_base_config(nodes, "dispatch", context_data=ctx or {}))
+
+
+class TestRouterIntentRouting:
+    @pytest.mark.asyncio
+    async def test_expression_match_skips_intent_llm(self):
+        agent = _intent_router_agent(detected_language="hi")
+        with patch.object(agent, "_decide_next_node_llm", new_callable=AsyncMock) as mock_llm:
+            await agent._resolve_router_chain([{"role": "user", "content": "namaste"}])
+        mock_llm.assert_not_called()
+        assert agent.current_node_id == "hindi"
+
+    @pytest.mark.asyncio
+    async def test_intent_routes_when_no_expression_matches(self):
+        agent = _intent_router_agent(detected_language="en")
+        picked = (
+            "billing",
+            {"topic": "invoice"},
+            320.0,
+            [{"role": "system", "content": "routing"}],
+            [{"type": "function"}],
+            "asks about an invoice",
+            0.9,
+            {"input_tokens": 12},
+        )
+        with patch.object(agent, "_decide_next_node_llm", new_callable=AsyncMock, return_value=picked) as mock_llm:
+            hops = await agent._resolve_router_chain([{"role": "user", "content": "my invoice is wrong"}])
+
+        mock_llm.assert_called_once()
+        offered = mock_llm.call_args.args[1]  # only intent edges go to the routing LLM
+        assert {e["to_node_id"] for e in offered} == {"billing", "support"}
+        assert agent.current_node_id == "billing"
+        assert agent.context_data["topic"] == "invoice"
+        assert len(hops) == 1
+        assert hops[0]["routing_type"] == "llm"
+        assert hops[0]["routing_messages"] is not None
+        assert hops[0]["extracted_params"] == {"topic": "invoice"}
+        assert hops[0]["confidence"] == 0.9
+
+    @pytest.mark.asyncio
+    async def test_intent_no_match_falls_to_catch_all(self):
+        agent = _intent_router_agent(detected_language="en")
+        stay = (None, None, 250.0, [{"role": "system", "content": "routing"}], [], "unclear", 0.3, None)
+        with patch.object(agent, "_decide_next_node_llm", new_callable=AsyncMock, return_value=stay) as mock_llm:
+            hops = await agent._resolve_router_chain([{"role": "user", "content": "ummm"}])
+
+        mock_llm.assert_called_once()
+        assert agent.current_node_id == "general"
+        assert hops[0]["routing_type"] == "deterministic"
+        assert "intent: no match" in hops[0]["routing_expression"]
+
+    @pytest.mark.asyncio
+    async def test_one_intent_call_per_chain(self):
+        # r1 routes via intent to r2 (another intent router); r2 must take its
+        # catch-all instead of making a second LLM call.
+        nodes = [
+            {
+                "id": "r1",
+                "node_type": "router",
+                "edges": [
+                    {"to_node_id": "r2", "condition": "user wants a specialist"},
+                    {"to_node_id": "general", "condition_type": "unconditional"},
+                ],
+            },
+            {
+                "id": "r2",
+                "node_type": "router",
+                "edges": [
+                    {"to_node_id": "billing", "condition": "billing question"},
+                    {"to_node_id": "support", "condition_type": "unconditional"},
+                ],
+            },
+            {"id": "billing", "prompt": "b", "edges": []},
+            {"id": "support", "prompt": "s", "edges": []},
+            {"id": "general", "prompt": "g", "edges": []},
+        ]
+        agent = _make_agent(_base_config(nodes, "r1"))
+        pick_r2 = ("r2", None, 300.0, [{"role": "system", "content": "r"}], [], "specialist", 0.8, None)
+        with patch.object(agent, "_decide_next_node_llm", new_callable=AsyncMock, return_value=pick_r2) as mock_llm:
+            hops = await agent._resolve_router_chain([{"role": "user", "content": "hi"}])
+
+        assert mock_llm.call_count == 1
+        assert agent.current_node_id == "support"  # r2's catch-all, no second call
+        assert [h["current_node"] for h in hops] == ["r2", "support"]

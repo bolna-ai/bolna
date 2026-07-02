@@ -401,20 +401,19 @@ class GraphNode(BaseModel):
 
     @model_validator(mode="after")
     def validate_router_node(self):
-        """A router node dispatches silently: it never speaks, routes only on
-        deterministic edges, and must have a catch-all so it always advances."""
+        """A router node dispatches silently: it never speaks and must have a
+        catch-all so it always advances."""
         if self.node_type != NodeType.ROUTER:
             return self
 
         if self.prompt or self.static_message:
             raise ValueError(f"Router node '{self.id}' must not set a prompt or static_message; it never speaks.")
 
-        allowed = {EdgeConditionType.EXPRESSION, EdgeConditionType.UNCONDITIONAL}
         for edge in self.edges:
-            if edge.condition_type not in allowed:
+            if edge.condition_type == EdgeConditionType.EVENT:
                 raise ValueError(
-                    f"Router node '{self.id}' edge to '{edge.to_node_id}' must be an expression or unconditional edge; "
-                    f"intent/LLM and event edges are not allowed on router nodes."
+                    f"Router node '{self.id}' edge to '{edge.to_node_id}' cannot be an event edge; "
+                    f"a call never rests on a router, so event edges there would never fire."
                 )
 
         if not any(edge.condition_type == EdgeConditionType.UNCONDITIONAL for edge in self.edges):
