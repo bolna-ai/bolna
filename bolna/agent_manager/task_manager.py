@@ -1417,18 +1417,26 @@ class TaskManager(BaseManager):
                     #   disabled → legacy per-segment LID heuristic (LID_MODE env:
                     #              shadow/active) with on_lid_switch wired — master
                     #              behavior, byte-for-byte.
-                    LID_PROVIDER = os.getenv("LID_PROVIDER", "sarvam")
+                    # Detector provider: per-call feature flag (dashboard-backend sets
+                    # tools_config["language_switch_lid_provider"] from the
+                    # language_switch_soniox_lid grant) → env → sarvam default.
+                    LID_PROVIDER = self.task_config.get("tools_config", {}).get(
+                        "language_switch_lid_provider"
+                    ) or os.getenv("LID_PROVIDER", "sarvam")
                     lid_config = {"telephony_provider": provider}
                     switch_enabled = self.__language_switch_enabled()
                     if switch_enabled:
-                        # The Switch LLM uses its own dedicated Anthropic credentials
-                        # (see LanguageSwitcher) — deliberately NOT the agent's llm_key/
-                        # base_url, which may point at Azure/OpenAI and would 404 on Claude.
+                        # The Switch LLM uses its own dedicated credentials (resolved
+                        # provider-aware in LanguageSwitcher) — deliberately NOT the
+                        # agent's llm_key/base_url. tools_config["language_switch_llm"]
+                        # (set by dashboard-backend from the language_switch_azure_llm
+                        # feature flag) overrides the model; absent → Claude default.
                         self.language_switcher = LanguageSwitcher(
                             available_labels=list(transcribers.keys()),
                             run_id=self.run_id,
+                            model=self.task_config.get("tools_config", {}).get("language_switch_llm"),
                         )
-                        # Pay the Anthropic TLS handshake now, not on the first real decision.
+                        # Pay the TLS handshake now, not on the first real decision.
                         self.language_switcher.prewarm()
 
                     self.tools["transcriber"] = TranscriberPool(

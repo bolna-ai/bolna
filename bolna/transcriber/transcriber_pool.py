@@ -275,8 +275,8 @@ class TranscriberPool:
                 config=self._lid_config,
             )
             # The LLM-driven flow consumes the detector through the per-turn buffer
-            # API (take_turn_transcript / buffer_age_seconds). Backends without it
-            # (azure, elevenlabs_scribe) make that flow silently inert — every drain
+            # API (take_turn_transcript / buffer_age_seconds), owned by LIDBackend.
+            # A backend missing it makes that flow silently inert — every drain
             # returns empty and the idle-flush never fires — so shout now, at setup,
             # instead of leaving a mute mystery in call logs.
             if self._on_lid_switch is None and not hasattr(self._lid, "take_turn_transcript"):

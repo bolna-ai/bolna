@@ -113,6 +113,85 @@ async def test_provider_prefixed_model_left_untouched():
     assert non_claude.model == "azure/gpt-4.1-mini"
 
 
+CRED_ENVS = [
+    "LANGUAGE_SWITCH_LLM_API_KEY",
+    "LANGUAGE_SWITCH_LLM_API_BASE",
+    "LANGUAGE_SWITCH_LLM_API_VERSION",
+    "ANTHROPIC_API_KEY",
+    "AZURE_OPENAI_API_KEY",
+    "AZURE_OPENAI_ENDPOINT",
+    "AZURE_OPENAI_API_VERSION",
+    "OPENAI_API_KEY",
+]
+
+
+def _clear_cred_envs(monkeypatch):
+    for name in CRED_ENVS:
+        monkeypatch.delenv(name, raising=False)
+
+
+def test_credentials_claude_falls_back_to_anthropic(monkeypatch):
+    from bolna.helpers.language_switcher import resolve_switch_llm_credentials
+
+    _clear_cred_envs(monkeypatch)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "ant-key")
+    monkeypatch.setenv("AZURE_OPENAI_API_KEY", "az-key")  # must not leak into the claude path
+    assert resolve_switch_llm_credentials("anthropic/claude-haiku-4-5-20251001") == ("ant-key", "", "")
+
+
+def test_credentials_azure_falls_back_to_azure_openai_envs(monkeypatch):
+    # The opt-in feature: LANGUAGE_SWITCH_LLM=azure/ptu-gpt-4-1-mini picks up the
+    # SAME AZURE_OPENAI_* envs bolna/llms/azure_llm.py uses (ecosystem convention) —
+    # NOT the Anthropic key (which would 401 against Azure).
+    from bolna.helpers.language_switcher import resolve_switch_llm_credentials
+
+    _clear_cred_envs(monkeypatch)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "ant-key")
+    monkeypatch.setenv("AZURE_OPENAI_API_KEY", "az-key")
+    monkeypatch.setenv("AZURE_OPENAI_ENDPOINT", "https://ptu.example.azure.com")
+    monkeypatch.setenv("AZURE_OPENAI_API_VERSION", "2024-06-01")
+    assert resolve_switch_llm_credentials("azure/ptu-gpt-4-1-mini") == (
+        "az-key",
+        "https://ptu.example.azure.com",
+        "2024-06-01",
+    )
+
+
+def test_credentials_openai_style_falls_back_to_openai(monkeypatch):
+    from bolna.helpers.language_switcher import resolve_switch_llm_credentials
+
+    _clear_cred_envs(monkeypatch)
+    monkeypatch.setenv("OPENAI_API_KEY", "oai-key")
+    assert resolve_switch_llm_credentials("gpt-4.1-nano") == ("oai-key", "", "")
+
+
+def test_credentials_dedicated_envs_always_win(monkeypatch):
+    from bolna.helpers.language_switcher import resolve_switch_llm_credentials
+
+    _clear_cred_envs(monkeypatch)
+    monkeypatch.setenv("LANGUAGE_SWITCH_LLM_API_KEY", "dedicated-key")
+    monkeypatch.setenv("LANGUAGE_SWITCH_LLM_API_BASE", "https://dedicated.example.com")
+    monkeypatch.setenv("AZURE_OPENAI_API_KEY", "az-key")
+    monkeypatch.setenv("AZURE_OPENAI_ENDPOINT", "https://global.azure.com")
+    key, base, version = resolve_switch_llm_credentials("azure/ptu-gpt-4-1-mini")
+    assert (key, base) == ("dedicated-key", "https://dedicated.example.com")
+
+
+def test_azure_switcher_wires_credentials_into_litellm(monkeypatch):
+    from bolna.helpers.language_switcher import LanguageSwitcher
+
+    _clear_cred_envs(monkeypatch)
+    monkeypatch.setenv("AZURE_OPENAI_API_KEY", "az-key")
+    monkeypatch.setenv("AZURE_OPENAI_ENDPOINT", "https://ptu.example.azure.com")
+    monkeypatch.setenv("AZURE_OPENAI_API_VERSION", "2024-06-01")
+    with patch(f"{MOD}.LiteLLM", return_value=MagicMock()) as fake_cls:
+        LanguageSwitcher(available_labels=["en", "te"], model="azure/ptu-gpt-4-1-mini")
+    kwargs = fake_cls.call_args.kwargs
+    assert kwargs["llm_key"] == "az-key"
+    assert kwargs["base_url"] == "https://ptu.example.azure.com"
+    assert kwargs["api_version"] == "2024-06-01"
+
+
 @pytest.mark.asyncio
 async def test_prewarm_fires_one_llm_call_and_swallows_errors():
     switcher, fake_llm = _make_switcher("ok")

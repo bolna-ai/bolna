@@ -21,6 +21,30 @@ logger = configure_logger(__name__)
 DEFAULT_LANGUAGE_SWITCH_LLM = "claude-haiku-4-5-20251001"
 
 
+def resolve_switch_llm_credentials(model: str) -> tuple[str, str, str]:
+    """(api_key, api_base, api_version) for the switch LLM, provider-aware.
+
+    LANGUAGE_SWITCH_LLM_API_* always wins; otherwise fall back to the standard env
+    for the model's provider. Claude (the default flow) keeps its ANTHROPIC_API_KEY
+    fallback; azure/* enables an in-region Azure deployment (e.g. a PTU
+    gpt-4.1-mini, which cuts the cross-region decide latency) using the SAME
+    AZURE_OPENAI_* env names as bolna/llms/azure_llm.py — the ecosystem convention —
+    and openai-style models fall back to OPENAI_API_KEY. base/version stay "" for
+    non-Azure so the wrapper's LITELLM_MODEL_API_* global fallback is still bypassed."""
+    key = os.getenv("LANGUAGE_SWITCH_LLM_API_KEY") or ""
+    base = os.getenv("LANGUAGE_SWITCH_LLM_API_BASE") or ""
+    version = os.getenv("LANGUAGE_SWITCH_LLM_API_VERSION") or ""
+    if model.startswith("azure/"):
+        key = key or os.getenv("AZURE_OPENAI_API_KEY") or ""
+        base = base or os.getenv("AZURE_OPENAI_ENDPOINT") or ""
+        version = version or os.getenv("AZURE_OPENAI_API_VERSION") or ""
+    elif model.startswith(("anthropic/", "claude")):
+        key = key or os.getenv("ANTHROPIC_API_KEY") or ""
+    else:
+        key = key or os.getenv("OPENAI_API_KEY") or ""
+    return key, base, version
+
+
 class LanguageSwitcher:
     """Dedicated LLM that decides which supported language a multilingual agent
     should operate in, given an unbiased per-turn transcript.
@@ -42,18 +66,18 @@ class LanguageSwitcher:
         if self.model.startswith("claude") and "/" not in self.model:
             self.model = f"anthropic/{self.model}"
         self.latency_ms = None
-        # The Switch LLM is infrastructure (always Claude), independent of the agent's
-        # configured LLM. It uses dedicated Anthropic credentials and must NOT inherit
-        # the agent's llm_key/base_url — otherwise an agent on Azure/OpenAI would route
-        # claude-sonnet to its own endpoint and 404. base_url/api_version default to ""
-        # to bypass LiteLLM's global LITELLM_MODEL_API_* env fallback and hit native
-        # Anthropic with ANTHROPIC_API_KEY.
-        switch_llm_key = os.getenv("LANGUAGE_SWITCH_LLM_API_KEY") or os.getenv("ANTHROPIC_API_KEY") or ""
+        # The Switch LLM is infrastructure, independent of the agent's configured LLM.
+        # It uses dedicated credentials and must NOT inherit the agent's llm_key/base_url
+        # — otherwise an agent on Azure/OpenAI would route the switch model to its own
+        # endpoint and 404. Credentials resolve provider-aware from env (see
+        # resolve_switch_llm_credentials).
+        switch_llm_key, switch_llm_base, switch_llm_version = resolve_switch_llm_credentials(self.model)
         if not switch_llm_key.strip():
             # Don't raise — that would kill call setup. But shout: without a key every
             # decide() call fails and language switching is silently inert.
             logger.error(
-                "LanguageSwitcher: neither LANGUAGE_SWITCH_LLM_API_KEY nor ANTHROPIC_API_KEY is set — "
+                f"LanguageSwitcher: no API key resolved for '{self.model}' — set LANGUAGE_SWITCH_LLM_API_KEY "
+                "(or the provider default: ANTHROPIC_API_KEY / AZURE_API_KEY / OPENAI_API_KEY) — "
                 "every switch decision will fail and language switching is effectively disabled"
             )
         self._llm = LiteLLM(
@@ -66,8 +90,8 @@ class LanguageSwitcher:
             max_tokens=200,
             temperature=0.0,
             llm_key=switch_llm_key,
-            base_url=os.getenv("LANGUAGE_SWITCH_LLM_API_BASE", ""),
-            api_version=os.getenv("LANGUAGE_SWITCH_LLM_API_VERSION", ""),
+            base_url=switch_llm_base,
+            api_version=switch_llm_version,
         )
 
     def prewarm(self):
