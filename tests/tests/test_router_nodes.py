@@ -15,6 +15,7 @@ from pydantic import ValidationError
 from bolna.agent_types.graph_agent import GraphAgent, _DETERMINISTIC_REASONING_PREFIX
 from bolna.models import GraphNode, GraphAgentConfig
 from bolna.enums import NodeType
+from bolna.llms.types import LLMStreamChunk
 
 
 # ---------------------------------------------------------------------------
@@ -415,6 +416,8 @@ class TestGenerateWithRouter:
         out = await _collect(agent.generate([{"role": "user", "content": "hi"}]))
         assert agent.current_node_id == "dispatch"  # never left the router
         assert not any(isinstance(o, dict) and "messages" in o for o in out)  # did not speak
+        # ends the turn with a terminal end-of-stream chunk so the pipeline unwinds cleanly
+        assert any(isinstance(o, LLMStreamChunk) and o.end_of_stream for o in out)
 
     @pytest.mark.asyncio
     async def test_entry_router_resolves_on_first_generate(self):
@@ -521,6 +524,9 @@ class TestRouterIntentRouting:
         assert agent.current_node_id == "general"
         assert hops[0]["routing_type"] == "deterministic"
         assert "intent: no match" in hops[0]["routing_expression"]
+        # the intent call's telemetry is carried onto the catch-all hop, not dropped
+        assert hops[0]["routing_messages"] is not None
+        assert hops[0]["routing_model"] is not None
 
     @pytest.mark.asyncio
     async def test_one_intent_call_per_chain(self):
@@ -555,3 +561,86 @@ class TestRouterIntentRouting:
         assert mock_llm.call_count == 1
         assert agent.current_node_id == "support"  # r2's catch-all, no second call
         assert [h["current_node"] for h in hops] == ["r2", "support"]
+
+
+# ---------------------------------------------------------------------------
+# Regression fixes (post-review)
+# ---------------------------------------------------------------------------
+
+
+class TestRouterFixes:
+    @pytest.mark.asyncio
+    async def test_node_turns_is_zero_on_router_entry(self):
+        # A stuck-detection edge (_node_turns gte 1) on a router must NOT fire the
+        # instant the router is entered mid-turn: node turns are 0 on arrival.
+        nodes = [
+            {
+                "id": "chat",
+                "prompt": "Chat.",
+                "edges": [{"to_node_id": "dispatch", "condition_type": "unconditional"}],
+            },
+            {
+                "id": "dispatch",
+                "node_type": "router",
+                "edges": [
+                    {
+                        "to_node_id": "escalation",
+                        "condition_type": "expression",
+                        "expression": _expr("_node_turns", "gte", 1),
+                    },
+                    {"to_node_id": "normal", "condition_type": "unconditional"},
+                ],
+            },
+            {"id": "escalation", "prompt": "Esc.", "edges": []},
+            {"id": "normal", "prompt": "Normal.", "edges": []},
+        ]
+        agent = _make_agent(_base_config(nodes, "chat"))
+        history = [{"role": "user", "content": f"m{i}"} for i in range(3)] + [{"role": "assistant", "content": "hi"}]
+        await _collect(agent.generate(history))
+        assert agent.current_node_id == "normal"  # not "escalation"
+
+    @pytest.mark.asyncio
+    async def test_entry_router_landed_node_speaks_without_yank(self):
+        # The node an entry router resolves to must speak this turn, not be re-routed
+        # away by its own unconditional out-edge.
+        nodes = [
+            {
+                "id": "entry",
+                "node_type": "router",
+                "edges": [
+                    {"to_node_id": "vip", "condition_type": "expression", "expression": _expr("tier", "eq", "vip")},
+                    {"to_node_id": "standard", "condition_type": "unconditional"},
+                ],
+            },
+            {"id": "vip", "prompt": "VIP.", "edges": [{"to_node_id": "wrapup", "condition_type": "unconditional"}]},
+            {"id": "standard", "prompt": "Std.", "edges": []},
+            {"id": "wrapup", "prompt": "Wrap.", "edges": []},
+        ]
+        agent = _make_agent(_base_config(nodes, "entry", context_data={"tier": "vip"}))
+        out = await _collect(agent.generate([{"role": "user", "content": "hi"}]))
+        assert agent.current_node_id == "vip"  # not "wrapup"
+        assert any(isinstance(o, dict) and "messages" in o for o in out)  # vip spoke
+
+    @pytest.mark.asyncio
+    async def test_catch_all_lowest_priority_wins(self):
+        nodes = [
+            {
+                "id": "dispatch",
+                "node_type": "router",
+                "edges": [
+                    {"to_node_id": "generic", "condition_type": "unconditional", "priority": 5},
+                    {"to_node_id": "premium", "condition_type": "unconditional", "priority": 1},
+                ],
+            },
+            {"id": "generic", "prompt": "g", "edges": []},
+            {"id": "premium", "prompt": "p", "edges": []},
+        ]
+        agent = _make_agent(_base_config(nodes, "dispatch"))
+        await agent._resolve_router_chain([{"role": "user", "content": "x"}])
+        assert agent.current_node_id == "premium"  # priority 1 < 5, not declaration order
+
+    @pytest.mark.asyncio
+    async def test_silence_flag_threaded_into_hops(self):
+        agent = _router_agent(detected_language="hi")
+        hops = await agent._resolve_router_chain([{"role": "user", "content": "[silence] "}])
+        assert hops[0]["is_silence_trigger"] is True
