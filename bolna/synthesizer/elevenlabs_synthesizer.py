@@ -342,6 +342,14 @@ class ElevenlabsSynthesizer(StreamSynthesizer):
     async def synthesize(self, text):
         return await self._generate_http(text, format="mp3_44100_128")
 
+    async def synthesize_telephony_clip(self, text):
+        """One-shot render in the telephony wire format (mu-law 8000) — no
+        decode/transcode step (and no ffmpeg), unlike the MP3 the plain synthesize()
+        returns. None on non-mulaw configs so callers fall back to synthesize()."""
+        if not self.use_mulaw:
+            return None
+        return await self._generate_http(text)
+
     async def _generate_http(self, text, format=None):
         payload = {
             "text": text,

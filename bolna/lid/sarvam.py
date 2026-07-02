@@ -98,7 +98,17 @@ class SarvamLID(LIDBackend):
             self._buffer_last_segment_ts = time.monotonic()
             self._buffer_event.set()
             self._buffer_segments.append(
-                {"lang": lang, "prob": prob, "text": transcript, "audio_s": round(audio_s or 0.0, 3)}
+                {
+                    "lang": lang,
+                    "prob": prob,
+                    "text": transcript,
+                    "audio_s": round(audio_s or 0.0, 3),
+                    # Arrival time — segments arrive in speech order (single in-order
+                    # stream), so trailing gaps identify the caller's last utterance.
+                    # Epoch (not monotonic): these flow into persisted telemetry records
+                    # whose other timestamps are epoch.
+                    "ts": time.time(),
+                }
             )
             # Longest single segment in the buffer — acknowledgment-length audio
             # (<~1s) is where saaras mis-tags languages (e.g. Tamil 'ஆமா' heard as
