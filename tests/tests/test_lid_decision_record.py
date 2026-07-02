@@ -122,3 +122,16 @@ def test_detector_and_llm_extras_default_when_absent():
     assert r["detector_segments"] == []
     assert r["detected_language"] is None
     assert r["detection_confidence"] is None
+
+
+def test_inflight_activity_captures_truncation_state():
+    # For a switch, this is the state captured BEFORE the truncate — audio_playing
+    # tells us the old-language reply was cut off mid-speech (vs cut nothing audible).
+    activity = {"response_in_pipeline": True, "audio_playing": True, "pending_marks": True}
+    r = _record(outcome="switched", switched_to="en", inflight_activity=activity)
+    assert r["inflight_activity"] == activity
+    assert r["inflight_activity"]["audio_playing"] is True
+
+
+def test_inflight_activity_defaults_to_empty():
+    assert _record()["inflight_activity"] == {}

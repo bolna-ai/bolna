@@ -127,7 +127,7 @@ Respond with raw JSON only — no markdown fences, no surrounding text:
   "detection_confidence": <0.0-1.0 — your confidence in detected_language, INDEPENDENT of whether it is supported or whether you switch; this is a pure language-identification confidence>,
   "target_language": "<one of the supported labels, or null to stay in the current language>",
   "target_confidence": <0.0-1.0 — your confidence that SWITCHING the agent to target_language is the right action (not merely that the language is present); use 0 when target_language is null>,
-  "explicit_request": <true|false — true ONLY if the caller explicitly asked to speak target_language (rule 1)>,
+  "explicit_request": <true|false — true ONLY if the caller NAMED target_language and asked to use it (rule 1: "English please", "हिंदी में बोलो", "Telugu lo matladandi"). The language name itself must be present in the utterance. A courtesy or filler word alone ("please", "hello", "sorry", "okay") is NEVER a request — do not infer a request from the language a word happens to be spoken in>,
   "reasoning": "<brief explanation, 12 words maximum>"
 }}
 """

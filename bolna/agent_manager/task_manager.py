@@ -135,6 +135,7 @@ def build_lid_decision_record(
     context_note=None,
     detector_lang_confidence=None,
     detector_segments=None,
+    inflight_activity=None,
 ):
     """Build one telemetry record for a Switch-LLM firing (switch / stay / gated).
 
@@ -169,6 +170,9 @@ def build_lid_decision_record(
         "switched_to": switched_to,
         "context_note_sent": context_note,
         "context_note_sent_at": now if context_note else None,
+        # Old-language response state when this firing resolved — for a switch, whether
+        # it truncated a reply mid-flight (audio_playing) vs cut nothing audible.
+        "inflight_activity": inflight_activity or {},
     }
 
 
@@ -5070,8 +5074,11 @@ class TaskManager(BaseManager):
         decide_started_at = time.time()
         decision = None
 
-        def emit_lid_decision(outcome, switched_to=None, context_note=None):
+        def emit_lid_decision(outcome, switched_to=None, context_note=None, inflight_activity=None):
             # pool is a confirmed TranscriberPool here (guarded at function entry).
+            # Snapshot the in-flight response now unless the caller passed a pre-truncation
+            # one (switch paths must capture BEFORE the truncate clears it).
+            activity = inflight_activity if inflight_activity is not None else self._inflight_response_activity()
             pool.lid_detection_events.append(
                 build_lid_decision_record(
                     outcome=outcome,
@@ -5089,6 +5096,7 @@ class TaskManager(BaseManager):
                     speculation_started=spec_task is not None,
                     switched_to=switched_to,
                     context_note=context_note,
+                    inflight_activity=activity,
                 )
             )
 
@@ -5193,12 +5201,18 @@ class TaskManager(BaseManager):
         # mis-tags languages (QA call 75ef1aee: two Tamil 'yes'-fragments of 0.54s/0.96s
         # were tagged Hindi with prob 1.0 and flipped the call ta→hi). A non-explicit
         # switch needs at least one substantive segment; explicit requests ("Tamil में
-        # बात करो") are legitimately short and bypass via the model's explicit_request.
+        # बात करो") are legitimately short and bypass via the model's explicit_request —
+        # but only when confident: the model can hallucinate explicit_request on a bare
+        # courtesy word (QA 4f105766: "यह। please" → explicit_request=true at 0.6 and
+        # switched hi→en; genuine requests score 0.97-0.99).
         min_segment_s = float(os.getenv("LANGUAGE_SWITCH_MIN_SEGMENT_AUDIO_S", "1.0"))
-        if not decision.get("explicit_request") and buffered_max_segment_s < min_segment_s:
+        explicit_min_conf = float(os.getenv("LANGUAGE_SWITCH_EXPLICIT_MIN_CONFIDENCE", "0.8"))
+        explicit_bypass = bool(decision.get("explicit_request")) and (target_conf or 0.0) >= explicit_min_conf
+        if not explicit_bypass and buffered_max_segment_s < min_segment_s:
             logger.info(
                 f"LanguageSwitcher: target '{target}' but longest segment "
-                f"{buffered_max_segment_s:.2f}s < {min_segment_s}s and not an explicit request — "
+                f"{buffered_max_segment_s:.2f}s < {min_segment_s}s and no confident explicit request "
+                f"(explicit={decision.get('explicit_request')}, conf={target_conf}) — "
                 f"no switch (short audio is unreliable LID evidence; reason={reasoning})"
             )
             emit_lid_decision("gated:short_audio")
@@ -5213,17 +5227,17 @@ class TaskManager(BaseManager):
         # reach this point, so normal turns are never truncated.
         # Don't truncate an in-flight tool call for a switch (QA 8166592d): switch the
         # language/pool in parallel and let the action finish — the tool call is the turn's reply.
+        activity = self._inflight_response_activity()  # captured pre-truncation for telemetry
         if self.function_call_in_flight:
             logger.info("LanguageSwitcher: in-flight function call — switching in parallel, not truncating the action")
             if target != self.language:
                 context_note = self.__switch_context_note(target, detector_transcript, reasoning)
                 await self.switch_language(target, triggered_by="lid_llm", context_note=context_note)
-                emit_lid_decision("switched", switched_to=target, context_note=context_note)
+                emit_lid_decision("switched", switched_to=target, context_note=context_note, inflight_activity=activity)
             else:
-                emit_lid_decision("gated:concurrent_switch")
+                emit_lid_decision("gated:concurrent_switch", inflight_activity=activity)
             return None
 
-        activity = self._inflight_response_activity()
         if any(activity.values()):
             logger.info(f"LanguageSwitcher: truncating in-flight old-language response before switch ({activity})")
             await self.__cleanup_downstream_tasks()
@@ -5232,7 +5246,7 @@ class TaskManager(BaseManager):
         # were clearing, so re-check against the live language before applying.
         current = self.language
         if target == current:
-            emit_lid_decision("gated:concurrent_switch")
+            emit_lid_decision("gated:concurrent_switch", inflight_activity=activity)
             return
 
         context_note = self.__switch_context_note(target, detector_transcript, reasoning)
@@ -5240,7 +5254,7 @@ class TaskManager(BaseManager):
             f"LanguageSwitcher: switching '{current}' → '{target}' (confidence={target_conf}, langs={languages}, reason={reasoning})"
         )
         await self.switch_language(target, triggered_by="lid_llm", context_note=context_note)
-        emit_lid_decision("switched", switched_to=target, context_note=context_note)
+        emit_lid_decision("switched", switched_to=target, context_note=context_note, inflight_activity=activity)
 
         # Mid-speech silent switch (streak-fired fast path): a FRESH detector segment
         # (<1s old) has landed since the decision drained the buffer — the caller is
