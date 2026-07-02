@@ -677,8 +677,10 @@ class GraphAgent(BaseAgent):
             self.node_history.append(self.current_node_id)
 
     def _end_turn_chunk(self, meta_info: Optional[dict], start_time: float) -> LLMStreamChunk:
-        """Terminal empty chunk so a turn that produces no speech (e.g. a router that
-        could not resolve) still ends the stream cleanly instead of wedging the pipeline."""
+        """Terminal empty end-of-stream chunk for a turn that produces no speech (a router
+        that could not resolve — only reachable via an invalid config that skipped
+        validation). Closes the stream on the end_of_llm_stream contract; the turn stays
+        silent and the next user turn resumes normally."""
         return LLMStreamChunk(
             data="",
             end_of_stream=True,
