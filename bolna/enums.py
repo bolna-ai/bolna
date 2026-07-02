@@ -278,6 +278,7 @@ class EdgeConditionType(str, Enum):
 class NodeType(str, Enum):
     LLM = "llm"
     STATIC = "static"
+    ROUTER = "router"
 
 
 class ToolScope(str, Enum):
