@@ -4462,9 +4462,10 @@ class TaskManager(BaseManager):
                             logger.info(
                                 f"Skipping speculative LLM: EagerEOT confidence {eot_confidence} below threshold {eager_eot_threshold}"
                             )
-                        elif self.__detector_language_mismatch():
+                        elif self.language_switcher is not None and self.__detector_language_mismatch():
                             # An eager reply would stream on the OLD voice before the switch
                             # decision lands; skip it so EndOfTurn takes the held-reply path.
+                            # Gated on the LLM-driven flow — legacy keeps eager behavior.
                             logger.info(
                                 "Skipping speculative LLM: detector language mismatch — reply holds for the switch decision"
                             )
