@@ -86,11 +86,11 @@ async def test_decide_sends_user_role_message():
 
 
 @pytest.mark.asyncio
-async def test_default_model_is_sonnet_with_provider_prefix():
+async def test_default_model_is_haiku_with_provider_prefix():
     # Bare claude-* names break on litellm versions whose registry predates the
     # model ("LLM Provider NOT provided") — the switcher must namespace them.
     switcher, _ = _make_switcher(json.dumps({"target_language": None}))
-    assert switcher.model == "anthropic/claude-sonnet-4-6"
+    assert switcher.model == "anthropic/claude-haiku-4-5-20251001"
 
 
 @pytest.mark.asyncio

@@ -12,11 +12,13 @@ from bolna.helpers.logger_config import configure_logger
 
 logger = configure_logger(__name__)
 
-# Default decision model (Claude Sonnet 4.6, V0). The LANGUAGE_SWITCH_LLM env var is
-# resolved at CONSTRUCTION time, not import time — the host app's load_dotenv() runs
-# after bolna modules are imported, so an import-time os.getenv freezes this default
-# and silently ignores .env (observed in QA: .env had haiku, calls still used sonnet).
-DEFAULT_LANGUAGE_SWITCH_LLM = "claude-sonnet-4-6"
+# Default decision model (Claude Haiku 4.5 — small classification task; halves the
+# 2.2-3.5s decide latency seen on sonnet, shrinking the old-language overlap window).
+# The LANGUAGE_SWITCH_LLM env var is resolved at CONSTRUCTION time, not import time —
+# the host app's load_dotenv() runs after bolna modules are imported, so an import-time
+# os.getenv freezes this default and silently ignores .env (observed in QA: .env had
+# haiku, calls still used sonnet).
+DEFAULT_LANGUAGE_SWITCH_LLM = "claude-haiku-4-5-20251001"
 
 
 class LanguageSwitcher:
