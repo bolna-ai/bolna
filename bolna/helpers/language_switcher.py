@@ -5,7 +5,7 @@ import time
 import uuid
 
 from bolna.llms import LiteLLM
-from bolna.prompts import LANGUAGE_SWITCH_PROMPT
+from bolna.prompts import LANGUAGE_SWITCH_SYSTEM_PROMPT, LANGUAGE_SWITCH_TURN_PROMPT
 from bolna.enums import LogComponent, LogDirection
 from bolna.helpers.utils import convert_to_request_log
 from bolna.helpers.logger_config import configure_logger
@@ -126,20 +126,32 @@ class LanguageSwitcher:
         if not detector_transcript or not detector_transcript.strip():
             return None
 
-        prompt = LANGUAGE_SWITCH_PROMPT.format(
-            active_language=active_label,
-            available_languages=", ".join(self.available_labels),
-            detector_transcript=detector_transcript.strip(),
-            active_transcript=(active_transcript or "").strip(),
-        )
+        # Static rules ride a cacheable system prefix (Anthropic cache_control /
+        # Azure-OpenAI automatic prefix caching from the static-first ordering);
+        # only the per-turn data varies, so the prefix stays cache-hot across calls.
+        system_block = {"type": "text", "text": LANGUAGE_SWITCH_SYSTEM_PROMPT}
+        if self.model.startswith(("anthropic/", "claude")):
+            system_block["cache_control"] = {"type": "ephemeral"}
+        messages = [
+            {"role": "system", "content": [system_block]},
+            {
+                "role": "user",
+                "content": LANGUAGE_SWITCH_TURN_PROMPT.format(
+                    active_language=active_label,
+                    available_languages=", ".join(self.available_labels),
+                    detector_transcript=detector_transcript.strip(),
+                    active_transcript=(active_transcript or "").strip(),
+                ),
+            },
+        ]
         try:
             start_time = time.time()
-            # Must be a "user" message: Anthropic/Claude requires at least one user
-            # turn. A system-only messages list gets emptied by litellm (system is
-            # lifted to the top-level `system` param) → "list index out of range".
+            # Must include a "user" message: Anthropic/Claude requires at least one
+            # user turn. A system-only messages list gets emptied by litellm (system
+            # is lifted to the top-level `system` param) → "list index out of range".
             # We don't force response_format (Claude doesn't reliably support
             # json_object via litellm); the prompt mandates JSON and we parse robustly.
-            response = await self._llm.generate([{"role": "user", "content": prompt}])
+            response = await self._llm.generate(messages)
             self.latency_ms = (time.time() - start_time) * 1000
             result = self._parse_json(response)
             logger.info(f"LanguageSwitcher decision: {result} (latency_ms={self.latency_ms:.0f})")

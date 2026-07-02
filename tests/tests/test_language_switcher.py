@@ -37,8 +37,8 @@ async def test_decide_returns_target_and_confidence_list():
     assert result["target_language"] == "hi"
     assert result["languages"][0] == {"language": "hi", "confidence": 0.9}
     fake_llm.generate.assert_awaited_once()
-    # Both transcripts + active language must reach the prompt.
-    prompt_text = fake_llm.generate.await_args.args[0][0]["content"]
+    # Both transcripts + active language must reach the per-turn user message.
+    prompt_text = fake_llm.generate.await_args.args[0][-1]["content"]
     assert "aap kaise hain" in prompt_text  # unbiased detector transcript
     assert "up cause an" in prompt_text  # live language-locked transcript
     assert "en" in prompt_text
@@ -78,11 +78,11 @@ async def test_decide_tolerates_markdown_fenced_json():
 
 @pytest.mark.asyncio
 async def test_decide_sends_user_role_message():
-    # Anthropic requires a user message; a system-only list errors. Guard the role.
+    # Anthropic requires a user message; a system-only list errors. Guard the shape.
     switcher, fake_llm = _make_switcher(json.dumps({"target_language": None}))
     await switcher.decide("hello", "", active_label="en")
     sent_messages = fake_llm.generate.await_args.args[0]
-    assert sent_messages[0]["role"] == "user"
+    assert [m["role"] for m in sent_messages] == ["system", "user"]
 
 
 @pytest.mark.asyncio
@@ -175,6 +175,63 @@ def test_credentials_dedicated_envs_always_win(monkeypatch):
     monkeypatch.setenv("AZURE_OPENAI_ENDPOINT", "https://global.azure.com")
     key, base, version = resolve_switch_llm_credentials("azure/ptu-gpt-4-1-mini")
     assert (key, base) == ("dedicated-key", "https://dedicated.example.com")
+
+
+@pytest.mark.asyncio
+async def test_decide_splits_static_system_and_dynamic_user():
+    switcher, fake_llm = _make_switcher(json.dumps({"target_language": None}), labels=("hi", "te"))
+    await switcher.decide("హలో", "garbled", active_label="te")
+
+    messages = fake_llm.generate.await_args.args[0]
+    assert [m["role"] for m in messages] == ["system", "user"]
+    system_block = messages[0]["content"][0]
+    # Claude default → Anthropic cache annotation on the static prefix.
+    assert system_block["cache_control"] == {"type": "ephemeral"}
+    # Static block carries the rules and NO per-turn data (else the prefix never caches).
+    assert "CODE-MIXING IS NOT A SWITCH" in system_block["text"]
+    assert "హలో" not in system_block["text"]
+    # Dynamic user message carries the per-turn data.
+    assert "హలో" in messages[1]["content"] and "garbled" in messages[1]["content"]
+    assert "te" in messages[1]["content"]
+
+
+@pytest.mark.asyncio
+async def test_decide_azure_model_gets_no_anthropic_annotation():
+    from bolna.helpers.language_switcher import LanguageSwitcher
+
+    fake_llm = MagicMock()
+    fake_llm.generate = AsyncMock(return_value=json.dumps({"target_language": None}))
+    with patch(f"{MOD}.LiteLLM", return_value=fake_llm):
+        switcher = LanguageSwitcher(available_labels=["hi"], model="azure/ptu-gpt-4-1-mini")
+    await switcher.decide("hello", "", active_label="hi")
+    system_block = fake_llm.generate.await_args.args[0][0]["content"][0]
+    # Azure/OpenAI cache prefixes automatically; cache_control would be a foreign key.
+    assert "cache_control" not in system_block
+
+
+def test_prompt_variants_rules_stay_in_sync():
+    # The cache variant duplicates the rules as a static block — a rule edit that
+    # lands in only one variant silently forks judge behavior between flagged and
+    # unflagged orgs. Pin the distinctive markers of every rule in BOTH variants.
+    from bolna.prompts import LANGUAGE_SWITCH_PROMPT, LANGUAGE_SWITCH_SYSTEM_PROMPT
+
+    markers = [
+        "INTENT ABOUT A NAMED LANGUAGE",
+        "judge the MATRIX language",
+        "NUMBERS, CODES, AND IDENTIFIERS ARE NOT LANGUAGE EVIDENCE",
+        "CLOSELY RELATED OR ACOUSTICALLY CONFUSABLE LANGUAGES",
+        "the majority frame wins",
+        "flip SCRIPT mid-turn",
+        "Judge the language by the words, not the script",
+        "CODE-MIXING IS NOT A SWITCH",
+        "one function word does not create a matrix",
+        "explicit_request",
+        "target_confidence",
+        "detection_confidence",
+    ]
+    for marker in markers:
+        assert marker in LANGUAGE_SWITCH_PROMPT, f"missing in base prompt: {marker}"
+        assert marker in LANGUAGE_SWITCH_SYSTEM_PROMPT, f"missing in cache variant: {marker}"
 
 
 def test_azure_switcher_wires_credentials_into_litellm(monkeypatch):

@@ -5172,7 +5172,10 @@ class TaskManager(BaseManager):
         # the per-language list (normalized match on the short code). If neither yields a
         # number, treat it as below threshold and stay — a missing confidence signal is
         # exactly the "when unsure, stay" case.
-        min_conf = float(os.getenv("LANGUAGE_SWITCH_MIN_CONFIDENCE", "0.6"))
+        # 0.8: measured on QA calls, junk decisions cluster at 0.6-0.75 (hallucinated
+        # "please" 0.60, te→mr matrix inversion 0.72, gu mis-tag 0.72) while genuine
+        # switches score 0.85-0.98 — 0.8 slices between the two bands.
+        min_conf = float(os.getenv("LANGUAGE_SWITCH_MIN_CONFIDENCE", "0.8"))
 
         def as_float(value):
             # LLM JSON can drift (e.g. "0.78" as a string); unparseable → None,
