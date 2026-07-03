@@ -4990,14 +4990,17 @@ class TaskManager(BaseManager):
     ) -> tuple | None:
         if not self.language_switcher:
             return
-        # A hangup may already be tearing the call down. Switching past this point
-        # truncates in-flight audio — including a queued agent_hangup goodbye chunk —
-        # which leaves __process_end_of_conversation waiting forever for a chunk that
-        # no longer exists (QA 67f7b856: switch decided ~3s after hangup cleared the
-        # agent_hangup marks → call stuck 11.5 min). A switch is meaningless once the
-        # call is ending, so abandon it.
-        if self.hangup_triggered or self.conversation_ended:
-            logger.info("LanguageSwitcher: hangup/teardown in progress — abandoning switch (pre-decide)")
+        # A hangup/transfer/end-call may already be tearing the call down or handing it
+        # off. Switching past this point truncates in-flight audio — including a queued
+        # agent_hangup goodbye chunk (QA 67f7b856: switch decided ~3s after hangup
+        # cleared the agent_hangup marks → call stuck 11.5 min) or a transfer's hold
+        # message (QA 7ab56fdd: a phantom kn detection on the silent transfer-hold
+        # truncated "please hold on…" and flipped en→kn mid-transfer). function_call_in_flight
+        # only covers the tool's execution window; has_transfer stays set for the whole
+        # handoff, so use the terminal-state check. A switch is meaningless once the call
+        # is ending or leaving, so abandon it.
+        if self.conversation_ended or self._should_ignore_transcriber_input():
+            logger.info("LanguageSwitcher: hangup/transfer/teardown in progress — abandoning switch (pre-decide)")
             return None
         pool = self.tools.get("transcriber")
         if not isinstance(pool, TranscriberPool):
@@ -5136,11 +5139,12 @@ class TaskManager(BaseManager):
         if not decision:
             emit_lid_decision("no_decision")
             return
-        # The decide can take seconds (Anthropic tail); a hangup may have been triggered
-        # and queued its agent_hangup audio while we waited. Re-check before the truncate
-        # below clears it and deadlocks teardown (QA 67f7b856).
-        if self.hangup_triggered or self.conversation_ended:
-            logger.info("LanguageSwitcher: hangup/teardown in progress — abandoning switch (post-decide)")
+        # The decide can take seconds (Anthropic tail); a hangup/transfer/end-call may
+        # have started while we waited. Re-check before the truncate below clears its
+        # in-flight audio and deadlocks teardown (QA 67f7b856) or breaks a transfer
+        # mid-handoff (QA 7ab56fdd).
+        if self.conversation_ended or self._should_ignore_transcriber_input():
+            logger.info("LanguageSwitcher: hangup/transfer/teardown in progress — abandoning switch (post-decide)")
             emit_lid_decision("gated:hangup")
             return None
         target = decision.get("target_language")
