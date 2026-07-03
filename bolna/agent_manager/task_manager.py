@@ -5566,9 +5566,7 @@ class TaskManager(BaseManager):
         non-done llm_task seen here can only belong to a NEWER concurrent turn, and
         cancelling that would kill the wrong response.
         """
-        # This path bypasses _process_conversation_task, so stamp llm_start_time + the eager
-        # stub here too, so the switch follow-up turn is recorded like any normal turn
-        # (real turn_id/sequence_id/llm_start_ms) even if a rapid next switch interrupts it.
+        # Bypasses _process_conversation_task, so stamp the eager stub here to record the turn normally.
         followup_meta_info["llm_start_time"] = time.time()
         self._append_eager_llm_stub(followup_meta_info)
         # Revalidate the follow-up's sequence_id — the truncate path's
@@ -6673,9 +6671,7 @@ class TaskManager(BaseManager):
 
                 output["progression_data"] = {
                     "call_start_epoch_ms": self.conversation_start_init_ts,
-                    # Ground-truth transcript (role+content) so the dashboard can render the
-                    # conversation directly instead of reconstructing it from latency telemetry
-                    # (turn_id/latency gaps otherwise drop user or agent turns).
+                    # Ground-truth transcript so the dashboard renders directly, not from latency gaps.
                     "messages": copy.deepcopy(output["messages"]),
                     "llm_latencies": copy.deepcopy(output["latency_dict"]["llm_latencies"]),
                     "transcriber_latencies": copy.deepcopy(output["latency_dict"]["transcriber_latencies"]),
@@ -6731,11 +6727,7 @@ class TaskManager(BaseManager):
                     if _seq is not None and _seq in _seq_to_asr_turn:
                         _ub["turn_id"] = _seq_to_asr_turn[_seq]
 
-                # user_bot_latencies only records turns the agent replied to (via
-                # on_agent_speech_started). Stamp a user-speech record for every OTHER
-                # transcriber turn that produced a transcript (interrupted/backchannel/
-                # unanswered) so the User row reflects every utterance, not just answered
-                # ones. agent_start_ms stays None (no agent reply) -> no spurious Agent block.
+                # Stamp a user-speech record for unanswered/interrupted turns too (agent_start_ms stays None).
                 _ub_turns = {
                     _ub.get("turn_id")
                     for _ub in output["progression_data"]["user_bot_latencies"]
