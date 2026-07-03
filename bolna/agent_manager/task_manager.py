@@ -5691,6 +5691,8 @@ class TaskManager(BaseManager):
         non-done llm_task seen here can only belong to a NEWER concurrent turn, and
         cancelling that would kill the wrong response.
         """
+        # This path bypasses _process_conversation_task, so stamp llm_start_time here or the turn's llm_start_ms is null.
+        followup_meta_info["llm_start_time"] = time.time()
         # Revalidate the follow-up's sequence_id — the truncate path's
         # invalidate_pending_responses would otherwise leave its audio permanently BLOCKed.
         self.interruption_manager.revalidate_sequence_id(followup_meta_info["sequence_id"])
