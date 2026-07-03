@@ -19,20 +19,10 @@ logger = configure_logger(__name__)
 
 
 class SonioxLID(LIDBackend):
-    """
-    LID via Soniox stt-rt-v5 with the multilingual hint set (no language lock).
+    """LID via Soniox stt-rt-v5, unbiased (multilingual hints, no language lock).
 
-    Streams raw audio over a persistent WebSocket; Soniox returns tokens tagged
-    with a per-token language. Finalized tokens are collected into one segment per
-    utterance (flushed on the <end> endpoint token) so segment cadence — and the
-    substance gate driven by segment duration — matches the Sarvam backend.
-    Soniox reports no language probability, so segment prob is None.
-
-    Config keys (all optional, fall back to env vars):
-        soniox_api_key     — SONIOX_API_KEY env var
-        soniox_host        — stt-rt.soniox.com
-        telephony_provider — "twilio" | "plivo" | other
-        sampling_rate      — 16000 (non-telephony input rate)
+    Finalized tokens accumulate into one segment per utterance (flushed on <end>) so
+    segment cadence matches SarvamLID. Soniox returns no language probability → prob None.
     """
 
     _MODEL = "stt-rt-v5"
@@ -42,9 +32,7 @@ class SonioxLID(LIDBackend):
         self._api_key = config.get("soniox_api_key") or os.getenv("SONIOX_API_KEY", "")
         self._host = config.get("soniox_host") or SONIOX_WEBSOCKET_HOST
         self._telephony = config.get("telephony_provider", "")
-        # Per-provider INPUT rate/encoding mirrors SarvamLID: telephony providers
-        # stream 8kHz. Soniox accepts mulaw/pcm_s16le natively at the declared
-        # sample_rate, so audio is forwarded raw — no resampling.
+        # Telephony streams 8kHz; Soniox accepts mulaw/pcm natively, no resampling.
         if self._telephony in ("plivo", "vobiz", "exotel"):
             self._audio_format = "pcm_s16le"
             self._input_sr = 8000
@@ -54,9 +42,6 @@ class SonioxLID(LIDBackend):
         else:
             self._audio_format = "pcm_s16le"
             self._input_sr = int(config.get("sampling_rate", 16000))
-        # Finalized tokens of the utterance currently being spoken; flushed into the
-        # turn buffer on the <end> endpoint token. Single dict so init/flush reset
-        # the whole segment state in one place.
         self._pending = self._empty_pending()
 
     @staticmethod
@@ -64,12 +49,7 @@ class SonioxLID(LIDBackend):
         return {"text": "", "lang_counts": {}, "last_lang": None, "start_ms": None, "end_ms": None}
 
     def _build_config(self) -> dict:
-        """First WebSocket frame: auth + stream config (Soniox carries the api_key here).
-
-        KEEP IN SYNC with SonioxTranscriber._build_config (bolna/transcriber/
-        soniox_transcriber.py) — same wire protocol, independently instantiated
-        (the LID tap is always unbiased/multilingual, so it does not share the
-        transcriber's per-call language/keyword options)."""
+        # First WS frame (Soniox carries the api_key here). Mirror SonioxTranscriber._build_config.
         return {
             "api_key": self._api_key,
             "model": self._MODEL,
@@ -78,8 +58,6 @@ class SonioxLID(LIDBackend):
             "num_channels": 1,
             "enable_endpoint_detection": True,
             "enable_language_identification": True,
-            # Unbiased across the supported Indian set — the detector must hear
-            # whatever language is actually spoken, not the agent's locked one.
             "language_hints": list(SONIOX_DEFAULT_MULTILINGUAL_HINTS),
         }
 
@@ -91,7 +69,7 @@ class SonioxLID(LIDBackend):
         if not text:
             return
         if pending["lang_counts"]:
-            # Dominant token language of the utterance; tie → latest seen.
+            # Dominant token language; tie → latest seen.
             best = max(pending["lang_counts"].values())
             top = [lang for lang, n in pending["lang_counts"].items() if n == best]
             lang = pending["last_lang"] if pending["last_lang"] in top else top[-1]
@@ -104,11 +82,9 @@ class SonioxLID(LIDBackend):
         logger.info(f"SonioxLID segment: lang={lang!r} transcript={text[:60]!r} audio_s={audio_s:.3f}")
         self._accumulate(text, lang, audio_s, prob=None)
         if self.on_language is not None and lang:
-            # Legacy per-segment signal; Soniox has no language score → confidence None.
-            asyncio.create_task(self.on_language(lang, None))
+            asyncio.create_task(self.on_language(lang, None))  # legacy per-segment signal
 
     def _handle_message(self, data: dict):
-        """Fold one Soniox response into the pending segment; flush on <end>."""
         if data.get("error_code") is not None:
             raise ConnectionError(f"{data.get('error_code')}: {data.get('error_message')}")
         pending = self._pending
@@ -121,7 +97,6 @@ class SonioxLID(LIDBackend):
                 pending = self._pending
                 continue
             if not token.get("is_final"):
-                # Non-final tokens still mutate; only committed text enters the segment.
                 continue
             pending["text"] += text
             lang = token.get("language")
@@ -143,7 +118,6 @@ class SonioxLID(LIDBackend):
         protocol = os.getenv("SONIOX_HOST_PROTOCOL", "wss")
         url = f"{protocol}://{self._host}/transcribe-websocket"
         logger.info(f"SonioxLID: connecting to {url}")
-        # Same shared SSL context as SonioxTranscriber — one place to fix cert handling.
         self._ws = await ws_lib.connect(url, ssl=get_ssl_context(url))
         await self._ws.send(json.dumps(self._build_config()))
         self._sender_task = asyncio.create_task(self._sender_loop())
@@ -181,11 +155,9 @@ class SonioxLID(LIDBackend):
             return
         except Exception as e:
             logger.error(f"SonioxLID receiver error: {e}")
-        # Reached on both a server-side graceful close and receive errors — same
-        # reconnect handling as SarvamLID so the detector never goes silently mute.
+        # Graceful close and errors both reach here — reconnect so the detector isn't left mute.
         self._schedule_reconnect("receiver closed")
 
     async def stop(self):
-        # Don't lose the utterance in flight at teardown.
-        self._flush_pending_segment()
+        self._flush_pending_segment()  # don't lose the in-flight utterance
         await self._shutdown_connection()

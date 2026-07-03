@@ -365,7 +365,7 @@ class TaskManager(BaseManager):
         self.eager_meta_info = None
         self.llm_queue_task = None
         self.execute_function_call_task = None
-        # Set while a tool call is executing so the LID switch never truncates it (QA 8166592d).
+        # Set while a tool call executes so a parallel LID switch won't truncate it.
         self.function_call_in_flight = False
         self.synthesizer_tasks = []
         self.synthesizer_task = None
@@ -4864,23 +4864,13 @@ class TaskManager(BaseManager):
                 async with self.language_switch_lock:
                     followup = await self.__run_language_switch(active_transcript, meta_info, spawn_language, speculate)
             finally:
-                # Claim THIS invocation's speculative task the instant our decision
-                # unwinds (returned OR raised). The lock is released but no await has run
-                # since (asyncio.Lock.__aexit__ doesn't suspend), so a concurrent handler
-                # can't have overwritten the slot yet — and __run_language_switch's commit
-                # path, if taken, already nulled it. We cancel our OWN handle in the outer
-                # finally; we must NOT re-read the shared slot after follow-up generation
-                # (which runs outside the lock), by which point the next turn's decision
-                # may have stored its own task there — cancelling that would kill its
-                # in-flight speculation while leaking ours.
+                # Claim our own spec task while the lock is still effectively ours (no await
+                # since release); re-reading the shared slot after generation could cancel the
+                # next turn's task instead.
                 spec = self._spec_followup_task
                 self._spec_followup_task = None
-            # Generate the follow-up OUTSIDE the lock: a streamed response can take
-            # several seconds, and holding the lock through it would needlessly queue
-            # the next turn's decision. Ordering comes from the lock (decisions are
-            # serial) plus truncate-on-switch: if a later confirmed switch finds this
-            # follow-up still playing, it truncates it by design — at that point the
-            # follow-up is old-language audio to the caller.
+            # Generate outside the lock (streamed, multi-second). A later confirmed switch
+            # truncates this follow-up if it's still playing, by design.
             if followup is not None:
                 await self.__generate_switch_followup(*followup)
         except Exception as e:
@@ -4916,9 +4906,7 @@ class TaskManager(BaseManager):
             mismatch_streak_fire = 10**9
         try:
             while not self.conversation_ended:
-                # Stop firing switch decisions once a hangup is underway — a switch
-                # mid-teardown truncates the agent_hangup goodbye and deadlocks
-                # __process_end_of_conversation (QA 67f7b856).
+                # No switches once hangup is underway — truncates the goodbye, deadlocks teardown.
                 if self.hangup_triggered:
                     await asyncio.sleep(0.5)
                     continue
@@ -4998,15 +4986,9 @@ class TaskManager(BaseManager):
     ) -> tuple | None:
         if not self.language_switcher:
             return
-        # A hangup/transfer/end-call may already be tearing the call down or handing it
-        # off. Switching past this point truncates in-flight audio — including a queued
-        # agent_hangup goodbye chunk (QA 67f7b856: switch decided ~3s after hangup
-        # cleared the agent_hangup marks → call stuck 11.5 min) or a transfer's hold
-        # message (QA 7ab56fdd: a phantom kn detection on the silent transfer-hold
-        # truncated "please hold on…" and flipped en→kn mid-transfer). function_call_in_flight
-        # only covers the tool's execution window; has_transfer stays set for the whole
-        # handoff, so use the terminal-state check. A switch is meaningless once the call
-        # is ending or leaving, so abandon it.
+        # Abandon if the call is ending/transferring: a switch here truncates the goodbye
+        # or the transfer hold message. has_transfer outlives function_call_in_flight, so
+        # use the terminal-state check.
         if self.conversation_ended or self._should_ignore_transcriber_input():
             logger.info("LanguageSwitcher: hangup/transfer/teardown in progress — abandoning switch (pre-decide)")
             return None
@@ -5055,16 +5037,9 @@ class TaskManager(BaseManager):
         idle_flush_user_text = trailing_utterance_text(detector_segments) or detector_transcript
         active = self.language
 
-        # Speculative follow-up (any path with a mismatched detector tag): start
-        # generating the reply on the MAIN conversational LLM now, in parallel with
-        # the decide — when the decision confirms, the response is already (nearly)
-        # ready and the decide latency vanishes from the caller's wait. On the
-        # turn-boundary and idle-flush paths this hides the ~1.2s follow-up
-        # generation that previously ran serially after the decide. Gated on the
-        # tag being fully supported (both pools + prompt) so a discard is the only
-        # possible miss cost (one wasted generation when the decide says stay —
-        # e.g. mis-tagged acknowledgments the substance gate rejects). Cleanup of
-        # an unconsumed task is owned by handle_language_switch's finally.
+        # Speculative follow-up: generate the reply on the main LLM in parallel with the
+        # decide, so decide latency vanishes when the switch confirms. Gated on a supported
+        # tag → worst case is one wasted generation on a stay. Cleanup owned by the caller's finally.
         spec_task = None
         spec_target = None
         # Speculation runs generate() concurrently with any in-flight main generation
@@ -5147,10 +5122,8 @@ class TaskManager(BaseManager):
         if not decision:
             emit_lid_decision("no_decision")
             return
-        # The decide can take seconds (Anthropic tail); a hangup/transfer/end-call may
-        # have started while we waited. Re-check before the truncate below clears its
-        # in-flight audio and deadlocks teardown (QA 67f7b856) or breaks a transfer
-        # mid-handoff (QA 7ab56fdd).
+        # decide() can take seconds; a hangup/transfer may have started meanwhile — re-check
+        # before the truncate below breaks its in-flight audio.
         if self.conversation_ended or self._should_ignore_transcriber_input():
             logger.info("LanguageSwitcher: hangup/transfer/teardown in progress — abandoning switch (post-decide)")
             emit_lid_decision("gated:hangup")
@@ -5187,14 +5160,8 @@ class TaskManager(BaseManager):
             emit_lid_decision("gated:no_synth")
             return
 
-        # Confidence gate (fail-closed): don't flip the language unless the model is
-        # confident enough. Prefer the model's explicit target_confidence; fall back to
-        # the per-language list (normalized match on the short code). If neither yields a
-        # number, treat it as below threshold and stay — a missing confidence signal is
-        # exactly the "when unsure, stay" case.
-        # 0.8: measured on QA calls, junk decisions cluster at 0.6-0.75 (hallucinated
-        # "please" 0.60, te→mr matrix inversion 0.72, gu mis-tag 0.72) while genuine
-        # switches score 0.85-0.98 — 0.8 slices between the two bands.
+        # Confidence gate (fail-closed): missing/low confidence → stay. 0.8 threshold —
+        # junk decisions cluster at 0.6-0.75, genuine switches at 0.85-0.98.
         min_conf = float(os.getenv("LANGUAGE_SWITCH_MIN_CONFIDENCE", "0.8"))
 
         def as_float(value):
@@ -5228,14 +5195,9 @@ class TaskManager(BaseManager):
             emit_lid_decision("gated:low_confidence")
             return
 
-        # Substance gate (fail-closed): acknowledgment-length audio is where saaras
-        # mis-tags languages (QA call 75ef1aee: two Tamil 'yes'-fragments of 0.54s/0.96s
-        # were tagged Hindi with prob 1.0 and flipped the call ta→hi). A non-explicit
-        # switch needs at least one substantive segment; explicit requests ("Tamil में
-        # बात करो") are legitimately short and bypass via the model's explicit_request —
-        # but only when confident: the model can hallucinate explicit_request on a bare
-        # courtesy word (QA 4f105766: "यह। please" → explicit_request=true at 0.6 and
-        # switched hi→en; genuine requests score 0.97-0.99).
+        # Substance gate: acknowledgment-length audio mis-tags languages. Short turns need
+        # an explicit by-name request to switch — and only a confident one, since the model
+        # can hallucinate explicit_request on a bare courtesy word ("please") at low conf.
         min_segment_s = float(os.getenv("LANGUAGE_SWITCH_MIN_SEGMENT_AUDIO_S", "1.0"))
         explicit_min_conf = float(os.getenv("LANGUAGE_SWITCH_EXPLICIT_MIN_CONFIDENCE", "0.8"))
         explicit_bypass = bool(decision.get("explicit_request")) and (target_conf or 0.0) >= explicit_min_conf
@@ -5249,15 +5211,9 @@ class TaskManager(BaseManager):
             emit_lid_decision("gated:short_audio")
             return
 
-        # A confirmed switch means any in-flight response is in a language the caller
-        # just demonstrated they don't follow — every extra second of it is noise (a
-        # long old-language reply can otherwise play out fully, ~12s observed in QA).
-        # Truncate it with the standard barge-in cleanup (clears output + synth audio,
-        # syncs history to the part actually heard, cancels the in-flight LLM) instead
-        # of draining it. Nothing in flight → switch immediately. Stay decisions never
-        # reach this point, so normal turns are never truncated.
-        # Don't truncate an in-flight tool call for a switch (QA 8166592d): switch the
-        # language/pool in parallel and let the action finish — the tool call is the turn's reply.
+        # Truncate the in-flight old-language reply (barge-in cleanup) before switching.
+        # But an in-flight tool call is the turn's action — switch the pool in parallel,
+        # don't truncate it.
         activity = self._inflight_response_activity()  # captured pre-truncation for telemetry
         if self.function_call_in_flight:
             logger.info("LanguageSwitcher: in-flight function call — switching in parallel, not truncating the action")
@@ -5322,13 +5278,8 @@ class TaskManager(BaseManager):
         if active_transcript:
             replaced = self.conversation_history.replace_last_user(active_transcript, detector_transcript)
             if not replaced:
-                # A newer user turn landed during the decide. Do NOT touch history —
-                # but the truncate above just cancelled that turn's in-flight
-                # generation, so skipping the follow-up here leaves the caller with
-                # NO reply at all (QA 746c08f1: switch landed, both generations
-                # cancelled, silence → online-check → hangup). Generate the
-                # follow-up over the untouched history instead — it answers the
-                # caller's newest turn in the new language.
+                # A newer turn landed during decide; the truncate cancelled its generation,
+                # so generate the follow-up over untouched history instead of leaving silence.
                 transcript_corrected = False
                 logger.info(
                     "LanguageSwitcher: newer user turn arrived during decision — skipping transcript "
@@ -5371,10 +5322,7 @@ class TaskManager(BaseManager):
             except Exception as e:
                 logger.info(f"LanguageSwitcher: speculative follow-up unavailable ({e!r}) — falling back")
             self._spec_followup_task = None
-            # switch_language + the up-to-6s spec await above can straddle a hangup that
-            # queued its agent_hangup goodbye. _synthesize only guards conversation_ended
-            # (not hangup_triggered), so synthesizing here would truncate that goodbye and
-            # re-open the __process_end_of_conversation deadlock (QA 67f7b856). Re-check.
+            # The spec await above can straddle a hangup; re-check so we don't truncate the goodbye.
             if self.hangup_triggered or self.conversation_ended:
                 logger.info("LanguageSwitcher: hangup during speculation — not speaking follow-up")
                 return None
@@ -5476,13 +5424,9 @@ class TaskManager(BaseManager):
             logger.error(f"LanguageSwitcher: post-switch fallback error: {e}\n{traceback.format_exc()}")
 
     async def __play_switch_handoff(self, target: str) -> None:
-        """Synthesize the TARGET language's handoff template to cover a reply-
-        generation gap after a switch — spoken by the NEW voice (pools already
-        switched), sequence_id=-1 so it's always-valid background audio (same as
-        the legacy handoff), and appended to history so transcripts show it."""
-        # Don't synthesize into a tearing-down pipeline — would truncate a queued
-        # agent_hangup goodbye and deadlock teardown (QA 67f7b856). _synthesize only
-        # guards conversation_ended, so check hangup_triggered explicitly.
+        """Speak the target language's handoff line (new voice, sequence_id=-1) to cover
+        the post-switch reply-generation gap."""
+        # Don't synthesize into a tearing-down pipeline (would truncate the goodbye).
         if self.hangup_triggered or self.conversation_ended:
             return
         handoff_text = self.__handoff_text_for(target)
@@ -5498,10 +5442,8 @@ class TaskManager(BaseManager):
         }
         clip = self.handoff_audio_cache.get(target)
         if clip:
-            # Pre-warmed clip: push the finished mu-law audio straight to telephony —
-            # no live synth into the just-switched pipeline.
-            # Both end-flags: telephony's final-mark check is end_of_llm_stream AND
-            # end_of_synthesizer_stream — without both, is_audio_being_played never clears.
+            # Pre-warmed mu-law clip pushed straight to telephony. Both end-flags required
+            # or the final-mark check never clears is_audio_being_played.
             handoff_meta.update(
                 {
                     "format": "mulaw",
@@ -5510,8 +5452,7 @@ class TaskManager(BaseManager):
                     "is_first_chunk": True,
                 }
             )
-            # Synthesizer request/response logs (cached) — without them the spoken
-            # handoff is invisible in the run's execution log.
+            # Cached synth logs — else the spoken handoff is invisible in the run log.
             for direction in (LogDirection.REQUEST, LogDirection.RESPONSE):
                 convert_to_request_log(
                     message=handoff_text,
@@ -5545,10 +5486,8 @@ class TaskManager(BaseManager):
         )
 
     async def __prewarm_handoff_clips(self):
-        """Pre-render every language's handoff on that language's OWN voice via the
-        one-shot HTTP synthesize() (never the live WS). Text and voice always match, so
-        clips are static for the whole call. Non-active labels first — they're the
-        likely first switch targets."""
+        """Pre-render each language's handoff on its own voice via one-shot synthesize().
+        Clips are static for the call; non-active labels first (likely first targets)."""
         pool = self.tools.get("synthesizer")
         if not isinstance(pool, SynthesizerPool):
             return
@@ -5651,19 +5590,9 @@ class TaskManager(BaseManager):
             messages[0]["content"] = target_prompt
         else:
             messages.insert(0, {"role": "system", "content": target_prompt})
-        # Mirror the real path's history correction on this deep COPY (it then commits the
-        # spec only if both paths agree). Turn-boundary: _handle_transcriber_output already
-        # append_user-ed the garbled (wrong-language) turn before this spawned, so replace
-        # THAT turn — found content-guarded, the same way replace_last_user does — with the
-        # unbiased detector transcript. Content-guarding (not just "is messages[-1] a user
-        # turn") is what tells the garbled current turn apart from an older turn: by the
-        # time this copy is taken the main reply may already trail the garbled turn, and
-        # the idle-flush case (no current user turn at all) leaves an OLDER user turn last —
-        # overwriting either would corrupt the prompt or append a second consecutive user
-        # turn (which alternating-role LLMs reject → spec errors out → never helps). A clean
-        # replacement dict also drops the garbled turn's stale turn_id/response_uid. If no
-        # turn matches (a newer turn arrived during the decide), leave history untouched and
-        # answer the newest turn — exactly as the real path does (transcript_corrected=False).
+        # Mirror the real path's history correction on this copy: replace the garbled
+        # current-turn user text with the unbiased transcript, matched content-guarded (so an
+        # older/idle-flush turn isn't overwritten). No match → leave untouched, answer newest.
         if active_transcript:
             for i in range(len(messages) - 1, -1, -1):
                 if messages[i].get("role") == "user":

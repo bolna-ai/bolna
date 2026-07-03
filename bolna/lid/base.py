@@ -21,14 +21,8 @@ class LIDBackend:
     — and call _accumulate() for each recognized segment.
     """
 
-    # Mid-call reconnects allowed when the provider closes the socket on us
-    # (observed in QA: server-side graceful close left the detector silently mute
-    # for the whole call). Cap is per-INCIDENT, not per-call: the attempt counter
-    # resets when the previous reconnect was long enough ago
-    # (_RECONNECT_RESET_WINDOW_S) that this is a fresh, unrelated drop rather than
-    # a tight reject loop. So a provider periodically closing an idle socket over a
-    # long call always recovers, while a server rejecting every connect within
-    # seconds is still stopped after _MAX_RECONNECTS.
+    # Per-incident reconnect cap: the counter resets after _RECONNECT_RESET_WINDOW_S
+    # so periodic idle-closes recover but a tight reject loop is still stopped.
     _MAX_RECONNECTS = 2
     _RECONNECT_DELAY_S = 0.5
     _RECONNECT_RESET_WINDOW_S = 30.0
@@ -36,8 +30,6 @@ class LIDBackend:
     def __init__(self, on_language, config):
         self.on_language = on_language
         self.config = config
-        # Audio feed queue: feed() is called from the pool's audio router (~50/s);
-        # the provider's sender loop drains it onto the wire.
         self._queue = asyncio.Queue(maxsize=20)
         self._ws = None
         self._sender_task = None
@@ -48,30 +40,23 @@ class LIDBackend:
         self._reconnect_attempts = 0
         self._last_reconnect_at = 0.0
         self._dead_drop_logged = False
-        # Rolling buffer of unbiased recognition for the current conversational turn.
-        # Providers emit one segment per utterance/VAD chunk (several per turn), so we
-        # accumulate here and let the caller drain once per turn via
-        # take_turn_transcript() — aligned to the main transcriber's turn boundary.
+        # Per-turn buffer: providers _accumulate() one segment per utterance; the
+        # caller drains it once per turn via take_turn_transcript().
         self._buffer_text = ""
         self._buffer_lang = None
         self._buffer_lang_streak = 0
         self._buffer_max_segment_s = 0.0
         self._buffer_last_segment_ts = None
-        self._buffer_lang_prob = None  # language probability of the latest segment
-        # Per-segment {lang, prob, text, audio_s, ts} for the turn (a turn can span languages).
-        self._buffer_segments: list[dict] = []
-        # Set whenever a segment lands; cleared on drain. Lets the idle-flush watcher
-        # sleep until speech actually arrives instead of polling on a fixed grid.
-        self._buffer_event = asyncio.Event()
+        self._buffer_lang_prob = None
+        self._buffer_segments: list[dict] = []  # {lang, prob, text, audio_s, ts} per segment
+        self._buffer_event = asyncio.Event()  # set on segment, cleared on drain (idle-flush wakeup)
 
     async def start(self):
         raise NotImplementedError
 
     def feed(self, audio_bytes):
         if self._dead:
-            # Log the first drop loudly, then go quiet — at ~50 chunks/s a
-            # per-chunk warning floods the call log while a reconnect runs.
-            if not self._dead_drop_logged:
+            if not self._dead_drop_logged:  # log once, not per-chunk at ~50/s
                 logger.warning(
                     f"{self.__class__.__name__}: feed() called but WS is dead — dropping chunks until reconnected"
                 )
@@ -116,10 +101,8 @@ class LIDBackend:
                 )
                 return
             self._reconnect_attempts += 1
-            # Tear down whatever is left of the old connection, and AWAIT the
-            # cancellations: a sender blocked in ws.send() during a network stall can
-            # otherwise raise after start() has installed the fresh connection and
-            # schedule a spurious reconnect against the healthy socket.
+            # Await the cancellations before start() installs a fresh socket, else a
+            # stalled sender can raise later and schedule a spurious reconnect.
             old_tasks = [t for t in (self._sender_task, self._receiver_task) if t and not t.done()]
             for task in old_tasks:
                 task.cancel()
@@ -172,39 +155,23 @@ class LIDBackend:
         logger.info(f"{self.__class__.__name__}: stopped")
 
     def _accumulate(self, transcript, lang, audio_s: float = 0.0, prob=None):
-        """Append a recognized segment to the current-turn buffer.
+        """Append one recognized segment to the current-turn buffer.
 
-        CONTRACT: call this once per UTTERANCE (VAD/endpoint-delimited), not per
-        token or interim fragment, with audio_s spanning the whole utterance.
-        buffer_max_segment_seconds() gates switch decisions (the ~1.0s substance
-        gate) — sub-utterance fragments would never clear it and switching would
-        silently under-fire for that provider."""
+        CONTRACT: call once per UTTERANCE (not per token), audio_s spanning the whole
+        utterance — buffer_max_segment_seconds() gates switching on the ~1.0s substance
+        bar, so sub-utterance fragments would never clear it.
+        """
         if transcript:
             self._buffer_text = " ".join(filter(None, [self._buffer_text, transcript]))
             self._buffer_last_segment_ts = time.monotonic()
             self._buffer_event.set()
+            # ts is epoch (matches persisted telemetry); segments arrive in speech order.
             self._buffer_segments.append(
-                {
-                    "lang": lang,
-                    "prob": prob,
-                    "text": transcript,
-                    "audio_s": round(audio_s or 0.0, 3),
-                    # Arrival time — segments arrive in speech order (single in-order
-                    # stream), so trailing gaps identify the caller's last utterance.
-                    # Epoch (not monotonic): these flow into persisted telemetry records
-                    # whose other timestamps are epoch.
-                    "ts": time.time(),
-                }
+                {"lang": lang, "prob": prob, "text": transcript, "audio_s": round(audio_s or 0.0, 3), "ts": time.time()}
             )
-            # Longest single segment in the buffer — acknowledgment-length audio
-            # (<~1s) is where recognizers mis-tag languages (e.g. Tamil 'ஆமா' heard
-            # as Hindi 'हाँ'), so switch decisions gate on having at least one
-            # substantive segment.
+            # Substance gate keys on the longest segment (short audio mis-tags languages).
             self._buffer_max_segment_s = max(self._buffer_max_segment_s, audio_s or 0.0)
             if lang:
-                # Consecutive same-language segments = double-confirmation; the
-                # watcher uses the streak to fire the decision without waiting
-                # out the idle window.
                 self._buffer_lang_streak = self._buffer_lang_streak + 1 if lang == self._buffer_lang else 1
                 self._buffer_lang = lang
                 self._buffer_lang_prob = prob
@@ -218,12 +185,7 @@ class LIDBackend:
         return self._buffer_event
 
     def buffer_age_seconds(self):
-        """Seconds since the last buffered segment, or None if the buffer is empty.
-
-        Used by the idle-flush fallback: a non-empty buffer that has gone quiet with
-        no main-transcriber turn means the active (locked) ASR couldn't decode the
-        caller's speech.
-        """
+        """Seconds since the last buffered segment, or None if empty (drives idle-flush)."""
         if not self._buffer_text.strip() or self._buffer_last_segment_ts is None:
             return None
         return time.monotonic() - self._buffer_last_segment_ts
