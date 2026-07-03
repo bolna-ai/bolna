@@ -165,13 +165,17 @@ class TranscriberPool:
         for t in self.transcribers.values():
             all_latencies.extend(t.turn_latencies)
 
-        # Order by the relative ASR start (asr_turn_start_ms/asr_start_ms, always present and
-        # same scale) — NOT asr_start_epoch_ms, which is usually null so the sort was a no-op
-        # and left turns in per-instance order after a mid-call language switch.
+        # Order by ASR start. The relative keys (asr_turn_start_ms/asr_start_ms) only
+        # exist AFTER task_manager finalization; at the pool level the raw transcriber
+        # dicts carry asr_start_epoch_ms instead — so fall through to it, else the sort
+        # keys on 0 for every turn and no-ops (leaving turns in per-instance order after
+        # a mid-call language switch). All three are same-scale ms within a call.
         def _order_key(d):
             v = d.get("asr_turn_start_ms")
             if v is None:
                 v = d.get("asr_start_ms")
+            if v is None:
+                v = d.get("asr_start_epoch_ms")
             return v if v is not None else 0
 
         all_latencies.sort(key=_order_key)
