@@ -3703,7 +3703,10 @@ class TaskManager(BaseManager):
                         # The eager stub carries the correct llm_start_ms; carry it forward if the
                         # completion stamp came back null (meta_info lost llm_start_time), so the
                         # turn keeps a valid start for downstream timeline/transcript rendering.
-                        if latency_dict.get("llm_start_ms") is None and previous_latency_item.get("llm_start_ms") is not None:
+                        if (
+                            latency_dict.get("llm_start_ms") is None
+                            and previous_latency_item.get("llm_start_ms") is not None
+                        ):
                             latency_dict["llm_start_ms"] = previous_latency_item["llm_start_ms"]
                         self.llm_latencies.turn_latencies[-1] = latency_dict
                     else:
@@ -6865,6 +6868,39 @@ class TaskManager(BaseManager):
                     _seq = _ub.get("sequence_id")
                     if _seq is not None and _seq in _seq_to_asr_turn:
                         _ub["turn_id"] = _seq_to_asr_turn[_seq]
+
+                # user_bot_latencies only records turns the agent replied to (via
+                # on_agent_speech_started). Stamp a user-speech record for every OTHER
+                # transcriber turn that produced a transcript (interrupted/backchannel/
+                # unanswered) so the User row reflects every utterance, not just answered
+                # ones. agent_start_ms stays None (no agent reply) -> no spurious Agent block.
+                _ub_turns = {
+                    _ub.get("turn_id")
+                    for _ub in output["progression_data"]["user_bot_latencies"]
+                    if _ub.get("turn_id") is not None
+                }
+                for _tt in output["progression_data"]["transcriber_latencies"].get("turn_latencies", []):
+                    _tid = _tt.get("turn_id")
+                    if not isinstance(_tid, int) or _tid in _ub_turns or not _tt.get("final_transcript"):
+                        continue
+                    _u_start = _tt.get("asr_turn_start_ms")
+                    if _u_start is None:
+                        _u_start = _tt.get("asr_start_ms")
+                    _u_end = _tt.get("user_speech_end_ms")
+                    if _u_end is None:
+                        _u_end = _tt.get("asr_finalized_ms")
+                    output["progression_data"]["user_bot_latencies"].append(
+                        {
+                            "turn_id": _tid,
+                            "sequence_id": None,
+                            "user_start_ms": _u_start,
+                            "user_first_start_ms": _u_start,
+                            "user_end_ms": _u_end,
+                            "agent_start_ms": None,
+                            "agent_end_ms": None,
+                            "latency_ms": None,
+                        }
+                    )
 
                 for _tts_t in output["progression_data"]["synthesizer_latencies"].get("turn_latencies", []):
                     _seq = _tts_t.get("sequence_id")

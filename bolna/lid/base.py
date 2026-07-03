@@ -135,15 +135,12 @@ class LIDBackend:
             try:
                 await self.start()
             except Exception as e:
-                logger.error(
-                    f"{self.__class__.__name__}: reconnect attempt {self._reconnect_attempts} failed: {e}"
-                )
+                logger.error(f"{self.__class__.__name__}: reconnect attempt {self._reconnect_attempts} failed: {e}")
                 return
             self._dead = False
             self._dead_drop_logged = False
             logger.info(
-                f"{self.__class__.__name__}: reconnected "
-                f"(attempt {self._reconnect_attempts}/{self._MAX_RECONNECTS})"
+                f"{self.__class__.__name__}: reconnected (attempt {self._reconnect_attempts}/{self._MAX_RECONNECTS})"
             )
         finally:
             self._reconnecting = False

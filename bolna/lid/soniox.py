@@ -148,9 +148,7 @@ class SonioxLID(LIDBackend):
         await self._ws.send(json.dumps(self._build_config()))
         self._sender_task = asyncio.create_task(self._sender_loop())
         self._receiver_task = asyncio.create_task(self._receiver_loop())
-        logger.info(
-            f"SonioxLID: connected (audio_format={self._audio_format}, sample_rate={self._input_sr})"
-        )
+        logger.info(f"SonioxLID: connected (audio_format={self._audio_format}, sample_rate={self._input_sr})")
 
     async def _sender_loop(self):
         try:
