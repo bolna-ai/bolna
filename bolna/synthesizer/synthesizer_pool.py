@@ -52,9 +52,13 @@ class SynthesizerPool:
 
     @property
     def turn_latencies(self):
+        # Each per-language synth accumulates only its own turns; after a mid-call switch
+        # they're spread across instances. Sort by tts_start_ms so the aggregated list is
+        # in true turn order (matching TranscriberPool.turn_latencies).
         all_latencies = []
         for s in self.synthesizers.values():
             all_latencies.extend(s.turn_latencies)
+        all_latencies.sort(key=lambda d: d.get("tts_start_ms") if d.get("tts_start_ms") is not None else 0)
         return all_latencies
 
     @property

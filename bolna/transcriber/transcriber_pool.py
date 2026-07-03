@@ -164,7 +164,15 @@ class TranscriberPool:
         all_latencies = []
         for t in self.transcribers.values():
             all_latencies.extend(t.turn_latencies)
-        all_latencies.sort(key=lambda d: d.get("asr_start_epoch_ms") or 0)
+        # Order by the relative ASR start (asr_turn_start_ms/asr_start_ms, always present and
+        # same scale) — NOT asr_start_epoch_ms, which is usually null so the sort was a no-op
+        # and left turns in per-instance order after a mid-call language switch.
+        def _order_key(d):
+            v = d.get("asr_turn_start_ms")
+            if v is None:
+                v = d.get("asr_start_ms")
+            return v if v is not None else 0
+        all_latencies.sort(key=_order_key)
         return all_latencies
 
     @property

@@ -3790,26 +3790,31 @@ class TaskManager(BaseManager):
             if rag_latency.get("sequence_id") not in existing_seq_ids:
                 self.rag_latencies["turn_latencies"].append(rag_latency)
 
-    async def _process_conversation_task(self, message, sequence, meta_info):
-        should_bypass_synth = "bypass_synth" in meta_info and meta_info["bypass_synth"] is True
-        next_step = self._get_next_step(sequence, "llm")
-        meta_info["llm_start_time"] = time.time()
-        meta_info["_non_fatal_errors"] = []
-
-        # Eager stub so hung/cancelled LLM calls still appear in progression as llm_start.
-        # __do_llm_generation upserts by sequence_id on completion, replacing this entry.
+    def _append_eager_llm_stub(self, meta_info):
+        """Record an LLM turn's start immediately (sequence_id/turn_id/asr_turn_id/llm_start_ms)
+        so a hung/cancelled/interrupted turn still appears in progression. __do_llm_generation
+        upserts by sequence_id on completion, replacing this stub. Used by BOTH the normal turn
+        path and the language-switch follow-up, so switched turns are stamped identically."""
         _t_s = self.tools.get("transcriber")
         if hasattr(_t_s, "transcribers") and hasattr(_t_s, "active_label"):
             _t_s = _t_s.transcribers.get(_t_s.active_label, _t_s)
+        start = meta_info.get("llm_start_time")
         self.llm_latencies.turn_latencies.append(
             {
                 "sequence_id": meta_info.get("sequence_id"),
                 "turn_id": meta_info.get("turn_id"),
                 "asr_turn_id": getattr(_t_s, "turn_counter", None),
                 "model": self.llm_config.get("model") if self.llm_config else None,
-                "llm_start_ms": round(meta_info["llm_start_time"] * 1000 - self.conversation_start_init_ts, 2),
+                "llm_start_ms": round(start * 1000 - self.conversation_start_init_ts, 2) if start else None,
             }
         )
+
+    async def _process_conversation_task(self, message, sequence, meta_info):
+        should_bypass_synth = "bypass_synth" in meta_info and meta_info["bypass_synth"] is True
+        next_step = self._get_next_step(sequence, "llm")
+        meta_info["llm_start_time"] = time.time()
+        meta_info["_non_fatal_errors"] = []
+        self._append_eager_llm_stub(meta_info)
 
         if self.turn_based_conversation:
             self.history.append({"role": "user", "content": message["data"]})
@@ -5695,8 +5700,11 @@ class TaskManager(BaseManager):
         non-done llm_task seen here can only belong to a NEWER concurrent turn, and
         cancelling that would kill the wrong response.
         """
-        # This path bypasses _process_conversation_task, so stamp llm_start_time here or the turn's llm_start_ms is null.
+        # This path bypasses _process_conversation_task, so stamp llm_start_time + the eager
+        # stub here too, so the switch follow-up turn is recorded like any normal turn
+        # (real turn_id/sequence_id/llm_start_ms) even if a rapid next switch interrupts it.
         followup_meta_info["llm_start_time"] = time.time()
+        self._append_eager_llm_stub(followup_meta_info)
         # Revalidate the follow-up's sequence_id — the truncate path's
         # invalidate_pending_responses would otherwise leave its audio permanently BLOCKed.
         self.interruption_manager.revalidate_sequence_id(followup_meta_info["sequence_id"])
