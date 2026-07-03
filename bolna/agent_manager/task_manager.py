@@ -4760,8 +4760,15 @@ class TaskManager(BaseManager):
         reply (the switch's follow-up answers in the new language); stayed, timed out,
         or switched via the in-flight-tool branch (which produces no follow-up) → run
         it. Shielded so cancelling the held reply never kills the decide."""
-        # Must cover the decide's own budget (settle 300ms + decide up to 8s + lock
-        hold_timeout = float(os.getenv("LANGUAGE_SWITCH_MISMATCH_HOLD_S", "5.0"))
+        # Hold must outlast the decide budget (settle + decide timeout + lock/overhead) — a
+        # shorter hold releases the old-language reply that the confirmed switch then truncates
+        # mid-sentence. Default is derived from that budget; the env still overrides.
+        decide_budget = (
+            int(os.getenv("LANGUAGE_SWITCH_SETTLE_MS", "300")) / 1000
+            + float(os.getenv("LANGUAGE_SWITCH_DECIDE_TIMEOUT_S", "8"))
+            + 1.0
+        )
+        hold_timeout = float(os.getenv("LANGUAGE_SWITCH_MISMATCH_HOLD_S", str(decide_budget)))
         timed_out = False
         try:
             await asyncio.wait_for(asyncio.shield(decision_task), timeout=hold_timeout)

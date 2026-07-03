@@ -158,6 +158,29 @@ def test_credentials_openai_style_falls_back_to_openai(monkeypatch):
     assert resolve_switch_llm_credentials("gpt-4.1-nano") == ("oai-key", "", "")
 
 
+def test_credentials_azure_version_defaults_like_azure_llm(monkeypatch):
+    # AZURE_OPENAI_API_VERSION unset → default (not ""), matching azure_llm.py, else every decide fails.
+    from bolna.helpers.language_switcher import resolve_switch_llm_credentials
+
+    _clear_cred_envs(monkeypatch)
+    monkeypatch.setenv("AZURE_OPENAI_API_KEY", "az-key")
+    monkeypatch.setenv("AZURE_OPENAI_ENDPOINT", "https://ptu.example.azure.com")
+    _, _, version = resolve_switch_llm_credentials("azure/ptu-gpt-4-1-mini")
+    assert version == "2024-12-01-preview"
+
+
+def test_misconfigured_azure_judge_falls_back_to_default(monkeypatch):
+    # azure flag granted but AZURE_OPENAI_* missing → don't ship a dead judge; use the default.
+    from bolna.helpers.language_switcher import LanguageSwitcher
+
+    _clear_cred_envs(monkeypatch)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "ant-key")  # default judge's key is present
+    with patch(f"{MOD}.LiteLLM", return_value=MagicMock()) as fake_cls:
+        sw = LanguageSwitcher(available_labels=["en", "te"], model="azure/ptu-gpt-4-1-mini")
+    assert sw.model == "anthropic/claude-haiku-4-5-20251001"
+    assert fake_cls.call_args.kwargs["llm_key"] == "ant-key"
+
+
 def test_credentials_dedicated_envs_always_win(monkeypatch):
     from bolna.helpers.language_switcher import resolve_switch_llm_credentials
 

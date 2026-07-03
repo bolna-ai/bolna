@@ -28,7 +28,9 @@ def resolve_switch_llm_credentials(model: str) -> tuple[str, str, str]:
     if model.startswith("azure/"):
         key = key or os.getenv("AZURE_OPENAI_API_KEY") or ""
         base = base or os.getenv("AZURE_OPENAI_ENDPOINT") or ""
-        version = version or os.getenv("AZURE_OPENAI_API_VERSION") or ""
+        # Match azure_llm.py's default so an unset AZURE_OPENAI_API_VERSION doesn't
+        # leave the judge with an empty version (which fails every decide).
+        version = version or os.getenv("AZURE_OPENAI_API_VERSION") or "2024-12-01-preview"
     elif model.startswith(("anthropic/", "claude")):
         key = key or os.getenv("ANTHROPIC_API_KEY") or ""
     else:
@@ -55,6 +57,16 @@ class LanguageSwitcher:
         self.latency_ms = None
         # Dedicated creds, NOT the agent's — an Azure/OpenAI agent would 404 the switch model.
         switch_llm_key, switch_llm_base, switch_llm_version = resolve_switch_llm_credentials(self.model)
+        # A configured (e.g. azure) judge with no resolvable key would fail EVERY decide,
+        # leaving switching inert for the flagged org. Fall back to the default judge, which
+        # switching depends on, rather than shipping a dead judge.
+        default_model = f"anthropic/{DEFAULT_LANGUAGE_SWITCH_LLM}"
+        if not switch_llm_key.strip() and self.model != default_model:
+            fb_key, fb_base, fb_version = resolve_switch_llm_credentials(default_model)
+            if fb_key.strip():
+                logger.warning(f"LanguageSwitcher: no key for '{self.model}' — falling back to {default_model}")
+                self.model = default_model
+                switch_llm_key, switch_llm_base, switch_llm_version = fb_key, fb_base, fb_version
         if not switch_llm_key.strip():
             # Don't raise (would kill call setup); log — every decide would otherwise fail silently.
             logger.error(

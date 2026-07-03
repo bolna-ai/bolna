@@ -39,7 +39,8 @@ class LIDBackend:
         self._reconnect_attempts = 0
         self._last_reconnect_at = 0.0
         self._dead_drop_logged = False
-        # Per-turn buffer: providers _accumulate() one segment per utterance; the
+        self._reconnect_task = None
+        # Per-turn buffer: providers _accumulate() one segment per utterance, drained per turn.
         self._buffer_text = ""
         self._buffer_lang = None
         self._buffer_lang_streak = 0
@@ -80,51 +81,67 @@ class LIDBackend:
             return
         self._reconnecting = True
         logger.error(f"{self.__class__.__name__}: socket dead ({source}) — detector mute, attempting reconnect")
-        asyncio.create_task(self._reconnect())
+        self._reconnect_task = asyncio.create_task(self._reconnect())
 
     async def _reconnect(self):
+        # Retry loop: a failed start() falls through to the next attempt (bounded by the
+        # per-incident cap) instead of leaving the detector permanently dead. Re-checks
+        # _stopping at the top and after the sleep so a stop() mid-window doesn't reopen
+        # a socket for a call that already ended.
         try:
-            # Reset the per-incident counter if the last reconnect was long ago — a
+            # Per-incident reset once at episode entry (a drop long after the last is a
+            # fresh incident); attempts then only climb inside the loop → bounded by the cap.
             now = time.monotonic()
             if now - self._last_reconnect_at > self._RECONNECT_RESET_WINDOW_S:
                 self._reconnect_attempts = 0
             self._last_reconnect_at = now
-            if self._reconnect_attempts >= self._MAX_RECONNECTS:
-                logger.error(
-                    f"{self.__class__.__name__}: reconnect cap ({self._MAX_RECONNECTS}) reached in "
-                    f"{self._RECONNECT_RESET_WINDOW_S:.0f}s — LID inactive until the next spread-out drop"
+            while not self._stopping:
+                if self._reconnect_attempts >= self._MAX_RECONNECTS:
+                    logger.error(
+                        f"{self.__class__.__name__}: reconnect cap ({self._MAX_RECONNECTS}) reached in "
+                        f"{self._RECONNECT_RESET_WINDOW_S:.0f}s — LID inactive until the next spread-out drop"
+                    )
+                    return
+                self._reconnect_attempts += 1
+                # Await the cancellations before start() installs a fresh socket, else a
+                # stalled sender can raise late and schedule a spurious reconnect.
+                old_tasks = [t for t in (self._sender_task, self._receiver_task) if t and not t.done()]
+                for task in old_tasks:
+                    task.cancel()
+                if old_tasks:
+                    await asyncio.gather(*old_tasks, return_exceptions=True)
+                if self._ws:
+                    try:
+                        await self._ws.close()
+                    except Exception:
+                        pass
+                self._on_reconnect_reset()
+                await asyncio.sleep(self._RECONNECT_DELAY_S)
+                if self._stopping:
+                    return
+                try:
+                    await self.start()
+                except Exception as e:
+                    logger.error(f"{self.__class__.__name__}: reconnect attempt {self._reconnect_attempts} failed: {e}")
+                    continue
+                self._dead = False
+                self._dead_drop_logged = False
+                logger.info(
+                    f"{self.__class__.__name__}: reconnected (attempt {self._reconnect_attempts}/{self._MAX_RECONNECTS})"
                 )
                 return
-            self._reconnect_attempts += 1
-            # Await the cancellations before start() installs a fresh socket, else a
-            old_tasks = [t for t in (self._sender_task, self._receiver_task) if t and not t.done()]
-            for task in old_tasks:
-                task.cancel()
-            if old_tasks:
-                await asyncio.gather(*old_tasks, return_exceptions=True)
-            if self._ws:
-                try:
-                    await self._ws.close()
-                except Exception:
-                    pass
-            self._on_reconnect_reset()
-            await asyncio.sleep(self._RECONNECT_DELAY_S)
-            try:
-                await self.start()
-            except Exception as e:
-                logger.error(f"{self.__class__.__name__}: reconnect attempt {self._reconnect_attempts} failed: {e}")
-                return
-            self._dead = False
-            self._dead_drop_logged = False
-            logger.info(
-                f"{self.__class__.__name__}: reconnected (attempt {self._reconnect_attempts}/{self._MAX_RECONNECTS})"
-            )
         finally:
             self._reconnecting = False
 
     async def _shutdown_connection(self):
-        """Common teardown: unblock the sender, cancel loops, close the socket."""
+        """Common teardown: stop reconnects, unblock the sender, cancel loops, close the socket."""
         self._stopping = True
+        if self._reconnect_task and not self._reconnect_task.done():
+            self._reconnect_task.cancel()
+            try:
+                await self._reconnect_task
+            except asyncio.CancelledError:
+                pass
         try:
             self._queue.put_nowait(None)
         except asyncio.QueueFull:
