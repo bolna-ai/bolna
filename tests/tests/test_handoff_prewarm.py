@@ -1,6 +1,4 @@
-"""Handoff clips are pre-rendered per language on that language's OWN voice as mu-law 8000;
-a switch plays the finished clip (no live synth into the just-switched pipeline). Cold cache
-falls back to live synthesis. Conversion must yield real mu-law (linear PCM tagged mulaw = noise)."""
+"""Handoff clips pre-rendered per language as mu-law; switch plays the clip, cold cache falls back to live synth."""
 
 import base64
 import io
@@ -35,8 +33,7 @@ def test_clip_from_base64_string():
 
 
 def test_undecodable_compressed_audio_is_not_cached_as_noise():
-    # ID3-tagged bytes that pydub can't decode must return None (→ live-synth fallback),
-    # never fall through to the raw-PCM path — that caches static.
+    # Undecodable compressed bytes must return None (→ live-synth fallback), not raw noise.
     assert _to_mulaw(MagicMock(), b"ID3\x04\x00" + b"\x12\x34" * 400) is None
     assert _to_mulaw(MagicMock(), b"\xff\xfb\x90\x00" + b"\x12\x34" * 400) is None  # bare MP3 frame
 
@@ -148,9 +145,7 @@ async def test_elevenlabs_clip_uses_wire_format_and_skips_non_mulaw():
 
 @pytest.mark.asyncio
 async def test_prewarm_prefers_native_mulaw_one_shot():
-    # A provider exposing synthesize_telephony_clip (ElevenLabs) returns native mu-law:
-    # cached AS-IS, never routed through the converter (raw mu-law can start with 0xFF
-    # and would false-positive the MP3 magic-byte guard).
+    # Native mu-law one-shot is cached as-is, never through the converter.
     tm = _tm()
     tm.switch_handoff_messages = {"te": "Telugu {language}."}
     native = b"\xff\xfb" + b"\x7f" * 798  # deliberately MP3-frame-looking mu-law

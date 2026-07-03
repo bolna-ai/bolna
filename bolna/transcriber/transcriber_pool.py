@@ -165,11 +165,7 @@ class TranscriberPool:
         for t in self.transcribers.values():
             all_latencies.extend(t.turn_latencies)
 
-        # Order by ASR start. The relative keys (asr_turn_start_ms/asr_start_ms) only
-        # exist AFTER task_manager finalization; at the pool level the raw transcriber
-        # dicts carry asr_start_epoch_ms instead — so fall through to it, else the sort
-        # keys on 0 for every turn and no-ops (leaving turns in per-instance order after
-        # a mid-call language switch). All three are same-scale ms within a call.
+        # Order by ASR start (same-scale ms within a call). Relative keys exist only
         def _order_key(d):
             v = d.get("asr_turn_start_ms")
             if v is None:
@@ -288,11 +284,7 @@ class TranscriberPool:
                 on_language=self._handle_lid_signal if self._on_lid_switch is not None else None,
                 config=self._lid_config,
             )
-            # The LLM-driven flow consumes the detector through the per-turn buffer
-            # API (take_turn_transcript / buffer_age_seconds), owned by LIDBackend.
-            # A backend missing it makes that flow silently inert — every drain
-            # returns empty and the idle-flush never fires — so shout now, at setup,
-            # instead of leaving a mute mystery in call logs.
+            # New flow needs the per-turn buffer API; a backend without it goes silently
             if self._on_lid_switch is None and not hasattr(self._lid, "take_turn_transcript"):
                 logger.error(
                     f"TranscriberPool: LID provider '{self._lid_provider_name}' has no per-turn buffer API — "

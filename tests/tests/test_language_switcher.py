@@ -1,8 +1,4 @@
-"""Unit tests for LanguageSwitcher — the dedicated LLM that decides language
-switches from the unbiased Saaras v3 detector transcript.
-
-LiteLLM is mocked so no network/credentials are needed.
-"""
+"""Unit tests for LanguageSwitcher (LiteLLM mocked — no network)."""
 
 import json
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -87,8 +83,7 @@ async def test_decide_sends_user_role_message():
 
 @pytest.mark.asyncio
 async def test_default_model_is_haiku_with_provider_prefix():
-    # Bare claude-* names break on litellm versions whose registry predates the
-    # model ("LLM Provider NOT provided") — the switcher must namespace them.
+    # Bare claude-* names break on older litellm; the switcher must namespace them.
     switcher, _ = _make_switcher(json.dumps({"target_language": None}))
     assert switcher.model == "anthropic/claude-haiku-4-5-20251001"
 
@@ -140,9 +135,7 @@ def test_credentials_claude_falls_back_to_anthropic(monkeypatch):
 
 
 def test_credentials_azure_falls_back_to_azure_openai_envs(monkeypatch):
-    # The opt-in feature: LANGUAGE_SWITCH_LLM=azure/ptu-gpt-4-1-mini picks up the
-    # SAME AZURE_OPENAI_* envs bolna/llms/azure_llm.py uses (ecosystem convention) —
-    # NOT the Anthropic key (which would 401 against Azure).
+    # azure/* picks up AZURE_OPENAI_* (not the Anthropic key, which would 401).
     from bolna.helpers.language_switcher import resolve_switch_llm_credentials
 
     _clear_cred_envs(monkeypatch)
@@ -210,9 +203,7 @@ async def test_decide_azure_model_gets_no_anthropic_annotation():
 
 
 def test_prompt_variants_rules_stay_in_sync():
-    # The cache variant duplicates the rules as a static block — a rule edit that
-    # lands in only one variant silently forks judge behavior between flagged and
-    # unflagged orgs. Pin the distinctive markers of every rule in BOTH variants.
+    # The rules are duplicated across both prompt variants; pin each rule's marker in both.
     from bolna.prompts import LANGUAGE_SWITCH_PROMPT, LANGUAGE_SWITCH_SYSTEM_PROMPT
 
     markers = [

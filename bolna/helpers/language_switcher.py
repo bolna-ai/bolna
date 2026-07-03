@@ -13,7 +13,6 @@ from bolna.helpers.logger_config import configure_logger
 logger = configure_logger(__name__)
 
 # Haiku 4.5: small classification task, ~half sonnet's decide latency. LANGUAGE_SWITCH_LLM
-# env is read at CONSTRUCTION (not import) time so the host's load_dotenv() has run.
 DEFAULT_LANGUAGE_SWITCH_LLM = "claude-haiku-4-5-20251001"
 
 
@@ -51,7 +50,6 @@ class LanguageSwitcher:
         self.run_id = run_id
         self.model = model or os.getenv("LANGUAGE_SWITCH_LLM", DEFAULT_LANGUAGE_SWITCH_LLM)
         # Explicit anthropic/ prefix: bare claude names fail on litellm versions whose
-        # registry predates the model ("LLM Provider NOT provided").
         if self.model.startswith("claude") and "/" not in self.model:
             self.model = f"anthropic/{self.model}"
         self.latency_ms = None
@@ -121,8 +119,7 @@ class LanguageSwitcher:
         ]
         try:
             start_time = time.time()
-            # Needs a user message (system-only list breaks litellm). No response_format —
-            # the prompt mandates JSON and _parse_json is tolerant.
+            # Needs a user message (system-only list breaks litellm); prompt mandates JSON.
             response = await self._llm.generate(messages)
             self.latency_ms = (time.time() - start_time) * 1000
             result = self._parse_json(response)

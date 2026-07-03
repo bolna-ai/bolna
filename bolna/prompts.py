@@ -132,13 +132,7 @@ Respond with raw JSON only — no markdown fences, no surrounding text:
 }}
 """
 
-# The LIVE prompt: LanguageSwitcher.decide() always uses this split form — rules in a
-# STATIC system block (cacheable prefix: Anthropic cache_control / OpenAI automatic
-# prefix caching) and only the per-turn data in the user message. LANGUAGE_SWITCH_PROMPT
-# above is the single-message reference form kept for rollback; KEEP THE RULES IN SYNC —
-# test_prompt_variants_rules_stay_in_sync asserts the distinctive rule markers exist in
-# both. Inline '{active_language}' references are genericized to "the active language"
-# here; the actual label arrives in the turn message.
+# Live prompt (split for prefix caching): static rules here, per-turn data in the user
 LANGUAGE_SWITCH_SYSTEM_PROMPT = """
 You are the language-switching controller for a multilingual voice agent. The agent can only operate in a fixed set of supported languages. Your job is to decide which supported language the agent should operate in for the caller's next turn.
 
@@ -180,8 +174,7 @@ Respond with raw JSON only — no markdown fences, no surrounding text:
 }
 """
 
-# Per-turn user message paired with LANGUAGE_SWITCH_SYSTEM_PROMPT (the only part
-# that changes per decide — keeps the cached prefix intact).
+# Per-turn user message paired with LANGUAGE_SWITCH_SYSTEM_PROMPT.
 LANGUAGE_SWITCH_TURN_PROMPT = """The agent is currently operating in: {active_language}
 Supported languages (target_language must be one of these labels, or null): {available_languages}
 

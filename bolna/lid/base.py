@@ -22,7 +22,6 @@ class LIDBackend:
     """
 
     # Per-incident reconnect cap: the counter resets after _RECONNECT_RESET_WINDOW_S
-    # so periodic idle-closes recover but a tight reject loop is still stopped.
     _MAX_RECONNECTS = 2
     _RECONNECT_DELAY_S = 0.5
     _RECONNECT_RESET_WINDOW_S = 30.0
@@ -41,7 +40,6 @@ class LIDBackend:
         self._last_reconnect_at = 0.0
         self._dead_drop_logged = False
         # Per-turn buffer: providers _accumulate() one segment per utterance; the
-        # caller drains it once per turn via take_turn_transcript().
         self._buffer_text = ""
         self._buffer_lang = None
         self._buffer_lang_streak = 0
@@ -87,9 +85,6 @@ class LIDBackend:
     async def _reconnect(self):
         try:
             # Reset the per-incident counter if the last reconnect was long ago — a
-            # drop spread well apart from the previous one is a fresh incident, not a
-            # loop. Keeps a long healthy call recovering from periodic idle-closes
-            # while still capping a rapid reject loop.
             now = time.monotonic()
             if now - self._last_reconnect_at > self._RECONNECT_RESET_WINDOW_S:
                 self._reconnect_attempts = 0
@@ -102,7 +97,6 @@ class LIDBackend:
                 return
             self._reconnect_attempts += 1
             # Await the cancellations before start() installs a fresh socket, else a
-            # stalled sender can raise later and schedule a spurious reconnect.
             old_tasks = [t for t in (self._sender_task, self._receiver_task) if t and not t.done()]
             for task in old_tasks:
                 task.cancel()

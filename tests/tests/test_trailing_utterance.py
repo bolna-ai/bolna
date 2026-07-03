@@ -1,7 +1,4 @@
-"""trailing_utterance_text picks the caller's LAST utterance (trailing segments whose
-arrival gaps are ≤ the threshold) so switch fallbacks reply to what was actually just
-said instead of the whole stale multi-language buffer. Subtractive by design: it can
-only drop text, never add — and returns '' so callers fall back to the full concat."""
+"""trailing_utterance_text: the caller's last utterance (trailing segments within the gap); '' → caller uses full concat."""
 
 from bolna.agent_manager.task_manager import trailing_utterance_text
 
@@ -12,7 +9,6 @@ def _seg(text, ts, lang="en"):
 
 def test_picks_trailing_group_and_drops_stale():
     # Stale gu/en/te fragments accumulate while the locked ASR is stuck; the real
-    # question arrives 5s later — only it should be selected.
     segments = [
         _seg("હા.", 10.0, "gu"),
         _seg("Can you tell me?", 12.0, "en"),

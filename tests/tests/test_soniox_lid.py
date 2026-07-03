@@ -1,7 +1,4 @@
-"""SonioxLID: tokens fold into ONE segment per utterance (flushed on <end>) so
-segment cadence — and the short-audio substance gate driven by segment duration —
-matches the Sarvam backend. Language = dominant final-token tag; Soniox reports no
-language probability so prob is None."""
+"""SonioxLID: tokens fold into one segment per utterance (flushed on <end>); lang = dominant tag, prob None."""
 
 from bolna.constants import SONIOX_ENDPOINT_TOKEN
 from bolna.lid.provider import LIDProvider
@@ -90,8 +87,7 @@ def test_region_tagged_language_normalized():
 
 
 def test_stop_flush_preserves_pending_utterance():
-    # Finals without a trailing <end> at teardown must still reach the buffer —
-    # exercised via the flush helper directly (stop() also closes network state).
+    # Finals without a trailing <end> at teardown must still reach the buffer.
     d = _detector()
     d._handle_message({"tokens": [_tok("bye", "en", start_ms=0, end_ms=400)]})
     d._flush_pending_segment()

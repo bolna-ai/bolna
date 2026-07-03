@@ -171,7 +171,6 @@ def build_lid_decision_record(
         "context_note_sent": context_note,
         "context_note_sent_at": now if context_note else None,
         # Old-language response state when this firing resolved — for a switch, whether
-        # it truncated a reply mid-flight (audio_playing) vs cut nothing audible.
         "inflight_activity": inflight_activity or {},
     }
 
@@ -186,7 +185,6 @@ def trailing_utterance_text(segments, gap_seconds=1.5):
     for seg in reversed(segments or []):
         ts = seg.get("ts")
         # Segments arrive at speech END, so the silence gap to the next segment is its
-        # START (arrival - audio duration) minus this segment's arrival.
         if prev_start is not None and (ts is None or prev_start - ts > gap_seconds):
             break
         if seg.get("text"):
@@ -508,7 +506,6 @@ class TaskManager(BaseManager):
         self._last_turn_meta_info = None
         self._lid_idle_watcher_task = None
         # Handoff clips pre-rendered per language on that language's OWN voice (text and
-        # voice always match, so clips are static for the whole call). label → mu-law 8000.
         self.handoff_audio_cache = {}
         self.handoff_prewarm_task = None
         # Mid-speech silent switch state: set when a streak-fired switch lands while
@@ -727,9 +724,6 @@ class TaskManager(BaseManager):
         self.switch_handoff_messages = self.task_config.get("tools_config", {}).get("switch_handoff_messages") or {}
         self.agent_names = self.task_config.get("tools_config", {}).get("agent_names") or {}
         # Injected for BOTH flows. In the LLM-driven flow the tool is the fast path for
-        # EXPLICIT language requests — the main LLM calls it instead of replying in the
-        # old voice (the detector can't flag "switch to Telugu" spoken in Hindi as a
-        # mismatch); the detector+decide flow covers implicit language changes.
         self.__inject_switch_language_tool()
 
         # # setting llm
@@ -1411,33 +1405,20 @@ class TaskManager(BaseManager):
                         if label == active_label:
                             self.transcriber_provider = cfg.get("provider", cfg.get("model"))
 
-                    # Unbiased Saaras v3 detector tap, gated per call by the
-                    # LANGUAGE_SWITCH feature flag (see __language_switch_enabled):
-                    #   enabled  → per-turn transcript buffer feeding the Switch LLM.
-                    #   disabled → legacy per-segment LID heuristic (LID_MODE env:
-                    #              shadow/active) with on_lid_switch wired — master
-                    #              behavior, byte-for-byte.
-                    # Detector provider: per-call feature flag (dashboard-backend sets
-                    # tools_config["language_switch_lid_provider"] from the
-                    # language_switch_soniox_lid grant) → env → sarvam default.
+                    # Detector tap: enabled → per-turn buffer feeds the Switch LLM; disabled → legacy heuristic.
                     LID_PROVIDER = self.task_config.get("tools_config", {}).get(
                         "language_switch_lid_provider"
                     ) or os.getenv("LID_PROVIDER", "sarvam")
                     lid_config = {"telephony_provider": provider}
                     switch_enabled = self.__language_switch_enabled()
                     if switch_enabled:
-                        # The Switch LLM uses its own dedicated credentials (resolved
-                        # provider-aware in LanguageSwitcher) — deliberately NOT the
-                        # agent's llm_key/base_url. tools_config["language_switch_llm"]
-                        # (set by dashboard-backend from the language_switch_azure_llm
-                        # feature flag) overrides the model; absent → Claude default.
+                        # language_switch_llm (from the azure flag) overrides the model; absent → default.
                         self.language_switcher = LanguageSwitcher(
                             available_labels=list(transcribers.keys()),
                             run_id=self.run_id,
                             model=self.task_config.get("tools_config", {}).get("language_switch_llm"),
                         )
-                        # Pay the TLS handshake now, not on the first real decision.
-                        self.language_switcher.prewarm()
+                        self.language_switcher.prewarm()  # pay the TLS handshake now
 
                     self.tools["transcriber"] = TranscriberPool(
                         transcribers=transcribers,
@@ -1557,7 +1538,6 @@ class TaskManager(BaseManager):
                 logger.info(f"SynthesizerPool created with labels={list(synthesizers.keys())}, active='{active_label}'")
 
                 # Pre-render every language's handoff clip on its own voice (background;
-                # telephony only — browsers can't play mu-law). Cold cache → live synth.
                 if self.language_switcher is not None and not self.turn_based_conversation:
                     if self.task_config["tools_config"]["output"]["provider"] != "default":
                         self.handoff_prewarm_task = asyncio.create_task(self.__prewarm_handoff_clips())
@@ -3157,9 +3137,6 @@ class TaskManager(BaseManager):
                 return
 
         # switch_language tool handler (injected in BOTH flows): waits for in-flight
-        # audio, plays the handoff on the CURRENT voice, switches, regenerates. In the
-        # LLM-driven flow this is the explicit-request fast path; a concurrent decide
-        # targeting the same language no-ops via the stale/concurrent-switch guards.
         if called_fun == "switch_language":
             language_label = resp.get("language", "")
 
@@ -3189,8 +3166,6 @@ class TaskManager(BaseManager):
                 return
 
             # Serialize with the LID decide (which holds this lock): without it a
-            # concurrent decide's in-flight-tool branch can flip the pools mid-handoff,
-            # rendering the handoff on the wrong voice and double-switching.
             async with self.language_switch_lock:
                 if language_label == self.language:
                     # A concurrent decide switched while we waited for the lock.
@@ -3231,8 +3206,6 @@ class TaskManager(BaseManager):
                         await self.switch_language(language_label)
                         function_response = f"Switched to {language_label}"
                         # Drain the detector buffer: it still holds the pre-switch
-                        # request segments, which would otherwise trip the idle watcher
-                        # into a decide on stale text and switch straight back.
                         if isinstance(self.tools.get("transcriber"), TranscriberPool):
                             self.tools["transcriber"].take_lid_transcript()
                     except ValueError as e:
@@ -3701,8 +3674,6 @@ class TaskManager(BaseManager):
                         "sequence_id"
                     ):
                         # The eager stub carries the correct llm_start_ms; carry it forward if the
-                        # completion stamp came back null (meta_info lost llm_start_time), so the
-                        # turn keeps a valid start for downstream timeline/transcript rendering.
                         if (
                             latency_dict.get("llm_start_ms") is None
                             and previous_latency_item.get("llm_start_ms") is not None
@@ -4234,9 +4205,6 @@ class TaskManager(BaseManager):
             self.response_in_pipeline = True
             # Once-per-turn language-switch decision (no-op unless gated on); background
             # task so it never delays the main LLM. When the detector already tagged this
-            # turn as a different supported language, hold the reply until the decision
-            # resolves — otherwise the reply races onto the OLD voice and gets truncated
-            # mid-word when the switch lands.
             decision_task = self._spawn_language_switch_decision(transcriber_message, meta_info)
             if decision_task is not None and self.__detector_language_mismatch():
                 self.llm_task = asyncio.create_task(
@@ -4492,8 +4460,6 @@ class TaskManager(BaseManager):
                             )
                         elif self.language_switcher is not None and self.__detector_language_mismatch():
                             # An eager reply would stream on the OLD voice before the switch
-                            # decision lands; skip it so EndOfTurn takes the held-reply path.
-                            # Gated on the LLM-driven flow — legacy keeps eager behavior.
                             logger.info(
                                 "Skipping speculative LLM: detector language mismatch — reply holds for the switch decision"
                             )
@@ -4795,8 +4761,6 @@ class TaskManager(BaseManager):
         or switched via the in-flight-tool branch (which produces no follow-up) → run
         it. Shielded so cancelling the held reply never kills the decide."""
         # Must cover the decide's own budget (settle 300ms + decide up to 8s + lock
-        # queueing) for typical decides; on timeout the reply plays and a late switch
-        # falls back to the truncate path.
         hold_timeout = float(os.getenv("LANGUAGE_SWITCH_MISMATCH_HOLD_S", "5.0"))
         timed_out = False
         try:
@@ -4806,7 +4770,6 @@ class TaskManager(BaseManager):
             logger.info(f"LanguageSwitcher: mismatch hold timed out after {hold_timeout}s — playing reply")
         except asyncio.CancelledError:
             # Distinguish the decide being cancelled (fall through and reply) from the
-            # held reply itself being cancelled (propagate, e.g. barge-in).
             if not decision_task.cancelled():
                 raise
             logger.info("LanguageSwitcher: decide cancelled during hold — playing reply")
@@ -4865,12 +4828,9 @@ class TaskManager(BaseManager):
                     followup = await self.__run_language_switch(active_transcript, meta_info, spawn_language, speculate)
             finally:
                 # Claim our own spec task while the lock is still effectively ours (no await
-                # since release); re-reading the shared slot after generation could cancel the
-                # next turn's task instead.
                 spec = self._spec_followup_task
                 self._spec_followup_task = None
             # Generate outside the lock (streamed, multi-second). A later confirmed switch
-            # truncates this follow-up if it's still playing, by design.
             if followup is not None:
                 await self.__generate_switch_followup(*followup)
         except Exception as e:
@@ -4987,8 +4947,6 @@ class TaskManager(BaseManager):
         if not self.language_switcher:
             return
         # Abandon if the call is ending/transferring: a switch here truncates the goodbye
-        # or the transfer hold message. has_transfer outlives function_call_in_flight, so
-        # use the terminal-state check.
         if self.conversation_ended or self._should_ignore_transcriber_input():
             logger.info("LanguageSwitcher: hangup/transfer/teardown in progress — abandoning switch (pre-decide)")
             return None
@@ -5033,13 +4991,10 @@ class TaskManager(BaseManager):
         if not detector_transcript:
             return
         # One selection, used by BOTH the speculative copy and the real history append —
-        # they must match or the committed spec answers different text than history shows.
         idle_flush_user_text = trailing_utterance_text(detector_segments) or detector_transcript
         active = self.language
 
         # Speculative follow-up: generate the reply on the main LLM in parallel with the
-        # decide, so decide latency vanishes when the switch confirms. Gated on a supported
-        # tag → worst case is one wasted generation on a stay. Cleanup owned by the caller's finally.
         spec_task = None
         spec_target = None
         # Speculation runs generate() concurrently with any in-flight main generation
@@ -5079,7 +5034,6 @@ class TaskManager(BaseManager):
         def emit_lid_decision(outcome, switched_to=None, context_note=None, inflight_activity=None):
             # pool is a confirmed TranscriberPool here (guarded at function entry).
             # Snapshot the in-flight response now unless the caller passed a pre-truncation
-            # one (switch paths must capture BEFORE the truncate clears it).
             activity = inflight_activity if inflight_activity is not None else self._inflight_response_activity()
             pool.lid_detection_events.append(
                 build_lid_decision_record(
@@ -5123,7 +5077,6 @@ class TaskManager(BaseManager):
             emit_lid_decision("no_decision")
             return
         # decide() can take seconds; a hangup/transfer may have started meanwhile — re-check
-        # before the truncate below breaks its in-flight audio.
         if self.conversation_ended or self._should_ignore_transcriber_input():
             logger.info("LanguageSwitcher: hangup/transfer/teardown in progress — abandoning switch (post-decide)")
             emit_lid_decision("gated:hangup")
@@ -5161,7 +5114,6 @@ class TaskManager(BaseManager):
             return
 
         # Confidence gate (fail-closed): missing/low confidence → stay. 0.8 threshold —
-        # junk decisions cluster at 0.6-0.75, genuine switches at 0.85-0.98.
         min_conf = float(os.getenv("LANGUAGE_SWITCH_MIN_CONFIDENCE", "0.8"))
 
         def as_float(value):
@@ -5196,8 +5148,6 @@ class TaskManager(BaseManager):
             return
 
         # Substance gate: acknowledgment-length audio mis-tags languages. Short turns need
-        # an explicit by-name request to switch — and only a confident one, since the model
-        # can hallucinate explicit_request on a bare courtesy word ("please") at low conf.
         min_segment_s = float(os.getenv("LANGUAGE_SWITCH_MIN_SEGMENT_AUDIO_S", "1.0"))
         explicit_min_conf = float(os.getenv("LANGUAGE_SWITCH_EXPLICIT_MIN_CONFIDENCE", "0.8"))
         explicit_bypass = bool(decision.get("explicit_request")) and (target_conf or 0.0) >= explicit_min_conf
@@ -5212,8 +5162,6 @@ class TaskManager(BaseManager):
             return
 
         # Truncate the in-flight old-language reply (barge-in cleanup) before switching.
-        # But an in-flight tool call is the turn's action — switch the pool in parallel,
-        # don't truncate it.
         activity = self._inflight_response_activity()  # captured pre-truncation for telemetry
         if self.function_call_in_flight:
             logger.info("LanguageSwitcher: in-flight function call — switching in parallel, not truncating the action")
@@ -5279,7 +5227,6 @@ class TaskManager(BaseManager):
             replaced = self.conversation_history.replace_last_user(active_transcript, detector_transcript)
             if not replaced:
                 # A newer turn landed during decide; the truncate cancelled its generation,
-                # so generate the follow-up over untouched history instead of leaving silence.
                 transcript_corrected = False
                 logger.info(
                     "LanguageSwitcher: newer user turn arrived during decision — skipping transcript "
@@ -5291,8 +5238,6 @@ class TaskManager(BaseManager):
                 )
         else:
             # Reply to the caller's LAST utterance, not the whole buffer — with the
-            # locked ASR stuck, the buffer accumulates stale multi-utterance (often
-            # multi-language) text that reads as noise to the main LLM.
             self.conversation_history.append_user(idle_flush_user_text)
             logger.info(
                 f"LanguageSwitcher: idle-flush — appended detector transcript as user turn {idle_flush_user_text[:80]!r}"
@@ -5407,8 +5352,6 @@ class TaskManager(BaseManager):
             if not full_text:
                 return
             # Reply to the caller's LAST utterance — the full buffer spans stale
-            # multi-utterance text the main LLM reads as noise (it answers noise by
-            # restarting its script, which invites barge-ins).
             reply_text = trailing_utterance_text(list(pending.get("segments") or []) + tail_segments) or full_text
             self.conversation_history.append_user(reply_text)
             logger.info(
@@ -5443,7 +5386,6 @@ class TaskManager(BaseManager):
         clip = self.handoff_audio_cache.get(target)
         if clip:
             # Pre-warmed mu-law clip pushed straight to telephony. Both end-flags required
-            # or the final-mark check never clears is_audio_being_played.
             handoff_meta.update(
                 {
                     "format": "mulaw",
@@ -5499,7 +5441,6 @@ class TaskManager(BaseManager):
             try:
                 clip = None
                 # Prefer a native mu-law 8000 one-shot when the provider offers it (no
-                # decode/transcode); cache as-is — it must NOT go through the converter.
                 telephony_one_shot = getattr(synth, "synthesize_telephony_clip", None)
                 if telephony_one_shot is not None:
                     clip = await telephony_one_shot(text)
@@ -5508,12 +5449,10 @@ class TaskManager(BaseManager):
                     if not audio:
                         return
                     # pydub decode shells out to ffprobe/ffmpeg — off the event loop,
-                    # which is streaming the welcome message in 20ms frames right now.
                     clip = await asyncio.to_thread(self.__handoff_clip_to_mulaw, synth, audio)
                 if clip:
                     self.handoff_audio_cache[label] = clip
                     # The one-shot render bills provider characters — count them where
-                    # task_output reads them (the synth's own counter).
                     synth.synthesized_characters = getattr(synth, "synthesized_characters", 0) + len(text)
                     logger.info(f"LanguageSwitcher: pre-warmed handoff clip '{label}' ({len(clip)} bytes)")
             except Exception as e:
@@ -5531,8 +5470,6 @@ class TaskManager(BaseManager):
             segment = AudioSegment.from_file(io.BytesIO(audio), format="wav" if audio[:4] == b"RIFF" else None)
         except Exception:
             # Compressed container that pydub couldn't decode (e.g. ElevenLabs MP3 with no
-            # ffmpeg on the box): NEVER run it through the raw-PCM fallback — a mis-decoded
-            # clip caches as pure noise. Skip caching; the switch falls back to live synth.
             if (
                 audio[:3] == b"ID3"
                 or audio[:2] in (b"\xff\xfb", b"\xff\xf3", b"\xff\xf2")
@@ -5591,8 +5528,6 @@ class TaskManager(BaseManager):
         else:
             messages.insert(0, {"role": "system", "content": target_prompt})
         # Mirror the real path's history correction on this copy: replace the garbled
-        # current-turn user text with the unbiased transcript, matched content-guarded (so an
-        # older/idle-flush turn isn't overwritten). No match → leave untouched, answer newest.
         if active_transcript:
             for i in range(len(messages) - 1, -1, -1):
                 if messages[i].get("role") == "user":
@@ -5601,7 +5536,6 @@ class TaskManager(BaseManager):
                     break
         else:
             # Idle-flush: the locked ASR produced no turn — append the SAME trailing-utterance
-            # text the real path appends, or the spec answers the full stale buffer.
             messages.append({"role": "user", "content": idle_user_text or detector_transcript})
         spec_meta = {
             "request_id": str(uuid.uuid4()),
@@ -6618,7 +6552,6 @@ class TaskManager(BaseManager):
             )
             tasks_to_cancel.append(process_task_cancellation(self._lid_idle_watcher_task, "lid_idle_watcher_task"))
             # Sync cancel BEFORE clearing, so an in-flight render can't repopulate the
-            # cache between the clear and the awaited cancellation below.
             if self.handoff_prewarm_task is not None:
                 self.handoff_prewarm_task.cancel()
             tasks_to_cancel.append(process_task_cancellation(self.handoff_prewarm_task, "handoff_prewarm_task"))

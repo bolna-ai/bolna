@@ -1,6 +1,4 @@
-"""The main reply must not race the switch decision onto the OLD voice: when the unbiased
-detector tags the turn as another supported language, the reply is held until the decision
-resolves — switched → dropped (the switch follow-up answers), stayed/timeout → played."""
+"""The reply is held until the switch decision resolves: switched → dropped, stayed/timeout → played."""
 
 import asyncio
 from unittest.mock import AsyncMock, MagicMock
@@ -47,7 +45,6 @@ async def test_reply_dropped_when_decision_switches():
 @pytest.mark.asyncio
 async def test_reply_runs_despite_switch_when_tool_call_in_flight():
     # The in-flight-tool switch branch produces no follow-up — dropping here would
-    # leave the caller unanswered, so the reply must run.
     tm = _tm()
     tm.function_call_in_flight = True
 
