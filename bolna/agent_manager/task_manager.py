@@ -3658,6 +3658,9 @@ class TaskManager(BaseManager):
                         )
                         prev = self.llm_latencies.turn_latencies[-1] if self.llm_latencies.turn_latencies else None
                         if prev and prev.get("sequence_id") == fc_latency_dict.get("sequence_id"):
+                            # Carry the stub's llm_start_ms forward if the completion stamp is null.
+                            if fc_latency_dict.get("llm_start_ms") is None and prev.get("llm_start_ms") is not None:
+                                fc_latency_dict["llm_start_ms"] = prev["llm_start_ms"]
                             self.llm_latencies.turn_latencies[-1] = fc_latency_dict
                         else:
                             self.llm_latencies.turn_latencies.append(fc_latency_dict)
@@ -3697,6 +3700,11 @@ class TaskManager(BaseManager):
                     if previous_latency_item and previous_latency_item.get("sequence_id") == latency_dict.get(
                         "sequence_id"
                     ):
+                        # The eager stub carries the correct llm_start_ms; carry it forward if the
+                        # completion stamp came back null (meta_info lost llm_start_time), so the
+                        # turn keeps a valid start for downstream timeline/transcript rendering.
+                        if latency_dict.get("llm_start_ms") is None and previous_latency_item.get("llm_start_ms") is not None:
+                            latency_dict["llm_start_ms"] = previous_latency_item["llm_start_ms"]
                         self.llm_latencies.turn_latencies[-1] = latency_dict
                     else:
                         self.llm_latencies.turn_latencies.append(latency_dict)
@@ -6786,6 +6794,10 @@ class TaskManager(BaseManager):
 
                 output["progression_data"] = {
                     "call_start_epoch_ms": self.conversation_start_init_ts,
+                    # Ground-truth transcript (role+content) so the dashboard can render the
+                    # conversation directly instead of reconstructing it from latency telemetry
+                    # (turn_id/latency gaps otherwise drop user or agent turns).
+                    "messages": copy.deepcopy(output["messages"]),
                     "llm_latencies": copy.deepcopy(output["latency_dict"]["llm_latencies"]),
                     "transcriber_latencies": copy.deepcopy(output["latency_dict"]["transcriber_latencies"]),
                     "synthesizer_latencies": copy.deepcopy(output["latency_dict"]["synthesizer_latencies"]),
