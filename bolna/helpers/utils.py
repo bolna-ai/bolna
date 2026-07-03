@@ -888,6 +888,53 @@ def pcm_to_ulaw(pcm_bytes):
     return ulaw_bytes
 
 
+def audio_to_mulaw8k(audio, rate_hint=8000, format_hint=""):
+    """One-shot synth output (base64 str / WAV / raw PCM) → mono 16-bit 8kHz mu-law.
+    Undecodable compressed containers (MP3/Ogg/FLAC) return None — never raw noise."""
+    import base64
+
+    if isinstance(audio, str):
+        audio = base64.b64decode(audio)
+    try:
+        # Explicit format for WAV takes pydub's native reader — no ffprobe/ffmpeg.
+        segment = AudioSegment.from_file(io.BytesIO(audio), format="wav" if audio[:4] == b"RIFF" else None)
+    except Exception:
+        if (
+            audio[:3] == b"ID3"
+            or audio[:2] in (b"\xff\xfb", b"\xff\xf3", b"\xff\xf2")
+            or audio[:4] in (b"OggS", b"fLaC")
+        ):
+            return None
+        # Headerless audio: trust the caller's declared rate/format.
+        if "law" in str(format_hint or ""):
+            audio = audioop.ulaw2lin(audio, 2)
+        segment = AudioSegment(data=audio, sample_width=2, frame_rate=int(rate_hint or 8000), channels=1)
+    segment = segment.set_frame_rate(8000).set_channels(1).set_sample_width(2)
+    return pcm_to_ulaw(segment.raw_data)
+
+
+def soniox_ws_url(host):
+    """Soniox realtime WS endpoint — single source of truth for transcriber + LID tap."""
+    protocol = os.getenv("SONIOX_HOST_PROTOCOL", "wss")
+    return f"{protocol}://{host}/transcribe-websocket"
+
+
+def build_soniox_config(api_key, model, audio_format, sample_rate, **extras):
+    """Soniox first-frame config (auth rides in it) — shared by transcriber + LID tap.
+    extras merge on top (language_hints, context, endpoint tuning...)."""
+    config = {
+        "api_key": api_key,
+        "model": model,
+        "audio_format": audio_format,
+        "sample_rate": int(sample_rate),
+        "num_channels": 1,
+        "enable_endpoint_detection": True,
+        "enable_language_identification": True,
+    }
+    config.update({k: v for k, v in extras.items() if v is not None})
+    return config
+
+
 def compute_function_pre_call_message(language, function_name, api_tool_pre_call_message):
     """Select pre-function call message with language support."""
     # Built-in tools that should switch silently — no audible filler.

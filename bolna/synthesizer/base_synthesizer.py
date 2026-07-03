@@ -30,6 +30,12 @@ class BaseSynthesizer:
                 return
         self.turn_latencies.append(entry)
 
+    async def synthesize_telephony_clip(self, text):
+        """One-shot render of `text` as raw mu-law 8000 bytes, or None when the provider
+        can't produce that natively — the caller then falls back to synthesize() +
+        audio_to_mulaw8k(). Override per provider (see ElevenlabsSynthesizer)."""
+        return None
+
     # ------------------------------------------------------------------
     # Common accessors
     # ------------------------------------------------------------------

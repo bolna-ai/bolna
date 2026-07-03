@@ -52,9 +52,11 @@ class SynthesizerPool:
 
     @property
     def turn_latencies(self):
+        # Per-synth turns are spread across instances after a switch; sort by tts_start_ms for true order.
         all_latencies = []
         for s in self.synthesizers.values():
             all_latencies.extend(s.turn_latencies)
+        all_latencies.sort(key=lambda d: d.get("tts_start_ms") if d.get("tts_start_ms") is not None else 0)
         return all_latencies
 
     @property

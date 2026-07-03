@@ -164,7 +164,17 @@ class TranscriberPool:
         all_latencies = []
         for t in self.transcribers.values():
             all_latencies.extend(t.turn_latencies)
-        all_latencies.sort(key=lambda d: d.get("asr_start_epoch_ms") or 0)
+
+        # Order by ASR start (same-scale ms within a call). Relative keys exist only
+        def _order_key(d):
+            v = d.get("asr_turn_start_ms")
+            if v is None:
+                v = d.get("asr_start_ms")
+            if v is None:
+                v = d.get("asr_start_epoch_ms")
+            return v if v is not None else 0
+
+        all_latencies.sort(key=_order_key)
         return all_latencies
 
     @property
@@ -274,11 +284,7 @@ class TranscriberPool:
                 on_language=self._handle_lid_signal if self._on_lid_switch is not None else None,
                 config=self._lid_config,
             )
-            # The LLM-driven flow consumes the detector through the per-turn buffer
-            # API (take_turn_transcript / buffer_age_seconds). Backends without it
-            # (azure, elevenlabs_scribe) make that flow silently inert — every drain
-            # returns empty and the idle-flush never fires — so shout now, at setup,
-            # instead of leaving a mute mystery in call logs.
+            # New flow needs the per-turn buffer API; a backend without it goes silently
             if self._on_lid_switch is None and not hasattr(self._lid, "take_turn_transcript"):
                 logger.error(
                     f"TranscriberPool: LID provider '{self._lid_provider_name}' has no per-turn buffer API — "

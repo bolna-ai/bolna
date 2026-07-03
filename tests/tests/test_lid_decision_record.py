@@ -1,7 +1,4 @@
-"""Unit tests for build_lid_decision_record — the per-firing telemetry record for
-the LLM-driven language switch. Persisted via task_output into
-lid_shadow_events.lid_detection_events (JSONB) for accuracy/latency metrics.
-"""
+"""build_lid_decision_record — the per-firing LID telemetry record (persisted to lid_detection_events)."""
 
 from bolna.agent_manager.task_manager import build_lid_decision_record
 
@@ -78,8 +75,7 @@ def test_non_switch_outcomes_have_no_context_note():
 
 
 def test_timeout_record_tolerates_missing_decision():
-    # decide() timed out → no decision dict; the record must still build (for the
-    # "LID fired but failed" metric) without KeyErrors.
+    # decide() timed out → no decision dict; the record must still build without KeyErrors.
     r = _record(outcome="timeout", decision=None)
     assert r["outcome"] == "timeout"
     assert r["target_language"] is None
@@ -122,3 +118,15 @@ def test_detector_and_llm_extras_default_when_absent():
     assert r["detector_segments"] == []
     assert r["detected_language"] is None
     assert r["detection_confidence"] is None
+
+
+def test_inflight_activity_captures_truncation_state():
+    # Captured pre-truncate; audio_playing tells whether the old reply was cut mid-speech.
+    activity = {"response_in_pipeline": True, "audio_playing": True, "pending_marks": True}
+    r = _record(outcome="switched", switched_to="en", inflight_activity=activity)
+    assert r["inflight_activity"] == activity
+    assert r["inflight_activity"]["audio_playing"] is True
+
+
+def test_inflight_activity_defaults_to_empty():
+    assert _record()["inflight_activity"] == {}

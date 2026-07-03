@@ -1,6 +1,6 @@
-from .azure import AzureLID
 from .base import LIDBackend, OnLanguageCallback
 from .provider import LIDProvider
 from .sarvam import SarvamLID
+from .soniox import SonioxLID
 
-__all__ = ["AzureLID", "LIDBackend", "LIDProvider", "OnLanguageCallback", "SarvamLID"]
+__all__ = ["LIDBackend", "LIDProvider", "OnLanguageCallback", "SarvamLID", "SonioxLID"]
