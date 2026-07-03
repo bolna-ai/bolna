@@ -83,6 +83,7 @@ from bolna.helpers.utils import (
     convert_to_request_log,
     yield_chunks_from_memory,
     process_task_cancellation,
+    audio_to_mulaw8k,
     pcm_to_ulaw,
     format_error_message,
     enrich_context_with_time_variables,
@@ -175,20 +176,33 @@ def build_lid_decision_record(
     }
 
 
-def trailing_utterance_text(segments, gap_seconds=1.5):
-    """Text of the caller's LAST utterance: trailing detector segments whose arrival
-    gaps are ≤ gap_seconds (arrival order = speech order on the single in-order LID
-    stream). Strictly subtractive over the buffer; returns '' when nothing usable so
-    callers can fall back to the full transcript."""
+# Handoff clips are static per (voice, text): cache across calls so an N-language agent
+# doesn't pay N TTS renders per call, concurrent with the welcome message. Process-wide.
+HANDOFF_CLIP_CACHE: dict = {}
+HANDOFF_CLIP_CACHE_MAX = 256
+
+
+def trailing_utterance_text(segments, gap_seconds=4.0):
+    """Text of the caller's LAST utterance: trailing detector segments in the same
+    language, back to a real silence boundary. Breaks on either a gap > gap_seconds
+    (4s ≈ an utterance boundary, so a request that pauses to think is kept together,
+    unlike a mid-sentence 1.5s) OR a language change (a distinct/stale prior utterance).
+    Subtractive; returns '' so callers fall back to the full transcript."""
     tail = []
     prev_start = None
+    tail_lang = None
     for seg in reversed(segments or []):
         ts = seg.get("ts")
-        # Segments arrive at speech END, so the silence gap to the next segment is its
-        if prev_start is not None and (ts is None or prev_start - ts > gap_seconds):
-            break
+        lang = seg.get("lang")
+        # Segments arrive at speech END, so a segment's own start = ts - audio_s.
+        if prev_start is not None:
+            gap_too_big = ts is None or prev_start - ts > gap_seconds
+            lang_changed = bool(tail_lang) and bool(lang) and lang != tail_lang
+            if gap_too_big or lang_changed:
+                break
         if seg.get("text"):
             tail.append(seg["text"])
+            tail_lang = tail_lang or lang
         prev_start = (ts - (seg.get("audio_s") or 0.0)) if ts is not None else None
     return " ".join(reversed(tail)).strip()
 
@@ -723,7 +737,7 @@ class TaskManager(BaseManager):
         # switch; new: played to cover the switch → follow-up generation gap).
         self.switch_handoff_messages = self.task_config.get("tools_config", {}).get("switch_handoff_messages") or {}
         self.agent_names = self.task_config.get("tools_config", {}).get("agent_names") or {}
-        # Injected for BOTH flows. In the LLM-driven flow the tool is the fast path for
+        # Injected for BOTH flows — in the LLM-driven flow it's the fast path for explicit requests.
         self.__inject_switch_language_tool()
 
         # # setting llm
@@ -3165,51 +3179,58 @@ class TaskManager(BaseManager):
                 self.execute_function_call_task = None
                 return
 
-            # Serialize with the LID decide (which holds this lock): without it a
-            async with self.language_switch_lock:
-                if language_label == self.language:
-                    # A concurrent decide switched while we waited for the lock.
-                    function_response = f"Already speaking in {language_label}, no switch needed"
-                else:
-                    # Only wait if audio is currently playing
-                    if not self._turn_audio_flushed.is_set():
-                        await self.wait_for_current_message()
+            # Explicit caller request via the main LLM — trusted, so no detector gates. But
+            # bail if the call is ending, else the handoff synthesizes over the queued goodbye.
+            if self.hangup_triggered or self.conversation_ended:
+                function_response = f"Call ending — not switching to {language_label}"
+            elif language_label == self.language:
+                function_response = f"Already speaking in {language_label}, no switch needed"
+            else:
+                # Playback wait + handoff synth stay OUTSIDE the lock; only the flip is
+                # serialized with the LID decide, so a queued decide isn't stalled for
+                # seconds (which would blow the mismatch-hold budget).
+                if not self._turn_audio_flushed.is_set():
+                    await self.wait_for_current_message()
 
-                    # Synthesize handoff message with CURRENT voice before switching
-                    handoff_template = self.switch_handoff_messages.get(self.language, "")
-                    if handoff_template:
-                        target_agent_name = self._get_voice_name_for_label(language_label)
-                        language_display = LANGUAGE_NAMES.get(language_label, language_label)
-                        handoff_text = handoff_template.replace("{agent_name}", target_agent_name).replace(
-                            "{language}", language_display
-                        )
-                        meta_info_handoff = {
-                            "io": self.tools["output"].get_provider(),
-                            "request_id": str(uuid.uuid4()),
-                            "cached": False,
-                            "sequence_id": -1,
-                            "format": "pcm",
-                            "message_category": "handoff",
-                            "end_of_llm_stream": True,
-                            "text": handoff_text,
-                        }
-                        self._turn_audio_flushed.clear()
-                        await self._synthesize(create_ws_data_packet(handoff_text, meta_info=meta_info_handoff))
-                        await self.wait_for_current_message()
-                        self.conversation_history.append_assistant(
-                            handoff_text, turn_id=turn_id, response_uid=response_uid
-                        )
-                        if turn_id is not None:
-                            self._turn_msg_map[turn_id] = self.conversation_history.messages[-1]
+                # Handoff on the CURRENT voice before switching.
+                handoff_template = self.switch_handoff_messages.get(self.language, "")
+                if handoff_template:
+                    target_agent_name = self._get_voice_name_for_label(language_label)
+                    language_display = LANGUAGE_NAMES.get(language_label, language_label)
+                    handoff_text = handoff_template.replace("{agent_name}", target_agent_name).replace(
+                        "{language}", language_display
+                    )
+                    meta_info_handoff = {
+                        "io": self.tools["output"].get_provider(),
+                        "request_id": str(uuid.uuid4()),
+                        "cached": False,
+                        "sequence_id": -1,
+                        "format": "pcm",
+                        "message_category": "handoff",
+                        "end_of_llm_stream": True,
+                        "text": handoff_text,
+                    }
+                    self._turn_audio_flushed.clear()
+                    await self._synthesize(create_ws_data_packet(handoff_text, meta_info=meta_info_handoff))
+                    await self.wait_for_current_message()
+                    self.conversation_history.append_assistant(
+                        handoff_text, turn_id=turn_id, response_uid=response_uid
+                    )
+                    if turn_id is not None:
+                        self._turn_msg_map[turn_id] = self.conversation_history.messages[-1]
 
-                    try:
-                        await self.switch_language(language_label)
-                        function_response = f"Switched to {language_label}"
-                        # Drain the detector buffer: it still holds the pre-switch
-                        if isinstance(self.tools.get("transcriber"), TranscriberPool):
-                            self.tools["transcriber"].take_lid_transcript()
-                    except ValueError as e:
-                        function_response = f"Failed to switch language: {e}"
+                async with self.language_switch_lock:
+                    if language_label == self.language:
+                        # A concurrent decide switched to the same target while we synthesized.
+                        function_response = f"Already speaking in {language_label}, no switch needed"
+                    else:
+                        try:
+                            await self.switch_language(language_label)
+                            function_response = f"Switched to {language_label}"
+                            if isinstance(self.tools.get("transcriber"), TranscriberPool):
+                                self.tools["transcriber"].take_lid_transcript()  # drop pre-switch detector buffer
+                        except ValueError as e:
+                            function_response = f"Failed to switch language: {e}"
 
             self.check_if_user_online = self.conversation_config.get("check_if_user_online", True)
             self.conversation_history.attach_tool_calls_to_turn(turn_id, resp["model_response"])
@@ -4752,6 +4773,12 @@ class TaskManager(BaseManager):
         active_short = (self.language or "").split("-")[0].lower()
         if not detected or detected == active_short or detected not in pool.labels:
             return False
+        # Same substance bar the decide gates on: acknowledgment-length mis-tags end in
+        # gated:short_audio anyway, so don't cost the caller the settle+decide hold.
+        # (An explicit short by-name request still switches — via truncate, not hold.)
+        min_segment_s = float(os.getenv("LANGUAGE_SWITCH_MIN_SEGMENT_AUDIO_S", "1.0"))
+        if pool.lid_buffer_max_segment_seconds() < min_segment_s:
+            return False
         synth = self.tools.get("synthesizer")
         return not isinstance(synth, SynthesizerPool) or detected in synth.labels
 
@@ -5445,9 +5472,18 @@ class TaskManager(BaseManager):
             text = self.__handoff_text_for(label)
             if not text:
                 return
+            cache_key = (
+                synth.__class__.__name__,
+                getattr(synth, "voice_id", None) or getattr(synth, "voice", None),
+                text,
+            )
+            cached = HANDOFF_CLIP_CACHE.get(cache_key)
+            if cached:
+                self.handoff_audio_cache[label] = cached
+                return
             try:
                 clip = None
-                # Prefer a native mu-law 8000 one-shot when the provider offers it (no
+                # Prefer a native mu-law 8000 one-shot when the provider offers it.
                 telephony_one_shot = getattr(synth, "synthesize_telephony_clip", None)
                 if telephony_one_shot is not None:
                     clip = await telephony_one_shot(text)
@@ -5455,11 +5491,13 @@ class TaskManager(BaseManager):
                     audio = await synth.synthesize(text)
                     if not audio:
                         return
-                    # pydub decode shells out to ffprobe/ffmpeg — off the event loop,
+                    # pydub decode shells out to ffprobe/ffmpeg — keep it off the event loop.
                     clip = await asyncio.to_thread(self.__handoff_clip_to_mulaw, synth, audio)
                 if clip:
                     self.handoff_audio_cache[label] = clip
-                    # The one-shot render bills provider characters — count them where
+                    if len(HANDOFF_CLIP_CACHE) >= HANDOFF_CLIP_CACHE_MAX:
+                        HANDOFF_CLIP_CACHE.pop(next(iter(HANDOFF_CLIP_CACHE)))
+                    HANDOFF_CLIP_CACHE[cache_key] = clip
                     synth.synthesized_characters = getattr(synth, "synthesized_characters", 0) + len(text)
                     logger.info(f"LanguageSwitcher: pre-warmed handoff clip '{label}' ({len(clip)} bytes)")
             except Exception as e:
@@ -5468,29 +5506,14 @@ class TaskManager(BaseManager):
         await asyncio.gather(*(render(label, synth) for label, synth in pool.synthesizers.items()))
 
     def __handoff_clip_to_mulaw(self, synth, audio):
-        """One-shot synth output (base64 str / WAV / MP3 / raw) → mono 16-bit 8kHz →
-        mu-law, the native telephony codec (raw linear PCM tagged mulaw plays as noise)."""
-        if isinstance(audio, str):
-            audio = base64.b64decode(audio)
-        try:
-            # Explicit format for WAV takes pydub's native reader — no ffprobe/ffmpeg.
-            segment = AudioSegment.from_file(io.BytesIO(audio), format="wav" if audio[:4] == b"RIFF" else None)
-        except Exception:
-            # Compressed container that pydub couldn't decode (e.g. ElevenLabs MP3 with no
-            if (
-                audio[:3] == b"ID3"
-                or audio[:2] in (b"\xff\xfb", b"\xff\xf3", b"\xff\xf2")
-                or audio[:4] in (b"OggS", b"fLaC")
-            ):
-                logger.error("LanguageSwitcher: handoff clip is a compressed container pydub can't decode — skipping")
-                return None
-            # Headerless audio: use the synth's declared rate/format.
-            rate = int(getattr(synth, "sampling_rate", 0) or getattr(synth, "sample_rate", 0) or 8000)
-            if "law" in str(getattr(synth, "format", "") or ""):
-                audio = audioop.ulaw2lin(audio, 2)
-            segment = AudioSegment(data=audio, sample_width=2, frame_rate=rate, channels=1)
-        segment = segment.set_frame_rate(8000).set_channels(1).set_sample_width(2)
-        return pcm_to_ulaw(segment.raw_data)
+        clip = audio_to_mulaw8k(
+            audio,
+            rate_hint=getattr(synth, "sampling_rate", 0) or getattr(synth, "sample_rate", 0) or 8000,
+            format_hint=getattr(synth, "format", "") or "",
+        )
+        if clip is None:
+            logger.error("LanguageSwitcher: handoff clip is a compressed container pydub can't decode — skipping")
+        return clip
 
     def __switch_context_note(self, target: str, detector_transcript: str, reasoning: str = None) -> str:
         """Build the language note installed in the system prompt on a switch.

@@ -84,14 +84,25 @@ class LanguageSwitcher:
             api_version=switch_llm_version,
         )
 
+    def _system_message(self):
+        # Static rules as a cacheable prefix (Anthropic cache_control; Azure caches automatically).
+        block = {"type": "text", "text": LANGUAGE_SWITCH_SYSTEM_PROMPT}
+        if self.model.startswith(("anthropic/", "claude")):
+            block["cache_control"] = {"type": "ephemeral"}
+        return {"role": "system", "content": [block]}
+
     def prewarm(self):
-        """Fire-and-forget a tiny request so the first real decide() skips the TLS handshake.
+        """Fire-and-forget request that pays the TLS handshake AND seeds the prompt cache
+        with the real system block, so the first decide of the call is a cache read.
         Returns the task for tests; the normal path ignores it."""
 
         async def _warm():
             try:
                 await asyncio.wait_for(
-                    self._llm.generate([{"role": "user", "content": "Reply with exactly: ok"}]), timeout=5
+                    self._llm.generate(
+                        [self._system_message(), {"role": "user", "content": "Reply with exactly: ok"}]
+                    ),
+                    timeout=5,
                 )
                 logger.info("LanguageSwitcher: connection prewarmed")
             except Exception as e:
@@ -113,12 +124,8 @@ class LanguageSwitcher:
         if not detector_transcript or not detector_transcript.strip():
             return None
 
-        # Static rules as a cacheable system prefix; only per-turn data varies below.
-        system_block = {"type": "text", "text": LANGUAGE_SWITCH_SYSTEM_PROMPT}
-        if self.model.startswith(("anthropic/", "claude")):
-            system_block["cache_control"] = {"type": "ephemeral"}
         messages = [
-            {"role": "system", "content": [system_block]},
+            self._system_message(),
             {
                 "role": "user",
                 "content": LANGUAGE_SWITCH_TURN_PROMPT.format(

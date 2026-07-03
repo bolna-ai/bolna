@@ -7,8 +7,15 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from pydub import AudioSegment
 
-from bolna.agent_manager.task_manager import TaskManager
+from bolna.agent_manager.task_manager import HANDOFF_CLIP_CACHE, TaskManager
 from bolna.synthesizer.synthesizer_pool import SynthesizerPool
+
+
+@pytest.fixture(autouse=True)
+def clear_clip_cache():
+    HANDOFF_CLIP_CACHE.clear()
+    yield
+    HANDOFF_CLIP_CACHE.clear()
 
 
 def _wav_bytes(duration_ms=100, rate=16000):
@@ -163,3 +170,26 @@ async def test_prewarm_prefers_native_mulaw_one_shot():
 
     assert tm.handoff_audio_cache["te"] == native  # cached untouched
     synth.synthesize.assert_not_awaited()  # MP3 path never used
+
+
+@pytest.mark.asyncio
+async def test_clips_cached_across_calls_per_voice_and_text():
+    # Second call with the same voice+text must not re-render (no repeat TTS billing).
+    tm1 = _tm()
+    tm1.switch_handoff_messages = {"te": "Telugu {language}."}
+    synth = MagicMock(spec=["synthesize", "synthesize_telephony_clip", "voice_id"])
+    synth.voice_id = "voice-1"
+    synth.synthesize_telephony_clip = AsyncMock(return_value=b"\x7f" * 800)
+    pool = MagicMock(spec=SynthesizerPool)
+    pool.active_label = "hi"
+    pool.synthesizers = {"te": synth}
+    tm1.tools["synthesizer"] = pool
+    await TaskManager._TaskManager__prewarm_handoff_clips.__get__(tm1, TaskManager)()
+    assert synth.synthesize_telephony_clip.await_count == 1
+
+    tm2 = _tm()  # next call, same agent config
+    tm2.switch_handoff_messages = {"te": "Telugu {language}."}
+    tm2.tools["synthesizer"] = pool
+    await TaskManager._TaskManager__prewarm_handoff_clips.__get__(tm2, TaskManager)()
+    assert synth.synthesize_telephony_clip.await_count == 1  # cache hit, no re-render
+    assert tm2.handoff_audio_cache["te"] == b"\x7f" * 800

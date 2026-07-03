@@ -28,6 +28,21 @@ def test_all_one_utterance_returns_everything():
     assert trailing_utterance_text(segments) == "a b c"
 
 
+def test_same_language_think_pause_keeps_head():
+    # A ~2s mid-request pause is the same utterance, not a boundary — keep the whole request.
+    segments = [
+        _seg("I need tomorrow's flight status", 10.0, "en"),
+        _seg("should I give you the PNR?", 13.0, "en"),  # 2s gap after prev ends
+    ]
+    assert trailing_utterance_text(segments) == "I need tomorrow's flight status should I give you the PNR?"
+
+
+def test_language_change_still_breaks_within_gap():
+    # A different-language fragment within the time gap is a distinct/stale utterance → drop it.
+    segments = [_seg("ఏ రోజు", 10.0, "te"), _seg("what is the fee?", 12.0, "en")]
+    assert trailing_utterance_text(segments) == "what is the fee?"
+
+
 def test_untimed_segments_fall_back_to_full_concat():
     # Old-format segments (no ts): selection impossible → full text (today's behavior).
     segments = [{"text": "one"}, {"text": "two"}]

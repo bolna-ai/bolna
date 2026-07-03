@@ -86,6 +86,7 @@ def test_detector_mismatch_gate():
     tm = _tm(language="hi")
     pool = MagicMock(spec=TranscriberPool)
     pool.lid_buffer_language = MagicMock(return_value="te")
+    pool.lid_buffer_max_segment_seconds = MagicMock(return_value=2.0)
     pool.labels = ["hi", "te"]
     synth = MagicMock(spec=SynthesizerPool)
     synth.labels = ["hi", "te"]
@@ -105,6 +106,10 @@ def test_detector_mismatch_gate():
     pool.lid_buffer_language = MagicMock(return_value="te")
     synth.labels = ["hi"]  # unsupported by synth pool → half-switch, don't hold
     assert _mismatch(tm) is False
+
+    synth.labels = ["hi", "te"]
+    pool.lid_buffer_max_segment_seconds = MagicMock(return_value=0.5)
+    assert _mismatch(tm) is False  # acknowledgment-length mis-tag → decide would gate; skip the hold
 
     tm.tools = {"transcriber": MagicMock()}  # not a pool (single-language call)
     assert _mismatch(tm) is False

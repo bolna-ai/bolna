@@ -225,9 +225,21 @@ async def test_decide_azure_model_gets_no_anthropic_annotation():
     assert "cache_control" not in system_block
 
 
-def test_prompt_variants_rules_stay_in_sync():
-    # The rules are duplicated across both prompt variants; pin each rule's marker in both.
-    from bolna.prompts import LANGUAGE_SWITCH_PROMPT, LANGUAGE_SWITCH_SYSTEM_PROMPT
+@pytest.mark.asyncio
+async def test_prewarm_seeds_prompt_cache_with_system_block():
+    # Prewarm must send the real cached system block so the first decide is a cache READ.
+    switcher, fake_llm = _make_switcher(json.dumps({"target_language": None}))
+    await switcher.prewarm()
+    messages = fake_llm.generate.await_args.args[0]
+    assert messages[0]["role"] == "system"
+    assert messages[0]["content"][0]["cache_control"] == {"type": "ephemeral"}
+    assert "CODE-MIXING IS NOT A SWITCH" in messages[0]["content"][0]["text"]
+    assert messages[1]["role"] == "user"
+
+
+def test_system_prompt_contains_all_rules():
+    # One source of truth now — pin each rule's distinctive marker so edits can't drop one.
+    from bolna.prompts import LANGUAGE_SWITCH_SYSTEM_PROMPT
 
     markers = [
         "INTENT ABOUT A NAMED LANGUAGE",
@@ -244,8 +256,7 @@ def test_prompt_variants_rules_stay_in_sync():
         "detection_confidence",
     ]
     for marker in markers:
-        assert marker in LANGUAGE_SWITCH_PROMPT, f"missing in base prompt: {marker}"
-        assert marker in LANGUAGE_SWITCH_SYSTEM_PROMPT, f"missing in cache variant: {marker}"
+        assert marker in LANGUAGE_SWITCH_SYSTEM_PROMPT, f"missing rule marker: {marker}"
 
 
 def test_azure_switcher_wires_credentials_into_litellm(monkeypatch):

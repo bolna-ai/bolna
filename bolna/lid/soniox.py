@@ -11,6 +11,7 @@ from bolna.constants import (
 )
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.ssl_context import get_ssl_context
+from bolna.helpers.utils import build_soniox_config, soniox_ws_url
 
 from .base import LIDBackend
 
@@ -49,17 +50,13 @@ class SonioxLID(LIDBackend):
         return {"text": "", "lang_counts": {}, "last_lang": None, "start_ms": None, "end_ms": None}
 
     def _build_config(self) -> dict:
-        # First WS frame (Soniox carries the api_key here). Mirror SonioxTranscriber._build_config.
-        return {
-            "api_key": self._api_key,
-            "model": self._MODEL,
-            "audio_format": self._audio_format,
-            "sample_rate": self._input_sr,
-            "num_channels": 1,
-            "enable_endpoint_detection": True,
-            "enable_language_identification": True,
-            "language_hints": list(SONIOX_DEFAULT_MULTILINGUAL_HINTS),
-        }
+        return build_soniox_config(
+            self._api_key,
+            self._MODEL,
+            self._audio_format,
+            self._input_sr,
+            language_hints=list(SONIOX_DEFAULT_MULTILINGUAL_HINTS),
+        )
 
     def _flush_pending_segment(self):
         """Move the finalized utterance into the per-turn buffer (one segment per <end>)."""
@@ -115,8 +112,7 @@ class SonioxLID(LIDBackend):
     async def start(self):
         import websockets as ws_lib
 
-        protocol = os.getenv("SONIOX_HOST_PROTOCOL", "wss")
-        url = f"{protocol}://{self._host}/transcribe-websocket"
+        url = soniox_ws_url(self._host)
         logger.info(f"SonioxLID: connecting to {url}")
         self._ws = await ws_lib.connect(url, ssl=get_ssl_context(url))
         await self._ws.send(json.dumps(self._build_config()))
