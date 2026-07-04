@@ -471,4 +471,5 @@ class SipTrunkOutputHandler(TelephonyOutputHandler):
             logger.error(f"sip-trunk send_hangup: {e}")
 
     def requires_custom_voicemail_detection(self):
-        return False
+        # SIP/BYOT (Asterisk) has no carrier-side AMD, so voicemail must be caught via the LLM path.
+        return True
