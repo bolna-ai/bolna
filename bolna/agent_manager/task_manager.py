@@ -3185,14 +3185,36 @@ class TaskManager(BaseManager):
                 function_response = f"Call ending — not switching to {language_label}"
             elif language_label == self.language:
                 function_response = f"Already speaking in {language_label}, no switch needed"
-            else:
-                # Playback wait + handoff synth stay OUTSIDE the lock; only the flip is
-                # serialized with the LID decide, so a queued decide isn't stalled for
-                # seconds (which would blow the mismatch-hold budget).
+            elif self.language_switcher is not None:
+                # NEW flow: playback wait stays OUTSIDE the lock; only the flip is
+                # serialized with the LID decide, so a queued decide isn't stalled for seconds.
                 if not self._turn_audio_flushed.is_set():
                     await self.wait_for_current_message()
 
-                # Handoff on the CURRENT voice before switching.
+                switched = False
+                async with self.language_switch_lock:
+                    if language_label == self.language:
+                        # A concurrent decide switched to the same target while we waited.
+                        function_response = f"Already speaking in {language_label}, no switch needed"
+                    else:
+                        try:
+                            await self.switch_language(language_label)
+                            switched = True
+                            function_response = f"Switched to {language_label}"
+                            if isinstance(self.tools.get("transcriber"), TranscriberPool):
+                                self.tools["transcriber"].take_lid_transcript()  # drop pre-switch detector buffer
+                        except ValueError as e:
+                            function_response = f"Failed to switch language: {e}"
+                if switched:
+                    # Target-language handoff on the NEW voice (prewarmed clip when available)
+                    # — same as the LID path, so both switch mechanisms sound identical.
+                    await self.__play_switch_handoff(language_label)
+            else:
+                # LEGACY flow (master behavior): source-language handoff on the CURRENT
+                # voice, then switch.
+                if not self._turn_audio_flushed.is_set():
+                    await self.wait_for_current_message()
+
                 handoff_template = self.switch_handoff_messages.get(self.language, "")
                 if handoff_template:
                     target_agent_name = self._get_voice_name_for_label(language_label)
@@ -3213,24 +3235,15 @@ class TaskManager(BaseManager):
                     self._turn_audio_flushed.clear()
                     await self._synthesize(create_ws_data_packet(handoff_text, meta_info=meta_info_handoff))
                     await self.wait_for_current_message()
-                    self.conversation_history.append_assistant(
-                        handoff_text, turn_id=turn_id, response_uid=response_uid
-                    )
+                    self.conversation_history.append_assistant(handoff_text, turn_id=turn_id, response_uid=response_uid)
                     if turn_id is not None:
                         self._turn_msg_map[turn_id] = self.conversation_history.messages[-1]
 
-                async with self.language_switch_lock:
-                    if language_label == self.language:
-                        # A concurrent decide switched to the same target while we synthesized.
-                        function_response = f"Already speaking in {language_label}, no switch needed"
-                    else:
-                        try:
-                            await self.switch_language(language_label)
-                            function_response = f"Switched to {language_label}"
-                            if isinstance(self.tools.get("transcriber"), TranscriberPool):
-                                self.tools["transcriber"].take_lid_transcript()  # drop pre-switch detector buffer
-                        except ValueError as e:
-                            function_response = f"Failed to switch language: {e}"
+                try:
+                    await self.switch_language(language_label)
+                    function_response = f"Switched to {language_label}"
+                except ValueError as e:
+                    function_response = f"Failed to switch language: {e}"
 
             self.check_if_user_online = self.conversation_config.get("check_if_user_online", True)
             self.conversation_history.attach_tool_calls_to_turn(turn_id, resp["model_response"])
