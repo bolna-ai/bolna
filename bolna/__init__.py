@@ -1,4 +1,4 @@
-__version__ = "0.10.125"
+__version__ = "0.10.126"
 
 import os
 from bolna.helpers.logger_config import configure_logger
