@@ -159,6 +159,7 @@ Return a single JSON object. Each key is a field name in snake_case. Each value 
 """
 
 
+
 CONVERSATION_SUMMARY_PROMPT = """
 Your job is to create the persona of users on based of previous messages in a conversation between an AI persona and a human to maintain a persona of user from assistant's perspective.
 Messages sent by the AI are marked with the 'assistant' role.
