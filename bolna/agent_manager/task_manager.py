@@ -228,6 +228,9 @@ class TaskManager(BaseManager):
         super().__init__()
         self.kwargs = kwargs
         self.kwargs["task_manager_instance"] = self
+        # Optional load-signal callback (set by the caller only for PTU-served calls).
+        self.on_turn_usage = kwargs.get("on_turn_usage")
+        self._usage_tasks = set()  # strong refs so fire-and-forget tallies aren't GC'd before they run
 
         self.conversation_start_init_ts = time.time() * 1000
         self.llm_latencies = ComponentLatencies()
@@ -3408,6 +3411,12 @@ class TaskManager(BaseManager):
         reasoning_content=None,
     ):
         self.llm_response_generated = True
+        # task 0 only, so aux LLMs (hangup/voicemail) never tally. Report input/output/cached so the
+        # consumer can compute normalized load (cached is exempt, output is weighted).
+        if self.task_id == 0 and self.on_turn_usage and input_tokens:
+            _usage_task = asyncio.create_task(self.on_turn_usage(input_tokens, output_tokens, cached_tokens))
+            self._usage_tasks.add(_usage_task)
+            _usage_task.add_done_callback(self._usage_tasks.discard)
         convert_to_request_log(
             message=llm_response,
             meta_info=meta_info,
