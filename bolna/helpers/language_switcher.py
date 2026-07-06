@@ -99,9 +99,7 @@ class LanguageSwitcher:
         async def _warm():
             try:
                 await asyncio.wait_for(
-                    self._llm.generate(
-                        [self._system_message(), {"role": "user", "content": "Reply with exactly: ok"}]
-                    ),
+                    self._llm.generate([self._system_message(), {"role": "user", "content": "Reply with exactly: ok"}]),
                     timeout=5,
                 )
                 logger.info("LanguageSwitcher: connection prewarmed")
