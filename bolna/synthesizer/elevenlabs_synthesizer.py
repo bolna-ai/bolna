@@ -97,7 +97,9 @@ class ElevenlabsSynthesizer(StreamSynthesizer):
         return audio, {"text_synthesized": text_synthesized}
 
     def _on_push(self, meta_info, text):
-        if not self.context_id:
+        # Mint only for pushes that will actually synthesize — a superseded push must not
+        # advance current_turn_context_id, or the prior turn's real isFinal gets suppressed.
+        if not self.context_id and self.should_synthesize_response(meta_info.get("sequence_id")):
             self.context_id = str(uuid.uuid4())
             self.current_turn_context_id = self.context_id
 

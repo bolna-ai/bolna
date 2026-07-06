@@ -3,6 +3,7 @@ isFinal, with a text-match backstop and per-context dedup so each turn emits one
 
 import asyncio
 import base64
+from types import SimpleNamespace
 import json
 
 from websockets.exceptions import ConnectionClosed
@@ -220,3 +221,29 @@ def test_on_push_stamps_turn_context_surviving_close():
     minted = synth.context_id
     synth.context_id = None  # close_context
     assert synth.current_turn_context_id == minted
+
+
+def test_superseded_push_does_not_advance_turn_context():
+    """A push for an invalidated sequence must not mint/advance the turn context —
+    otherwise the prior turn's real isFinal is suppressed with no successor EOS."""
+    synth = _make_synth()
+    synth.task_manager_instance = SimpleNamespace(is_sequence_id_in_current_ids=lambda sid: False)
+    synth.current_turn_context_id = "ctx-a"
+
+    synth._on_push({"sequence_id": 99}, "stale text")
+
+    assert synth.context_id is None, "superseded push must not mint a context"
+    assert synth.current_turn_context_id == "ctx-a", "turn context pointer must not advance"
+
+    synth.ws_send_time = 1.0
+    synth.websocket = FakeWS([_final_msg("ctx-a")])
+    items = asyncio.run(_collect(synth.receiver()))
+    assert len(_end_markers(items)) == 1, "prior turn's isFinal must still emit end-of-stream"
+
+
+def test_valid_push_advances_turn_context():
+    """A push for a live sequence mints the context and advances the turn pointer."""
+    synth = _make_synth()
+    synth._on_push({"sequence_id": 5}, "hello")
+    assert synth.context_id is not None
+    assert synth.current_turn_context_id == synth.context_id
