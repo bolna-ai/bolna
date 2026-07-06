@@ -12,10 +12,10 @@ numpy==1.26.1
 onnxruntime>=1.16.3
 openai>=1.10.0
 plivo==4.47.0
-pydantic==2.9.0
+pydantic>=2.9.0
 pydub==0.25.1
 python-dateutil==2.8.2
-python-dotenv==1.0.0
+python-dotenv>=1.0.0
 pytz>=2024.1
 redis==5.0.1
 requests>=2.31.0,<3
