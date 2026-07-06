@@ -3,6 +3,7 @@ isFinal, with a text-match backstop and per-context dedup so each turn emits one
 
 import asyncio
 import base64
+from types import SimpleNamespace
 import json
 
 from websockets.exceptions import ConnectionClosed
@@ -133,3 +134,116 @@ def test_sender_does_not_close_when_not_end_of_stream():
 
     assert not any(m.get("close_context") for m in synth.websocket.sent)
     assert synth.context_id == "ctx-live"
+
+
+def test_stale_context_text_match_suppressed():
+    """A draining previous-turn chunk whose tail matches the new turn's text must not
+    emit end-of-stream (call 8909c48c: two turns ending in the same phrase)."""
+    synth = _make_synth()
+    synth.ws_send_time = 1.0
+    synth.last_text_sent = True
+    synth.current_text = "क्या आपके पास एक और hold है जिसके बारे में आप बात करना चाहेंगे?"
+    synth.current_turn_context_id = "ctx-new"
+    synth.websocket = FakeWS(
+        [
+            _audio_msg("ctx-old", "बात करना चाहेंगे?"),  # stale context, same trailing phrase
+            _audio_msg("ctx-new", "बात करना चाहेंगे?"),
+        ]
+    )
+    items = asyncio.run(_collect(synth.receiver()))
+    assert len(_end_markers(items)) == 1, "only the current context's tail may emit end-of-stream"
+    assert items[-1][0] == b"\x00", "end-of-stream must come after the current context's audio"
+
+
+def test_stale_isfinal_suppressed():
+    """A stale context's late isFinal must not end the current turn's stream."""
+    synth = _make_synth()
+    synth.ws_send_time = 1.0
+    synth.current_turn_context_id = "ctx-new"
+    synth.websocket = FakeWS([_final_msg("ctx-old"), _final_msg("ctx-new")])
+    items = asyncio.run(_collect(synth.receiver()))
+    assert len(_end_markers(items)) == 1, "stale isFinal must be suppressed, current one must fire"
+
+
+def test_isfinal_ungated_without_current_turn_context():
+    """With no current turn context tracked, isFinal behaves as before (no hang risk)."""
+    synth = _make_synth()
+    synth.ws_send_time = 1.0
+    synth.websocket = FakeWS([_final_msg("ctx-any")])
+    items = asyncio.run(_collect(synth.receiver()))
+    assert len(_end_markers(items)) == 1
+
+
+def test_handle_interruption_blacklists_closed_draining_context():
+    """Interruption after close_context (context_id already None) must still blacklist
+    the turn's context so its draining frames are dropped entirely."""
+    synth = _make_synth()
+    synth.context_id = None
+    synth.current_turn_context_id = "ctx-old"
+    synth.websocket = FakeWS([])
+
+    asyncio.run(synth.handle_interruption())
+
+    assert "ctx-old" in synth.context_ids_to_ignore
+    assert synth.current_turn_context_id is None
+    assert synth.current_turn_start_time is None
+
+    synth.ws_send_time = 1.0
+    synth.last_text_sent = True
+    synth.current_text = "x"
+    synth.websocket = FakeWS([_audio_msg("ctx-old", "anything at all"), _final_msg("ctx-old")])
+    items = asyncio.run(_collect(synth.receiver()))
+    assert items == [], "blacklisted context frames must be dropped before any EOS logic"
+
+
+def test_handle_interruption_live_context_still_closes():
+    """Live-context interruption keeps its original behavior and also clears turn tracking."""
+    synth = _make_synth()
+    synth.context_id = "ctx-live"
+    synth.current_turn_context_id = "ctx-live"
+    synth.websocket = FakeWS([])
+
+    asyncio.run(synth.handle_interruption())
+
+    assert any(m.get("close_context") for m in synth.websocket.sent)
+    assert "ctx-live" in synth.context_ids_to_ignore
+    assert synth.context_id is None
+    assert synth.current_turn_context_id is None
+
+
+def test_on_push_stamps_turn_context_surviving_close():
+    """_on_push mints the context and stamps current_turn_context_id, which survives close."""
+    synth = _make_synth()
+    synth._on_push({}, "hello")
+    assert synth.context_id is not None
+    assert synth.current_turn_context_id == synth.context_id
+
+    minted = synth.context_id
+    synth.context_id = None  # close_context
+    assert synth.current_turn_context_id == minted
+
+
+def test_superseded_push_does_not_advance_turn_context():
+    """A push for an invalidated sequence must not mint/advance the turn context —
+    otherwise the prior turn's real isFinal is suppressed with no successor EOS."""
+    synth = _make_synth()
+    synth.task_manager_instance = SimpleNamespace(is_sequence_id_in_current_ids=lambda sid: False)
+    synth.current_turn_context_id = "ctx-a"
+
+    synth._on_push({"sequence_id": 99}, "stale text")
+
+    assert synth.context_id is None, "superseded push must not mint a context"
+    assert synth.current_turn_context_id == "ctx-a", "turn context pointer must not advance"
+
+    synth.ws_send_time = 1.0
+    synth.websocket = FakeWS([_final_msg("ctx-a")])
+    items = asyncio.run(_collect(synth.receiver()))
+    assert len(_end_markers(items)) == 1, "prior turn's isFinal must still emit end-of-stream"
+
+
+def test_valid_push_advances_turn_context():
+    """A push for a live sequence mints the context and advances the turn pointer."""
+    synth = _make_synth()
+    synth._on_push({"sequence_id": 5}, "hello")
+    assert synth.context_id is not None
+    assert synth.current_turn_context_id == synth.context_id
