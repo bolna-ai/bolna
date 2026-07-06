@@ -4550,11 +4550,12 @@ class TaskManager(BaseManager):
                             transcript_content[:120],
                         )
 
+                        # response_in_pipeline deliberately not counted: with no audio playing yet, a short
+                        # speech_final is a split-utterance tail — _handle_transcriber_output merges it.
                         if self.interruption_manager.is_false_interruption(
                             word_count=word_count,
                             transcript=transcript_content,
-                            is_audio_playing=self.tools["input"].is_audio_being_played_to_user()
-                            or self.response_in_pipeline,
+                            is_audio_playing=self.tools["input"].is_audio_being_played_to_user(),
                             welcome_played=self.tools["input"].welcome_message_played(),
                         ):
                             logger.info(
