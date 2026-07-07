@@ -1,6 +1,8 @@
-from typing import Any, Optional, Union
+from typing import Any, List, Optional, Union
 
 from pydantic import BaseModel, ConfigDict
+
+from bolna.enums import ToolScope
 
 
 class APIParams(BaseModel):
@@ -10,6 +12,11 @@ class APIParams(BaseModel):
     param: Optional[Union[str, dict]] = None
     headers: Optional[Union[str, dict]] = None
     pre_call_message: Optional[Union[str, dict]] = None
+    pre_call_webhook_url: Optional[str] = None
+    pre_call_webhook_param: Optional[Union[str, dict]] = None
+    # Graph-agent tool scope; None == GLOBAL. NODE limits visibility to ``nodes``.
+    scope: Optional[ToolScope] = None
+    nodes: Optional[List[str]] = None
 
 
 class LatencyData(BaseModel):
@@ -19,6 +26,8 @@ class LatencyData(BaseModel):
     connection_latency_ms: Optional[float] = None
     service_tier: Optional[str] = None
     llm_host: Optional[str] = None
+    reasoning_effort: Optional[str] = None
+    verbosity: Optional[str] = None
 
 
 class FunctionCallPayload(BaseModel):

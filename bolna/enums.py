@@ -70,6 +70,7 @@ class TranscriberProvider(str, Enum):
     ELEVENLABS = "elevenlabs"
     SMALLEST = "smallest"
     OPENAI = "openai"
+    SONIOX = "soniox"
 
     @classmethod
     def all_values(cls):
@@ -201,6 +202,7 @@ class LogComponent(str, Enum):
     LLM = "llm"
     LLM_HANGUP = "llm_hangup"
     LLM_LANGUAGE_DETECTION = "llm_language_detection"
+    LLM_LANGUAGE_SWITCH = "llm_language_switch"
     LLM_VOICEMAIL = "llm_voicemail"
     SYNTHESIZER = "synthesizer"
     TRANSCRIBER = "transcriber"
@@ -222,6 +224,7 @@ _DISPLAY_NAMES = {
     LogComponent.LLM_HANGUP: "LLM hangup check",
     LogComponent.LLM_VOICEMAIL: "LLM voicemail check",
     LogComponent.LLM_LANGUAGE_DETECTION: "LLM language detection",
+    LogComponent.LLM_LANGUAGE_SWITCH: "LLM language switch",
     LogComponent.FUNCTION_CALL: "Function call",
     LogComponent.GRAPH_ROUTING: "Graph routing",
 }
@@ -259,6 +262,12 @@ class ExpressionLogic(str, Enum):
     OR = "or"
 
 
+class VariableType(str, Enum):
+    STRING = "string"
+    NUMBER = "number"
+    BOOLEAN = "boolean"
+
+
 class EdgeConditionType(str, Enum):
     LLM = "llm"
     EXPRESSION = "expression"
@@ -269,6 +278,14 @@ class EdgeConditionType(str, Enum):
 class NodeType(str, Enum):
     LLM = "llm"
     STATIC = "static"
+    ROUTER = "router"
+
+
+class ToolScope(str, Enum):
+    """Where a graph-agent tool is exposed: GLOBAL (every node) or NODE (only its listed nodes)."""
+
+    GLOBAL = "global"
+    NODE = "node"
 
 
 class UsageSource(str, Enum):

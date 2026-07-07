@@ -1,7 +1,7 @@
 aiobotocore==2.9.0
 aiofiles==23.2.1
 aiohttp>=3.10.11,<4.0.0
-azure-cognitiveservices-speech==1.38.0
+azure-cognitiveservices-speech==1.40.0
 fastapi==0.108.0
 google-cloud-speech==2.25.0
 google-genai>=1.68.0
@@ -12,10 +12,10 @@ numpy==1.26.1
 onnxruntime>=1.16.3
 openai>=1.10.0
 plivo==4.47.0
-pydantic==2.9.0
+pydantic>=2.9.0
 pydub==0.25.1
 python-dateutil==2.8.2
-python-dotenv==1.0.0
+python-dotenv>=1.0.0
 pytz>=2024.1
 redis==5.0.1
 requests>=2.31.0,<3

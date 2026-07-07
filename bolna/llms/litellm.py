@@ -59,7 +59,7 @@ class LiteLLM(BaseLLM):
             self.trigger_function_call = False
         self.run_id = kwargs.get("run_id", None)
 
-    async def generate_stream(self, messages, synthesize=True, meta_info=None, tool_choice=None):
+    async def generate_stream(self, messages, synthesize=True, meta_info=None, tool_choice=None, tools=None):
         if not messages or len(messages) == 0:
             raise Exception("No messages provided")
 
@@ -72,9 +72,12 @@ class LiteLLM(BaseLLM):
         model_args["stop"] = ["User:"]
 
         if self.trigger_function_call:
-            model_args["tools"] = json.loads(self.tools) if isinstance(self.tools, str) else self.tools
-            model_args["tool_choice"] = tool_choice or "auto"
-            model_args["parallel_tool_calls"] = False
+            _tools = tools if tools is not None else self.tools
+            _tools = json.loads(_tools) if isinstance(_tools, str) else _tools
+            if _tools:  # omit tools when none are visible this turn (an empty array is a 400)
+                model_args["tools"] = _tools
+                model_args["tool_choice"] = tool_choice or "auto"
+                model_args["parallel_tool_calls"] = False
 
         tools = model_args.get("tools", [])
         accumulator = None
@@ -115,7 +118,7 @@ class LiteLLM(BaseLLM):
             logger.error(f"LiteLLM rate limit exceeded: {e}")
             raise
         except APIConnectionError as e:
-            logger.error(f"LiteLLM connection error: {e}")
+            logger.error(f"LiteLLM connection error: {e} | cause: {e.__cause__!r}")
             raise
         except APIError as e:
             logger.error(f"LiteLLM API error: {e}")
@@ -221,7 +224,7 @@ class LiteLLM(BaseLLM):
             logger.error(f"LiteLLM rate limit exceeded: {e}")
             raise
         except APIConnectionError as e:
-            logger.error(f"LiteLLM connection error: {e}")
+            logger.error(f"LiteLLM connection error: {e} | cause: {e.__cause__!r}")
             raise
         except APIError as e:
             logger.error(f"LiteLLM API error: {e}")

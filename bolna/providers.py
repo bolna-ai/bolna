@@ -21,6 +21,7 @@ from .transcriber import (
     ElevenLabsTranscriber,
     SmallestTranscriber,
     OpenAITranscriber,
+    SonioxTranscriber,
 )
 from .input_handlers import (
     DefaultInputHandler,
@@ -65,6 +66,7 @@ SUPPORTED_TRANSCRIBER_PROVIDERS = {
     TranscriberProvider.ELEVENLABS.value: ElevenLabsTranscriber,
     TranscriberProvider.SMALLEST.value: SmallestTranscriber,
     TranscriberProvider.OPENAI.value: OpenAITranscriber,
+    TranscriberProvider.SONIOX.value: SonioxTranscriber,
 }
 
 # Backwards compatibility

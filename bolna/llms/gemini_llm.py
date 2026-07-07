@@ -238,8 +238,9 @@ class GeminiLLM(BaseLLM):
         return config
 
     async def generate_stream(
-        self, messages, synthesize=True, meta_info=None, tool_choice=None
+        self, messages, synthesize=True, meta_info=None, tool_choice=None, tools=None
     ) -> AsyncIterable[LLMStreamChunk]:
+        # tools= accepted for interface parity; per-node scoping is not wired for Gemini.
         system_instruction, history = self._prepare_history(messages)
         config = self._build_config(system_instruction)
 

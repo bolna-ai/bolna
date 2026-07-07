@@ -9,6 +9,7 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from bolna.agent_types.graph_agent import GraphAgent, _DETERMINISTIC_REASONING_PREFIX
+from bolna.helpers.expression_evaluator import evaluate_condition
 
 
 # ---------------------------------------------------------------------------
@@ -232,7 +233,7 @@ class TestExpressionMatchSkipsLLM:
             # LLM should NOT have been called
             mock_thread.assert_not_called()
 
-        next_node, params, latency_ms, msgs, tools, reasoning, confidence = result
+        next_node, params, latency_ms, msgs, tools, reasoning, confidence, usage_info = result
         assert next_node == "hindi_agent"
         assert confidence == 1.0
         assert reasoning.startswith(_DETERMINISTIC_REASONING_PREFIX)
@@ -315,7 +316,7 @@ class TestFallThroughToLLM:
         with patch("asyncio.to_thread", new_callable=AsyncMock, return_value=mock_resp):
             result = await agent.decide_next_node_with_functions([{"role": "user", "content": "I want to book"}])
 
-        next_node, params, latency_ms, msgs, tools, reasoning, confidence = result
+        next_node, params, latency_ms, msgs, tools, reasoning, confidence, usage_info = result
         assert next_node == "booking"
         assert confidence == 0.9
         assert not reasoning.startswith(_DETERMINISTIC_REASONING_PREFIX)
@@ -676,3 +677,117 @@ class TestRoutingInfoType:
 
         routing_info = chunks[0].get("routing_info")
         assert routing_info["routing_type"] == "llm"
+
+
+class TestTypedCoercion:
+    """variable_types coerces expression comparisons into the right domain."""
+
+    def test_number_avoids_lexicographic(self):
+        # declared number -> numeric comparison: 9 > 10 is False
+        cond = {"variable": "recipient_data.age", "operator": "gt", "value": 10}
+        ctx = {"recipient_data": {"age": "9"}}
+        assert not evaluate_condition(cond, ctx, {"recipient_data.age": "number"})
+
+    def test_string_string_lexicographic_is_the_bug_typing_fixes(self):
+        # both sides strings compare lexicographically ("9" > "10" is True); declaring number corrects it
+        cond = {"variable": "recipient_data.age", "operator": "gt", "value": "10"}
+        ctx = {"recipient_data": {"age": "9"}}
+        assert evaluate_condition(cond, ctx)
+        assert not evaluate_condition(cond, ctx, {"recipient_data.age": "number"})
+
+    def test_resolution_is_exact_path(self):
+        # keys match the condition's variable exactly; a leaf-only key does not apply
+        cond = {"variable": "recipient_data.age", "operator": "gt", "value": "100"}
+        ctx = {"recipient_data": {"age": "9"}}
+        assert not evaluate_condition(cond, ctx, {"recipient_data.age": "number"})  # 9 > 100 numeric -> False
+        assert evaluate_condition(cond, ctx, {"age": "number"})  # leaf key ignored -> "9" > "100" lexically -> True
+
+    def test_boolean_string_tokens(self):
+        cond = {"variable": "is_member", "operator": "eq", "value": True}
+        assert evaluate_condition(cond, {"is_member": "true"}, {"is_member": "boolean"})
+        assert not evaluate_condition(cond, {"is_member": "false"}, {"is_member": "boolean"})
+
+    def test_string_match(self):
+        cond = {"variable": "plan", "operator": "eq", "value": "premium"}
+        assert evaluate_condition(cond, {"plan": "premium"}, {"plan": "string"})
+
+    def test_uncoercible_fails_closed(self):
+        cond = {"variable": "age", "operator": "gt", "value": 10}
+        assert not evaluate_condition(cond, {"age": "abc"}, {"age": "number"})
+
+    def test_inference_bool_fix_without_declaration(self):
+        cond = {"variable": "is_member", "operator": "eq", "value": True}
+        assert evaluate_condition(cond, {"is_member": "true"})
+
+    def test_inference_numeric_cross_preserved(self):
+        cond = {"variable": "age", "operator": "gte", "value": 18}
+        assert evaluate_condition(cond, {"age": "21"})
+
+    def test_inference_bool_literal_does_not_hijack_numbers(self):
+        # a bool literal must not change numeric/string comparisons for non-bool-like actuals
+        assert evaluate_condition({"variable": "x", "operator": "gt", "value": True}, {"x": 5})  # 5.0 > 1.0
+        assert not evaluate_condition({"variable": "x", "operator": "eq", "value": True}, {"x": 5})  # 5 != True
+        assert evaluate_condition({"variable": "x", "operator": "neq", "value": False}, {"x": "hello"})
+
+    def test_invalid_declared_type_falls_back_to_inference(self):
+        cond = {"variable": "age", "operator": "gt", "value": "10"}
+        with patch("bolna.helpers.expression_evaluator.logger") as mock_logger:
+            result = evaluate_condition(cond, {"age": "9"}, {"age": "int"})
+        assert result  # inference path: "9" > "10" lexically
+        assert mock_logger.warning.call_count == 1  # unknown type warned, then ignored
+
+    def test_neq_and_lt_with_declared_number(self):
+        assert evaluate_condition({"variable": "age", "operator": "lt", "value": 18}, {"age": "16"}, {"age": "number"})
+        assert evaluate_condition({"variable": "age", "operator": "neq", "value": 18}, {"age": "16"}, {"age": "number"})
+
+    def test_membership_coerces_declared_type(self):
+        # a declared type coerces the value and the list elements: "21" -> 21.0 in [18.0, 21.0, 25.0]
+        cond = {"variable": "age", "operator": "in", "value": [18, 21, 25]}
+        assert evaluate_condition(cond, {"age": "21"}, {"age": "number"})
+        assert not evaluate_condition(cond, {"age": "20"}, {"age": "number"})
+
+
+class TestVariableTypesThreading:
+    """self.variable_types flows from the agent into deterministic evaluation."""
+
+    def _age_edge(self):
+        return {
+            "to_node_id": "adult",
+            "condition_type": "expression",
+            "expression": {
+                "logic": "and",
+                "conditions": [{"variable": "recipient_data.age", "operator": "gte", "value": 18}],
+            },
+        }
+
+    def test_threaded_through_deterministic_edges(self):
+        agent = _make_agent()
+        agent.variable_types = {"recipient_data.age": "number"}
+        edge = self._age_edge()
+
+        agent.context_data = {"recipient_data": {"age": "16"}}
+        matched, _ = agent._evaluate_deterministic_edges([edge])
+        assert matched is None  # 16 >= 18 is False
+
+        agent.context_data = {"recipient_data": {"age": "21"}}
+        matched, _ = agent._evaluate_deterministic_edges([edge])
+        assert matched is edge  # 21 >= 18 is True
+
+    def test_coercion_failure_warns_once_per_edge(self):
+        # the evaluate + describe passes must not double-log the coercion warning
+        agent = _make_agent()
+        agent.variable_types = {"recipient_data.age": "number"}
+        agent.context_data = {"recipient_data": {"age": "abc"}}
+        with patch("bolna.helpers.expression_evaluator.logger") as mock_logger:
+            matched, _ = agent._evaluate_deterministic_edges([self._age_edge()])
+        assert matched is None
+        assert mock_logger.warning.call_count == 1
+
+    def test_unknown_type_warns_once_per_edge(self):
+        # an invalid declared type warns once per edge, not once per evaluate + describe resolve
+        agent = _make_agent()
+        agent.variable_types = {"recipient_data.age": "int"}  # not a valid VariableType
+        agent.context_data = {"recipient_data": {"age": "21"}}
+        with patch("bolna.helpers.expression_evaluator.logger") as mock_logger:
+            agent._evaluate_deterministic_edges([self._age_edge()])
+        assert mock_logger.warning.call_count == 1

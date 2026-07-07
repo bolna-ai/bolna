@@ -37,14 +37,23 @@ class SarvamLID(LIDBackend):
         self._api_key = config.get("sarvam_api_key") or os.getenv("SARVAM_API_KEY", "")
         self._host = config.get("sarvam_host") or os.getenv("SARVAM_HOST", "api.sarvam.ai")
         self._telephony = config.get("telephony_provider", "")
+        # Target rate Saaras receives (it wants 16k). Per-provider INPUT rate/encoding
+        # must mirror sarvam_transcriber._configure_audio_params — telephony providers
+        # stream 8kHz, so we resample 8k→16k. Getting this wrong (e.g. treating vobiz's
+        # 8kHz as 16kHz) feeds garbled audio to Saaras → no transcripts → no detection.
         self._sr = int(config.get("sampling_rate", 16000))
-        self._input_sr = 8000 if self._telephony in ("twilio", "plivo") else self._sr
-        self._encoding = "mulaw" if self._telephony == "twilio" else "linear16"
-        self._queue = asyncio.Queue(maxsize=20)
-        self._ws = None
-        self._sender_task = None
-        self._receiver_task = None
-        self._dead = False
+        if self._telephony in ("plivo", "vobiz", "exotel"):
+            self._encoding = "linear16"
+            self._input_sr = 8000
+        elif self._telephony == "twilio":
+            self._encoding = "mulaw"
+            self._input_sr = 8000
+        else:
+            self._encoding = "linear16"
+            self._input_sr = self._sr
+        self._resample_state = None
+
+    def _on_reconnect_reset(self):
         self._resample_state = None
 
     def _build_url(self) -> str:
@@ -53,6 +62,9 @@ class SarvamLID(LIDBackend):
             "mode": "transcribe",
             "language-code": "unknown",
             "high_vad_sensitivity": "true",
+            # Matches the working sarvam_transcriber config. We read transcripts from
+            # the "data" messages and buffer them; VAD events are not relied upon.
+            "vad_signals": "true",
         }
         qs = "&".join(f"{k}={v}" for k, v in params.items())
         return f"{self._WS_BASE.format(host=self._host)}?{qs}"
@@ -85,15 +97,6 @@ class SarvamLID(LIDBackend):
         self._receiver_task = asyncio.create_task(self._receiver_loop())
         logger.info("SarvamLID: connected")
 
-    def feed(self, audio_bytes):
-        if self._dead:
-            logger.warning("SarvamLID: feed() called but WS is dead — chunk dropped (LID inactive)")
-            return
-        try:
-            self._queue.put_nowait(audio_bytes)
-        except asyncio.QueueFull:
-            logger.debug("SarvamLID: audio queue full — chunk dropped (backpressure)")
-
     async def _sender_loop(self):
         try:
             while True:
@@ -108,8 +111,7 @@ class SarvamLID(LIDBackend):
             pass
         except Exception as e:
             logger.error(f"SarvamLID sender error: {e}")
-            self._dead = True
-            logger.warning("SarvamLID: sender loop exited abnormally — LID inactive for remainder of call")
+            self._schedule_reconnect("sender error")
 
     async def _receiver_loop(self):
         try:
@@ -118,6 +120,7 @@ class SarvamLID(LIDBackend):
                     data = json.loads(raw) if isinstance(raw, str) else {}
                     if data.get("type") == "data":
                         payload = data.get("data", {})
+                        transcript = (payload.get("transcript") or "").strip()
                         lang = payload.get("language_code", "")
                         lang_prob = payload.get("language_probability")
                         metrics = payload.get("metrics") or {}
@@ -125,14 +128,22 @@ class SarvamLID(LIDBackend):
                         processing_latency = float(metrics.get("processing_latency") or 0.0)
                         logger.info(
                             f"SarvamLID raw: lang={lang!r} language_probability={lang_prob} "
-                            f"audio_duration={audio_duration:.3f}s processing_latency={processing_latency:.3f}s"
+                            f"transcript={transcript[:60]!r} audio_duration={audio_duration:.3f}s "
+                            f"processing_latency={processing_latency:.3f}s"
                         )
-                        if lang_prob is None:
-                            logger.debug("SarvamLID: language_probability missing — skipping detection")
-                            continue
-                        conf = float(lang_prob)
-                        if lang and lang != "unknown":
-                            short = lang.split("-")[0].lower()
+
+                        short = lang.split("-")[0].lower() if lang and lang != "unknown" else None
+
+                        # saaras emits one "data" message per VAD segment (multiple per
+                        # spoken turn). Accumulate into the rolling buffer; the caller
+                        # drains it once per conversational turn via take_turn_transcript().
+                        seg_prob = float(lang_prob) if lang_prob is not None else None
+                        self._accumulate(transcript, short, audio_duration, seg_prob)
+
+                        # Legacy per-segment language signal (kept for backends/telemetry
+                        # that still consume on_language). Skipped when no confidence.
+                        if self.on_language is not None and lang_prob is not None and short:
+                            conf = float(lang_prob)
                             logger.info(
                                 f"SarvamLID: detected {lang!r} (short={short!r}, duration={audio_duration:.2f}s, conf={conf:.2f})"
                             )
@@ -140,32 +151,14 @@ class SarvamLID(LIDBackend):
                 except Exception as e:
                     logger.error(f"SarvamLID receiver parse error: {e}")
         except asyncio.CancelledError:
-            pass
+            return
         except Exception as e:
             logger.error(f"SarvamLID receiver error: {e}")
-            self._dead = True
-            logger.warning("SarvamLID: receiver loop exited abnormally — LID inactive for remainder of call")
+        # Reached on BOTH a server-side graceful close (the async-for simply ends,
+        # no exception raised) and receive errors. The graceful case previously
+        # exited silently — detector mute for the rest of the call with zero log
+        # lines (QA call edbdb998: 0 segments in 21s, Tamil never detected).
+        self._schedule_reconnect("receiver closed")
 
     async def stop(self):
-        try:
-            self._queue.put_nowait(None)
-        except asyncio.QueueFull:
-            while not self._queue.empty():
-                try:
-                    self._queue.get_nowait()
-                except asyncio.QueueEmpty:
-                    break
-            self._queue.put_nowait(None)
-        for task in (self._sender_task, self._receiver_task):
-            if task and not task.done():
-                task.cancel()
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    pass
-        if self._ws:
-            try:
-                await self._ws.close()
-            except Exception:
-                pass
-        logger.info("SarvamLID: stopped")
+        await self._shutdown_connection()

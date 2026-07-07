@@ -44,6 +44,10 @@ class DictWithMissing(dict):
         return ""
 
 
+# Server-owned telephony ids; never exposed to the model (prompt var, {placeholder}, or tool param).
+SERVER_OWNED_CALL_IDENTIFIERS = frozenset({"call_sid", "stream_sid"})
+
+
 def load_file(file_path, is_json=False):
     data = None
     with open(file_path, "r") as f:
@@ -228,7 +232,8 @@ async def get_raw_audio_bytes(
 
 
 def get_md5_hash(text):
-    return hashlib.md5(text.encode()).hexdigest()
+    # Non-security hash (cache keys / ids); usedforsecurity=False documents that and clears bandit B324.
+    return hashlib.md5(text.encode(), usedforsecurity=False).hexdigest()
 
 
 def is_valid_md5(hash_string):
@@ -313,7 +318,11 @@ def update_prompt_with_context(prompt, context_data):
     try:
         if not context_data or not isinstance(context_data.get("recipient_data"), dict):
             return prompt.format_map(DictWithMissing({}))
-        return prompt.format_map(DictWithMissing(context_data.get("recipient_data", {})))
+        # A {call_sid}/{stream_sid} template renders empty instead of leaking the real id.
+        recipient_data = {
+            k: v for k, v in context_data["recipient_data"].items() if k not in SERVER_OWNED_CALL_IDENTIFIERS
+        }
+        return prompt.format_map(DictWithMissing(recipient_data))
     except Exception as e:
         return prompt
 
@@ -529,10 +538,12 @@ async def write_request_logs(message, run_id):
         LogComponent.LLM_HANGUP,
         LogComponent.LLM_VOICEMAIL,
         LogComponent.LLM_LANGUAGE_DETECTION,
+        LogComponent.LLM_LANGUAGE_SWITCH,
     ):
-        # Convert dict to string if necessary
+        # ensure_ascii=False so non-Latin scripts (Hindi/Telugu/…) stay readable in the trace
+        # Data column instead of rendering as \uXXXX escapes.
         if isinstance(message_data, dict):
-            message_data = json.dumps(message_data)
+            message_data = json.dumps(message_data, ensure_ascii=False)
         component_details = [
             message_data,
             message.get("input_tokens", 0),
@@ -592,7 +603,7 @@ async def write_request_logs(message, run_id):
 
     metadata_str = None
     if metadata:
-        metadata_str = json.dumps(metadata)
+        metadata_str = json.dumps(metadata, ensure_ascii=False)
     row = row + component_details + [metadata_str]
 
     header = "Time,Component,Direction,Leg ID,Sequence ID,Model,Data,Input Tokens,Output Tokens,Characters,Latency,Cached,Final Transcript,Engine,Metadata\n"
@@ -877,6 +888,53 @@ def pcm_to_ulaw(pcm_bytes):
     return ulaw_bytes
 
 
+def audio_to_mulaw8k(audio, rate_hint=8000, format_hint=""):
+    """One-shot synth output (base64 str / WAV / raw PCM) → mono 16-bit 8kHz mu-law.
+    Undecodable compressed containers (MP3/Ogg/FLAC) return None — never raw noise."""
+    import base64
+
+    if isinstance(audio, str):
+        audio = base64.b64decode(audio)
+    try:
+        # Explicit format for WAV takes pydub's native reader — no ffprobe/ffmpeg.
+        segment = AudioSegment.from_file(io.BytesIO(audio), format="wav" if audio[:4] == b"RIFF" else None)
+    except Exception:
+        if (
+            audio[:3] == b"ID3"
+            or audio[:2] in (b"\xff\xfb", b"\xff\xf3", b"\xff\xf2")
+            or audio[:4] in (b"OggS", b"fLaC")
+        ):
+            return None
+        # Headerless audio: trust the caller's declared rate/format.
+        if "law" in str(format_hint or ""):
+            audio = audioop.ulaw2lin(audio, 2)
+        segment = AudioSegment(data=audio, sample_width=2, frame_rate=int(rate_hint or 8000), channels=1)
+    segment = segment.set_frame_rate(8000).set_channels(1).set_sample_width(2)
+    return pcm_to_ulaw(segment.raw_data)
+
+
+def soniox_ws_url(host):
+    """Soniox realtime WS endpoint — single source of truth for transcriber + LID tap."""
+    protocol = os.getenv("SONIOX_HOST_PROTOCOL", "wss")
+    return f"{protocol}://{host}/transcribe-websocket"
+
+
+def build_soniox_config(api_key, model, audio_format, sample_rate, **extras):
+    """Soniox first-frame config (auth rides in it) — shared by transcriber + LID tap.
+    extras merge on top (language_hints, context, endpoint tuning...)."""
+    config = {
+        "api_key": api_key,
+        "model": model,
+        "audio_format": audio_format,
+        "sample_rate": int(sample_rate),
+        "num_channels": 1,
+        "enable_endpoint_detection": True,
+        "enable_language_identification": True,
+    }
+    config.update({k: v for k, v in extras.items() if v is not None})
+    return config
+
+
 def compute_function_pre_call_message(language, function_name, api_tool_pre_call_message):
     """Select pre-function call message with language support."""
     # Built-in tools that should switch silently — no audible filler.
@@ -918,8 +976,10 @@ def structure_system_prompt(
         if not is_web_based_call:
             final_prompt = update_prompt_with_context(system_prompt, context_data)
 
-        if call_sid:
-            default_variables["call_sid"] = call_sid
+        # call_sid is deliberately NOT exposed as a prompt variable: the model would echo it
+        # into spoken text (and into the required transfer_call call_sid arg), yet the real sid
+        # is always injected server-side in __execute_function_call via get_call_sid(). Exposing
+        # it only risks the agent reading the internal id aloud during a transfer.
 
         final_prompt = f"{final_prompt}\n\n## Call information:\n\n### Variables:\n"
         for k, v in default_variables.items():

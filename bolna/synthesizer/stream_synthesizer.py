@@ -157,16 +157,16 @@ class StreamSynthesizer(BaseSynthesizer):
         self.current_text = text
         self.synthesized_characters += len(text) if text else 0
         self.current_sequence_chars += len(text) if text else 0
-        end_of_llm_stream = meta_info.get("end_of_llm_stream", False)
         self.meta_info = copy.deepcopy(meta_info)
         meta_info["text"] = text
 
         # Stamp turn start on first push of a new turn
         self._stamp_turn_start(meta_info)
 
-        # Provider-specific pre-push hook (e.g. update context_id)
+        # Pre-push hook (e.g. context_id); Cartesia may defer end_of_llm_stream, so read it after.
         self._on_push(meta_info, text)
 
+        end_of_llm_stream = meta_info.get("end_of_llm_stream", False)
         self.sender_task = asyncio.create_task(self.sender(text, meta_info.get("sequence_id"), end_of_llm_stream))
         self.text_queue.append(meta_info)
 
@@ -255,6 +255,9 @@ class StreamSynthesizer(BaseSynthesizer):
             if audio == b"\x00":
                 logger.info(f"{self.provider_name}: end of stream")
                 self.meta_info["end_of_synthesizer_stream"] = True
+                # eos may pop a non-final chunk's meta; carry end_of_llm_stream so is_final_chunk fires
+                if self.last_text_sent:
+                    self.meta_info["end_of_llm_stream"] = True
                 self.first_chunk_generated = False
                 self._record_turn_latency()
             else:

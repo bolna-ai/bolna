@@ -1,3 +1,4 @@
+import copy
 import json
 import re
 from typing import Optional
@@ -6,7 +7,12 @@ from openai import BadRequestError, APIError
 
 from bolna.constants import GPT5_MODEL_PREFIX
 from bolna.enums import ChatRole, ResponseStreamEvent, ResponseItemType, LogComponent, LogDirection
-from bolna.helpers.utils import convert_to_request_log, compute_function_pre_call_message, now_ms
+from bolna.helpers.utils import (
+    convert_to_request_log,
+    compute_function_pre_call_message,
+    now_ms,
+    SERVER_OWNED_CALL_IDENTIFIERS,
+)
 from .llm import BaseLLM
 from .message_models import MessageFormatAdapter
 from .types import APIParams, LLMStreamChunk, LatencyData, FunctionCallPayload
@@ -21,6 +27,25 @@ def _clean_rescue_answer(answer: str) -> str | None:
     return cleaned if cleaned else None
 
 
+def _strip_server_injected_params(tools):
+    """Drop server-owned ids (call_sid/stream_sid) from each tool schema so the model can't echo them."""
+    cleaned = []
+    for tool in tools:
+        params = tool.get("function", {}).get("parameters")
+        props = params.get("properties") if isinstance(params, dict) else None
+        if not props or not any(k in props for k in SERVER_OWNED_CALL_IDENTIFIERS):
+            cleaned.append(tool)
+            continue
+        tool = copy.deepcopy(tool)
+        params = tool["function"]["parameters"]
+        for key in SERVER_OWNED_CALL_IDENTIFIERS:
+            params["properties"].pop(key, None)
+            if isinstance(params.get("required"), list) and key in params["required"]:
+                params["required"].remove(key)
+        cleaned.append(tool)
+    return cleaned
+
+
 class OpenAICompatibleLLM(BaseLLM):
     """Base class for OpenAI-API-compatible LLM providers.
 
@@ -31,11 +56,15 @@ class OpenAICompatibleLLM(BaseLLM):
 
     @staticmethod
     def _find_tool_call_end(text):
-        """Return the index after the closing brace/paren of a text-based tool call, or -1 if incomplete."""
+        """Return the index after the closing brace/paren of a text tool call
+        (functions.x(...) or a bare {...} object), or -1 if incomplete."""
         m = re.search(r"functions\.\w+\s*[({]", text)
-        if not m:
+        if m:
+            start = m.end() - 1
+        elif text.lstrip().startswith("{"):
+            start = text.index("{")
+        else:
             return -1
-        start = m.end() - 1
         depth = 0
         for i in range(start, len(text)):
             if text[i] in "({":
@@ -48,6 +77,40 @@ class OpenAICompatibleLLM(BaseLLM):
                         end += 1
                     return end
         return -1
+
+    @staticmethod
+    def _find_offered_tool_name(text, offered):
+        """Earliest offered tool name in text (longest wins on a tie, to prefer the most specific),
+        or None. Used to recover which tool a captured narration fragment refers to."""
+        best, best_i = None, len(text) + 1
+        for t in offered or []:
+            name = (t.get("function") or {}).get("name")
+            if not name or (i := text.find(name)) == -1:
+                continue
+            if i < best_i or (i == best_i and len(name) > len(best or "")):
+                best, best_i = name, i
+        return best
+
+    @staticmethod
+    def _find_text_tool_call_start(text, offered):
+        """Earliest index where a narrated tool call begins: a `functions.` prefix, or an offered
+        tool name that sits inside an unclosed { } wrapper (e.g. {type:transfer_call_..}). A bare
+        tool name in plain text is left as speech, so a tool named like a common word ('book') never
+        triggers on an ordinary sentence. Returns -1 if none."""
+        idx = -1
+        m = re.search(r"functions\.\w", text)
+        if m:
+            idx = m.start()
+        for t in offered or []:
+            name = (t.get("function") or {}).get("name")
+            if not name or (i := text.find(name)) == -1:
+                continue
+            brace = text.rfind("{", 0, i)
+            if brace == -1 or "}" in text[brace:i]:
+                continue  # not inside a { } wrapper -> ordinary speech, not a tool call
+            if idx == -1 or brace < idx:
+                idx = brace
+        return idx
 
     @staticmethod
     def _parse_text_tool_call(text):
@@ -79,6 +142,8 @@ class OpenAICompatibleLLM(BaseLLM):
         raw = text[start:end]
         if raw.startswith("("):
             raw = raw[1:-1].strip()
+        if not raw:
+            return func_name, "{}"
 
         try:
             json.loads(raw)
@@ -106,14 +171,35 @@ class OpenAICompatibleLLM(BaseLLM):
         if not self.trigger_function_call:
             return None
 
-        parsed = self._parse_text_tool_call(text)
-        if not parsed:
-            return None
+        # Respect per-call tool visibility (node scoping): only rescue a tool offered this turn.
+        offered = model_args.get("tools") or []
+        if isinstance(offered, str):
+            offered = json.loads(offered)
 
-        func_name, args_str = parsed
+        parsed = self._parse_text_tool_call(text)
+        if parsed:
+            func_name, args_str = parsed
+            args_recovered = False
+        else:
+            # No functions.NAME(...) form — e.g. a {type:transfer_call_..} shape, a truncated call,
+            # or a mangled wrapper. Recover by matching any offered tool name; fire only if it needs
+            # no model args (the required-args gate below).
+            func_name = self._find_offered_tool_name(text, offered)
+            if not func_name:
+                return None
+            args_str, args_recovered = "{}", True
 
         if func_name not in self.api_params:
             logger.warning(f"Text tool call rescue: '{func_name}' not in api_params, falling back to TTS")
+            return None
+
+        tool_spec = next((t for t in offered if t.get("function", {}).get("name") == func_name), None)
+        if tool_spec is None:
+            logger.warning(f"Text tool call rescue: '{func_name}' not offered this turn, falling back to TTS")
+            return None
+
+        if args_recovered and (tool_spec["function"].get("parameters") or {}).get("required"):
+            logger.warning(f"Text tool call rescue: '{func_name}' recovered by name but needs model args, dropping")
             return None
 
         func_conf = self.api_params[func_name]
@@ -141,9 +227,6 @@ class OpenAICompatibleLLM(BaseLLM):
         )
 
         # Mirror ToolCallAccumulator.build_api_payload: validate required keys against the tool spec
-        tools_list = json.loads(self.tools) if isinstance(self.tools, str) else (self.tools or [])
-        tool_spec = next((t for t in tools_list if t.get("function", {}).get("name") == func_name), None)
-
         try:
             parsed_args = json.loads(args_str)
             if tool_spec and tool_spec["function"].get("parameters") is not None:
@@ -171,6 +254,7 @@ class OpenAICompatibleLLM(BaseLLM):
         self.previous_response_id = None
         self._pending_call_ids: set[str] = set()
         self.compact_threshold = compact_threshold
+        self._interruption_hint: Optional[str] = None
 
     @property
     def _responses_client(self):
@@ -184,13 +268,14 @@ class OpenAICompatibleLLM(BaseLLM):
     def _build_responses_input(self, messages):
         """Build (instructions, input_items) for Responses API.
 
-        When previous_response_id is set, only sends new items since last
-        server response. Otherwise sends the full conversation.
-
-        Tool call guard: if the previous response made function calls whose
-        outputs are not yet in the history, fall back to full context to
-        avoid 400 errors from the server.
+        With previous_response_id set, only sends items after the last
+        assistant. Falls back to full history when pending tool outputs are
+        missing. Any pending interruption hint is consumed exactly once and
+        only prepended on the chain-alive happy path.
         """
+        hint = self._interruption_hint
+        self._interruption_hint = None
+
         if self.previous_response_id:
             if self._pending_call_ids:
                 completed = {m.get("tool_call_id") for m in messages if m.get("role") == ChatRole.TOOL}
@@ -198,21 +283,29 @@ class OpenAICompatibleLLM(BaseLLM):
                     logger.info("Pending tool call outputs missing, sending full context")
                     self.previous_response_id = None
                     return MessageFormatAdapter.chat_to_responses_input(messages)
-            return self._extract_new_input(messages)
+            instructions, input_items = self._extract_new_input(messages)
+            if hint is not None:
+                input_items = [self._build_interruption_hint_item(hint), *input_items]
+            return instructions, input_items
         return MessageFormatAdapter.chat_to_responses_input(messages)
 
+    @staticmethod
+    def _build_interruption_hint_item(heard_text: str) -> dict:
+        heard = (heard_text or "").strip()
+        return {
+            "type": ResponseItemType.MESSAGE,
+            "role": "developer",
+            "content": (
+                f'[Your previous response was interrupted. The user only heard: "{heard}". Adapt accordingly.]'
+            ),
+        }
+
+    def set_interruption_hint(self, heard_text: Optional[str]) -> None:
+        """Record what the user heard before barge-in. Consumed on next build."""
+        self._interruption_hint = "" if heard_text is None else heard_text
+
     def _extract_new_input(self, messages):
-        """Extract only new items since last server response.
-
-        The server already has all context up to its last output. We only
-        need to send:
-        - New user messages (after the last assistant message)
-        - Function call outputs (tool results)
-        """
-        instructions = ""
-        if messages and messages[0].get("role") == ChatRole.SYSTEM:
-            instructions = messages[0].get("content", "")
-
+        """Send only items after the last assistant; prior context (including system) lives on the chain."""
         last_assistant_idx = -1
         for i in range(len(messages) - 1, -1, -1):
             if messages[i].get("role") == ChatRole.ASSISTANT:
@@ -221,11 +314,11 @@ class OpenAICompatibleLLM(BaseLLM):
 
         if last_assistant_idx < 0:
             _, input_items = MessageFormatAdapter.chat_to_responses_input(messages)
-            return instructions, input_items
+            return "", input_items
 
         new_messages = messages[last_assistant_idx + 1 :]
         _, input_items = MessageFormatAdapter.chat_to_responses_input(new_messages)
-        return instructions, input_items
+        return "", input_items
 
     @staticmethod
     def _is_stale_response_error(error):
@@ -239,15 +332,18 @@ class OpenAICompatibleLLM(BaseLLM):
         """
         return isinstance(error, BadRequestError)
 
-    def _parse_tools(self):
-        """Parse tools from string or list format."""
+    def _parse_tools(self, tools=None):
+        """Parse tools from string or list format. ``tools`` overrides ``self.tools`` when given."""
         if not self.trigger_function_call:
             return []
-        return json.loads(self.tools) if isinstance(self.tools, str) else self.tools
+        src = tools if tools is not None else self.tools
+        parsed = json.loads(src) if isinstance(src, str) else src
+        return _strip_server_injected_params(parsed)
 
     def invalidate_response_chain(self):
         self.previous_response_id = None
         self._pending_call_ids = set()
+        self._interruption_hint = None
 
     def _build_function_call_chunk(
         self,
@@ -325,21 +421,19 @@ class OpenAICompatibleLLM(BaseLLM):
         return LLMStreamChunk(data=api_call_payload, end_of_stream=False, latency=latency_data, is_function_call=True)
 
     def _build_responses_create_kwargs(
-        self, messages, meta_info, request_json, tool_choice, *, store=True, stream=None
+        self, messages, meta_info, request_json, tool_choice, *, store=True, stream=None, tools=None
     ):
         """Build create kwargs common to both HTTP SSE and WebSocket streaming paths."""
-        instructions, input_items = self._build_responses_input(messages)
-        responses_tools = MessageFormatAdapter.chat_tools_to_responses_tools(self._parse_tools())
+        _, input_items = self._build_responses_input(messages)
+        responses_tools = MessageFormatAdapter.chat_tools_to_responses_tools(self._parse_tools(tools))
 
         create_kwargs = {
             "model": self.model,
-            "instructions": instructions or None,
             "input": input_items,
             "store": store,
             "truncation": "auto",
             "max_output_tokens": self.max_tokens,
             "temperature": self.temperature,
-            "user": f"{self.run_id}#{meta_info['turn_id']}" if meta_info else None,
         }
 
         if stream is not None:
@@ -363,6 +457,8 @@ class OpenAICompatibleLLM(BaseLLM):
             verbosity = self.model_args.get("verbosity")
             if verbosity:
                 create_kwargs.setdefault("text", {})["verbosity"] = verbosity
+            # Preserves reasoning across full-history fallbacks; no-op when chain is alive.
+            create_kwargs["include"] = ["reasoning.encrypted_content"]
 
         if self.previous_response_id:
             create_kwargs["previous_response_id"] = self.previous_response_id
@@ -378,13 +474,13 @@ class OpenAICompatibleLLM(BaseLLM):
         return create_kwargs, responses_tools
 
     async def _generate_stream_responses(
-        self, messages, synthesize=True, request_json=False, meta_info=None, tool_choice=None
+        self, messages, synthesize=True, request_json=False, meta_info=None, tool_choice=None, tools=None
     ):
         if not messages:
             raise ValueError("No messages provided")
 
         create_kwargs, responses_tools = self._build_responses_create_kwargs(
-            messages, meta_info, request_json, tool_choice, store=True, stream=True
+            messages, meta_info, request_json, tool_choice, store=True, stream=True, tools=tools
         )
 
         answer, buffer = "", ""
@@ -413,7 +509,7 @@ class OpenAICompatibleLLM(BaseLLM):
                     )
                 self.previous_response_id = None
                 async for chunk in self._generate_stream_responses(
-                    messages, synthesize, request_json, meta_info, tool_choice
+                    messages, synthesize, request_json, meta_info, tool_choice, tools
                 ):
                     yield chunk
                 return
@@ -458,6 +554,8 @@ class OpenAICompatibleLLM(BaseLLM):
                     total_stream_duration_ms=None,
                     service_tier=service_tier,
                     llm_host=llm_host,
+                    reasoning_effort=self.model_args.get("reasoning_effort"),
+                    verbosity=self.model_args.get("verbosity"),
                 )
 
             if event.type == ResponseStreamEvent.OUTPUT_TEXT_DELTA:
@@ -565,11 +663,10 @@ class OpenAICompatibleLLM(BaseLLM):
         self.started_streaming = False
 
     async def _generate_responses(self, messages, request_json=False, ret_metadata=False, meta_info=None):
-        instructions, input_items = self._build_responses_input(messages)
+        _, input_items = self._build_responses_input(messages)
 
         create_kwargs = {
             "model": self.model,
-            "instructions": instructions or None,
             "input": input_items,
             "store": True,
             "truncation": "auto",
@@ -595,6 +692,7 @@ class OpenAICompatibleLLM(BaseLLM):
             verbosity = self.model_args.get("verbosity")
             if verbosity:
                 create_kwargs.setdefault("text", {})["verbosity"] = verbosity
+            create_kwargs["include"] = ["reasoning.encrypted_content"]
 
         if self.previous_response_id:
             create_kwargs["previous_response_id"] = self.previous_response_id

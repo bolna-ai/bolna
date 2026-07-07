@@ -106,21 +106,15 @@ class OpenAIWSConnection:
                     return
 
     async def cancel_response(self, response_id: str):
-        """Cancel an in-flight response. Best-effort, errors are non-critical."""
-        if self._ws is None:
+        """Best-effort cancel: signal the server to terminate the in-flight
+        response. We do not drain events here — the concurrent stream_response
+        loop is the sole recv consumer and will see the resulting terminal
+        event itself. Holding the lock would block the cancel until the
+        stream completes naturally, defeating its purpose."""
+        if self._ws is None or self._ws.state is not WSState.OPEN:
             return
         try:
-            await self._ws.send(
-                json.dumps(
-                    {
-                        "type": ResponseStreamEvent.CANCEL,
-                        "response_id": response_id,
-                    }
-                )
-            )
-            async for raw_msg in self._ws:
-                if json.loads(raw_msg).get("type") in self.TERMINAL_EVENTS:
-                    break
+            await self._ws.send(json.dumps({"type": ResponseStreamEvent.CANCEL, "response_id": response_id}))
         except Exception:
             pass
 
@@ -176,7 +170,8 @@ class OpenAiLLM(OpenAICompatibleLLM):
 
         self.model_args["service_tier"] = kwargs.get("service_tier", "default")
 
-        http_client = get_shared_http_client(base_url=kwargs.get("base_url"), http2=True)
+        # http2=False: cancelled h2 requests leak streams until the connection pins at 100 (barge-in)
+        http_client = get_shared_http_client(base_url=kwargs.get("base_url"), http2=False)
 
         if kwargs.get("provider", "openai") == "custom":
             base_url = kwargs.get("base_url")
@@ -212,24 +207,28 @@ class OpenAiLLM(OpenAICompatibleLLM):
             self._ws_transport = OpenAIWSConnection(api_key=api_key)
             self._ws_transport.start_connect()
 
-    async def generate_stream(self, messages, synthesize=True, request_json=False, meta_info=None, tool_choice=None):
+    async def generate_stream(
+        self, messages, synthesize=True, request_json=False, meta_info=None, tool_choice=None, tools=None
+    ):
         if self.use_responses_api:
             if self._ws_transport:
                 async for chunk in self._generate_stream_ws_responses(
-                    messages, synthesize, request_json, meta_info, tool_choice
+                    messages, synthesize, request_json, meta_info, tool_choice, tools
                 ):
                     yield chunk
             else:
                 async for chunk in self._generate_stream_responses(
-                    messages, synthesize, request_json, meta_info, tool_choice
+                    messages, synthesize, request_json, meta_info, tool_choice, tools
                 ):
                     yield chunk
         else:
-            async for chunk in self._generate_stream_chat(messages, synthesize, request_json, meta_info, tool_choice):
+            async for chunk in self._generate_stream_chat(
+                messages, synthesize, request_json, meta_info, tool_choice, tools
+            ):
                 yield chunk
 
     async def _generate_stream_chat(
-        self, messages, synthesize=True, request_json=False, meta_info=None, tool_choice=None
+        self, messages, synthesize=True, request_json=False, meta_info=None, tool_choice=None, tools=None
     ):
         if not messages or len(messages) == 0:
             raise Exception("No messages provided")
@@ -241,16 +240,17 @@ class OpenAiLLM(OpenAICompatibleLLM):
             "messages": messages,
             "stream": True,
             "stream_options": {"include_usage": True},
-            "user": f"{self.run_id}#{meta_info['turn_id']}",
         }
 
         if not self.model.startswith(GPT5_MODEL_PREFIX):
             model_args["stop"] = ["User:"]
 
         if self.trigger_function_call:
-            model_args["tools"] = json.loads(self.tools) if isinstance(self.tools, str) else self.tools
-            model_args["tool_choice"] = tool_choice or "auto"
-            model_args["parallel_tool_calls"] = False
+            _tools = self._parse_tools(tools)
+            if _tools:  # omit tools when none are visible this turn (an empty array is a 400)
+                model_args["tools"] = _tools
+                model_args["tool_choice"] = tool_choice or "auto"
+                model_args["parallel_tool_calls"] = False
 
         answer, buffer = "", ""
         tools = model_args.get("tools", [])
@@ -282,7 +282,7 @@ class OpenAiLLM(OpenAICompatibleLLM):
             logger.error(f"OpenAI rate limit exceeded: {e}")
             raise
         except APIConnectionError as e:
-            logger.error(f"OpenAI connection error: {e}")
+            logger.error(f"OpenAI connection error: {e} | cause: {e.__cause__!r}")
             raise
         except APIError as e:
             logger.error(f"OpenAI API error: {e}")
@@ -357,9 +357,8 @@ class OpenAiLLM(OpenAICompatibleLLM):
                         text_tool_buffer = None
                         answer += remainder
                         buffer = remainder
-                elif re.search(r"functions\.\w", buffer + content):
+                elif (idx := self._find_text_tool_call_start(buffer + content, tools)) != -1:
                     combined = buffer + content
-                    idx = combined.find("functions.")
                     before = combined[:idx]
                     after = combined[idx:]
                     if before:
@@ -401,8 +400,8 @@ class OpenAiLLM(OpenAICompatibleLLM):
             if rescue_chunk:
                 yield rescue_chunk
             else:
-                logger.warning("Text tool call rescue failed, falling back to TTS")
-                buffer += captured_tool_text
+                # A functions.<name>(...) fragment is never speech; drop it rather than speak ids aloud.
+                logger.warning(f"Text tool call rescue failed, dropping fragment: {captured_tool_text[:80]!r}")
 
         if accumulator and accumulator.final_tool_calls:
             api_call_payload = accumulator.build_api_payload(model_args, meta_info, answer)
@@ -482,7 +481,7 @@ class OpenAiLLM(OpenAICompatibleLLM):
             logger.error(f"OpenAI rate limit exceeded: {e}")
             raise
         except APIConnectionError as e:
-            logger.error(f"OpenAI connection error: {e}")
+            logger.error(f"OpenAI connection error: {e} | cause: {e.__cause__!r}")
             raise
         except APIError as e:
             logger.error(f"OpenAI API error: {e}")
@@ -498,15 +497,16 @@ class OpenAiLLM(OpenAICompatibleLLM):
             return {"type": "text"}
 
     async def _generate_stream_ws_responses(
-        self, messages, synthesize=True, request_json=False, meta_info=None, tool_choice=None
+        self, messages, synthesize=True, request_json=False, meta_info=None, tool_choice=None, tools=None
     ):
         """Stream via persistent WebSocket — same interface as _generate_stream_responses."""
         if not messages:
             raise ValueError("No messages provided")
 
-        # store=False: WS previous_response_id uses connection-local cache, not server storage
+        # store=True activates server-side prompt-cache (cached_tokens in usage)
+        # on top of the WS connection-local cache. Storage is free per OpenAI.
         create_params, responses_tools = self._build_responses_create_kwargs(
-            messages, meta_info, request_json, tool_choice, store=False
+            messages, meta_info, request_json, tool_choice, store=True, tools=tools
         )
 
         # WS endpoint silently closes on float temperature — coerce to int
@@ -707,11 +707,10 @@ class OpenAiLLM(OpenAICompatibleLLM):
 
         self.started_streaming = False
 
-    def invalidate_response_chain(self):
-        response_id = self.previous_response_id
-        super().invalidate_response_chain()
-        if self._ws_transport and response_id:
-            asyncio.ensure_future(self._ws_transport.cancel_response(response_id))
+    def cancel_in_flight_response(self):
+        """Cancel the in-flight WS response; keeps previous_response_id alive."""
+        if self._ws_transport and self.previous_response_id:
+            asyncio.ensure_future(self._ws_transport.cancel_response(self.previous_response_id))
 
     async def close(self):
         # httpx client is shared via pool, don't close it here

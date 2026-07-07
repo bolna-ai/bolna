@@ -11,6 +11,7 @@ from websockets.asyncio.client import ClientConnection
 from websockets.exceptions import ConnectionClosedError, InvalidHandshake, ConnectionClosed
 
 from .base_transcriber import BaseTranscriber
+from bolna.constants import ELEVENLABS_REALTIME_MAX_KEYTERMS
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.ssl_context import get_ssl_context
 from bolna.helpers.utils import create_ws_data_packet, timestamp_ms
@@ -35,6 +36,7 @@ class ElevenLabsTranscriber(BaseTranscriber):
         commit_strategy="vad",
         include_timestamps=True,
         include_language_detection=True,
+        keywords=None,
         **kwargs,
     ):
         super().__init__(input_queue)
@@ -68,6 +70,17 @@ class ElevenLabsTranscriber(BaseTranscriber):
         # Note: self.vad_silence_threshold_secs is set above from endpointing
         self.include_timestamps = include_timestamps
         self.include_language_detection = include_language_detection
+
+        # Keyterm biasing: comma-separated config string -> array of terms (Scribe takes no weights)
+        self.keyterms = []
+        if keywords and isinstance(keywords, str):
+            self.keyterms = [kw.strip() for kw in keywords.split(",") if kw.strip()]
+            if len(self.keyterms) > ELEVENLABS_REALTIME_MAX_KEYTERMS:
+                logger.warning(
+                    f"ElevenLabs realtime supports up to {ELEVENLABS_REALTIME_MAX_KEYTERMS} keyterms; "
+                    f"got {len(self.keyterms)}, using the first {ELEVENLABS_REALTIME_MAX_KEYTERMS}."
+                )
+                self.keyterms = self.keyterms[:ELEVENLABS_REALTIME_MAX_KEYTERMS]
 
         # VAD tuning parameters - balanced for accuracy and latency
         # ElevenLabs valid ranges: vad_threshold (0.1-0.9), min_speech_duration_ms (50-2000), min_silence_duration_ms (50-2000)
@@ -142,12 +155,16 @@ class ElevenLabsTranscriber(BaseTranscriber):
             "include_language_detection": "true" if self.include_language_detection else "false",
         }
 
-        websocket_url = f"wss://{self.elevenlabs_host}/v1/speech-to-text/realtime?{urlencode(params)}"
+        # repeated query params: keyterms=a&keyterms=b
+        if self.keyterms:
+            params["keyterms"] = self.keyterms
+
+        websocket_url = f"wss://{self.elevenlabs_host}/v1/speech-to-text/realtime?{urlencode(params, doseq=True)}"
         logger.info(
             f"ElevenLabs WebSocket params - language: {self.language}, audio_format: {audio_format}, "
             f"vad_threshold: {self.vad_threshold}, min_speech_ms: {self.min_speech_duration_ms}, "
             f"min_silence_ms: {self.min_silence_duration_ms}, vad_silence_secs: {self.vad_silence_threshold_secs}, "
-            f"lang_detection: {self.include_language_detection}"
+            f"lang_detection: {self.include_language_detection}, keyterms: {len(self.keyterms)}"
         )
         return websocket_url
 

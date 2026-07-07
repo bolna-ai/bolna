@@ -13,6 +13,7 @@ from .enums import (
     ExpressionLogic,
     EdgeConditionType,
     NodeType,
+    VariableType,
 )
 from .constants import MODEL_REASONING_EFFORT_MAP
 
@@ -251,15 +252,45 @@ class RerankerConfig(BaseModel):
 
 
 class LanceDBProviderConfig(BaseModel):
-    vector_id: str
+    # extra="allow" keeps call-time enrichment fields (chunk_size, overlapping) that the
+    # backend injects into provider_config before sending the config to the engine.
+    model_config = {"extra": "allow"}
+
+    vector_id: Optional[str] = None
+    vector_ids: Optional[List[str]] = None
     similarity_top_k: Optional[int] = 5
     score_threshold: Optional[float] = 0.1
     reranker: Optional[RerankerConfig] = RerankerConfig()  # Default to disabled reranker
 
+    @model_validator(mode="after")
+    def require_vector_identifier(self):
+        if not self.vector_id and not self.vector_ids:
+            raise ValueError("Either vector_id or vector_ids must be provided")
+        return self
+
 
 class VectorStore(BaseModel):
     provider: str
-    provider_config: Union[LanceDBProviderConfig, MongoDBProviderConfig]
+    provider_config: Union[LanceDBProviderConfig, MongoDBProviderConfig] = Field(union_mode="left_to_right")
+
+
+class UsedSource(BaseModel):
+    rag_id: Optional[str] = None
+    vector_id: Optional[str] = None
+    source: Optional[str] = None
+
+
+class RagConfig(BaseModel):
+    """Canonical knowledge-base config shared by the knowledgebase agent, graph agents
+    (global) and graph nodes. used_sources is populated server-side at call time.
+    """
+
+    # extra="allow" preserves server-injected enrichment keys and any node-level extras.
+    model_config = {"extra": "allow"}
+
+    vector_store: VectorStore
+    similarity_top_k: Optional[int] = None
+    used_sources: Optional[List[UsedSource]] = None
 
 
 class Llm(BaseModel):
@@ -355,15 +386,6 @@ class GraphEdge(BaseModel):
     priority: Optional[int] = None  # lower = evaluated first. Defaults: expression/unconditional=0, llm=100
 
 
-class GraphNodeRAGConfig(BaseModel):
-    """RAG configuration for Graph Agent nodes."""
-
-    vector_store: VectorStore
-    temperature: Optional[float] = 0.7
-    model: Optional[str] = "gpt-4"
-    max_tokens: Optional[int] = 150
-
-
 class GraphNode(BaseModel):
     id: str
     description: Optional[str] = None
@@ -375,7 +397,30 @@ class GraphNode(BaseModel):
     edges: List[GraphEdge] = Field(default_factory=list)
     function_call: Optional[str] = None
     completion_check: Optional[Callable[[List[dict]], bool]] = None
-    rag_config: Optional[GraphNodeRAGConfig] = None
+    rag_config: Optional[RagConfig] = None
+
+    @model_validator(mode="after")
+    def validate_router_node(self):
+        """A router node dispatches silently: it never speaks and must have a
+        catch-all so it always advances."""
+        if self.node_type != NodeType.ROUTER:
+            return self
+
+        if self.prompt or self.static_message:
+            raise ValueError(f"Router node '{self.id}' must not set a prompt or static_message; it never speaks.")
+
+        for edge in self.edges:
+            if edge.condition_type == EdgeConditionType.EVENT:
+                raise ValueError(
+                    f"Router node '{self.id}' edge to '{edge.to_node_id}' cannot be an event edge; "
+                    f"a call never rests on a router, so event edges there would never fire."
+                )
+
+        if not any(edge.condition_type == EdgeConditionType.UNCONDITIONAL for edge in self.edges):
+            raise ValueError(
+                f"Router node '{self.id}' must have one unconditional catch-all edge so it always advances."
+            )
+        return self
 
 
 class GraphAgentConfig(Llm):
@@ -383,6 +428,11 @@ class GraphAgentConfig(Llm):
     nodes: List[GraphNode]
     current_node_id: str
     context_data: Optional[dict] = None
+    # Variable path -> declared type, used to coerce expression-routing comparisons into
+    # the right domain. Keys match the condition's variable exactly (e.g. "recipient_data.age").
+    variable_types: Optional[Dict[str, VariableType]] = None
+    # Global knowledge base. Nodes without their own rag_config fall back to this at retrieval time.
+    rag_config: Optional[RagConfig] = None
     # Routing configuration
     routing_model: Optional[str] = None  # Model for routing decisions (default: same as main model)
     routing_provider: Optional[str] = None  # Provider for routing (e.g., "groq" for fast inference)
@@ -400,6 +450,41 @@ class GraphAgentConfig(Llm):
             target_model = self.routing_model or self.model
             if target_model is not None:
                 validate_reasoning_effort_for_model(target_model, effort_value)
+        return self
+
+    @model_validator(mode="after")
+    def validate_router_graph(self):
+        """Router edges must target existing nodes, and routers must not cycle among
+        themselves (either would leave the chain unable to reach a speaking node)."""
+        router_nodes = [n for n in self.nodes if n.node_type == NodeType.ROUTER]
+        if not router_nodes:
+            return self
+
+        node_ids = {n.id for n in self.nodes}
+        for node in router_nodes:
+            for edge in node.edges:
+                if edge.to_node_id not in node_ids:
+                    raise ValueError(f"Router node '{node.id}' routes to unknown node '{edge.to_node_id}'.")
+
+        router_ids = {n.id for n in router_nodes}
+        adjacency = {n.id: [e.to_node_id for e in n.edges if e.to_node_id in router_ids] for n in router_nodes}
+
+        WHITE, GRAY, BLACK = 0, 1, 2
+        color = {rid: WHITE for rid in router_ids}
+
+        def has_cycle(rid):
+            color[rid] = GRAY
+            for nxt in adjacency.get(rid, []):
+                if color[nxt] == GRAY or (color[nxt] == WHITE and has_cycle(nxt)):
+                    return True
+            color[rid] = BLACK
+            return False
+
+        for rid in router_ids:
+            if color[rid] == WHITE and has_cycle(rid):
+                raise ValueError(
+                    f"Router nodes form a cycle involving '{rid}'; a router chain must terminate at a non-router node."
+                )
         return self
 
 

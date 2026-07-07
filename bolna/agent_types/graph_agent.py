@@ -3,7 +3,7 @@ from collections import defaultdict
 import os
 import re
 import time
-from openai import OpenAI
+from openai import OpenAI, AzureOpenAI
 from dotenv import load_dotenv
 import json
 
@@ -19,8 +19,8 @@ from bolna.helpers.utils import (
     DictWithMissing,
     get_md5_hash,
 )
-from bolna.helpers.expression_evaluator import evaluate_edge_expression
-from bolna.enums import EdgeConditionType, NodeType
+from bolna.helpers.expression_evaluator import evaluate_edge_expression, describe_edge_expression
+from bolna.enums import EdgeConditionType, NodeType, ToolScope
 from bolna.llms.types import LLMStreamChunk, LatencyData
 from bolna.llms import OpenAiLLM
 from bolna.providers import SUPPORTED_LLM_PROVIDERS
@@ -41,7 +41,20 @@ load_dotenv()
 logger = configure_logger(__name__)
 
 _DETERMINISTIC_REASONING_PREFIX = "deterministic:"
+_ROUTER_REASONING_PREFIX = f"{_DETERMINISTIC_REASONING_PREFIX}router:"
 _PROMPT_VAR_PATTERN = re.compile(r"\{([a-zA-Z_][a-zA-Z0-9_]*)\}")
+
+# Time variables frozen per call for the conversation prompt; see _prompt_context.
+_TIME_VAR_KEYS = (
+    "current_date",
+    "current_time",
+    "current_hour",
+    "current_minute",
+    "current_weekday",
+    "current_day",
+    "current_month",
+    "current_year",
+)
 
 
 class GraphAgent(BaseAgent):
@@ -51,6 +64,7 @@ class GraphAgent(BaseAgent):
         self.agent_information = self.config.get("agent_information")
         self.current_node_id = self.config.get("current_node_id")
         self.context_data = self.config.get("context_data") or {}
+        self.variable_types = self.config.get("variable_types") or {}
         self.llm_model = self.config.get("model")
 
         # Get credentials from config (injected by task_manager) or fall back to env vars
@@ -68,7 +82,10 @@ class GraphAgent(BaseAgent):
         self.current_node_entry_index = 0
         self._silence_repeats = 0
         self._event_triggered_generation = False
+        self._last_deterministic_eval = None
+        self._frozen_time_vars: Optional[Dict[str, Any]] = None
         self.rag_configs = self.initialize_rag_configs()
+        self.global_rag_config = self._initialize_global_rag_config()
         self.rag_server_url = os.getenv("RAG_SERVER_URL", "http://localhost:8000")
 
         # Cache transition tools per node for faster routing (bounded to prevent unbounded growth)
@@ -81,6 +98,7 @@ class GraphAgent(BaseAgent):
         self.routing_instructions = self.config.get("routing_instructions")  # Custom routing instructions
         self.routing_reasoning_effort = self.config.get("routing_reasoning_effort")
         self.routing_max_tokens = self.config.get("routing_max_tokens")
+        self.service_tier = self.config.get("service_tier")
         logger.info(
             f"GraphAgent routing_instructions loaded: {bool(self.routing_instructions)} (length: {len(self.routing_instructions) if self.routing_instructions else 0})"
         )
@@ -136,46 +154,78 @@ class GraphAgent(BaseAgent):
             logger.error(f"Failed to create LLM: {e}, falling back to default OpenAiLLM")
             return OpenAiLLM(model=self.llm_model or "gpt-4o-mini", llm_key=self.llm_key or os.getenv("OPENAI_API_KEY"))
 
+    @staticmethod
+    def _extract_rag_collections(rag_config: Dict) -> List[str]:
+        """Extract collection/vector IDs from a rag_config dict, supporting all known formats."""
+        collections = []
+        legacy_pc = rag_config.get("provider_config") if isinstance(rag_config.get("provider_config"), dict) else {}
+        provider_config = (rag_config.get("vector_store") or {}).get("provider_config") or {}
+        # Prefer the first location that actually carries a vector id; a present-but-empty
+        # field (e.g. top-level "vector_ids": []) must not shadow a valid vector_store.
+        if isinstance(rag_config.get("vector_ids"), list) and rag_config["vector_ids"]:
+            collections.extend(rag_config["vector_ids"])
+        elif rag_config.get("vector_id"):
+            collections.append(rag_config["vector_id"])
+        elif legacy_pc.get("vector_id"):
+            collections.append(legacy_pc["vector_id"])
+        elif isinstance(provider_config.get("vector_ids"), list) and provider_config["vector_ids"]:
+            collections.extend(provider_config["vector_ids"])
+        elif provider_config.get("vector_id"):
+            collections.append(provider_config["vector_id"])
+        return [c for c in collections if c]
+
+    @staticmethod
+    def _extract_similarity_top_k(rag_config: Dict, default: int = 10) -> int:
+        provider_config = (rag_config.get("vector_store") or {}).get("provider_config") or {}
+        return rag_config.get("similarity_top_k") or provider_config.get("similarity_top_k") or default
+
     def initialize_rag_configs(self) -> Dict[str, Dict]:
         """Initialize RAG configurations for each node."""
         rag_configs = {}
         for node in self.config.get("nodes", []):
             rag_config = node.get("rag_config")
-            if rag_config:
-                # Extract collection/vector IDs
-                collections = []
-                # Legacy: direct vector_id on rag_config
-                if "vector_id" in rag_config:
-                    collections.append(rag_config["vector_id"])
-                # Legacy: rag_config.provider_config.vector_id
-                elif (
-                    "provider_config" in rag_config
-                    and isinstance(rag_config.get("provider_config"), dict)
-                    and "vector_id" in rag_config["provider_config"]
-                ):
-                    collections.append(rag_config["provider_config"]["vector_id"])
-                # New: rag_config.vector_store.provider_config.vector_id
-                else:
-                    try:
-                        vector_store = rag_config.get("vector_store") or {}
-                        provider_config = vector_store.get("provider_config") or {}
-                        vs_vector_id = provider_config.get("vector_id")
-                        if vs_vector_id:
-                            collections.append(vs_vector_id)
-                    except Exception:
-                        pass
+            if not rag_config:
+                continue
 
-                rag_configs[node["id"]] = {
-                    "collections": collections,
-                    "similarity_top_k": rag_config.get("similarity_top_k", 10),
-                    "temperature": rag_config.get("temperature", 0.7),
-                    "model": rag_config.get("model", "gpt-4o"),
-                    "max_tokens": rag_config.get("max_tokens", 150),
-                }
+            collections = self._extract_rag_collections(rag_config)
+            # Nodes without resolvable collections fall back to the global rag_config
+            if not collections:
+                continue
 
-                logger.info(f"Initialized RAG config for node {node['id']} with collections: {collections}")
+            rag_configs[node["id"]] = {
+                "collections": collections,
+                "similarity_top_k": self._extract_similarity_top_k(rag_config),
+            }
+
+            logger.info(f"Initialized RAG config for node {node['id']} with collections: {collections}")
 
         return rag_configs
+
+    def _initialize_global_rag_config(self) -> Dict:
+        """Initialize the agent-level RAG config (same shape as KnowledgeBaseAgent's rag_config)."""
+        rag_config = self.config.get("rag_config")
+        if not rag_config:
+            return {}
+
+        collections = []
+        used_sources = rag_config.get("used_sources")
+        if used_sources:
+            collections = [
+                source["vector_id"] for source in used_sources if isinstance(source, dict) and source.get("vector_id")
+            ]
+        if not collections:
+            collections = self._extract_rag_collections(rag_config)
+
+        if not collections:
+            logger.warning("Global rag_config present but no collections resolved")
+            return {}
+
+        logger.info(f"Initialized global RAG config with collections: {collections}")
+        return {
+            "collections": collections,
+            "similarity_top_k": self._extract_similarity_top_k(rag_config),
+            "used_sources": used_sources or [],
+        }
 
     def _init_routing_client(self):
         """Initialize routing client. Uses Groq if available, else OpenAI."""
@@ -199,6 +249,17 @@ class GraphAgent(BaseAgent):
                 self.routing_client = self.openai
                 self.routing_provider = "openai"
                 self.routing_model = os.getenv("DEFAULT_ROUTING_MODEL_OPENAI", "gpt-4.1-mini")
+        elif self.routing_provider == "azure":
+            azure_endpoint = self.base_url or os.getenv("AZURE_OPENAI_ENDPOINT")
+            api_version = self.config.get("api_version") or os.getenv("AZURE_OPENAI_API_VERSION", "2024-12-01-preview")
+            self.routing_client = AzureOpenAI(
+                azure_endpoint=azure_endpoint, api_key=self.llm_key, api_version=api_version
+            )
+            if self.routing_model:
+                self.routing_model = self.routing_model.split("/", 1)[-1]
+            else:
+                self.routing_model = os.getenv("DEFAULT_ROUTING_MODEL_AZURE", "gpt-4.1-mini")
+            logger.info(f"Routing initialized with Azure ({self.routing_model})")
         else:
             self.routing_client = self.openai
             if not self.routing_model:
@@ -362,12 +423,17 @@ class GraphAgent(BaseAgent):
         llm.sort(key=lambda e: e["priority"] if e.get("priority") is not None else 100)
         return deterministic, llm
 
-    def _evaluate_deterministic_edges(self, edges: list) -> Optional[dict]:
-        """Return first matching deterministic edge, or None."""
+    def _evaluate_deterministic_edges(self, edges: list) -> Tuple[Optional[dict], List[str]]:
+        """Return (first matching deterministic edge or None, per-edge evaluation traces)."""
+        evaluations = []
         for edge in edges:
-            if evaluate_edge_expression(edge, self.context_data):
-                return edge
-        return None
+            is_match = evaluate_edge_expression(edge, self.context_data, self.variable_types)
+            evaluations.append(
+                f"-> {edge.get('to_node_id')}: {describe_edge_expression(edge, self.context_data, self.variable_types)} | matched={is_match}"
+            )
+            if is_match:
+                return edge, evaluations
+        return None, evaluations
 
     def process_event(self, event: dict) -> dict:
         """Process an external event. Merges properties into context_data
@@ -404,7 +470,7 @@ class GraphAgent(BaseAgent):
                     self.node_history.append(self.current_node_id)
 
                 target_node = self.get_node_by_id(edge["to_node_id"])
-                node_type = target_node.get("node_type", NodeType.LLM) if target_node else NodeType.LLM
+                node_type = self._node_type_of(target_node)
 
                 logger.info(f"Event '{event_name}' matched edge: {previous_node} -> {self.current_node_id}")
                 return {
@@ -422,13 +488,208 @@ class GraphAgent(BaseAgent):
         return {"matched": False, "event": event_name}
 
     def _compute_turn_counts(self, history: list) -> tuple:
-        """Count (node_turns, total_turns) from history."""
+        """Count (node_turns, total_turns) from history. A node just entered this
+        turn (entry_index == len(history), as during a router hop) has 0 node turns."""
         total_turns = sum(1 for msg in history if msg.get("role") == "user")
-        node_history = (
-            history[self.current_node_entry_index :] if self.current_node_entry_index < len(history) else history
-        )
+        node_history = history[self.current_node_entry_index :]
         node_turns = sum(1 for msg in node_history if msg.get("role") == "user")
         return node_turns, total_turns
+
+    def _enrich_routing_context(self, history: list) -> None:
+        """Refresh time variables and turn counts in context_data for expression evaluation."""
+        recipient_data = self.context_data.get("recipient_data")
+        timezone_str = recipient_data.get("timezone") if isinstance(recipient_data, dict) else None
+        if timezone_str:
+            enrich_context_with_time_variables(self.context_data, timezone_str)
+
+        node_turns, total_turns = self._compute_turn_counts(history)
+        self.context_data["_node_turns"] = node_turns
+        self.context_data["_total_turns"] = total_turns
+        self.context_data["_silence_repeats"] = self._silence_repeats
+
+    @staticmethod
+    def _node_type_of(node: Optional[dict]) -> str:
+        return node.get("node_type", NodeType.LLM) if node else NodeType.LLM
+
+    def _match_expression_edge(self, node: dict) -> Tuple[Optional[dict], str]:
+        """First matching expression edge in priority order, with the evaluation trace."""
+        deterministic_edges, _ = self._classify_edges(node.get("edges", []))
+        expression_edges = [e for e in deterministic_edges if e.get("condition_type") == EdgeConditionType.EXPRESSION]
+        matched_edge, evaluations = self._evaluate_deterministic_edges(expression_edges)
+        return matched_edge, "; ".join(evaluations) or "no expression edge matched"
+
+    @staticmethod
+    def _catch_all_edge(node: dict) -> Optional[dict]:
+        """Lowest-priority unconditional edge, matching the priority precedence used everywhere else."""
+        unconditional = [e for e in node.get("edges", []) if e.get("condition_type") == EdgeConditionType.UNCONDITIONAL]
+        if not unconditional:
+            return None
+        return min(unconditional, key=lambda e: e["priority"] if e.get("priority") is not None else 0)
+
+    def _router_hop_info(
+        self,
+        previous_node: str,
+        *,
+        routing_type: str,
+        latency_ms: float,
+        reasoning: Optional[str],
+        confidence: Optional[float],
+        is_silence_trigger: bool = False,
+        extracted_params: Optional[dict] = None,
+        routing_messages: Optional[List[dict]] = None,
+        routing_tools: Optional[List[dict]] = None,
+        routing_expression: Optional[str] = None,
+        routing_usage: Optional[dict] = None,
+    ) -> dict:
+        # A routing-LLM call happened whenever it produced messages, even on a hop that
+        # then fell back to the catch-all — so its model/usage stay attributed and counted.
+        made_llm_call = routing_messages is not None
+        return {
+            "previous_node": previous_node,
+            "current_node": self.current_node_id,
+            "transitioned": True,
+            "routing_type": routing_type,
+            "routing_model": self.routing_model if made_llm_call else None,
+            "routing_provider": self.routing_provider if made_llm_call else None,
+            "routing_latency_ms": round(latency_ms, 1),
+            "extracted_params": extracted_params or {},
+            "node_history": list(self.node_history),
+            "routing_messages": routing_messages,
+            "routing_tools": routing_tools,
+            "reasoning": reasoning,
+            "routing_expression": routing_expression,
+            "confidence": confidence,
+            "routing_usage": routing_usage,
+            "node_type": self._node_type_of(self.get_node_by_id(self.current_node_id)),
+            "is_silence_trigger": is_silence_trigger,
+        }
+
+    async def _resolve_router_chain(self, history: list) -> List[dict]:
+        """Hop silently through router nodes until a speaking node is reached, one
+        routing_info per hop. Each hop: expression edges first (priority order), then
+        intent edges via one routing-LLM call, then the unconditional catch-all. The
+        LLM is called at most once per chain so a chain never stacks routing latency;
+        the visited-set bounds the hops, so the chain always terminates."""
+        hops = []
+        visited = set()
+        intent_call_spent = False
+        is_silence_trigger = bool(history and history[-1].get("content", "").startswith("[silence]"))
+
+        while self._node_type_of(self.get_node_by_id(self.current_node_id)) == NodeType.ROUTER:
+            if self.current_node_id in visited:
+                logger.error(
+                    f"Router cycle detected at '{self.current_node_id}', stopping chain. "
+                    f"Flow: {' -> '.join(self.node_history)}"
+                )
+                break
+            visited.add(self.current_node_id)
+
+            hop_start = time.perf_counter()
+            self._enrich_routing_context(history)
+            router_node = self.get_node_by_id(self.current_node_id)
+            previous_node = self.current_node_id
+
+            edge, eval_trace = self._match_expression_edge(router_node)
+
+            # Telemetry from an intent call that returned no match, carried onto the
+            # catch-all hop so its tokens are still counted and the call is still logged.
+            spent_messages = spent_tools = spent_usage = None
+
+            if edge is None and not intent_call_spent:
+                _, intent_edges = self._classify_edges(router_node.get("edges", []))
+                if intent_edges:
+                    intent_call_spent = True
+                    (
+                        next_node_id,
+                        extracted_params,
+                        latency_ms,
+                        routing_messages,
+                        routing_tools,
+                        reasoning,
+                        confidence,
+                        routing_usage,
+                    ) = await self._decide_next_node_llm(router_node, intent_edges, history, hop_start)
+                    if next_node_id:
+                        self._advance_to_node(next_node_id, entry_index=len(history))
+                        if extracted_params:
+                            self.context_data.update(extracted_params)
+                        logger.info(
+                            f"Router dispatch (intent) on node '{previous_node}': -> {self.current_node_id} "
+                            f"| {reasoning} (latency: {latency_ms:.1f}ms)"
+                        )
+                        hops.append(
+                            self._router_hop_info(
+                                previous_node,
+                                routing_type="llm",
+                                latency_ms=latency_ms,
+                                reasoning=reasoning,
+                                confidence=confidence,
+                                is_silence_trigger=is_silence_trigger,
+                                extracted_params=extracted_params,
+                                routing_messages=routing_messages,
+                                routing_tools=routing_tools,
+                                routing_usage=routing_usage,
+                            )
+                        )
+                        continue
+                    spent_messages, spent_tools, spent_usage = routing_messages, routing_tools, routing_usage
+                    eval_trace = f"{eval_trace}; intent: no match"
+
+            if edge is None:
+                edge = self._catch_all_edge(router_node)
+            if edge is None:
+                logger.error(
+                    f"Router node '{self.current_node_id}' has no matching edge and no catch-all, "
+                    f"stopping chain. Evaluations: {eval_trace}"
+                )
+                break
+
+            self._advance_to_node(edge["to_node_id"], entry_index=len(history))
+            latency_ms = (time.perf_counter() - hop_start) * 1000
+            condition = edge.get("condition") or edge.get("condition_type", "router")
+
+            logger.info(
+                f"Router dispatch on node '{previous_node}': -> {self.current_node_id} "
+                f"| {eval_trace} (latency: {latency_ms:.1f}ms)"
+            )
+            hops.append(
+                self._router_hop_info(
+                    previous_node,
+                    routing_type="deterministic",
+                    latency_ms=latency_ms,
+                    reasoning=f"{_ROUTER_REASONING_PREFIX}{condition}",
+                    confidence=1.0,
+                    is_silence_trigger=is_silence_trigger,
+                    routing_expression=eval_trace,
+                    routing_messages=spent_messages,
+                    routing_tools=spent_tools,
+                    routing_usage=spent_usage,
+                )
+            )
+
+        return hops
+
+    def _advance_to_node(self, node_id: str, entry_index: int) -> None:
+        self.current_node_id = node_id
+        self.current_node_entry_index = entry_index
+        self._silence_repeats = 0
+        if not self.node_history or self.node_history[-1] != self.current_node_id:
+            self.node_history.append(self.current_node_id)
+
+    def _end_turn_chunk(self, meta_info: Optional[dict], start_time: float) -> LLMStreamChunk:
+        """Terminal empty end-of-stream chunk for a turn that produces no speech (a router
+        that could not resolve — only reachable via an invalid config that skipped
+        validation). Closes the stream on the end_of_llm_stream contract; the turn stays
+        silent and the next user turn resumes normally."""
+        return LLMStreamChunk(
+            data="",
+            end_of_stream=True,
+            latency=LatencyData(
+                sequence_id=meta_info.get("sequence_id") if meta_info else None,
+                first_token_latency_ms=0,
+                total_stream_duration_ms=now_ms() - start_time,
+            ),
+        )
 
     async def _decide_next_node_llm(
         self, node: dict, llm_edges: list, history: List[dict], start_time: float
@@ -467,7 +728,7 @@ class GraphAgent(BaseAgent):
             except Exception as e:
                 logger.debug(f"Variable substitution in routing_instructions failed: {e}")
 
-        node_objective = node.get("prompt", "")
+        node_objective = node.get("prompt") or node.get("description") or ""
         system_prompt = f"""Routing Guidelines: \n {instructions}\n Current Node: {node["id"]}{context_section} \n Node Objective: {node_objective}\n\n Node Conversation History:\n"""
 
         logger.debug(f"Routing system prompt:\n{system_prompt}")
@@ -520,6 +781,11 @@ class GraphAgent(BaseAgent):
                 routing_kwargs["max_tokens"] = self.routing_max_tokens or 250
                 routing_kwargs["temperature"] = 0.0
 
+            if self.routing_provider in ("openai", "azure") and self.service_tier:
+                routing_kwargs["service_tier"] = self.service_tier
+
+            self._routing_reasoning_effort_used = routing_kwargs.get("reasoning_effort")
+
             response = await asyncio.to_thread(self.routing_client.chat.completions.create, **routing_kwargs)
             latency_ms = (time.perf_counter() - start_time) * 1000
 
@@ -535,6 +801,7 @@ class GraphAgent(BaseAgent):
                     "cached_tokens": response.usage.prompt_tokens_details.cached_tokens
                     if response.usage.prompt_tokens_details
                     else None,
+                    "service_tier": getattr(response, "service_tier", None),
                 }
 
             # Extract the function call
@@ -594,6 +861,7 @@ class GraphAgent(BaseAgent):
     ]:
         """Two-phase routing: deterministic expressions first, then LLM fallback."""
         start_time = time.perf_counter()
+        self._last_deterministic_eval = None
 
         current_node = self.get_node_by_id(self.current_node_id)
         if not current_node:
@@ -606,32 +874,29 @@ class GraphAgent(BaseAgent):
             return None, None, 0, None, None, None, None, None
 
         # Inject time variables and turn counts for expression evaluation
-        timezone_str = (
-            self.context_data.get("recipient_data", {}).get("timezone")
-            if isinstance(self.context_data.get("recipient_data"), dict)
-            else None
-        )
-        if timezone_str:
-            enrich_context_with_time_variables(self.context_data, timezone_str)
-
-        node_turns, total_turns = self._compute_turn_counts(history)
-        self.context_data["_node_turns"] = node_turns
-        self.context_data["_total_turns"] = total_turns
-        self.context_data["_silence_repeats"] = self._silence_repeats
+        self._enrich_routing_context(history)
 
         deterministic_edges, llm_edges = self._classify_edges(edges)
 
         # Phase 1: deterministic (0ms)
         if deterministic_edges:
-            matched_edge = self._evaluate_deterministic_edges(deterministic_edges)
+            matched_edge, det_evaluations = self._evaluate_deterministic_edges(deterministic_edges)
+            self._last_deterministic_eval = "; ".join(det_evaluations)
             if matched_edge:
                 latency_ms = (time.perf_counter() - start_time) * 1000
                 ct = matched_edge.get("condition_type", EdgeConditionType.EXPRESSION)
                 reasoning = f"{_DETERMINISTIC_REASONING_PREFIX}{ct}:{matched_edge.get('condition', ct)}"
                 logger.info(
-                    f"Routing decision (deterministic): -> {matched_edge['to_node_id']} | {reasoning} (latency: {latency_ms:.1f}ms)"
+                    f"Routing decision (deterministic) on node '{self.current_node_id}': "
+                    f"-> {matched_edge['to_node_id']} | {self._last_deterministic_eval} (latency: {latency_ms:.1f}ms)"
                 )
                 return matched_edge["to_node_id"], None, latency_ms, None, None, reasoning, 1.0, None
+
+            logger.info(
+                f"No deterministic edge matched on node '{self.current_node_id}' "
+                f"({'falling back to LLM routing' if llm_edges else 'staying on node'}): "
+                f"{self._last_deterministic_eval}"
+            )
 
         # Phase 2: LLM
         if llm_edges:
@@ -692,6 +957,41 @@ class GraphAgent(BaseAgent):
         logger.info(f"Node '{self.current_node_id}' forcing specific function: {fn}")
         return {"type": "function", "function": {"name": fn}}
 
+    def _tools_for_node(self, node: Optional[dict], forced_name: Optional[str] = None) -> Optional[List[dict]]:
+        """Tools visible on this node (global + node-scoped + forced), or None to use the full set.
+
+        forced_name is the tool the resolved tool_choice forces this turn (or None); a forced tool
+        must stay visible for the tool_choice to be valid, but only when the force actually survives.
+        """
+        if not self.llm or not getattr(self.llm, "trigger_function_call", False):
+            return None
+        raw = getattr(self.llm, "tools", None)
+        if not raw:
+            return None
+        full = json.loads(raw) if isinstance(raw, str) else raw
+        if not full:
+            return None
+
+        api_params = getattr(self.llm, "api_params", {}) or {}
+        node_id = node.get("id") if node else None
+        forced = forced_name
+
+        subset = []
+        for tool in full:
+            name = tool.get("function", {}).get("name")
+            params = api_params.get(name, {}) or {}
+            if name == forced:
+                subset.append(tool)  # must stay visible so the forced tool_choice is valid
+            elif params.get("scope") == ToolScope.NODE.value:
+                if node_id is not None and node_id in (params.get("nodes") or []):
+                    subset.append(tool)
+            else:
+                subset.append(tool)
+
+        if len(subset) == len(full):
+            return None  # nothing filtered -> let generate_stream use self.tools
+        return subset
+
     def _missing_forced_function_vars(self, node: dict, fn: str) -> List[str]:
         tools = getattr(self.llm, "tools", None) or []
         if isinstance(tools, str):
@@ -722,8 +1022,27 @@ class GraphAgent(BaseAgent):
             return False
         return any(msg.get("role") == "tool" and msg.get("tool_call_id") in call_ids_for_fn for msg in node_history)
 
-    async def _build_messages(self, history: List[dict]) -> List[dict]:
-        """Build messages array: system prompt (+ optional RAG) + conversation history."""
+    def _prompt_context(self) -> Optional[dict]:
+        """Context for prompt substitution with time frozen at call start.
+
+        Routing re-enriches time live each turn for expression edges; the prompt
+        freezes it so its text stays identical across turns and the prompt cache
+        keeps hitting, matching normal agents which render time once at setup.
+        """
+        if not self.context_data or not isinstance(self.context_data.get("recipient_data"), dict):
+            return self.context_data
+        recipient = self.context_data["recipient_data"]
+        if self._frozen_time_vars is None:
+            timezone_str = recipient.get("timezone")
+            if timezone_str:
+                enrich_context_with_time_variables(self.context_data, timezone_str)
+            self._frozen_time_vars = {k: recipient[k] for k in _TIME_VAR_KEYS if k in recipient}
+        if not self._frozen_time_vars:
+            return self.context_data
+        return {**self.context_data, "recipient_data": {**recipient, **self._frozen_time_vars}}
+
+    async def _build_messages(self, history: List[dict], meta_info: Optional[dict] = None) -> List[dict]:
+        """Build messages array: system prompt + conversation history (+ optional trailing RAG)."""
         current_node = self.get_node_by_id(self.current_node_id)
         if not current_node:
             raise ValueError("Current node not found.")
@@ -731,22 +1050,22 @@ class GraphAgent(BaseAgent):
         detected_lang = self.context_data.get("detected_language")  # None if not yet detected
         node_prompt = self._get_prompt_with_example(current_node, detected_lang)
 
-        if self.context_data:
-            timezone_str = self.context_data.get("recipient_data", {}).get("timezone")
-            if timezone_str:
-                enrich_context_with_time_variables(self.context_data, timezone_str)
-            node_prompt = update_prompt_with_context(node_prompt, self.context_data)
+        prompt_context = self._prompt_context()
+        if prompt_context:
+            node_prompt = update_prompt_with_context(node_prompt, prompt_context)
 
         if self.agent_information:
             agent_info = self.agent_information
-            if self.context_data:
-                agent_info = update_prompt_with_context(agent_info, self.context_data)
+            if prompt_context:
+                agent_info = update_prompt_with_context(agent_info, prompt_context)
             prompt = f"{agent_info}\n\n{node_prompt}"
         else:
             prompt = node_prompt
 
-        # Try RAG if configured for this node
-        rag_config = self.rag_configs.get(self.current_node_id)
+        # RAG depends on the latest message, so it goes in a trailing message rather
+        # than the system prompt, keeping [system + history] a cacheable prefix.
+        rag_message = None
+        rag_config = self.rag_configs.get(self.current_node_id) or self.global_rag_config
         if rag_config and rag_config.get("collections"):
             try:
                 client = await RAGServiceClientSingleton.get_client(self.rag_server_url)
@@ -757,9 +1076,20 @@ class GraphAgent(BaseAgent):
                     max_results=rag_config.get("similarity_top_k", 10),
                     similarity_threshold=0.0,
                 )
+                if meta_info is not None:
+                    meta_info["rag_latency"] = {
+                        "sequence_id": meta_info.get("sequence_id"),
+                        "total_query_time_ms": rag_response.total_query_time_ms,
+                        "server_processing_time_ms": rag_response.server_processing_time_ms,
+                        "collections_count": len(rag_config["collections"]),
+                        "results_count": rag_response.total_results,
+                    }
                 if rag_response.contexts:
                     rag_context = await client.format_context_for_prompt(rag_response.contexts)
-                    prompt = f"{prompt}\n\nKnowledge base:\n{rag_context}\n\nUse this information naturally."
+                    rag_message = {
+                        "role": "system",
+                        "content": f"Knowledge base for the latest user message:\n{rag_context}\n\nUse this information naturally.",
+                    }
             except Exception as e:
                 logger.error(f"RAG error for node {self.current_node_id}: {e}")
 
@@ -768,7 +1098,10 @@ class GraphAgent(BaseAgent):
 
         # Pass conversation history as-is to preserve tool_calls/tool_call_id fields
         conversation = [msg for msg in history_subset if msg.get("role") != "system"]
-        return [{"role": "system", "content": prompt}] + conversation
+        messages = [{"role": "system", "content": prompt}] + conversation
+        if rag_message:
+            messages.append(rag_message)
+        return messages
 
     async def generate(self, message: List[dict], **kwargs) -> AsyncGenerator:
         meta_info = kwargs.get("meta_info", {})
@@ -785,7 +1118,7 @@ class GraphAgent(BaseAgent):
             if is_event:
                 self._event_triggered_generation = False
                 current_node = self.get_node_by_id(self.current_node_id)
-                node_type = current_node.get("node_type", NodeType.LLM) if current_node else NodeType.LLM
+                node_type = self._node_type_of(current_node)
 
                 yield {
                     "routing_info": {
@@ -808,6 +1141,16 @@ class GraphAgent(BaseAgent):
                     }
                 }
 
+                if node_type == NodeType.ROUTER:
+                    for hop in await self._resolve_router_chain(message):
+                        yield {"routing_info": hop}
+                    current_node = self.get_node_by_id(self.current_node_id)
+                    node_type = self._node_type_of(current_node)
+                    if node_type == NodeType.ROUTER:
+                        logger.error(f"Router '{self.current_node_id}' did not resolve to a speaking node")
+                        yield self._end_turn_chunk(meta_info, start_time)
+                        return
+
                 if node_type == NodeType.STATIC:
                     static_text = current_node.get("static_message", "") if current_node else ""
                     if static_text:
@@ -819,7 +1162,7 @@ class GraphAgent(BaseAgent):
                         }
                     return
 
-                messages = await self._build_messages(message)
+                messages = await self._build_messages(message, meta_info=meta_info)
                 # Inject ephemeral event hint (NOT persisted in conversation_history)
                 event_name = self.context_data.get("_last_event", "")
                 messages.append(
@@ -830,8 +1173,10 @@ class GraphAgent(BaseAgent):
                 )
                 yield {"messages": messages}
                 tool_choice = self._get_tool_choice_for_node(history=message)
+                forced_name = tool_choice["function"]["name"] if tool_choice else None
+                node_tools = self._tools_for_node(current_node, forced_name)
                 async for chunk in self.llm.generate_stream(
-                    messages, synthesize=synthesize, meta_info=meta_info, tool_choice=tool_choice
+                    messages, synthesize=synthesize, meta_info=meta_info, tool_choice=tool_choice, tools=node_tools
                 ):
                     yield chunk
                 return
@@ -840,56 +1185,74 @@ class GraphAgent(BaseAgent):
             if is_silence_trigger:
                 self._silence_repeats += 1
 
-            previous_node = self.current_node_id
-            (
-                next_node_id,
-                extracted_params,
-                routing_latency_ms,
-                routing_messages,
-                routing_tools,
-                reasoning,
-                confidence,
-                routing_usage,
-            ) = await self.decide_next_node_with_functions(message)
+            # Entry-node dispatch: the turn begins on a router start node. Resolve it
+            # and let the resolved node speak this turn — do NOT re-route it through
+            # decide_next (that would stack another routing call and could transition it
+            # away before it speaks, unlike a router reached mid-turn by a transition).
+            if self._node_type_of(self.get_node_by_id(self.current_node_id)) == NodeType.ROUTER:
+                for hop in await self._resolve_router_chain(message):
+                    yield {"routing_info": hop}
+            else:
+                previous_node = self.current_node_id
+                (
+                    next_node_id,
+                    extracted_params,
+                    routing_latency_ms,
+                    routing_messages,
+                    routing_tools,
+                    reasoning,
+                    confidence,
+                    routing_usage,
+                ) = await self.decide_next_node_with_functions(message)
 
-            if next_node_id:
-                logger.info(f"Transitioning: {self.current_node_id} -> {next_node_id} (params: {extracted_params})")
-                self.current_node_id = next_node_id
-                self.current_node_entry_index = len(message)
-                self._silence_repeats = 0
-                if extracted_params:
-                    self.context_data.update(extracted_params)
+                if next_node_id:
+                    logger.info(f"Transitioning: {self.current_node_id} -> {next_node_id} (params: {extracted_params})")
+                    self._advance_to_node(next_node_id, entry_index=len(message))
+                    if extracted_params:
+                        self.context_data.update(extracted_params)
 
-            if next_node_id and (not self.node_history or self.node_history[-1] != self.current_node_id):
-                self.node_history.append(self.current_node_id)
+                routing_type = (
+                    "deterministic" if (reasoning and reasoning.startswith(_DETERMINISTIC_REASONING_PREFIX)) else "llm"
+                )
+                node_type = self._node_type_of(self.get_node_by_id(self.current_node_id))
 
-            routing_type = (
-                "deterministic" if (reasoning and reasoning.startswith(_DETERMINISTIC_REASONING_PREFIX)) else "llm"
-            )
-
-            current_node = self.get_node_by_id(self.current_node_id)
-            node_type = current_node.get("node_type", NodeType.LLM) if current_node else NodeType.LLM
-
-            yield {
-                "routing_info": {
-                    "previous_node": previous_node,
-                    "current_node": self.current_node_id,
-                    "transitioned": next_node_id is not None,
-                    "routing_type": routing_type,
-                    "routing_model": self.routing_model,
-                    "routing_provider": getattr(self, "routing_provider", None),
-                    "routing_latency_ms": round(routing_latency_ms, 1),
-                    "extracted_params": extracted_params or {},
-                    "node_history": list(self.node_history),
-                    "routing_messages": routing_messages,
-                    "routing_tools": routing_tools,
-                    "reasoning": reasoning,
-                    "confidence": confidence,
-                    "routing_usage": routing_usage,
-                    "node_type": node_type,
-                    "is_silence_trigger": is_silence_trigger,
+                yield {
+                    "routing_info": {
+                        "previous_node": previous_node,
+                        "current_node": self.current_node_id,
+                        "transitioned": next_node_id is not None,
+                        "routing_type": routing_type,
+                        "routing_model": self.routing_model,
+                        "routing_provider": getattr(self, "routing_provider", None),
+                        "routing_latency_ms": round(routing_latency_ms, 1),
+                        "routing_reasoning_effort": getattr(self, "_routing_reasoning_effort_used", None),
+                        "extracted_params": extracted_params or {},
+                        "node_history": list(self.node_history),
+                        "routing_messages": routing_messages,
+                        "routing_tools": routing_tools,
+                        "reasoning": reasoning,
+                        "routing_expression": self._last_deterministic_eval,
+                        "confidence": confidence,
+                        "routing_usage": routing_usage,
+                        "node_type": node_type,
+                        "is_silence_trigger": is_silence_trigger,
+                    }
                 }
-            }
+
+                # Silent deterministic dispatch: if the transition landed on a router,
+                # resolve the chain in this turn until a speaking node is reached.
+                if node_type == NodeType.ROUTER:
+                    for hop in await self._resolve_router_chain(message):
+                        yield {"routing_info": hop}
+
+            # A router that could not resolve (invalid config that bypassed validation)
+            # ends the turn cleanly rather than speaking from an empty node prompt.
+            current_node = self.get_node_by_id(self.current_node_id)
+            node_type = self._node_type_of(current_node)
+            if node_type == NodeType.ROUTER:
+                logger.error(f"Router '{self.current_node_id}' did not resolve to a speaking node")
+                yield self._end_turn_chunk(meta_info, start_time)
+                return
 
             if node_type == NodeType.STATIC:
                 static_text = current_node.get("static_message", "") if current_node else ""
@@ -902,11 +1265,13 @@ class GraphAgent(BaseAgent):
                     }
                 return
 
-            messages = await self._build_messages(message)
+            messages = await self._build_messages(message, meta_info=meta_info)
             yield {"messages": messages}
             tool_choice = self._get_tool_choice_for_node(history=message)
+            forced_name = tool_choice["function"]["name"] if tool_choice else None
+            node_tools = self._tools_for_node(current_node, forced_name)
             async for chunk in self.llm.generate_stream(
-                messages, synthesize=synthesize, meta_info=meta_info, tool_choice=tool_choice
+                messages, synthesize=synthesize, meta_info=meta_info, tool_choice=tool_choice, tools=node_tools
             ):
                 yield chunk
 

@@ -7,6 +7,9 @@ PCM16_SCALE = 32768.0
 OPENAI_TRANSCRIBER_HEARTBEAT_INTERVAL_S = 5
 OPENAI_TRANSCRIBER_UTTERANCE_TIMEOUT_S = 0.5
 
+# ElevenLabs realtime (scribe_v2_realtime) accepts up to 50 keyterms for biasing.
+ELEVENLABS_REALTIME_MAX_KEYTERMS = 50
+
 # Deepgram Flux defaults — all overridable via agent transcriber config
 DEEPGRAM_FLUX_EOT_THRESHOLD = 0.7  # confidence to declare end-of-turn
 DEEPGRAM_FLUX_EAGER_EOT_THRESHOLD = 0.5  # confidence to trigger speculative LLM early
@@ -15,6 +18,14 @@ DEEPGRAM_FLUX_EOT_TIMEOUT_MS = 500  # max silence before forcing end-of-turn
 DEEPGRAM_FLUX_TURN_STALL_FLOOR_S = 3.0
 # Min idle time before the inactivity backstop hangs up; kept above hangup_after_silence.
 STALL_HANGUP_FLOOR_S = 20.0
+
+# Soniox real-time STT
+SONIOX_WEBSOCKET_HOST = "stt-rt.soniox.com"
+SONIOX_ENDPOINT_TOKEN = "<end>"  # sentinel token emitted when the speaker stops
+# Hinted for multilingual auto-detect: Soniox identifies and code-switches across these in one
+# stream; hinting the relevant set sharpens accuracy over fully-open auto. No real-time as/od.
+SONIOX_DEFAULT_MULTILINGUAL_HINTS = ["en", "hi", "ta", "te", "kn", "ml", "mr", "bn", "gu", "pa", "ur"]
+SONIOX_AUTO_LANGUAGE_VALUES = {"", "multi", "auto", "multilingual", "unknown"}
 
 # Model prefixes
 GPT5_MODEL_PREFIX = "gpt-5"
@@ -154,6 +165,9 @@ LLM_DEFAULT_CONFIGS = {
     "google": {"model": "gemini-2.5-flash", "provider": "google"},
 }
 
+# Legacy language-switch tool, injected into the main LLM on multilingual agents
+# when the LLM-driven switch flow is NOT enabled (tools_config["llm_language_switch"]
+# false/absent) — restored from master for the feature-flag fallback path.
 SWITCH_LANGUAGE_TOOL_DEFINITION = {
     "type": "function",
     "function": {
@@ -200,6 +214,21 @@ END_CALL_TOOL_DEFINITION = {
 SARVAM_MODEL_SAMPLING_RATE_MAPPING = {
     "bulbul:v2": 22050,
     "bulbul:v3": 22050,  # NOTE: Documentation claims 24000, but WAV header shows 22050
+}
+
+# bulbul TTS requires a concrete target_language_code (no "unknown"/auto).
+SARVAM_TTS_SUPPORTED_LANGUAGES = {
+    "en-IN",
+    "hi-IN",
+    "bn-IN",
+    "ta-IN",
+    "te-IN",
+    "kn-IN",
+    "ml-IN",
+    "mr-IN",
+    "gu-IN",
+    "pa-IN",
+    "od-IN",
 }
 
 MODEL_REASONING_EFFORT_MAP = {
