@@ -94,7 +94,28 @@ class VoicemailHandler:
         except Exception as e:
             logger.error(f"Error starting voicemail check background task: {e}")
 
+    def _record_latency(self, meta_info: dict, latency_ms=None, metadata: Optional[dict] = None, cancelled: bool = False) -> None:
+        """Append a voicemail_check entry to other_latencies. Mirrors the hangup_check record
+        (ts_ms + turn_id) so it can be placed on the timeline. Also called on cancellation so a
+        check interrupted by the call ending is still visible in observability."""
+        metadata = metadata or {}
+        record = {
+            "type": "voicemail_check",
+            "latency_ms": latency_ms,
+            "model": self.llm_model,
+            "provider": "openai",  # TODO: Make dynamic based on provider used
+            "service_tier": metadata.get("service_tier"),
+            "llm_host": metadata.get("llm_host"),
+            "sequence_id": meta_info.get("sequence_id"),
+            "turn_id": meta_info.get("turn_id"),
+            "ts_ms": round(time.time() * 1000 - self.tm.conversation_start_init_ts, 2),
+        }
+        if cancelled:
+            record["cancelled"] = True
+        self.tm.llm_latencies.other_latencies.append(record)
+
     async def _background_check(self, transcriber_message: str, meta_info: dict, is_final: bool) -> None:
+        check_start = time.time()
         try:
             if "llm_agent" not in self.tm.tools or not hasattr(self.tm.tools["llm_agent"], "check_for_voicemail"):
                 logger.warning("Voicemail detection enabled but llm_agent doesn't support check_for_voicemail")
@@ -124,17 +145,7 @@ class VoicemailHandler:
                 else False
             )
 
-            self.tm.llm_latencies.other_latencies.append(
-                {
-                    "type": "voicemail_check",
-                    "latency_ms": metadata.get("latency_ms", None),
-                    "model": self.llm_model,
-                    "provider": "openai",  # TODO: Make dynamic based on provider used
-                    "service_tier": metadata.get("service_tier", None),
-                    "llm_host": metadata.get("llm_host", None),
-                    "sequence_id": meta_info.get("sequence_id"),
-                }
-            )
+            self._record_latency(meta_info, latency_ms=metadata.get("latency_ms"), metadata=metadata)
 
             convert_to_request_log(
                 message=voicemail_result,
@@ -154,6 +165,12 @@ class VoicemailHandler:
                 self.detected = True
                 self.tm.hangup_detail = HangupReason.VOICEMAIL_DETECTED
                 await self._handle_detected()
+        except asyncio.CancelledError:
+            # Call ended (or barge-in) while the check was still awaiting the LLM. CancelledError is a
+            # BaseException, so the `except Exception` below would miss it — record the attempt (with the
+            # elapsed time) so a cancelled check is still visible, then re-raise to honour cancellation.
+            self._record_latency(meta_info, latency_ms=round((time.time() - check_start) * 1000, 2), cancelled=True)
+            raise
         except Exception as e:
             logger.error(f"Error during background voicemail detection: {e}")
 
