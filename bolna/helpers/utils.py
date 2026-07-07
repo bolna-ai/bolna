@@ -426,6 +426,13 @@ def convert_audio_to_wav(audio_bytes, source_format="flac"):
     return buffer.getvalue()
 
 
+def wav_bytes_to_mp3(wav_bytes):
+    audio = AudioSegment.from_file(io.BytesIO(wav_bytes), format="wav")
+    buffer = io.BytesIO()
+    audio.export(buffer, format="mp3")
+    return buffer.getvalue()
+
+
 def resample(audio_bytes, target_sample_rate, format="mp3", pcm_channels=1, original_sample_rate=None):
     """
     Resample audio bytes
