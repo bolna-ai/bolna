@@ -3635,6 +3635,7 @@ class TaskManager(BaseManager):
                     meta_info["end_of_llm_stream"] = True
                     meta_info["text"] = static_text
                     meta_info["cached"] = True
+                    meta_info["message_category"] = "static_node"
                     ws_packet = create_ws_data_packet(static_hash, meta_info=meta_info, is_md5_hash=True)
                     await self._synthesize(ws_packet)
                     return
@@ -5805,16 +5806,20 @@ class TaskManager(BaseManager):
             # TODO: Either load IVR audio into memory before call or user s3 iter_cunks
             # This will help with interruption in IVR
             audio_chunk = None
+            static_node_audio = meta_info.get("message_category") in ("static_node", "event_proactive")
             if self.turn_based_conversation or self.task_config["tools_config"]["output"]["provider"] == "default":
+                # Static-node clips are pre-generated as mp3 keyed by md5(text); fetch that
+                # format explicitly rather than the output format, which may differ (e.g. wav).
+                audio_format = "mp3" if static_node_audio else self.task_config["tools_config"]["output"]["format"]
                 audio_chunk = await get_raw_audio_bytes(
                     text,
                     self.assistant_name,
-                    self.task_config["tools_config"]["output"]["format"],
+                    audio_format,
                     local=self.is_local,
                     assistant_id=self.assistant_id,
                 )
                 logger.info("Sending preprocessed audio")
-                meta_info["format"] = self.task_config["tools_config"]["output"]["format"]
+                meta_info["format"] = audio_format
                 meta_info["end_of_synthesizer_stream"] = True
                 await self.tools["output"].handle(create_ws_data_packet(audio_chunk, meta_info))
             else:
@@ -5828,6 +5833,21 @@ class TaskManager(BaseManager):
                         logger.info(f"Got to convert it to pcm")
                         audio_chunk = wav_bytes_to_pcm(resample(audio, format="wav", target_sample_rate=8000))
                         meta_info["format"] = "pcm"
+                elif static_node_audio:
+                    logger.info(f"Getting static node audio {text} from S3")
+                    audio = await get_raw_audio_bytes(
+                        text, self.assistant_name, "mp3", assistant_id=self.assistant_id, local=self.is_local
+                    )
+                    yield_in_chunks = False
+                    if audio is not None:
+                        audio_chunk = wav_bytes_to_pcm(resample(audio, format="mp3", target_sample_rate=8000))
+                        meta_info["format"] = "pcm"
+                    else:
+                        # Cache miss: synthesize live from the resolved text so the node still speaks.
+                        logger.info("Static node audio missing in S3; synthesizing live")
+                        meta_info["cached"] = False
+                        await self._synthesize(create_ws_data_packet(meta_info["text"], meta_info=meta_info))
+                        return
                 else:
                     start_time = time.perf_counter()
                     audio_chunk = self.preloaded_welcome_audio if self.preloaded_welcome_audio else None
