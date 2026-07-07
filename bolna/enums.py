@@ -18,6 +18,7 @@ class TelephonyProvider(str, Enum):
     PLIVO = "plivo"
     VOBIZ = "vobiz"
     SIP_TRUNK = "sip-trunk"
+    FREESWITCH = "freeswitch"  # linear16 16k in / 24k out (not ulaw/8k) — deliberately not a telephony_provider
     DEFAULT = "default"
     DATABASE = "database"
 

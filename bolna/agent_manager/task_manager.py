@@ -1131,6 +1131,13 @@ class TaskManager(BaseManager):
                 output_kwargs["is_web_based_call"] = self.is_web_based_call
                 output_kwargs["mark_event_meta_data"] = self.mark_event_meta_data
 
+            # FreeSWITCH streams PCM @ self.sampling_rate; no mark echo → self-complete via
+            # input_handler (input handler is set up before output, like sip-trunk).
+            if self.task_config["tools_config"]["output"]["provider"] == TelephonyProvider.FREESWITCH.value:
+                output_kwargs["mark_event_meta_data"] = self.mark_event_meta_data
+                output_kwargs["sampling_rate"] = self.sampling_rate
+                output_kwargs["input_handler"] = self.tools.get("input")
+
             self.tools["output"] = output_handler_class(**output_kwargs)
             self.output_handler_set = True
             logger.info("output handler set")
@@ -1370,7 +1377,7 @@ class TaskManager(BaseManager):
                         if is_sip:
                             cfg["encoding"] = "mulaw"
                             cfg["sampling_rate"] = 8000
-                        elif provider == "web_based_call":
+                        elif provider in ("web_based_call", TelephonyProvider.FREESWITCH.value):
                             cfg["encoding"] = "linear16"
                             cfg["sampling_rate"] = 16000
                         if self.turn_based_conversation:
@@ -1444,8 +1451,8 @@ class TaskManager(BaseManager):
                     transcriber_config["encoding"] = "mulaw"
                     transcriber_config["sampling_rate"] = 8000
                     logger.info(f"Configured transcriber for Asterisk sip-trunk with mulaw encoding @ 8kHz")
-                elif provider == "web_based_call":
-                    # Web streams linear16 PCM @16kHz; coerce here so all ASR providers get it, not just Deepgram.
+                elif provider in ("web_based_call", TelephonyProvider.FREESWITCH.value):
+                    # Web + FreeSWITCH fork both stream linear16 PCM @16kHz; coerce for all ASR providers.
                     transcriber_config["encoding"] = "linear16"
                     transcriber_config["sampling_rate"] = 16000
 
@@ -1504,9 +1511,11 @@ class TaskManager(BaseManager):
                     provider_name = cfg.pop("provider")
                     provider_config = cfg.pop("provider_config")
 
-                    # Web plays raw PCM at a fixed 24kHz; force every language synth to match
-                    # (telephony/chat untouched). Else non-24k languages drift (e.g. Hindi too slow).
-                    if self.is_web_based_call:
+                    # Web + FreeSWITCH play raw PCM at a fixed 24kHz; force every language synth to
+                    # match (telephony/chat untouched). Else non-24k languages drift (e.g. Hindi too slow).
+                    if self.is_web_based_call or (
+                        self.task_config["tools_config"]["output"]["provider"] == TelephonyProvider.FREESWITCH.value
+                    ):
                         provider_config = dict(provider_config)  # don't mutate the cached agent config
                         provider_config["sampling_rate"] = 24000
                         cfg.pop("sampling_rate", None)  # avoid passing sampling_rate twice to the synth

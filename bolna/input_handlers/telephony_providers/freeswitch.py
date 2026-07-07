@@ -1,0 +1,57 @@
+import asyncio
+import json
+import time
+
+from starlette.websockets import WebSocketDisconnect, WebSocketState
+
+from bolna.input_handlers.default import DefaultInputHandler
+from bolna.helpers.utils import create_ws_data_packet
+from bolna.helpers.logger_config import configure_logger
+
+logger = configure_logger(__name__)
+
+
+class FreeSwitchInputHandler(DefaultInputHandler):
+    """Reads the mod_audio_stream fork: raw L16 mono @16k binary frames (caller audio),
+    plus optional text frames (JSON control/metadata). Same audio pipeline as the web/default
+    path (linear16 16k → transcriber); only the transport differs (binary vs base64-in-JSON)."""
+
+    def __init__(self, *args, **kwargs):
+        kwargs.pop("ws_context_data", None)  # accepted for parity with telephony handlers
+        super().__init__(*args, **kwargs)
+        self.io_provider = "freeswitch"
+
+    def ingest_audio(self, data):
+        ws_data_packet = create_ws_data_packet(
+            data=data,
+            meta_info={"io": "freeswitch", "type": "audio", "sequence": self.input_types["audio"]},
+        )
+        if self.conversation_recording:
+            if self.conversation_recording["metadata"]["started"] == 0:
+                self.conversation_recording["metadata"]["started"] = time.time()
+            self.conversation_recording["input"]["data"] += data
+        self.queues["transcriber"].put_nowait(ws_data_packet)
+
+    async def _listen(self):
+        try:
+            while self.running:
+                message = await self.websocket.receive()
+                if message.get("type") == "websocket.disconnect":
+                    raise WebSocketDisconnect(message.get("code", 1000))
+                if message.get("bytes") is not None:
+                    self.ingest_audio(message["bytes"])          # raw L16 caller audio
+                elif message.get("text") is not None:
+                    try:
+                        await self.process_message(json.loads(message["text"]))
+                    except (json.JSONDecodeError, TypeError):
+                        logger.info(f"freeswitch: non-JSON text frame ignored")
+        except WebSocketDisconnect:
+            self.queues["transcriber"].put_nowait(
+                create_ws_data_packet(data=None, meta_info={"io": "freeswitch", "eos": True})
+            )
+            self.running = False
+        except Exception as e:
+            self.queues["transcriber"].put_nowait(
+                create_ws_data_packet(data=None, meta_info={"io": "freeswitch", "eos": True})
+            )
+            logger.error(f"freeswitch input handler error: {e}", exc_info=True)
