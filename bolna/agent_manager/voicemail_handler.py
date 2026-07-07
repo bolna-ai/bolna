@@ -111,11 +111,14 @@ class VoicemailHandler:
             "ts_ms": round(time.time() * 1000 - self.tm.conversation_start_init_ts, 2),
         }
         if cancelled:
+            # cancelled_at_ms instead of latency_ms (mirrors the hangup_check cancel path):
+            # datadog emits response_time_ms for any entry with latency_ms, and an aborted
+            # check is not a real completion — it would skew the distribution downward.
             record["cancelled"] = True
+            record["cancelled_at_ms"] = record["ts_ms"]
         self.tm.llm_latencies.other_latencies.append(record)
 
     async def _background_check(self, transcriber_message: str, meta_info: dict, is_final: bool) -> None:
-        check_start = time.time()
         try:
             if "llm_agent" not in self.tm.tools or not hasattr(self.tm.tools["llm_agent"], "check_for_voicemail"):
                 logger.warning("Voicemail detection enabled but llm_agent doesn't support check_for_voicemail")
@@ -167,9 +170,10 @@ class VoicemailHandler:
                 await self._handle_detected()
         except asyncio.CancelledError:
             # Call ended (or barge-in) while the check was still awaiting the LLM. CancelledError is a
-            # BaseException, so the `except Exception` below would miss it — record the attempt (with the
-            # elapsed time) so a cancelled check is still visible, then re-raise to honour cancellation.
-            self._record_latency(meta_info, latency_ms=round((time.time() - check_start) * 1000, 2), cancelled=True)
+            # BaseException, so the `except Exception` below would miss it — record the attempt so a
+            # cancelled check is still visible, then re-raise to honour cancellation. No latency_ms:
+            # the check never completed (see _record_latency's cancelled_at_ms).
+            self._record_latency(meta_info, cancelled=True)
             raise
         except Exception as e:
             logger.error(f"Error during background voicemail detection: {e}")
