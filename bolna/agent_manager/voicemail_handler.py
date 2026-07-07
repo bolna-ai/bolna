@@ -94,7 +94,9 @@ class VoicemailHandler:
         except Exception as e:
             logger.error(f"Error starting voicemail check background task: {e}")
 
-    def _record_latency(self, meta_info: dict, latency_ms=None, metadata: Optional[dict] = None, cancelled: bool = False) -> None:
+    def _record_latency(
+        self, meta_info: dict, latency_ms=None, metadata: Optional[dict] = None, cancelled: bool = False
+    ) -> None:
         """Append a voicemail_check entry to other_latencies. Mirrors the hangup_check record
         (ts_ms + turn_id) so it can be placed on the timeline. Also called on cancellation so a
         check interrupted by the call ending is still visible in observability."""
