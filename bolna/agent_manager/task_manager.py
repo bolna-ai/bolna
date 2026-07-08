@@ -6289,6 +6289,13 @@ class TaskManager(BaseManager):
                         await self._synthesize(create_ws_data_packet(user_online_message, meta_info=meta_info))
                     self.conversation_history.append_assistant(user_online_message, exclude_from_llm=True)
 
+                    # Explicitly reset the audio flag after synthesizing the prompt.
+                    # handle_interruption() below sends clearAudio to Plivo and wipes the
+                    # mark dictionary, so the final-chunk mark echo will never arrive and
+                    # is_audio_being_played would stay stuck True forever — blocking the
+                    # silence-hangup gate in this loop indefinitely.
+                    self.tools["input"].update_is_audio_being_played(False)
+
                 # Just in case we need to clear messages sent before
                 await self.tools["output"].handle_interruption()
             else:
