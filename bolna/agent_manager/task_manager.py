@@ -5811,13 +5811,25 @@ class TaskManager(BaseManager):
                 # Static-node clips are pre-generated as mp3 keyed by md5(text); fetch that
                 # format explicitly rather than the output format, which may differ (e.g. wav).
                 audio_format = "mp3" if static_node_audio else self.task_config["tools_config"]["output"]["format"]
-                audio_chunk = await get_raw_audio_bytes(
-                    text,
-                    self.assistant_name,
-                    audio_format,
-                    local=self.is_local,
-                    assistant_id=self.assistant_id,
-                )
+                try:
+                    audio_chunk = await get_raw_audio_bytes(
+                        text,
+                        self.assistant_name,
+                        audio_format,
+                        local=self.is_local,
+                        assistant_id=self.assistant_id,
+                    )
+                except Exception as static_audio_err:
+                    if not static_node_audio:
+                        raise
+                    logger.error(f"Failed to fetch static node audio {text}: {static_audio_err}")
+                    audio_chunk = None
+                if static_node_audio and audio_chunk is None:
+                    # Cache miss or fetch failure: synthesize live so the node still speaks.
+                    logger.info("Static node audio unavailable; synthesizing live from text")
+                    meta_info["cached"] = False
+                    await self._synthesize(create_ws_data_packet(meta_info["text"], meta_info=meta_info))
+                    return
                 logger.info("Sending preprocessed audio")
                 meta_info["format"] = audio_format
                 meta_info["end_of_synthesizer_stream"] = True
@@ -5835,16 +5847,19 @@ class TaskManager(BaseManager):
                         meta_info["format"] = "pcm"
                 elif static_node_audio:
                     logger.info(f"Getting static node audio {text} from S3")
-                    audio = await get_raw_audio_bytes(
-                        text, self.assistant_name, "mp3", assistant_id=self.assistant_id, local=self.is_local
-                    )
                     yield_in_chunks = False
-                    if audio is not None:
-                        audio_chunk = wav_bytes_to_pcm(resample(audio, format="mp3", target_sample_rate=8000))
-                        meta_info["format"] = "pcm"
-                    else:
-                        # Cache miss: synthesize live from the resolved text so the node still speaks.
-                        logger.info("Static node audio missing in S3; synthesizing live")
+                    try:
+                        audio = await get_raw_audio_bytes(
+                            text, self.assistant_name, "mp3", assistant_id=self.assistant_id, local=self.is_local
+                        )
+                        if audio is not None:
+                            audio_chunk = wav_bytes_to_pcm(resample(audio, format="mp3", target_sample_rate=8000))
+                            meta_info["format"] = "pcm"
+                    except Exception as static_audio_err:
+                        logger.error(f"Failed to prepare static node audio {text}: {static_audio_err}")
+                    if audio_chunk is None:
+                        # Cache miss or fetch/convert failure: synthesize live so the node still speaks.
+                        logger.info("Static node audio unavailable; synthesizing live from text")
                         meta_info["cached"] = False
                         await self._synthesize(create_ws_data_packet(meta_info["text"], meta_info=meta_info))
                         return
