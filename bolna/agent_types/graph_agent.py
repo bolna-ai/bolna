@@ -71,6 +71,11 @@ class GraphAgent(BaseAgent):
         # Get credentials from config (injected by task_manager) or fall back to env vars
         self.llm_key = self.config.get("llm_key") or os.getenv("OPENAI_API_KEY")
         self.base_url = self.config.get("base_url")
+        # Aux (hangup/voicemail) keep the customer's creds across a PTU/priority swap; fall back if not decoupled.
+        self.aux_llm_key = self.config.get("aux_llm_key") or self.llm_key
+        self.aux_base_url = (
+            self.config.get("aux_base_url") if self.config.get("aux_base_url") is not None else self.base_url
+        )
 
         # Initialize OpenAI client with credentials (supports EU routing)
         if self.base_url:
@@ -108,14 +113,18 @@ class GraphAgent(BaseAgent):
         # Initialize main LLM for response generation (supports api_tools/function calling + real streaming)
         self.llm = self._initialize_llm()
 
-        # Initialize LLMs for hangup and voicemail detection
+        # Initialize LLMs for hangup and voicemail detection (kept on the aux creds, not the swapped ones)
         llm_kwargs = {}
-        if self.llm_key:
-            llm_kwargs["llm_key"] = self.llm_key
-        if self.base_url:
-            llm_kwargs["base_url"] = self.base_url
+        if self.aux_llm_key:
+            llm_kwargs["llm_key"] = self.aux_llm_key
+        if self.aux_base_url:
+            llm_kwargs["base_url"] = self.aux_base_url
+        # Use aux_model (the customer's original); self.llm_model may be the swapped PTU deployment (404 on aux).
         self.conversation_completion_llm = OpenAiLLM(
-            model=os.getenv("CHECK_FOR_COMPLETION_LLM", self.llm_model or "gpt-4o-mini"), **llm_kwargs
+            model=os.getenv(
+                "CHECK_FOR_COMPLETION_LLM", self.config.get("aux_model") or self.llm_model or "gpt-4o-mini"
+            ),
+            **llm_kwargs,
         )
         self.voicemail_llm = OpenAiLLM(model=os.getenv("VOICEMAIL_DETECTION_LLM", "gpt-4.1-mini"), **llm_kwargs)
 
@@ -235,6 +244,15 @@ class GraphAgent(BaseAgent):
         # Auto-detect provider if not specified
         if not self.routing_provider:
             self.routing_provider = "groq" if groq_available else "openai"
+
+        # On a PTU/priority swap, route non-groq routing to the conversation target too (groq stays, it's faster).
+        if self.config.get("route_routing_to_conversation") and not (
+            self.routing_provider == "groq" and groq_available
+        ):
+            self.routing_provider = self.config.get("provider") or self.routing_provider
+            conv_model = self.config.get("model")
+            if conv_model:
+                self.routing_model = conv_model.split("/", 1)[-1]
 
         if self.routing_provider == "groq":
             if groq_available:
