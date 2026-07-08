@@ -80,6 +80,7 @@ from bolna.helpers.utils import (
     get_md5_hash,
     clean_json_string,
     wav_bytes_to_pcm,
+    mp3_bytes_to_pcm,
     convert_to_request_log,
     yield_chunks_from_memory,
     process_task_cancellation,
@@ -2617,7 +2618,9 @@ class TaskManager(BaseManager):
 
         if node_type == NodeType.STATIC:
             # Static node: play cached audio directly, no LLM cost
-            static_text = target_node.get("static_message", "") if target_node else ""
+            static_text = (
+                select_message_by_language(target_node.get("static_message"), self.language) if target_node else ""
+            )
             if static_text:
                 if self.context_data:
                     static_text = update_prompt_with_context(static_text, self.context_data)
@@ -3633,6 +3636,7 @@ class TaskManager(BaseManager):
                     meta_info["end_of_llm_stream"] = True
                     meta_info["text"] = static_text
                     meta_info["cached"] = True
+                    meta_info["message_category"] = "static_node"
                     ws_packet = create_ws_data_packet(static_hash, meta_info=meta_info, is_md5_hash=True)
                     await self._synthesize(ws_packet)
                     return
@@ -5803,16 +5807,32 @@ class TaskManager(BaseManager):
             # TODO: Either load IVR audio into memory before call or user s3 iter_cunks
             # This will help with interruption in IVR
             audio_chunk = None
+            static_node_audio = meta_info.get("message_category") in ("static_node", "event_proactive")
             if self.turn_based_conversation or self.task_config["tools_config"]["output"]["provider"] == "default":
-                audio_chunk = await get_raw_audio_bytes(
-                    text,
-                    self.assistant_name,
-                    self.task_config["tools_config"]["output"]["format"],
-                    local=self.is_local,
-                    assistant_id=self.assistant_id,
-                )
+                # Static-node clips are pre-generated as mp3 keyed by md5(text); fetch that
+                # format explicitly rather than the output format, which may differ (e.g. wav).
+                audio_format = "mp3" if static_node_audio else self.task_config["tools_config"]["output"]["format"]
+                try:
+                    audio_chunk = await get_raw_audio_bytes(
+                        text,
+                        self.assistant_name,
+                        audio_format,
+                        local=self.is_local,
+                        assistant_id=self.assistant_id,
+                    )
+                except Exception as static_audio_err:
+                    if not static_node_audio:
+                        raise
+                    logger.error(f"Failed to fetch static node audio {text}: {static_audio_err}")
+                    audio_chunk = None
+                if static_node_audio and audio_chunk is None:
+                    # Cache miss or fetch failure: synthesize live so the node still speaks.
+                    logger.info("Static node audio unavailable; synthesizing live from text")
+                    meta_info["cached"] = False
+                    await self._synthesize(create_ws_data_packet(meta_info["text"], meta_info=meta_info))
+                    return
                 logger.info("Sending preprocessed audio")
-                meta_info["format"] = self.task_config["tools_config"]["output"]["format"]
+                meta_info["format"] = audio_format
                 meta_info["end_of_synthesizer_stream"] = True
                 await self.tools["output"].handle(create_ws_data_packet(audio_chunk, meta_info))
             else:
@@ -5826,6 +5846,27 @@ class TaskManager(BaseManager):
                         logger.info(f"Got to convert it to pcm")
                         audio_chunk = wav_bytes_to_pcm(resample(audio, format="wav", target_sample_rate=8000))
                         meta_info["format"] = "pcm"
+                elif static_node_audio:
+                    logger.info(f"Getting static node audio {text} from S3")
+                    yield_in_chunks = False
+                    try:
+                        audio = await get_raw_audio_bytes(
+                            text, self.assistant_name, "mp3", assistant_id=self.assistant_id, local=self.is_local
+                        )
+                        if audio is not None:
+                            # Telephony wire format is 8k mu-law. Providers key off meta_info["format"]:
+                            # plivo/vobiz send non-wav bytes as audio/x-mulaw without converting, so raw
+                            # linear16 would play as noise. mu-law is correct across plivo/twilio/exotel.
+                            audio_chunk = audioop.lin2ulaw(mp3_bytes_to_pcm(audio, target_sample_rate=8000), 2)
+                            meta_info["format"] = "mulaw"
+                    except Exception as static_audio_err:
+                        logger.error(f"Failed to prepare static node audio {text}: {static_audio_err}")
+                    if audio_chunk is None:
+                        # Cache miss or fetch/convert failure: synthesize live so the node still speaks.
+                        logger.info("Static node audio unavailable; synthesizing live from text")
+                        meta_info["cached"] = False
+                        await self._synthesize(create_ws_data_packet(meta_info["text"], meta_info=meta_info))
+                        return
                 else:
                     start_time = time.perf_counter()
                     audio_chunk = self.preloaded_welcome_audio if self.preloaded_welcome_audio else None
