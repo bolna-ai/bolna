@@ -68,6 +68,10 @@ class FreeSwitchOutputHandler(DefaultOutputHandler):
             for mark_id in marks:
                 if self.input_handler:
                     self.input_handler.process_mark_message({"type": "mark", "name": mark_id})
+            # turn-taking reads this state; without clearing it the agent looks like
+            # it's still speaking and user turns get delayed (mirrors sip_trunk)
+            if self.input_handler and self.input_handler.is_audio_being_played_to_user():
+                self.input_handler.update_is_audio_being_played(False)
         except asyncio.CancelledError:
             pass  # interrupted → playout aborted
 
@@ -75,46 +79,53 @@ class FreeSwitchOutputHandler(DefaultOutputHandler):
         if self._closed:
             return
         try:
-            if packet["meta_info"]["type"] != "audio":
-                return  # freeswitch path streams audio only
-            audio = packet["data"]
-
-            if self._response_first_send is None:
-                self._response_first_send = time.time()
-            self._response_bytes += len(audio)
-
-            meta_info = packet["meta_info"]
-            if meta_info.get("message_category") == "agent_welcome_message" and not self.welcome_message_sent_ts:
-                self.welcome_message_sent_ts = time.time() * 1000
-
-            frames = 0
-            for i in range(0, len(audio), STREAM_CHUNK_BYTES):
-                chunk = audio[i : i + STREAM_CHUNK_BYTES]
-                b64 = base64.b64encode(chunk).decode("utf-8")
-                await self.websocket.send_text(
-                    json.dumps(
-                        {
-                            "type": "streamAudio",
-                            "data": {"audioDataType": "raw", "sampleRate": self.sampling_rate, "audioData": b64},
-                        }
-                    )
-                )
-                frames += 1
-            logger.info(
-                f"freeswitch out: streamAudio pcm={len(audio)}B in {frames} frames "
-                f"cat={meta_info.get('message_category')} seq={meta_info.get('sequence_id')}"
+            meta_info = packet.get("meta_info") or {}
+            audio = packet.get("data") if meta_info.get("type") == "audio" else None
+            # finality can also arrive on a no-audio packet — don't drop it (mirrors sip_trunk)
+            is_final = bool(
+                (meta_info.get("end_of_llm_stream") and meta_info.get("end_of_synthesizer_stream"))
+                or meta_info.get("is_final_chunk_of_entire_response")
+                or (meta_info.get("sequence_id") == -1 and meta_info.get("end_of_llm_stream"))
             )
+            has_audio = audio and len(audio) > 1 and audio != b"\x00\x00"
+            if not has_audio and not is_final:
+                return
+
+            if has_audio:
+                if self._response_first_send is None:
+                    self._response_first_send = time.time()
+                self._response_bytes += len(audio)
+
+                if meta_info.get("message_category") == "agent_welcome_message" and not self.welcome_message_sent_ts:
+                    self.welcome_message_sent_ts = time.time() * 1000
+
+                frames = 0
+                for i in range(0, len(audio), STREAM_CHUNK_BYTES):
+                    chunk = audio[i : i + STREAM_CHUNK_BYTES]
+                    b64 = base64.b64encode(chunk).decode("utf-8")
+                    await self.websocket.send_text(
+                        json.dumps(
+                            {
+                                "type": "streamAudio",
+                                "data": {"audioDataType": "raw", "sampleRate": self.sampling_rate, "audioData": b64},
+                            }
+                        )
+                    )
+                    frames += 1
+                logger.info(
+                    f"freeswitch out: streamAudio pcm={len(audio)}B in {frames} frames "
+                    f"cat={meta_info.get('message_category')} seq={meta_info.get('sequence_id')} final={is_final}"
+                )
 
             # register the chunk's mark for playback-completion bookkeeping
             mark_id = meta_info.get("mark_id") or str(uuid.uuid4())
-            is_final = meta_info.get("end_of_llm_stream", False) and meta_info.get("end_of_synthesizer_stream", False)
             if self.mark_event_meta_data:
                 self.mark_event_meta_data.update_data(mark_id, {
-                    "text_synthesized": "" if meta_info["sequence_id"] == -1 else meta_info.get("text_synthesized", ""),
+                    "text_synthesized": "" if meta_info.get("sequence_id") == -1 else meta_info.get("text_synthesized", ""),
                     "type": meta_info.get("message_category", ""),
                     "is_first_chunk": meta_info.get("is_first_chunk", False),
                     "is_final_chunk": is_final,
-                    "sequence_id": meta_info["sequence_id"],
+                    "sequence_id": meta_info.get("sequence_id"),
                 })
             self._pending_marks.append(mark_id)
 
