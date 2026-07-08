@@ -6652,7 +6652,11 @@ class TaskManager(BaseManager):
 
                 # Collect language detection latency if available
                 if hasattr(self, "language_detector") and self.language_detector.latency_data:
-                    self.llm_latencies.other_latencies.append(self.language_detector.latency_data)
+                    detection_entry = self.language_detector.latency_data
+                    detected_epoch_ms = detection_entry.pop("detected_at_epoch_ms", None)
+                    if detected_epoch_ms is not None:
+                        detection_entry["ts_ms"] = round(detected_epoch_ms - _call_start_ms, 2)
+                    self.llm_latencies.other_latencies.append(detection_entry)
 
                 welcome_message_sent_ts = self.tools["output"].get_welcome_message_sent_ts()
                 _user_bot_latencies = [
@@ -6679,6 +6683,11 @@ class TaskManager(BaseManager):
                     }
                     for e in self.interruption_manager.user_bot_latencies
                 ]
+
+                # Cancel the voicemail check BEFORE latency_dict/progression_data are snapshotted
+                # below — tasks_to_cancel is only awaited after the snapshot, so a cancelled-check
+                # record appended during that gather would never be persisted.
+                await process_task_cancellation(self.voicemail_handler.check_task, "voicemail_check_task")
 
                 output = {
                     "messages": self._prepare_precise_transcript_messages(self.history),
@@ -6861,9 +6870,6 @@ class TaskManager(BaseManager):
                 tasks_to_cancel.append(process_task_cancellation(self.first_message_task, "first_message_task"))
                 tasks_to_cancel.append(process_task_cancellation(self.dtmf_task, "dtmf_task"))
                 tasks_to_cancel.append(process_task_cancellation(self.event_listener_task, "event_listener_task"))
-                tasks_to_cancel.append(
-                    process_task_cancellation(self.voicemail_handler.check_task, "voicemail_check_task")
-                )
                 tasks_to_cancel.append(
                     process_task_cancellation(self.handle_accumulated_message_task, "handle_accumulated_message_task")
                 )
