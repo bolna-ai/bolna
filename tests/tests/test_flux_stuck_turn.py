@@ -119,6 +119,57 @@ def test_release_with_buffered_interims_force_finalizes_transcript():
     assert t._flux_turn_is_stalled(1_000_000.0) is False
 
 
+def test_release_with_eager_pending_cancels_speculative_before_transcript():
+    # A stall right after EagerEndOfTurn: without the turn_resumed the speculative LLM task is
+    # orphaned downstream (tool side-effects run, staged user turn duplicates) and the stale
+    # pending flag marks the NEXT turn's EndOfTurn as was_eager.
+    q = asyncio.Queue()
+    t = _make_flux(output_queue=q)
+    _open_turn(t, last_interim_age_s=t.flux_turn_stall_timeout_s + 1)
+    t.is_transcript_sent_for_processing = False
+    t.eager_transcript_pending = "Ok"
+    t.current_turn_interim_details = [
+        {"transcript": "Ok", "latency_ms": None, "is_final": True, "received_at": 1.0},
+    ]
+
+    asyncio.run(t._release_stuck_flux_turn())
+
+    # turn_resumed first (cancels the speculative task + reverts staged history downstream),
+    # then the forced transcript — FIFO order is load-bearing.
+    assert q.get_nowait()["data"] == {"type": "turn_resumed"}
+    packet = q.get_nowait()["data"]
+    assert packet["type"] == "transcript"
+    assert packet["content"] == "Ok"
+    assert packet["force_finalized"] is True
+    assert q.qsize() == 0
+    assert t.eager_transcript_pending is None
+
+
+def test_release_with_eager_pending_and_no_text_cancels_then_speech_ended():
+    # The bare speech_ended arm had the same orphan bug — the eager cancel must cover both arms.
+    q = asyncio.Queue()
+    t = _make_flux(output_queue=q)
+    _open_turn(t, last_interim_age_s=t.flux_turn_stall_timeout_s + 1)
+    t.is_transcript_sent_for_processing = False
+    t.eager_transcript_pending = "Ok"
+
+    asyncio.run(t._release_stuck_flux_turn())
+
+    assert q.get_nowait()["data"] == {"type": "turn_resumed"}
+    assert q.get_nowait()["data"] == {"type": "speech_ended"}
+    assert q.qsize() == 0
+    assert t.eager_transcript_pending is None
+
+
+def test_reset_turn_state_clears_pending_eager():
+    # Prevents a stale flag from marking the next turn's EndOfTurn as was_eager, which would
+    # reuse an orphaned speculative response for the wrong turn.
+    t = _make_flux()
+    t.eager_transcript_pending = "Ok"
+    t._reset_turn_state()
+    assert t.eager_transcript_pending is None
+
+
 def test_nova_does_not_arm_flux_watchdog_state():
     # Nova sets last_interim_time too (its own monitor uses it); the flux stall predicate
     # must stay inert for non-flux models.

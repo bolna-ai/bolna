@@ -347,6 +347,8 @@ class DeepgramTranscriber(BaseTranscriber):
         self.current_turn_id = None
         self.final_transcript = ""
         self.is_transcript_sent_for_processing = True
+        # A stale pending-eager flag would mark the NEXT turn's EndOfTurn as was_eager
+        self.eager_transcript_pending = None
 
     async def _force_finalize_utterance(self):
         """Force-finalize a stuck utterance and send to queue"""
@@ -439,6 +441,12 @@ class DeepgramTranscriber(BaseTranscriber):
         return (now - self.last_interim_time) > self.flux_turn_stall_timeout_s
 
     async def _release_stuck_flux_turn(self):
+        # A pending eager turn means a speculative LLM task is in flight downstream — cancel it
+        # (and its staged history) via turn_resumed before releasing, so the orphan can't run
+        # tools, duplicate the user turn, or leak was_eager into the next turn.
+        if self.eager_transcript_pending is not None:
+            self.eager_transcript_pending = None
+            await self.push_to_transcriber_queue(create_ws_data_packet({"type": "turn_resumed"}, self.meta_info))
         # Deliver the buffered words (mirrors Nova's force-finalize) so the user's speech still
         # reaches the LLM; bare speech_ended only when the stuck turn produced no text — it still
         # resets callee_speaking downstream, and _reset_turn_state drops any later finalization.
@@ -457,7 +465,7 @@ class DeepgramTranscriber(BaseTranscriber):
                 if self._flux_turn_is_stalled(time.time()):
                     logger.warning(
                         f"Flux turn stall: no event for >{self.flux_turn_stall_timeout_s:.1f}s "
-                        f"(turn {self.current_turn_id}), releasing via speech_ended."
+                        f"(turn {self.current_turn_id}), releasing stuck turn."
                     )
                     await self._release_stuck_flux_turn()
         except asyncio.CancelledError:
