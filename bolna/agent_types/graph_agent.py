@@ -18,6 +18,7 @@ from bolna.helpers.utils import (
     enrich_context_with_time_variables,
     DictWithMissing,
     get_md5_hash,
+    select_message_by_language,
 )
 from bolna.helpers.expression_evaluator import evaluate_edge_expression, describe_edge_expression
 from bolna.enums import EdgeConditionType, NodeType, ToolScope
@@ -1103,6 +1104,19 @@ class GraphAgent(BaseAgent):
             messages.append(rag_message)
         return messages
 
+    def _static_message_chunk(self, current_node: Optional[dict]) -> Optional[dict]:
+        """Resolve a static node's message for the active language and build its
+        playback chunk: context-substituted text plus the audio-cache hash. None if empty."""
+        text = select_message_by_language(
+            current_node.get("static_message") if current_node else None,
+            self.context_data.get("detected_language"),
+        )
+        if not text:
+            return None
+        if self.context_data:
+            text = update_prompt_with_context(text, self.context_data)
+        return {"static_message": text, "static_audio_hash": get_md5_hash(text)}
+
     async def generate(self, message: List[dict], **kwargs) -> AsyncGenerator:
         meta_info = kwargs.get("meta_info", {})
         synthesize = kwargs.get("synthesize", True)
@@ -1152,14 +1166,9 @@ class GraphAgent(BaseAgent):
                         return
 
                 if node_type == NodeType.STATIC:
-                    static_text = current_node.get("static_message", "") if current_node else ""
-                    if static_text:
-                        if self.context_data:
-                            static_text = update_prompt_with_context(static_text, self.context_data)
-                        yield {
-                            "static_message": static_text,
-                            "static_audio_hash": get_md5_hash(static_text),
-                        }
+                    chunk = self._static_message_chunk(current_node)
+                    if chunk:
+                        yield chunk
                     return
 
                 messages = await self._build_messages(message, meta_info=meta_info)
@@ -1255,14 +1264,9 @@ class GraphAgent(BaseAgent):
                 return
 
             if node_type == NodeType.STATIC:
-                static_text = current_node.get("static_message", "") if current_node else ""
-                if static_text:
-                    if self.context_data:
-                        static_text = update_prompt_with_context(static_text, self.context_data)
-                    yield {
-                        "static_message": static_text,
-                        "static_audio_hash": get_md5_hash(static_text),
-                    }
+                chunk = self._static_message_chunk(current_node)
+                if chunk:
+                    yield chunk
                 return
 
             messages = await self._build_messages(message, meta_info=meta_info)

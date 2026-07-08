@@ -163,6 +163,7 @@ def _make_task_manager(agent=None, **overrides):
     tm.repeat_after_silence_seconds = None
     tm.conversation_history = ConversationHistory()
     tm.context_data = graph_agent.context_data  # Share context_data with agent
+    tm._language = "en"  # backs the `language` property (real __init__ sets this)
 
     # Task config (minimal)
     tm.task_config = {
