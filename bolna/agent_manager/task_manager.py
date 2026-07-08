@@ -338,8 +338,11 @@ class TaskManager(BaseManager):
         self.preloaded_welcome_audio = (
             base64.b64decode(self.welcome_message_audio) if self.welcome_message_audio else None
         )
-        # Cached welcome is 8kHz PCM; web plays at 24kHz, so upsample or the first audio is pitched.
-        if self.is_web_based_call and self.preloaded_welcome_audio:
+        # Cached welcome is 8kHz PCM; web/freeswitch play at 24kHz, so upsample or the first audio is pitched.
+        is_freeswitch_output = (task.get("tools_config", {}).get("output") or {}).get(
+            "provider"
+        ) == TelephonyProvider.FREESWITCH.value
+        if (self.is_web_based_call or is_freeswitch_output) and self.preloaded_welcome_audio:
             self.preloaded_welcome_audio = resample(
                 self.preloaded_welcome_audio, target_sample_rate=24000, format="pcm", original_sample_rate=8000
             )
