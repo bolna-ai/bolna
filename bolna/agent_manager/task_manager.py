@@ -5854,8 +5854,11 @@ class TaskManager(BaseManager):
                             text, self.assistant_name, "mp3", assistant_id=self.assistant_id, local=self.is_local
                         )
                         if audio is not None:
-                            audio_chunk = mp3_bytes_to_pcm(audio, target_sample_rate=8000)
-                            meta_info["format"] = "pcm"
+                            # Telephony wire format is 8k mu-law. Providers key off meta_info["format"]:
+                            # plivo/vobiz send non-wav bytes as audio/x-mulaw without converting, so raw
+                            # linear16 would play as noise. mu-law is correct across plivo/twilio/exotel.
+                            audio_chunk = audioop.lin2ulaw(mp3_bytes_to_pcm(audio, target_sample_rate=8000), 2)
+                            meta_info["format"] = "mulaw"
                     except Exception as static_audio_err:
                         logger.error(f"Failed to prepare static node audio {text}: {static_audio_err}")
                     if audio_chunk is None:
