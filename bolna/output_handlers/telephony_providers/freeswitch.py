@@ -9,6 +9,11 @@ from bolna.helpers.logger_config import configure_logger
 
 logger = configure_logger(__name__)
 
+# A single large streamAudio frame (e.g. a ~90KB cached welcome → ~120KB WS frame) drops the
+# mod_audio_stream connection (libwsc, code 1006). Split PCM into small frames; the module's
+# playout buffer reassembles them, so no pacing is needed. Even byte count keeps L16 samples intact.
+STREAM_CHUNK_BYTES = 8192
+
 
 class FreeSwitchOutputHandler(DefaultOutputHandler):
     """Streams TTS to the patched mod_audio_stream, which injects it into the call:
@@ -73,7 +78,6 @@ class FreeSwitchOutputHandler(DefaultOutputHandler):
             if packet["meta_info"]["type"] != "audio":
                 return  # freeswitch path streams audio only
             audio = packet["data"]
-            b64 = base64.b64encode(audio).decode("utf-8")
 
             if self._response_first_send is None:
                 self._response_first_send = time.time()
@@ -83,17 +87,23 @@ class FreeSwitchOutputHandler(DefaultOutputHandler):
             if meta_info.get("message_category") == "agent_welcome_message" and not self.welcome_message_sent_ts:
                 self.welcome_message_sent_ts = time.time() * 1000
 
-            frame = json.dumps(
-                {
-                    "type": "streamAudio",
-                    "data": {"audioDataType": "raw", "sampleRate": self.sampling_rate, "audioData": b64},
-                }
-            )
+            frames = 0
+            for i in range(0, len(audio), STREAM_CHUNK_BYTES):
+                chunk = audio[i : i + STREAM_CHUNK_BYTES]
+                b64 = base64.b64encode(chunk).decode("utf-8")
+                await self.websocket.send_text(
+                    json.dumps(
+                        {
+                            "type": "streamAudio",
+                            "data": {"audioDataType": "raw", "sampleRate": self.sampling_rate, "audioData": b64},
+                        }
+                    )
+                )
+                frames += 1
             logger.info(
-                f"freeswitch out: streamAudio pcm={len(audio)}B frame={len(frame)}B "
+                f"freeswitch out: streamAudio pcm={len(audio)}B in {frames} frames "
                 f"cat={meta_info.get('message_category')} seq={meta_info.get('sequence_id')}"
             )
-            await self.websocket.send_text(frame)
 
             # register the chunk's mark for playback-completion bookkeeping
             mark_id = meta_info.get("mark_id") or str(uuid.uuid4())
