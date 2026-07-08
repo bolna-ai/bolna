@@ -80,6 +80,7 @@ from bolna.helpers.utils import (
     get_md5_hash,
     clean_json_string,
     wav_bytes_to_pcm,
+    mp3_bytes_to_pcm,
     convert_to_request_log,
     yield_chunks_from_memory,
     process_task_cancellation,
@@ -5853,7 +5854,7 @@ class TaskManager(BaseManager):
                             text, self.assistant_name, "mp3", assistant_id=self.assistant_id, local=self.is_local
                         )
                         if audio is not None:
-                            audio_chunk = wav_bytes_to_pcm(resample(audio, format="mp3", target_sample_rate=8000))
+                            audio_chunk = mp3_bytes_to_pcm(audio, target_sample_rate=8000)
                             meta_info["format"] = "pcm"
                     except Exception as static_audio_err:
                         logger.error(f"Failed to prepare static node audio {text}: {static_audio_err}")

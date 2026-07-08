@@ -433,6 +433,12 @@ def wav_bytes_to_mp3(wav_bytes):
     return buffer.getvalue()
 
 
+def mp3_bytes_to_pcm(mp3_bytes, target_sample_rate=8000):
+    audio = AudioSegment.from_file(io.BytesIO(mp3_bytes), format="mp3")
+    audio = audio.set_frame_rate(target_sample_rate).set_channels(1).set_sample_width(2)
+    return audio.raw_data
+
+
 def resample(audio_bytes, target_sample_rate, format="mp3", pcm_channels=1, original_sample_rate=None):
     """
     Resample audio bytes
