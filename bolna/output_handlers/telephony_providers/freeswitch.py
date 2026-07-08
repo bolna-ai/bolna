@@ -126,6 +126,9 @@ class FreeSwitchOutputHandler(DefaultOutputHandler):
                     "is_first_chunk": meta_info.get("is_first_chunk", False),
                     "is_final_chunk": is_final,
                     "sequence_id": meta_info.get("sequence_id"),
+                    # record_ack / latency tracking require these (same contract as sip_trunk)
+                    "duration": (len(audio) / self.bytes_per_second) if has_audio else 0.0,
+                    "sent_ts": time.time(),
                 })
             self._pending_marks.append(mark_id)
 
