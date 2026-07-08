@@ -27,6 +27,15 @@ class FreeSwitchOutputHandler(DefaultOutputHandler):
         self._response_first_send = None
         self._pending_marks = []
         self._finish_task = None
+        self.stream_sid = None
+
+    async def set_stream_sid(self, stream_id):
+        # the first-message/welcome path calls this (telephony handlers track a stream_sid);
+        # freeswitch's stream is the ws itself, so just store it for parity.
+        self.stream_sid = stream_id
+
+    def get_stream_sid(self):
+        return self.stream_sid
 
     async def handle_interruption(self):
         if self._closed:
