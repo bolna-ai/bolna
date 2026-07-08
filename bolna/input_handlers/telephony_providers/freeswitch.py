@@ -33,25 +33,39 @@ class FreeSwitchInputHandler(DefaultInputHandler):
         self.queues["transcriber"].put_nowait(ws_data_packet)
 
     async def _listen(self):
+        bin_frames = 0
+        txt_frames = 0
+        logger.info("freeswitch _listen START")
         try:
             while self.running:
                 message = await self.websocket.receive()
                 if message.get("type") == "websocket.disconnect":
+                    logger.info(
+                        f"freeswitch _listen: websocket.disconnect code={message.get('code')} "
+                        f"after bin={bin_frames} txt={txt_frames}"
+                    )
                     raise WebSocketDisconnect(message.get("code", 1000))
                 if message.get("bytes") is not None:
-                    self.ingest_audio(message["bytes"])          # raw L16 caller audio
+                    bin_frames += 1
+                    self.ingest_audio(message["bytes"])  # raw L16 caller audio
                 elif message.get("text") is not None:
+                    txt_frames += 1
+                    logger.info(f"freeswitch _listen: text frame #{txt_frames}: {message['text'][:200]}")
                     try:
                         await self.process_message(json.loads(message["text"]))
                     except (json.JSONDecodeError, TypeError):
                         logger.info(f"freeswitch: non-JSON text frame ignored")
-        except WebSocketDisconnect:
+        except WebSocketDisconnect as e:
+            logger.info(
+                f"freeswitch _listen: WebSocketDisconnect code={getattr(e, 'code', None)} "
+                f"after bin={bin_frames} txt={txt_frames}"
+            )
             self.queues["transcriber"].put_nowait(
                 create_ws_data_packet(data=None, meta_info={"io": "freeswitch", "eos": True})
             )
             self.running = False
         except Exception as e:
+            logger.error(f"freeswitch input handler error after bin={bin_frames} txt={txt_frames}: {e}", exc_info=True)
             self.queues["transcriber"].put_nowait(
                 create_ws_data_packet(data=None, meta_info={"io": "freeswitch", "eos": True})
             )
-            logger.error(f"freeswitch input handler error: {e}", exc_info=True)

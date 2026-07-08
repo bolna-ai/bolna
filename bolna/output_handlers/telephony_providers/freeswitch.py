@@ -83,10 +83,17 @@ class FreeSwitchOutputHandler(DefaultOutputHandler):
             if meta_info.get("message_category") == "agent_welcome_message" and not self.welcome_message_sent_ts:
                 self.welcome_message_sent_ts = time.time() * 1000
 
-            await self.websocket.send_text(json.dumps({
-                "type": "streamAudio",
-                "data": {"audioDataType": "raw", "sampleRate": self.sampling_rate, "audioData": b64},
-            }))
+            frame = json.dumps(
+                {
+                    "type": "streamAudio",
+                    "data": {"audioDataType": "raw", "sampleRate": self.sampling_rate, "audioData": b64},
+                }
+            )
+            logger.info(
+                f"freeswitch out: streamAudio pcm={len(audio)}B frame={len(frame)}B "
+                f"cat={meta_info.get('message_category')} seq={meta_info.get('sequence_id')}"
+            )
+            await self.websocket.send_text(frame)
 
             # register the chunk's mark for playback-completion bookkeeping
             mark_id = meta_info.get("mark_id") or str(uuid.uuid4())
