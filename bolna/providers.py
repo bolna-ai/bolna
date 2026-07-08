@@ -9,6 +9,7 @@ from .synthesizer import (
     SarvamSynthesizer,
     RimeSynthesizer,
     PixaSynthesizer,
+    RumikSynthesizer,
 )
 from .transcriber import (
     DeepgramTranscriber,
@@ -53,6 +54,7 @@ SUPPORTED_SYNTHESIZER_MODELS = {
     SynthesizerProvider.SARVAM.value: SarvamSynthesizer,
     SynthesizerProvider.RIME.value: RimeSynthesizer,
     SynthesizerProvider.PIXA.value: PixaSynthesizer,
+    SynthesizerProvider.RUMIK.value: RumikSynthesizer,
 }
 
 SUPPORTED_TRANSCRIBER_PROVIDERS = {
