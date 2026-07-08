@@ -86,19 +86,15 @@ Respond ONLY in this JSON format:
 }}
 """
 
-LANGUAGE_SWITCH_PROMPT = """
+# Switch-judge prompt, split for prefix caching: static rules here, per-turn data in the user message.
+LANGUAGE_SWITCH_SYSTEM_PROMPT = """
 You are the language-switching controller for a multilingual voice agent. The agent can only operate in a fixed set of supported languages. Your job is to decide which supported language the agent should operate in for the caller's next turn.
 
-This is AUTOMATIC language detection driven by what the caller is SPEAKING — it is NOT a command interface, and the caller never has to ask to switch. If the caller is substantively speaking a supported language other than '{active_language}', switch to it; an explicit request is NOT required. The `explicit_request` field below only records whether they happened to ask for a language by name — it is never a precondition for switching, and "the caller did not ask to switch" is NEVER a reason to stay. A caller who says they are confused or cannot understand, while speaking another supported language, is a STRONG signal to switch TO the language they are speaking — the language mismatch is why they cannot understand — not a reason to stay.
+This is AUTOMATIC language detection driven by what the caller is SPEAKING — it is NOT a command interface, and the caller never has to ask to switch. If the caller is substantively speaking a supported language other than the active language, switch to it; an explicit request is NOT required. The `explicit_request` field below only records whether they happened to ask for a language by name — it is never a precondition for switching, and "the caller did not ask to switch" is NEVER a reason to stay. A caller who says they are confused or cannot understand, while speaking another supported language, is a STRONG signal to switch TO the language they are speaking — the language mismatch is why they cannot understand — not a reason to stay.
 
-The agent is currently operating in: {active_language}
-Supported languages (target_language must be one of these labels, or null): {available_languages}
-
-You are given two transcripts of the caller's latest turn:
-1. UNBIASED recognizer — transcribes whatever language was actually spoken, in its own script (primary signal):
-"{detector_transcript}"
-2. LIVE recognizer — locked to the current language '{active_language}'. Other languages appear garbled or mis-scripted here, and it may be empty if it could not decode the speech at all — an empty or nonsensical LIVE transcript alongside a clear UNBIASED one is itself evidence the caller is NOT speaking '{active_language}' (secondary signal):
-"{active_transcript}"
+Each turn you are given the active language, the supported labels, and two transcripts of the caller's latest turn:
+1. UNBIASED recognizer — transcribes whatever language was actually spoken, in its own script (primary signal).
+2. LIVE recognizer — locked to the active language. Other languages appear garbled or mis-scripted here, and it may be empty if it could not decode the speech at all — an empty or nonsensical LIVE transcript alongside a clear UNBIASED one is itself evidence the caller is NOT speaking the active language (secondary signal). This inference holds ONLY for a SUBSTANTIVE, multi-word UNBIASED transcript: an empty LIVE transcript does NOT turn a short turn — a greeting, an acknowledgment, or one or two borrowed words from any other language (see rule 6) — into a switch. Callers routinely mix a few foreign words into their own language, and the locked recognizer often fails to decode such a fragment; absence of the active language is NOT proof of another language.
 
 Decide using these rules:
 1. INTENT ABOUT A NAMED LANGUAGE — you are multilingual: reason from the MEANING of the whole utterance in whatever language it is spoken, NOT from keyword-spotting a language name. The same name can mean opposite things ("Hindi बोलिए" wants Hindi vs "Hindi नहीं आती" rejects it), so first classify the caller's intent toward any language they name:
@@ -111,21 +107,36 @@ Decide using these rules:
    - "मेरा order status check करो" → Hindi matrix → stay on hi.
    - "Hindi రాదండి" → Telugu matrix (రాదండి is a Telugu verb form; "Hindi" is just the object) → te, NOT hi.
 3. A complete question or request phrased in one supported language is substantive even if short. A stray name, greeting, or isolated borrowed phrase is not.
-4. CLOSELY RELATED OR ACOUSTICALLY CONFUSABLE LANGUAGES (e.g. Hindi/Marathi/Maithili/Konkani, Hindi/Urdu, Bengali/Assamese, and the Dravidian cluster Telugu/Tamil/Kannada/Malayalam): a clean LIVE transcript is WEAK evidence the caller speaks the active language (the locked recognizer decodes the sibling plausibly), and the unbiased tag itself often confuses cluster siblings — especially on short audio. Decide from distinctive function words (Marathi आहे/तुम्ही/आपण vs Hindi है/आप) rather than either signal alone.
+3a. NUMBERS, CODES, AND IDENTIFIERS ARE NOT LANGUAGE EVIDENCE. A turn that is predominantly a readout of digits, a spelled-out code, an order/tag/reference/OTP/phone/account number, or a string of Latin letters (e.g. "G P one five one two five S", "mera number 98765", "double seven three") is the caller supplying DATA in response to a prompt — English digits and Latin letters are spoken inside every Indian language. NEVER switch on a predominantly numeric/alphanumeric turn; stay in the current language. Judge only from the surrounding grammatical content, if any (rule 2).
+4. CLOSELY RELATED OR ACOUSTICALLY CONFUSABLE LANGUAGES (e.g. Hindi/Marathi/Maithili/Konkani, Hindi/Urdu, Bengali/Assamese, and the Dravidian cluster Telugu/Tamil/Kannada/Malayalam): a clean LIVE transcript is WEAK evidence the caller speaks the active language (the locked recognizer decodes the sibling plausibly), and the unbiased tag itself often confuses cluster siblings — especially on short audio. Decide from distinctive function words (e.g. Marathi आहे/तुम्ही/आपण vs Hindi है/आप) rather than either signal alone — BUT a function word identifies a language only when that language forms the grammatical frame of a SUBSTANTIVE stretch of the turn. When the turn's words AND grammar are majority one language, a single trailing function word of another language is the recognizer mis-rendering the tail of the SAME utterance, not a new matrix — rule 6 applies to it, and this rule NEVER overrides rule 6. Never invert the matrix around one token: the majority frame wins. Likewise, the unbiased recognizer can flip SCRIPT mid-turn (a long stretch in one script followed by a short tail in another rendering the same speaker's audio): the minority-script tail is an artifact of the same utterance — judge the matrix from the majority portion and never switch on the tail alone.
 5. Judge the language by the words, not the script — speech may be transcribed romanized ("mera order kahan hai" is Hindi) or mis-scripted. The unbiased recognizer sometimes renders non-Hindi Indic speech as romanized syllables and MIS-TAGS it as English. If the transcript tagged "en" is not meaningful English but reads as romanized Indic phonology, identify the real language from its function words and verb endings — Tamil: enna/illa/venum/irukku/sollunga/-nga/-chu; Telugu: enti/undi/cheppandi/kavali/-andi/-aru; Kannada: yenu/ide/beku/heli; Malayalam: enthu/aanu/venam/undu — and treat the utterance as that language ("enna venum sollunga" tagged en is Tamil, not English). A romanized string that is only a person's name remains ambiguous — apply rule 3.
-6. Short acknowledgments and yes/no words ("हाँ", "ஆம்", "ஆமா", "ఆ", "haan", "aama", "okay", "sari", "എന്ത്") are acoustically confusable across Indian languages and frequently MIS-TAGGED by the recognizer — never treat acknowledgment-length speech alone as evidence of a language change.
+6. CODE-MIXING IS NOT A SWITCH — callers speaking one language routinely borrow one or two words from another (most often English, but any language: an Urdu word in Hindi, an English word in Telugu, etc.). A turn that is ONLY one or two words of language B, with no grammatical frame of B around them, is NEVER a switch to B (target_language = null, stay) — no matter which language B is, and even if the LIVE transcript is empty. This covers:
+   - Short acknowledgments / yes-no words ("हाँ", "ஆம்", "ஆமா", "ఆ", "haan", "aama", "okay", "sari") — acoustically confusable and frequently MIS-TAGGED.
+   - Standalone greetings / courtesy words ("hi", "hello", "hey", "bye", "thanks", "sorry") — universal across languages.
+   - Isolated borrowed content words dropped into the caller's own language ("travel", "booking", "ticket" in Telugu; any single foreign word) — mixing is normal and does NOT mean the caller changed language.
+   This holds EVEN WHEN the 1-2 words of B include a distinctive function word or verb ending (e.g. a lone "आहे" after a majority-Telugu turn): one function word does not create a matrix — it is how cluster mis-recognition looks (rule 4). The ONLY exceptions that switch on so few words are the explicit intent cases in rule 1 — the caller directly asking for language B by name ("English please", "हिंदी में", "Telugu lo") or rejecting the current one. Absent an explicit request, switching to B requires a SUBSTANTIVE MATRIX of B — its own function words framing a full clause — not a lone borrowed word, a lone function word, or a short fragment tagged as B.
 7. If the dominant spoken language is NOT in the supported list, or you are unsure, stay (target_language = null).
 
 Respond with raw JSON only — no markdown fences, no surrounding text:
-{{
+{
   "detected_language": "<ISO code of the language the caller is ACTUALLY speaking, e.g. 'ta','te','pa','en' — judged by rules 1-6; report it even if it is NOT in the supported list; never null>",
   "detection_confidence": <0.0-1.0 — your confidence in detected_language, INDEPENDENT of whether it is supported or whether you switch; this is a pure language-identification confidence>,
   "target_language": "<one of the supported labels, or null to stay in the current language>",
   "target_confidence": <0.0-1.0 — your confidence that SWITCHING the agent to target_language is the right action (not merely that the language is present); use 0 when target_language is null>,
-  "explicit_request": <true|false — true ONLY if the caller explicitly asked to speak target_language (rule 1)>,
+  "explicit_request": <true|false — true ONLY if the caller NAMED target_language and asked to use it (rule 1: "English please", "हिंदी में बोलो", "Telugu lo matladandi"). The language name itself must be present in the utterance. A courtesy or filler word alone ("please", "hello", "sorry", "okay") is NEVER a request — do not infer a request from the language a word happens to be spoken in>,
   "reasoning": "<brief explanation, 12 words maximum>"
-}}
+}
 """
+
+# Per-turn user message paired with LANGUAGE_SWITCH_SYSTEM_PROMPT.
+LANGUAGE_SWITCH_TURN_PROMPT = """The agent is currently operating in: {active_language}
+Supported languages (target_language must be one of these labels, or null): {available_languages}
+
+Caller's latest turn:
+1. UNBIASED transcript: "{detector_transcript}"
+2. LIVE transcript: "{active_transcript}"
+
+Respond with raw JSON only."""
 
 EXTRACTION_PROMPT_GENERATION_PROMPT = """
 You are a parsing assistant. Your job is to convert a structured set of extraction instructions into a JSON object where:

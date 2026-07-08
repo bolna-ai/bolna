@@ -255,12 +255,46 @@ async def test_reconnect_cap_resets_for_spread_out_drops(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_reconnect_failure_keeps_detector_dead(monkeypatch):
+async def test_reconnect_retries_until_cap_on_persistent_failure(monkeypatch):
+    # A failing start() retries within the loop (bounded by the cap) instead of leaving
+    # the detector permanently dead after one attempt.
     monkeypatch.setattr(SarvamLID, "_RECONNECT_DELAY_S", 0)
+    monkeypatch.setattr(SarvamLID, "_RECONNECT_RESET_WINDOW_S", 10**9)
     d = _detector()
     d._dead = True
     d._reconnecting = True
     d.start = AsyncMock(side_effect=RuntimeError("403"))
     await d._reconnect()
+    assert d.start.await_count == SarvamLID._MAX_RECONNECTS
     assert d._dead is True
-    assert d._reconnecting is False  # a later trigger may try the remaining budget
+    assert d._reconnecting is False
+
+
+@pytest.mark.asyncio
+async def test_reconnect_bails_when_stopping_after_sleep(monkeypatch):
+    # A stop() landing inside the reconnect window must not reopen a socket for an ended call.
+    monkeypatch.setattr(SarvamLID, "_RECONNECT_DELAY_S", 0)
+    d = _detector()
+    d._dead = True
+
+    async def _stop_then_fail():
+        raise AssertionError("start() must not run after stop()")
+
+    d.start = AsyncMock(side_effect=_stop_then_fail)
+    d._stopping = True  # simulate stop() already flipped the flag
+    await d._reconnect()
+    d.start.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_shutdown_cancels_pending_reconnect(monkeypatch):
+    # The reconnect task handle is stored and cancelled by teardown so it can't outlive the call.
+    d = _detector()
+
+    async def _never():
+        await asyncio.sleep(3600)
+
+    d._reconnect_task = asyncio.create_task(_never())
+    d.start = AsyncMock()
+    await d._shutdown_connection()
+    assert d._reconnect_task.cancelled()

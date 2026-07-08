@@ -73,6 +73,7 @@ class ElevenlabsSynthesizer(StreamSynthesizer):
         self.context_id = None
         self.context_ids_to_ignore = set()
         self._eos_context_id = None  # context the last end-of-stream was emitted for
+        self.current_turn_context_id = None  # survives close_context, unlike context_id
         self.ws_send_time = None
         self.ws_trace_id = None
         self.current_turn_ttfb = None
@@ -96,8 +97,11 @@ class ElevenlabsSynthesizer(StreamSynthesizer):
         return audio, {"text_synthesized": text_synthesized}
 
     def _on_push(self, meta_info, text):
-        if not self.context_id:
+        # Mint only for pushes that will actually synthesize — a superseded push must not
+        # advance current_turn_context_id, or the prior turn's real isFinal gets suppressed.
+        if not self.context_id and self.should_synthesize_response(meta_info.get("sequence_id")):
             self.context_id = str(uuid.uuid4())
+            self.current_turn_context_id = self.context_id
 
     # ------------------------------------------------------------------
     # Format helper
@@ -112,14 +116,18 @@ class ElevenlabsSynthesizer(StreamSynthesizer):
 
     async def handle_interruption(self):
         try:
+            # Also covers a context already closed at end_of_llm_stream but still draining frames.
+            if self.current_turn_context_id:
+                self.context_ids_to_ignore.add(self.current_turn_context_id)
+                self.current_turn_context_id = None
+                # The interrupted context's end-of-stream is now dropped, so the
+                # next turn must be re-detected as new to clear stale queue entries.
+                self.current_turn_start_time = None
             if self.context_id:
                 self.context_ids_to_ignore.add(self.context_id)
                 interrupt_message = {"context_id": self.context_id, "close_context": True}
                 await self.websocket.send(json.dumps(interrupt_message))
                 self.context_id = None
-                # The interrupted context's end-of-stream is now dropped, so the
-                # next turn must be re-detected as new to clear stale queue entries.
-                self.current_turn_start_time = None
         except Exception:
             pass
 
@@ -269,9 +277,15 @@ class ElevenlabsSynthesizer(StreamSynthesizer):
                 else:
                     logger.info("No audio data in the response")
 
+                # A stale (previous-turn) context's frames must never end the current turn's stream.
+                is_stale_context = (
+                    ctx is not None and self.current_turn_context_id is not None and ctx != self.current_turn_context_id
+                )
+                if emit_eos and is_stale_context:
+                    logger.info(f"Suppressing end-of-stream from stale context {ctx}")
                 # isFinal and the text-match can both fire within one turn; emit end-of-stream
                 # only once per context.
-                if emit_eos and not (ctx is not None and ctx == self._eos_context_id):
+                elif emit_eos and not (ctx is not None and ctx == self._eos_context_id):
                     self._eos_context_id = ctx
                     yield b"\x00", ""
 
@@ -341,6 +355,14 @@ class ElevenlabsSynthesizer(StreamSynthesizer):
 
     async def synthesize(self, text):
         return await self._generate_http(text, format="mp3_44100_128")
+
+    async def synthesize_telephony_clip(self, text):
+        """One-shot render in the telephony wire format (mu-law 8000) — no
+        decode/transcode step (and no ffmpeg), unlike the MP3 the plain synthesize()
+        returns. None on non-mulaw configs so callers fall back to synthesize()."""
+        if not self.use_mulaw:
+            return None
+        return await self._generate_http(text)
 
     async def _generate_http(self, text, format=None):
         payload = {

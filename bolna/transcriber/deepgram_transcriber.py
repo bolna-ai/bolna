@@ -126,7 +126,6 @@ class DeepgramTranscriber(BaseTranscriber):
         # Kept above the normal end-of-turn wait so an ordinary pause isn't treated as a stall.
         self.flux_turn_stall_timeout_s = max(DEEPGRAM_FLUX_TURN_STALL_FLOOR_S, (self.eot_timeout_ms / 1000.0) * 4)
         self.flux_watchdog_task = None
-        self._last_flux_msg_time = None
         self.eager_transcript_pending = None
         self.language_hints = kwargs.get("language_hints")
         # ASR-native LID events (flux-general-multi only) — collected per turn and
@@ -348,6 +347,8 @@ class DeepgramTranscriber(BaseTranscriber):
         self.current_turn_id = None
         self.final_transcript = ""
         self.is_transcript_sent_for_processing = True
+        # A stale pending-eager flag would mark the NEXT turn's EndOfTurn as was_eager
+        self.eager_transcript_pending = None
 
     async def _force_finalize_utterance(self):
         """Force-finalize a stuck utterance and send to queue"""
@@ -432,16 +433,28 @@ class DeepgramTranscriber(BaseTranscriber):
             raise
 
     def _flux_turn_is_stalled(self, now):
-        """True if a turn is open (interim seen) but no Flux event arrived within the stall window."""
-        if self.last_interim_time is None or self._last_flux_msg_time is None:
+        """True if a turn is open (interim seen) but transcript progress stopped within the stall
+        window. Keyed on last_interim_time, not message arrival: a stuck turn's socket stays chatty
+        with empty Updates (prod run 9c9dc030), which must not count as liveness."""
+        if not self.is_flux_model or self.last_interim_time is None:
             return False
-        return (now - self._last_flux_msg_time) > self.flux_turn_stall_timeout_s
+        return (now - self.last_interim_time) > self.flux_turn_stall_timeout_s
 
     async def _release_stuck_flux_turn(self):
-        # speech_ended ends the user turn downstream (resets callee_speaking) without injecting a
-        # transcript or LLM call; _reset_turn_state then drops any later finalization for this turn.
-        await self.push_to_transcriber_queue(create_ws_data_packet({"type": "speech_ended"}, self.meta_info))
-        self._reset_turn_state()
+        # A pending eager turn means a speculative LLM task is in flight downstream — cancel it
+        # (and its staged history) via turn_resumed before releasing, so the orphan can't run
+        # tools, duplicate the user turn, or leak was_eager into the next turn.
+        if self.eager_transcript_pending is not None:
+            self.eager_transcript_pending = None
+            await self.push_to_transcriber_queue(create_ws_data_packet({"type": "turn_resumed"}, self.meta_info))
+        # Deliver the buffered words (mirrors Nova's force-finalize) so the user's speech still
+        # reaches the LLM; bare speech_ended only when the stuck turn produced no text — it still
+        # resets callee_speaking downstream, and _reset_turn_state drops any later finalization.
+        if self.final_transcript.strip() or self.current_turn_interim_details:
+            await self._force_finalize_utterance()
+        else:
+            await self.push_to_transcriber_queue(create_ws_data_packet({"type": "speech_ended"}, self.meta_info))
+            self._reset_turn_state()
 
     async def monitor_flux_turn_timeout(self):
         """Force-close a Flux turn that stays open without any closing event, so a missing
@@ -452,7 +465,7 @@ class DeepgramTranscriber(BaseTranscriber):
                 if self._flux_turn_is_stalled(time.time()):
                     logger.warning(
                         f"Flux turn stall: no event for >{self.flux_turn_stall_timeout_s:.1f}s "
-                        f"(turn {self.current_turn_id}), releasing via speech_ended."
+                        f"(turn {self.current_turn_id}), releasing stuck turn."
                     )
                     await self._release_stuck_flux_turn()
         except asyncio.CancelledError:
@@ -895,10 +908,6 @@ class DeepgramTranscriber(BaseTranscriber):
         async for msg in ws:
             try:
                 msg = json.loads(msg)
-
-                # Track liveness off every message (any type), so the stall watchdog also covers
-                # turns that only produced an Update and never a StartOfTurn.
-                self._last_flux_msg_time = time.time()
 
                 if self.connection_start_time is None:
                     self.connection_start_time = time.time() - (self.num_frames * self.audio_frame_duration)

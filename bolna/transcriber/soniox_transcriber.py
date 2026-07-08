@@ -11,7 +11,7 @@ from websockets.exceptions import ConnectionClosedError, InvalidHandshake
 from .base_transcriber import BaseTranscriber
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.ssl_context import get_ssl_context
-from bolna.helpers.utils import create_ws_data_packet, timestamp_ms
+from bolna.helpers.utils import build_soniox_config, create_ws_data_packet, soniox_ws_url, timestamp_ms
 from bolna.enums import TelephonyProvider
 from bolna.constants import (
     SONIOX_AUTO_LANGUAGE_VALUES,
@@ -129,34 +129,20 @@ class SonioxTranscriber(BaseTranscriber):
 
     def _build_config(self):
         """First WebSocket frame: auth + stream config (Soniox carries the api_key here, not a header)."""
-        config = {
-            "api_key": self.api_key,
-            "model": self.model,
-            "audio_format": self.soniox_audio_format,
-            "sample_rate": int(self.sampling_rate),
-            "num_channels": 1,
-            "enable_endpoint_detection": True,
-            "enable_language_identification": True,
-        }
-        if self.max_endpoint_delay_ms is not None:
-            config["max_endpoint_delay_ms"] = self.max_endpoint_delay_ms
-        if self.endpoint_sensitivity is not None:
-            config["endpoint_sensitivity"] = self.endpoint_sensitivity
-
-        hints = self._resolve_language_hints()
-        if hints:
-            config["language_hints"] = hints
-
-        if self.keywords:
-            terms = [kw.strip() for kw in self.keywords.split(",") if kw.strip()]
-            if terms:
-                config["context"] = {"terms": terms}
-
-        return config
+        terms = [kw.strip() for kw in self.keywords.split(",") if kw.strip()] if self.keywords else []
+        return build_soniox_config(
+            self.api_key,
+            self.model,
+            self.soniox_audio_format,
+            self.sampling_rate,
+            max_endpoint_delay_ms=self.max_endpoint_delay_ms,
+            endpoint_sensitivity=self.endpoint_sensitivity,
+            language_hints=self._resolve_language_hints() or None,
+            context={"terms": terms} if terms else None,
+        )
 
     def get_soniox_ws_url(self):
-        protocol = os.getenv("SONIOX_HOST_PROTOCOL", "wss")
-        return f"{protocol}://{self.soniox_host}/transcribe-websocket"
+        return soniox_ws_url(self.soniox_host)
 
     def get_meta_info(self):
         return self.meta_info
