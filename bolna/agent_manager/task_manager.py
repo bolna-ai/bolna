@@ -6356,8 +6356,17 @@ class TaskManager(BaseManager):
                 audio = await get_raw_audio_bytes(
                     f"{self.backchanneling_audios}/{filename}", local=True, is_location=True
                 )
-                if not self.turn_based_conversation and self.task_config["tools_config"]["output"] != "default":
-                    audio = resample(audio, target_sample_rate=8000, format="wav")
+                if not self.turn_based_conversation:
+                    # backchannel wavs are 8kHz; web/freeswitch play raw PCM at the synth rate
+                    # (self.sampling_rate, e.g. 24k) — sending them labeled 24k without upsampling
+                    # plays ~3x fast. mulaw telephony (twilio/plivo/exotel) stays 8k.
+                    # NB: the old `["output"] != "default"` compared a dict to a str (always True).
+                    output_provider = (self.task_config["tools_config"].get("output") or {}).get("provider")
+                    is_raw_pcm_output = (
+                        self.is_web_based_call or output_provider == TelephonyProvider.FREESWITCH.value
+                    )
+                    target_rate = self.sampling_rate if is_raw_pcm_output else 8000
+                    audio = resample(audio, target_sample_rate=target_rate, format="wav")
                     audio = wav_bytes_to_pcm(audio)
                 await self.tools["output"].handle(create_ws_data_packet(audio, self.__get_updated_meta_info()))
             else:

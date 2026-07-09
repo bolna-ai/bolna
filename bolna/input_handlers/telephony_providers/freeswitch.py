@@ -63,8 +63,13 @@ class FreeSwitchInputHandler(DefaultInputHandler):
                     logger.info(f"freeswitch _listen: text frame #{txt_frames}: {message['text'][:200]}")
                     try:
                         await self.process_message(json.loads(message["text"]))
-                    except (json.JSONDecodeError, TypeError):
-                        logger.info(f"freeswitch: non-JSON text frame ignored")
+                    except json.JSONDecodeError:
+                        logger.info("freeswitch: non-JSON text frame ignored")
+                    except Exception as e:
+                        # a malformed/unexpected control frame (e.g. mod_audio_stream's initial
+                        # metadata JSON with no "type" key) must not tear down caller audio —
+                        # log and keep reading frames.
+                        logger.warning(f"freeswitch: ignoring unprocessable text frame: {e}")
         except WebSocketDisconnect as e:
             logger.info(
                 f"freeswitch _listen: WebSocketDisconnect code={getattr(e, 'code', None)} "

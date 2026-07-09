@@ -43,6 +43,29 @@ class FreeSwitchOutputHandler(DefaultOutputHandler):
     def get_stream_sid(self):
         return self.stream_sid
 
+    @staticmethod
+    def is_closed_socket_error(e) -> bool:
+        # starlette raises a bare RuntimeError('Cannot call "send" once a close message has
+        # been sent.') — builtins module, text has "close" not "closed"/"disconnect".
+        text = str(e).lower()
+        return (
+            "websocket" in type(e).__module__
+            or "close" in text
+            or "disconnect" in text
+        )
+
+    def mark_closed(self):
+        """Latch closed AND release turn-taking state — if the socket dies on the final chunk
+        the playout self-ack never runs, and task_manager blocks on is_audio_being_played."""
+        self._closed = True
+        if self._finish_task and not self._finish_task.done():
+            self._finish_task.cancel()
+        self._pending_marks = []
+        self._response_bytes = 0
+        self._response_first_send = None
+        if self.input_handler and self.input_handler.is_audio_being_played_to_user():
+            self.input_handler.update_is_audio_being_played(False)
+
     async def handle_interruption(self):
         if self._closed:
             return
@@ -151,8 +174,8 @@ class FreeSwitchOutputHandler(DefaultOutputHandler):
         except Exception as e:
             # only a dead websocket should silence the handler permanently; anything else
             # (e.g. a bad chunk) must be loud and must not kill the rest of the call's audio.
-            if "websocket" in type(e).__module__ or "closed" in str(e).lower() or "disconnect" in str(e).lower():
-                self._closed = True
+            if self.is_closed_socket_error(e):
                 logger.info(f"freeswitch ws send failed (client disconnected): {e}")
+                self.mark_closed()
             else:
                 logger.error(f"freeswitch handle error (audio chunk dropped): {e}", exc_info=True)
