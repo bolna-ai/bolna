@@ -141,11 +141,18 @@ class FreeSwitchOutputHandler(DefaultOutputHandler):
             # on the final chunk, self-ack the whole response after its estimated playout
             if is_final:
                 total_dur = self._response_bytes / self.bytes_per_second
-                remaining = (self._response_first_send + total_dur) - time.time()
+                # a no-audio final (e.g. language-switch handoff) has no first-send ts
+                first_send = self._response_first_send if self._response_first_send is not None else time.time()
+                remaining = (first_send + total_dur) - time.time()
                 marks, self._pending_marks = self._pending_marks, []
                 self._response_bytes = 0
                 self._response_first_send = None
                 self._finish_task = asyncio.create_task(self._complete_after_playout(remaining, marks))
         except Exception as e:
-            self._closed = True
-            logger.debug(f"freeswitch ws send failed (client disconnected): {e}")
+            # only a dead websocket should silence the handler permanently; anything else
+            # (e.g. a bad chunk) must be loud and must not kill the rest of the call's audio.
+            if "websocket" in type(e).__module__ or "closed" in str(e).lower() or "disconnect" in str(e).lower():
+                self._closed = True
+                logger.info(f"freeswitch ws send failed (client disconnected): {e}")
+            else:
+                logger.error(f"freeswitch handle error (audio chunk dropped): {e}", exc_info=True)
