@@ -6,6 +6,7 @@ import uuid
 
 from bolna.output_handlers.default import DefaultOutputHandler
 from bolna.helpers.logger_config import configure_logger
+from bolna.helpers.utils import wav_bytes_to_pcm
 
 logger = configure_logger(__name__)
 
@@ -90,6 +91,11 @@ class FreeSwitchOutputHandler(DefaultOutputHandler):
             has_audio = audio and len(audio) > 1 and audio != b"\x00\x00"
             if not has_audio and not is_final:
                 return
+
+            # some synths (e.g. elevenlabs mp3 path) deliver WAV-with-header chunks; the fork
+            # protocol is raw L16, so strip the container or the header plays as a click.
+            if has_audio and audio[:4] == b"RIFF":
+                audio = wav_bytes_to_pcm(audio)
 
             if has_audio:
                 if self._response_first_send is None:

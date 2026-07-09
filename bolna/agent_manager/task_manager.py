@@ -1546,6 +1546,10 @@ class TaskManager(BaseManager):
                 synthesizer_kwargs = self.kwargs.copy()
                 if is_telephony:
                     synthesizer_kwargs["use_mulaw"] = True
+                elif self.is_web_based_call or output_provider == TelephonyProvider.FREESWITCH.value:
+                    # web/freeswitch play raw PCM @24k; synths like elevenlabs/cartesia default to
+                    # mulaw@8k (telephony) which garbles when labeled 24k — force it off.
+                    synthesizer_kwargs["use_mulaw"] = False
 
                 synthesizers = {}
                 for label, cfg in multilingual.items():
@@ -1615,6 +1619,12 @@ class TaskManager(BaseManager):
             if self.task_config["tools_config"]["output"]["provider"] == TelephonyProvider.SIP_TRUNK.value:
                 synthesizer_kwargs["use_mulaw"] = True
                 logger.info(f"[SIP-TRUNK] Configuring synthesizer with use_mulaw=True for Asterisk sip-trunk")
+            elif (
+                self.is_web_based_call
+                or self.task_config["tools_config"]["output"]["provider"] == TelephonyProvider.FREESWITCH.value
+            ):
+                # web/freeswitch play raw PCM @24k — synths must not emit telephony mulaw@8k
+                synthesizer_kwargs["use_mulaw"] = False
 
             self.tools["synthesizer"] = synthesizer_class(
                 **synth_config, **provider_config, **synthesizer_kwargs, caching=caching
