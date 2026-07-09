@@ -122,8 +122,8 @@ class SmallestTranscriber(BaseTranscriber):
 
     def _configure_audio_params(self):
         """Configure audio parameters based on telephony provider."""
-        if self.provider == "twilio":
-            # Twilio sends mulaw at 8kHz
+        if self.provider in ("twilio", "sip-trunk"):
+            # Twilio and sip-trunk (Asterisk) send mulaw at 8kHz
             self.encoding = "mulaw"
             self.sampling_rate = 8000
             self.audio_frame_duration = 0.2

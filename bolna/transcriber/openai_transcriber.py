@@ -105,7 +105,7 @@ class OpenAITranscriber(BaseTranscriber):
         self._configure_audio_params()
 
     def _configure_audio_params(self):
-        if self.telephony_provider == "twilio":
+        if self.telephony_provider in ("twilio", "sip-trunk"):
             self.encoding = "mulaw"
             self.input_sampling_rate = 8000
         elif self.telephony_provider in ("plivo", "exotel", "vobiz"):

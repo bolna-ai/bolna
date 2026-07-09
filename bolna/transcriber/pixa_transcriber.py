@@ -97,7 +97,7 @@ class PixaTranscriber(BaseTranscriber):
 
     def _configure_audio_params(self):
         """Configure audio parameters based on telephony provider."""
-        if self.telephony_provider == "twilio":
+        if self.telephony_provider in ("twilio", "sip-trunk"):
             self.encoding = "mulaw"
             self.input_sampling_rate = 8000
             self.sampling_rate = 8000
