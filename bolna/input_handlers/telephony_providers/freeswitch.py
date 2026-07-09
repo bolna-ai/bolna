@@ -16,20 +16,30 @@ class FreeSwitchInputHandler(DefaultInputHandler):
     plus optional text frames (JSON control/metadata). Same audio pipeline as the web/default
     path (linear16 16k → transcriber); only the transport differs (binary vs base64-in-JSON)."""
 
+    # mod_audio_stream sends 20ms (640B) frames; ASR providers wrap each packet as an
+    # independent audio unit (sarvam: one WAV per message), and 20ms slivers are undecodable.
+    # Coalesce to 200ms — the same per-message cadence the telephony providers deliver.
+    INGEST_CHUNK_BYTES = 6400
+
     def __init__(self, *args, **kwargs):
         kwargs.pop("ws_context_data", None)  # accepted for parity with telephony handlers
         super().__init__(*args, **kwargs)
         self.io_provider = "freeswitch"
+        self.ingest_buffer = b""
 
     def ingest_audio(self, data):
-        ws_data_packet = create_ws_data_packet(
-            data=data,
-            meta_info={"io": "freeswitch", "type": "audio", "sequence": self.input_types["audio"]},
-        )
         if self.conversation_recording:
             if self.conversation_recording["metadata"]["started"] == 0:
                 self.conversation_recording["metadata"]["started"] = time.time()
             self.conversation_recording["input"]["data"] += data
+        self.ingest_buffer += data
+        if len(self.ingest_buffer) < self.INGEST_CHUNK_BYTES:
+            return
+        chunk, self.ingest_buffer = self.ingest_buffer, b""
+        ws_data_packet = create_ws_data_packet(
+            data=chunk,
+            meta_info={"io": "freeswitch", "type": "audio", "sequence": self.input_types["audio"]},
+        )
         self.queues["transcriber"].put_nowait(ws_data_packet)
 
     async def _listen(self):
