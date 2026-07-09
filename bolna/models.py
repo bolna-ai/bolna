@@ -19,6 +19,9 @@ from .constants import MODEL_REASONING_EFFORT_MAP
 
 AGENT_WELCOME_MESSAGE = "This call is being recorded for quality assurance and training. Please speak now."
 
+# A message that is either a single string or a per-language {lang_code: text} map.
+LocalizedText = Union[str, Dict[str, str]]
+
 
 def validate_attribute(value, allowed_values, value_type="provider"):
     if value not in allowed_values:
@@ -414,7 +417,7 @@ class GraphNode(BaseModel):
     description: Optional[str] = None
     node_type: NodeType = NodeType.LLM
     prompt: str = ""
-    static_message: Optional[str] = None
+    static_message: Optional[LocalizedText] = None
     repeat_after_silence_seconds: Optional[float] = None
     examples: Optional[Dict[str, str]] = None
     edges: List[GraphEdge] = Field(default_factory=list)
