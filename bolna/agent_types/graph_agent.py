@@ -113,18 +113,22 @@ class GraphAgent(BaseAgent):
         # Initialize main LLM for response generation (supports api_tools/function calling + real streaming)
         self.llm = self._initialize_llm()
 
-        # Initialize LLMs for hangup and voicemail detection (kept on the aux creds, not the swapped ones)
+        # Hangup/voicemail use OpenAiLLM (no Azure support): on Azure use the platform OpenAI key, else the aux creds.
+        aux_provider = self.config.get("aux_provider") or self.config.get("provider") or "openai"
+        aux_model = self.config.get("aux_model") or self.llm_model
+        if aux_model:
+            aux_model = aux_model.split("/", 1)[-1]
         llm_kwargs = {}
-        if self.aux_llm_key:
-            llm_kwargs["llm_key"] = self.aux_llm_key
-        if self.aux_base_url:
-            llm_kwargs["base_url"] = self.aux_base_url
-        # Use aux_model (the customer's original); self.llm_model may be the swapped PTU deployment (404 on aux).
+        if aux_provider == "azure":
+            if os.getenv("OPENAI_API_KEY"):
+                llm_kwargs["llm_key"] = os.getenv("OPENAI_API_KEY")
+        else:
+            if self.aux_llm_key:
+                llm_kwargs["llm_key"] = self.aux_llm_key
+            if self.aux_base_url:
+                llm_kwargs["base_url"] = self.aux_base_url
         self.conversation_completion_llm = OpenAiLLM(
-            model=os.getenv(
-                "CHECK_FOR_COMPLETION_LLM", self.config.get("aux_model") or self.llm_model or "gpt-4o-mini"
-            ),
-            **llm_kwargs,
+            model=os.getenv("CHECK_FOR_COMPLETION_LLM", aux_model or "gpt-4o-mini"), **llm_kwargs
         )
         self.voicemail_llm = OpenAiLLM(model=os.getenv("VOICEMAIL_DETECTION_LLM", "gpt-4.1-mini"), **llm_kwargs)
 

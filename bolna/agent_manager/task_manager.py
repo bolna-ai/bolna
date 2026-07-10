@@ -1657,6 +1657,8 @@ class TaskManager(BaseManager):
                 injected_cfg["aux_base_url"] = self.kwargs["aux_base_url"]
             if "aux_model" in self.kwargs:
                 injected_cfg["aux_model"] = self.kwargs["aux_model"]
+            if "aux_provider" in self.kwargs:
+                injected_cfg["aux_provider"] = self.kwargs["aux_provider"]
             if "route_routing_to_conversation" in self.kwargs:
                 injected_cfg["route_routing_to_conversation"] = self.kwargs["route_routing_to_conversation"]
             if self.llm_config.get("use_responses_api"):
