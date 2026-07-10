@@ -48,11 +48,7 @@ class FreeSwitchOutputHandler(DefaultOutputHandler):
         # starlette raises a bare RuntimeError('Cannot call "send" once a close message has
         # been sent.') — builtins module, text has "close" not "closed"/"disconnect".
         text = str(e).lower()
-        return (
-            "websocket" in type(e).__module__
-            or "close" in text
-            or "disconnect" in text
-        )
+        return "websocket" in type(e).__module__ or "close" in text or "disconnect" in text
 
     def mark_closed(self):
         """Latch closed AND release turn-taking state — if the socket dies on the final chunk
@@ -149,16 +145,21 @@ class FreeSwitchOutputHandler(DefaultOutputHandler):
             # register the chunk's mark for playback-completion bookkeeping
             mark_id = meta_info.get("mark_id") or str(uuid.uuid4())
             if self.mark_event_meta_data:
-                self.mark_event_meta_data.update_data(mark_id, {
-                    "text_synthesized": "" if meta_info.get("sequence_id") == -1 else meta_info.get("text_synthesized", ""),
-                    "type": meta_info.get("message_category", ""),
-                    "is_first_chunk": meta_info.get("is_first_chunk", False),
-                    "is_final_chunk": is_final,
-                    "sequence_id": meta_info.get("sequence_id"),
-                    # record_ack / latency tracking require these (same contract as sip_trunk)
-                    "duration": (len(audio) / self.bytes_per_second) if has_audio else 0.0,
-                    "sent_ts": time.time(),
-                })
+                self.mark_event_meta_data.update_data(
+                    mark_id,
+                    {
+                        "text_synthesized": ""
+                        if meta_info.get("sequence_id") == -1
+                        else meta_info.get("text_synthesized", ""),
+                        "type": meta_info.get("message_category", ""),
+                        "is_first_chunk": meta_info.get("is_first_chunk", False),
+                        "is_final_chunk": is_final,
+                        "sequence_id": meta_info.get("sequence_id"),
+                        # record_ack / latency tracking require these (same contract as sip_trunk)
+                        "duration": (len(audio) / self.bytes_per_second) if has_audio else 0.0,
+                        "sent_ts": time.time(),
+                    },
+                )
             self._pending_marks.append(mark_id)
 
             # on the final chunk, self-ack the whole response after its estimated playout

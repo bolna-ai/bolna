@@ -105,8 +105,10 @@ def welcome_pcm_upsampled(welcome_b64: str, target_sample_rate: int) -> bytes:
     once — instead of in each TaskManager.__init__ — keeps CPU from spiking when many calls start
     at once (the welcome burst)."""
     return resample(
-        base64.b64decode(welcome_b64), target_sample_rate=target_sample_rate,
-        format="pcm", original_sample_rate=8000,
+        base64.b64decode(welcome_b64),
+        target_sample_rate=target_sample_rate,
+        format="pcm",
+        original_sample_rate=8000,
     )
 
 
@@ -6375,9 +6377,7 @@ class TaskManager(BaseManager):
                     # plays ~3x fast. mulaw telephony (twilio/plivo/exotel) stays 8k.
                     # NB: the old `["output"] != "default"` compared a dict to a str (always True).
                     output_provider = (self.task_config["tools_config"].get("output") or {}).get("provider")
-                    is_raw_pcm_output = (
-                        self.is_web_based_call or output_provider == TelephonyProvider.FREESWITCH.value
-                    )
+                    is_raw_pcm_output = self.is_web_based_call or output_provider == TelephonyProvider.FREESWITCH.value
                     target_rate = self.sampling_rate if is_raw_pcm_output else 8000
                     audio = resample(audio, target_sample_rate=target_rate, format="wav")
                     audio = wav_bytes_to_pcm(audio)
