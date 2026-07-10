@@ -1,6 +1,7 @@
 import asyncio
 import audioop
 from collections import defaultdict
+from functools import lru_cache
 from datetime import datetime
 import io
 import math
@@ -95,6 +96,18 @@ from .models import ComponentLatencies
 from .voicemail_handler import VoicemailHandler
 
 logger = configure_logger(__name__)
+
+
+@lru_cache(maxsize=256)
+def welcome_pcm_upsampled(welcome_b64: str, target_sample_rate: int) -> bytes:
+    """Upsample the cached 8kHz welcome PCM to the raw-PCM output rate (web/freeswitch), memoized
+    per (welcome, rate). The welcome is identical across every call of an agent, so resampling it
+    once — instead of in each TaskManager.__init__ — keeps CPU from spiking when many calls start
+    at once (the welcome burst)."""
+    return resample(
+        base64.b64decode(welcome_b64), target_sample_rate=target_sample_rate,
+        format="pcm", original_sample_rate=8000,
+    )
 
 
 def _inject_end_call_tool(api_tools, *, scope, nodes, description=None):
@@ -338,14 +351,14 @@ class TaskManager(BaseManager):
         self.preloaded_welcome_audio = (
             base64.b64decode(self.welcome_message_audio) if self.welcome_message_audio else None
         )
-        # Cached welcome is 8kHz PCM; web/freeswitch play at 24kHz, so upsample or the first audio is pitched.
+        # Cached welcome is 8kHz PCM; web/freeswitch play at 24kHz, so upsample or the first audio is
+        # pitched. Memoized per welcome (welcome_pcm_upsampled) so this resample runs once, not in
+        # every call's __init__ — otherwise a burst of concurrent calls spikes CPU on the event loop.
         is_freeswitch_output = (task.get("tools_config", {}).get("output") or {}).get(
             "provider"
         ) == TelephonyProvider.FREESWITCH.value
         if (self.is_web_based_call or is_freeswitch_output) and self.preloaded_welcome_audio:
-            self.preloaded_welcome_audio = resample(
-                self.preloaded_welcome_audio, target_sample_rate=24000, format="pcm", original_sample_rate=8000
-            )
+            self.preloaded_welcome_audio = welcome_pcm_upsampled(self.welcome_message_audio, 24000)
         self.observable_variables = {}
         self.output_handler_set = False
         # IO HANDLERS
