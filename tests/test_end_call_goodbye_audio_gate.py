@@ -17,6 +17,7 @@ buffered goodbye flushes on the next transmit pass.
 import asyncio
 import os
 import sys
+import time
 from unittest.mock import AsyncMock, MagicMock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -72,17 +73,48 @@ def test_speech_ended_swallowed_during_hangup():
     assert im.callee_speaking is True  # swallowed -> stays stuck without the fix
 
 
-def test_enter_hangup_releases_audio_gate():
-    """Fix: entering hangup opens the gate so the goodbye can flush (SEND)."""
-    im = _im_with_speaking_user()
-    assert im.get_audio_send_status(GOODBYE_SEQ, history_length=1) == "WAIT"
-
+def _enter_hangup(im):
+    """Drive the real _enter_hangup_state against a stub carrying this InterruptionManager."""
     tm = MagicMock()
     tm.interruption_manager = im
     tm.hangup_decision_at = None
     TaskManager._enter_hangup_state(tm)
+    return tm
 
+
+def test_enter_hangup_releases_audio_gate():
+    """Fix: entering hangup opens the gate so the goodbye can flush (SEND)."""
+    im = _im_with_speaking_user()
+    assert im.get_audio_send_status(GOODBYE_SEQ, history_length=1) == "WAIT"
+    _enter_hangup(im)
     assert im.get_audio_send_status(GOODBYE_SEQ, history_length=1) == "SEND"
+
+
+def test_release_on_production_history_length():
+    """Production path (history_length > 2 exercises the grace branch): a stuck-VAD goodbye
+    still flushes after hangup. utterance_end_time == -1 (no clean UtteranceEnd for the
+    in-flight speech) makes the grace check a no-op, so the gate returns SEND once hangup
+    clears callee_speaking."""
+    im = _im_with_speaking_user()
+    assert im.utterance_end_time == -1
+    assert im.get_audio_send_status(GOODBYE_SEQ, history_length=3) == "WAIT"
+    _enter_hangup(im)
+    assert im.get_audio_send_status(GOODBYE_SEQ, history_length=3) == "SEND"
+
+
+def test_grace_period_holds_briefly_then_clears():
+    """After hangup releases callee_speaking, the grace branch can only delay the goodbye
+    by at most incremental_delay, never indefinitely."""
+    im = _im_with_speaking_user()
+    _enter_hangup(im)
+
+    # Recent UtteranceEnd -> within grace window -> WAIT
+    im.utterance_end_time = time.time() * 1000
+    assert im.get_audio_send_status(GOODBYE_SEQ, history_length=3) == "WAIT"
+
+    # Older than incremental_delay -> grace elapsed -> SEND (does not stick)
+    im.utterance_end_time = time.time() * 1000 - (im.incremental_delay + 50)
+    assert im.get_audio_send_status(GOODBYE_SEQ, history_length=3) == "SEND"
 
 
 def test_gate_still_holds_outside_hangup():
@@ -92,7 +124,8 @@ def test_gate_still_holds_outside_hangup():
 
 
 def test_transcript_still_ignored_during_hangup():
-    """Regression: no new turn is started from transcriber input after end_call."""
+    """Precondition the fix relies on: while hangup drains the goodbye, transcriber input
+    is still dropped, so a late interim cannot start a new turn or clear the mark queue."""
     im = _im_with_speaking_user()
     tm = _ignore_tm(im, end_call_in_progress=True)
     asyncio.run(_drive_listen_transcriber(tm, [INTERIM]))
@@ -102,6 +135,8 @@ def test_transcript_still_ignored_during_hangup():
 if __name__ == "__main__":
     test_speech_ended_swallowed_during_hangup()
     test_enter_hangup_releases_audio_gate()
+    test_release_on_production_history_length()
+    test_grace_period_holds_briefly_then_clears()
     test_gate_still_holds_outside_hangup()
     test_transcript_still_ignored_during_hangup()
     print("all tests passed")
