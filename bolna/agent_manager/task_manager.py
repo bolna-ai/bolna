@@ -3936,6 +3936,8 @@ class TaskManager(BaseManager):
         self.hangup_triggered = True
         if self.hangup_decision_at is None:
             self.hangup_decision_at = time.time()
+        # Hangup gates transcriber input, so release the audio gate now or the goodbye stalls on WAIT.
+        self.interruption_manager.on_user_speech_ended(update_utterance_time=False)
 
     def _should_ignore_transcriber_input(self) -> bool:
         return self.hangup_triggered or self._end_call_in_progress or self.has_transfer
