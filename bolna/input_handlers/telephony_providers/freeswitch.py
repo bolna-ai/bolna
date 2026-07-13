@@ -26,6 +26,18 @@ class FreeSwitchInputHandler(DefaultInputHandler):
         super().__init__(*args, **kwargs)
         self.io_provider = "freeswitch"
         self.ingest_buffer = b""
+        # set by FreeSwitchOutputHandler: called when mod_audio_stream reports its playout
+        # buffer ACTUALLY drained (real playback-complete, vs the byte-count estimate)
+        self.on_playout_done = None
+
+    async def process_message(self, message):
+        if message.get("type") == "playoutDone":
+            # mod_audio_stream: all queued TTS has really been played to the caller — hand the
+            # signal to the output handler so turn-taking state matches what was heard
+            if self.on_playout_done:
+                self.on_playout_done()
+            return
+        await super().process_message(message)
 
     def ingest_audio(self, data):
         if self.conversation_recording:

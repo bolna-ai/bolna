@@ -1204,7 +1204,11 @@ class TaskManager(BaseManager):
             self.output_handler_set = True
             logger.info("output handler set")
         else:
-            raise "Other input handlers not supported yet"
+            # raising a plain string surfaces as TypeError("exceptions must derive from
+            # BaseException") and hides which provider was unsupported
+            raise ValueError(
+                f"Unsupported output provider: {self.task_config['tools_config']['output']['provider']}"
+            )
 
     async def message_task_new(self):
         tasks = []
@@ -1255,7 +1259,12 @@ class TaskManager(BaseManager):
                     input_kwargs["agent_config"] = {"tasks": [self.task_config]}
             self.tools["input"] = input_handler_class(**input_kwargs)
         else:
-            raise "Other input handlers not supported yet"
+            # raising a plain string surfaces as TypeError("exceptions must derive from
+            # BaseException") and hides which provider was unsupported — this exact failure
+            # masked the missing-freeswitch-handler case when a PyPI bolna shadowed the branch
+            raise ValueError(
+                f"Unsupported input provider: {self.task_config['tools_config']['input']['provider']}"
+            )
 
     async def __forced_first_message(self, timeout=10.0):
         logger.info(f"Executing the first message task")

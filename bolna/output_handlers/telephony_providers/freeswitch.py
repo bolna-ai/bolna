@@ -33,7 +33,29 @@ class FreeSwitchOutputHandler(DefaultOutputHandler):
         self._response_first_send = None
         self._pending_marks = []
         self._finish_task = None
+        self._finish_marks = []
         self.stream_sid = None
+        # REAL playback-complete via mod_audio_stream's playoutDone is available (see
+        # on_playout_done_event) but DISABLED: it finishes the turn at buffer-drain, which is
+        # marginally before the caller's downstream jitter/browser buffer stops playing, risking
+        # an early turn-end/tail clip. Turn-end uses the byte-count estimator (below) — proven,
+        # and interruption does not depend on this. Re-enable by wiring on_playout_done here.
+
+    def on_playout_done_event(self):
+        # AVAILABLE, currently unwired (see __init__). Finish the response the instant the
+        # module's playout buffer truly drains, instead of the estimated timer.
+        if self._closed:
+            return
+        if not self._finish_marks:
+            return  # mid-response chunk gap or nothing awaiting completion — estimator owns it
+        if self._finish_task and not self._finish_task.done():
+            self._finish_task.cancel()
+        marks, self._finish_marks = self._finish_marks, []
+        for mark_id in marks:
+            if self.input_handler:
+                self.input_handler.process_mark_message({"type": "mark", "name": mark_id})
+        if self.input_handler and self.input_handler.is_audio_being_played_to_user():
+            self.input_handler.update_is_audio_being_played(False)
 
     async def set_stream_sid(self, stream_id):
         # the first-message/welcome path calls this (telephony handlers track a stream_sid);
@@ -57,6 +79,7 @@ class FreeSwitchOutputHandler(DefaultOutputHandler):
         if self._finish_task and not self._finish_task.done():
             self._finish_task.cancel()
         self._pending_marks = []
+        self._finish_marks = []
         self._response_bytes = 0
         self._response_first_send = None
         if self.input_handler and self.input_handler.is_audio_being_played_to_user():
@@ -73,6 +96,7 @@ class FreeSwitchOutputHandler(DefaultOutputHandler):
         if self._finish_task and not self._finish_task.done():
             self._finish_task.cancel()
         self._pending_marks = []
+        self._finish_marks = []
         self._response_bytes = 0
         self._response_first_send = None
         if self.mark_event_meta_data:
@@ -85,6 +109,7 @@ class FreeSwitchOutputHandler(DefaultOutputHandler):
         try:
             if remaining > 0:
                 await asyncio.sleep(remaining)
+            self._finish_marks = []  # estimator finishing — a later playoutDone must not re-ack
             for mark_id in marks:
                 if self.input_handler:
                     self.input_handler.process_mark_message({"type": "mark", "name": mark_id})
@@ -162,7 +187,9 @@ class FreeSwitchOutputHandler(DefaultOutputHandler):
                 )
             self._pending_marks.append(mark_id)
 
-            # on the final chunk, self-ack the whole response after its estimated playout
+            # on the final chunk, arm completion: the module's playoutDone event finishes the
+            # response at the REAL drain moment; the estimated timer is the fallback if the
+            # event is lost (WS blip) — whichever fires first wins, both are idempotent.
             if is_final:
                 total_dur = self._response_bytes / self.bytes_per_second
                 # a no-audio final (e.g. language-switch handoff) has no first-send ts
@@ -171,6 +198,7 @@ class FreeSwitchOutputHandler(DefaultOutputHandler):
                 marks, self._pending_marks = self._pending_marks, []
                 self._response_bytes = 0
                 self._response_first_send = None
+                self._finish_marks = list(marks)
                 self._finish_task = asyncio.create_task(self._complete_after_playout(remaining, marks))
         except Exception as e:
             # only a dead websocket should silence the handler permanently; anything else
