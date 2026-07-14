@@ -3863,7 +3863,7 @@ class TaskManager(BaseManager):
                     if self.llm_latencies.turn_latencies
                     else None
                 )
-                self._report_provider_health(
+                await self._report_provider_health(
                     "llm", self.llm_config.get("provider"), self.llm_config.get("model"), True, _ttft
                 )
         except asyncio.CancelledError:
@@ -4281,12 +4281,21 @@ class TaskManager(BaseManager):
         else:
             logger.info(f"Need to separate out output task")
 
-    def _report_provider_health(self, service, provider, model, ok, latency_ms=None):
-        """Fire-and-forget per-provider health signal for the circuit breaker (shadow). Never affects the call."""
+    async def _report_provider_health(self, service, provider, model, ok, latency_ms=None, blocking=False):
+        """Per-provider health signal for the circuit breaker (shadow). Never affects the call.
+
+        Fire-and-forget by default. On the error path pass blocking=True so the write lands before the
+        call tears down (a bare create_task would be cancelled by shutdown); the timeout keeps a slow
+        Redis from ever delaying teardown.
+        """
         if not self.on_provider_health or not provider:
             return
         try:
-            _cb = asyncio.create_task(self.on_provider_health(service, provider, model, ok, latency_ms))
+            coro = self.on_provider_health(service, provider, model, ok, latency_ms)
+            if blocking:
+                await asyncio.wait_for(coro, timeout=2)
+                return
+            _cb = asyncio.create_task(coro)
             self._cb_tasks.add(_cb)
             _cb.add_done_callback(self._cb_tasks.discard)
         except Exception:
@@ -4305,11 +4314,12 @@ class TaskManager(BaseManager):
                 "provider": getattr(error, "provider", None),
                 "model": getattr(error, "model", None),
             }
-            self._report_provider_health(
+            await self._report_provider_health(
                 getattr(error, "component", "unknown"),
                 getattr(error, "provider", None),
                 getattr(error, "model", None),
                 False,
+                blocking=True,
             )
 
         # Log to CSV if not already done
