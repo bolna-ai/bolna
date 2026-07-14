@@ -1206,9 +1206,7 @@ class TaskManager(BaseManager):
         else:
             # raising a plain string surfaces as TypeError("exceptions must derive from
             # BaseException") and hides which provider was unsupported
-            raise ValueError(
-                f"Unsupported output provider: {self.task_config['tools_config']['output']['provider']}"
-            )
+            raise ValueError(f"Unsupported output provider: {self.task_config['tools_config']['output']['provider']}")
 
     async def message_task_new(self):
         tasks = []
@@ -1262,9 +1260,7 @@ class TaskManager(BaseManager):
             # raising a plain string surfaces as TypeError("exceptions must derive from
             # BaseException") and hides which provider was unsupported — this exact failure
             # masked the missing-freeswitch-handler case when a PyPI bolna shadowed the branch
-            raise ValueError(
-                f"Unsupported input provider: {self.task_config['tools_config']['input']['provider']}"
-            )
+            raise ValueError(f"Unsupported input provider: {self.task_config['tools_config']['input']['provider']}")
 
     async def __forced_first_message(self, timeout=10.0):
         logger.info(f"Executing the first message task")
