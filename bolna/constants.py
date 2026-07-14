@@ -251,4 +251,15 @@ MODEL_REASONING_EFFORT_MAP = {
     "gpt-5.4": [RE.NONE, RE.LOW, RE.MEDIUM, RE.HIGH, RE.XHIGH],
     "gpt-5.4-mini": [RE.NONE, RE.LOW, RE.MEDIUM, RE.HIGH],
     "gpt-5.4-nano": [RE.NONE, RE.LOW, RE.MEDIUM, RE.HIGH],
+    "gpt-5.6-sol": [RE.NONE, RE.LOW, RE.MEDIUM, RE.HIGH, RE.XHIGH],
+    "gpt-5.6-terra": [RE.NONE, RE.LOW, RE.MEDIUM, RE.HIGH, RE.XHIGH],
+    "gpt-5.6-luna": [RE.NONE, RE.LOW, RE.MEDIUM, RE.HIGH, RE.XHIGH],
 }
+
+
+def default_reasoning_effort(model: str) -> str:
+    """Lowest-latency effort the model supports: minimal where available, else the lowest in its map."""
+    supported = MODEL_REASONING_EFFORT_MAP.get(model)
+    if not supported or RE.MINIMAL in supported:
+        return RE.MINIMAL.value
+    return supported[0].value
