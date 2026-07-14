@@ -83,6 +83,7 @@ class GraphAgent(BaseAgent):
         self.current_node_entry_index = 0
         self._silence_repeats = 0
         self._event_triggered_generation = False
+        self._active_node_first_response_delivered = True
         self._last_deterministic_eval = None
         self._frozen_time_vars: Optional[Dict[str, Any]] = None
         self.rag_configs = self.initialize_rag_configs()
@@ -466,6 +467,7 @@ class GraphAgent(BaseAgent):
                 self.current_node_id = edge["to_node_id"]
                 self.current_node_entry_index = 0  # caller should set to len(history)
                 self._silence_repeats = 0
+                self._active_node_first_response_delivered = False
 
                 if self.current_node_id not in self.node_history or self.node_history[-1] != self.current_node_id:
                     self.node_history.append(self.current_node_id)
@@ -674,8 +676,39 @@ class GraphAgent(BaseAgent):
         self.current_node_id = node_id
         self.current_node_entry_index = entry_index
         self._silence_repeats = 0
+        self._active_node_first_response_delivered = False
         if not self.node_history or self.node_history[-1] != self.current_node_id:
             self.node_history.append(self.current_node_id)
+
+    def mark_first_response_delivered(self) -> None:
+        """Unblock routing once the active node's first customer-facing TTS turn is delivered."""
+        self._active_node_first_response_delivered = True
+
+    def _should_hold_for_first_delivery(self, node: Optional[dict]) -> bool:
+        return (
+            node is not None
+            and self._node_type_of(node) == NodeType.LLM
+            and not self._active_node_first_response_delivered
+        )
+
+    def _hold_routing_info(self, is_silence_trigger: bool) -> dict:
+        return {
+            "previous_node": self.current_node_id,
+            "current_node": self.current_node_id,
+            "transitioned": False,
+            "routing_type": "hold",
+            "routing_model": None,
+            "routing_provider": None,
+            "routing_latency_ms": None,
+            "extracted_params": {},
+            "node_history": list(self.node_history),
+            "routing_messages": None,
+            "routing_tools": None,
+            "reasoning": f"{_DETERMINISTIC_REASONING_PREFIX}hold:first_response_undelivered",
+            "confidence": 1.0,
+            "node_type": self._node_type_of(self.get_node_by_id(self.current_node_id)),
+            "is_silence_trigger": is_silence_trigger,
+        }
 
     def _end_turn_chunk(self, meta_info: Optional[dict], start_time: float) -> LLMStreamChunk:
         """Terminal empty end-of-stream chunk for a turn that produces no speech (a router
@@ -1201,6 +1234,12 @@ class GraphAgent(BaseAgent):
             if self._node_type_of(self.get_node_by_id(self.current_node_id)) == NodeType.ROUTER:
                 for hop in await self._resolve_router_chain(message):
                     yield {"routing_info": hop}
+            elif self._should_hold_for_first_delivery(self.get_node_by_id(self.current_node_id)):
+                logger.info(
+                    f"Holding on node '{self.current_node_id}' until its first response is delivered; "
+                    f"user input registered as context, not a routing trigger"
+                )
+                yield {"routing_info": self._hold_routing_info(is_silence_trigger)}
             else:
                 previous_node = self.current_node_id
                 (

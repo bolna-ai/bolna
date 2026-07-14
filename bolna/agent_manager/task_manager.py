@@ -6215,6 +6215,11 @@ class TaskManager(BaseManager):
                             )
                         self.interruption_manager.on_successful_response_delivered(sequence_id)
                         self.interruption_manager.on_agent_speech_ended()
+                        if (
+                            self.__is_graph_agent()
+                            and message["meta_info"].get("message_category", "") != "is_user_online_message"
+                        ):
+                            self.tools["llm_agent"].mark_first_response_delivered()
                     # Reset asked_if_user_is_still_there flag after any message except is_user_online_message
                     if message["meta_info"].get("message_category", "") != "is_user_online_message":
                         self.asked_if_user_is_still_there = False
