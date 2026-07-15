@@ -83,6 +83,7 @@ from bolna.helpers.utils import (
     get_md5_hash,
     clean_json_string,
     wav_bytes_to_pcm,
+    mp3_bytes_to_pcm,
     convert_to_request_log,
     yield_chunks_from_memory,
     process_task_cancellation,
@@ -248,6 +249,9 @@ class TaskManager(BaseManager):
         # Optional load-signal callback (set by the caller only for PTU-served calls).
         self.on_turn_usage = kwargs.get("on_turn_usage")
         self._usage_tasks = set()  # strong refs so fire-and-forget tallies aren't GC'd before they run
+        # Optional per-provider health callback (circuit-breaker shadow); never affects the call.
+        self.on_provider_health = kwargs.get("on_provider_health")
+        self._cb_tasks = set()
 
         self.conversation_start_init_ts = time.time() * 1000
         self.llm_latencies = ComponentLatencies()
@@ -2680,7 +2684,9 @@ class TaskManager(BaseManager):
 
         if node_type == NodeType.STATIC:
             # Static node: play cached audio directly, no LLM cost
-            static_text = target_node.get("static_message", "") if target_node else ""
+            static_text = (
+                select_message_by_language(target_node.get("static_message"), self.language) if target_node else ""
+            )
             if static_text:
                 if self.context_data:
                     static_text = update_prompt_with_context(static_text, self.context_data)
@@ -3696,6 +3702,7 @@ class TaskManager(BaseManager):
                     meta_info["end_of_llm_stream"] = True
                     meta_info["text"] = static_text
                     meta_info["cached"] = True
+                    meta_info["message_category"] = "static_node"
                     ws_packet = create_ws_data_packet(static_hash, meta_info=meta_info, is_md5_hash=True)
                     await self._synthesize(ws_packet)
                     return
@@ -3913,6 +3920,15 @@ class TaskManager(BaseManager):
 
         try:
             await self.__do_llm_generation(messages, meta_info, next_step, should_bypass_synth)
+            if self.task_id == 0:  # conversation LLM only; report the turn's first-token latency (shadow breaker)
+                _ttft = (
+                    self.llm_latencies.turn_latencies[-1].get("first_token_latency_ms")
+                    if self.llm_latencies.turn_latencies
+                    else None
+                )
+                await self._report_provider_health(
+                    "llm", self.llm_config.get("provider"), self.llm_config.get("model"), True, _ttft
+                )
         except asyncio.CancelledError:
             # Stamp cancellation on this sequence's latency entry (eager stub or completed entry)
             # so hung/cancelled LLM calls are distinguishable from still-running ones in progression.
@@ -3995,6 +4011,8 @@ class TaskManager(BaseManager):
         self.hangup_triggered = True
         if self.hangup_decision_at is None:
             self.hangup_decision_at = time.time()
+        # Hangup gates transcriber input, so release the audio gate now or the goodbye stalls on WAIT.
+        self.interruption_manager.on_user_speech_ended(update_utterance_time=False)
 
     def _should_ignore_transcriber_input(self) -> bool:
         return self.hangup_triggered or self._end_call_in_progress or self.has_transfer
@@ -4326,6 +4344,26 @@ class TaskManager(BaseManager):
         else:
             logger.info(f"Need to separate out output task")
 
+    async def _report_provider_health(self, service, provider, model, ok, latency_ms=None, blocking=False):
+        """Per-provider health signal for the circuit breaker (shadow). Never affects the call.
+
+        Fire-and-forget by default. On the error path pass blocking=True so the write lands before the
+        call tears down (a bare create_task would be cancelled by shutdown); the timeout keeps a slow
+        Redis from ever delaying teardown.
+        """
+        if not self.on_provider_health or not provider:
+            return
+        try:
+            coro = self.on_provider_health(service, provider, model, ok, latency_ms)
+            if blocking:
+                await asyncio.wait_for(coro, timeout=2)
+                return
+            _cb = asyncio.create_task(coro)
+            self._cb_tasks.add(_cb)
+            _cb.add_done_callback(self._cb_tasks.discard)
+        except Exception:
+            pass
+
     async def _end_call_on_component_error(self, error, hangup_detail):
         """End the call gracefully when a critical pipeline component fails.
 
@@ -4339,6 +4377,13 @@ class TaskManager(BaseManager):
                 "provider": getattr(error, "provider", None),
                 "model": getattr(error, "model", None),
             }
+            await self._report_provider_health(
+                getattr(error, "component", "unknown"),
+                getattr(error, "provider", None),
+                getattr(error, "model", None),
+                False,
+                blocking=True,
+            )
 
         # Log to CSV if not already done
         if self.run_id and not self._error_logged:
@@ -5866,16 +5911,32 @@ class TaskManager(BaseManager):
             # TODO: Either load IVR audio into memory before call or user s3 iter_cunks
             # This will help with interruption in IVR
             audio_chunk = None
+            static_node_audio = meta_info.get("message_category") in ("static_node", "event_proactive")
             if self.turn_based_conversation or self.task_config["tools_config"]["output"]["provider"] == "default":
-                audio_chunk = await get_raw_audio_bytes(
-                    text,
-                    self.assistant_name,
-                    self.task_config["tools_config"]["output"]["format"],
-                    local=self.is_local,
-                    assistant_id=self.assistant_id,
-                )
+                # Static-node clips are pre-generated as mp3 keyed by md5(text); fetch that
+                # format explicitly rather than the output format, which may differ (e.g. wav).
+                audio_format = "mp3" if static_node_audio else self.task_config["tools_config"]["output"]["format"]
+                try:
+                    audio_chunk = await get_raw_audio_bytes(
+                        text,
+                        self.assistant_name,
+                        audio_format,
+                        local=self.is_local,
+                        assistant_id=self.assistant_id,
+                    )
+                except Exception as static_audio_err:
+                    if not static_node_audio:
+                        raise
+                    logger.error(f"Failed to fetch static node audio {text}: {static_audio_err}")
+                    audio_chunk = None
+                if static_node_audio and audio_chunk is None:
+                    # Cache miss or fetch failure: synthesize live so the node still speaks.
+                    logger.info("Static node audio unavailable; synthesizing live from text")
+                    meta_info["cached"] = False
+                    await self._synthesize(create_ws_data_packet(meta_info["text"], meta_info=meta_info))
+                    return
                 logger.info("Sending preprocessed audio")
-                meta_info["format"] = self.task_config["tools_config"]["output"]["format"]
+                meta_info["format"] = audio_format
                 meta_info["end_of_synthesizer_stream"] = True
                 await self.tools["output"].handle(create_ws_data_packet(audio_chunk, meta_info))
             else:
@@ -5889,6 +5950,27 @@ class TaskManager(BaseManager):
                         logger.info(f"Got to convert it to pcm")
                         audio_chunk = wav_bytes_to_pcm(resample(audio, format="wav", target_sample_rate=8000))
                         meta_info["format"] = "pcm"
+                elif static_node_audio:
+                    logger.info(f"Getting static node audio {text} from S3")
+                    yield_in_chunks = False
+                    try:
+                        audio = await get_raw_audio_bytes(
+                            text, self.assistant_name, "mp3", assistant_id=self.assistant_id, local=self.is_local
+                        )
+                        if audio is not None:
+                            # Telephony wire format is 8k mu-law. Providers key off meta_info["format"]:
+                            # plivo/vobiz send non-wav bytes as audio/x-mulaw without converting, so raw
+                            # linear16 would play as noise. mu-law is correct across plivo/twilio/exotel.
+                            audio_chunk = audioop.lin2ulaw(mp3_bytes_to_pcm(audio, target_sample_rate=8000), 2)
+                            meta_info["format"] = "mulaw"
+                    except Exception as static_audio_err:
+                        logger.error(f"Failed to prepare static node audio {text}: {static_audio_err}")
+                    if audio_chunk is None:
+                        # Cache miss or fetch/convert failure: synthesize live so the node still speaks.
+                        logger.info("Static node audio unavailable; synthesizing live from text")
+                        meta_info["cached"] = False
+                        await self._synthesize(create_ws_data_packet(meta_info["text"], meta_info=meta_info))
+                        return
                 else:
                     start_time = time.perf_counter()
                     audio_chunk = self.preloaded_welcome_audio if self.preloaded_welcome_audio else None
