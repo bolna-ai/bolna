@@ -232,6 +232,9 @@ class TaskManager(BaseManager):
         # Optional load-signal callback (set by the caller only for PTU-served calls).
         self.on_turn_usage = kwargs.get("on_turn_usage")
         self._usage_tasks = set()  # strong refs so fire-and-forget tallies aren't GC'd before they run
+        # Optional per-provider health callback (circuit-breaker shadow); never affects the call.
+        self.on_provider_health = kwargs.get("on_provider_health")
+        self._cb_tasks = set()
 
         self.conversation_start_init_ts = time.time() * 1000
         self.llm_latencies = ComponentLatencies()
@@ -3854,6 +3857,15 @@ class TaskManager(BaseManager):
 
         try:
             await self.__do_llm_generation(messages, meta_info, next_step, should_bypass_synth)
+            if self.task_id == 0:  # conversation LLM only; report the turn's first-token latency (shadow breaker)
+                _ttft = (
+                    self.llm_latencies.turn_latencies[-1].get("first_token_latency_ms")
+                    if self.llm_latencies.turn_latencies
+                    else None
+                )
+                await self._report_provider_health(
+                    "llm", self.llm_config.get("provider"), self.llm_config.get("model"), True, _ttft
+                )
         except asyncio.CancelledError:
             # Stamp cancellation on this sequence's latency entry (eager stub or completed entry)
             # so hung/cancelled LLM calls are distinguishable from still-running ones in progression.
@@ -4269,6 +4281,26 @@ class TaskManager(BaseManager):
         else:
             logger.info(f"Need to separate out output task")
 
+    async def _report_provider_health(self, service, provider, model, ok, latency_ms=None, blocking=False):
+        """Per-provider health signal for the circuit breaker (shadow). Never affects the call.
+
+        Fire-and-forget by default. On the error path pass blocking=True so the write lands before the
+        call tears down (a bare create_task would be cancelled by shutdown); the timeout keeps a slow
+        Redis from ever delaying teardown.
+        """
+        if not self.on_provider_health or not provider:
+            return
+        try:
+            coro = self.on_provider_health(service, provider, model, ok, latency_ms)
+            if blocking:
+                await asyncio.wait_for(coro, timeout=2)
+                return
+            _cb = asyncio.create_task(coro)
+            self._cb_tasks.add(_cb)
+            _cb.add_done_callback(self._cb_tasks.discard)
+        except Exception:
+            pass
+
     async def _end_call_on_component_error(self, error, hangup_detail):
         """End the call gracefully when a critical pipeline component fails.
 
@@ -4282,6 +4314,13 @@ class TaskManager(BaseManager):
                 "provider": getattr(error, "provider", None),
                 "model": getattr(error, "model", None),
             }
+            await self._report_provider_health(
+                getattr(error, "component", "unknown"),
+                getattr(error, "provider", None),
+                getattr(error, "model", None),
+                False,
+                blocking=True,
+            )
 
         # Log to CSV if not already done
         if self.run_id and not self._error_logged:
