@@ -1,8 +1,7 @@
-import asyncio
 import json
 import time
 
-from starlette.websockets import WebSocketDisconnect, WebSocketState
+from starlette.websockets import WebSocketDisconnect
 
 from bolna.input_handlers.default import DefaultInputHandler
 from bolna.helpers.utils import create_ws_data_packet
