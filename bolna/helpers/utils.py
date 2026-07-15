@@ -416,15 +416,6 @@ def pcm_to_wav_bytes(pcm_data, sample_rate=16000, num_channels=1, sample_width=2
     return buffer.getvalue()
 
 
-def wav_bytes_to_mp3(wav_bytes):
-    # same implementation as bolna master (dashboard-backend's agent_helpers imports this;
-    # its absence on this branch crash-loops any server pairing the two)
-    audio = AudioSegment.from_file(io.BytesIO(wav_bytes), format="wav")
-    buffer = io.BytesIO()
-    audio.export(buffer, format="mp3")
-    return buffer.getvalue()
-
-
 def convert_audio_to_wav(audio_bytes, source_format="flac"):
     logger.info(f"CONVERTING AUDIO TO WAV {source_format}")
     audio = AudioSegment.from_file(io.BytesIO(audio_bytes), format=source_format)
