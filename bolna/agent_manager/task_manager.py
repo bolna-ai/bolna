@@ -35,6 +35,8 @@ from bolna.constants import (
     END_CALL_TOOL_DEFINITION,
     GPT5_4_MODEL_PREFIX,
     STALL_HANGUP_FLOOR_S,
+    WEB_BASED_CALL_PROVIDER,
+    WEBCALL_TTS_SAMPLE_RATE,
 )
 from bolna.helpers.function_calling_helpers import (
     trigger_api,
@@ -360,7 +362,7 @@ class TaskManager(BaseManager):
             "provider"
         ) == TelephonyProvider.FREESWITCH.value
         if (self.is_web_based_call or is_freeswitch_output) and self.preloaded_welcome_audio:
-            self.preloaded_welcome_audio = welcome_pcm_upsampled(self.welcome_message_audio, 24000)
+            self.preloaded_welcome_audio = welcome_pcm_upsampled(self.welcome_message_audio, WEBCALL_TTS_SAMPLE_RATE)
         self.observable_variables = {}
         self.output_handler_set = False
         # IO HANDLERS
@@ -1445,7 +1447,7 @@ class TaskManager(BaseManager):
                         if is_sip:
                             cfg["encoding"] = "mulaw"
                             cfg["sampling_rate"] = 8000
-                        elif provider in ("web_based_call", TelephonyProvider.FREESWITCH.value):
+                        elif provider in (WEB_BASED_CALL_PROVIDER, TelephonyProvider.FREESWITCH.value):
                             cfg["encoding"] = "linear16"
                             cfg["sampling_rate"] = 16000
                         if self.turn_based_conversation:
@@ -1514,7 +1516,7 @@ class TaskManager(BaseManager):
                     transcriber_config["encoding"] = "mulaw"
                     transcriber_config["sampling_rate"] = 8000
                     logger.info(f"Configured transcriber for Asterisk sip-trunk with mulaw encoding @ 8kHz")
-                elif provider in ("web_based_call", TelephonyProvider.FREESWITCH.value):
+                elif provider in (WEB_BASED_CALL_PROVIDER, TelephonyProvider.FREESWITCH.value):
                     # Web + FreeSWITCH fork both stream linear16 PCM @16kHz; coerce for all ASR providers.
                     transcriber_config["encoding"] = "linear16"
                     transcriber_config["sampling_rate"] = 16000
@@ -1584,7 +1586,7 @@ class TaskManager(BaseManager):
                         self.task_config["tools_config"]["output"]["provider"] == TelephonyProvider.FREESWITCH.value
                     ):
                         provider_config = dict(provider_config)  # don't mutate the cached agent config
-                        provider_config["sampling_rate"] = 24000
+                        provider_config["sampling_rate"] = WEBCALL_TTS_SAMPLE_RATE
                         cfg.pop("sampling_rate", None)  # avoid passing sampling_rate twice to the synth
 
                     if self.turn_based_conversation:

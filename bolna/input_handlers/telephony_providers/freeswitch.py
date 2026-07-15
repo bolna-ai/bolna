@@ -54,6 +54,20 @@ class FreeSwitchInputHandler(DefaultInputHandler):
         )
         self.queues["transcriber"].put_nowait(ws_data_packet)
 
+    def flush_ingest(self):
+        """Push any sub-INGEST_CHUNK_BYTES residual to the transcriber. Called on disconnect,
+        BEFORE the eos packet — otherwise the final <200ms of the caller's last utterance is
+        silently dropped from the transcript."""
+        if not self.ingest_buffer:
+            return
+        chunk, self.ingest_buffer = self.ingest_buffer, b""
+        self.queues["transcriber"].put_nowait(
+            create_ws_data_packet(
+                data=chunk,
+                meta_info={"io": "freeswitch", "type": "audio", "sequence": self.input_types["audio"]},
+            )
+        )
+
     async def _listen(self):
         bin_frames = 0
         txt_frames = 0
@@ -87,12 +101,14 @@ class FreeSwitchInputHandler(DefaultInputHandler):
                 f"freeswitch _listen: WebSocketDisconnect code={getattr(e, 'code', None)} "
                 f"after bin={bin_frames} txt={txt_frames}"
             )
+            self.flush_ingest()
             self.queues["transcriber"].put_nowait(
                 create_ws_data_packet(data=None, meta_info={"io": "freeswitch", "eos": True})
             )
             self.running = False
         except Exception as e:
             logger.error(f"freeswitch input handler error after bin={bin_frames} txt={txt_frames}: {e}", exc_info=True)
+            self.flush_ingest()
             self.queues["transcriber"].put_nowait(
                 create_ws_data_packet(data=None, meta_info={"io": "freeswitch", "eos": True})
             )

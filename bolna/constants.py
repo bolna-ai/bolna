@@ -4,6 +4,12 @@ from bolna.enums import ReasoningEffort as RE
 PREPROCESS_DIR = "agent_data"
 PCM16_SCALE = 32768.0
 
+# Provider label for browser web calls (raw-WS transport). Not a TelephonyProvider — it's the
+# codebase-wide literal the transcribers already branch on; single home for new comparisons.
+WEB_BASED_CALL_PROVIDER = "web_based_call"
+# Web + FreeSWITCH webcall paths play raw PCM at this fixed rate (telephony stays 8k mulaw).
+WEBCALL_TTS_SAMPLE_RATE = 24000
+
 OPENAI_TRANSCRIBER_HEARTBEAT_INTERVAL_S = 5
 OPENAI_TRANSCRIBER_UTTERANCE_TIMEOUT_S = 0.5
 
