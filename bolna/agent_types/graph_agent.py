@@ -84,6 +84,7 @@ class GraphAgent(BaseAgent):
         self._silence_repeats = 0
         self._event_triggered_generation = False
         self._active_node_first_response_delivered = True
+        self._hold_until_first_delivery = not self.config.get("turn_based_conversation", False)
         self._last_deterministic_eval = None
         self._frozen_time_vars: Optional[Dict[str, Any]] = None
         self.rag_configs = self.initialize_rag_configs()
@@ -686,7 +687,8 @@ class GraphAgent(BaseAgent):
 
     def _should_hold_for_first_delivery(self, node: Optional[dict]) -> bool:
         return (
-            node is not None
+            self._hold_until_first_delivery
+            and node is not None
             and self._node_type_of(node) == NodeType.LLM
             and not self._active_node_first_response_delivered
         )

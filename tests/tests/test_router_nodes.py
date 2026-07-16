@@ -715,3 +715,18 @@ class TestFirstDeliveryHold:
         assert agent._active_node_first_response_delivered is True
         agent._advance_to_node("C", 0)
         assert agent._active_node_first_response_delivered is False
+
+    @pytest.mark.asyncio
+    async def test_no_hold_in_turn_based_text_mode(self):
+        agent = _make_agent(_base_config(self._nodes(), "A", turn_based_conversation=True))
+        agent._advance_to_node("B", 0)
+        assert agent._active_node_first_response_delivered is False
+        assert agent._hold_until_first_delivery is False
+
+        with patch.object(
+            agent, "_decide_next_node_llm", new_callable=AsyncMock, return_value=self._PICK_C
+        ) as mock_llm:
+            await _collect(agent.generate([{"role": "user", "content": "yes"}]))
+
+        mock_llm.assert_called_once()
+        assert agent.current_node_id == "C"
