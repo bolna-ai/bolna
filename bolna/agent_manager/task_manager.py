@@ -199,7 +199,9 @@ def build_lid_decision_record(
 HANDOFF_CLIP_CACHE: dict = {}
 HANDOFF_CLIP_CACHE_MAX = 256
 
-_NON_NODE_RESPONSE_CATEGORIES = frozenset({"is_user_online_message", "filler", "backchanneling"})
+_NON_NODE_RESPONSE_CATEGORIES = frozenset(
+    {"is_user_online_message", "filler", "backchanneling", "agent_welcome_message", "handoff"}
+)
 
 
 def trailing_utterance_text(segments, gap_seconds=4.0):
