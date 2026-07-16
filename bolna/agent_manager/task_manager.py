@@ -199,6 +199,8 @@ def build_lid_decision_record(
 HANDOFF_CLIP_CACHE: dict = {}
 HANDOFF_CLIP_CACHE_MAX = 256
 
+_NON_NODE_RESPONSE_CATEGORIES = frozenset({"is_user_online_message", "filler", "backchanneling"})
+
 
 def trailing_utterance_text(segments, gap_seconds=4.0):
     """Text of the caller's LAST utterance: trailing detector segments in the same
@@ -6217,7 +6219,7 @@ class TaskManager(BaseManager):
                         self.interruption_manager.on_agent_speech_ended()
                         if (
                             self.__is_graph_agent()
-                            and message["meta_info"].get("message_category", "") != "is_user_online_message"
+                            and message["meta_info"].get("message_category", "") not in _NON_NODE_RESPONSE_CATEGORIES
                         ):
                             self.tools["llm_agent"].mark_first_response_delivered()
                     # Reset asked_if_user_is_still_there flag after any message except is_user_online_message

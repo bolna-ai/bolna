@@ -1231,10 +1231,11 @@ class GraphAgent(BaseAgent):
             # and let the resolved node speak this turn — do NOT re-route it through
             # decide_next (that would stack another routing call and could transition it
             # away before it speaks, unlike a router reached mid-turn by a transition).
-            if self._node_type_of(self.get_node_by_id(self.current_node_id)) == NodeType.ROUTER:
+            active_node = self.get_node_by_id(self.current_node_id)
+            if self._node_type_of(active_node) == NodeType.ROUTER:
                 for hop in await self._resolve_router_chain(message):
                     yield {"routing_info": hop}
-            elif self._should_hold_for_first_delivery(self.get_node_by_id(self.current_node_id)):
+            elif self._should_hold_for_first_delivery(active_node):
                 logger.info(
                     f"Holding on node '{self.current_node_id}' until its first response is delivered; "
                     f"user input registered as context, not a routing trigger"
