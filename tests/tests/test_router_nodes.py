@@ -669,7 +669,9 @@ class TestFirstDeliveryHold:
         agent._advance_to_node("B", 0)
         assert agent._active_node_first_response_delivered is False
 
-        with patch.object(agent, "_decide_next_node_llm", new_callable=AsyncMock, return_value=self._PICK_C) as mock_llm:
+        with patch.object(
+            agent, "_decide_next_node_llm", new_callable=AsyncMock, return_value=self._PICK_C
+        ) as mock_llm:
             out = await _collect(agent.generate([{"role": "user", "content": "haanji boliye"}]))
 
         mock_llm.assert_not_called()
@@ -686,7 +688,9 @@ class TestFirstDeliveryHold:
         agent.mark_first_response_delivered()
         assert agent._active_node_first_response_delivered is True
 
-        with patch.object(agent, "_decide_next_node_llm", new_callable=AsyncMock, return_value=self._PICK_C) as mock_llm:
+        with patch.object(
+            agent, "_decide_next_node_llm", new_callable=AsyncMock, return_value=self._PICK_C
+        ) as mock_llm:
             await _collect(agent.generate([{"role": "user", "content": "yes I answered"}]))
 
         mock_llm.assert_called_once()
@@ -697,7 +701,9 @@ class TestFirstDeliveryHold:
         agent = _make_agent(_base_config(self._nodes(), "B"))
         assert agent._active_node_first_response_delivered is True
 
-        with patch.object(agent, "_decide_next_node_llm", new_callable=AsyncMock, return_value=self._PICK_C) as mock_llm:
+        with patch.object(
+            agent, "_decide_next_node_llm", new_callable=AsyncMock, return_value=self._PICK_C
+        ) as mock_llm:
             await _collect(agent.generate([{"role": "user", "content": "answer"}]))
 
         mock_llm.assert_called_once()
