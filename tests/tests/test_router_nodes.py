@@ -644,3 +644,89 @@ class TestRouterFixes:
         agent = _router_agent(detected_language="hi")
         hops = await agent._resolve_router_chain([{"role": "user", "content": "[silence] "}])
         assert hops[0]["is_silence_trigger"] is True
+
+
+class TestFirstDeliveryHold:
+    """A node entered by a transition must speak its first question before it can route out
+    (BOLNA-1582): an utterance arriving before that first TTS turn is delivered is context only."""
+
+    def _nodes(self):
+        return [
+            {"id": "A", "prompt": "A.", "edges": [{"to_node_id": "B", "condition_type": "unconditional"}]},
+            {
+                "id": "B",
+                "prompt": "Ask Q1.",
+                "edges": [{"to_node_id": "C", "condition": "user answered", "function_name": "transition_to_C"}],
+            },
+            {"id": "C", "prompt": "C.", "edges": []},
+        ]
+
+    _PICK_C = ("C", {}, 1.0, [{"role": "system", "content": "routing"}], [], "user answered", 0.9, None)
+
+    @pytest.mark.asyncio
+    async def test_holds_and_speaks_when_first_response_undelivered(self):
+        agent = _make_agent(_base_config(self._nodes(), "A"))
+        agent._advance_to_node("B", 0)
+        assert agent._active_node_first_response_delivered is False
+
+        with patch.object(
+            agent, "_decide_next_node_llm", new_callable=AsyncMock, return_value=self._PICK_C
+        ) as mock_llm:
+            out = await _collect(agent.generate([{"role": "user", "content": "haanji boliye"}]))
+
+        mock_llm.assert_not_called()
+        assert agent.current_node_id == "B"
+        routing = [o["routing_info"] for o in out if isinstance(o, dict) and "routing_info" in o]
+        assert routing[-1]["routing_type"] == "hold"
+        assert routing[-1]["transitioned"] is False
+        assert any(isinstance(o, dict) and "messages" in o for o in out)
+
+    @pytest.mark.asyncio
+    async def test_routes_after_first_response_delivered(self):
+        agent = _make_agent(_base_config(self._nodes(), "A"))
+        agent._advance_to_node("B", 0)
+        agent.mark_first_response_delivered()
+        assert agent._active_node_first_response_delivered is True
+
+        with patch.object(
+            agent, "_decide_next_node_llm", new_callable=AsyncMock, return_value=self._PICK_C
+        ) as mock_llm:
+            await _collect(agent.generate([{"role": "user", "content": "yes I answered"}]))
+
+        mock_llm.assert_called_once()
+        assert agent.current_node_id == "C"
+
+    @pytest.mark.asyncio
+    async def test_initial_node_routes_on_first_turn(self):
+        agent = _make_agent(_base_config(self._nodes(), "B"))
+        assert agent._active_node_first_response_delivered is True
+
+        with patch.object(
+            agent, "_decide_next_node_llm", new_callable=AsyncMock, return_value=self._PICK_C
+        ) as mock_llm:
+            await _collect(agent.generate([{"role": "user", "content": "answer"}]))
+
+        mock_llm.assert_called_once()
+        assert agent.current_node_id == "C"
+
+    @pytest.mark.asyncio
+    async def test_advance_resets_delivered_flag(self):
+        agent = _make_agent(_base_config(self._nodes(), "B"))
+        assert agent._active_node_first_response_delivered is True
+        agent._advance_to_node("C", 0)
+        assert agent._active_node_first_response_delivered is False
+
+    @pytest.mark.asyncio
+    async def test_no_hold_in_turn_based_text_mode(self):
+        agent = _make_agent(_base_config(self._nodes(), "A", turn_based_conversation=True))
+        agent._advance_to_node("B", 0)
+        assert agent._active_node_first_response_delivered is False
+        assert agent._hold_until_first_delivery is False
+
+        with patch.object(
+            agent, "_decide_next_node_llm", new_callable=AsyncMock, return_value=self._PICK_C
+        ) as mock_llm:
+            await _collect(agent.generate([{"role": "user", "content": "yes"}]))
+
+        mock_llm.assert_called_once()
+        assert agent.current_node_id == "C"
