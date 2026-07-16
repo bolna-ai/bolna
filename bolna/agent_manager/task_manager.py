@@ -33,7 +33,7 @@ from bolna.constants import (
     SWITCH_LANGUAGE_TOOL_DEFINITION,
     END_CALL_FUNCTION_PREFIX,
     END_CALL_TOOL_DEFINITION,
-    GPT5_4_MODEL_PREFIX,
+    RESPONSES_API_MODEL_PREFIXES,
     STALL_HANGUP_FLOOR_S,
     WEB_BASED_CALL_PROVIDER,
     WEBCALL_TTS_SAMPLE_RATE,
@@ -513,8 +513,8 @@ class TaskManager(BaseManager):
                 if "thinking_budget" in self.llm_agent_config:
                     self.llm_config["thinking_budget"] = self.llm_agent_config["thinking_budget"]
 
-                if self.llm_agent_config.get("use_responses_api") or GPT5_4_MODEL_PREFIX in self.llm_config.get(
-                    "model", ""
+                if self.llm_agent_config.get("use_responses_api") or any(
+                    p in self.llm_config.get("model", "") for p in RESPONSES_API_MODEL_PREFIXES
                 ):
                     self.llm_config["use_responses_api"] = True
 
