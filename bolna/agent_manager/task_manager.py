@@ -81,6 +81,7 @@ from bolna.helpers.utils import (
     save_audio_file_to_s3,
     update_prompt_with_context,
     get_md5_hash,
+    static_node_audio_key,
     clean_json_string,
     wav_bytes_to_pcm,
     mp3_bytes_to_pcm,
@@ -275,6 +276,8 @@ class TaskManager(BaseManager):
 
         self.timezone = pytz.timezone(DEFAULT_TIMEZONE)
         self.language = DEFAULT_LANGUAGE_CODE
+        self.synthesizer_voice_id = None
+        self.synthesizer_model = None
         self.transfer_call_params = self.kwargs.get("transfer_call_params", None)
 
         if task["tools_config"].get("api_tools", None) is not None:
@@ -1638,6 +1641,8 @@ class TaskManager(BaseManager):
             synthesizer_class = SUPPORTED_SYNTHESIZER_MODELS.get(self.synthesizer_provider)
             provider_config = synth_config.pop("provider_config")
             self.synthesizer_voice = provider_config["voice"]
+            self.synthesizer_voice_id = provider_config.get("voice_id")
+            self.synthesizer_model = provider_config.get("model")
             if self.turn_based_conversation:
                 synth_config["audio_format"] = "mp3"  # Hard code mp3 if we're connected through dashboard
                 synth_config["stream"] = (
@@ -5924,6 +5929,16 @@ class TaskManager(BaseManager):
             # This will help with interruption in IVR
             audio_chunk = None
             static_node_audio = meta_info.get("message_category") in ("static_node", "event_proactive")
+            if meta_info.get("message_category") == "static_node" and meta_info.get("text"):
+                # Fetch the clip keyed to the active voice/language, not text alone, so a voice
+                # change regenerates it instead of replaying the stale pre-generated clip.
+                text = static_node_audio_key(
+                    meta_info["text"],
+                    provider=self.synthesizer_provider,
+                    voice=self.synthesizer_voice,
+                    voice_id=self.synthesizer_voice_id,
+                    model=self.synthesizer_model,
+                )
             if self.turn_based_conversation or self.task_config["tools_config"]["output"]["provider"] == "default":
                 # Static-node clips are pre-generated as mp3 keyed by md5(text); fetch that
                 # format explicitly rather than the output format, which may differ (e.g. wav).
