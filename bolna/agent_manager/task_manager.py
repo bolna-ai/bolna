@@ -1644,15 +1644,22 @@ class TaskManager(BaseManager):
                     True if self.enforce_streaming else False
                 )  # Hardcode stream to be False as we don't want to get blocked by a __listen_synthesizer co-routine
 
-            # Configure use_mulaw for Asterisk/sip-trunk to ensure synthesizer outputs ulaw
+            # Telephony providers expect mulaw@8000Hz — force use_mulaw regardless of the
+            # server-side kwarg (it defaults to False and only covers some synths), mirroring
+            # the multilingual-pool path above. Synths that honor the kwarg (e.g. cartesia)
+            # would otherwise stream raw PCM that telephony plays as mulaw → loud static.
+            output_provider = self.task_config["tools_config"]["output"]["provider"]
+            is_telephony = output_provider in (
+                TelephonyProvider.PLIVO.value,
+                TelephonyProvider.TWILIO.value,
+                TelephonyProvider.EXOTEL.value,
+                TelephonyProvider.VOBIZ.value,
+                TelephonyProvider.SIP_TRUNK.value,
+            )
             synthesizer_kwargs = self.kwargs.copy()
-            if self.task_config["tools_config"]["output"]["provider"] == TelephonyProvider.SIP_TRUNK.value:
+            if is_telephony:
                 synthesizer_kwargs["use_mulaw"] = True
-                logger.info(f"[SIP-TRUNK] Configuring synthesizer with use_mulaw=True for Asterisk sip-trunk")
-            elif (
-                self.is_web_based_call
-                or self.task_config["tools_config"]["output"]["provider"] == TelephonyProvider.FREESWITCH.value
-            ):
+            elif self.is_web_based_call or output_provider == TelephonyProvider.FREESWITCH.value:
                 # web/freeswitch play raw PCM @24k — synths must not emit telephony mulaw@8k
                 synthesizer_kwargs["use_mulaw"] = False
 
