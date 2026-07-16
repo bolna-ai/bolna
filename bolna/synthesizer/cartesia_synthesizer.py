@@ -45,7 +45,7 @@ class CartesiaSynthesizer(StreamSynthesizer):
         self.language = language
         self.sampling_rate = sampling_rate
         self.speed = speed
-        self.use_mulaw = True
+        self.use_mulaw = kwargs.get("use_mulaw", True)  # web/freeswitch pass False → raw PCM @sampling_rate
         self.stream = True
 
         self.cartesia_host = os.getenv("CARTESIA_API_HOST", "api.cartesia.ai")
@@ -122,7 +122,11 @@ class CartesiaSynthesizer(StreamSynthesizer):
             "transcript": text,
             "language": self.language,
             "voice": {"mode": "id", "id": self.voice_id},
-            "output_format": {"container": "raw", "encoding": "pcm_mulaw", "sample_rate": 8000},
+            "output_format": (
+                {"container": "raw", "encoding": "pcm_mulaw", "sample_rate": 8000}
+                if self.use_mulaw
+                else {"container": "raw", "encoding": "pcm_s16le", "sample_rate": int(self.sampling_rate)}
+            ),
             "generation_config": {"speed": self.speed},
         }
         if text:

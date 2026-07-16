@@ -1,6 +1,7 @@
 import asyncio
 import audioop
 from collections import defaultdict
+from functools import lru_cache
 from datetime import datetime
 import io
 import math
@@ -34,6 +35,8 @@ from bolna.constants import (
     END_CALL_TOOL_DEFINITION,
     GPT5_4_MODEL_PREFIX,
     STALL_HANGUP_FLOOR_S,
+    WEB_BASED_CALL_PROVIDER,
+    WEBCALL_TTS_SAMPLE_RATE,
 )
 from bolna.helpers.function_calling_helpers import (
     trigger_api,
@@ -96,6 +99,20 @@ from .models import ComponentLatencies
 from .voicemail_handler import VoicemailHandler
 
 logger = configure_logger(__name__)
+
+
+@lru_cache(maxsize=256)
+def welcome_pcm_upsampled(welcome_b64: str, target_sample_rate: int) -> bytes:
+    """Upsample the cached 8kHz welcome PCM to the raw-PCM output rate (web/freeswitch), memoized
+    per (welcome, rate). The welcome is identical across every call of an agent, so resampling it
+    once — instead of in each TaskManager.__init__ — keeps CPU from spiking when many calls start
+    at once (the welcome burst)."""
+    return resample(
+        base64.b64decode(welcome_b64),
+        target_sample_rate=target_sample_rate,
+        format="pcm",
+        original_sample_rate=8000,
+    )
 
 
 def _inject_end_call_tool(api_tools, *, scope, nodes, description=None):
@@ -342,6 +359,14 @@ class TaskManager(BaseManager):
         self.preloaded_welcome_audio = (
             base64.b64decode(self.welcome_message_audio) if self.welcome_message_audio else None
         )
+        # Cached welcome is 8kHz PCM; web/freeswitch play at 24kHz, so upsample or the first audio is
+        # pitched. Memoized per welcome (welcome_pcm_upsampled) so this resample runs once, not in
+        # every call's __init__ — otherwise a burst of concurrent calls spikes CPU on the event loop.
+        is_freeswitch_output = (task.get("tools_config", {}).get("output") or {}).get(
+            "provider"
+        ) == TelephonyProvider.FREESWITCH.value
+        if (self.is_web_based_call or is_freeswitch_output) and self.preloaded_welcome_audio:
+            self.preloaded_welcome_audio = welcome_pcm_upsampled(self.welcome_message_audio, WEBCALL_TTS_SAMPLE_RATE)
         self.observable_variables = {}
         self.output_handler_set = False
         # IO HANDLERS
@@ -1174,11 +1199,20 @@ class TaskManager(BaseManager):
                 output_kwargs["is_web_based_call"] = self.is_web_based_call
                 output_kwargs["mark_event_meta_data"] = self.mark_event_meta_data
 
+            # FreeSWITCH streams PCM @ self.sampling_rate; no mark echo → self-complete via
+            # input_handler (input handler is set up before output, like sip-trunk).
+            if self.task_config["tools_config"]["output"]["provider"] == TelephonyProvider.FREESWITCH.value:
+                output_kwargs["mark_event_meta_data"] = self.mark_event_meta_data
+                output_kwargs["sampling_rate"] = self.sampling_rate
+                output_kwargs["input_handler"] = self.tools.get("input")
+
             self.tools["output"] = output_handler_class(**output_kwargs)
             self.output_handler_set = True
             logger.info("output handler set")
         else:
-            raise "Other input handlers not supported yet"
+            # raising a plain string surfaces as TypeError("exceptions must derive from
+            # BaseException") and hides which provider was unsupported
+            raise ValueError(f"Unsupported output provider: {self.task_config['tools_config']['output']['provider']}")
 
     async def message_task_new(self):
         tasks = []
@@ -1229,7 +1263,10 @@ class TaskManager(BaseManager):
                     input_kwargs["agent_config"] = {"tasks": [self.task_config]}
             self.tools["input"] = input_handler_class(**input_kwargs)
         else:
-            raise "Other input handlers not supported yet"
+            # raising a plain string surfaces as TypeError("exceptions must derive from
+            # BaseException") and hides which provider was unsupported — this exact failure
+            # masked the missing-freeswitch-handler case when a PyPI bolna shadowed the branch
+            raise ValueError(f"Unsupported input provider: {self.task_config['tools_config']['input']['provider']}")
 
     async def __forced_first_message(self, timeout=10.0):
         logger.info(f"Executing the first message task")
@@ -1414,6 +1451,9 @@ class TaskManager(BaseManager):
                         if is_sip:
                             cfg["encoding"] = "mulaw"
                             cfg["sampling_rate"] = 8000
+                        elif provider in (WEB_BASED_CALL_PROVIDER, TelephonyProvider.FREESWITCH.value):
+                            cfg["encoding"] = "linear16"
+                            cfg["sampling_rate"] = 16000
                         if self.turn_based_conversation:
                             cfg["stream"] = True if self.enforce_streaming else False
 
@@ -1480,6 +1520,10 @@ class TaskManager(BaseManager):
                     transcriber_config["encoding"] = "mulaw"
                     transcriber_config["sampling_rate"] = 8000
                     logger.info(f"Configured transcriber for Asterisk sip-trunk with mulaw encoding @ 8kHz")
+                elif provider in (WEB_BASED_CALL_PROVIDER, TelephonyProvider.FREESWITCH.value):
+                    # Web + FreeSWITCH fork both stream linear16 PCM @16kHz; coerce for all ASR providers.
+                    transcriber_config["encoding"] = "linear16"
+                    transcriber_config["sampling_rate"] = 16000
 
                 # Checking models for backwards compatibility
                 if (
@@ -1528,6 +1572,10 @@ class TaskManager(BaseManager):
                 synthesizer_kwargs = self.kwargs.copy()
                 if is_telephony:
                     synthesizer_kwargs["use_mulaw"] = True
+                elif self.is_web_based_call or output_provider == TelephonyProvider.FREESWITCH.value:
+                    # web/freeswitch play raw PCM @24k; synths like elevenlabs/cartesia default to
+                    # mulaw@8k (telephony) which garbles when labeled 24k — force it off.
+                    synthesizer_kwargs["use_mulaw"] = False
 
                 synthesizers = {}
                 for label, cfg in multilingual.items():
@@ -1535,6 +1583,15 @@ class TaskManager(BaseManager):
                     caching = cfg.pop("caching", True)
                     provider_name = cfg.pop("provider")
                     provider_config = cfg.pop("provider_config")
+
+                    # Web + FreeSWITCH play raw PCM at a fixed 24kHz; force every language synth to
+                    # match (telephony/chat untouched). Else non-24k languages drift (e.g. Hindi too slow).
+                    if self.is_web_based_call or (
+                        self.task_config["tools_config"]["output"]["provider"] == TelephonyProvider.FREESWITCH.value
+                    ):
+                        provider_config = dict(provider_config)  # don't mutate the cached agent config
+                        provider_config["sampling_rate"] = WEBCALL_TTS_SAMPLE_RATE
+                        cfg.pop("sampling_rate", None)  # avoid passing sampling_rate twice to the synth
 
                     if self.turn_based_conversation:
                         cfg["audio_format"] = "mp3"
@@ -1588,6 +1645,12 @@ class TaskManager(BaseManager):
             if self.task_config["tools_config"]["output"]["provider"] == TelephonyProvider.SIP_TRUNK.value:
                 synthesizer_kwargs["use_mulaw"] = True
                 logger.info(f"[SIP-TRUNK] Configuring synthesizer with use_mulaw=True for Asterisk sip-trunk")
+            elif (
+                self.is_web_based_call
+                or self.task_config["tools_config"]["output"]["provider"] == TelephonyProvider.FREESWITCH.value
+            ):
+                # web/freeswitch play raw PCM @24k — synths must not emit telephony mulaw@8k
+                synthesizer_kwargs["use_mulaw"] = False
 
             self.tools["synthesizer"] = synthesizer_class(
                 **synth_config, **provider_config, **synthesizer_kwargs, caching=caching
@@ -6397,8 +6460,15 @@ class TaskManager(BaseManager):
                 audio = await get_raw_audio_bytes(
                     f"{self.backchanneling_audios}/{filename}", local=True, is_location=True
                 )
-                if not self.turn_based_conversation and self.task_config["tools_config"]["output"] != "default":
-                    audio = resample(audio, target_sample_rate=8000, format="wav")
+                if not self.turn_based_conversation:
+                    # backchannel wavs are 8kHz; web/freeswitch play raw PCM at the synth rate
+                    # (self.sampling_rate, e.g. 24k) — sending them labeled 24k without upsampling
+                    # plays ~3x fast. mulaw telephony (twilio/plivo/exotel) stays 8k.
+                    # NB: the old `["output"] != "default"` compared a dict to a str (always True).
+                    output_provider = (self.task_config["tools_config"].get("output") or {}).get("provider")
+                    is_raw_pcm_output = self.is_web_based_call or output_provider == TelephonyProvider.FREESWITCH.value
+                    target_rate = self.sampling_rate if is_raw_pcm_output else 8000
+                    audio = resample(audio, target_sample_rate=target_rate, format="wav")
                     audio = wav_bytes_to_pcm(audio)
                 await self.tools["output"].handle(create_ws_data_packet(audio, self.__get_updated_meta_info()))
             else:

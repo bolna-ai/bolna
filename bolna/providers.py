@@ -30,6 +30,7 @@ from .input_handlers import (
     PlivoInputHandler,
     VobizInputHandler,
     SipTrunkInputHandler,
+    FreeSwitchInputHandler,
 )
 from .output_handlers import (
     DefaultOutputHandler,
@@ -38,6 +39,7 @@ from .output_handlers import (
     PlivoOutputHandler,
     VobizOutputHandler,
     SipTrunkOutputHandler,
+    FreeSwitchOutputHandler,
 )
 from .llms import OpenAiLLM, LiteLLM, AzureLLM, GeminiLLM
 from .enums import TelephonyProvider, SynthesizerProvider, TranscriberProvider, LLMProvider
@@ -99,6 +101,7 @@ SUPPORTED_INPUT_HANDLERS = {
     TelephonyProvider.PLIVO.value: PlivoInputHandler,
     TelephonyProvider.VOBIZ.value: VobizInputHandler,
     TelephonyProvider.SIP_TRUNK.value: SipTrunkInputHandler,
+    TelephonyProvider.FREESWITCH.value: FreeSwitchInputHandler,
 }
 SUPPORTED_INPUT_TELEPHONY_HANDLERS = {
     TelephonyProvider.TWILIO.value: TwilioInputHandler,
@@ -114,6 +117,7 @@ SUPPORTED_OUTPUT_HANDLERS = {
     TelephonyProvider.PLIVO.value: PlivoOutputHandler,
     TelephonyProvider.VOBIZ.value: VobizOutputHandler,
     TelephonyProvider.SIP_TRUNK.value: SipTrunkOutputHandler,
+    TelephonyProvider.FREESWITCH.value: FreeSwitchOutputHandler,
 }
 SUPPORTED_OUTPUT_TELEPHONY_HANDLERS = {
     TelephonyProvider.TWILIO.value: TwilioOutputHandler,
