@@ -36,6 +36,11 @@ SONIOX_AUTO_LANGUAGE_VALUES = {"", "multi", "auto", "multilingual", "unknown"}
 # Model prefixes
 GPT5_MODEL_PREFIX = "gpt-5"
 GPT5_4_MODEL_PREFIX = "gpt-5.4"
+GPT5_5_MODEL_PREFIX = "gpt-5.5"
+GPT5_6_MODEL_PREFIX = "gpt-5.6"
+# Function tools with reasoning_effort are rejected on chat completions for these models,
+# so tool-using agents are routed through the Responses API.
+RESPONSES_API_MODEL_PREFIXES = (GPT5_4_MODEL_PREFIX, GPT5_5_MODEL_PREFIX, GPT5_6_MODEL_PREFIX)
 
 HIGH_LEVEL_ASSISTANT_ANALYTICS_DATA = {
     "extraction_details": {},
@@ -251,6 +256,8 @@ MODEL_REASONING_EFFORT_MAP = {
     "gpt-5.4": [RE.NONE, RE.LOW, RE.MEDIUM, RE.HIGH, RE.XHIGH],
     "gpt-5.4-mini": [RE.NONE, RE.LOW, RE.MEDIUM, RE.HIGH],
     "gpt-5.4-nano": [RE.NONE, RE.LOW, RE.MEDIUM, RE.HIGH],
+    "gpt-5.5": [RE.NONE, RE.LOW, RE.MEDIUM, RE.HIGH, RE.XHIGH],
+    "gpt-5.5-pro": [RE.MEDIUM, RE.HIGH, RE.XHIGH],
     "gpt-5.6-sol": [RE.NONE, RE.LOW, RE.MEDIUM, RE.HIGH, RE.XHIGH],
     "gpt-5.6-terra": [RE.NONE, RE.LOW, RE.MEDIUM, RE.HIGH, RE.XHIGH],
     "gpt-5.6-luna": [RE.NONE, RE.LOW, RE.MEDIUM, RE.HIGH, RE.XHIGH],
