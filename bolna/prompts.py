@@ -70,6 +70,9 @@ Pre-recorded personal greetings
 If the user: line contains ANY of the above signals, respond with: {"is_voicemail": "Yes"}
 If the user: line clearly shows a real person speaking (e.g., "Hello?", "Haan", "Haan bolo", "Bol", "Who is this?", any natural two-way greeting), respond with: {"is_voicemail": "No"}
 
+Do NOT treat telecom carrier / network-operator intercepts as voicemail - respond with {"is_voicemail": "No"} for these, in ANY language (English, Hindi, or any other), even when the voice is automated or recorded and even if it partially resembles the phrases above. These messages mean the call did NOT reach a person or a mailbox and give NO option to leave a recorded message.
+(e.g., "the number you have dialled is not reachable / switched off / busy / does not exist / is invalid / is temporarily out of service / is not in service", "the number you have dialled ...", "please try again later", "all lines are busy", ringback / caller-tune / hold-music audio)
+
 
 Respond only in this JSON format:
 {
