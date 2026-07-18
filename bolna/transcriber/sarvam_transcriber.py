@@ -107,7 +107,7 @@ class SarvamTranscriber(BaseTranscriber):
             self.input_sampling_rate = 8000
             self.sampling_rate = 16000
             self.audio_frame_duration = 0.2
-        elif self.telephony_provider == "twilio":
+        elif self.telephony_provider in ("twilio", "sip-trunk"):
             self.encoding = "mulaw"
             self.input_sampling_rate = 8000
             self.sampling_rate = 16000

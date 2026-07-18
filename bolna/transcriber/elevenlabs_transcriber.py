@@ -117,12 +117,12 @@ class ElevenLabsTranscriber(BaseTranscriber):
         self.audio_frame_duration = 0.5  # Default for 8k samples at 16kHz
         audio_format = "pcm_16000"  # Default
 
-        if self.provider in ("twilio", "exotel", "plivo", "vobiz"):
-            # Twilio uses mulaw at 8kHz, exotel/plivo use linear16 at 8kHz
-            self.encoding = "mulaw" if self.provider == "twilio" else "linear16"
+        if self.provider in ("twilio", "sip-trunk", "exotel", "plivo", "vobiz"):
+            # Twilio/sip-trunk use mulaw at 8kHz, exotel/plivo use linear16 at 8kHz
+            self.encoding = "mulaw" if self.provider in ("twilio", "sip-trunk") else "linear16"
             self.sampling_rate = 8000
             self.audio_frame_duration = 0.2  # 200ms chunks for telephony
-            audio_format = "ulaw_8000" if self.provider == "twilio" else "pcm_8000"
+            audio_format = "ulaw_8000" if self.provider in ("twilio", "sip-trunk") else "pcm_8000"
 
         elif self.provider == "web_based_call":
             self.encoding = "linear16"

@@ -131,8 +131,8 @@ class GladiaTranscriber(BaseTranscriber):
 
     def _configure_audio_params(self):
         """Configure audio parameters based on telephony provider."""
-        if self.provider == "twilio":
-            # Twilio sends mulaw at 8kHz - Gladia supports this natively
+        if self.provider in ("twilio", "sip-trunk"):
+            # Twilio/sip-trunk send mulaw at 8kHz - Gladia supports this natively
             self.encoding = "wav/ulaw"
             self.sample_rate = 8000
             self.bit_depth = 8
@@ -190,7 +190,7 @@ class GladiaTranscriber(BaseTranscriber):
             "endpointing": self.endpointing,
             "maximum_duration_without_endpointing": self.maximum_duration_without_endpointing,
             "pre_processing": {
-                "audio_enhancer": self.provider in ("twilio", "exotel", "plivo"),
+                "audio_enhancer": self.provider in ("twilio", "sip-trunk", "exotel", "plivo"),
                 "speech_threshold": self.speech_threshold,
             },
             "messages_config": {
