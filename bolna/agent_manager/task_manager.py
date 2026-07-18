@@ -72,6 +72,7 @@ from bolna.enums import (
     NodeType,
     ChatRole,
     ToolScope,
+    TaskType,
 )
 from bolna.exceptions import BolnaComponentError, LLMError, SynthesizerError, TranscriberError
 from bolna.prompts import *
@@ -911,7 +912,7 @@ class TaskManager(BaseManager):
                 llm_agent = self.__setup_tasks(**agent_params)
                 self.llm_agent_map[agent] = llm_agent
 
-        elif self.task_config["task_type"] == "webhook":
+        elif self.task_config["task_type"] == TaskType.WEBHOOK:
             if "webhookURL" in self.task_config["tools_config"]["api_tools"]:
                 webhook_url = self.task_config["tools_config"]["api_tools"]["webhookURL"]
             else:
@@ -1201,7 +1202,7 @@ class TaskManager(BaseManager):
 
     def __agent_type(self):
         """Configured llm_agent type, or None for webhook and speech-to-speech tasks."""
-        if self.task_config["task_type"] == "webhook":
+        if self.task_config["task_type"] == TaskType.WEBHOOK:
             return None
         return (self.task_config["tools_config"].get("llm_agent") or {}).get("agent_type", None)
 
@@ -1215,7 +1216,7 @@ class TaskManager(BaseManager):
         return bool(self.s2s_config) and self._is_conversation_task()
 
     # def __is_knowledge_agent(self):
-    #     if self.task_config["task_type"] == "webhook":
+    #     if self.task_config["task_type"] == TaskType.WEBHOOK:
     #         return False
     #     agent_type = self.task_config['tools_config']["llm_agent"].get("agent_type", None)
     #     return agent_type == "knowledge_agent"
@@ -1956,15 +1957,15 @@ class TaskManager(BaseManager):
         logger.info(f"S2S agent configured | provider={self.s2s_provider_name} model={self.s2s_model}")
 
     def __setup_tasks(self, llm=None, agent_type=None, assistant_config=None):
-        if self.task_config["task_type"] == "conversation" and not self.__is_multiagent():
+        if self.task_config["task_type"] == TaskType.CONVERSATION and not self.__is_multiagent():
             self.tools["llm_agent"] = self.__get_agent_object(llm, agent_type, assistant_config)
         elif self.__is_multiagent():
             return self.__get_agent_object(llm, agent_type, assistant_config)
-        elif self.task_config["task_type"] == "extraction":
+        elif self.task_config["task_type"] == TaskType.EXTRACTION:
             logger.info("Setting up extraction agent")
             self.tools["llm_agent"] = ExtractionContextualAgent(llm, prompt=self.system_prompt)
             self.extracted_data = None
-        elif self.task_config["task_type"] == "summarization":
+        elif self.task_config["task_type"] == TaskType.SUMMARIZATION:
             logger.info("Setting up summarization agent")
             self.tools["llm_agent"] = SummarizationContextualAgent(llm, prompt=self.system_prompt)
             self.summarized_data = None
@@ -1985,7 +1986,7 @@ class TaskManager(BaseManager):
         return f"{enriched_prompt}\n{notes}\n{DATE_PROMPT.format(today, current_time, current_timezone)}"
 
     async def load_prompt(self, assistant_name, task_id, local, **kwargs):
-        if self.task_config["task_type"] == "webhook":
+        if self.task_config["task_type"] == TaskType.WEBHOOK:
             return
 
         agent_type = (self.task_config["tools_config"].get("llm_agent") or {}).get("agent_type", "simple_llm_agent")
@@ -2101,8 +2102,8 @@ class TaskManager(BaseManager):
             self.timezone = pytz.timezone(self.context_data["recipient_data"]["timezone"])
         current_date, current_time = get_date_time_from_timezone(self.timezone)
 
-        if not prompt and task_type in ("extraction", "summarization"):
-            if task_type == "extraction":
+        if not prompt and task_type in (TaskType.EXTRACTION, TaskType.SUMMARIZATION):
+            if task_type == TaskType.EXTRACTION:
                 extraction_json = (
                     task.get("tools_config").get("llm_agent", {}).get("llm_config", {}).get("extraction_json")
                 )
@@ -2111,7 +2112,7 @@ class TaskManager(BaseManager):
                     extraction_json = update_prompt_with_context(extraction_json, self.context_data)
                 prompt = EXTRACTION_PROMPT.format(current_date, current_time, self.timezone, extraction_json)
                 return {"system_prompt": prompt}
-            elif task_type == "summarization":
+            elif task_type == TaskType.SUMMARIZATION:
                 return {"system_prompt": SUMMARIZATION_PROMPT}
         return prompt
 
@@ -2675,13 +2676,13 @@ class TaskManager(BaseManager):
         return sequence, meta_info
 
     def _is_extraction_task(self):
-        return self.task_config["task_type"] == "extraction"
+        return self.task_config["task_type"] == TaskType.EXTRACTION
 
     def _is_summarization_task(self):
-        return self.task_config["task_type"] == "summarization"
+        return self.task_config["task_type"] == TaskType.SUMMARIZATION
 
     def _is_conversation_task(self):
-        return self.task_config["task_type"] == "conversation"
+        return self.task_config["task_type"] == TaskType.CONVERSATION
 
     def _get_next_step(self, sequence, origin):
         try:
@@ -2711,7 +2712,7 @@ class TaskManager(BaseManager):
             self.stream_sid = message["meta_info"]["stream_sid"]
 
     async def _process_followup_task(self, message=None):
-        if self.task_config["task_type"] == "webhook":
+        if self.task_config["task_type"] == TaskType.WEBHOOK:
             logger.info(f"Input patrameters {self.input_parameters}")
             extraction_details = self.input_parameters.get("extraction_details", {})
             logger.info(f"DOING THE POST REQUEST TO WEBHOOK {extraction_details}")
@@ -2734,7 +2735,7 @@ class TaskManager(BaseManager):
                 ) from e
             latency_ms = (time.time() - start_time) * 1000
 
-            if self.task_config["task_type"] == "summarization":
+            if self.task_config["task_type"] == TaskType.SUMMARIZATION:
                 self.summarized_data = json_data["summary"]
                 self.llm_latencies.other_latencies.append(
                     {
@@ -8539,7 +8540,7 @@ class TaskManager(BaseManager):
             else:
                 # Run agent followup tasks
                 try:
-                    if self.task_config["task_type"] == "webhook":
+                    if self.task_config["task_type"] == TaskType.WEBHOOK:
                         await self._process_followup_task()
                     else:
                         await self._run_llm_task(self.input_parameters)
@@ -8894,21 +8895,21 @@ class TaskManager(BaseManager):
                     )
             else:
                 output = self.input_parameters
-                if self.task_config["task_type"] == "extraction":
+                if self.task_config["task_type"] == TaskType.EXTRACTION:
                     output = {
                         "extracted_data": self.extracted_data,
-                        "task_type": "extraction",
+                        "task_type": TaskType.EXTRACTION.value,
                         "latency_dict": {"llm_latencies": self.llm_latencies.model_dump()},
                     }
-                elif self.task_config["task_type"] == "summarization":
+                elif self.task_config["task_type"] == TaskType.SUMMARIZATION:
                     logger.info(f"self.summarized_data {self.summarized_data}")
                     output = {
                         "summary": self.summarized_data,
-                        "task_type": "summarization",
+                        "task_type": TaskType.SUMMARIZATION.value,
                         "latency_dict": {"llm_latencies": self.llm_latencies.model_dump()},
                     }
-                elif self.task_config["task_type"] == "webhook":
-                    output = {"status": self.webhook_response, "task_type": "webhook"}
+                elif self.task_config["task_type"] == TaskType.WEBHOOK:
+                    output = {"status": self.webhook_response, "task_type": TaskType.WEBHOOK.value}
 
             try:
                 await asyncio.gather(*tasks_to_cancel)
