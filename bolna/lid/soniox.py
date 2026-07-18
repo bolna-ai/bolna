@@ -37,7 +37,7 @@ class SonioxLID(LIDBackend):
         if self._telephony in ("plivo", "vobiz", "exotel"):
             self._audio_format = "pcm_s16le"
             self._input_sr = 8000
-        elif self._telephony == "twilio":
+        elif self._telephony in ("twilio", "sip-trunk"):
             self._audio_format = "mulaw"
             self._input_sr = 8000
         else:

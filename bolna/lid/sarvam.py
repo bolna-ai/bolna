@@ -45,7 +45,7 @@ class SarvamLID(LIDBackend):
         if self._telephony in ("plivo", "vobiz", "exotel"):
             self._encoding = "linear16"
             self._input_sr = 8000
-        elif self._telephony == "twilio":
+        elif self._telephony in ("twilio", "sip-trunk"):
             self._encoding = "mulaw"
             self._input_sr = 8000
         else:
