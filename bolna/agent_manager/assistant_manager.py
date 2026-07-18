@@ -4,6 +4,7 @@ import uuid
 
 from .base_manager import BaseManager
 from .task_manager import TaskManager
+from bolna.enums import TaskType
 from bolna.helpers.logger_config import configure_logger
 from bolna.models import AGENT_WELCOME_MESSAGE
 from bolna.helpers.utils import update_prompt_with_context
@@ -85,6 +86,6 @@ class AssistantManager(BaseManager):
             self.task_states[task_id] = True
             if task_id == 0:
                 input_parameters = task_output
-            if task["task_type"] == "extraction":
+            if task["task_type"] == TaskType.EXTRACTION:
                 input_parameters["extraction_details"] = task_output["extracted_data"]
         logger.info("Done with execution of the agent")

@@ -10,6 +10,7 @@ from bolna.helpers.utils import store_file
 from bolna.prompts import *
 from bolna.helpers.logger_config import configure_logger
 from bolna.models import *
+from bolna.enums import TaskType
 from bolna.llms import LiteLLM
 from bolna.agent_manager.assistant_manager import AssistantManager
 
@@ -58,7 +59,7 @@ async def create_agent(agent_data: CreateAgentPayload):
     if len(data_for_db["tasks"]) > 0:
         logger.info("Setting up follow up tasks")
         for index, task in enumerate(data_for_db["tasks"]):
-            if task["task_type"] == "extraction":
+            if task["task_type"] == TaskType.EXTRACTION:
                 extraction_prompt_llm = os.getenv("EXTRACTION_PROMPT_GENERATION_MODEL")
                 extraction_prompt_generation_llm = LiteLLM(model=extraction_prompt_llm, max_tokens=2000)
                 extraction_prompt = await extraction_prompt_generation_llm.generate(
@@ -98,7 +99,7 @@ async def edit_agent(agent_id: str, agent_data: CreateAgentPayload = Body(...)):
         logger.info(f"Updating Agent {agent_id}: {new_data}")
 
         for index, task in enumerate(new_data.get("tasks", [])):
-            if task.get("task_type") == "extraction":
+            if task.get("task_type") == TaskType.EXTRACTION:
                 extraction_prompt_llm = os.getenv("EXTRACTION_PROMPT_GENERATION_MODEL")
                 if not extraction_prompt_llm:
                     raise HTTPException(status_code=500, detail="Extraction model not configured")
