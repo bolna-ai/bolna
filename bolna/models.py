@@ -348,6 +348,9 @@ class Transcriber(BaseModel):
     vad_threshold: Optional[float] = 0.5
     vad_prefix_padding_ms: Optional[int] = 300
     assemblyai_config: Optional[AssemblyAITranscriberConfig] = None
+    # OpenAI realtime client-side VAD: RMS gate on resampled 24 kHz PCM16.
+    # Lower = more sensitive (soft speech); raise for noisy Twilio/mulaw lines.
+    speech_rms_threshold: Optional[int] = None
 
     @field_validator("provider")
     def validate_model(cls, value):
