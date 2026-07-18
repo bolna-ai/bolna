@@ -29,6 +29,7 @@ from .transcriber import (
     SonioxTranscriber,
     GeminiTranscriber,
     RealtimeTranscriber,
+    FunASRTranscriber,
 )
 from .input_handlers import (
     DefaultInputHandler,
@@ -93,6 +94,7 @@ SUPPORTED_TRANSCRIBER_PROVIDERS = {
     TranscriberProvider.SONIOX.value: SonioxTranscriber,
     TranscriberProvider.GEMINI.value: GeminiTranscriber,
     TranscriberProvider.BOLNA.value: RealtimeTranscriber,
+    TranscriberProvider.FUNASR.value: FunASRTranscriber,
 }
 
 # Backwards compatibility
