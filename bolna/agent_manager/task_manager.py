@@ -3822,25 +3822,23 @@ class TaskManager(BaseManager):
                 if self.stream:
                     text_chunk = self.__process_stop_words(data, meta_info)
 
-                    # A hack as during the 'await' part control passes to llm streaming function parameters
-                    # So we have to make sure we've commited the filler message
-                    filler_message = compute_function_pre_call_message(
-                        self.language, function_tool, function_tool_message
-                    )
-                    # filler_message = PRE_FUNCTION_CALL_MESSAGE.get(self.language, PRE_FUNCTION_CALL_MESSAGE[DEFAULT_LANGUAGE_CODE])
-                    if text_chunk == filler_message:
+                    # The LLM layer tags the pre-tool-call filler chunk with function_name (while
+                    # is_function_call is still False). Stage the exact spoken text off that signal
+                    # rather than recomputing the filler against a live self.language — a concurrent
+                    # mid-turn language switch can desync the recomputed string from what was spoken.
+                    if function_tool and text_chunk and str(text_chunk).strip():
                         logger.info("Got a pre function call message")
                         turn_id = meta_info.get("turn_id")
                         response_uid = meta_info.get("response_uid")
                         messages.append(
                             {
                                 "role": "assistant",
-                                "content": filler_message,
+                                "content": text_chunk,
                                 "turn_id": turn_id,
                                 "response_uid": response_uid,
                             }
                         )
-                        self._stage_assistant_history(meta_info, filler_message)
+                        self._stage_assistant_history(meta_info, text_chunk)
                         self.conversation_history.sync_interim(messages)
 
                     await self._handle_llm_output(next_step, text_chunk, should_bypass_synth, meta_info)
