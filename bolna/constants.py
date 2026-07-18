@@ -89,6 +89,10 @@ CONTENT_POLICY_ERROR_MARKERS = ("content policy", "content_policy", "content_fil
 # sequence_id -1 the handlers blank text_synthesized, so its mark never carries text.
 CACHED_SINGLE_MARK_CATEGORIES = ("static_node",)
 
+# FunASR / SenseVoice self-hosted STT (remote server; weights are not bundled in Bolna)
+FUNASR_DEFAULT_WS_URL = "ws://127.0.0.1:10095"
+FUNASR_DEFAULT_CHUNK_SIZE = [5, 10, 5]
+
 # Model prefixes
 GPT5_MODEL_PREFIX = "gpt-5"
 GPT5_4_MODEL_PREFIX = "gpt-5.4"
