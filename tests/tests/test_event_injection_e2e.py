@@ -160,6 +160,7 @@ def _make_task_manager(agent=None, **overrides):
     tm.llm_task = None
     tm.run_id = f"test-{uuid.uuid4().hex[:8]}"
     tm.task_id = 0
+    tm._response_turn_id = 0  # real __init__ sets this; __get_updated_meta_info increments it
     tm.repeat_after_silence_seconds = None
     tm.conversation_history = ConversationHistory()
     tm.context_data = graph_agent.context_data  # Share context_data with agent

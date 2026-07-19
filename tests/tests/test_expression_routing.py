@@ -101,6 +101,28 @@ def _mock_routing_response(function_name, function_args_dict):
     return mock_response
 
 
+def _uncond_intent_config():
+    """A normal node with both an intent edge and an unconditional default: the shape where
+    the intent edge used to be silently dead."""
+    return {
+        "nodes": [
+            {
+                "id": "greeting",
+                "prompt": "Greet.",
+                "edges": [
+                    {
+                        "to_node_id": "escalate",
+                        "condition": "user asks for a human agent",
+                    },  # intent (no condition_type)
+                    {"to_node_id": "proceed", "condition_type": "unconditional", "priority": 0},  # default advance
+                ],
+            },
+            {"id": "escalate", "prompt": "Escalate.", "edges": []},
+            {"id": "proceed", "prompt": "Proceed.", "edges": []},
+        ],
+    }
+
+
 # ---------------------------------------------------------------------------
 # _edge_function_name
 # ---------------------------------------------------------------------------
@@ -499,6 +521,92 @@ class TestPriorityOrdering:
 
         result = await agent.decide_next_node_with_functions(history)
         assert result[0] == "fallback"
+
+    @pytest.mark.asyncio
+    async def test_expression_beats_lower_priority_unconditional(self):
+        """Expression is Tier 1, so it beats a lower-priority-number unconditional default."""
+        agent = _make_agent(
+            {
+                "nodes": [
+                    {
+                        "id": "greeting",
+                        "prompt": "Greet.",
+                        "edges": [
+                            {"to_node_id": "fallback", "condition_type": "unconditional", "priority": 1},
+                            {
+                                "to_node_id": "escalation",
+                                "condition_type": "expression",
+                                "priority": 5,
+                                "expression": {
+                                    "logic": "and",
+                                    "conditions": [{"variable": "_node_turns", "operator": "gte", "value": 1}],
+                                },
+                            },
+                        ],
+                    },
+                    {"id": "escalation", "prompt": "Escalate.", "edges": []},
+                    {"id": "fallback", "prompt": "Fallback.", "edges": []},
+                ],
+            }
+        )
+        agent.context_data = {}
+        agent.current_node_entry_index = 0
+
+        with patch("asyncio.to_thread", new_callable=AsyncMock) as mock_thread:
+            result = await agent.decide_next_node_with_functions([{"role": "user", "content": "hi"}])
+            mock_thread.assert_not_called()  # deterministic, no routing LLM
+        assert result[0] == "escalation"  # expression wins over the lower-priority unconditional default
+
+
+# ---------------------------------------------------------------------------
+# Unconditional default alongside intent edges (unify)
+# ---------------------------------------------------------------------------
+
+
+class TestUnconditionalWithIntentEdges:
+    """An unconditional edge on a normal node no longer suppresses its intent edges.
+    Intent is evaluated (one LLM call); the unconditional is the default advance target."""
+
+    @pytest.mark.asyncio
+    async def test_intent_edge_is_live_not_suppressed(self):
+        agent = _make_agent(_uncond_intent_config())
+        agent.context_data = {}
+        mock_resp = _mock_routing_response("transition_to_escalate", {"reasoning": "wants a human", "confidence": 0.9})
+        with patch("asyncio.to_thread", new_callable=AsyncMock, return_value=mock_resp) as mock_thread:
+            result = await agent.decide_next_node_with_functions([{"role": "user", "content": "get me a human"}])
+        mock_thread.assert_called_once()  # intent LLM ran; the unconditional did NOT short-circuit it
+        assert result[0] == "escalate"
+        assert not result[5].startswith(_DETERMINISTIC_REASONING_PREFIX)
+
+    @pytest.mark.asyncio
+    async def test_llm_can_pick_described_default(self):
+        agent = _make_agent(_uncond_intent_config())
+        agent.context_data = {}
+        mock_resp = _mock_routing_response("transition_to_proceed", {"reasoning": "no escalation", "confidence": 0.8})
+        with patch("asyncio.to_thread", new_callable=AsyncMock, return_value=mock_resp):
+            result = await agent.decide_next_node_with_functions([{"role": "user", "content": "ok great"}])
+        assert result[0] == "proceed"
+
+    @pytest.mark.asyncio
+    async def test_default_taken_deterministically_on_llm_error(self):
+        agent = _make_agent(_uncond_intent_config())
+        agent.context_data = {}
+        with patch("asyncio.to_thread", new_callable=AsyncMock, side_effect=RuntimeError("boom")):
+            result = await agent.decide_next_node_with_functions([{"role": "user", "content": "hmm"}])
+        assert result[0] == "proceed"  # node still advances via its default
+        assert result[5].startswith(_DETERMINISTIC_REASONING_PREFIX)
+
+    @pytest.mark.asyncio
+    async def test_stay_not_offered_when_default_present(self):
+        agent = _make_agent(_uncond_intent_config())
+        agent.context_data = {}
+        mock_resp = _mock_routing_response("transition_to_proceed", {"reasoning": "x", "confidence": 0.5})
+        with patch("asyncio.to_thread", new_callable=AsyncMock, return_value=mock_resp):
+            result = await agent.decide_next_node_with_functions([{"role": "user", "content": "hi"}])
+        tool_names = [t["function"]["name"] for t in result[4]]
+        assert "stay_on_current_node" not in tool_names
+        assert "transition_to_escalate" in tool_names
+        assert "transition_to_proceed" in tool_names  # default offered as a described option
 
 
 # ---------------------------------------------------------------------------
