@@ -34,6 +34,7 @@ SONIOX_DEFAULT_MULTILINGUAL_HINTS = ["en", "hi", "ta", "te", "kn", "ml", "mr", "
 SONIOX_AUTO_LANGUAGE_VALUES = {"", "multi", "auto", "multilingual", "unknown"}
 
 # FunASR / SenseVoice self-hosted STT (remote server; weights are not bundled in Bolna)
+FUNASR_DEFAULT_HTTP_URL = "http://127.0.0.1:8000"
 FUNASR_DEFAULT_WS_URL = "ws://127.0.0.1:10095"
 FUNASR_DEFAULT_CHUNK_SIZE = [5, 10, 5]
 
