@@ -204,9 +204,11 @@ class DefaultInputHandler:
             self.last_final_chunk_played_ts = time.time()
 
             if message_type != "is_user_online_message":
-                self.observable_variables["final_chunk_played_observable"].value = not self.observable_variables[
-                    "final_chunk_played_observable"
-                ].value
+                # .get(): task cleanup clears observable_variables while a playout-estimator
+                # timer can still be pending — a late mark then lands on an empty dict
+                final_chunk_observable = self.observable_variables.get("final_chunk_played_observable")
+                if final_chunk_observable is not None:
+                    final_chunk_observable.value = not final_chunk_observable.value
             self.update_is_audio_being_played(False)
 
             if message_type == "agent_welcome_message":
