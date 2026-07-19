@@ -336,7 +336,7 @@ In case you wish to extend and add some other Telephony like Vonage, Telnyx, etc
 ## Security Acknowledgments
 We would like to thank the following individuals for responsibly disclosing security vulnerabilities and helping us keep this project safe:
 
-- [@anaskhan54](https://github.com/anaskhan54) — Jun, 2026
+- [@anaskhan54](https://github.com/anaskhan54) — June, 2026
 
 ## Contributing
 We love all types of contributions: whether big or small helping in improving this community resource.
