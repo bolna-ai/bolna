@@ -262,6 +262,28 @@ These are the current supported ASRs Providers:
 | Provider     | Environment variable to be added in `.env` file |
 |--------------|-------------------------------------------------|
 | Deepgram     | `DEEPGRAM_AUTH_TOKEN`                           |
+| FunASR / SenseVoice (self-hosted) | `FUNASR_WS_URL`, `FUNASR_HTTP_URL` (optional `FUNASR_PROTOCOL`, `FUNASR_API_KEY`) |
+
+**Self-hosted FunASR / SenseVoice**
+
+Bolna talks to a remote FunASR runtime (model weights stay on your FunASR host):
+
+- Streaming (default): realtime WebSocket (`FUNASR_PROTOCOL=realtime`) — START / PCM / COMMIT / STOP for agent turn-taking
+- Streaming (optional): classic `2pass` WebSocket (`FUNASR_PROTOCOL=wss`)
+- Non-stream: OpenAI-compatible `POST /v1/audio/transcriptions` against `funasr-server` (default `http://127.0.0.1:8000`)
+
+```python
+transcriber = Transcriber(provider="funasr", model="sensevoice", stream=True, language="en")
+```
+
+```bash
+# .env (see .env.sample)
+FUNASR_WS_URL=ws://127.0.0.1:10095
+FUNASR_HTTP_URL=http://127.0.0.1:8000
+FUNASR_PROTOCOL=realtime
+```
+
+SenseVoice language coverage is zh / en / ja / ko / yue. Run your own `funasr-server` or FunASR WebSocket runtime separately; Bolna only speaks the network protocol.
 
 </details>
 &nbsp;<br>
