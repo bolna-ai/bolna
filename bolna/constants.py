@@ -90,6 +90,7 @@ CONTENT_POLICY_ERROR_MARKERS = ("content policy", "content_policy", "content_fil
 CACHED_SINGLE_MARK_CATEGORIES = ("static_node",)
 
 # FunASR / SenseVoice self-hosted STT (remote server; weights are not bundled in Bolna)
+FUNASR_DEFAULT_HTTP_URL = "http://127.0.0.1:8000"
 FUNASR_DEFAULT_WS_URL = "ws://127.0.0.1:10095"
 FUNASR_DEFAULT_CHUNK_SIZE = [5, 10, 5]
 

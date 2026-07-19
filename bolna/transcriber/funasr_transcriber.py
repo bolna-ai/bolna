@@ -7,7 +7,6 @@ import time
 import traceback
 import wave
 from typing import Optional
-from urllib.parse import urlparse
 
 import aiohttp
 import numpy as np
@@ -18,7 +17,12 @@ from websockets.asyncio.client import ClientConnection
 from websockets.exceptions import ConnectionClosedError, InvalidHandshake
 
 from .base_transcriber import BaseTranscriber
-from bolna.constants import FUNASR_DEFAULT_CHUNK_SIZE, FUNASR_DEFAULT_WS_URL, WEB_BASED_CALL_PROVIDER
+from bolna.constants import (
+    FUNASR_DEFAULT_CHUNK_SIZE,
+    FUNASR_DEFAULT_HTTP_URL,
+    FUNASR_DEFAULT_WS_URL,
+    WEB_BASED_CALL_PROVIDER,
+)
 from bolna.enums import TelephonyProvider
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.ssl_context import get_ssl_context
@@ -31,9 +35,11 @@ logger = configure_logger(__name__)
 class FunASRTranscriber(BaseTranscriber):
     """Self-hosted FunASR / SenseVoice STT.
 
-    Streaming uses the FunASR WebSocket runtime (classic ``2pass`` protocol or the
-    newer ``funasr-realtime-server`` START/COMMIT/STOP protocol). Non-stream uses the
-    OpenAI-compatible ``POST /v1/audio/transcriptions`` endpoint from ``funasr-server``.
+    Streaming defaults to the FunASR realtime WebSocket runtime (START/COMMIT/STOP)
+    so Bolna can commit utterance boundaries for interruption/turn-taking. Classic
+    ``2pass`` ``funasr_wss`` remains available via ``funasr_protocol=wss``.
+    Non-stream uses OpenAI-compatible ``POST /v1/audio/transcriptions`` on
+    ``funasr-server`` (default ``http://127.0.0.1:8000``).
 
     Model weights stay on the FunASR server — Bolna only speaks the network protocol.
     """
@@ -66,8 +72,8 @@ class FunASRTranscriber(BaseTranscriber):
         self.transcriber_output_queue = output_queue
         self.connected_via_dashboard = kwargs.get("enforce_streaming", True)
 
-        # Protocol: "wss" (classic funasr_wss) or "realtime" (START/COMMIT/STOP).
-        self.protocol = (kwargs.get("funasr_protocol") or os.getenv("FUNASR_PROTOCOL") or "wss").lower()
+        # Default realtime (client COMMIT) for voice-agent loops; classic 2pass via "wss".
+        self.protocol = (kwargs.get("funasr_protocol") or os.getenv("FUNASR_PROTOCOL") or "realtime").lower()
         self.asr_mode = kwargs.get("funasr_mode") or os.getenv("FUNASR_MODE") or "2pass"
         self.chunk_size = kwargs.get("chunk_size") or FUNASR_DEFAULT_CHUNK_SIZE
         self.chunk_interval = int(kwargs.get("chunk_interval") or os.getenv("FUNASR_CHUNK_INTERVAL") or 10)
@@ -79,10 +85,11 @@ class FunASRTranscriber(BaseTranscriber):
             or os.getenv("FUNASR_WS_URL")
             or FUNASR_DEFAULT_WS_URL
         )
+        # Do not derive HTTP from the WS URL — classic WS is :10095 while funasr-server is :8000.
         self.http_base_url = (
             kwargs.get("http_base_url")
             or os.getenv("FUNASR_HTTP_URL")
-            or self._derive_http_base(self.ws_url)
+            or FUNASR_DEFAULT_HTTP_URL
         )
 
         self.audio_frame_duration = 0.2
@@ -116,14 +123,6 @@ class FunASRTranscriber(BaseTranscriber):
 
         # Client-endpoint realtime protocol: commit after silence (endpointing_ms).
         self._silence_task: Optional[asyncio.Task] = None
-
-    @staticmethod
-    def _derive_http_base(ws_url: str) -> str:
-        parsed = urlparse(ws_url)
-        scheme = "https" if parsed.scheme == "wss" else "http"
-        host = parsed.hostname or "127.0.0.1"
-        port = parsed.port or (443 if scheme == "https" else 8000)
-        return f"{scheme}://{host}:{port}"
 
     def _resolve_audio_params(self):
         if self.telephony_provider in TelephonyProvider.telephony_values():
@@ -298,6 +297,12 @@ class FunASRTranscriber(BaseTranscriber):
 
                 if ws_data_packet.get("meta_info", {}).get("eos") is True:
                     try:
+                        if self._silence_task and not self._silence_task.done():
+                            self._silence_task.cancel()
+                            try:
+                                await self._silence_task
+                            except asyncio.CancelledError:
+                                pass
                         if self.protocol == "realtime":
                             if self._speech_active:
                                 await ws.send("COMMIT")
@@ -320,6 +325,10 @@ class FunASRTranscriber(BaseTranscriber):
                 if not pcm:
                     continue
                 try:
+                    # Mark speech active on first audio so realtime silence COMMIT can fire
+                    # even before the first interim arrives.
+                    if not self._speech_active:
+                        self._speech_active = True
                     await ws.send(pcm)
                     await self._schedule_realtime_commit(ws)
                 except ConnectionClosedError as e:
@@ -364,14 +373,23 @@ class FunASRTranscriber(BaseTranscriber):
                     break
 
                 text = (res.get("text") or res.get("transcript") or "").strip()
-                if not text and not self._is_final_message(res):
+                is_final = self._is_final_message(res)
+
+                # Empty final (e.g. COMMIT with no speech) — close the turn for Bolna.
+                if is_final and not text:
+                    if self.current_turn_id is not None or self._speech_active:
+                        yield create_ws_data_packet({"type": "speech_ended"}, self.meta_info)
+                        self._reset_turn_state()
+                    continue
+
+                if not text and not is_final:
                     continue
 
                 if text and self.current_turn_id is None:
                     self._start_turn()
                     yield create_ws_data_packet("speech_started", self.meta_info)
 
-                if text and self._is_interim_message(res) and not self._is_final_message(res):
+                if text and self._is_interim_message(res) and not is_final:
                     self.last_interim_time = time.time()
                     running = text
                     # Classic 2pass online is incremental; accumulate for display.
@@ -390,7 +408,7 @@ class FunASRTranscriber(BaseTranscriber):
                         {"type": "interim_transcript_received", "content": running}, self.meta_info
                     )
 
-                if text and self._is_final_message(res):
+                if text and is_final:
                     final = text
                     if not self.is_transcript_sent_for_processing:
                         logger.info(f"FunASR final transcript: {final}")
@@ -547,34 +565,32 @@ class FunASRTranscriber(BaseTranscriber):
             if not self.stream:
                 self.sender_task = asyncio.create_task(self.sender_http())
                 await self.sender_task
-                return
+            else:
+                start_time = timestamp_ms()
+                try:
+                    funasr_ws = await self.funasr_connect()
+                except (ValueError, ConnectionError) as e:
+                    logger.error(f"Failed to establish FunASR connection: {e}")
+                    self.connection_error = str(e)
+                    await self.toggle_connection()
+                else:
+                    if not self.connection_time:
+                        self.connection_time = round(timestamp_ms() - start_time)
 
-            start_time = timestamp_ms()
-            try:
-                funasr_ws = await self.funasr_connect()
-            except (ValueError, ConnectionError) as e:
-                logger.error(f"Failed to establish FunASR connection: {e}")
-                self.connection_error = str(e)
-                await self.toggle_connection()
-                return
-
-            if not self.connection_time:
-                self.connection_time = round(timestamp_ms() - start_time)
-
-            self.sender_task = asyncio.create_task(self.sender_stream(funasr_ws))
-            try:
-                async for message in self.receiver(funasr_ws):
-                    if self.connection_on:
-                        await self.push_to_transcriber_queue(message)
-                    else:
-                        break
-            except ConnectionClosedError as e:
-                logger.error(f"FunASR websocket closed during streaming: {e}")
-                self.connection_error = str(e)
-            except Exception as e:
-                logger.error(f"Error during FunASR streaming: {e}")
-                self.connection_error = str(e)
-                raise
+                    self.sender_task = asyncio.create_task(self.sender_stream(funasr_ws))
+                    try:
+                        async for message in self.receiver(funasr_ws):
+                            if self.connection_on:
+                                await self.push_to_transcriber_queue(message)
+                            else:
+                                break
+                    except ConnectionClosedError as e:
+                        logger.error(f"FunASR websocket closed during streaming: {e}")
+                        self.connection_error = str(e)
+                    except Exception as e:
+                        logger.error(f"Error during FunASR streaming: {e}")
+                        self.connection_error = str(e)
+                        raise
         except (ValueError, ConnectionError) as e:
             logger.error(f"Connection error in FunASR transcribe: {e}")
             self.connection_error = str(e)
@@ -592,9 +608,14 @@ class FunASRTranscriber(BaseTranscriber):
                 finally:
                     self.websocket_connection = None
                     self.connection_authenticated = False
-            if self.sender_task is not None:
+            if self.sender_task is not None and not self.sender_task.done():
                 self.sender_task.cancel()
+                try:
+                    await self.sender_task
+                except (asyncio.CancelledError, Exception):
+                    pass
             meta = dict(getattr(self, "meta_info", None) or {})
             if self.connection_error:
                 meta["connection_error"] = self.connection_error
-            await self.push_to_transcriber_queue(create_ws_data_packet("transcriber_connection_closed", meta))
+            if self.transcriber_output_queue is not None:
+                await self.push_to_transcriber_queue(create_ws_data_packet("transcriber_connection_closed", meta))
