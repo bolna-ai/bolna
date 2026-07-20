@@ -3824,8 +3824,14 @@ class TaskManager(BaseManager):
 
                     # A hack as during the 'await' part control passes to llm streaming function parameters
                     # So we have to make sure we've commited the filler message
+                    # Match the language snapshotted at pre-call time (what the accumulator built the filler with), not live self.language which can flip mid-turn.
+                    pre_call_language = meta_info.get("detected_language") or self.language
+                    if pre_call_language != self.language:
+                        logger.info(
+                            f"Filler language mismatch: pre_call_language={pre_call_language} vs current self.language={self.language}; matching against pre_call_language"
+                        )
                     filler_message = compute_function_pre_call_message(
-                        self.language, function_tool, function_tool_message
+                        pre_call_language, function_tool, function_tool_message
                     )
                     # filler_message = PRE_FUNCTION_CALL_MESSAGE.get(self.language, PRE_FUNCTION_CALL_MESSAGE[DEFAULT_LANGUAGE_CODE])
                     if text_chunk == filler_message:
@@ -3849,7 +3855,9 @@ class TaskManager(BaseManager):
         except Exception as e:
             raise LLMError(str(e), provider=self.llm_config.get("provider"), model=self.llm_config.get("model")) from e
 
-        filler_message = compute_function_pre_call_message(self.language, function_tool, function_tool_message)
+        filler_message = compute_function_pre_call_message(
+            meta_info.get("detected_language") or self.language, function_tool, function_tool_message
+        )
         if self.stream and llm_response != filler_message:
             self.__store_into_history(
                 meta_info,
