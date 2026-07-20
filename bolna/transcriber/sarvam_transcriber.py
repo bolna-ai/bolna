@@ -19,6 +19,7 @@ from typing import Optional
 
 from .base_transcriber import BaseTranscriber
 from bolna.helpers.logger_config import configure_logger
+from bolna.enums import TelephonyProvider
 from bolna.helpers.ssl_context import get_ssl_context
 from bolna.helpers.utils import create_ws_data_packet, timestamp_ms
 
@@ -102,13 +103,9 @@ class SarvamTranscriber(BaseTranscriber):
             self.session = aiohttp.ClientSession()
 
     def _configure_audio_params(self):
-        if self.telephony_provider in ("plivo", "vobiz", "exotel"):
-            self.encoding = "linear16"
-            self.input_sampling_rate = 8000
-            self.sampling_rate = 16000
-            self.audio_frame_duration = 0.2
-        elif self.telephony_provider in ("twilio", "sip-trunk"):
-            self.encoding = "mulaw"
+        if self.telephony_provider in TelephonyProvider.telephony_values():
+            # Telephony streams 8kHz, saaras only accepts 16kHz; _convert_audio_to_wav upsamples.
+            self.encoding = "mulaw" if self.telephony_provider in TelephonyProvider.mulaw_values() else "linear16"
             self.input_sampling_rate = 8000
             self.sampling_rate = 16000
             self.audio_frame_duration = 0.2

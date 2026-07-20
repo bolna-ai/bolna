@@ -37,6 +37,16 @@ class TelephonyProvider(str, Enum):
         """Return telephony provider values as a list of strings."""
         return [provider.value for provider in cls.telephony_providers()]
 
+    @classmethod
+    def mulaw_providers(cls):
+        """Telephony providers that stream mulaw; every other telephony provider streams linear16."""
+        return [cls.TWILIO, cls.SIP_TRUNK]
+
+    @classmethod
+    def mulaw_values(cls):
+        """Return mulaw telephony provider values as a list of strings."""
+        return [provider.value for provider in cls.mulaw_providers()]
+
 
 class SynthesizerProvider(str, Enum):
     """Enum for synthesizer (TTS) providers."""

@@ -9,6 +9,7 @@ from bolna.constants import (
     SONIOX_ENDPOINT_TOKEN,
     SONIOX_WEBSOCKET_HOST,
 )
+from bolna.enums import TelephonyProvider
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.ssl_context import get_ssl_context
 from bolna.helpers.utils import build_soniox_config, soniox_ws_url
@@ -34,11 +35,8 @@ class SonioxLID(LIDBackend):
         self._host = config.get("soniox_host") or SONIOX_WEBSOCKET_HOST
         self._telephony = config.get("telephony_provider", "")
         # Telephony streams 8kHz; Soniox accepts mulaw/pcm natively, no resampling.
-        if self._telephony in ("plivo", "vobiz", "exotel"):
-            self._audio_format = "pcm_s16le"
-            self._input_sr = 8000
-        elif self._telephony in ("twilio", "sip-trunk"):
-            self._audio_format = "mulaw"
+        if self._telephony in TelephonyProvider.telephony_values():
+            self._audio_format = "mulaw" if self._telephony in TelephonyProvider.mulaw_values() else "pcm_s16le"
             self._input_sr = 8000
         else:
             self._audio_format = "pcm_s16le"

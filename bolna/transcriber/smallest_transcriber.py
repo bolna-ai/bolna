@@ -12,6 +12,7 @@ from websockets.exceptions import ConnectionClosedError, InvalidHandshake, Conne
 from dotenv import load_dotenv
 
 from .base_transcriber import BaseTranscriber
+from bolna.enums import TelephonyProvider
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.ssl_context import get_ssl_context
 from bolna.helpers.utils import create_ws_data_packet, timestamp_ms
@@ -122,7 +123,7 @@ class SmallestTranscriber(BaseTranscriber):
 
     def _configure_audio_params(self):
         """Configure audio parameters based on telephony provider."""
-        if self.provider in ("twilio", "sip-trunk"):
+        if self.provider in TelephonyProvider.mulaw_values():
             # Twilio and SIP-trunk send mulaw at 8kHz
             self.encoding = "mulaw"
             self.sampling_rate = 8000

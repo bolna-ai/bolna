@@ -13,6 +13,7 @@ from websockets.exceptions import ConnectionClosedError, InvalidHandshake, Conne
 from dotenv import load_dotenv
 
 from .base_transcriber import BaseTranscriber
+from bolna.enums import TelephonyProvider
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.ssl_context import get_ssl_context
 from bolna.helpers.utils import create_ws_data_packet, timestamp_ms
@@ -131,7 +132,7 @@ class GladiaTranscriber(BaseTranscriber):
 
     def _configure_audio_params(self):
         """Configure audio parameters based on telephony provider."""
-        if self.provider in ("twilio", "sip-trunk"):
+        if self.provider in TelephonyProvider.mulaw_values():
             # Twilio/sip-trunk send mulaw at 8kHz - Gladia supports this natively
             self.encoding = "wav/ulaw"
             self.sample_rate = 8000
@@ -190,7 +191,7 @@ class GladiaTranscriber(BaseTranscriber):
             "endpointing": self.endpointing,
             "maximum_duration_without_endpointing": self.maximum_duration_without_endpointing,
             "pre_processing": {
-                "audio_enhancer": self.provider in ("twilio", "sip-trunk", "exotel", "plivo"),
+                "audio_enhancer": self.provider in TelephonyProvider.telephony_values(),
                 "speech_threshold": self.speech_threshold,
             },
             "messages_config": {
