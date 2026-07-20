@@ -339,7 +339,7 @@ class AssemblyAITranscriber(BaseTranscriber):
                 audio_data = ws_data_packet.get("data")
                 if isinstance(audio_data, bytes):
                     try:
-                        if self.provider in TelephonyProvider.mulaw_values() and self.encoding == "mulaw":
+                        if self.encoding == "mulaw":
                             audio_data = ulaw2lin(audio_data, 2)
 
                         await ws.send(audio_data)
