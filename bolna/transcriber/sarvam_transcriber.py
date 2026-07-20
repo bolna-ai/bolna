@@ -450,8 +450,9 @@ class SarvamTranscriber(BaseTranscriber):
                 except Exception:
                     logger.error(f"Sarvam receiver error handling message: {traceback.format_exc()}")
         except ConnectionClosed as e:
-            if e.code != 1000:
-                self.connection_error = f"sarvam closed the connection: code={e.code} reason={e.reason!r}"
+            # Logged, not treated as an error: a socket dying abnormally is also what a
+            # normal hangup looks like from here, and only the error message above tells
+            # the two apart.
             logger.info(f"Sarvam websocket closed: code={e.code} reason={e.reason!r}")
         except Exception:
             logger.error(f"Sarvam receiver error: {traceback.format_exc()}")
