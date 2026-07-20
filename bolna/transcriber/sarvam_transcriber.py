@@ -11,7 +11,7 @@ from dotenv import load_dotenv
 import aiohttp
 import websockets
 from websockets.asyncio.client import ClientConnection
-from websockets.exceptions import InvalidHandshake
+from websockets.exceptions import ConnectionClosed, InvalidHandshake
 
 import numpy as np
 from scipy.signal import resample_poly
@@ -443,10 +443,21 @@ class SarvamTranscriber(BaseTranscriber):
                         self.meta_info["transcriber_duration"] = data.get("duration", 0)
                         yield create_ws_data_packet("transcriber_connection_closed", self.meta_info)
                         return
+
+                    elif isinstance(data, dict) and data.get("type") == "error":
+                        # Sarvam rejects a stream by sending this and then closing (e.g. a
+                        # sample_rate the model won't accept). Record the reason and let its
+                        # close end the loop, so the call still tears down immediately.
+                        self.connection_error = (data.get("data") or {}).get("message") or json.dumps(data)
+                        logger.error(f"Sarvam rejected the stream: {self.connection_error}")
                 except Exception:
-                    traceback.print_exc()
+                    logger.error(f"Sarvam receiver error handling message: {traceback.format_exc()}")
+        except ConnectionClosed as e:
+            if e.code != 1000:
+                self.connection_error = f"sarvam closed the connection: code={e.code} reason={e.reason!r}"
+            logger.info(f"Sarvam websocket closed: code={e.code} reason={e.reason!r}")
         except Exception:
-            traceback.print_exc()
+            logger.error(f"Sarvam receiver error: {traceback.format_exc()}")
 
     async def _close(self, ws: ClientConnection, data=None):
         try:
@@ -561,7 +572,7 @@ class SarvamTranscriber(BaseTranscriber):
         try:
             self.transcription_task = asyncio.create_task(self.transcribe())
         except Exception:
-            traceback.print_exc()
+            logger.error(f"Sarvam transcriber failed to start: {traceback.format_exc()}")
 
     async def send_heartbeat(self, ws: ClientConnection, interval_sec: float = 10.0):
         try:
@@ -587,7 +598,7 @@ class SarvamTranscriber(BaseTranscriber):
                     meta["connection_error"] = self.connection_error
                     await self.push_to_transcriber_queue(create_ws_data_packet("transcriber_connection_closed", meta))
                 except Exception:
-                    traceback.print_exc()
+                    logger.error(f"Sarvam failed to emit connection_closed: {traceback.format_exc()}")
                 return
 
             if not self.connection_time:
@@ -606,7 +617,7 @@ class SarvamTranscriber(BaseTranscriber):
                                 break
                 except Exception as e:
                     self.connection_error = str(e)
-                    traceback.print_exc()
+                    logger.error(f"Sarvam stream ended with an error: {traceback.format_exc()}")
             else:
                 self.sender_task = asyncio.create_task(self.sender())
                 try:
@@ -624,7 +635,7 @@ class SarvamTranscriber(BaseTranscriber):
                     meta["connection_error"] = self.connection_error
                 await self.push_to_transcriber_queue(create_ws_data_packet("transcriber_connection_closed", meta))
             except Exception:
-                traceback.print_exc()
+                logger.error(f"Sarvam failed to emit connection_closed: {traceback.format_exc()}")
         finally:
             if self.sender_task:
                 self.sender_task.cancel()
