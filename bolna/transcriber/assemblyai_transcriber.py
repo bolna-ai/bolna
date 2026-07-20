@@ -12,6 +12,7 @@ from websockets.asyncio.client import ClientConnection
 from websockets.exceptions import ConnectionClosedError, InvalidHandshake
 
 from .base_transcriber import BaseTranscriber
+from bolna.enums import TelephonyProvider
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.ssl_context import get_ssl_context
 from bolna.helpers.utils import create_ws_data_packet, timestamp_ms
@@ -84,8 +85,8 @@ class AssemblyAITranscriber(BaseTranscriber):
         """Get the AssemblyAI WebSocket URL with appropriate parameters"""
         connection_params = {"sample_rate": self.sampling_rate, "format_turns": self.format_turns}
 
-        if self.provider in ("twilio", "exotel", "plivo", "vobiz"):
-            self.encoding = "mulaw" if self.provider in ("twilio") else "linear16"
+        if self.provider in TelephonyProvider.telephony_values():
+            self.encoding = "mulaw" if self.provider in TelephonyProvider.mulaw_values() else "linear16"
             self.sampling_rate = 8000
             self.audio_frame_duration = 0.2
             connection_params["sample_rate"] = self.sampling_rate
@@ -338,7 +339,7 @@ class AssemblyAITranscriber(BaseTranscriber):
                 audio_data = ws_data_packet.get("data")
                 if isinstance(audio_data, bytes):
                     try:
-                        if self.provider == "twilio" and self.encoding == "mulaw":
+                        if self.encoding == "mulaw":
                             audio_data = ulaw2lin(audio_data, 2)
 
                         await ws.send(audio_data)
