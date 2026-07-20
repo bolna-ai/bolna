@@ -110,7 +110,7 @@ class ElevenLabsTranscriber(BaseTranscriber):
 
         # Timeout tracking for stuck utterances
         self.last_interim_time = None
-        self.interim_timeout = kwargs.get("interim_timeout", 5.0)
+        self.interim_timeout = kwargs.get("interim_timeout", 1.2)
         self.utterance_timeout_task = None
 
     def get_elevenlabs_ws_url(self):
