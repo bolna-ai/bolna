@@ -459,8 +459,9 @@ class GraphAgentConfig(Llm):
 
     @model_validator(mode="after")
     def validate_router_graph(self):
-        """Router edges must target existing nodes, routers must not cycle, and a chain
-        may contain at most one intent router (so a turn makes at most one routing call)."""
+        """Router edges must target existing nodes and routers must not cycle; either would
+        leave the chain unable to reach a speaking node. Chained intent routers are allowed
+        (each makes its own routing call, a latency tradeoff, not a correctness one)."""
         router_nodes = [n for n in self.nodes if n.node_type == NodeType.ROUTER]
         if not router_nodes:
             return self
@@ -490,26 +491,6 @@ class GraphAgentConfig(Llm):
                 raise ValueError(
                     f"Router nodes form a cycle involving '{rid}'; a router chain must terminate at a non-router node."
                 )
-
-        # At most one intent router per chain: an intent router must not reach another via
-        # router-to-router edges (that would force a second routing LLM call in one turn).
-        intent_router_ids = {
-            n.id for n in router_nodes if any(e.condition_type in (None, EdgeConditionType.LLM) for e in n.edges)
-        }
-        for start in intent_router_ids:
-            seen, stack = set(), list(adjacency.get(start, []))
-            while stack:
-                rid = stack.pop()
-                if rid in seen:
-                    continue
-                seen.add(rid)
-                if rid in intent_router_ids:
-                    raise ValueError(
-                        f"Router chain from '{start}' reaches another intent router '{rid}'; "
-                        f"a router chain may contain at most one intent router. Split the intent "
-                        f"decisions across speaking nodes, or use expression edges."
-                    )
-                stack.extend(adjacency.get(rid, []))
         return self
 
 

@@ -5914,6 +5914,14 @@ class TaskManager(BaseManager):
                                 )
                         else:
                             logger.info(f"Skipping message with sequence_id: {sequence_id}")
+                            # A retired sequence's final chunk is skipped here, so its
+                            # is_final_chunk mark never reaches Plivo and no mark echo ever
+                            # arrives to clear is_audio_being_played. Without this, the flag
+                            # latches True forever and every later user utterance is dropped
+                            # as a false interruption. Mirror the BLOCK-path guard.
+                            if meta_info.get("end_of_synthesizer_stream", False):
+                                self._turn_audio_flushed.set()
+                                self.tools["input"].update_is_audio_being_played(False)
 
                         # Give control to other tasks
                         sleep_time = self.tools["synthesizer"].get_sleep_time()
