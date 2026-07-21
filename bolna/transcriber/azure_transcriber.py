@@ -8,6 +8,7 @@ from dotenv import load_dotenv
 from .base_transcriber import BaseTranscriber
 import azure.cognitiveservices.speech as speechsdk
 from bolna.helpers.utils import create_ws_data_packet, timestamp_ms
+from bolna.enums import TelephonyProvider
 from bolna.helpers.logger_config import configure_logger
 
 logger = configure_logger(__name__)
@@ -50,8 +51,8 @@ class AzureTranscriber(BaseTranscriber):
         self._turn_start_epoch_ms = None
         self.turn_counter = 0
 
-        if self.audio_provider in ("twilio", "exotel", "plivo"):
-            self.encoding = "mulaw" if self.audio_provider in ("twilio",) else "linear16"
+        if self.audio_provider in TelephonyProvider.telephony_values():
+            self.encoding = "mulaw" if self.audio_provider in TelephonyProvider.mulaw_values() else "linear16"
             if self.encoding == "mulaw":
                 self.bits_per_sample = 8
             self.audio_frame_duration = 0.2

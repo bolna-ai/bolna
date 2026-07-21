@@ -152,13 +152,8 @@ class DeepgramTranscriber(BaseTranscriber):
         self.audio_frame_duration = 0.5  # We're sending 8k samples with a sample rate of 16k
 
         if self.provider in TelephonyProvider.telephony_values():
-            # For sip-trunk (Asterisk), encoding and sampling_rate are already set in task_manager
-            # Don't override them - use what was passed from task_config
-            if self.provider != TelephonyProvider.SIP_TRUNK.value:
-                self.encoding = "mulaw" if self.provider in ("twilio") else "linear16"
-                self.sampling_rate = 8000
-            # For sip-trunk, encoding and sampling_rate come from task_config (set in task_manager)
-            # They're already set from the __init__ parameters, so we don't override
+            self.encoding = "mulaw" if self.provider in TelephonyProvider.mulaw_values() else "linear16"
+            self.sampling_rate = 8000
             self.audio_frame_duration = 0.2  # 200ms chunks for telephony
 
             dg_params["encoding"] = self.encoding
@@ -222,9 +217,8 @@ class DeepgramTranscriber(BaseTranscriber):
         self.audio_frame_duration = 0.5
 
         if self.provider in TelephonyProvider.telephony_values():
-            if self.provider != TelephonyProvider.SIP_TRUNK.value:
-                self.encoding = "mulaw" if self.provider == "twilio" else "linear16"
-                self.sampling_rate = 8000
+            self.encoding = "mulaw" if self.provider in TelephonyProvider.mulaw_values() else "linear16"
+            self.sampling_rate = 8000
             self.audio_frame_duration = 0.2
             dg_params["encoding"] = self.encoding
             dg_params["sample_rate"] = self.sampling_rate
