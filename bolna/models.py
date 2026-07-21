@@ -386,7 +386,9 @@ class GraphEdge(BaseModel):
     function_description: Optional[str] = None  # Detailed description for LLM
     # Optional parameters to collect during transition
     parameters: Optional[Dict[str, str]] = None  # e.g., {"city": "string"}
-    priority: Optional[int] = None  # lower = evaluated first. Defaults: expression/unconditional=0, llm=100
+    # lower = evaluated first within a tier (expression/intent/unconditional); does not rank across tiers.
+    # Defaults: expression/unconditional=0, llm=100
+    priority: Optional[int] = None
 
 
 class GraphNode(BaseModel):
@@ -457,8 +459,9 @@ class GraphAgentConfig(Llm):
 
     @model_validator(mode="after")
     def validate_router_graph(self):
-        """Router edges must target existing nodes, and routers must not cycle among
-        themselves (either would leave the chain unable to reach a speaking node)."""
+        """Router edges must target existing nodes and routers must not cycle; either would
+        leave the chain unable to reach a speaking node. Chained intent routers are allowed
+        (each makes its own routing call, a latency tradeoff, not a correctness one)."""
         router_nodes = [n for n in self.nodes if n.node_type == NodeType.ROUTER]
         if not router_nodes:
             return self

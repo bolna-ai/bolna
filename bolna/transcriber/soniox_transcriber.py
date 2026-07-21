@@ -104,10 +104,8 @@ class SonioxTranscriber(BaseTranscriber):
     def _resolve_audio_params(self):
         """Set encoding, sample rate and frame duration from the telephony/web I/O provider."""
         if self.provider in TelephonyProvider.telephony_values():
-            # sip-trunk passes its own encoding/sample_rate from task_config; don't override.
-            if self.provider != TelephonyProvider.SIP_TRUNK.value:
-                self.encoding = "mulaw" if self.provider == "twilio" else "linear16"
-                self.sampling_rate = 8000
+            self.encoding = "mulaw" if self.provider in TelephonyProvider.mulaw_values() else "linear16"
+            self.sampling_rate = 8000
             self.audio_frame_duration = 0.2
         elif self.provider == "web_based_call":
             self.encoding = "linear16"
