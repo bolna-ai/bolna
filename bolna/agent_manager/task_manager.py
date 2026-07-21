@@ -5048,8 +5048,14 @@ class TaskManager(BaseManager):
             mismatch_streak_fire = 10**9
         try:
             while not self.conversation_ended:
-                # No switches once hangup is underway — truncates the goodbye, deadlocks teardown.
-                if self.hangup_triggered:
+                # No switches once hangup / end-call / transfer is underway — a switch here
+                # truncates the goodbye and deadlocks teardown. Just as important: on these states
+                # __run_language_switch abandons the decision PRE-drain (the _should_ignore check
+                # below its entry), leaving the aged detector buffer intact and >= threshold. Without
+                # this guard the fire branch below would re-invoke the decision every iteration with
+                # no awaiting yield — a synchronous spin that pegs and blocks the pod's event loop,
+                # starving co-tenant calls of media/TTS (Jul 2026 transcript-missing incident).
+                if self._should_ignore_transcriber_input():
                     await asyncio.sleep(0.5)
                     continue
                 pool = self.tools.get("transcriber")
@@ -5099,6 +5105,13 @@ class TaskManager(BaseManager):
                     # Streak fires are saaras double-confirmations — high enough precision
                     # to also start the follow-up generation speculatively.
                     await self.handle_language_switch(spawn_language=self.language, speculate=streak_fired)
+                    # Spin-guard: a healthy decision drains the buffer (age → None) and the loop
+                    # parks on the buffer event next iteration. If it returned WITHOUT draining
+                    # (e.g. an ignore-input flag flipped after the loop-top guard), the buffer stays
+                    # >= threshold and we would re-fire immediately with no yield. Force one so the
+                    # loop can never busy-spin the event loop, whatever the return path.
+                    if pool.lid_buffer_age() is not None:
+                        await asyncio.sleep(0.1)
                     continue
                 # Buffered but not idle long enough — sleep the remaining time, but wake
                 # IMMEDIATELY if a new segment lands (clear-then-wait on the buffer event):
