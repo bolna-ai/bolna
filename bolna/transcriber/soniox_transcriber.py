@@ -420,6 +420,7 @@ class SonioxTranscriber(BaseTranscriber):
             raise
         except Exception as e:
             logger.error(f"Soniox utterance timeout monitor error: {e}")
+            raise
 
     async def push_to_transcriber_queue(self, data_packet):
         await self.transcriber_output_queue.put(data_packet)
