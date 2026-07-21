@@ -3824,30 +3824,32 @@ class TaskManager(BaseManager):
 
                     # A hack as during the 'await' part control passes to llm streaming function parameters
                     # So we have to make sure we've commited the filler message
-                    # Match the language snapshotted at pre-call time (what the accumulator built the filler with), not live self.language which can flip mid-turn.
-                    pre_call_language = meta_info.get("detected_language") or self.language
-                    if pre_call_language != self.language:
-                        logger.info(
-                            f"Filler language mismatch: pre_call_language={pre_call_language} vs current self.language={self.language}; matching against pre_call_language"
+                    # Only the function-call chunk carries function_tool; gate here so the compute + mismatch log run once for the filler, not per text chunk.
+                    if function_tool:
+                        # Match the language snapshotted at pre-call time (what the accumulator built the filler with), not live self.language which can flip mid-turn.
+                        pre_call_language = meta_info.get("detected_language") or self.language
+                        if pre_call_language != self.language:
+                            logger.info(
+                                f"Filler language mismatch: pre_call_language={pre_call_language} vs current self.language={self.language}; matching against pre_call_language"
+                            )
+                        filler_message = compute_function_pre_call_message(
+                            pre_call_language, function_tool, function_tool_message
                         )
-                    filler_message = compute_function_pre_call_message(
-                        pre_call_language, function_tool, function_tool_message
-                    )
-                    # filler_message = PRE_FUNCTION_CALL_MESSAGE.get(self.language, PRE_FUNCTION_CALL_MESSAGE[DEFAULT_LANGUAGE_CODE])
-                    if text_chunk == filler_message:
-                        logger.info("Got a pre function call message")
-                        turn_id = meta_info.get("turn_id")
-                        response_uid = meta_info.get("response_uid")
-                        messages.append(
-                            {
-                                "role": "assistant",
-                                "content": filler_message,
-                                "turn_id": turn_id,
-                                "response_uid": response_uid,
-                            }
-                        )
-                        self._stage_assistant_history(meta_info, filler_message)
-                        self.conversation_history.sync_interim(messages)
+                        # filler_message = PRE_FUNCTION_CALL_MESSAGE.get(self.language, PRE_FUNCTION_CALL_MESSAGE[DEFAULT_LANGUAGE_CODE])
+                        if text_chunk == filler_message:
+                            logger.info("Got a pre function call message")
+                            turn_id = meta_info.get("turn_id")
+                            response_uid = meta_info.get("response_uid")
+                            messages.append(
+                                {
+                                    "role": "assistant",
+                                    "content": filler_message,
+                                    "turn_id": turn_id,
+                                    "response_uid": response_uid,
+                                }
+                            )
+                            self._stage_assistant_history(meta_info, filler_message)
+                            self.conversation_history.sync_interim(messages)
 
                     await self._handle_llm_output(next_step, text_chunk, should_bypass_synth, meta_info)
         except BolnaComponentError:
