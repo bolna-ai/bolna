@@ -243,6 +243,11 @@ class ElevenLabsTranscriber(BaseTranscriber):
         logger.info(f"Force-finalized transcript after timeout: {transcript_to_send}")
         await self.push_to_transcriber_queue(create_ws_data_packet(data, self.meta_info))
         self._reset_turn_state()
+        # This utterance was already pushed — suppress ElevenLabs' own (late) commit for it,
+        # or the same turn gets processed twice (fragment now + full text seconds later).
+        # The next utterance's first partial flips this back to False, so only the stale
+        # commit is swallowed. Mirrors deepgram_transcriber's post-force-finalize state.
+        self.is_transcript_sent_for_processing = True
 
     async def monitor_utterance_timeout(self):
         """Monitor for stuck utterances that never receive committed transcript"""
