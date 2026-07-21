@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "bolna"
-version = "0.10.146"
+version = "0.10.147"
 readme = "README.md"
 authors = [
     { name = "Prateek Sachan", email = "ps@prateeksachan.com" }

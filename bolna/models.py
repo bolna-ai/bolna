@@ -386,7 +386,9 @@ class GraphEdge(BaseModel):
     function_description: Optional[str] = None  # Detailed description for LLM
     # Optional parameters to collect during transition
     parameters: Optional[Dict[str, str]] = None  # e.g., {"city": "string"}
-    priority: Optional[int] = None  # lower = evaluated first. Defaults: expression/unconditional=0, llm=100
+    # lower = evaluated first within a tier (expression/intent/unconditional); does not rank across tiers.
+    # Defaults: expression/unconditional=0, llm=100
+    priority: Optional[int] = None
 
 
 class GraphNode(BaseModel):
@@ -457,8 +459,8 @@ class GraphAgentConfig(Llm):
 
     @model_validator(mode="after")
     def validate_router_graph(self):
-        """Router edges must target existing nodes, and routers must not cycle among
-        themselves (either would leave the chain unable to reach a speaking node)."""
+        """Router edges must target existing nodes, routers must not cycle, and a chain
+        may contain at most one intent router (so a turn makes at most one routing call)."""
         router_nodes = [n for n in self.nodes if n.node_type == NodeType.ROUTER]
         if not router_nodes:
             return self
@@ -488,6 +490,26 @@ class GraphAgentConfig(Llm):
                 raise ValueError(
                     f"Router nodes form a cycle involving '{rid}'; a router chain must terminate at a non-router node."
                 )
+
+        # At most one intent router per chain: an intent router must not reach another via
+        # router-to-router edges (that would force a second routing LLM call in one turn).
+        intent_router_ids = {
+            n.id for n in router_nodes if any(e.condition_type in (None, EdgeConditionType.LLM) for e in n.edges)
+        }
+        for start in intent_router_ids:
+            seen, stack = set(), list(adjacency.get(start, []))
+            while stack:
+                rid = stack.pop()
+                if rid in seen:
+                    continue
+                seen.add(rid)
+                if rid in intent_router_ids:
+                    raise ValueError(
+                        f"Router chain from '{start}' reaches another intent router '{rid}'; "
+                        f"a router chain may contain at most one intent router. Split the intent "
+                        f"decisions across speaking nodes, or use expression edges."
+                    )
+                stack.extend(adjacency.get(rid, []))
         return self
 
 

@@ -191,6 +191,60 @@ class TestRouterNodeValidation:
         cfg = GraphAgentConfig(**_base_config(nodes, "r1"))
         assert len(cfg.nodes) == 3
 
+    def test_two_intent_routers_in_chain_rejected(self):
+        # A router chain that passes through two intent routers would force two routing
+        # LLM calls in one silent turn, so it is rejected at load time.
+        nodes = [
+            {
+                "id": "r1",
+                "node_type": "router",
+                "edges": [
+                    {"to_node_id": "r2", "condition": "wants a specialist"},  # intent
+                    {"to_node_id": "general", "condition_type": "unconditional"},
+                ],
+            },
+            {
+                "id": "r2",
+                "node_type": "router",
+                "edges": [
+                    {"to_node_id": "billing", "condition": "billing question"},  # intent
+                    {"to_node_id": "support", "condition_type": "unconditional"},
+                ],
+            },
+            {"id": "billing", "prompt": "b", "edges": []},
+            {"id": "support", "prompt": "s", "edges": []},
+            {"id": "general", "prompt": "g", "edges": []},
+        ]
+        with pytest.raises(ValidationError, match="at most one intent router"):
+            GraphAgentConfig(**_base_config(nodes, "r1"))
+
+    def test_expression_router_then_intent_router_allowed(self):
+        # An expression router chaining into a single intent router is fine: only one
+        # intent router on the path, so only one routing LLM call.
+        nodes = [
+            {
+                "id": "r1",
+                "node_type": "router",
+                "edges": [
+                    {"to_node_id": "r2", "condition_type": "expression", "expression": _expr("x", "eq", "1")},
+                    {"to_node_id": "general", "condition_type": "unconditional"},
+                ],
+            },
+            {
+                "id": "r2",
+                "node_type": "router",
+                "edges": [
+                    {"to_node_id": "billing", "condition": "billing question"},  # intent
+                    {"to_node_id": "support", "condition_type": "unconditional"},
+                ],
+            },
+            {"id": "billing", "prompt": "b", "edges": []},
+            {"id": "support", "prompt": "s", "edges": []},
+            {"id": "general", "prompt": "g", "edges": []},
+        ]
+        cfg = GraphAgentConfig(**_base_config(nodes, "r1"))
+        assert len(cfg.nodes) == 5
+
 
 # ---------------------------------------------------------------------------
 # _resolve_router_chain
@@ -514,10 +568,14 @@ class TestRouterIntentRouting:
         assert hops[0]["confidence"] == 0.9
 
     @pytest.mark.asyncio
-    async def test_intent_no_match_falls_to_catch_all(self):
+    async def test_intent_llm_no_decision_falls_to_catch_all(self):
+        # When the routing LLM returns no decision (error or abstain), the router falls to
+        # the catch-all deterministically and carries the spent telemetry. A genuine
+        # no-intent-match now goes through the LLM picking the described default instead
+        # (see test_intent_router_offers_default_not_stay), which records as an llm hop.
         agent = _intent_router_agent(detected_language="en")
-        stay = (None, None, 250.0, [{"role": "system", "content": "routing"}], [], "unclear", 0.3, None)
-        with patch.object(agent, "_decide_next_node_llm", new_callable=AsyncMock, return_value=stay) as mock_llm:
+        no_decision = (None, None, 250.0, [{"role": "system", "content": "routing"}], [], "unclear", 0.3, None)
+        with patch.object(agent, "_decide_next_node_llm", new_callable=AsyncMock, return_value=no_decision) as mock_llm:
             hops = await agent._resolve_router_chain([{"role": "user", "content": "ummm"}])
 
         mock_llm.assert_called_once()
@@ -529,9 +587,23 @@ class TestRouterIntentRouting:
         assert hops[0]["routing_model"] is not None
 
     @pytest.mark.asyncio
-    async def test_one_intent_call_per_chain(self):
-        # r1 routes via intent to r2 (another intent router); r2 must take its
-        # catch-all instead of making a second LLM call.
+    async def test_intent_router_offers_default_not_stay(self):
+        # The routing LLM for an intent router is handed the catch-all as a described
+        # 'default' transition, and the stay_on_current_node escape is dropped.
+        agent = _intent_router_agent(detected_language="en")
+        intent_edges = [{"to_node_id": "billing", "condition": "billing", "function_name": "go_to_billing"}]
+        default = {"to_node_id": "general", "condition_type": "unconditional"}
+        tools = agent._build_transition_tools_for_edges(intent_edges + [default], allow_stay=False)
+        names = [t["function"]["name"] for t in tools]
+        assert "go_to_billing" in names
+        assert "transition_to_general" in names  # catch-all offered as a real option
+        assert "stay_on_current_node" not in names
+
+    @pytest.mark.asyncio
+    async def test_chained_intent_routers_route_independently(self):
+        # Two intent routers chained (built as raw dicts, bypassing the validation that
+        # now forbids this): with intent_call_spent removed, each routes on its own call
+        # rather than the second silently taking its catch-all.
         nodes = [
             {
                 "id": "r1",
@@ -555,12 +627,15 @@ class TestRouterIntentRouting:
         ]
         agent = _make_agent(_base_config(nodes, "r1"))
         pick_r2 = ("r2", None, 300.0, [{"role": "system", "content": "r"}], [], "specialist", 0.8, None)
-        with patch.object(agent, "_decide_next_node_llm", new_callable=AsyncMock, return_value=pick_r2) as mock_llm:
+        pick_billing = ("billing", None, 300.0, [{"role": "system", "content": "r"}], [], "billing", 0.8, None)
+        with patch.object(
+            agent, "_decide_next_node_llm", new_callable=AsyncMock, side_effect=[pick_r2, pick_billing]
+        ) as mock_llm:
             hops = await agent._resolve_router_chain([{"role": "user", "content": "hi"}])
 
-        assert mock_llm.call_count == 1
-        assert agent.current_node_id == "support"  # r2's catch-all, no second call
-        assert [h["current_node"] for h in hops] == ["r2", "support"]
+        assert mock_llm.call_count == 2
+        assert agent.current_node_id == "billing"
+        assert [h["current_node"] for h in hops] == ["r2", "billing"]
 
 
 # ---------------------------------------------------------------------------
