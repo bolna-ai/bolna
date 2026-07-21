@@ -191,9 +191,10 @@ class TestRouterNodeValidation:
         cfg = GraphAgentConfig(**_base_config(nodes, "r1"))
         assert len(cfg.nodes) == 3
 
-    def test_two_intent_routers_in_chain_rejected(self):
-        # A router chain that passes through two intent routers would force two routing
-        # LLM calls in one silent turn, so it is rejected at load time.
+    def test_two_intent_routers_in_chain_allowed(self):
+        # Chained intent routers are allowed: each makes its own routing call, a latency
+        # tradeoff, not a correctness one. The runtime routes them independently
+        # (see test_chained_intent_routers_route_independently).
         nodes = [
             {
                 "id": "r1",
@@ -215,8 +216,8 @@ class TestRouterNodeValidation:
             {"id": "support", "prompt": "s", "edges": []},
             {"id": "general", "prompt": "g", "edges": []},
         ]
-        with pytest.raises(ValidationError, match="at most one intent router"):
-            GraphAgentConfig(**_base_config(nodes, "r1"))
+        cfg = GraphAgentConfig(**_base_config(nodes, "r1"))
+        assert len(cfg.nodes) == 5
 
     def test_expression_router_then_intent_router_allowed(self):
         # An expression router chaining into a single intent router is fine: only one
