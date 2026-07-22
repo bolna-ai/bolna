@@ -117,6 +117,20 @@ class LLMProvider(str, Enum):
         return [provider.value for provider in cls]
 
 
+class TaskType(str, Enum):
+    """Enum for agent task types (conversation pipeline stages)."""
+
+    CONVERSATION = "conversation"
+    EXTRACTION = "extraction"
+    SUMMARIZATION = "summarization"
+    WEBHOOK = "webhook"
+
+    @classmethod
+    def all_values(cls):
+        """Return all task type values as a list of strings."""
+        return [task_type.value for task_type in cls]
+
+
 class ReasoningEffort(str, Enum):
     NONE = "none"
     MINIMAL = "minimal"

@@ -7,6 +7,7 @@ from .enums import (
     TelephonyProvider,
     SynthesizerProvider,
     TranscriberProvider,
+    TaskType,
     ReasoningEffort,
     Verbosity,
     ExpressionOperator,
@@ -630,8 +631,14 @@ class ConversationConfig(BaseModel):
 class Task(BaseModel):
     tools_config: ToolsConfig
     toolchain: ToolsChainModel
-    task_type: Optional[str] = "conversation"  # extraction, summarization, notification
+    task_type: Optional[str] = TaskType.CONVERSATION.value
     task_config: ConversationConfig = dict()
+
+    @field_validator("task_type")
+    def validate_task_type(cls, value):
+        if value is None:
+            return TaskType.CONVERSATION.value
+        return validate_attribute(value, TaskType.all_values(), value_type="task_type")
 
 
 class AgentModel(BaseModel):
