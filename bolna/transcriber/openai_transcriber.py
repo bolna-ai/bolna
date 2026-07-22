@@ -16,6 +16,8 @@ from websockets.exceptions import InvalidHandshake, ConnectionClosed, Connection
 from .base_transcriber import BaseTranscriber
 from bolna.constants import (
     OPENAI_TRANSCRIBER_HEARTBEAT_INTERVAL_S,
+    OPENAI_TRANSCRIBER_SPEECH_RMS_THRESHOLD,
+    OPENAI_TRANSCRIBER_TELEPHONY_SPEECH_RMS_THRESHOLD,
     OPENAI_TRANSCRIBER_UTTERANCE_TIMEOUT_S,
 )
 from bolna.helpers.logger_config import configure_logger
@@ -40,7 +42,7 @@ class OpenAITranscriber(BaseTranscriber):
         endpointing=400,
         delay="medium",
         noise_reduction=False,
-        speech_rms_threshold=400,
+        speech_rms_threshold=None,
         vad_threshold=0.5,
         vad_prefix_padding_ms=300,
         **kwargs,
@@ -56,7 +58,7 @@ class OpenAITranscriber(BaseTranscriber):
         # 'effort' was the old parameter name; accept it for backward compat
         self.delay = kwargs.pop("effort", None) or delay
         self.noise_reduction = noise_reduction
-        self.speech_rms_threshold = speech_rms_threshold
+        self.speech_rms_threshold = self._resolve_speech_rms_threshold(telephony_provider, speech_rms_threshold)
         self.vad_threshold = float(vad_threshold)
         self.vad_prefix_padding_ms = int(vad_prefix_padding_ms)
 
@@ -101,8 +103,19 @@ class OpenAITranscriber(BaseTranscriber):
         self._turn_committed = False
         # Timestamp of last committed turn (for utterance timeout)
         self._commit_time: Optional[float] = None
+        # Set when we emit a transcript from interim deltas after utterance timeout;
+        # used to ignore a late transcription.completed for the same turn.
+        self._force_finalized_turn_id: Optional[str] = None
 
         self._configure_audio_params()
+
+    @staticmethod
+    def _resolve_speech_rms_threshold(telephony_provider, speech_rms_threshold) -> float:
+        if speech_rms_threshold is not None:
+            return float(speech_rms_threshold)
+        if telephony_provider in ("twilio", "plivo", "exotel", "vobiz"):
+            return float(OPENAI_TRANSCRIBER_TELEPHONY_SPEECH_RMS_THRESHOLD)
+        return float(OPENAI_TRANSCRIBER_SPEECH_RMS_THRESHOLD)
 
     def _configure_audio_params(self):
         if self.telephony_provider == "twilio":
@@ -113,6 +126,9 @@ class OpenAITranscriber(BaseTranscriber):
             self.input_sampling_rate = 8000
         else:
             self.input_sampling_rate = self.sampling_rate
+
+    def _interim_transcript_text(self) -> str:
+        return "".join(detail.get("transcript", "") for detail in self.current_turn_interim_details).strip()
 
     def _resample_to_24k(self, audio_bytes: bytes) -> bytes:
         """Convert incoming audio (any rate/encoding) to 24 kHz linear16."""
@@ -242,8 +258,61 @@ class OpenAITranscriber(BaseTranscriber):
         except Exception as e:
             logger.error(f"Error in OpenAI heartbeat: {e}")
 
+    async def _force_finalize_from_interims(self):
+        """Emit a transcript from interim deltas when transcription.completed is late/missing.
+
+        Without this, Twilio calls can sit silent for tens of seconds while the LLM
+        waits for the final event, and the agent appears non-responsive (#711).
+        """
+        turn_id = self._last_committed_turn_id or self.current_turn_id
+        transcript = self._interim_transcript_text()
+        self._final_transcript_event.set()
+
+        if not transcript:
+            logger.warning(
+                f"Utterance timeout on turn {turn_id}: no interim text available to force-finalize"
+            )
+            self._reset_turn_state()
+            return
+
+        logger.warning(
+            f"Utterance timeout on turn {turn_id}: force-finalizing from interim text "
+            f"({len(transcript)} chars): {transcript[:80]}"
+        )
+        self._force_finalized_turn_id = turn_id
+
+        if self.current_turn_start_time:
+            total_ms = round((time.perf_counter() - self.current_turn_start_time) * 1000)
+            self.meta_info["transcriber_total_stream_duration"] = total_ms / 1000
+
+        first_interim_to_final_ms, last_interim_to_final_ms = self.calculate_interim_to_final_latencies(
+            self.current_turn_interim_details
+        )
+        self.turn_latencies.append(
+            {
+                "turn_id": turn_id,
+                "sequence_id": turn_id,
+                "interim_details": self.current_turn_interim_details,
+                "first_interim_to_final_ms": first_interim_to_final_ms,
+                "last_interim_to_final_ms": last_interim_to_final_ms,
+                "total_stream_duration_ms": round(
+                    (self.meta_info.get("transcriber_total_stream_duration") or 0) * 1000
+                ),
+                "asr_start_epoch_ms": self._turn_start_epoch_ms,
+                "asr_finalized_epoch_ms": timestamp_ms(),
+                "final_transcript": transcript,
+                "force_finalized": True,
+            }
+        )
+        self._reset_turn_state()
+        self.meta_info["turn_latencies"] = self.turn_latencies
+        await self.push_to_transcriber_queue(
+            create_ws_data_packet({"type": "transcript", "content": transcript}, self.meta_info)
+        )
+        del self.meta_info["turn_latencies"]
+
     async def monitor_utterance_timeout(self):
-        """Force-finalize a committed turn if completed event never arrives."""
+        """Force-finalize a committed turn if completed event never arrives in time."""
         try:
             while True:
                 await asyncio.sleep(0.1)
@@ -254,12 +323,7 @@ class OpenAITranscriber(BaseTranscriber):
                 ):
                     elapsed = time.time() - self._commit_time
                     if elapsed > OPENAI_TRANSCRIBER_UTTERANCE_TIMEOUT_S:
-                        logger.warning(
-                            f"Utterance timeout: completed event missing for {elapsed:.1f}s "
-                            f"after commit on turn {self.current_turn_id}. Force-finalizing."
-                        )
-                        self._final_transcript_event.set()
-                        self._reset_turn_state()
+                        await self._force_finalize_from_interims()
         except asyncio.CancelledError:
             logger.info("OpenAI utterance timeout task cancelled")
             raise
@@ -327,13 +391,21 @@ class OpenAITranscriber(BaseTranscriber):
                         self.audio_submission_time = time.time()
                         self._final_transcript_event.clear()
                         self._audio_appended_since_commit = False
+                        # Clear stale commit state so the utterance-timeout monitor
+                        # does not fire against the previous turn while new speech runs.
+                        self._turn_committed = False
+                        self._commit_time = None
+                        self._force_finalized_turn_id = None
                         self.turn_counter += 1
                         self.current_turn_id = f"turn_{self.turn_counter}"
                         self.current_turn_start_time = time.perf_counter()
                         self._turn_start_epoch_ms = timestamp_ms()
                         self.current_turn_interim_details = []
                         self.is_transcript_sent_for_processing = False
-                        logger.info(f"Speech detected, starting turn {self.current_turn_id}")
+                        logger.info(
+                            f"Speech detected (RMS={rms:.0f} threshold={self.speech_rms_threshold}), "
+                            f"starting turn {self.current_turn_id}"
+                        )
                         await self.push_to_transcriber_queue(create_ws_data_packet("speech_started", self.meta_info))
                 else:
                     if self._speech_active:
@@ -405,11 +477,20 @@ class OpenAITranscriber(BaseTranscriber):
                         # Always unblock EOS drain, even for empty transcripts
                         self._final_transcript_event.set()
 
+                        # _last_committed_turn_id is saved at commit time and is the
+                        # most reliable identifier — current_turn_id may already point
+                        # to the next turn if the sender started speaking immediately.
+                        turn_id = self._last_committed_turn_id or self.current_turn_id or item_id
+
+                        # Skip duplicate if we already force-finalized this turn from interims.
+                        if turn_id and turn_id == self._force_finalized_turn_id:
+                            logger.info(
+                                f"Ignoring late transcription.completed for force-finalized turn {turn_id}"
+                            )
+                            self._force_finalized_turn_id = None
+                            continue
+
                         if transcript:
-                            # _last_committed_turn_id is saved at commit time and is the
-                            # most reliable identifier — current_turn_id may already point
-                            # to the next turn if the sender started speaking immediately.
-                            turn_id = self._last_committed_turn_id or self.current_turn_id or item_id
                             logger.info(f"Transcript completed for turn {turn_id}: {transcript[:80]}")
                             if self.current_turn_start_time:
                                 total_ms = round((time.perf_counter() - self.current_turn_start_time) * 1000)
