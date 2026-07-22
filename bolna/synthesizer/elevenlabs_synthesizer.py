@@ -87,6 +87,8 @@ class ElevenlabsSynthesizer(StreamSynthesizer):
         self.ws_send_time = None
         self.ws_trace_id = None
         self.current_turn_ttfb = None
+        self.eos_accum_context_id = None  # context whose spoken chars are being accumulated
+        self.eos_accum_text = ""  # spoken-so-far for that context (end-of-stream match)
 
     # ------------------------------------------------------------------
     # StreamSynthesizer hooks
@@ -256,6 +258,11 @@ class ElevenlabsSynthesizer(StreamSynthesizer):
                         text_spoken = "".join(data.get("alignment", {}).get("chars", []))
                     except Exception:
                         text_spoken = ""
+                    # Accumulate spoken text per context for the end-of-stream match below.
+                    if ctx != self.eos_accum_context_id:
+                        self.eos_accum_context_id = ctx
+                        self.eos_accum_text = ""
+                    self.eos_accum_text += text_spoken
                     yield chunk, text_spoken
 
                 emit_eos = False
@@ -267,23 +274,20 @@ class ElevenlabsSynthesizer(StreamSynthesizer):
 
                 elif self.last_text_sent:
                     try:
-                        response_chars = data.get("alignment", {}).get("chars", [])
-                        response_text = "".join(response_chars)
-                        last_four = " ".join(response_text.split(" ")[-4:]).replace('"', "").strip()
                         current_norm = self.normalize_text(self.current_text.strip()).replace('"', "").strip()
-                        logger.info(f"Last four char - {last_four} | current text - {current_norm}")
-
-                        # Skip punctuation-only chunks (e.g. ".", ",") that match trivially.
-                        has_alnum = any(c.isalnum() for c in last_four)
+                        spoken_norm = self.normalize_text(self.eos_accum_text.strip()).replace('"', "").strip()
                         # Strip whitespace before compare: ElevenLabs alignment splits
                         # "first-time" into "first- time", breaking endswith.
-                        last_four_cmp = re.sub(r"\s+", "", last_four)
                         current_cmp = re.sub(r"\s+", "", current_norm)
-                        if last_four_cmp and has_alnum and current_cmp.endswith(last_four_cmp):
+                        spoken_cmp = re.sub(r"\s+", "", spoken_norm)
+                        logger.info(f"EOS check spoken_len={len(spoken_cmp)} current_len={len(current_cmp)}")
+                        # End the stream only once the WHOLE turn text has been spoken, not when a
+                        # truncated frame fragment (e.g. "s.") coincidentally suffixes it (87da790e).
+                        if current_cmp and spoken_cmp.endswith(current_cmp):
                             logger.info("send end_of_synthesizer_stream")
                             emit_eos = True
                     except Exception as e:
-                        logger.error(f"Error getting chars from response - {e}")
+                        logger.error(f"Error matching spoken text - {e}")
                         emit_eos = True
                 else:
                     logger.info("No audio data in the response")
