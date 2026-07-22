@@ -71,6 +71,11 @@ class SonioxTranscriber(BaseTranscriber):
         self.audio_frame_duration = 0.5
         self._resolve_audio_params()
 
+        # Utterance timeout — force-finalize if Soniox never sends endpoint after last interim
+        _interim_timeout = kwargs.get("interim_timeout")
+        self.interim_timeout = float(_interim_timeout) if _interim_timeout is not None else 8.0
+        self.utterance_timeout_task = None
+
         # Connection + task state
         self.websocket_connection = None
         self.connection_authenticated = False
@@ -354,18 +359,75 @@ class SonioxTranscriber(BaseTranscriber):
                         self._reset_turn_state()
 
                 if res.get("finished"):
-                    logger.info("Soniox session finished")
+                    logger.info(
+                        f"Soniox session finished — num_frames={self.num_frames} "
+                        f"audio_submitted={self.audio_submitted} turn_counter={self.turn_counter}"
+                    )
                     break
 
             except Exception as e:
                 logger.error(f"Error processing Soniox message: {e}")
                 traceback.print_exc()
 
+    async def _force_finalize_utterance(self):
+        """Force-finalize a stuck utterance when Soniox never sends the endpoint token."""
+        transcript_to_send = self.final_transcript.strip()
+
+        if not transcript_to_send and self.current_turn_interim_details:
+            transcript_to_send = self.current_turn_interim_details[-1]["transcript"]
+            logger.info(f"Soniox force-finalize: using last interim as fallback: {transcript_to_send}")
+
+        if not transcript_to_send:
+            logger.warning("Soniox force-finalize: no transcript available, resetting turn state")
+            self._reset_turn_state()
+            return
+
+        try:
+            self._build_finalized_turn_latency(transcript_to_send)
+        except Exception as e:
+            logger.error(f"Soniox force-finalize: error building turn latencies: {e}")
+
+        self.meta_info["user_stop_offset_ms"] = self.user_stop_offset_ms
+        if self._last_detected_language:
+            self.meta_info["transcriber_detected_language"] = self._last_detected_language
+
+        data = {"type": "transcript", "content": transcript_to_send, "force_finalized": True}
+        logger.info(f"Soniox force-finalized transcript after timeout: {transcript_to_send}")
+        await self.push_to_transcriber_queue(create_ws_data_packet(data, self.meta_info))
+        self._reset_turn_state()
+
+    async def monitor_utterance_timeout(self):
+        """Monitor for utterances stuck mid-turn — force-finalize if Soniox never sends endpoint."""
+        try:
+            while True:
+                await asyncio.sleep(1.0)
+                if (
+                    self.last_interim_time
+                    and not self.is_transcript_sent_for_processing
+                    and (self.final_transcript.strip() or self.current_turn_interim_details)
+                ):
+                    elapsed = time.time() - self.last_interim_time
+                    if elapsed > self.interim_timeout:
+                        logger.warning(
+                            f"Soniox utterance timeout: no endpoint for {elapsed:.1f}s, "
+                            f"force-finalizing turn {self.current_turn_id}"
+                        )
+                        await self._force_finalize_utterance()
+        except asyncio.CancelledError:
+            logger.info("Soniox utterance timeout monitor cancelled")
+            raise
+        except Exception as e:
+            logger.error(f"Soniox utterance timeout monitor error: {e}")
+            raise
+
     async def push_to_transcriber_queue(self, data_packet):
         await self.transcriber_output_queue.put(data_packet)
 
     async def toggle_connection(self):
         self.connection_on = False
+        if self.utterance_timeout_task is not None:
+            self.utterance_timeout_task.cancel()
+            self.utterance_timeout_task = None
         if self.sender_task is not None:
             self.sender_task.cancel()
         if self.websocket_connection is not None:
@@ -385,6 +447,7 @@ class SonioxTranscriber(BaseTranscriber):
         for task_name, task in [
             ("sender_task", getattr(self, "sender_task", None)),
             ("transcription_task", getattr(self, "transcription_task", None)),
+            ("utterance_timeout_task", getattr(self, "utterance_timeout_task", None)),
         ]:
             if task is not None and not task.done():
                 task.cancel()
@@ -433,6 +496,7 @@ class SonioxTranscriber(BaseTranscriber):
                 self.connection_time = round(timestamp_ms() - start_time)
 
             self.sender_task = asyncio.create_task(self.sender_stream(soniox_ws))
+            self.utterance_timeout_task = asyncio.create_task(self.monitor_utterance_timeout())
 
             try:
                 async for message in self.receiver(soniox_ws):
