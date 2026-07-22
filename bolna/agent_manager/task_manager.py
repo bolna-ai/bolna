@@ -1461,8 +1461,11 @@ class TaskManager(BaseManager):
                         elif provider in (WEB_BASED_CALL_PROVIDER, TelephonyProvider.FREESWITCH.value):
                             cfg["encoding"] = "linear16"
                             cfg["sampling_rate"] = 16000
-                        if self.turn_based_conversation:
-                            cfg["stream"] = True if self.enforce_streaming else False
+                        # Live calls (telephony/web) must stream; only turn-based playground
+                        # honors enforce_streaming. A non-streaming transcriber on a live call
+                        # falls back to the batch REST path, which the self-hosted Deepgram
+                        # engine (plaintext) can't serve — the connection dies on a TLS mismatch.
+                        cfg["stream"] = bool(self.enforce_streaming or not self.turn_based_conversation)
 
                         if "provider" in cfg:
                             cls = SUPPORTED_TRANSCRIBER_PROVIDERS.get(cfg["provider"])
@@ -1537,11 +1540,15 @@ class TaskManager(BaseManager):
                     transcriber_config["model"] in SUPPORTED_TRANSCRIBER_MODELS.keys()
                     or transcriber_config["provider"] in SUPPORTED_TRANSCRIBER_PROVIDERS.keys()
                 ):
-                    if self.turn_based_conversation:
-                        transcriber_config["stream"] = True if self.enforce_streaming else False
-                        logger.info(
-                            f"transcriber stream={transcriber_config['stream']} enforce_streaming={self.enforce_streaming}"
-                        )
+                    # Live calls (telephony/web) must stream; only turn-based playground
+                    # honors enforce_streaming. A non-streaming transcriber on a live call
+                    # falls back to the batch REST path, which the self-hosted Deepgram
+                    # engine (plaintext) can't serve — the connection dies on a TLS mismatch.
+                    transcriber_config["stream"] = bool(self.enforce_streaming or not self.turn_based_conversation)
+                    logger.info(
+                        f"transcriber stream={transcriber_config['stream']} "
+                        f"enforce_streaming={self.enforce_streaming} turn_based={self.turn_based_conversation}"
+                    )
                     if "provider" in transcriber_config:
                         transcriber_class = SUPPORTED_TRANSCRIBER_PROVIDERS.get(transcriber_config["provider"])
                     else:
