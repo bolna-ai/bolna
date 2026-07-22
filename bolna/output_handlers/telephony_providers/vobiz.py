@@ -1,6 +1,5 @@
 import base64
 import json
-import os
 from dotenv import load_dotenv
 from bolna.output_handlers.telephony import TelephonyOutputHandler
 from bolna.helpers.logger_config import configure_logger
@@ -15,10 +14,6 @@ class VobizOutputHandler(TelephonyOutputHandler):
 
         super().__init__(io_provider, websocket, mark_event_meta_data, log_dir_name)
         self.is_chunking_supported = True
-
-        # VoBiz accepts far-ahead audio into its buffer that a barge-in then discards via
-        # clearAudio (see 87da790e), so pace sends to <= this x real-time. 0 disables.
-        self.max_send_rate_factor = float(os.getenv("VOBIZ_MAX_SEND_RATE_FACTOR", "1.5") or 0)
 
     async def handle_interruption(self):
         if self._closed:

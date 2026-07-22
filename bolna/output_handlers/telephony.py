@@ -1,4 +1,3 @@
-import asyncio
 import base64
 import json
 import os
@@ -22,31 +21,6 @@ class TelephonyOutputHandler(DefaultOutputHandler):
         self.stream_sid = None
         self.current_request_id = None
         self.rejected_request_ids = set()
-
-        # Pace media sends to <= this multiple of real-time so the provider buffer can't fill
-        # far ahead; otherwise a barge-in's clearAudio discards seconds of already-sent-but-
-        # unplayed audio (see 87da790e). Disabled by default; subclasses opt in (VoBiz does).
-        self.max_send_rate_factor = 0.0
-        self._rl_first_send_ts = 0.0
-        self._rl_bytes_sent = 0
-        self._rl_last_send_ts = 0.0
-
-    async def _rate_limit_send(self, audio_bytes, audio_format):
-        """Sleep so cumulative send rate stays <= max_send_rate_factor x real-time.
-        Re-anchors after a >1s gap so each response burst is paced from its own start."""
-        if self.max_send_rate_factor <= 0 or not audio_bytes:
-            return
-        bytes_per_sec = 8000 if audio_format == "mulaw" else 16000
-        now = time.monotonic()
-        if self._rl_first_send_ts == 0.0 or (now - self._rl_last_send_ts) > 1.0:
-            self._rl_first_send_ts = now
-            self._rl_bytes_sent = 0
-        self._rl_last_send_ts = now
-        self._rl_bytes_sent += audio_bytes
-        min_elapsed = self._rl_bytes_sent / (self.max_send_rate_factor * bytes_per_sec)
-        elapsed = now - self._rl_first_send_ts
-        if elapsed < min_elapsed:
-            await asyncio.sleep(min_elapsed - elapsed)
 
     async def handle_interruption(self):
         pass
@@ -124,7 +98,6 @@ class TelephonyOutputHandler(DefaultOutputHandler):
                         ):
                             self.welcome_message_sent_ts = time.time() * 1000
                         logger.info(f"Sending media event - {meta_info.get('mark_id')}")
-                        await self._rate_limit_send(len(audio_chunk), meta_info.get("format", "mulaw"))
 
                     mark_event_meta_data = {
                         "text_synthesized": ""
