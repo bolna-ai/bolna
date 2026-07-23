@@ -108,9 +108,11 @@ class ElevenLabsTranscriber(BaseTranscriber):
         # Latency tracking
         self.last_audio_send_time = None
 
-        # Timeout tracking for stuck utterances
+        # Timeout tracking for stuck utterances. 2.0s ≈ 2× scribe's partial cadence
+        # (~1s between partials in prod), so a slightly late partial doesn't trigger a
+        # mid-utterance force-finalize, while a genuinely stuck commit is cut at ~2s not 5s.
         self.last_interim_time = None
-        self.interim_timeout = kwargs.get("interim_timeout", 1.2)
+        self.interim_timeout = kwargs.get("interim_timeout", 2.0)
         self.utterance_timeout_task = None
 
     def get_elevenlabs_ws_url(self):

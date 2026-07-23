@@ -69,3 +69,19 @@ async def test_force_finalize_with_nothing_to_send_keeps_gate_open():
     await t._force_finalize_utterance()
     assert t.is_transcript_sent_for_processing is False
     assert t.transcriber_output_queue.empty()
+
+
+def test_default_interim_timeout_is_two_seconds():
+    """2.0s ≈ 2× scribe's observed ~1s partial cadence: late partials don't trigger
+    a mid-utterance force-finalize, stuck commits are cut at ~2s instead of 5s.
+    Still overridable via the interim_timeout kwarg."""
+    assert make_transcriber().interim_timeout == 2.0
+
+    t = ElevenLabsTranscriber(
+        telephony_provider="web_based_call",
+        input_queue=asyncio.Queue(),
+        output_queue=asyncio.Queue(),
+        transcriber_key="test",
+        interim_timeout=1.2,
+    )
+    assert t.interim_timeout == 1.2
