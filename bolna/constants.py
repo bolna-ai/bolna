@@ -4,6 +4,12 @@ from bolna.enums import ReasoningEffort as RE
 PREPROCESS_DIR = "agent_data"
 PCM16_SCALE = 32768.0
 
+# Provider label for browser web calls (raw-WS transport). Not a TelephonyProvider — it's the
+# codebase-wide literal the transcribers already branch on; single home for new comparisons.
+WEB_BASED_CALL_PROVIDER = "web_based_call"
+# Web + FreeSWITCH webcall paths play raw PCM at this fixed rate (telephony stays 8k mulaw).
+WEBCALL_TTS_SAMPLE_RATE = 24000
+
 OPENAI_TRANSCRIBER_HEARTBEAT_INTERVAL_S = 5
 OPENAI_TRANSCRIBER_UTTERANCE_TIMEOUT_S = 0.5
 
@@ -30,6 +36,11 @@ SONIOX_AUTO_LANGUAGE_VALUES = {"", "multi", "auto", "multilingual", "unknown"}
 # Model prefixes
 GPT5_MODEL_PREFIX = "gpt-5"
 GPT5_4_MODEL_PREFIX = "gpt-5.4"
+GPT5_5_MODEL_PREFIX = "gpt-5.5"
+GPT5_6_MODEL_PREFIX = "gpt-5.6"
+# Function tools with reasoning_effort are rejected on chat completions for these models,
+# so tool-using agents are routed through the Responses API.
+RESPONSES_API_MODEL_PREFIXES = (GPT5_4_MODEL_PREFIX, GPT5_5_MODEL_PREFIX, GPT5_6_MODEL_PREFIX)
 
 HIGH_LEVEL_ASSISTANT_ANALYTICS_DATA = {
     "extraction_details": {},
@@ -245,4 +256,17 @@ MODEL_REASONING_EFFORT_MAP = {
     "gpt-5.4": [RE.NONE, RE.LOW, RE.MEDIUM, RE.HIGH, RE.XHIGH],
     "gpt-5.4-mini": [RE.NONE, RE.LOW, RE.MEDIUM, RE.HIGH],
     "gpt-5.4-nano": [RE.NONE, RE.LOW, RE.MEDIUM, RE.HIGH],
+    "gpt-5.5": [RE.NONE, RE.LOW, RE.MEDIUM, RE.HIGH, RE.XHIGH],
+    "gpt-5.5-pro": [RE.MEDIUM, RE.HIGH, RE.XHIGH],
+    "gpt-5.6-sol": [RE.NONE, RE.LOW, RE.MEDIUM, RE.HIGH, RE.XHIGH],
+    "gpt-5.6-terra": [RE.NONE, RE.LOW, RE.MEDIUM, RE.HIGH, RE.XHIGH],
+    "gpt-5.6-luna": [RE.NONE, RE.LOW, RE.MEDIUM, RE.HIGH, RE.XHIGH],
 }
+
+
+def default_reasoning_effort(model: str) -> str:
+    """Lowest-latency effort the model supports: minimal where available, else the lowest in its map."""
+    supported = MODEL_REASONING_EFFORT_MAP.get(model)
+    if not supported or RE.MINIMAL in supported:
+        return RE.MINIMAL.value
+    return supported[0].value

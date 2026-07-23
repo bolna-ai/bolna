@@ -1,6 +1,7 @@
 import asyncio
 import audioop
 from collections import defaultdict
+from functools import lru_cache
 from datetime import datetime
 import io
 import math
@@ -32,8 +33,10 @@ from bolna.constants import (
     SWITCH_LANGUAGE_TOOL_DEFINITION,
     END_CALL_FUNCTION_PREFIX,
     END_CALL_TOOL_DEFINITION,
-    GPT5_4_MODEL_PREFIX,
+    RESPONSES_API_MODEL_PREFIXES,
     STALL_HANGUP_FLOOR_S,
+    WEB_BASED_CALL_PROVIDER,
+    WEBCALL_TTS_SAMPLE_RATE,
 )
 from bolna.helpers.function_calling_helpers import (
     trigger_api,
@@ -78,8 +81,10 @@ from bolna.helpers.utils import (
     save_audio_file_to_s3,
     update_prompt_with_context,
     get_md5_hash,
+    static_node_audio_key,
     clean_json_string,
     wav_bytes_to_pcm,
+    mp3_bytes_to_pcm,
     convert_to_request_log,
     yield_chunks_from_memory,
     process_task_cancellation,
@@ -95,6 +100,20 @@ from .models import ComponentLatencies
 from .voicemail_handler import VoicemailHandler
 
 logger = configure_logger(__name__)
+
+
+@lru_cache(maxsize=256)
+def welcome_pcm_upsampled(welcome_b64: str, target_sample_rate: int) -> bytes:
+    """Upsample the cached 8kHz welcome PCM to the raw-PCM output rate (web/freeswitch), memoized
+    per (welcome, rate). The welcome is identical across every call of an agent, so resampling it
+    once — instead of in each TaskManager.__init__ — keeps CPU from spiking when many calls start
+    at once (the welcome burst)."""
+    return resample(
+        base64.b64decode(welcome_b64),
+        target_sample_rate=target_sample_rate,
+        format="pcm",
+        original_sample_rate=8000,
+    )
 
 
 def _inject_end_call_tool(api_tools, *, scope, nodes, description=None):
@@ -181,6 +200,10 @@ def build_lid_decision_record(
 HANDOFF_CLIP_CACHE: dict = {}
 HANDOFF_CLIP_CACHE_MAX = 256
 
+_NON_NODE_RESPONSE_CATEGORIES = frozenset(
+    {"is_user_online_message", "filler", "backchanneling", "agent_welcome_message", "handoff"}
+)
+
 
 def trailing_utterance_text(segments, gap_seconds=4.0):
     """Text of the caller's LAST utterance: trailing detector segments in the same
@@ -231,6 +254,9 @@ class TaskManager(BaseManager):
         # Optional load-signal callback (set by the caller only for PTU-served calls).
         self.on_turn_usage = kwargs.get("on_turn_usage")
         self._usage_tasks = set()  # strong refs so fire-and-forget tallies aren't GC'd before they run
+        # Optional per-provider health callback (circuit-breaker shadow); never affects the call.
+        self.on_provider_health = kwargs.get("on_provider_health")
+        self._cb_tasks = set()
 
         self.conversation_start_init_ts = time.time() * 1000
         self.llm_latencies = ComponentLatencies()
@@ -250,6 +276,8 @@ class TaskManager(BaseManager):
 
         self.timezone = pytz.timezone(DEFAULT_TIMEZONE)
         self.language = DEFAULT_LANGUAGE_CODE
+        self.synthesizer_voice_id = None
+        self.synthesizer_model = None
         self.transfer_call_params = self.kwargs.get("transfer_call_params", None)
 
         if task["tools_config"].get("api_tools", None) is not None:
@@ -338,6 +366,14 @@ class TaskManager(BaseManager):
         self.preloaded_welcome_audio = (
             base64.b64decode(self.welcome_message_audio) if self.welcome_message_audio else None
         )
+        # Cached welcome is 8kHz PCM; web/freeswitch play at 24kHz, so upsample or the first audio is
+        # pitched. Memoized per welcome (welcome_pcm_upsampled) so this resample runs once, not in
+        # every call's __init__ — otherwise a burst of concurrent calls spikes CPU on the event loop.
+        is_freeswitch_output = (task.get("tools_config", {}).get("output") or {}).get(
+            "provider"
+        ) == TelephonyProvider.FREESWITCH.value
+        if (self.is_web_based_call or is_freeswitch_output) and self.preloaded_welcome_audio:
+            self.preloaded_welcome_audio = welcome_pcm_upsampled(self.welcome_message_audio, WEBCALL_TTS_SAMPLE_RATE)
         self.observable_variables = {}
         self.output_handler_set = False
         # IO HANDLERS
@@ -480,8 +516,8 @@ class TaskManager(BaseManager):
                 if "thinking_budget" in self.llm_agent_config:
                     self.llm_config["thinking_budget"] = self.llm_agent_config["thinking_budget"]
 
-                if self.llm_agent_config.get("use_responses_api") or GPT5_4_MODEL_PREFIX in self.llm_config.get(
-                    "model", ""
+                if self.llm_agent_config.get("use_responses_api") or any(
+                    p in self.llm_config.get("model", "") for p in RESPONSES_API_MODEL_PREFIXES
                 ):
                     self.llm_config["use_responses_api"] = True
 
@@ -1170,11 +1206,20 @@ class TaskManager(BaseManager):
                 output_kwargs["is_web_based_call"] = self.is_web_based_call
                 output_kwargs["mark_event_meta_data"] = self.mark_event_meta_data
 
+            # FreeSWITCH streams PCM @ self.sampling_rate; no mark echo → self-complete via
+            # input_handler (input handler is set up before output, like sip-trunk).
+            if self.task_config["tools_config"]["output"]["provider"] == TelephonyProvider.FREESWITCH.value:
+                output_kwargs["mark_event_meta_data"] = self.mark_event_meta_data
+                output_kwargs["sampling_rate"] = self.sampling_rate
+                output_kwargs["input_handler"] = self.tools.get("input")
+
             self.tools["output"] = output_handler_class(**output_kwargs)
             self.output_handler_set = True
             logger.info("output handler set")
         else:
-            raise "Other input handlers not supported yet"
+            # raising a plain string surfaces as TypeError("exceptions must derive from
+            # BaseException") and hides which provider was unsupported
+            raise ValueError(f"Unsupported output provider: {self.task_config['tools_config']['output']['provider']}")
 
     async def message_task_new(self):
         tasks = []
@@ -1225,7 +1270,10 @@ class TaskManager(BaseManager):
                     input_kwargs["agent_config"] = {"tasks": [self.task_config]}
             self.tools["input"] = input_handler_class(**input_kwargs)
         else:
-            raise "Other input handlers not supported yet"
+            # raising a plain string surfaces as TypeError("exceptions must derive from
+            # BaseException") and hides which provider was unsupported — this exact failure
+            # masked the missing-freeswitch-handler case when a PyPI bolna shadowed the branch
+            raise ValueError(f"Unsupported input provider: {self.task_config['tools_config']['input']['provider']}")
 
     async def __forced_first_message(self, timeout=10.0):
         logger.info(f"Executing the first message task")
@@ -1410,6 +1458,9 @@ class TaskManager(BaseManager):
                         if is_sip:
                             cfg["encoding"] = "mulaw"
                             cfg["sampling_rate"] = 8000
+                        elif provider in (WEB_BASED_CALL_PROVIDER, TelephonyProvider.FREESWITCH.value):
+                            cfg["encoding"] = "linear16"
+                            cfg["sampling_rate"] = 16000
                         if self.turn_based_conversation:
                             cfg["stream"] = True if self.enforce_streaming else False
 
@@ -1476,6 +1527,10 @@ class TaskManager(BaseManager):
                     transcriber_config["encoding"] = "mulaw"
                     transcriber_config["sampling_rate"] = 8000
                     logger.info(f"Configured transcriber for Asterisk sip-trunk with mulaw encoding @ 8kHz")
+                elif provider in (WEB_BASED_CALL_PROVIDER, TelephonyProvider.FREESWITCH.value):
+                    # Web + FreeSWITCH fork both stream linear16 PCM @16kHz; coerce for all ASR providers.
+                    transcriber_config["encoding"] = "linear16"
+                    transcriber_config["sampling_rate"] = 16000
 
                 # Checking models for backwards compatibility
                 if (
@@ -1524,6 +1579,10 @@ class TaskManager(BaseManager):
                 synthesizer_kwargs = self.kwargs.copy()
                 if is_telephony:
                     synthesizer_kwargs["use_mulaw"] = True
+                elif self.is_web_based_call or output_provider == TelephonyProvider.FREESWITCH.value:
+                    # web/freeswitch play raw PCM @24k; synths like elevenlabs/cartesia default to
+                    # mulaw@8k (telephony) which garbles when labeled 24k — force it off.
+                    synthesizer_kwargs["use_mulaw"] = False
 
                 synthesizers = {}
                 for label, cfg in multilingual.items():
@@ -1531,6 +1590,15 @@ class TaskManager(BaseManager):
                     caching = cfg.pop("caching", True)
                     provider_name = cfg.pop("provider")
                     provider_config = cfg.pop("provider_config")
+
+                    # Web + FreeSWITCH play raw PCM at a fixed 24kHz; force every language synth to
+                    # match (telephony/chat untouched). Else non-24k languages drift (e.g. Hindi too slow).
+                    if self.is_web_based_call or (
+                        self.task_config["tools_config"]["output"]["provider"] == TelephonyProvider.FREESWITCH.value
+                    ):
+                        provider_config = dict(provider_config)  # don't mutate the cached agent config
+                        provider_config["sampling_rate"] = WEBCALL_TTS_SAMPLE_RATE
+                        cfg.pop("sampling_rate", None)  # avoid passing sampling_rate twice to the synth
 
                     if self.turn_based_conversation:
                         cfg["audio_format"] = "mp3"
@@ -1573,17 +1641,32 @@ class TaskManager(BaseManager):
             synthesizer_class = SUPPORTED_SYNTHESIZER_MODELS.get(self.synthesizer_provider)
             provider_config = synth_config.pop("provider_config")
             self.synthesizer_voice = provider_config["voice"]
+            self.synthesizer_voice_id = provider_config.get("voice_id")
+            self.synthesizer_model = provider_config.get("model")
             if self.turn_based_conversation:
                 synth_config["audio_format"] = "mp3"  # Hard code mp3 if we're connected through dashboard
                 synth_config["stream"] = (
                     True if self.enforce_streaming else False
                 )  # Hardcode stream to be False as we don't want to get blocked by a __listen_synthesizer co-routine
 
-            # Configure use_mulaw for Asterisk/sip-trunk to ensure synthesizer outputs ulaw
+            # Telephony providers expect mulaw@8000Hz — force use_mulaw regardless of the
+            # server-side kwarg (it defaults to False and only covers some synths), mirroring
+            # the multilingual-pool path above. Synths that honor the kwarg (e.g. cartesia)
+            # would otherwise stream raw PCM that telephony plays as mulaw → loud static.
+            output_provider = self.task_config["tools_config"]["output"]["provider"]
+            is_telephony = output_provider in (
+                TelephonyProvider.PLIVO.value,
+                TelephonyProvider.TWILIO.value,
+                TelephonyProvider.EXOTEL.value,
+                TelephonyProvider.VOBIZ.value,
+                TelephonyProvider.SIP_TRUNK.value,
+            )
             synthesizer_kwargs = self.kwargs.copy()
-            if self.task_config["tools_config"]["output"]["provider"] == TelephonyProvider.SIP_TRUNK.value:
+            if is_telephony:
                 synthesizer_kwargs["use_mulaw"] = True
-                logger.info(f"[SIP-TRUNK] Configuring synthesizer with use_mulaw=True for Asterisk sip-trunk")
+            elif self.is_web_based_call or output_provider == TelephonyProvider.FREESWITCH.value:
+                # web/freeswitch play raw PCM @24k — synths must not emit telephony mulaw@8k
+                synthesizer_kwargs["use_mulaw"] = False
 
             self.tools["synthesizer"] = synthesizer_class(
                 **synth_config, **provider_config, **synthesizer_kwargs, caching=caching
@@ -1655,6 +1738,7 @@ class TaskManager(BaseManager):
                 injected_cfg["compact_threshold"] = self.llm_config["compact_threshold"]
             injected_cfg["buffer_size"] = self.task_config["tools_config"]["synthesizer"].get("buffer_size")
             injected_cfg["language"] = self.language
+            injected_cfg["turn_based_conversation"] = self.turn_based_conversation
 
             llm_agent = GraphAgent(injected_cfg)
             logger.info("Graph agent created with rag-proxy-server support")
@@ -2617,7 +2701,9 @@ class TaskManager(BaseManager):
 
         if node_type == NodeType.STATIC:
             # Static node: play cached audio directly, no LLM cost
-            static_text = target_node.get("static_message", "") if target_node else ""
+            static_text = (
+                select_message_by_language(target_node.get("static_message"), self.language) if target_node else ""
+            )
             if static_text:
                 if self.context_data:
                     static_text = update_prompt_with_context(static_text, self.context_data)
@@ -3633,6 +3719,7 @@ class TaskManager(BaseManager):
                     meta_info["end_of_llm_stream"] = True
                     meta_info["text"] = static_text
                     meta_info["cached"] = True
+                    meta_info["message_category"] = "static_node"
                     ws_packet = create_ws_data_packet(static_hash, meta_info=meta_info, is_md5_hash=True)
                     await self._synthesize(ws_packet)
                     return
@@ -3737,24 +3824,32 @@ class TaskManager(BaseManager):
 
                     # A hack as during the 'await' part control passes to llm streaming function parameters
                     # So we have to make sure we've commited the filler message
-                    filler_message = compute_function_pre_call_message(
-                        self.language, function_tool, function_tool_message
-                    )
-                    # filler_message = PRE_FUNCTION_CALL_MESSAGE.get(self.language, PRE_FUNCTION_CALL_MESSAGE[DEFAULT_LANGUAGE_CODE])
-                    if text_chunk == filler_message:
-                        logger.info("Got a pre function call message")
-                        turn_id = meta_info.get("turn_id")
-                        response_uid = meta_info.get("response_uid")
-                        messages.append(
-                            {
-                                "role": "assistant",
-                                "content": filler_message,
-                                "turn_id": turn_id,
-                                "response_uid": response_uid,
-                            }
+                    # Only the function-call chunk carries function_tool; gate here so the compute + mismatch log run once for the filler, not per text chunk.
+                    if function_tool:
+                        # Match the language snapshotted at pre-call time (what the accumulator built the filler with), not live self.language which can flip mid-turn.
+                        pre_call_language = meta_info.get("detected_language") or self.language
+                        if pre_call_language != self.language:
+                            logger.info(
+                                f"Filler language mismatch: pre_call_language={pre_call_language} vs current self.language={self.language}; matching against pre_call_language"
+                            )
+                        filler_message = compute_function_pre_call_message(
+                            pre_call_language, function_tool, function_tool_message
                         )
-                        self._stage_assistant_history(meta_info, filler_message)
-                        self.conversation_history.sync_interim(messages)
+                        # filler_message = PRE_FUNCTION_CALL_MESSAGE.get(self.language, PRE_FUNCTION_CALL_MESSAGE[DEFAULT_LANGUAGE_CODE])
+                        if text_chunk == filler_message:
+                            logger.info("Got a pre function call message")
+                            turn_id = meta_info.get("turn_id")
+                            response_uid = meta_info.get("response_uid")
+                            messages.append(
+                                {
+                                    "role": "assistant",
+                                    "content": filler_message,
+                                    "turn_id": turn_id,
+                                    "response_uid": response_uid,
+                                }
+                            )
+                            self._stage_assistant_history(meta_info, filler_message)
+                            self.conversation_history.sync_interim(messages)
 
                     await self._handle_llm_output(next_step, text_chunk, should_bypass_synth, meta_info)
         except BolnaComponentError:
@@ -3762,7 +3857,9 @@ class TaskManager(BaseManager):
         except Exception as e:
             raise LLMError(str(e), provider=self.llm_config.get("provider"), model=self.llm_config.get("model")) from e
 
-        filler_message = compute_function_pre_call_message(self.language, function_tool, function_tool_message)
+        filler_message = compute_function_pre_call_message(
+            meta_info.get("detected_language") or self.language, function_tool, function_tool_message
+        )
         if self.stream and llm_response != filler_message:
             self.__store_into_history(
                 meta_info,
@@ -3850,6 +3947,15 @@ class TaskManager(BaseManager):
 
         try:
             await self.__do_llm_generation(messages, meta_info, next_step, should_bypass_synth)
+            if self.task_id == 0:  # conversation LLM only; report the turn's first-token latency (shadow breaker)
+                _ttft = (
+                    self.llm_latencies.turn_latencies[-1].get("first_token_latency_ms")
+                    if self.llm_latencies.turn_latencies
+                    else None
+                )
+                await self._report_provider_health(
+                    "llm", self.llm_config.get("provider"), self.llm_config.get("model"), True, _ttft
+                )
         except asyncio.CancelledError:
             # Stamp cancellation on this sequence's latency entry (eager stub or completed entry)
             # so hung/cancelled LLM calls are distinguishable from still-running ones in progression.
@@ -3932,6 +4038,8 @@ class TaskManager(BaseManager):
         self.hangup_triggered = True
         if self.hangup_decision_at is None:
             self.hangup_decision_at = time.time()
+        # Hangup gates transcriber input, so release the audio gate now or the goodbye stalls on WAIT.
+        self.interruption_manager.on_user_speech_ended(update_utterance_time=False)
 
     def _should_ignore_transcriber_input(self) -> bool:
         return self.hangup_triggered or self._end_call_in_progress or self.has_transfer
@@ -4263,6 +4371,26 @@ class TaskManager(BaseManager):
         else:
             logger.info(f"Need to separate out output task")
 
+    async def _report_provider_health(self, service, provider, model, ok, latency_ms=None, blocking=False):
+        """Per-provider health signal for the circuit breaker (shadow). Never affects the call.
+
+        Fire-and-forget by default. On the error path pass blocking=True so the write lands before the
+        call tears down (a bare create_task would be cancelled by shutdown); the timeout keeps a slow
+        Redis from ever delaying teardown.
+        """
+        if not self.on_provider_health or not provider:
+            return
+        try:
+            coro = self.on_provider_health(service, provider, model, ok, latency_ms)
+            if blocking:
+                await asyncio.wait_for(coro, timeout=2)
+                return
+            _cb = asyncio.create_task(coro)
+            self._cb_tasks.add(_cb)
+            _cb.add_done_callback(self._cb_tasks.discard)
+        except Exception:
+            pass
+
     async def _end_call_on_component_error(self, error, hangup_detail):
         """End the call gracefully when a critical pipeline component fails.
 
@@ -4276,6 +4404,13 @@ class TaskManager(BaseManager):
                 "provider": getattr(error, "provider", None),
                 "model": getattr(error, "model", None),
             }
+            await self._report_provider_health(
+                getattr(error, "component", "unknown"),
+                getattr(error, "provider", None),
+                getattr(error, "model", None),
+                False,
+                blocking=True,
+            )
 
         # Log to CSV if not already done
         if self.run_id and not self._error_logged:
@@ -4923,8 +5058,14 @@ class TaskManager(BaseManager):
             mismatch_streak_fire = 10**9
         try:
             while not self.conversation_ended:
-                # No switches once hangup is underway — truncates the goodbye, deadlocks teardown.
-                if self.hangup_triggered:
+                # No switches once hangup / end-call / transfer is underway — a switch here
+                # truncates the goodbye and deadlocks teardown. Just as important: on these states
+                # __run_language_switch abandons the decision PRE-drain (the _should_ignore check
+                # below its entry), leaving the aged detector buffer intact and >= threshold. Without
+                # this guard the fire branch below would re-invoke the decision every iteration with
+                # no awaiting yield — a synchronous spin that pegs and blocks the pod's event loop,
+                # starving co-tenant calls of media/TTS (Jul 2026 transcript-missing incident).
+                if self._should_ignore_transcriber_input():
                     await asyncio.sleep(0.5)
                     continue
                 pool = self.tools.get("transcriber")
@@ -4974,6 +5115,13 @@ class TaskManager(BaseManager):
                     # Streak fires are saaras double-confirmations — high enough precision
                     # to also start the follow-up generation speculatively.
                     await self.handle_language_switch(spawn_language=self.language, speculate=streak_fired)
+                    # Spin-guard: a healthy decision drains the buffer (age → None) and the loop
+                    # parks on the buffer event next iteration. If it returned WITHOUT draining
+                    # (e.g. an ignore-input flag flipped after the loop-top guard), the buffer stays
+                    # >= threshold and we would re-fire immediately with no yield. Force one so the
+                    # loop can never busy-spin the event loop, whatever the return path.
+                    if pool.lid_buffer_age() is not None:
+                        await asyncio.sleep(0.1)
                     continue
                 # Buffered but not idle long enough — sleep the remaining time, but wake
                 # IMMEDIATELY if a new segment lands (clear-then-wait on the buffer event):
@@ -5766,6 +5914,14 @@ class TaskManager(BaseManager):
                                 )
                         else:
                             logger.info(f"Skipping message with sequence_id: {sequence_id}")
+                            # A retired sequence's final chunk is skipped here, so its
+                            # is_final_chunk mark never reaches Plivo and no mark echo ever
+                            # arrives to clear is_audio_being_played. Without this, the flag
+                            # latches True forever and every later user utterance is dropped
+                            # as a false interruption. Mirror the BLOCK-path guard.
+                            if meta_info.get("end_of_synthesizer_stream", False):
+                                self._turn_audio_flushed.set()
+                                self.tools["input"].update_is_audio_being_played(False)
 
                         # Give control to other tasks
                         sleep_time = self.tools["synthesizer"].get_sleep_time()
@@ -5803,16 +5959,42 @@ class TaskManager(BaseManager):
             # TODO: Either load IVR audio into memory before call or user s3 iter_cunks
             # This will help with interruption in IVR
             audio_chunk = None
-            if self.turn_based_conversation or self.task_config["tools_config"]["output"]["provider"] == "default":
-                audio_chunk = await get_raw_audio_bytes(
-                    text,
-                    self.assistant_name,
-                    self.task_config["tools_config"]["output"]["format"],
-                    local=self.is_local,
-                    assistant_id=self.assistant_id,
+            static_node_audio = meta_info.get("message_category") in ("static_node", "event_proactive")
+            if meta_info.get("message_category") == "static_node" and meta_info.get("text"):
+                # Fetch the clip keyed to the active voice/language, not text alone, so a voice
+                # change regenerates it instead of replaying the stale pre-generated clip.
+                text = static_node_audio_key(
+                    meta_info["text"],
+                    provider=self.synthesizer_provider,
+                    voice=self.synthesizer_voice,
+                    voice_id=self.synthesizer_voice_id,
+                    model=self.synthesizer_model,
                 )
+            if self.turn_based_conversation or self.task_config["tools_config"]["output"]["provider"] == "default":
+                # Static-node clips are pre-generated as mp3 keyed by md5(text); fetch that
+                # format explicitly rather than the output format, which may differ (e.g. wav).
+                audio_format = "mp3" if static_node_audio else self.task_config["tools_config"]["output"]["format"]
+                try:
+                    audio_chunk = await get_raw_audio_bytes(
+                        text,
+                        self.assistant_name,
+                        audio_format,
+                        local=self.is_local,
+                        assistant_id=self.assistant_id,
+                    )
+                except Exception as static_audio_err:
+                    if not static_node_audio:
+                        raise
+                    logger.error(f"Failed to fetch static node audio {text}: {static_audio_err}")
+                    audio_chunk = None
+                if static_node_audio and audio_chunk is None:
+                    # Cache miss or fetch failure: synthesize live so the node still speaks.
+                    logger.info("Static node audio unavailable; synthesizing live from text")
+                    meta_info["cached"] = False
+                    await self._synthesize(create_ws_data_packet(meta_info["text"], meta_info=meta_info))
+                    return
                 logger.info("Sending preprocessed audio")
-                meta_info["format"] = self.task_config["tools_config"]["output"]["format"]
+                meta_info["format"] = audio_format
                 meta_info["end_of_synthesizer_stream"] = True
                 await self.tools["output"].handle(create_ws_data_packet(audio_chunk, meta_info))
             else:
@@ -5826,6 +6008,27 @@ class TaskManager(BaseManager):
                         logger.info(f"Got to convert it to pcm")
                         audio_chunk = wav_bytes_to_pcm(resample(audio, format="wav", target_sample_rate=8000))
                         meta_info["format"] = "pcm"
+                elif static_node_audio:
+                    logger.info(f"Getting static node audio {text} from S3")
+                    yield_in_chunks = False
+                    try:
+                        audio = await get_raw_audio_bytes(
+                            text, self.assistant_name, "mp3", assistant_id=self.assistant_id, local=self.is_local
+                        )
+                        if audio is not None:
+                            # Telephony wire format is 8k mu-law. Providers key off meta_info["format"]:
+                            # plivo/vobiz send non-wav bytes as audio/x-mulaw without converting, so raw
+                            # linear16 would play as noise. mu-law is correct across plivo/twilio/exotel.
+                            audio_chunk = audioop.lin2ulaw(mp3_bytes_to_pcm(audio, target_sample_rate=8000), 2)
+                            meta_info["format"] = "mulaw"
+                    except Exception as static_audio_err:
+                        logger.error(f"Failed to prepare static node audio {text}: {static_audio_err}")
+                    if audio_chunk is None:
+                        # Cache miss or fetch/convert failure: synthesize live so the node still speaks.
+                        logger.info("Static node audio unavailable; synthesizing live from text")
+                        meta_info["cached"] = False
+                        await self._synthesize(create_ws_data_packet(meta_info["text"], meta_info=meta_info))
+                        return
                 else:
                     start_time = time.perf_counter()
                     audio_chunk = self.preloaded_welcome_audio if self.preloaded_welcome_audio else None
@@ -6070,6 +6273,11 @@ class TaskManager(BaseManager):
                             )
                         self.interruption_manager.on_successful_response_delivered(sequence_id)
                         self.interruption_manager.on_agent_speech_ended()
+                        if (
+                            self.__is_graph_agent()
+                            and message["meta_info"].get("message_category", "") not in _NON_NODE_RESPONSE_CATEGORIES
+                        ):
+                            self.tools["llm_agent"].mark_first_response_delivered()
                     # Reset asked_if_user_is_still_there flag after any message except is_user_online_message
                     if message["meta_info"].get("message_category", "") != "is_user_online_message":
                         self.asked_if_user_is_still_there = False
@@ -6289,6 +6497,13 @@ class TaskManager(BaseManager):
                         await self._synthesize(create_ws_data_packet(user_online_message, meta_info=meta_info))
                     self.conversation_history.append_assistant(user_online_message, exclude_from_llm=True)
 
+                    # Explicitly reset the audio flag after synthesizing the prompt.
+                    # handle_interruption() below sends clearAudio to Plivo and wipes the
+                    # mark dictionary, so the final-chunk mark echo will never arrive and
+                    # is_audio_being_played would stay stuck True forever — blocking the
+                    # silence-hangup gate in this loop indefinitely.
+                    self.tools["input"].update_is_audio_being_played(False)
+
                 # Just in case we need to clear messages sent before
                 await self.tools["output"].handle_interruption()
             else:
@@ -6308,8 +6523,15 @@ class TaskManager(BaseManager):
                 audio = await get_raw_audio_bytes(
                     f"{self.backchanneling_audios}/{filename}", local=True, is_location=True
                 )
-                if not self.turn_based_conversation and self.task_config["tools_config"]["output"] != "default":
-                    audio = resample(audio, target_sample_rate=8000, format="wav")
+                if not self.turn_based_conversation:
+                    # backchannel wavs are 8kHz; web/freeswitch play raw PCM at the synth rate
+                    # (self.sampling_rate, e.g. 24k) — sending them labeled 24k without upsampling
+                    # plays ~3x fast. mulaw telephony (twilio/plivo/exotel) stays 8k.
+                    # NB: the old `["output"] != "default"` compared a dict to a str (always True).
+                    output_provider = (self.task_config["tools_config"].get("output") or {}).get("provider")
+                    is_raw_pcm_output = self.is_web_based_call or output_provider == TelephonyProvider.FREESWITCH.value
+                    target_rate = self.sampling_rate if is_raw_pcm_output else 8000
+                    audio = resample(audio, target_sample_rate=target_rate, format="wav")
                     audio = wav_bytes_to_pcm(audio)
                 await self.tools["output"].handle(create_ws_data_packet(audio, self.__get_updated_meta_info()))
             else:
@@ -6652,7 +6874,11 @@ class TaskManager(BaseManager):
 
                 # Collect language detection latency if available
                 if hasattr(self, "language_detector") and self.language_detector.latency_data:
-                    self.llm_latencies.other_latencies.append(self.language_detector.latency_data)
+                    detection_entry = self.language_detector.latency_data
+                    detected_epoch_ms = detection_entry.pop("detected_at_epoch_ms", None)
+                    if detected_epoch_ms is not None:
+                        detection_entry["ts_ms"] = round(detected_epoch_ms - _call_start_ms, 2)
+                    self.llm_latencies.other_latencies.append(detection_entry)
 
                 welcome_message_sent_ts = self.tools["output"].get_welcome_message_sent_ts()
                 _user_bot_latencies = [
@@ -6679,6 +6905,11 @@ class TaskManager(BaseManager):
                     }
                     for e in self.interruption_manager.user_bot_latencies
                 ]
+
+                # Cancel the voicemail check BEFORE latency_dict/progression_data are snapshotted
+                # below — tasks_to_cancel is only awaited after the snapshot, so a cancelled-check
+                # record appended during that gather would never be persisted.
+                await process_task_cancellation(self.voicemail_handler.check_task, "voicemail_check_task")
 
                 output = {
                     "messages": self._prepare_precise_transcript_messages(self.history),
@@ -6861,9 +7092,6 @@ class TaskManager(BaseManager):
                 tasks_to_cancel.append(process_task_cancellation(self.first_message_task, "first_message_task"))
                 tasks_to_cancel.append(process_task_cancellation(self.dtmf_task, "dtmf_task"))
                 tasks_to_cancel.append(process_task_cancellation(self.event_listener_task, "event_listener_task"))
-                tasks_to_cancel.append(
-                    process_task_cancellation(self.voicemail_handler.check_task, "voicemail_check_task")
-                )
                 tasks_to_cancel.append(
                     process_task_cancellation(self.handle_accumulated_message_task, "handle_accumulated_message_task")
                 )

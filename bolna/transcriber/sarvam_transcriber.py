@@ -11,7 +11,7 @@ from dotenv import load_dotenv
 import aiohttp
 import websockets
 from websockets.asyncio.client import ClientConnection
-from websockets.exceptions import InvalidHandshake
+from websockets.exceptions import ConnectionClosed, InvalidHandshake
 
 import numpy as np
 from scipy.signal import resample_poly
@@ -19,6 +19,7 @@ from typing import Optional
 
 from .base_transcriber import BaseTranscriber
 from bolna.helpers.logger_config import configure_logger
+from bolna.enums import TelephonyProvider
 from bolna.helpers.ssl_context import get_ssl_context
 from bolna.helpers.utils import create_ws_data_packet, timestamp_ms
 
@@ -102,13 +103,9 @@ class SarvamTranscriber(BaseTranscriber):
             self.session = aiohttp.ClientSession()
 
     def _configure_audio_params(self):
-        if self.telephony_provider in ("plivo", "vobiz", "exotel"):
-            self.encoding = "linear16"
-            self.input_sampling_rate = 8000
-            self.sampling_rate = 16000
-            self.audio_frame_duration = 0.2
-        elif self.telephony_provider == "twilio":
-            self.encoding = "mulaw"
+        if self.telephony_provider in TelephonyProvider.telephony_values():
+            # Telephony streams 8kHz, saaras only accepts 16kHz; _convert_audio_to_wav upsamples.
+            self.encoding = "mulaw" if self.telephony_provider in TelephonyProvider.mulaw_values() else "linear16"
             self.input_sampling_rate = 8000
             self.sampling_rate = 16000
             self.audio_frame_duration = 0.2
@@ -443,10 +440,22 @@ class SarvamTranscriber(BaseTranscriber):
                         self.meta_info["transcriber_duration"] = data.get("duration", 0)
                         yield create_ws_data_packet("transcriber_connection_closed", self.meta_info)
                         return
+
+                    elif isinstance(data, dict) and data.get("type") == "error":
+                        # Sarvam rejects a stream by sending this and then closing (e.g. a
+                        # sample_rate the model won't accept). Record the reason and let its
+                        # close end the loop, so the call still tears down immediately.
+                        self.connection_error = (data.get("data") or {}).get("message") or json.dumps(data)
+                        logger.error(f"Sarvam rejected the stream: {self.connection_error}")
                 except Exception:
-                    traceback.print_exc()
+                    logger.error(f"Sarvam receiver error handling message: {traceback.format_exc()}")
+        except ConnectionClosed as e:
+            # Logged, not treated as an error: a socket dying abnormally is also what a
+            # normal hangup looks like from here, and only the error message above tells
+            # the two apart.
+            logger.info(f"Sarvam websocket closed: code={e.code} reason={e.reason!r}")
         except Exception:
-            traceback.print_exc()
+            logger.error(f"Sarvam receiver error: {traceback.format_exc()}")
 
     async def _close(self, ws: ClientConnection, data=None):
         try:
@@ -561,7 +570,7 @@ class SarvamTranscriber(BaseTranscriber):
         try:
             self.transcription_task = asyncio.create_task(self.transcribe())
         except Exception:
-            traceback.print_exc()
+            logger.error(f"Sarvam transcriber failed to start: {traceback.format_exc()}")
 
     async def send_heartbeat(self, ws: ClientConnection, interval_sec: float = 10.0):
         try:
@@ -587,7 +596,7 @@ class SarvamTranscriber(BaseTranscriber):
                     meta["connection_error"] = self.connection_error
                     await self.push_to_transcriber_queue(create_ws_data_packet("transcriber_connection_closed", meta))
                 except Exception:
-                    traceback.print_exc()
+                    logger.error(f"Sarvam failed to emit connection_closed: {traceback.format_exc()}")
                 return
 
             if not self.connection_time:
@@ -606,7 +615,7 @@ class SarvamTranscriber(BaseTranscriber):
                                 break
                 except Exception as e:
                     self.connection_error = str(e)
-                    traceback.print_exc()
+                    logger.error(f"Sarvam stream ended with an error: {traceback.format_exc()}")
             else:
                 self.sender_task = asyncio.create_task(self.sender())
                 try:
@@ -624,7 +633,7 @@ class SarvamTranscriber(BaseTranscriber):
                     meta["connection_error"] = self.connection_error
                 await self.push_to_transcriber_queue(create_ws_data_packet("transcriber_connection_closed", meta))
             except Exception:
-                traceback.print_exc()
+                logger.error(f"Sarvam failed to emit connection_closed: {traceback.format_exc()}")
         finally:
             if self.sender_task:
                 self.sender_task.cancel()

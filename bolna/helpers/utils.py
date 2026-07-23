@@ -236,6 +236,12 @@ def get_md5_hash(text):
     return hashlib.md5(text.encode(), usedforsecurity=False).hexdigest()
 
 
+def static_node_audio_key(text, provider=None, voice=None, voice_id=None, model=None):
+    """S3 filename stem for a static-node clip, bound to the voice it was rendered with."""
+    identity = "|".join(str(part or "") for part in (provider, voice, voice_id, model))
+    return get_md5_hash(f"{identity}|{text}")
+
+
 def is_valid_md5(hash_string):
     return bool(re.fullmatch(r"[0-9a-f]{32}", hash_string))
 
@@ -424,6 +430,19 @@ def convert_audio_to_wav(audio_bytes, source_format="flac"):
     audio.export(buffer, format="wav")
     logger.info(f"SENDING BACK WAV")
     return buffer.getvalue()
+
+
+def wav_bytes_to_mp3(wav_bytes):
+    audio = AudioSegment.from_file(io.BytesIO(wav_bytes), format="wav")
+    buffer = io.BytesIO()
+    audio.export(buffer, format="mp3")
+    return buffer.getvalue()
+
+
+def mp3_bytes_to_pcm(mp3_bytes, target_sample_rate=8000):
+    audio = AudioSegment.from_file(io.BytesIO(mp3_bytes), format="mp3")
+    audio = audio.set_frame_rate(target_sample_rate).set_channels(1).set_sample_width(2)
+    return audio.raw_data
 
 
 def resample(audio_bytes, target_sample_rate, format="mp3", pcm_channels=1, original_sample_rate=None):

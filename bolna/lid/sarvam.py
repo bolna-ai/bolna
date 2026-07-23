@@ -8,6 +8,7 @@ import wave
 
 from dotenv import load_dotenv
 
+from bolna.enums import TelephonyProvider
 from bolna.helpers.logger_config import configure_logger
 
 from .base import LIDBackend
@@ -42,11 +43,8 @@ class SarvamLID(LIDBackend):
         # stream 8kHz, so we resample 8k→16k. Getting this wrong (e.g. treating vobiz's
         # 8kHz as 16kHz) feeds garbled audio to Saaras → no transcripts → no detection.
         self._sr = int(config.get("sampling_rate", 16000))
-        if self._telephony in ("plivo", "vobiz", "exotel"):
-            self._encoding = "linear16"
-            self._input_sr = 8000
-        elif self._telephony == "twilio":
-            self._encoding = "mulaw"
+        if self._telephony in TelephonyProvider.telephony_values():
+            self._encoding = "mulaw" if self._telephony in TelephonyProvider.mulaw_values() else "linear16"
             self._input_sr = 8000
         else:
             self._encoding = "linear16"

@@ -13,7 +13,7 @@ import websockets
 from .stream_synthesizer import StreamSynthesizer
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.ssl_context import get_ssl_context
-from bolna.helpers.utils import convert_audio_to_wav, create_ws_data_packet, resample
+from bolna.helpers.utils import create_ws_data_packet, resample
 from bolna.memory.cache.inmemory_scalar_cache import InmemoryScalarCache
 
 logger = configure_logger(__name__)
@@ -59,7 +59,17 @@ class ElevenlabsSynthesizer(StreamSynthesizer):
             self.cache = InmemoryScalarCache()
 
         self.elevenlabs_host = os.getenv("ELEVENLABS_API_HOST", "api.elevenlabs.io")
-        self.wire_format = "ulaw_8000" if self.use_mulaw else "mp3_44100_128"
+        if self.use_mulaw:
+            self.wire_format = "ulaw_8000"
+            self.wire_pcm_rate = None
+        else:
+            # Raw PCM on the wire: ElevenLabs WS chunks are not cut on MP3 frame boundaries,
+            # so decoding each chunk as standalone MP3 (pydub/ffmpeg) crashes mid-stream and
+            # kills the synth loop. PCM at the target rate needs no decode and usually no
+            # resample — same pattern as cartesia/sarvam on the web/freeswitch path.
+            rate = int(self.sampling_rate)
+            self.wire_pcm_rate = rate if rate in (16000, 22050, 24000, 44100) else 24000
+            self.wire_format = f"pcm_{self.wire_pcm_rate}"
         self.ws_url = (
             f"wss://{self.elevenlabs_host}/v1/text-to-speech/{self.voice}/multi-stream-input"
             f"?model_id={self.model}&output_format={self.wire_format}"
@@ -77,6 +87,8 @@ class ElevenlabsSynthesizer(StreamSynthesizer):
         self.ws_send_time = None
         self.ws_trace_id = None
         self.current_turn_ttfb = None
+        self.eos_accum_context_id = None  # context whose spoken chars are being accumulated
+        self.eos_accum_text = ""  # spoken-so-far for that context (end-of-stream match)
 
     # ------------------------------------------------------------------
     # StreamSynthesizer hooks
@@ -86,10 +98,11 @@ class ElevenlabsSynthesizer(StreamSynthesizer):
         return "mulaw" if self.wire_format == "ulaw_8000" else "wav"
 
     def _process_audio_chunk(self, chunk):
-        # ulaw_8000 arrives ready to use; mp3 needs conversion + resampling
+        # ulaw_8000 arrives ready to use; pcm needs at most a rate conversion (a passthrough
+        # when wire_pcm_rate == sampling_rate, which is the normal web/freeswitch case)
         if self.wire_format == "ulaw_8000":
             return chunk
-        return resample(convert_audio_to_wav(chunk, source_format="mp3"), int(self.sampling_rate), format="wav")
+        return resample(chunk, int(self.sampling_rate), format="pcm", original_sample_rate=self.wire_pcm_rate)
 
     def _unpack_receiver_message(self, item):
         """ElevenLabs receiver yields (audio, text_synthesized) tuples."""
@@ -245,6 +258,11 @@ class ElevenlabsSynthesizer(StreamSynthesizer):
                         text_spoken = "".join(data.get("alignment", {}).get("chars", []))
                     except Exception:
                         text_spoken = ""
+                    # Accumulate spoken text per context for the end-of-stream match below.
+                    if ctx != self.eos_accum_context_id:
+                        self.eos_accum_context_id = ctx
+                        self.eos_accum_text = ""
+                    self.eos_accum_text += text_spoken
                     yield chunk, text_spoken
 
                 emit_eos = False
@@ -256,23 +274,28 @@ class ElevenlabsSynthesizer(StreamSynthesizer):
 
                 elif self.last_text_sent:
                     try:
-                        response_chars = data.get("alignment", {}).get("chars", [])
-                        response_text = "".join(response_chars)
-                        last_four = " ".join(response_text.split(" ")[-4:]).replace('"', "").strip()
                         current_norm = self.normalize_text(self.current_text.strip()).replace('"', "").strip()
-                        logger.info(f"Last four char - {last_four} | current text - {current_norm}")
-
-                        # Skip punctuation-only chunks (e.g. ".", ",") that match trivially.
-                        has_alnum = any(c.isalnum() for c in last_four)
+                        spoken_norm = self.normalize_text(self.eos_accum_text.strip()).replace('"', "").strip()
                         # Strip whitespace before compare: ElevenLabs alignment splits
                         # "first-time" into "first- time", breaking endswith.
-                        last_four_cmp = re.sub(r"\s+", "", last_four)
                         current_cmp = re.sub(r"\s+", "", current_norm)
-                        if last_four_cmp and has_alnum and current_cmp.endswith(last_four_cmp):
+                        spoken_cmp = re.sub(r"\s+", "", spoken_norm)
+                        # Require ~the whole turn spoken before trusting the suffix match, else a
+                        # repeated closer ("Sure." twice, final push "Sure.") matches one segment early.
+                        spoken_enough = (
+                            self.current_sequence_chars <= 0
+                            or len(self.eos_accum_text) >= 0.9 * self.current_sequence_chars
+                        )
+                        logger.info(
+                            f"EOS check spoken_chars={len(self.eos_accum_text)} seq_chars={self.current_sequence_chars} enough={spoken_enough}"
+                        )
+                        # End the stream only once the WHOLE turn text has been spoken, not when a
+                        # truncated frame fragment (e.g. "s.") coincidentally suffixes it (87da790e).
+                        if current_cmp and spoken_enough and spoken_cmp.endswith(current_cmp):
                             logger.info("send end_of_synthesizer_stream")
                             emit_eos = True
                     except Exception as e:
-                        logger.error(f"Error getting chars from response - {e}")
+                        logger.error(f"Error matching spoken text - {e}")
                         emit_eos = True
                 else:
                     logger.info("No audio data in the response")
