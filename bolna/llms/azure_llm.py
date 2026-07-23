@@ -16,8 +16,8 @@ from openai import (
     BadRequestError,
 )
 
-from bolna.constants import DEFAULT_LANGUAGE_CODE, GPT5_MODEL_PREFIX
-from bolna.enums import ReasoningEffort, Verbosity
+from bolna.constants import DEFAULT_LANGUAGE_CODE, GPT5_MODEL_PREFIX, default_reasoning_effort
+from bolna.enums import Verbosity
 from bolna.helpers.utils import convert_to_request_log, compute_function_pre_call_message, now_ms
 from .openai_base import OpenAICompatibleLLM
 from .tool_call_accumulator import ToolCallAccumulator
@@ -64,7 +64,9 @@ class AzureLLM(OpenAICompatibleLLM):
         self.model_args = {}
         if self.model.startswith(GPT5_MODEL_PREFIX):
             max_tokens_key = "max_completion_tokens"
-            self.model_args["reasoning_effort"] = kwargs.get("reasoning_effort", None) or ReasoningEffort.MINIMAL.value
+            self.model_args["reasoning_effort"] = kwargs.get("reasoning_effort", None) or default_reasoning_effort(
+                self.model
+            )
             self.model_args["verbosity"] = kwargs.get("verbosity", None) or Verbosity.LOW.value
 
         self.model_args.update({max_tokens_key: self.max_tokens, "temperature": self.temperature, "model": self.model})
