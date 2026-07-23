@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 import requests
@@ -20,7 +21,9 @@ class VobizInputHandler(TelephonyInputHandler):
         turn_based_conversation=False,
         is_welcome_message_played=False,
         observable_variables=None,
+        auth_credentials=None,
     ):
+        self.auth_credentials = auth_credentials or {}
         super().__init__(
             queues,
             websocket,
@@ -50,8 +53,8 @@ class VobizInputHandler(TelephonyInputHandler):
                 except Exception as stop_err:
                     logger.info(f"Could not send vobiz stop event: {stop_err}")
 
-            api_key = os.getenv("VOBIZ_API_KEY")
-            api_secret = os.getenv("VOBIZ_API_SECRET")
+            api_key = self.auth_credentials.get("auth_id") or os.getenv("VOBIZ_API_KEY")
+            api_secret = self.auth_credentials.get("auth_token") or os.getenv("VOBIZ_API_SECRET")
             call_uuid = self.call_sid
 
             if api_key and call_uuid:
@@ -59,7 +62,7 @@ class VobizInputHandler(TelephonyInputHandler):
                 auth = None
                 if api_key and api_secret:
                     auth = HTTPBasicAuth(api_key, api_secret)
-                response = requests.delete(url, auth=auth)
+                response = await asyncio.to_thread(requests.delete, url, auth=auth, timeout=30)
                 if response.status_code in (200, 204):
                     logger.info(f"Successfully disconnected Vobiz call: {call_uuid}")
                 else:

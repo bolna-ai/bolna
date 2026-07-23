@@ -1259,6 +1259,12 @@ class TaskManager(BaseManager):
                 if self.task_config["tools_config"]["input"]["provider"] == "default":
                     input_kwargs["queue"] = input_queue
 
+                if self.task_config["tools_config"]["input"]["provider"] in (
+                    TelephonyProvider.PLIVO.value,
+                    TelephonyProvider.VOBIZ.value,
+                ) and self.kwargs.get("telephony_credentials"):
+                    input_kwargs["auth_credentials"] = self.kwargs["telephony_credentials"]
+
                 input_kwargs["observable_variables"] = self.observable_variables
 
                 # Asterisk (sip-trunk): pass context data for pre-parsed MEDIA_START
