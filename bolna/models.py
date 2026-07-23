@@ -109,6 +109,25 @@ class PixaConfig(BaseModel):
     repetition_penalty: Optional[float] = 1.3
 
 
+class RumikConfig(BaseModel):
+    voice: str
+    model: str = "muga"  # "muga" (Hinglish, tone-tagged) or "mulberry" (English + Hindi)
+    voice_id: Optional[str] = None
+    language: Optional[str] = None
+    # muga-only: fallback tone prepended to untagged text
+    tone: Optional[str] = None
+    # mulberry-only voice controls
+    description: Optional[str] = None
+    speaker: Optional[str] = None
+    f0_up_key: Optional[float] = None
+    # optional sampling controls (Rumik applies its own defaults when omitted)
+    temperature: Optional[float] = None
+    top_p: Optional[float] = None
+    top_k: Optional[int] = None
+    repetition_penalty: Optional[float] = None
+    max_new_tokens: Optional[int] = None
+
+
 class AzureConfig(BaseModel):
     voice: str
     model: str
@@ -156,6 +175,7 @@ class Synthesizer(BaseModel):
         CartesiaConfig,
         DeepgramConfig,
         OpenAIConfig,
+        RumikConfig,
     ] = Field(union_mode="smart")
     stream: bool = False
     buffer_size: Optional[int] = 40  # 40 characters in a buffer
@@ -199,6 +219,9 @@ class Synthesizer(BaseModel):
         elif provider == "rime":
             if isinstance(config, dict):
                 values["provider_config"] = RimeConfig(**config)
+        elif provider == "rumik":
+            if isinstance(config, dict):
+                values["provider_config"] = RumikConfig(**config)
 
         return values
 
