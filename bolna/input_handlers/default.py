@@ -243,7 +243,7 @@ class DefaultInputHandler:
     def __process_text(self, text):
         logger.info(f"Sequences {self.input_types}")
         ws_data_packet = create_ws_data_packet(
-            data=text, meta_info={"io": "default", "type": "text", "sequence": self.input_types["audio"]}
+            data=text, meta_info={"io": "default", "type": "text", "sequence": self.input_types["text"]}
         )
 
         if self.turn_based_conversation:
