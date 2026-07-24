@@ -33,6 +33,11 @@ SONIOX_ENDPOINT_TOKEN = "<end>"  # sentinel token emitted when the speaker stops
 SONIOX_DEFAULT_MULTILINGUAL_HINTS = ["en", "hi", "ta", "te", "kn", "ml", "mr", "bn", "gu", "pa", "ur"]
 SONIOX_AUTO_LANGUAGE_VALUES = {"", "multi", "auto", "multilingual", "unknown"}
 
+# FunASR / SenseVoice self-hosted STT (remote server; weights are not bundled in Bolna)
+FUNASR_DEFAULT_HTTP_URL = "http://127.0.0.1:8000"
+FUNASR_DEFAULT_WS_URL = "ws://127.0.0.1:10095"
+FUNASR_DEFAULT_CHUNK_SIZE = [5, 10, 5]
+
 # Model prefixes
 GPT5_MODEL_PREFIX = "gpt-5"
 GPT5_4_MODEL_PREFIX = "gpt-5.4"

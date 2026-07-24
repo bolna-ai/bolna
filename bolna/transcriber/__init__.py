@@ -10,5 +10,6 @@ from .elevenlabs_transcriber import ElevenLabsTranscriber
 from .smallest_transcriber import SmallestTranscriber
 from .openai_transcriber import OpenAITranscriber
 from .soniox_transcriber import SonioxTranscriber
+from .funasr_transcriber import FunASRTranscriber
 from .transcriber_pool import TranscriberPool
 from bolna.lid import LIDProvider, SarvamLID, SonioxLID
