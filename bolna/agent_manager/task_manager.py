@@ -103,16 +103,19 @@ logger = configure_logger(__name__)
 
 
 @lru_cache(maxsize=256)
-def welcome_pcm_upsampled(welcome_b64: str, target_sample_rate: int) -> bytes:
-    """Upsample the cached 8kHz welcome PCM to the raw-PCM output rate (web/freeswitch), memoized
-    per (welcome, rate). The welcome is identical across every call of an agent, so resampling it
+def welcome_pcm_upsampled(welcome_b64: str, target_sample_rate: int, source_sample_rate: int = 8000) -> bytes:
+    """Upsample the cached welcome PCM to the raw-PCM output rate (web/freeswitch), memoized
+    per (welcome, rates). The welcome is identical across every call of an agent, so resampling it
     once — instead of in each TaskManager.__init__ — keeps CPU from spiking when many calls start
-    at once (the welcome burst)."""
+    at once (the welcome burst). Welcomes already at the target rate pass through untouched."""
+    decoded = base64.b64decode(welcome_b64)
+    if source_sample_rate == target_sample_rate:
+        return decoded
     return resample(
-        base64.b64decode(welcome_b64),
+        decoded,
         target_sample_rate=target_sample_rate,
         format="pcm",
-        original_sample_rate=8000,
+        original_sample_rate=source_sample_rate,
     )
 
 
@@ -360,20 +363,30 @@ class TaskManager(BaseManager):
         }
 
         self.welcome_message_audio = self.kwargs.pop("welcome_message_audio", None)
+        # Rate the backend synthesized the welcome at: 8000 for telephony (unchanged legacy
+        # payloads too), 24000 for web calls so the first turn matches the full-band TTS.
+        self.welcome_message_audio_sample_rate = int(self.kwargs.pop("welcome_message_audio_sample_rate", None) or 8000)
 
         self.welcome_message_delay = task.get("task_config", {}).get("welcome_message_delay", 0)
         # Pre-decode welcome audio for faster playback
         self.preloaded_welcome_audio = (
             base64.b64decode(self.welcome_message_audio) if self.welcome_message_audio else None
         )
-        # Cached welcome is 8kHz PCM; web/freeswitch play at 24kHz, so upsample or the first audio is
-        # pitched. Memoized per welcome (welcome_pcm_upsampled) so this resample runs once, not in
-        # every call's __init__ — otherwise a burst of concurrent calls spikes CPU on the event loop.
+        # Cached welcome PCM may be below the raw-PCM output rate (web/freeswitch play at 24kHz), so
+        # upsample or the first audio is pitched; already-24kHz welcomes pass through. Memoized per
+        # welcome (welcome_pcm_upsampled) so this resample runs once, not in every call's __init__ —
+        # otherwise a burst of concurrent calls spikes CPU on the event loop.
         is_freeswitch_output = (task.get("tools_config", {}).get("output") or {}).get(
             "provider"
         ) == TelephonyProvider.FREESWITCH.value
-        if (self.is_web_based_call or is_freeswitch_output) and self.preloaded_welcome_audio:
-            self.preloaded_welcome_audio = welcome_pcm_upsampled(self.welcome_message_audio, WEBCALL_TTS_SAMPLE_RATE)
+        if (
+            (self.is_web_based_call or is_freeswitch_output)
+            and self.preloaded_welcome_audio
+            and self.welcome_message_audio_sample_rate != WEBCALL_TTS_SAMPLE_RATE
+        ):
+            self.preloaded_welcome_audio = welcome_pcm_upsampled(
+                self.welcome_message_audio, WEBCALL_TTS_SAMPLE_RATE, self.welcome_message_audio_sample_rate
+            )
         self.observable_variables = {}
         self.output_handler_set = False
         # IO HANDLERS
@@ -1258,6 +1271,12 @@ class TaskManager(BaseManager):
 
                 if self.task_config["tools_config"]["input"]["provider"] == "default":
                     input_kwargs["queue"] = input_queue
+
+                if self.task_config["tools_config"]["input"]["provider"] in (
+                    TelephonyProvider.PLIVO.value,
+                    TelephonyProvider.VOBIZ.value,
+                ) and self.kwargs.get("telephony_credentials"):
+                    input_kwargs["auth_credentials"] = self.kwargs["telephony_credentials"]
 
                 input_kwargs["observable_variables"] = self.observable_variables
 

@@ -108,9 +108,11 @@ class ElevenLabsTranscriber(BaseTranscriber):
         # Latency tracking
         self.last_audio_send_time = None
 
-        # Timeout tracking for stuck utterances
+        # Timeout tracking for stuck utterances. 2.0s ≈ 2× scribe's partial cadence
+        # (~1s between partials in prod), so a slightly late partial doesn't trigger a
+        # mid-utterance force-finalize, while a genuinely stuck commit is cut at ~2s not 5s.
         self.last_interim_time = None
-        self.interim_timeout = kwargs.get("interim_timeout", 5.0)
+        self.interim_timeout = kwargs.get("interim_timeout", 2.0)
         self.utterance_timeout_task = None
 
     def get_elevenlabs_ws_url(self):
@@ -243,6 +245,11 @@ class ElevenLabsTranscriber(BaseTranscriber):
         logger.info(f"Force-finalized transcript after timeout: {transcript_to_send}")
         await self.push_to_transcriber_queue(create_ws_data_packet(data, self.meta_info))
         self._reset_turn_state()
+        # This utterance was already pushed — suppress ElevenLabs' own (late) commit for it,
+        # or the same turn gets processed twice (fragment now + full text seconds later).
+        # The next utterance's first partial flips this back to False, so only the stale
+        # commit is swallowed. Mirrors deepgram_transcriber's post-force-finalize state.
+        self.is_transcript_sent_for_processing = True
 
     async def monitor_utterance_timeout(self):
         """Monitor for stuck utterances that never receive committed transcript"""
