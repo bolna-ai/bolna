@@ -54,6 +54,14 @@ class OpenAICompatibleLLM(BaseLLM):
     - Override _responses_client property if they need a different client
     """
 
+    # Set by subclasses that strip a provider prefix off self.model before calling the API.
+    _request_log_model = None
+
+    @property
+    def request_log_model(self):
+        """Provider-qualified model name, so request logs key the same way the task manager records."""
+        return self._request_log_model or self.model
+
     @staticmethod
     def _find_tool_call_end(text):
         """Return the index after the closing brace/paren of a text tool call
@@ -402,7 +410,7 @@ class OpenAICompatibleLLM(BaseLLM):
                     convert_to_request_log(
                         arguments_str,
                         meta_info,
-                        self.model,
+                        self.request_log_model,
                         LogComponent.LLM,
                         direction=LogDirection.RESPONSE,
                         is_cached=False,

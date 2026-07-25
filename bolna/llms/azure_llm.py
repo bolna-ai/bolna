@@ -44,6 +44,7 @@ class AzureLLM(OpenAICompatibleLLM):
             self.model = model.replace("azure/", "", 1)
         else:
             self.model = model
+        self._request_log_model = model
 
         self.custom_tools = kwargs.get("api_tools", None)
         self.language = language
@@ -144,7 +145,9 @@ class AzureLLM(OpenAICompatibleLLM):
         tools = model_args.get("tools", [])
         accumulator = None
         if self.trigger_function_call:
-            accumulator = ToolCallAccumulator(self.api_params, tools, self.language, self.model, self.run_id)
+            accumulator = ToolCallAccumulator(
+                self.api_params, tools, self.language, self.request_log_model, self.run_id
+            )
 
         text_tool_buffer = None
         captured_tool_text = None
