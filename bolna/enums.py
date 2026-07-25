@@ -61,6 +61,7 @@ class SynthesizerProvider(str, Enum):
     SARVAM = "sarvam"
     RIME = "rime"
     PIXA = "pixa"
+    SPEECHIFY = "speechify"
 
     @classmethod
     def all_values(cls):
