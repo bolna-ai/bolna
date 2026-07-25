@@ -6447,7 +6447,18 @@ class TaskManager(BaseManager):
                 await self.process_call_hangup()
                 break
 
-            if self.tools["input"].is_audio_being_played_to_user() or self.response_in_pipeline:
+            # is_audio_being_played can be cleared early (at synth stream-end) while the
+            # provider is still playing out a long buffered turn, which lets the inactivity
+            # hangup below fire mid-monologue. Also treat "the latest turn's final chunk has
+            # not been ACKed yet" as busy. NOTE: this intentionally does NOT gate the stall
+            # backstop above (which keeps the raw flag), so a genuinely stuck stream is still
+            # cleaned up after STALL_HANGUP_FLOOR_S.
+            audio_pending_playback = self.interruption_manager.is_agent_audio_pending_playback()
+            if (
+                self.tools["input"].is_audio_being_played_to_user()
+                or audio_pending_playback
+                or self.response_in_pipeline
+            ):
                 continue
 
             if (
