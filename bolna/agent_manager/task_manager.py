@@ -6375,6 +6375,24 @@ class TaskManager(BaseManager):
             and time_since_user_last_spoke > stall_timeout
         )
 
+    def compute_last_ai_audio_timestamp(self):
+        """Most recent moment agent audio actually reached the user.
+
+        last_transmitted_timestamp advances only on a turn's FINAL-chunk mark ack
+        (final_chunk_played_observer), which can lag playback by seconds or stay frozen
+        through a long single agent turn - so a still-speaking agent gets mis-scored as
+        silent and the call is hung up mid-utterance. The input handler stamps
+        update_start_ts on every played-chunk mark ack (exposed as get_current_mark_started_time),
+        so it tracks in-progress playback and freezes the instant playback ends. Take the
+        more recent of the two. This can only make the measured AI-silence smaller (never
+        larger), so it never causes an earlier hangup, and update_start_ts cannot advance
+        during genuine silence so it never suppresses a legitimate one."""
+        last_ai_audio_timestamp = self.last_transmitted_timestamp
+        input_handler = self.tools.get("input")
+        if input_handler is not None:
+            last_ai_audio_timestamp = max(last_ai_audio_timestamp, input_handler.get_current_mark_started_time() or 0)
+        return last_ai_audio_timestamp
+
     async def __check_for_completion(self):
         logger.info(f"Starting task to check for completion")
         while True:
@@ -6424,7 +6442,10 @@ class TaskManager(BaseManager):
                 self.execute_function_call_task is not None and not self.execute_function_call_task.done()
             )
 
-            time_since_last_spoken_ai_word = time.time() - self.last_transmitted_timestamp
+            # Reference the last moment agent audio actually played, not only the last
+            # turn-completion stamp - otherwise a long single turn is mis-scored as silence
+            # and hung up mid-utterance (see compute_last_ai_audio_timestamp).
+            time_since_last_spoken_ai_word = time.time() - self.compute_last_ai_audio_timestamp()
             time_since_user_last_spoke = (
                 (time.time() - self.time_since_last_spoken_human_word)
                 if self.time_since_last_spoken_human_word > 0
