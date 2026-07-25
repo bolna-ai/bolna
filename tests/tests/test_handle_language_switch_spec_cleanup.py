@@ -49,7 +49,7 @@ async def test_concurrent_handlers_each_cancel_own_spec():
     b_overwrote_slot = asyncio.Event()
     call_count = {"n": 0}
 
-    async def fake_run(active_transcript, meta_info, spawn_language, speculate):
+    async def fake_run(active_transcript, meta_info, spawn_language):
         call_count["n"] += 1
         if call_count["n"] == 1:  # handler A — spawns spec, returns a follow-up to generate
             tm._spec_followup_task = specA
@@ -84,7 +84,7 @@ async def test_single_handler_cancels_unconsumed_spec():
     tm = _make_tm()
     spec = asyncio.create_task(_never())
 
-    async def fake_run(active_transcript, meta_info, spawn_language, speculate):
+    async def fake_run(active_transcript, meta_info, spawn_language):
         tm._spec_followup_task = spec
         return None  # nothing consumed the spec
 
@@ -103,7 +103,7 @@ async def test_committed_spec_left_untouched():
     tm = _make_tm()
     spec = asyncio.create_task(_never())
 
-    async def fake_run(active_transcript, meta_info, spawn_language, speculate):
+    async def fake_run(active_transcript, meta_info, spawn_language):
         tm._spec_followup_task = spec
         tm._spec_followup_task = None  # commit path consumed + cleared it
         return ("committed-followup",)
@@ -128,7 +128,7 @@ async def test_spec_cancelled_when_decision_raises_after_spawn():
     tm = _make_tm()
     spec = asyncio.create_task(_never())
 
-    async def fake_run(active_transcript, meta_info, spawn_language, speculate):
+    async def fake_run(active_transcript, meta_info, spawn_language):
         tm._spec_followup_task = spec
         raise RuntimeError("decide blew up after spawning speculation")
 

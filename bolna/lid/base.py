@@ -211,13 +211,21 @@ class LIDBackend:
         return self._buffer_lang
 
     def buffer_language_streak(self):
-        """How many consecutive buffered segments carried the current buffer_language."""
+        """How many consecutive buffered segments carried the current buffer_language.
+
+        No production consumer: the pool wrapper and the mid-turn fast path that read this
+        were removed when switch decisions moved to full-turn transcripts only. Kept
+        deliberately — it is the highest-precision signal the detector produces (N same-language
+        confirmations), so it stays available if the fast path is ever re-enabled.
+        """
         return self._buffer_lang_streak
 
     def buffer_language_confidence(self):
         """Language probability of the current buffer_language (peek, no drain).
 
-        None when the provider does not return a language score (e.g. Soniox).
+        Sarvam reports a per-utterance score; Soniox has none, so it derives one from the
+        winning language's token share. None only when a backend supplies neither — callers
+        must treat None as "no evidence", never as low confidence.
         """
         return self._buffer_lang_prob
 

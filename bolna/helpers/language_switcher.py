@@ -14,6 +14,9 @@ logger = configure_logger(__name__)
 
 # Haiku 4.5: small classification task, ~half sonnet's decide latency. LANGUAGE_SWITCH_LLM
 DEFAULT_LANGUAGE_SWITCH_LLM = "claude-haiku-4-5-20251001"
+# Fire a second identical decide if the first hasn't answered by now. Above the p50 (~1.4s) so
+# the common turn never pays for two, below the tail it exists to cut. LANGUAGE_SWITCH_HEDGE_AFTER_S.
+DEFAULT_HEDGE_AFTER_S = 1.8
 
 
 def resolve_switch_llm_credentials(model: str) -> tuple[str, str, str]:
@@ -55,6 +58,7 @@ class LanguageSwitcher:
         if self.model.startswith("claude") and "/" not in self.model:
             self.model = f"anthropic/{self.model}"
         self.latency_ms = None
+        self.hedge_won = False  # last decide was answered by the hedged request, not the first
         # Dedicated creds, NOT the agent's — an Azure/OpenAI agent would 404 the switch model.
         switch_llm_key, switch_llm_base, switch_llm_version = resolve_switch_llm_credentials(self.model)
         # A configured (e.g. azure) judge with no resolvable key would fail EVERY decide,
@@ -108,13 +112,23 @@ class LanguageSwitcher:
 
         return asyncio.create_task(_warm())
 
-    async def decide(self, detector_transcript: str, active_transcript: str, active_label: str) -> dict | None:
+    async def decide(
+        self,
+        detector_transcript: str,
+        active_transcript: str,
+        active_label: str,
+        recent_turns: list | None = None,
+    ) -> dict | None:
         """Decide the language from both transcripts.
 
         Args:
             detector_transcript: unbiased recognizer transcript (primary signal).
             active_transcript: live (language-locked) recognizer transcript for the turn.
             active_label: the currently-active language label.
+            recent_turns: (lang, longest_segment_s) for earlier turns, oldest first. Without it
+                every turn is judged in isolation, so a caller who has switched but only says
+                short things ("no", "not sure") can never accumulate evidence and the agent
+                cannot self-correct.
 
         Returns {"languages": [{"language","confidence"}...], "target_language": <label|None>,
         "reasoning": str} or None on failure.
@@ -129,23 +143,88 @@ class LanguageSwitcher:
                 "content": LANGUAGE_SWITCH_TURN_PROMPT.format(
                     active_language=active_label,
                     available_languages=", ".join(self.available_labels),
+                    recent_turns=self._format_recent_turns(recent_turns),
                     detector_transcript=detector_transcript.strip(),
                     active_transcript=(active_transcript or "").strip(),
                 ),
             },
         ]
+        start_time = time.time()
         try:
-            start_time = time.time()
-            # Needs a user message (system-only list breaks litellm); prompt mandates JSON.
-            response = await self._llm.generate(messages)
+            result = await self._hedged_generate(messages)
+            if result is None:
+                return None
             self.latency_ms = (time.time() - start_time) * 1000
-            result = self._parse_json(response)
-            logger.info(f"LanguageSwitcher decision: {result} (latency_ms={self.latency_ms:.0f})")
+            logger.info(
+                f"LanguageSwitcher decision: {result} (latency_ms={self.latency_ms:.0f}, hedge_won={self.hedge_won})"
+            )
             self._log_decision(detector_transcript, result)
             return result
         except Exception as e:
             logger.error(f"LanguageSwitcher decision error: {e}")
             return None
+
+    async def _hedged_generate(self, messages) -> dict | None:
+        """First parsed reply wins. A second identical request fires after HEDGE_AFTER_S if the
+        first hasn't answered, because this judge's slowness is a per-request tail (most decides
+        1.3-2.7s, observed tail 5.9s), not a slow model — a fresh request usually beats the
+        straggler. Bounds caller-visible silence without raising the decide timeout, and both
+        requests read the same cached prefix. 0 disables (single request)."""
+        hedge_after_s = float(os.getenv("LANGUAGE_SWITCH_HEDGE_AFTER_S", str(DEFAULT_HEDGE_AFTER_S)))
+        self.hedge_won = False  # per-decide; without the reset it stays True for the rest of the call
+
+        async def attempt():
+            return self._parse_json(await self._llm.generate(messages))
+
+        first = asyncio.create_task(attempt())
+        if hedge_after_s <= 0:
+            return await first
+
+        await asyncio.wait({first}, timeout=hedge_after_s)
+        if first.done() and first.exception() is None:
+            return first.result()
+        # Hedge on a SLOW first attempt and on a FAST-FAILED one alike: a 429 at 200ms is the case
+        # where a retry is cheapest, and returning its exception threw the whole decide away.
+        if first.done():
+            logger.info(f"LanguageSwitcher: first attempt failed ({first.exception()}) — retrying")
+        else:
+            logger.info(f"LanguageSwitcher: no decision in {hedge_after_s}s — hedging a second request")
+        second = asyncio.create_task(attempt())
+        pending = {first, second}
+        try:
+            # First SUCCESSFUL reply wins; a failing straggler must not lose the other's answer.
+            while pending:
+                done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+                winner = None
+                for task in done:
+                    # Retrieve EVERY completed task's exception, not just until the first success —
+                    # an unretrieved one logs "Task exception was never retrieved" on the loop, and
+                    # iterating a set made which task set hedge_won nondeterministic.
+                    if task.exception() is not None:
+                        logger.info(f"LanguageSwitcher: hedged attempt failed: {task.exception()}")
+                    elif winner is None or task is second:
+                        winner = task
+                if winner is not None:
+                    self.hedge_won = winner is second
+                    return winner.result()
+            return None
+        finally:
+            for task in (first, second):
+                if not task.done():
+                    task.cancel()
+
+    @staticmethod
+    def _format_recent_turns(recent_turns) -> str:
+        """`hi(2.1), en(1.8), en(0.4)` — the prompt weighs each entry's duration, so a run of
+        sub-second acknowledgment mis-tags reads differently from real sustained speech."""
+        if not recent_turns:
+            return "(none)"
+        parts = []
+        for lang, seconds in recent_turns:
+            if not lang:
+                continue
+            parts.append(f"{lang}({float(seconds or 0.0):.1f})")
+        return ", ".join(parts) if parts else "(none)"
 
     @staticmethod
     def _parse_json(text: str) -> dict:

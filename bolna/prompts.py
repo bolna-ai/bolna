@@ -127,6 +127,7 @@ Decide using these rules:
    - Isolated borrowed content words dropped into the caller's own language ("travel", "booking", "ticket" in Telugu; any single foreign word) — mixing is normal and does NOT mean the caller changed language.
    This holds EVEN WHEN the 1-2 words of B include a distinctive function word or verb ending (e.g. a lone "आहे" after a majority-Telugu turn): one function word does not create a matrix — it is how cluster mis-recognition looks (rule 4). The ONLY exceptions that switch on so few words are the explicit intent cases in rule 1 — the caller directly asking for language B by name ("English please", "हिंदी में", "Telugu lo") or rejecting the current one. Absent an explicit request, switching to B requires a SUBSTANTIVE MATRIX of B — its own function words framing a full clause — not a lone borrowed word, a lone function word, or a short fragment tagged as B.
 7. If the dominant spoken language is NOT in the supported list, or you are unsure, stay (target_language = null).
+8. SUSTAINED DRIFT ACROSS TURNS IS A SWITCH — rule 6 judges THIS turn in isolation, which is right for one borrowed word but wrong when the caller has already moved. RECENT TURNS lists earlier turns as `lang(longest-segment-seconds)`. If the caller has produced language B on the recent turns AND this turn is also B, that repetition IS the substantive matrix rule 6 asks for, even when each turn alone looks short — switch to B (if supported). Weigh it by duration: entries around 1s or more are real speech; strings of sub-second entries are the acknowledgment mis-tags rule 6 describes and are NOT evidence, however many there are. Two or more substantive B turns in a row while the agent stayed in A means the agent got it wrong earlier — prefer switching over staying. This is also how a caller corrects a bad switch without naming a language: they simply keep answering in B.
 
 Respond with raw JSON only — no markdown fences, no surrounding text:
 {
@@ -142,6 +143,7 @@ Respond with raw JSON only — no markdown fences, no surrounding text:
 # Per-turn user message paired with LANGUAGE_SWITCH_SYSTEM_PROMPT.
 LANGUAGE_SWITCH_TURN_PROMPT = """The agent is currently operating in: {active_language}
 Supported languages (target_language must be one of these labels, or null): {available_languages}
+RECENT TURNS (oldest→newest, `lang(longest-segment-seconds)`, may be empty): {recent_turns}
 
 Caller's latest turn:
 1. UNBIASED transcript: "{detector_transcript}"

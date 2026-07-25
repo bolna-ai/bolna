@@ -1,4 +1,5 @@
-"""SonioxLID: tokens fold into one segment per utterance (flushed on <end>); lang = dominant tag, prob None."""
+"""SonioxLID: tokens fold into one segment per utterance (flushed on <end>); lang = dominant tag,
+prob = that tag's token share (Soniox reports no language score of its own)."""
 
 from bolna.constants import SONIOX_ENDPOINT_TOKEN
 from bolna.lid.provider import LIDProvider
@@ -41,7 +42,7 @@ def test_segment_duration_spans_utterance_not_tokens():
     segs = d.buffer_segments()
     assert len(segs) == 1
     assert segs[0]["lang"] == "te"
-    assert segs[0]["prob"] is None  # soniox has no language probability
+    assert segs[0]["prob"] == 1.0  # both tokens tagged te → full token share
     assert segs[0]["ts"] is not None
 
 
@@ -77,7 +78,7 @@ def test_multiple_utterances_become_multiple_segments():
     segs = d.buffer_segments()
     assert [s["lang"] for s in segs] == ["te", "en"]
     assert d.buffer_language() == "en"  # latest
-    assert d.buffer_language_confidence() is None
+    assert d.buffer_language_confidence() == 1.0  # the latest segment was single-language
 
 
 def test_region_tagged_language_normalized():
@@ -134,3 +135,58 @@ def test_telephony_audio_params():
     assert (twilio._audio_format, twilio._input_sr) == ("mulaw", 8000)
     web = SonioxLID(None, {})
     assert (web._audio_format, web._input_sr) == ("pcm_s16le", 16000)
+
+
+def test_prob_is_the_winning_tag_token_share():
+    # Soniox reports no language score, so the dominant tag's token share stands in for one:
+    # 3 of 4 tokens Marathi = 0.75. Without this the switch path's detector-corroboration check
+    # is permanently inert on Soniox (it requires a numeric prob).
+    d = _detector()
+    d._handle_message(
+        {
+            "tokens": [
+                _tok("mala", "mr", start_ms=0, end_ms=400),
+                _tok(" samajla", "mr", end_ms=800),
+                _tok(" nahi", "mr", end_ms=1200),
+                _tok(" okay", "en", end_ms=1600),
+                _tok(SONIOX_ENDPOINT_TOKEN),
+            ]
+        }
+    )
+    segs = d.buffer_segments()
+    assert segs[0]["lang"] == "mr"
+    assert segs[0]["prob"] == 0.75
+    assert d.buffer_language_confidence() == 0.75
+
+
+def test_mixed_tokens_yield_a_low_prob():
+    # An evenly split segment must NOT read as confident — this is what keeps corroboration from
+    # rubber-stamping code-mixed audio.
+    d = _detector()
+    d._handle_message(
+        {
+            "tokens": [
+                _tok("haan", "hi", start_ms=0, end_ms=500),
+                _tok(" okay", "en", end_ms=1100),
+                _tok(SONIOX_ENDPOINT_TOKEN),
+            ]
+        }
+    )
+    assert d.buffer_language_confidence() == 0.5
+
+
+def test_missing_timestamps_warn_and_zero_audio(caplog):
+    # audio_s=0 reads as short audio at every substance gate, which silently disables switching —
+    # it must be loud.
+    d = _detector()
+    with caplog.at_level("WARNING"):
+        d._handle_message({"tokens": [_tok("haan", "hi"), _tok(SONIOX_ENDPOINT_TOKEN)]})
+    assert d.buffer_max_segment_seconds() == 0.0
+    assert any("no token timestamps" in r.message for r in caplog.records)
+
+
+def test_untagged_tokens_leave_prob_none():
+    # No language tags at all → no evidence, not low confidence. Callers must distinguish these.
+    d = _detector()
+    d._handle_message({"tokens": [_tok("hello", start_ms=0, end_ms=1200), _tok(SONIOX_ENDPOINT_TOKEN)]})
+    assert d.buffer_language_confidence() is None

@@ -63,19 +63,32 @@ class SonioxLID(LIDBackend):
         text = pending["text"].strip()
         if not text:
             return
+        prob = None
         if pending["lang_counts"]:
             # Dominant token language; tie → latest seen.
             best = max(pending["lang_counts"].values())
             top = [lang for lang, n in pending["lang_counts"].items() if n == best]
             lang = pending["last_lang"] if pending["last_lang"] in top else top[-1]
+            # Soniox returns no language score, so use the winner's token share as the confidence:
+            # a segment where 18/20 tokens are Marathi is far stronger evidence than 11/20. Without
+            # this the switch path's detector-corroboration check is permanently inert on Soniox.
+            total = sum(pending["lang_counts"].values())
+            if total:
+                prob = round(pending["lang_counts"].get(lang, 0) / total, 3)
         else:
             lang = None
         if pending["start_ms"] is not None and pending["end_ms"] is not None:
             audio_s = max(0.0, (pending["end_ms"] - pending["start_ms"]) / 1000.0)
         else:
+            # Every substance gate keys on segment duration, so a systematic 0.0 here silently
+            # disables switching (every turn reads as short audio) — warn rather than fail quietly.
             audio_s = 0.0
-        logger.info(f"SonioxLID segment: lang={lang!r} transcript={text[:60]!r} audio_s={audio_s:.3f}")
-        self._accumulate(text, lang, audio_s, prob=None)
+            logger.warning(
+                f"SonioxLID: segment has no token timestamps (start_ms={pending['start_ms']}, "
+                f"end_ms={pending['end_ms']}) — audio_s=0 will read as short audio and block switching"
+            )
+        logger.info(f"SonioxLID segment: lang={lang!r} prob={prob} transcript={text[:60]!r} audio_s={audio_s:.3f}")
+        self._accumulate(text, lang, audio_s, prob=prob)
         if self.on_language is not None and lang:
             asyncio.create_task(self.on_language(lang, None))  # legacy per-segment signal
 

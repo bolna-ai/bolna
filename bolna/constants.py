@@ -25,6 +25,21 @@ DEEPGRAM_FLUX_TURN_STALL_FLOOR_S = 3.0
 # Min idle time before the inactivity backstop hangs up; kept above hangup_after_silence.
 STALL_HANGUP_FLOOR_S = 20.0
 
+# LLM-driven language-switch defaults, all overridable by the matching LANGUAGE_SWITCH_* env.
+# Read via os.getenv(..., CONSTANT) at call time, never frozen at import (load_dotenv runs later).
+# Ceiling on the Switch-LLM decide. The detector buffer is drained BEFORE the decide, so a
+# timeout loses that utterance — keep above the observed decide tail (~5.9s seen in QA).
+LANGUAGE_SWITCH_DECIDE_TIMEOUT_S = 6.0
+# Let the detector's socket deliver this turn's tail before draining its buffer.
+LANGUAGE_SWITCH_SETTLE_MS = 300
+# Silence between cutting audible old-language audio and the first new-language audio.
+LANGUAGE_SWITCH_AUDIO_GAP_S = 0.2
+# Ceiling on how long a mismatched turn's AUDIO waits for the switch decision. Generation is not
+# delayed, so this is only paid when synthesis outruns the decide. Capped independently of the
+# decide timeout (sized for the slow tail) because past this point a wrong-language reply the
+# switch then truncates beats more dead air. Wall-clock backstop: the gate cannot wedge on it.
+LANGUAGE_SWITCH_MAX_HOLD_S = 3.5
+
 # Soniox real-time STT
 SONIOX_WEBSOCKET_HOST = "stt-rt.soniox.com"
 SONIOX_ENDPOINT_TOKEN = "<end>"  # sentinel token emitted when the speaker stops

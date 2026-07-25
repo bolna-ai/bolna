@@ -30,20 +30,21 @@ def _tm(*, has_transfer=False, end_call=False, hangup=False, buffer_age=5.0):
     tm.hangup_triggered = hangup
     tm._end_call_in_progress = end_call
     tm.has_transfer = has_transfer
-    tm._pending_switch_turn = None
     tm.language = "hi"
     tm.handle_language_switch = AsyncMock()  # no-op: never drains the buffer
 
     pool = MagicMock(spec=TranscriberPool)
     pool.lid_buffer_age.return_value = buffer_age
     pool.lid_buffer_language.return_value = "hi"  # == active → mismatch False, threshold=idle_flush
-    pool.lid_buffer_language_streak.return_value = 0
     pool.lid_buffer_event.return_value = None
     tm.tools = {"transcriber": pool}
 
     # Real methods under test / relied upon.
     tm._should_ignore_transcriber_input = TaskManager._should_ignore_transcriber_input.__get__(tm, TaskManager)
     tm._TaskManager__lid_idle_watcher = TaskManager._TaskManager__lid_idle_watcher.__get__(tm, TaskManager)
+    # staticmethod: bind the real one, or unpacking a MagicMock raises inside the watcher and its
+    # outer handler swallows it — the loop would exit and the test would pass for the wrong reason.
+    tm._TaskManager__buffered_language_evidence = TaskManager._TaskManager__buffered_language_evidence
     return tm
 
 
