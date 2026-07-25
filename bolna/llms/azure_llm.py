@@ -16,7 +16,7 @@ from openai import (
     BadRequestError,
 )
 
-from bolna.constants import DEFAULT_LANGUAGE_CODE, GPT5_MODEL_PREFIX, default_reasoning_effort
+from bolna.constants import DEFAULT_LANGUAGE_CODE, GPT5_MODEL_PREFIX, canonical_model, default_reasoning_effort
 from bolna.enums import Verbosity
 from bolna.helpers.utils import convert_to_request_log, compute_function_pre_call_message, now_ms
 from .openai_base import OpenAICompatibleLLM
@@ -44,7 +44,9 @@ class AzureLLM(OpenAICompatibleLLM):
             self.model = model.replace("azure/", "", 1)
         else:
             self.model = model
+        # self.model is the Azure deployment name, which need not resemble the model it serves.
         self._request_log_model = model
+        self._model_family = canonical_model(self.model)
 
         self.custom_tools = kwargs.get("api_tools", None)
         self.language = language
@@ -63,10 +65,10 @@ class AzureLLM(OpenAICompatibleLLM):
         self.temperature = temperature
         max_tokens_key = "max_tokens"
         self.model_args = {}
-        if self.model.startswith(GPT5_MODEL_PREFIX):
+        if self.model_family.startswith(GPT5_MODEL_PREFIX):
             max_tokens_key = "max_completion_tokens"
             self.model_args["reasoning_effort"] = kwargs.get("reasoning_effort", None) or default_reasoning_effort(
-                self.model
+                self.model_family
             )
             self.model_args["verbosity"] = kwargs.get("verbosity", None) or Verbosity.LOW.value
 
@@ -131,7 +133,7 @@ class AzureLLM(OpenAICompatibleLLM):
             "stream_options": {"include_usage": True},
         }
 
-        if not self.model.startswith(GPT5_MODEL_PREFIX):
+        if not self.model_family.startswith(GPT5_MODEL_PREFIX):
             model_args["stop"] = ["User:"]
 
         if self.trigger_function_call:

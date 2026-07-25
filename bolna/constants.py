@@ -270,3 +270,14 @@ def default_reasoning_effort(model: str) -> str:
     if not supported or RE.MINIMAL in supported:
         return RE.MINIMAL.value
     return supported[0].value
+
+
+def canonical_model(name: str) -> str:
+    """The known model a deployment serves, e.g. 'ptu-gpt-5.4-mini' -> 'gpt-5.4-mini'.
+
+    Azure deployment names are chosen freely, so model-family checks cannot read them directly.
+    Longest match wins so 'gpt-5.4-mini' beats 'gpt-5.4'. Unrecognised names pass through.
+    """
+    bare = (name or "").rsplit("/", 1)[-1]
+    known = [m for m in MODEL_REASONING_EFFORT_MAP if m in bare]
+    return max(known, key=len) if known else bare
