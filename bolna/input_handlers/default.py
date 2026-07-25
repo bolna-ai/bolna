@@ -58,6 +58,11 @@ class DefaultInputHandler:
         # agent_end_ms in user_bot_latencies.
         self.last_final_chunk_sequence_id: Optional[int] = None
         self.last_final_chunk_played_ts: Optional[float] = None
+        # Wall-clock time of the most recent content-audio mark ACK, i.e. the last moment
+        # the provider confirmed a chunk of agent audio was played to the caller. Unlike
+        # last_final_chunk_played_ts this advances on EVERY chunk, so the completion
+        # watchdog can tell that a long single turn is still actively playing.
+        self.last_audio_played_ts: Optional[float] = None
 
     def get_calculated_plivo_latency(self):
         return self.calculated_plivo_latency
@@ -136,6 +141,9 @@ class DefaultInputHandler:
     def get_current_mark_started_time(self):
         return self.update_start_ts
 
+    def get_last_audio_played_ts(self):
+        return self.last_audio_played_ts
+
     def welcome_message_played(self):
         return self.is_welcome_message_played
 
@@ -171,6 +179,10 @@ class DefaultInputHandler:
                 self.mark_event_meta_data.record_ack(delay, mark_event_meta_data_obj.get("sequence_id"))
 
         if is_content_audio:
+            # A content chunk was just played to the caller — record it so the completion
+            # watchdog treats an in-progress long turn as "AI still speaking" rather than
+            # relying only on the final-chunk ACK (which lands ~10-20s later).
+            self.last_audio_played_ts = time.time()
             heard_text = mark_event_meta_data_obj.get("text_synthesized") or ""
             self.response_heard_by_user += heard_text
             self.mark_event_meta_data.record_heard_text(mark_event_meta_data_obj, heard_text)

@@ -6424,7 +6424,14 @@ class TaskManager(BaseManager):
                 self.execute_function_call_task is not None and not self.execute_function_call_task.done()
             )
 
-            time_since_last_spoken_ai_word = time.time() - self.last_transmitted_timestamp
+            # last_transmitted_timestamp only advances when a turn's FINAL chunk is played,
+            # so during one long (~90s) single response it stays frozen at the previous turn
+            # and the watchdog wrongly reads the agent as silent. Fold in the last content
+            # mark ACK (advances on every chunk) so the AI-activity clock reflects audio that
+            # is actually still playing to the caller.
+            last_audio_played_ts = self.tools["input"].get_last_audio_played_ts() or 0
+            effective_last_ai_ts = max(self.last_transmitted_timestamp, last_audio_played_ts)
+            time_since_last_spoken_ai_word = time.time() - effective_last_ai_ts
             time_since_user_last_spoke = (
                 (time.time() - self.time_since_last_spoken_human_word)
                 if self.time_since_last_spoken_human_word > 0
