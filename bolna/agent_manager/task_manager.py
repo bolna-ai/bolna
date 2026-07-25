@@ -6468,7 +6468,19 @@ class TaskManager(BaseManager):
                 await self.process_call_hangup()
                 break
 
-            if self.tools["input"].is_audio_being_played_to_user() or self.response_in_pipeline:
+            # is_audio_being_played is cleared at synth stream-end while the provider may still
+            # be playing out a long buffered final chunk (whose ack lands seconds later). Also
+            # treat "the latest turn's final chunk has not been ACKed yet" as busy so neither the
+            # trigger_user_online nudge nor the hang_conversation_after path fires mid-utterance
+            # and clears the still-playing audio. The stall backstop above is intentionally NOT
+            # gated on this (it keeps the raw flag), so a genuinely stuck stream is still cleaned
+            # up once compute_last_ai_audio_timestamp goes stale past STALL_HANGUP_FLOOR_S.
+            audio_pending_playback = self.interruption_manager.is_agent_audio_pending_playback()
+            if (
+                self.tools["input"].is_audio_being_played_to_user()
+                or audio_pending_playback
+                or self.response_in_pipeline
+            ):
                 continue
 
             if (
