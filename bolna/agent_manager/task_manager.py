@@ -6380,17 +6380,12 @@ class TaskManager(BaseManager):
         """Most recent moment agent audio was still reaching the user.
 
         last_transmitted_timestamp only advances on a turn's final-chunk mark ack, so it stays
-        frozen through a long turn and the watchdog scores a still-speaking agent as silent. The
-        playout estimate covers that turn; the per-chunk mark stamp is kept alongside it as
-        provider-confirmed ground truth, so a transport whose marks carry no duration is no worse
-        off than before. Clamping the estimate to now means the measured silence can only shrink,
-        never grow, so this can delay a hangup but never cause an earlier one.
+        frozen through a long turn and the watchdog scores a still-speaking agent as silent.
+        The playout estimate covers that turn, and clamping it to now means the measured silence
+        can only shrink, never grow, so this can delay a hangup but never cause an earlier one.
         """
-        input_handler = self.tools.get("input")
         return max(
-            self.last_transmitted_timestamp,
-            (input_handler.get_current_mark_started_time() or 0) if input_handler is not None else 0,
-            min(time.time(), self.mark_event_meta_data.get_audio_playing_until()),
+            self.last_transmitted_timestamp, min(time.time(), self.mark_event_meta_data.get_audio_playing_until())
         )
 
     async def __check_for_completion(self):

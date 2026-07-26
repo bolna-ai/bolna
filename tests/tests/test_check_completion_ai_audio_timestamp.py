@@ -12,11 +12,10 @@ from bolna.helpers.mark_event_meta_data import MarkEventMetaData
 
 
 # Exercised on a stand-in via the unbound method, as in test_check_completion_stall_backstop.
-def _resolve(last_transmitted, audio_playing_until, mark_started=0):
+def _resolve(last_transmitted, audio_playing_until):
     fake = SimpleNamespace(
         last_transmitted_timestamp=last_transmitted,
         mark_event_meta_data=SimpleNamespace(get_audio_playing_until=lambda: audio_playing_until),
-        tools={"input": SimpleNamespace(get_current_mark_started_time=lambda: mark_started)},
     )
     return TaskManager.compute_last_ai_audio_timestamp(fake)
 
@@ -45,13 +44,6 @@ def test_no_estimate_falls_back_to_final_chunk_stamp():
     # Marks registered without a duration, and calls before any audio, leave the estimate at 0.
     now = time.time()
     assert _resolve(now - 30, 0.0) == now - 30
-
-
-def test_mark_stamp_carries_a_transport_whose_marks_have_no_duration():
-    # No estimate available, but the provider is still ACKing per-chunk marks: use those rather
-    # than the frozen final-chunk stamp, so such a transport is no worse off than before.
-    now = time.time()
-    assert _resolve(now - 30, 0.0, mark_started=now - 2) == now - 2
 
 
 def test_never_reports_older_than_final_chunk_stamp():
