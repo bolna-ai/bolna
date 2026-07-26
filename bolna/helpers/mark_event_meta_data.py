@@ -5,7 +5,7 @@ from typing import Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
-from bolna.constants import NON_PLAYOUT_MARK_TYPES
+from bolna.constants import IS_USER_ONLINE_MESSAGE
 from bolna.helpers.logger_config import configure_logger
 
 logger = configure_logger(__name__)
@@ -74,14 +74,19 @@ class MarkEventMetaData:
 
     def _note_audio_queued(self, value, duration):
         # Audio is handed over faster than real time, so a chunk starts playing when the
-        # previously queued audio ends, not when it is sent.
-        if duration <= 0 or value.get("type") in NON_PLAYOUT_MARK_TYPES:
+        # previously queued audio ends, not when it is sent. The online-check prompt is left out
+        # so it does not postpone the inactivity hangup, as in final_chunk_played_observable.
+        if duration <= 0 or value.get("type") == IS_USER_ONLINE_MESSAGE:
             return
         self.audio_playing_until = max(self.audio_playing_until, time.time()) + duration
 
     def get_audio_playing_until(self) -> float:
         """Estimated wall-clock end of queued agent audio; in the past once playback is done."""
         return self.audio_playing_until
+
+    def drop_playout_estimate(self) -> None:
+        """Queued audio was discarded, so nothing is playing."""
+        self.audio_playing_until = 0.0
 
     def update_data(self, mark_id, value):
         value["counter"] = self.counter
@@ -191,8 +196,7 @@ class MarkEventMetaData:
             list(self.mark_event_meta_data.keys()),
         )
         self.counter = 0
-        # Provider was told to drop its queue, so nothing is playing.
-        self.audio_playing_until = 0.0
+        self.drop_playout_estimate()
 
         for mark_id, value in self.mark_event_meta_data.items():
             if value.get("type") != "pre_mark_message":

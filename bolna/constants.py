@@ -204,10 +204,6 @@ NON_EVIDENCE_MARK_TYPES = ("pre_mark_message", "backchanneling")
 # final_chunk_played_observable must exclude the same value or the two silence clocks disagree.
 IS_USER_ONLINE_MESSAGE = "is_user_online_message"
 
-# Marks excluded from the completion watchdog's playout estimate: pre-marks carry no audio, and
-# the online-check prompt must not postpone the inactivity hangup.
-NON_PLAYOUT_MARK_TYPES = ("pre_mark_message", IS_USER_ONLINE_MESSAGE)
-
 # Formats whose byte length maps directly to playback time. Compressed audio does not.
 UNCOMPRESSED_AUDIO_FORMATS = ("pcm", "wav", "mulaw", "ulaw")
 

@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 from .default import DefaultOutputHandler
 from bolna.constants import AUDIO_STREAM_END_SENTINELS
 from bolna.helpers.logger_config import configure_logger
+from bolna.helpers.utils import calculate_audio_duration
 
 logger = configure_logger(__name__)
 load_dotenv()
@@ -100,6 +101,13 @@ class TelephonyOutputHandler(DefaultOutputHandler):
                             self.welcome_message_sent_ts = time.time() * 1000
                         logger.info(f"Sending media event - {meta_info.get('mark_id')}")
 
+                    # Telephony streams at 8k. The end-of-stream sentinel sent no media above,
+                    # so it adds no playback time and must not advance the playout estimate.
+                    duration = (
+                        0
+                        if audio_chunk in AUDIO_STREAM_END_SENTINELS
+                        else calculate_audio_duration(len(audio_chunk), 8000, format=meta_info.get("format", "mulaw"))
+                    )
                     mark_event_meta_data = {
                         "text_synthesized": ""
                         if meta_info["sequence_id"] == -1
@@ -112,15 +120,7 @@ class TelephonyOutputHandler(DefaultOutputHandler):
                         "turn_id": meta_info.get("turn_id"),
                         "response_uid": meta_info.get("response_uid"),
                         "response_group_uid": meta_info.get("response_group_uid"),
-                        # 0 for the end-of-stream sentinel: no media was sent above, so it adds
-                        # no playback time and must not advance the watchdog's playout estimate.
-                        "duration": 0
-                        if audio_chunk in AUDIO_STREAM_END_SENTINELS
-                        else (
-                            len(audio_chunk) / 8000
-                            if meta_info.get("format", "mulaw") in ("mulaw", "ulaw")
-                            else len(audio_chunk) / 16000
-                        ),
+                        "duration": duration,
                         "sent_ts": time.time(),  # Track when audio was actually sent to telephony provider
                     }
                     mark_id = (
