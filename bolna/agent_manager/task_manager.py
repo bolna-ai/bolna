@@ -2395,6 +2395,10 @@ class TaskManager(BaseManager):
         self.output_task = asyncio.create_task(self.__process_output_loop())
         self.started_transmitting_audio = False  # Since we're interrupting we need to stop transmitting as well
         self.last_transmitted_timestamp = time.time()
+        # clear_data() normally drops the playout estimate, but it runs after the provider's
+        # clear send and is skipped if that raises, leaving a stale future deadline that would
+        # hold the watchdog off. Reset it here so an interruption always clears it.
+        self.mark_event_meta_data.audio_playing_until = 0.0
         logger.info(f"Cleaning up downstream tasks. Time taken to send a clear message {time.time() - start_time}")
 
     def __get_updated_meta_info(self, meta_info=None):

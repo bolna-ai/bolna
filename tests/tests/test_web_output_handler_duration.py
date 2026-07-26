@@ -65,3 +65,22 @@ def test_single_byte_chunk_does_not_throw():
     handler, mark, _ = _run(audio=b"\x01")
     assert handler.is_closed() is False
     assert mark.get_audio_playing_until() > 0
+
+
+def test_compressed_audio_reports_no_duration():
+    # Byte length does not map to time for mp3, which turn-based hardcodes and static-node clips
+    # use. A confidently wrong duration would expire the estimate mid-clip, so report none.
+    _, mark, _ = _run(audio=b"\xff\xfb" * 20000, fmt="mp3")
+    assert mark.get_audio_playing_until() == 0.0
+
+
+def test_end_of_stream_sentinel_reports_no_duration():
+    # A control packet adds no playback time; counting it would reset the AI-silence clock.
+    _, mark, _ = _run(audio=b"\x00")
+    assert mark.get_audio_playing_until() == 0.0
+
+
+def test_mark_carries_sent_ts_like_telephony():
+    # wait_for_current_message and the ack/latency paths all filter on sent_ts.
+    _, mark, _ = _run()
+    assert all(m["sent_ts"] > 0 for m in mark.get_chunk_marks())

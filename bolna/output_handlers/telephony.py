@@ -7,6 +7,7 @@ import uuid
 import traceback
 from dotenv import load_dotenv
 from .default import DefaultOutputHandler
+from bolna.constants import AUDIO_STREAM_END_SENTINELS
 from bolna.helpers.logger_config import configure_logger
 
 logger = configure_logger(__name__)
@@ -111,9 +112,15 @@ class TelephonyOutputHandler(DefaultOutputHandler):
                         "turn_id": meta_info.get("turn_id"),
                         "response_uid": meta_info.get("response_uid"),
                         "response_group_uid": meta_info.get("response_group_uid"),
-                        "duration": len(audio_chunk) / 8000
-                        if meta_info.get("format", "mulaw") == "mulaw"
-                        else len(audio_chunk) / 16000,
+                        # 0 for the end-of-stream sentinel: no media was sent above, so it adds
+                        # no playback time and must not advance the watchdog's playout estimate.
+                        "duration": 0
+                        if audio_chunk in AUDIO_STREAM_END_SENTINELS
+                        else (
+                            len(audio_chunk) / 8000
+                            if meta_info.get("format", "mulaw") in ("mulaw", "ulaw")
+                            else len(audio_chunk) / 16000
+                        ),
                         "sent_ts": time.time(),  # Track when audio was actually sent to telephony provider
                     }
                     mark_id = (

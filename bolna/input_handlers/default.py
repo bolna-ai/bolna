@@ -6,6 +6,7 @@ from typing import Optional
 from starlette.websockets import WebSocketDisconnect
 
 from dotenv import load_dotenv
+from bolna.constants import IS_USER_ONLINE_MESSAGE
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.utils import create_ws_data_packet
 
@@ -203,7 +204,7 @@ class DefaultInputHandler:
             self.last_final_chunk_sequence_id = mark_event_meta_data_obj.get("sequence_id")
             self.last_final_chunk_played_ts = time.time()
 
-            if message_type != "is_user_online_message":
+            if message_type != IS_USER_ONLINE_MESSAGE:
                 # .get(): task cleanup clears observable_variables while a playout-estimator
                 # timer can still be pending — a late mark then lands on an empty dict
                 final_chunk_observable = self.observable_variables.get("final_chunk_played_observable")

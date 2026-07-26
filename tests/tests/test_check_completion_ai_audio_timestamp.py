@@ -90,6 +90,21 @@ def test_pre_mark_does_not_extend_the_estimate():
     assert mark.get_audio_playing_until() == 0.0
 
 
+def test_zero_duration_mark_does_not_reset_a_stale_estimate():
+    # A mark for which no audio was queued (control packet, unmeasurable format) must not pull
+    # the estimate forward to now, which would discard the accumulated silence.
+    mark = MarkEventMetaData()
+    mark.audio_playing_until = time.time() - 60
+    mark.update_data("m0", _content_mark(0))
+    assert mark.get_audio_playing_until() < time.time() - 59
+
+
+def test_none_duration_does_not_raise():
+    mark = MarkEventMetaData()
+    mark.update_data("m0", _content_mark(None))
+    assert mark.get_audio_playing_until() == 0.0
+
+
 def test_decision_flips_for_long_turn_but_not_for_real_silence():
     # Replay with hangup_after_silence = 10s: stale stamp at now-17.6 either way.
     now = time.time()

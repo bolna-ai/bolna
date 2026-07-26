@@ -3,6 +3,7 @@ import uuid
 import time
 import base64
 from dotenv import load_dotenv
+from bolna.constants import AUDIO_STREAM_END_SENTINELS, UNCOMPRESSED_AUDIO_FORMATS
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.utils import calculate_audio_duration
 
@@ -32,6 +33,17 @@ class DefaultOutputHandler:
         self.sampling_rate = sampling_rate
         self.welcome_message_sent_ts = None
         self._closed = False
+
+    def _playout_duration(self, audio, audio_format):
+        """Seconds of audio this chunk adds, or 0 when byte length does not map to time.
+
+        Compressed formats (turn-based hardcodes mp3, and static-node clips are mp3) and the
+        end-of-stream sentinel would otherwise report a confidently wrong duration, which the
+        completion watchdog's playout estimate would then trust.
+        """
+        if audio in AUDIO_STREAM_END_SENTINELS or audio_format not in UNCOMPRESSED_AUDIO_FORMATS:
+            return 0
+        return calculate_audio_duration(len(audio), self.sampling_rate, format=audio_format)
 
     def close(self):
         """Mark the output handler as closed to prevent sends after websocket close."""
@@ -133,10 +145,9 @@ class DefaultOutputHandler:
                         "is_final_chunk": meta_info.get("end_of_llm_stream", False)
                         and meta_info.get("end_of_synthesizer_stream", False),
                         "sequence_id": meta_info["sequence_id"],
+                        "sent_ts": time.time(),
                         # Feeds the completion watchdog's playout estimate, as on telephony.
-                        "duration": calculate_audio_duration(
-                            len(packet["data"]), self.sampling_rate, format=meta_info.get("format", "pcm")
-                        ),
+                        "duration": self._playout_duration(packet["data"], meta_info.get("format", "pcm")),
                     }
                     mark_id = (
                         meta_info.get("mark_id")
