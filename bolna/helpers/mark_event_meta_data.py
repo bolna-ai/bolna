@@ -69,6 +69,20 @@ class MarkEventMetaData:
         self.last_heard_turn_id = None
         self.last_heard_response_uid = None
         self.welcome_pre_mark_id = None
+        self.audio_playing_until = 0.0
+
+    def _note_audio_queued(self, value):
+        # Audio is handed over faster than real time, so a chunk starts playing when the
+        # previously queued audio ends, not when it is sent. The online-check prompt is left out
+        # so it does not postpone the inactivity hangup, as in final_chunk_played_observable.
+        duration = value.get("duration", 0) or 0
+        if duration <= 0 or value.get("type") == "is_user_online_message":
+            return
+        self.audio_playing_until = max(self.audio_playing_until, time.time()) + duration
+
+    def get_audio_playing_until(self) -> float:
+        """Estimated wall-clock end of queued agent audio; in the past once playback is done."""
+        return self.audio_playing_until
 
     def update_data(self, mark_id, value):
         value["counter"] = self.counter
@@ -92,6 +106,7 @@ class MarkEventMetaData:
         )
         self.mark_changed.set()
         if value.get("type") != "pre_mark_message":
+            self._note_audio_queued(value)
             self._mark_stats.total_sent += 1
             seq = value.get("sequence_id")
             if seq is not None:
@@ -177,6 +192,8 @@ class MarkEventMetaData:
             list(self.mark_event_meta_data.keys()),
         )
         self.counter = 0
+        # Provider was told to drop its queue, so nothing is playing.
+        self.audio_playing_until = 0.0
 
         for mark_id, value in self.mark_event_meta_data.items():
             if value.get("type") != "pre_mark_message":
