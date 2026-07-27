@@ -336,6 +336,10 @@ class TaskManager(BaseManager):
         self.sampling_rate = 24000
         self.conversation_ended = False
         self.has_transfer = False
+        # Signatures (tool name + resolved args) of API tool calls already executed this call.
+        # Guards against re-hitting an external tool when the LLM re-emits an identical call
+        # on a later turn (BLT-018) - see __execute_function_call.
+        self.executed_tool_call_signatures = set()
         self.hangup_triggered = False
         self.hangup_triggered_at = None
         self.hangup_decision_at = None
@@ -2927,6 +2931,18 @@ class TaskManager(BaseManager):
                         )
                     )
 
+    @staticmethod
+    def _tool_call_signature(called_fun, resp):
+        """Stable key for an API tool invocation: function name + resolved args, ignoring the
+        OpenAI plumbing (model_response/tool_call_id/textual_response). Two calls with the same
+        signature produce the same side effect, so the second is a safe no-op."""
+        ignore = {"model_response", "tool_call_id", "textual_response"}
+        args = {k: v for k, v in resp.items() if k not in ignore}
+        try:
+            return f"{called_fun}|{json.dumps(args, sort_keys=True, default=str)}"
+        except TypeError:
+            return f"{called_fun}|{sorted((k, str(v)) for k, v in args.items())}"
+
     async def __execute_function_call(
         self, url, method, param, api_token, headers, model_args, meta_info, next_step, called_fun, **resp
     ):
@@ -3376,6 +3392,27 @@ class TaskManager(BaseManager):
             )
             return
 
+        # Idempotency guard (BLT-018): a burst of short user acknowledgements during call
+        # closing spawns fresh LLM turns that re-emit the same action tool with identical args
+        # (e.g. reschedule_call), re-hitting the external API. Same pattern as the transfer_call
+        # guard above - skip the re-run and record an "already done" result so the LLM stops
+        # re-triggering. Keyed on tool name + args, so a retrieval tool called with NEW args
+        # (product_search, etc.) still runs.
+        call_signature = self._tool_call_signature(called_fun, resp)
+        if call_signature in self.executed_tool_call_signatures:
+            logger.info(f"Skipping duplicate tool call {called_fun}; identical call already executed this call")
+            self.conversation_history.attach_tool_calls_to_turn(turn_id, resp["model_response"])
+            self.conversation_history.append_tool_result(
+                resp.get("tool_call_id", ""),
+                json.dumps(
+                    {
+                        "status": "success",
+                        "message": "Already done earlier in this call. Do not call this tool again; continue the conversation.",
+                    }
+                ),
+            )
+            return
+
         # Optional pre-call webhook: notify an external system before the tool's main
         # request runs (e.g. a transfer reason before a custom transfer POST). Fired
         # fire-and-forget so a webhook outage never blocks or delays the main call.
@@ -3466,6 +3503,8 @@ class TaskManager(BaseManager):
         textual_response = resp.get("textual_response", None)
         self.conversation_history.attach_tool_calls_to_turn(turn_id, resp["model_response"])
         self.conversation_history.append_tool_result(resp.get("tool_call_id", ""), function_response)
+        # Mark this exact call executed so an identical re-emission on a later turn is skipped.
+        self.executed_tool_call_signatures.add(call_signature)
 
         logger.info(f"Logging function call parameters ")
         convert_to_request_log(
