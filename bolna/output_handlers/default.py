@@ -3,7 +3,7 @@ import uuid
 import time
 import base64
 from dotenv import load_dotenv
-from bolna.constants import AUDIO_STREAM_END_SENTINELS, UNCOMPRESSED_AUDIO_FORMATS
+from bolna.constants import AUDIO_STREAM_END_SENTINELS, UNCOMPRESSED_AUDIO_FORMATS, WEBCALL_TTS_SAMPLE_RATE
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.utils import calculate_audio_duration
 
@@ -19,7 +19,7 @@ class DefaultOutputHandler:
         queue=None,
         is_web_based_call=False,
         mark_event_meta_data=None,
-        sampling_rate=24000,
+        sampling_rate=WEBCALL_TTS_SAMPLE_RATE,
     ):
         self.websocket = websocket
         self.is_interruption_task_on = False
