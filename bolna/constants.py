@@ -200,6 +200,16 @@ SWITCH_LANGUAGE_TOOL_DEFINITION = {
 # Control marks carry no playback evidence and must not be used as a trim target.
 NON_EVIDENCE_MARK_TYPES = ("pre_mark_message", "backchanneling")
 
+# message_category of the "are you still there" prompt. The playout estimate and
+# final_chunk_played_observable must exclude the same value or the two silence clocks disagree.
+IS_USER_ONLINE_MESSAGE = "is_user_online_message"
+
+# Formats whose byte length maps directly to playback time. Compressed audio does not.
+UNCOMPRESSED_AUDIO_FORMATS = ("pcm", "wav", "mulaw", "ulaw")
+
+# End-of-stream control signal; telephony pads the single byte to two before sending.
+AUDIO_STREAM_END_SENTINELS = (b"\x00", b"\x00\x00")
+
 END_CALL_FUNCTION_PREFIX = "end_call"
 
 END_CALL_TOOL_DEFINITION = {
@@ -270,3 +280,14 @@ def default_reasoning_effort(model: str) -> str:
     if not supported or RE.MINIMAL in supported:
         return RE.MINIMAL.value
     return supported[0].value
+
+
+def canonical_model(name: str) -> str:
+    """The known model a deployment serves, e.g. 'ptu-gpt-5.4-mini' -> 'gpt-5.4-mini'.
+
+    Azure deployment names are chosen freely, so model-family checks cannot read them directly.
+    Longest match wins so 'gpt-5.4-mini' beats 'gpt-5.4'. Unrecognised names pass through.
+    """
+    bare = (name or "").rsplit("/", 1)[-1]
+    known = [m for m in MODEL_REASONING_EFFORT_MAP if m in bare]
+    return max(known, key=len) if known else bare

@@ -54,6 +54,20 @@ class OpenAICompatibleLLM(BaseLLM):
     - Override _responses_client property if they need a different client
     """
 
+    # Both are set by subclasses whose self.model is a deployment name rather than the model itself.
+    _request_log_model = None
+    _model_family = None
+
+    @property
+    def request_log_model(self):
+        """Provider-qualified model name, so request logs key the same way the task manager records."""
+        return self._request_log_model or self.model
+
+    @property
+    def model_family(self):
+        """Model self.model actually serves; family checks must use this, not the deployment name."""
+        return self._model_family or self.model
+
     @staticmethod
     def _find_tool_call_end(text):
         """Return the index after the closing brace/paren of a text tool call
@@ -402,7 +416,7 @@ class OpenAICompatibleLLM(BaseLLM):
                     convert_to_request_log(
                         arguments_str,
                         meta_info,
-                        self.model,
+                        self.request_log_model,
                         LogComponent.LLM,
                         direction=LogDirection.RESPONSE,
                         is_cached=False,
@@ -446,7 +460,7 @@ class OpenAICompatibleLLM(BaseLLM):
         if service_tier:
             create_kwargs["service_tier"] = service_tier
 
-        if self.model.startswith(GPT5_MODEL_PREFIX):
+        if self.model_family.startswith(GPT5_MODEL_PREFIX):
             create_kwargs["temperature"] = 1
             reasoning_effort = self.model_args.get("reasoning_effort")
             reasoning_config = {}
@@ -681,7 +695,7 @@ class OpenAICompatibleLLM(BaseLLM):
         if service_tier:
             create_kwargs["service_tier"] = service_tier
 
-        if self.model.startswith(GPT5_MODEL_PREFIX):
+        if self.model_family.startswith(GPT5_MODEL_PREFIX):
             create_kwargs["temperature"] = 1
             reasoning_config = {}
             reasoning_effort = self.model_args.get("reasoning_effort")
