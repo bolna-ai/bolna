@@ -5,15 +5,15 @@ azure-cognitiveservices-speech==1.40.0
 fastapi==0.109.1
 google-cloud-speech==2.27.0
 google-genai>=1.68.0
+groq>=0.4.0
 grpcio==1.71.0
 grpcio-status==1.71.0
-groq>=0.4.0
 httpx[http2]>=0.25.0
 litellm==1.84.0
+lxml>=6.1.0
 numpy==1.26.1
 onnxruntime>=1.16.3
 openai>=1.10.0
-lxml>=6.1.0
 plivo==4.61.0
 protobuf>=5.29.6,<6.0.0
 pydantic>=2.9.0
