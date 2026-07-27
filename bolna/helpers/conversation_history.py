@@ -85,6 +85,19 @@ class ConversationHistory:
                     if turn_id is not None and msgs[i].get("turn_id") is None:
                         msgs[i]["turn_id"] = turn_id
                     return
+        # Not found by response_uid: adopt a uid-less placeholder for the same turn_id (e.g. the
+        # tool_calls one attach_tool_calls_to_turn leaves) instead of appending a duplicate, which
+        # would split the tool-call turn from its result and get the tool_calls stripped (BLT-018).
+        if turn_id is not None:
+            for i in range(len(msgs) - 1, -1, -1):
+                if (
+                    msgs[i].get("role") == ChatRole.ASSISTANT
+                    and msgs[i].get("turn_id") == turn_id
+                    and msgs[i].get("response_uid") is None
+                ):
+                    msgs[i]["content"] = content
+                    msgs[i]["response_uid"] = response_uid
+                    return
         msgs.append({"role": ChatRole.ASSISTANT, "content": content, "turn_id": turn_id, "response_uid": response_uid})
 
     def append_tool_result(self, tool_call_id: str, content: str):
