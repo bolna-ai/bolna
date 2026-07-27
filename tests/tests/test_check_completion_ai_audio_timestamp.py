@@ -1,76 +1,113 @@
-"""Tests for compute_last_ai_audio_timestamp — the inactivity watchdog's "AI last spoke"
-reference (task_manager.__check_for_completion).
-
-Regression guard for the mid-utterance inactivity hangup (calls 89ce0a14, 57956d2b): during a
-long single agent turn, last_transmitted_timestamp (set only on the FINAL-chunk mark ack) stays
-frozen while the input handler's per-chunk playback stamp (get_current_mark_started_time) keeps
-advancing. The watchdog must key off the more recent of the two, so a still-speaking agent is not
-mis-scored as silent, while genuine silence is still measured from the real last-audio moment.
+"""Regression guard for the mid-utterance inactivity hangup: the playout estimate on
+MarkEventMetaData and compute_last_ai_audio_timestamp, which the watchdog reads as "AI last
+spoke". last_transmitted_timestamp alone stays frozen through a long agent turn, so the watchdog
+scored a still-speaking agent as silent and cut the call.
 """
 
+import time
 from types import SimpleNamespace
 
 from bolna.agent_manager.task_manager import TaskManager
+from bolna.helpers.mark_event_meta_data import MarkEventMetaData
 
 
-# compute_last_ai_audio_timestamp only reads self.last_transmitted_timestamp and
-# self.tools["input"].get_current_mark_started_time(), so we exercise it on a lightweight
-# stand-in via the unbound method (same approach as test_check_completion_stall_backstop).
-def _resolve(last_transmitted, mark_started, *, with_input=True):
-    tools = {}
-    if with_input:
-        tools["input"] = SimpleNamespace(get_current_mark_started_time=lambda: mark_started)
-    fake = SimpleNamespace(last_transmitted_timestamp=last_transmitted, tools=tools)
+# Exercised on a stand-in via the unbound method, as in test_check_completion_stall_backstop.
+def _resolve(last_transmitted, audio_playing_until):
+    fake = SimpleNamespace(
+        last_transmitted_timestamp=last_transmitted,
+        mark_event_meta_data=SimpleNamespace(get_audio_playing_until=lambda: audio_playing_until),
+    )
     return TaskManager.compute_last_ai_audio_timestamp(fake)
 
 
-def test_in_progress_playback_wins_over_stale_final_chunk():
-    # The bug: final-chunk stamp frozen at the previous turn (100.0) while audio is still
-    # playing now (195.0) -> must report the recent playback moment.
-    assert _resolve(100.0, 195.0) == 195.0
+def _content_mark(duration, mark_type="agent_response"):
+    return {"type": mark_type, "sequence_id": 4, "duration": duration}
+
+
+def test_audio_still_playing_reports_now():
+    # Stamp frozen 90s back while audio still has 30s to play: measured silence must be ~0.
+    now = time.time()
+    assert _resolve(now - 90, now + 30) >= now - 0.5
+
+
+def test_finished_playback_reports_when_audio_stopped():
+    now = time.time()
+    assert _resolve(now - 90, now - 12) == now - 12
 
 
 def test_final_chunk_stamp_wins_when_more_recent():
-    # After a turn fully completes, the final-chunk ack (200.0) is newer than the last
-    # pre-mark stamp (150.0) -> report the final-chunk moment.
-    assert _resolve(200.0, 150.0) == 200.0
+    now = time.time()
+    assert _resolve(now - 2, now - 12) == now - 2
 
 
-def test_genuine_silence_keeps_the_frozen_stamp():
-    # Audio ended; both stamps are frozen at the real last-audio moment, so silence is
-    # still measured from it and a legitimate inactivity hangup can still fire.
-    assert _resolve(120.0, 120.0) == 120.0
+def test_no_estimate_falls_back_to_final_chunk_stamp():
+    # Marks registered without a duration, and calls before any audio, leave the estimate at 0.
+    now = time.time()
+    assert _resolve(now - 30, 0.0) == now - 30
 
 
-def test_missing_mark_time_falls_back_to_final_chunk():
-    # get_current_mark_started_time() could be None -> must not crash or poison max().
-    assert _resolve(150.0, None) == 150.0
+def test_never_reports_older_than_final_chunk_stamp():
+    # Silence can only shrink versus the stamp alone, so this can never hang up earlier.
+    now = time.time()
+    for playing_until in (0.0, now - 60, now, now + 60):
+        assert _resolve(now - 30, playing_until) >= now - 30
 
 
-def test_zero_mark_time_falls_back_to_final_chunk():
-    assert _resolve(150.0, 0) == 150.0
+def test_queued_audio_accumulates_beyond_send_time():
+    # Three 10s chunks sent back to back must push the estimate ~30s out, not ~10s.
+    mark = MarkEventMetaData()
+    for i in range(3):
+        mark.update_data(f"m{i}", _content_mark(10.0))
+    assert 29 < mark.get_audio_playing_until() - time.time() <= 30
 
 
-def test_no_input_handler_uses_final_chunk_only():
-    # Defensive: if the input tool is absent, fall back to last_transmitted_timestamp.
-    assert _resolve(150.0, 999.0, with_input=False) == 150.0
+def test_estimate_resumes_from_now_after_playback_finished():
+    # A turn after a gap starts its tail from now, not from the stale previous deadline.
+    mark = MarkEventMetaData()
+    mark.audio_playing_until = time.time() - 60
+    mark.update_data("m0", _content_mark(5.0))
+    assert 4 < mark.get_audio_playing_until() - time.time() <= 5
 
 
-def test_never_reports_older_than_final_chunk():
-    # Invariant: the result is >= last_transmitted_timestamp, so measured AI-silence can only
-    # shrink (never grow) vs the old behaviour -> the change can never cause an EARLIER hangup.
-    for last_transmitted, mark in [(100.0, 90.0), (100.0, 100.0), (100.0, 110.0), (100.0, None)]:
-        assert _resolve(last_transmitted, mark) >= last_transmitted
+def test_interruption_drops_the_estimate():
+    # Keeps a barge-in from leaving the watchdog permanently blocked.
+    mark = MarkEventMetaData()
+    mark.update_data("m0", _content_mark(30.0))
+    mark.clear_data()
+    assert mark.get_audio_playing_until() == 0.0
+
+
+def test_online_check_prompt_does_not_extend_the_estimate():
+    # The "are you still there" prompt must not postpone the inactivity hangup.
+    mark = MarkEventMetaData()
+    mark.update_data("m0", _content_mark(3.0, mark_type="is_user_online_message"))
+    assert mark.get_audio_playing_until() == 0.0
+
+
+def test_pre_mark_does_not_extend_the_estimate():
+    mark = MarkEventMetaData()
+    mark.update_data("m0", {"type": "pre_mark_message", "duration": 5.0})
+    assert mark.get_audio_playing_until() == 0.0
+
+
+def test_zero_duration_mark_does_not_reset_a_stale_estimate():
+    # A mark for which no audio was queued (control packet, unmeasurable format) must not pull
+    # the estimate forward to now, which would discard the accumulated silence.
+    mark = MarkEventMetaData()
+    mark.audio_playing_until = time.time() - 60
+    mark.update_data("m0", _content_mark(0))
+    assert mark.get_audio_playing_until() < time.time() - 59
+
+
+def test_none_duration_does_not_raise():
+    mark = MarkEventMetaData()
+    mark.update_data("m0", _content_mark(None))
+    assert mark.get_audio_playing_until() == 0.0
 
 
 def test_decision_flips_for_long_turn_but_not_for_real_silence():
-    # Concrete replay of call 57956d2b with hangup_after_silence = 10s.
-    now = 1000.0
+    # Replay with hangup_after_silence = 10s: stale stamp at now-17.6 either way.
+    now = time.time()
     threshold = 10.0
-    # Long turn: agent finished speaking ~2s ago (playback stamp now-2), but the final-chunk
-    # stamp is stale at now-17.6 -> old code would hang up mid-utterance; fixed code must not.
-    long_turn_silence = now - _resolve(now - 17.6, now - 2.0)
-    assert long_turn_silence < threshold
-    # Real silence: no audio for 17.6s on either stamp -> still exceeds the threshold.
-    real_silence = now - _resolve(now - 17.6, now - 17.6)
-    assert real_silence > threshold
+    assert now - _resolve(now - 17.6, now + 4) < threshold  # 4s of audio left, must not cut
+    assert now - _resolve(now - 17.6, now - 17.6) > threshold  # real silence, must still cut

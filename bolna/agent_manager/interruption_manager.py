@@ -306,22 +306,6 @@ class InterruptionManager:
                 logger.info(f"Recorded agent audio fully played: sequence_id={sequence_id}")
                 return
 
-    def is_agent_audio_pending_playback(self) -> bool:
-        """True when the most recent agent turn has started sending audio but the telephony
-        provider has not yet ACKed its final chunk (agent_end_s unset) — i.e. the caller is
-        still hearing the agent.
-
-        The completion watchdog uses this so it never nudges/hangs up while agent audio is
-        still draining to the caller. compute_last_ai_audio_timestamp keeps the AI-silence
-        clock honest during a long turn, but a single long final chunk emits no intermediate
-        marks (one pre-mark at its start, one content-ack at its end), so between them the
-        clock still ages and the shorter trigger_user_online_message_after threshold can trip
-        mid-utterance. agent_end_s is set from the is_final_chunk mark ack (real playback end)."""
-        if not self.user_bot_latencies:
-            return False
-        last = self.user_bot_latencies[-1]
-        return bool(last.get("agent_start_s")) and not last.get("agent_end_s")
-
     def _finalize_agent_speaking_session(self) -> None:
         """Close current agent speaking window; called on clean end or barge-in."""
         if self._agent_speaking_start_time <= 0:

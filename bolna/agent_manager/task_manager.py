@@ -1218,6 +1218,7 @@ class TaskManager(BaseManager):
             if self.task_config["tools_config"]["output"]["provider"] == "default":
                 output_kwargs["is_web_based_call"] = self.is_web_based_call
                 output_kwargs["mark_event_meta_data"] = self.mark_event_meta_data
+                output_kwargs["sampling_rate"] = self.sampling_rate
 
             # FreeSWITCH streams PCM @ self.sampling_rate; no mark echo → self-complete via
             # input_handler (input handler is set up before output, like sip-trunk).
@@ -2394,6 +2395,10 @@ class TaskManager(BaseManager):
         self.output_task = asyncio.create_task(self.__process_output_loop())
         self.started_transmitting_audio = False  # Since we're interrupting we need to stop transmitting as well
         self.last_transmitted_timestamp = time.time()
+        # clear_data() normally drops the playout estimate, but it runs after the provider's
+        # clear send and is skipped if that raises, leaving a stale future deadline that would
+        # hold the watchdog off. Drop it here so an interruption always clears it.
+        self.mark_event_meta_data.drop_playout_estimate()
         logger.info(f"Cleaning up downstream tasks. Time taken to send a clear message {time.time() - start_time}")
 
     def __get_updated_meta_info(self, meta_info=None):
@@ -6376,22 +6381,16 @@ class TaskManager(BaseManager):
         )
 
     def compute_last_ai_audio_timestamp(self):
-        """Most recent moment agent audio actually reached the user.
+        """Most recent moment agent audio was still reaching the user.
 
-        last_transmitted_timestamp advances only on a turn's FINAL-chunk mark ack
-        (final_chunk_played_observer), which can lag playback by seconds or stay frozen
-        through a long single agent turn - so a still-speaking agent gets mis-scored as
-        silent and the call is hung up mid-utterance. The input handler stamps
-        update_start_ts on every played-chunk mark ack (exposed as get_current_mark_started_time),
-        so it tracks in-progress playback and freezes the instant playback ends. Take the
-        more recent of the two. This can only make the measured AI-silence smaller (never
-        larger), so it never causes an earlier hangup, and update_start_ts cannot advance
-        during genuine silence so it never suppresses a legitimate one."""
-        last_ai_audio_timestamp = self.last_transmitted_timestamp
-        input_handler = self.tools.get("input")
-        if input_handler is not None:
-            last_ai_audio_timestamp = max(last_ai_audio_timestamp, input_handler.get_current_mark_started_time() or 0)
-        return last_ai_audio_timestamp
+        last_transmitted_timestamp only advances on a turn's final-chunk mark ack, so it stays
+        frozen through a long turn and the watchdog scores a still-speaking agent as silent.
+        The playout estimate covers that turn, and clamping it to now means the measured silence
+        can only shrink, never grow, so this can delay a hangup but never cause an earlier one.
+        """
+        return max(
+            self.last_transmitted_timestamp, min(time.time(), self.mark_event_meta_data.get_audio_playing_until())
+        )
 
     async def __check_for_completion(self):
         logger.info(f"Starting task to check for completion")
@@ -6442,9 +6441,6 @@ class TaskManager(BaseManager):
                 self.execute_function_call_task is not None and not self.execute_function_call_task.done()
             )
 
-            # Reference the last moment agent audio actually played, not only the last
-            # turn-completion stamp - otherwise a long single turn is mis-scored as silence
-            # and hung up mid-utterance (see compute_last_ai_audio_timestamp).
             time_since_last_spoken_ai_word = time.time() - self.compute_last_ai_audio_timestamp()
             time_since_user_last_spoke = (
                 (time.time() - self.time_since_last_spoken_human_word)
@@ -6468,19 +6464,9 @@ class TaskManager(BaseManager):
                 await self.process_call_hangup()
                 break
 
-            # is_audio_being_played is cleared at synth stream-end while the provider may still
-            # be playing out a long buffered final chunk (whose ack lands seconds later). Also
-            # treat "the latest turn's final chunk has not been ACKed yet" as busy so neither the
-            # trigger_user_online nudge nor the hang_conversation_after path fires mid-utterance
-            # and clears the still-playing audio. The stall backstop above is intentionally NOT
-            # gated on this (it keeps the raw flag), so a genuinely stuck stream is still cleaned
-            # up once compute_last_ai_audio_timestamp goes stale past STALL_HANGUP_FLOOR_S.
-            audio_pending_playback = self.interruption_manager.is_agent_audio_pending_playback()
-            if (
-                self.tools["input"].is_audio_being_played_to_user()
-                or audio_pending_playback
-                or self.response_in_pipeline
-            ):
+            # Draining audio needs no term here: every branch below is gated on
+            # time_since_last_spoken_ai_word, which stays at 0 while the caller can still hear.
+            if self.tools["input"].is_audio_being_played_to_user() or self.response_in_pipeline:
                 continue
 
             if (
