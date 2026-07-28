@@ -2933,7 +2933,7 @@ class TaskManager(BaseManager):
 
     def _is_once_per_call(self, called_fun):
         """A tool the agent opted into firing at most once per call (tools_params[...].idempotent)."""
-        return bool(self.kwargs.get("api_tools", {}).get("tools_params", {}).get(called_fun, {}).get("idempotent"))
+        return bool(self.kwargs.get("api_tools", {}).get("tools_params", {}).get(called_fun, {}).get("once_per_call"))
 
     @staticmethod
     def _tool_execution_succeeded(response):

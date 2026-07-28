@@ -30,7 +30,7 @@ def test_execution_succeeded_only_on_clean_2xx():
 
 def test_is_once_per_call_reads_opt_in_flag():
     tm = TaskManager.__new__(TaskManager)
-    tm.kwargs = {"api_tools": {"tools_params": {"a": {"idempotent": True}, "b": {}}}}
+    tm.kwargs = {"api_tools": {"tools_params": {"a": {"once_per_call": True}, "b": {}}}}
     assert tm._is_once_per_call("a") is True
     assert tm._is_once_per_call("b") is False
     assert tm._is_once_per_call("missing") is False
@@ -54,7 +54,7 @@ def _make_task_manager(idempotent):
     tm.kwargs = {
         "api_tools": {
             "tools_params": {
-                "custom_task_reschedule_call": {"url": "http://x", "method": "POST", "idempotent": idempotent}
+                "custom_task_reschedule_call": {"url": "http://x", "method": "POST", "once_per_call": idempotent}
             }
         }
     }
@@ -152,3 +152,12 @@ async def test_non_idempotent_tool_never_deduped():
         await _run_tool(tm)
     assert trigger.await_count == 2  # repeatable tool runs both times
     assert tm.executed_once_per_call_tools == set()
+
+
+def test_once_per_call_survives_apiparams_validation():
+    # The unit tests build tm.kwargs by hand; this crosses the pydantic boundary dashboard-backend
+    # validates against, catching the "flag silently dropped" bug (extra='ignore').
+    from bolna.llms.types import APIParams
+
+    dumped = APIParams(**{"url": "http://x", "method": "POST", "once_per_call": True}).model_dump()
+    assert dumped.get("once_per_call") is True
