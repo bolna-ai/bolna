@@ -530,6 +530,9 @@ class TaskManager(BaseManager):
                 if "reasoning_effort" in self.llm_agent_config:
                     self.llm_config["reasoning_effort"] = self.llm_agent_config["reasoning_effort"]
 
+                if "reasoning_summary" in self.llm_agent_config:
+                    self.llm_config["reasoning_summary"] = self.llm_agent_config["reasoning_summary"]
+
                 if "thinking_budget" in self.llm_agent_config:
                     self.llm_config["thinking_budget"] = self.llm_agent_config["thinking_budget"]
 
@@ -1751,6 +1754,8 @@ class TaskManager(BaseManager):
                 injected_cfg["api_tools"] = self.kwargs["api_tools"]
             if "reasoning_effort" in self.kwargs:
                 injected_cfg["reasoning_effort"] = self.kwargs["reasoning_effort"]
+            if "reasoning_summary" in self.kwargs:
+                injected_cfg["reasoning_summary"] = self.kwargs["reasoning_summary"]
             if "service_tier" in self.kwargs:
                 injected_cfg["service_tier"] = self.kwargs["service_tier"]
             if "routing_reasoning_effort" in self.kwargs:
@@ -1790,6 +1795,8 @@ class TaskManager(BaseManager):
                 injected_cfg["api_tools"] = self.kwargs["api_tools"]
             if "reasoning_effort" in self.kwargs:
                 injected_cfg["reasoning_effort"] = self.kwargs["reasoning_effort"]
+            if "reasoning_summary" in self.kwargs:
+                injected_cfg["reasoning_summary"] = self.kwargs["reasoning_summary"]
             if "service_tier" in self.kwargs:
                 injected_cfg["service_tier"] = self.kwargs["service_tier"]
             if self.llm_config.get("use_responses_api"):

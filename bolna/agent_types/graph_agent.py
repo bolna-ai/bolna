@@ -144,6 +144,7 @@ class GraphAgent(BaseAgent):
                 "api_tools",
                 "buffer_size",
                 "reasoning_effort",
+                "reasoning_summary",
                 "service_tier",
                 "use_responses_api",
                 "compact_threshold",
