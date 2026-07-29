@@ -340,6 +340,10 @@ class TaskManager(BaseManager):
         self.sampling_rate = 24000
         self.conversation_ended = False
         self.has_transfer = False
+        # Names of opt-in `idempotent` (once-per-call) API tools that already succeeded this call.
+        # Guards against re-hitting an external tool - and re-speaking its pre-call message - when
+        # the LLM re-emits it on a later turn (BLT-018). See __execute_function_call / __do_llm_generation.
+        self.executed_once_per_call_tools = set()
         self.hangup_triggered = False
         self.hangup_triggered_at = None
         self.hangup_decision_at = None
@@ -2937,6 +2941,17 @@ class TaskManager(BaseManager):
                         )
                     )
 
+    def _is_once_per_call(self, called_fun):
+        """A tool the agent opted into firing at most once per call (tools_params[...].idempotent)."""
+        return bool(self.kwargs.get("api_tools", {}).get("tools_params", {}).get(called_fun, {}).get("once_per_call"))
+
+    @staticmethod
+    def _tool_execution_succeeded(response):
+        """trigger_api never raises - it returns an error body on timeout/SSRF/non-2xx. A call
+        counts as done only on a real 2xx with no error, so a failed call isn't recorded as
+        executed (which would fake success for the LLM's retry)."""
+        return 200 <= (response.get("status_code") or 0) < 300 and not response.get("error")
+
     async def __execute_function_call(
         self, url, method, param, api_token, headers, model_args, meta_info, next_step, called_fun, **resp
     ):
@@ -3386,10 +3401,39 @@ class TaskManager(BaseManager):
             )
             return
 
+        tool_conf = self.kwargs.get("api_tools", {}).get("tools_params", {}).get(called_fun, {})
+
+        # Idempotency guard (BLT-018), OPT-IN per tool via tools_params[...].idempotent. A burst of
+        # short user acknowledgements during call closing spawns fresh LLM turns that re-emit the
+        # same action tool, re-hitting the external API - the same failure the transfer_call guard
+        # above prevents. Only once-per-call tools are guarded, so retrieval tools (product_search,
+        # check_availability, zero-arg status checks) that may legitimately repeat are untouched.
+        # After a tool has succeeded once this call, skip the re-run and feed an "already done"
+        # result back through a normal follow-up generation so the agent keeps talking (never a
+        # dead-air return). The matching pre-call filler is suppressed in __do_llm_generation.
+        if self._is_once_per_call(called_fun) and called_fun in self.executed_once_per_call_tools:
+            logger.info(f"Skipping duplicate once-per-call tool {called_fun}; already succeeded this call")
+            already_done = json.dumps(
+                {
+                    "status": "success",
+                    "message": "Already done earlier in this call. Do not call this tool again; continue the conversation.",
+                }
+            )
+            self.conversation_history.attach_tool_calls_to_turn(turn_id, resp["model_response"])
+            self.conversation_history.append_tool_result(resp.get("tool_call_id", ""), already_done)
+            convert_to_request_log(
+                already_done, meta_info, None, "function_call", direction="response", run_id=self.run_id
+            )
+            self.check_if_user_online = self.conversation_config.get("check_if_user_online", True)
+            messages = self.conversation_history.get_copy()
+            followup_meta_info = self._spawn_followup_meta_info(meta_info)
+            await self.__do_llm_generation(messages, followup_meta_info, next_step, should_trigger_function_call=True)
+            self.execute_function_call_task = None
+            return
+
         # Optional pre-call webhook: notify an external system before the tool's main
         # request runs (e.g. a transfer reason before a custom transfer POST). Fired
         # fire-and-forget so a webhook outage never blocks or delays the main call.
-        tool_conf = self.kwargs.get("api_tools", {}).get("tools_params", {}).get(called_fun, {})
         pre_call_webhook_url = tool_conf.get("pre_call_webhook_url")
         if pre_call_webhook_url:
             self.fire_pre_call_webhook(
@@ -3476,6 +3520,11 @@ class TaskManager(BaseManager):
         textual_response = resp.get("textual_response", None)
         self.conversation_history.attach_tool_calls_to_turn(turn_id, resp["model_response"])
         self.conversation_history.append_tool_result(resp.get("tool_call_id", ""), function_response)
+        # Mark a once-per-call tool done only on a genuine success (trigger_api returns an error
+        # body rather than raising, so a timeout/non-2xx must NOT count as done - else the LLM's
+        # natural retry would be told it already succeeded).
+        if self._is_once_per_call(called_fun) and self._tool_execution_succeeded(response):
+            self.executed_once_per_call_tools.add(called_fun)
 
         logger.info(f"Logging function call parameters ")
         convert_to_request_log(
@@ -3866,6 +3915,19 @@ class TaskManager(BaseManager):
                         )
                         # filler_message = PRE_FUNCTION_CALL_MESSAGE.get(self.language, PRE_FUNCTION_CALL_MESSAGE[DEFAULT_LANGUAGE_CODE])
                         if text_chunk == filler_message:
+                            # BLT-018: a once-per-call tool the LLM re-emits on a later turn is skipped
+                            # in __execute_function_call, but its pre-call filler ("Your call has been
+                            # rescheduled.") streams here first. Suppress the duplicate filler so the line
+                            # isn't spoken a second time; only the tool NAME is known at this point, which
+                            # is exactly the once-per-call key.
+                            if (
+                                self._is_once_per_call(function_tool)
+                                and function_tool in self.executed_once_per_call_tools
+                            ):
+                                logger.info(
+                                    f"Suppressing duplicate pre-call filler for once-per-call tool {function_tool}"
+                                )
+                                continue
                             logger.info("Got a pre function call message")
                             turn_id = meta_info.get("turn_id")
                             response_uid = meta_info.get("response_uid")

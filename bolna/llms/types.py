@@ -17,6 +17,8 @@ class APIParams(BaseModel):
     # Graph-agent tool scope; None == GLOBAL. NODE limits visibility to ``nodes``.
     scope: Optional[ToolScope] = None
     nodes: Optional[List[str]] = None
+    # Fire this tool (and its pre-call message) at most once per call; re-emission skipped. BLT-018.
+    once_per_call: Optional[bool] = False
 
 
 class LatencyData(BaseModel):
