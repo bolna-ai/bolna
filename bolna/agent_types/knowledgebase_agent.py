@@ -13,6 +13,7 @@ from bolna.llms.types import LLMStreamChunk, LatencyData
 from bolna.providers import SUPPORTED_LLM_PROVIDERS
 from bolna.llms import OpenAiLLM
 from bolna.prompts import VOICEMAIL_DETECTION_PROMPT
+from bolna.exceptions import LLMError
 
 logger = configure_logger(__name__)
 
@@ -48,12 +49,10 @@ class KnowledgeBaseAgent(BaseAgent):
 
     def _initialize_llm(self):
         """Initialize the LLM instance with all necessary config (including api_tools for function calling)."""
+        provider = self.config.get("provider") or self.config.get("llm_provider", "openai")
         try:
-            provider = self.config.get("provider") or self.config.get("llm_provider", "openai")
-
             if provider not in SUPPORTED_LLM_PROVIDERS:
-                logger.warning(f"Unknown provider: {provider}, using openai")
-                provider = "openai"
+                raise ValueError(f"Unsupported LLM provider: {provider}")
 
             llm_kwargs = {
                 "model": self.llm_model,
@@ -81,11 +80,13 @@ class KnowledgeBaseAgent(BaseAgent):
             llm_class = SUPPORTED_LLM_PROVIDERS[provider]
             return llm_class(**llm_kwargs)
 
-        except Exception as e:
-            logger.error(f"Failed to create LLM: {e}, falling back to basic OpenAI")
-            from openai import OpenAI
-
-            return OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+        except Exception as exc:
+            logger.exception(f"Failed to initialize configured LLM provider '{provider}' with model '{self.llm_model}'")
+            raise LLMError(
+                "Failed to initialize configured LLM",
+                provider=provider,
+                model=self.llm_model,
+            ) from exc
 
     def _initialize_rag_config(self) -> Dict:
         """Initialize RAG configuration from the provided config."""
