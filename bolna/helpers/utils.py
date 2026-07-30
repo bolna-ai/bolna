@@ -504,7 +504,8 @@ def merge_wav_bytes(wav_files_bytes):
 
 
 def calculate_audio_duration(size_bytes, sampling_rate, bit_depth=16, channels=1, format="wav"):
-    bytes_per_sample = (bit_depth / 8) * channels if format != "mulaw" else 1
+    # "ulaw" is the same 1-byte-per-sample encoding as "mulaw"; both spellings are in use.
+    bytes_per_sample = 1 if format in ("mulaw", "ulaw") else (bit_depth / 8) * channels
     total_samples = size_bytes / bytes_per_sample
     duration_seconds = total_samples / sampling_rate
     return duration_seconds

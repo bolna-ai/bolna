@@ -58,6 +58,10 @@ class OpenAICompatibleLLM(BaseLLM):
     _request_log_model = None
     _model_family = None
 
+    # A reasoning summary streams ahead of the answer text, so it is opt-in: requesting one costs
+    # time to first spoken token on a live call. Set from config by subclasses; None omits it.
+    reasoning_summary = None
+
     @property
     def request_log_model(self):
         """Provider-qualified model name, so request logs key the same way the task manager records."""
@@ -466,7 +470,8 @@ class OpenAICompatibleLLM(BaseLLM):
             reasoning_config = {}
             if reasoning_effort:
                 reasoning_config["effort"] = reasoning_effort
-            reasoning_config["summary"] = "auto"
+            if self.reasoning_summary:
+                reasoning_config["summary"] = self.reasoning_summary
             create_kwargs["reasoning"] = reasoning_config
             verbosity = self.model_args.get("verbosity")
             if verbosity:
@@ -701,7 +706,8 @@ class OpenAICompatibleLLM(BaseLLM):
             reasoning_effort = self.model_args.get("reasoning_effort")
             if reasoning_effort:
                 reasoning_config["effort"] = reasoning_effort
-            reasoning_config["summary"] = "auto"
+            if self.reasoning_summary:
+                reasoning_config["summary"] = self.reasoning_summary
             create_kwargs["reasoning"] = reasoning_config
             verbosity = self.model_args.get("verbosity")
             if verbosity:
