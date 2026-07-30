@@ -1231,14 +1231,20 @@ class TaskManager(BaseManager):
                     self.task_config["tools_config"]["output"]["provider"]
                 )
 
+                # A speech-to-speech agent has no synthesizer config to stamp; its run loop
+                # encodes straight to the rate chosen here.
+                is_s2s_output = self.__is_s2s()
+                synth_config = None if is_s2s_output else self.task_config["tools_config"]["synthesizer"]
                 if self.task_config["tools_config"]["output"]["provider"] in SUPPORTED_OUTPUT_TELEPHONY_HANDLERS.keys():
                     output_kwargs["mark_event_meta_data"] = self.mark_event_meta_data
                     logger.info(f"Making sure that the sampling rate for output handler is 8000")
-                    self.task_config["tools_config"]["synthesizer"]["provider_config"]["sampling_rate"] = 8000
+                    if synth_config:
+                        synth_config["provider_config"]["sampling_rate"] = 8000
                     # sip-trunk (Asterisk) uses ulaw; other telephony use pcm (handler converts to mulaw)
                     if self.task_config["tools_config"]["output"]["provider"] == TelephonyProvider.SIP_TRUNK.value:
-                        self.task_config["tools_config"]["synthesizer"]["audio_format"] = "ulaw"
-                        logger.info(f"Setting synthesizer audio format to ulaw for Asterisk sip-trunk")
+                        if synth_config:
+                            synth_config["audio_format"] = "ulaw"
+                            logger.info(f"Setting synthesizer audio format to ulaw for Asterisk sip-trunk")
                         # Pass input handler to output handler so it can simulate mark events
                         input_handler = self.tools.get("input")
                         output_kwargs["input_handler"] = input_handler
@@ -1247,12 +1253,14 @@ class TaskManager(BaseManager):
                         logger.info(
                             f"Passing input_handler to sip-trunk output handler for mark event simulation: {input_handler is not None}"
                         )
-                    else:
-                        self.task_config["tools_config"]["synthesizer"]["audio_format"] = "pcm"
+                    elif synth_config:
+                        synth_config["audio_format"] = "pcm"
+                    self.sampling_rate = 8000
                 else:
-                    self.task_config["tools_config"]["synthesizer"]["provider_config"]["sampling_rate"] = 24000
+                    if synth_config:
+                        synth_config["provider_config"]["sampling_rate"] = WEBCALL_TTS_SAMPLE_RATE
                     output_kwargs["queue"] = output_queue
-                self.sampling_rate = self.task_config["tools_config"]["synthesizer"]["provider_config"]["sampling_rate"]
+                    self.sampling_rate = WEBCALL_TTS_SAMPLE_RATE
 
             if self.task_config["tools_config"]["output"]["provider"] == "default":
                 output_kwargs["is_web_based_call"] = self.is_web_based_call
@@ -7331,28 +7339,30 @@ class TaskManager(BaseManager):
     # Speech-to-speech conversation
     ########################
 
-    def _s2s_io_format(self):
-        """(encoding, sample_rate) of the audio on both legs of the media stream.
+    def _s2s_is_carrier_leg(self):
+        """True when the media stream is a telephony bridge rather than a browser leg."""
+        if self.turn_based_conversation or self.is_web_based_call:
+            return False
+        return self.task_config["tools_config"]["input"]["provider"] in SUPPORTED_OUTPUT_TELEPHONY_HANDLERS
 
-        Mirrors the encoding the transcriber path selects, so a config that works for the
-        ASR pipeline behaves identically here. Every carrier bridge streams 8k mu-law;
-        only the browser and FreeSWITCH legs carry linear PCM.
+    def _s2s_input_format(self):
+        """(encoding, sample_rate) of the caller audio arriving on audio_queue.
+
+        Mirrors what the transcriber path selects, so a config that works for the ASR
+        pipeline behaves identically here. Every carrier bridge streams 8k mu-law; the
+        browser and FreeSWITCH legs carry linear PCM at 16k.
         """
-        if self.turn_based_conversation:
-            provider = "playground"
-        elif self.is_web_based_call:
-            provider = WEB_BASED_CALL_PROVIDER
-        else:
-            provider = self.task_config["tools_config"]["input"]["provider"]
+        return ("mulaw", 8000) if self._s2s_is_carrier_leg() else ("pcm", 16000)
 
-        if provider in (
-            WEB_BASED_CALL_PROVIDER,
-            TelephonyProvider.FREESWITCH.value,
-            TelephonyProvider.DEFAULT.value,
-            "playground",
-        ):
-            return "pcm", 16000
-        return "mulaw", 8000
+    def _s2s_output_format(self):
+        """(encoding, sample_rate) the output handler expects.
+
+        Not the mirror of the input: a web call sends 16k up and plays 24k back, so the
+        two legs are resolved separately.
+        """
+        if self._s2s_is_carrier_leg():
+            return "mulaw", 8000
+        return "pcm", self.sampling_rate
 
     def _build_s2s_provider(self):
         system_prompt = self.system_prompt
@@ -7381,8 +7391,8 @@ class TaskManager(BaseManager):
     async def _run_s2s_conversation(self):
         s2s = self._build_s2s_provider()
         self.tools["s2s"] = s2s
-        self._s2s_encoding, self._s2s_rate = self._s2s_io_format()
-        self.sampling_rate = self._s2s_rate
+        self._s2s_in_encoding, self._s2s_in_rate = self._s2s_input_format()
+        self._s2s_out_encoding, self._s2s_out_rate = self._s2s_output_format()
         self._s2s_tool_tasks = set()
         self._s2s_hangup_after_response = False
         self._s2s_pending_results = 0
@@ -7399,7 +7409,8 @@ class TaskManager(BaseManager):
 
         logger.info(
             f"S2S conversation started | provider={self.s2s_provider_name} model={self.s2s_model} "
-            f"io={self._s2s_encoding}@{self._s2s_rate} in={s2s.input_sample_rate} out={s2s.output_sample_rate}"
+            f"leg_in={self._s2s_in_encoding}@{self._s2s_in_rate} leg_out={self._s2s_out_encoding}@{self._s2s_out_rate} "
+            f"model_in={s2s.input_sample_rate} model_out={s2s.output_sample_rate}"
         )
 
         welcome = (self.kwargs.get("agent_welcome_message") or "").strip()
@@ -7458,9 +7469,9 @@ class TaskManager(BaseManager):
                 discarded += 1
                 continue
 
-            pcm = ulaw_to_pcm(data) if self._s2s_encoding == "mulaw" else data
-            if self._s2s_rate != s2s.input_sample_rate:
-                pcm = resample(pcm, s2s.input_sample_rate, format="pcm", original_sample_rate=self._s2s_rate)
+            pcm = ulaw_to_pcm(data) if self._s2s_in_encoding == "mulaw" else data
+            if self._s2s_in_rate != s2s.input_sample_rate:
+                pcm = resample(pcm, s2s.input_sample_rate, format="pcm", original_sample_rate=self._s2s_in_rate)
 
             try:
                 await s2s.send_audio(pcm)
@@ -7535,15 +7546,15 @@ class TaskManager(BaseManager):
 
     def _s2s_encode_output(self, pcm):
         s2s = self.tools["s2s"]
-        if self._s2s_rate != s2s.output_sample_rate:
-            pcm = resample(pcm, self._s2s_rate, format="pcm", original_sample_rate=s2s.output_sample_rate)
-        return pcm_to_ulaw(pcm) if self._s2s_encoding == "mulaw" else pcm
+        if self._s2s_out_rate != s2s.output_sample_rate:
+            pcm = resample(pcm, self._s2s_out_rate, format="pcm", original_sample_rate=s2s.output_sample_rate)
+        return pcm_to_ulaw(pcm) if self._s2s_out_encoding == "mulaw" else pcm
 
     def _s2s_meta(self, **extra):
         meta = {
             "io": self.tools["output"].get_provider() if not self.default_io else "default",
             "sequence_id": -1,
-            "format": self._s2s_encoding,
+            "format": self._s2s_out_encoding,
         }
         if self._s2s_hangup_after_response:
             meta["message_category"] = "agent_hangup"
@@ -7613,7 +7624,7 @@ class TaskManager(BaseManager):
                             "data": message["data"],
                             "start_time": time.time(),
                             "duration": calculate_audio_duration(
-                                len(message["data"]), self.sampling_rate, format=self._s2s_encoding
+                                len(message["data"]), self._s2s_out_rate, format=self._s2s_out_encoding
                             ),
                         }
                     )

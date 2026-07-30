@@ -67,23 +67,67 @@ def make_tm(*, io_provider="plivo", web=False, turn_based=False, in_rate=24000, 
     )
     inp = SimpleNamespace(io_provider=io_provider, update_is_audio_being_played=MagicMock(), is_dtmf_active=False)
     tm.tools = {"s2s": provider, "output": output, "input": inp}
-    tm._s2s_encoding, tm._s2s_rate = tm._s2s_io_format()
-    tm.sampling_rate = tm._s2s_rate
+    # __setup_output_handlers stamps this before the S2S loop starts.
+    tm.sampling_rate = 8000 if tm._s2s_is_carrier_leg() else 24000
+    tm._s2s_in_encoding, tm._s2s_in_rate = tm._s2s_input_format()
+    tm._s2s_out_encoding, tm._s2s_out_rate = tm._s2s_output_format()
     return tm
 
 
 class TestIOFormatSelection:
     @pytest.mark.parametrize("provider", ["plivo", "twilio", "exotel", "vobiz", "sip-trunk"])
-    def test_every_carrier_leg_is_8k_mulaw(self, provider):
+    def test_every_carrier_leg_is_8k_mulaw_both_ways(self, provider):
         # Plivo is the primary carrier and streams mu-law like the rest; treating it as
         # linear PCM would send noise to the model.
-        assert make_tm(io_provider=provider)._s2s_io_format() == ("mulaw", 8000)
+        tm = make_tm(io_provider=provider)
+        assert tm._s2s_input_format() == ("mulaw", 8000)
+        assert tm._s2s_output_format() == ("mulaw", 8000)
 
-    def test_web_call_is_16k_pcm(self):
-        assert make_tm(io_provider="default", web=True)._s2s_io_format() == ("pcm", 16000)
+    def test_web_call_sends_16k_and_plays_back_24k(self):
+        # The browser leg is asymmetric: encoding output at the input rate would play
+        # the agent back at the wrong speed.
+        tm = make_tm(io_provider="default", web=True)
+        assert tm._s2s_input_format() == ("pcm", 16000)
+        assert tm._s2s_output_format() == ("pcm", 24000)
 
-    def test_dashboard_playground_is_16k_pcm(self):
-        assert make_tm(io_provider="default", turn_based=True)._s2s_io_format() == ("pcm", 16000)
+    def test_dashboard_playground_matches_the_web_leg(self):
+        tm = make_tm(io_provider="default", turn_based=True)
+        assert tm._s2s_input_format() == ("pcm", 16000)
+        assert tm._s2s_output_format() == ("pcm", 24000)
+
+
+class TestOutputHandlerSetup:
+    """__setup_output_handlers runs before the S2S loop and used to stamp synthesizer config."""
+
+    def _setup(self, output_provider, *, web=False):
+        tm = TaskManager.__new__(TaskManager)
+        tm.task_config = {
+            "task_type": "conversation",
+            "tools_config": {
+                "output": {"provider": output_provider},
+                "input": {"provider": output_provider},
+                "s2s": {"provider": "openai_realtime", "provider_config": {}},
+            },
+        }
+        tm.s2s_config = tm.task_config["tools_config"]["s2s"]
+        tm.websocket = MagicMock()
+        tm.mark_event_meta_data = MagicMock()
+        tm.is_web_based_call = web
+        tm.turn_based_conversation = False
+        tm.context_data = {}
+        tm.tools = {}
+        tm.output_handler_set = False
+        TaskManager._TaskManager__setup_output_handlers(tm, False, asyncio.Queue())
+        return tm
+
+    @pytest.mark.parametrize("provider", ["plivo", "twilio", "sip-trunk"])
+    def test_telephony_setup_without_a_synthesizer(self, provider):
+        # An S2S agent carries no tools_config["synthesizer"]; stamping it would KeyError
+        # before the call ever started.
+        assert self._setup(provider).sampling_rate == 8000
+
+    def test_web_setup_without_a_synthesizer(self):
+        assert self._setup("default", web=True).sampling_rate == 24000
 
 
 class TestAudioIngest:
@@ -143,9 +187,10 @@ class TestAudioOutput:
         assert len(encoded) == 160
         assert audioop.ulaw2lin(encoded, 2) == _silence_pcm(160)
 
-    def test_web_output_stays_pcm(self):
-        tm = make_tm(io_provider="default", web=True, out_rate=16000)
-        pcm = _silence_pcm(320)
+    def test_web_output_stays_pcm_at_the_playback_rate(self):
+        # Model already emits 24k and the browser plays 24k, so nothing is resampled.
+        tm = make_tm(io_provider="default", web=True, out_rate=24000)
+        pcm = _silence_pcm(480)
         assert tm._s2s_encode_output(pcm) == pcm
 
     def test_hangup_audio_is_tagged_so_it_bypasses_interruption_gating(self):
