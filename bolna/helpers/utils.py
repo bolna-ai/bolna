@@ -263,6 +263,13 @@ def get_required_input_types(task):
     return input_types
 
 
+def is_s2s_agent(task):
+    """True when a task runs speech-to-speech instead of the transcriber/LLM/synthesizer chain."""
+    if not isinstance(task, dict):
+        return False
+    return bool((task.get("tools_config") or {}).get("s2s"))
+
+
 def format_messages(messages, use_system_prompt=False, include_tools=False):
     formatted_string = ""
     for message in messages:
