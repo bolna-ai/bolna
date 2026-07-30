@@ -621,6 +621,18 @@ async def write_request_logs(message, run_id):
             None,
         ]
         metadata = message.get("graph_routing_metadata", {})
+    elif message["component"] == LogComponent.S2S:
+        component_details = [
+            message_data,
+            message.get("input_tokens", 0),
+            message.get("output_tokens", 0),
+            None,
+            message.get("latency", None),
+            False,
+            None,
+            None,
+        ]
+        metadata = message.get("s2s_metadata", {})
     elif message["component"] == LogComponent.ERROR:
         component_details = [message_data, None, None, None, message.get("latency", None), False, None, None]
         metadata = message.get("error_metadata", {})
@@ -813,6 +825,21 @@ def convert_to_request_log(
                     else UsageSource.ESTIMATED.value
                 )
                 log["llm_metadata"] = llm_metadata
+        case LogComponent.S2S:
+            log["latency"] = meta_info.get("s2s_latency", None) if direction == LogDirection.RESPONSE else None
+            if direction == LogDirection.RESPONSE:
+                log["input_tokens"] = input_tokens or 0
+                log["output_tokens"] = output_tokens or 0
+                # Audio and text are priced apart, so the split has to survive to billing.
+                s2s_metadata = dict(meta_info.get("s2s_usage") or {})
+                if cached_tokens:
+                    s2s_metadata["cached_tokens"] = cached_tokens
+                s2s_metadata["usage_source"] = (
+                    UsageSource.API_REPORTED.value
+                    if (input_tokens is not None or output_tokens is not None)
+                    else UsageSource.ESTIMATED.value
+                )
+                log["s2s_metadata"] = s2s_metadata
         case LogComponent.SYNTHESIZER:
             log["latency"] = meta_info.get("synthesizer_latency", None) if direction == LogDirection.RESPONSE else None
         case LogComponent.TRANSCRIBER:

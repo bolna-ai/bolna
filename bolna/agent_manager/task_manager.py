@@ -7582,15 +7582,31 @@ class TaskManager(BaseManager):
             self._s2s_tool_tasks.add(task)
             task.add_done_callback(self._s2s_tool_tasks.discard)
 
-        if event.transcript:
+        usage = event.usage or {}
+        if event.transcript or usage:
             convert_to_request_log(
                 event.transcript,
-                {"request_id": self.task_id, "sequence_id": -1},
+                {
+                    "request_id": self.task_id,
+                    "sequence_id": -1,
+                    "s2s_usage": {
+                        key: usage.get(key, 0)
+                        for key in (
+                            "input_audio_tokens",
+                            "input_text_tokens",
+                            "output_audio_tokens",
+                            "output_text_tokens",
+                        )
+                    },
+                },
                 model=self.s2s_model,
                 component=LogComponent.S2S,
                 direction=LogDirection.RESPONSE,
                 is_cached=False,
                 run_id=self.run_id,
+                input_tokens=usage.get("input_tokens", 0),
+                output_tokens=usage.get("output_tokens", 0),
+                cached_tokens=usage.get("cached_tokens", 0),
             )
 
         # The end-of-stream sentinel makes the output handler emit its final mark, which is
