@@ -4436,17 +4436,22 @@ class TaskManager(BaseManager):
             return pool.get(tool.active_label, tool)
         return tool
 
+    def _component_model(self, kind):
+        """Model of the live transcriber/synthesizer. None where the provider has no model (azure ASR)."""
+        return getattr(self._active_tool(kind), "model", None)
+
     async def _report_component_health(self, service, provider, process_latency_ms, connect_flag):
         """Per-turn ASR/TTS success for the shadow breaker, plus the connection latency once."""
         if not self.on_provider_health or not provider:
             return
-        # model=None matches the fail side (component errors carry no model) so both share one member.
+        # Must match the model the component errors report, or successes and failures split across members.
+        model = self._component_model(service)
         if not getattr(self, connect_flag):
             conn_ms = getattr(self._active_tool(service), "connection_time", None)
             if conn_ms is not None:
                 setattr(self, connect_flag, True)
-                await self._report_provider_health(service, provider, None, True, conn_ms, phase="connect")
-        await self._report_provider_health(service, provider, None, True, process_latency_ms, phase="process")
+                await self._report_provider_health(service, provider, model, True, conn_ms, phase="connect")
+        await self._report_provider_health(service, provider, model, True, process_latency_ms, phase="process")
 
     async def _report_stream_connect(self):
         """Media-stream (stream_sid) connect latency for the shadow breaker: telephony only, once/call."""
@@ -4521,7 +4526,8 @@ class TaskManager(BaseManager):
         )
         if connection_error:
             await self._end_call_on_component_error(
-                TranscriberError(connection_error, provider=provider), HangupReason.TRANSCRIBER_CONNECTION_ERROR
+                TranscriberError(connection_error, provider=provider, model=self._component_model("transcriber")),
+                HangupReason.TRANSCRIBER_CONNECTION_ERROR,
             )
 
     async def _maybe_update_tts_language(self, meta_info):
@@ -4918,10 +4924,11 @@ class TaskManager(BaseManager):
             pass
         except Exception as e:
             provider = self.task_config["tools_config"]["transcriber"].get("provider")
+            model = self._component_model("transcriber")
             await self._end_call_on_component_error(
-                TranscriberError(str(e), provider=provider), HangupReason.TRANSCRIBER_ERROR
+                TranscriberError(str(e), provider=provider, model=model), HangupReason.TRANSCRIBER_ERROR
             )
-            raise TranscriberError(str(e), provider=provider) from e
+            raise TranscriberError(str(e), provider=provider, model=model) from e
 
     async def __process_http_transcription(self, message):
         meta_info = self.__get_updated_meta_info(message["meta_info"])
@@ -6025,7 +6032,10 @@ class TaskManager(BaseManager):
                 except Exception as e:
                     self._turn_audio_flushed.set()
                     await self._end_call_on_component_error(
-                        SynthesizerError(str(e), provider=self.synthesizer_provider), HangupReason.SYNTHESIZER_ERROR
+                        SynthesizerError(
+                            str(e), provider=self.synthesizer_provider, model=self._component_model("synthesizer")
+                        ),
+                        HangupReason.SYNTHESIZER_ERROR,
                     )
                     break
 
@@ -6035,10 +6045,12 @@ class TaskManager(BaseManager):
             logger.info("Synthesizer task cancelled outside loop.")
             # await self.handle_cancellation("Synthesizer task was cancelled outside loop.")
         except Exception as e:
+            model = self._component_model("synthesizer")
             await self._end_call_on_component_error(
-                SynthesizerError(str(e), provider=self.synthesizer_provider), HangupReason.SYNTHESIZER_ERROR
+                SynthesizerError(str(e), provider=self.synthesizer_provider, model=model),
+                HangupReason.SYNTHESIZER_ERROR,
             )
-            raise SynthesizerError(str(e), provider=self.synthesizer_provider) from e
+            raise SynthesizerError(str(e), provider=self.synthesizer_provider, model=model) from e
         finally:
             await self.tools["synthesizer"].cleanup()
 
