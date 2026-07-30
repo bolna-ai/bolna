@@ -1,5 +1,50 @@
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field, replace
+from enum import Enum
 from typing import Optional
+
+
+class AudioEncoding(str, Enum):
+    MULAW = "mulaw"
+    PCM = "pcm"
+
+
+@dataclass(frozen=True)
+class AudioFormat:
+    """How audio is carried on one leg of the media stream."""
+
+    encoding: AudioEncoding
+    sample_rate: int
+
+
+@dataclass(frozen=True)
+class S2SUsage:
+    """Tokens for one turn. Audio and text bill at different rates, so they stay apart."""
+
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cached_tokens: int = 0
+    input_audio_tokens: int = 0
+    input_text_tokens: int = 0
+    output_audio_tokens: int = 0
+    output_text_tokens: int = 0
+
+    def __add__(self, other: "S2SUsage") -> "S2SUsage":
+        return replace(self, **{f: getattr(self, f) + getattr(other, f) for f in _USAGE_FIELDS})
+
+    def modality_split(self) -> dict:
+        """The audio/text breakdown that has to reach billing."""
+        return {
+            "input_audio_tokens": self.input_audio_tokens,
+            "input_text_tokens": self.input_text_tokens,
+            "output_audio_tokens": self.output_audio_tokens,
+            "output_text_tokens": self.output_text_tokens,
+        }
+
+    def as_dict(self) -> dict:
+        return asdict(self)
+
+
+_USAGE_FIELDS = tuple(S2SUsage.__dataclass_fields__)
 
 
 @dataclass
@@ -53,7 +98,7 @@ class ResponseDone:
     """A full model response (turn) has completed."""
 
     transcript: str
-    usage: Optional[dict] = field(default=None)
+    usage: Optional[S2SUsage] = field(default=None)
 
 
 @dataclass

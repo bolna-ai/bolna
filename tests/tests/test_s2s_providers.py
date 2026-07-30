@@ -8,12 +8,15 @@ from bolna.models import GeminiLiveConfig, OpenAIRealtimeConfig, S2SConfig
 from bolna.providers import SUPPORTED_S2S_PROVIDERS
 from bolna.s2s import GeminiLiveS2S, OpenAIRealtimeS2S
 from bolna.s2s.events import (
+    AudioEncoding,
+    AudioFormat,
     AudioDelta,
     FunctionCall,
     InputTranscript,
     Interrupted,
     ResponseDone,
     S2SError,
+    S2SUsage,
     SessionExpiring,
     SessionReady,
     SessionResumed,
@@ -94,6 +97,48 @@ def attach_ws(provider, frames):
 
 async def drain(provider):
     return [event async for event in provider.receive_events()]
+
+
+class TestS2SUsage:
+    def test_adds_field_by_field(self):
+        total = S2SUsage(input_tokens=1, input_audio_tokens=2) + S2SUsage(input_tokens=10, output_text_tokens=5)
+        assert total.input_tokens == 11
+        assert total.input_audio_tokens == 2
+        assert total.output_text_tokens == 5
+
+    def test_modality_split_is_exactly_what_billing_reads(self):
+        usage = S2SUsage(
+            input_tokens=99,
+            cached_tokens=7,
+            input_audio_tokens=1,
+            input_text_tokens=2,
+            output_audio_tokens=3,
+            output_text_tokens=4,
+        )
+        # Flat totals travel in their own log columns, so the split must not repeat them.
+        assert usage.modality_split() == {
+            "input_audio_tokens": 1,
+            "input_text_tokens": 2,
+            "output_audio_tokens": 3,
+            "output_text_tokens": 4,
+        }
+
+    def test_starts_at_zero(self):
+        assert S2SUsage() + S2SUsage() == S2SUsage()
+
+    def test_is_immutable(self):
+        with pytest.raises(Exception):
+            S2SUsage().input_tokens = 5
+
+
+class TestAudioFormat:
+    def test_compares_by_value(self):
+        assert AudioFormat(AudioEncoding.MULAW, 8000) == AudioFormat(AudioEncoding.MULAW, 8000)
+        assert AudioFormat(AudioEncoding.PCM, 16000) != AudioFormat(AudioEncoding.PCM, 24000)
+
+    def test_encoding_serialises_to_the_string_the_output_handler_expects(self):
+        assert AudioEncoding.MULAW.value == "mulaw"
+        assert AudioEncoding.PCM.value == "pcm"
 
 
 class TestProviderRegistry:
@@ -190,8 +235,8 @@ class TestOpenAIEventMapping:
 
         done = next(e for e in events if isinstance(e, ResponseDone))
         assert done.transcript == "hello"
-        assert done.usage["input_tokens"] == 5
-        assert provider.usage_total["output_tokens"] == 7
+        assert done.usage.input_tokens == 5
+        assert provider.usage_total.output_tokens == 7
 
     @pytest.mark.asyncio
     async def test_barge_in_preserves_what_the_agent_already_said(self):
@@ -356,8 +401,49 @@ class TestGeminiEventMapping:
         provider = make_gemini()
         attach_ws(provider, [{"usageMetadata": {"promptTokenCount": 3, "responseTokenCount": 4}}])
         await drain(provider)
-        assert provider.usage_total["input_tokens"] == 3
-        assert provider.usage_total["output_tokens"] == 4
+        assert provider.usage_total.input_tokens == 3
+        assert provider.usage_total.output_tokens == 4
+
+    @pytest.mark.asyncio
+    async def test_turn_usage_reaches_response_done(self):
+        # Gemini reports usage in its own message, not on turnComplete. Leaving it off the
+        # turn event means billing sees zero tokens for every Gemini call.
+        provider = make_gemini()
+        attach_ws(
+            provider,
+            [
+                {
+                    "usageMetadata": {
+                        "promptTokenCount": 363,
+                        "responseTokenCount": 35,
+                        "promptTokensDetails": [{"modality": "AUDIO", "tokenCount": 201}],
+                        "responseTokensDetails": [{"modality": "AUDIO", "tokenCount": 35}],
+                    }
+                },
+                {"serverContent": {"turnComplete": True}},
+            ],
+        )
+        done = next(e for e in await drain(provider) if isinstance(e, ResponseDone))
+        assert done.usage is not None
+        assert done.usage.input_tokens == 363
+        assert done.usage.input_audio_tokens == 201
+        assert done.usage.output_audio_tokens == 35
+
+    @pytest.mark.asyncio
+    async def test_turn_usage_resets_between_turns(self):
+        provider = make_gemini()
+        attach_ws(
+            provider,
+            [
+                {"usageMetadata": {"promptTokenCount": 10, "responseTokenCount": 1}},
+                {"serverContent": {"turnComplete": True}},
+                {"usageMetadata": {"promptTokenCount": 20, "responseTokenCount": 2}},
+                {"serverContent": {"turnComplete": True}},
+            ],
+        )
+        turns = [e for e in await drain(provider) if isinstance(e, ResponseDone)]
+        assert [t.usage.input_tokens for t in turns] == [10, 20]
+        assert provider.usage_total.input_tokens == 30
 
     @pytest.mark.asyncio
     async def test_usage_keeps_the_audio_text_split(self):
@@ -382,9 +468,9 @@ class TestGeminiEventMapping:
             ],
         )
         await drain(provider)
-        assert provider.usage_total["input_text_tokens"] == 137
-        assert provider.usage_total["input_audio_tokens"] == 201
-        assert provider.usage_total["output_audio_tokens"] == 35
+        assert provider.usage_total.input_text_tokens == 137
+        assert provider.usage_total.input_audio_tokens == 201
+        assert provider.usage_total.output_audio_tokens == 35
 
     @pytest.mark.asyncio
     async def test_first_audio_latency_measured_from_turn_start(self):

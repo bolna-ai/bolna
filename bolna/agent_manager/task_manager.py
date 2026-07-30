@@ -105,6 +105,7 @@ from bolna.helpers.utils import (
 from bolna.helpers.logger_config import configure_logger
 from ..helpers.mark_event_meta_data import MarkEventMetaData
 from ..helpers.observable_variable import ObservableVariable
+from bolna.models import S2SConfig
 from .models import ComponentLatencies
 from .voicemail_handler import VoicemailHandler
 
@@ -1863,16 +1864,13 @@ class TaskManager(BaseManager):
 
     def __setup_s2s(self):
         """Validate the S2S config. The provider itself is built once prompts are loaded."""
-        provider = (self.s2s_config or {}).get("provider")
-        if provider not in SUPPORTED_S2S_PROVIDERS:
-            raise ValueError(f"Unsupported S2S provider '{provider}'. Supported: {list(SUPPORTED_S2S_PROVIDERS)}")
-        self.s2s_provider_name = provider
-        self.s2s_provider_config = dict(self.s2s_config.get("provider_config") or {})
-        self.s2s_model = self.s2s_provider_config.get("model")
+        self.s2s = S2SConfig(**self.s2s_config)
+        self.s2s_provider_name = self.s2s.provider
+        self.s2s_model = self.s2s.provider_config.model
         # A goodbye message would need TTS, which an S2S agent has no synthesizer for.
         # The model speaks its own goodbye before end_call instead.
         self.call_hangup_message_config = None
-        logger.info(f"S2S agent configured | provider={provider} model={self.s2s_model}")
+        logger.info(f"S2S agent configured | provider={self.s2s_provider_name} model={self.s2s_model}")
 
     def __setup_tasks(self, llm=None, agent_type=None, assistant_config=None):
         if self.task_config["task_type"] == "conversation" and not self.__is_multiagent():
@@ -7346,23 +7344,25 @@ class TaskManager(BaseManager):
         return self.task_config["tools_config"]["input"]["provider"] in SUPPORTED_OUTPUT_TELEPHONY_HANDLERS
 
     def _s2s_input_format(self):
-        """(encoding, sample_rate) of the caller audio arriving on audio_queue.
+        """Format of the caller audio arriving on audio_queue.
 
         Mirrors what the transcriber path selects, so a config that works for the ASR
         pipeline behaves identically here. Every carrier bridge streams 8k mu-law; the
         browser and FreeSWITCH legs carry linear PCM at 16k.
         """
-        return ("mulaw", 8000) if self._s2s_is_carrier_leg() else ("pcm", 16000)
+        if self._s2s_is_carrier_leg():
+            return s2s_events.AudioFormat(s2s_events.AudioEncoding.MULAW, 8000)
+        return s2s_events.AudioFormat(s2s_events.AudioEncoding.PCM, 16000)
 
     def _s2s_output_format(self):
-        """(encoding, sample_rate) the output handler expects.
+        """Format the output handler expects.
 
         Not the mirror of the input: a web call sends 16k up and plays 24k back, so the
         two legs are resolved separately.
         """
         if self._s2s_is_carrier_leg():
-            return "mulaw", 8000
-        return "pcm", self.sampling_rate
+            return s2s_events.AudioFormat(s2s_events.AudioEncoding.MULAW, 8000)
+        return s2s_events.AudioFormat(s2s_events.AudioEncoding.PCM, self.sampling_rate)
 
     def _build_s2s_provider(self):
         system_prompt = self.system_prompt
@@ -7376,27 +7376,28 @@ class TaskManager(BaseManager):
         api_key = self.kwargs.get("s2s_key") or os.getenv(
             "GOOGLE_API_KEY" if self.s2s_provider_name == S2SProvider.GEMINI_LIVE.value else "OPENAI_API_KEY"
         )
-        config = {k: v for k, v in self.s2s_provider_config.items() if v is not None}
-        config.pop("model", None)
-        config.pop("voice", None)
+        # mode="json" so enum fields (reasoning_effort) reach the provider as plain strings.
+        options = self.s2s.provider_config.model_dump(exclude_none=True, mode="json")
+        options.pop("model")
+        voice = options.pop("voice")
         return SUPPORTED_S2S_PROVIDERS[self.s2s_provider_name](
             system_prompt=system_prompt or "",
-            voice=self.s2s_provider_config.get("voice"),
+            voice=voice,
             model=self.s2s_model,
             api_key=api_key,
             tools=tools,
-            **config,
+            **options,
         )
 
     async def _run_s2s_conversation(self):
         s2s = self._build_s2s_provider()
         self.tools["s2s"] = s2s
-        self._s2s_in_encoding, self._s2s_in_rate = self._s2s_input_format()
-        self._s2s_out_encoding, self._s2s_out_rate = self._s2s_output_format()
+        self._s2s_input = self._s2s_input_format()
+        self._s2s_output = self._s2s_output_format()
         self._s2s_tool_tasks = set()
         self._s2s_hangup_after_response = False
         self._s2s_pending_results = 0
-        self._s2s_welcome_gate_ms = int((self.s2s_config or {}).get("welcome_audio_gate_ms") or 1500)
+        self._s2s_welcome_gate_ms = self.s2s.welcome_audio_gate_ms
         self._s2s_started_at = time.time()
 
         try:
@@ -7409,7 +7410,8 @@ class TaskManager(BaseManager):
 
         logger.info(
             f"S2S conversation started | provider={self.s2s_provider_name} model={self.s2s_model} "
-            f"leg_in={self._s2s_in_encoding}@{self._s2s_in_rate} leg_out={self._s2s_out_encoding}@{self._s2s_out_rate} "
+            f"leg_in={self._s2s_input.encoding.value}@{self._s2s_input.sample_rate} "
+            f"leg_out={self._s2s_output.encoding.value}@{self._s2s_output.sample_rate} "
             f"model_in={s2s.input_sample_rate} model_out={s2s.output_sample_rate}"
         )
 
@@ -7469,9 +7471,11 @@ class TaskManager(BaseManager):
                 discarded += 1
                 continue
 
-            pcm = ulaw_to_pcm(data) if self._s2s_in_encoding == "mulaw" else data
-            if self._s2s_in_rate != s2s.input_sample_rate:
-                pcm = resample(pcm, s2s.input_sample_rate, format="pcm", original_sample_rate=self._s2s_in_rate)
+            pcm = ulaw_to_pcm(data) if self._s2s_input.encoding is s2s_events.AudioEncoding.MULAW else data
+            if self._s2s_input.sample_rate != s2s.input_sample_rate:
+                pcm = resample(
+                    pcm, s2s.input_sample_rate, format="pcm", original_sample_rate=self._s2s_input.sample_rate
+                )
 
             try:
                 await s2s.send_audio(pcm)
@@ -7546,15 +7550,15 @@ class TaskManager(BaseManager):
 
     def _s2s_encode_output(self, pcm):
         s2s = self.tools["s2s"]
-        if self._s2s_out_rate != s2s.output_sample_rate:
-            pcm = resample(pcm, self._s2s_out_rate, format="pcm", original_sample_rate=s2s.output_sample_rate)
-        return pcm_to_ulaw(pcm) if self._s2s_out_encoding == "mulaw" else pcm
+        if self._s2s_output.sample_rate != s2s.output_sample_rate:
+            pcm = resample(pcm, self._s2s_output.sample_rate, format="pcm", original_sample_rate=s2s.output_sample_rate)
+        return pcm_to_ulaw(pcm) if self._s2s_output.encoding is s2s_events.AudioEncoding.MULAW else pcm
 
     def _s2s_meta(self, **extra):
         meta = {
             "io": self.tools["output"].get_provider() if not self.default_io else "default",
             "sequence_id": -1,
-            "format": self._s2s_out_encoding,
+            "format": self._s2s_output.encoding.value,
         }
         if self._s2s_hangup_after_response:
             meta["message_category"] = "agent_hangup"
@@ -7571,42 +7575,25 @@ class TaskManager(BaseManager):
                 break
 
     async def _s2s_finish_turn(self, event):
-        if event.usage and self.task_id == 0 and self.on_turn_usage:
-            task = asyncio.create_task(
-                self.on_turn_usage(
-                    event.usage.get("input_tokens", 0),
-                    event.usage.get("output_tokens", 0),
-                    event.usage.get("cached_tokens", 0),
-                )
-            )
+        usage = event.usage
+        if usage and self.task_id == 0 and self.on_turn_usage:
+            task = asyncio.create_task(self.on_turn_usage(usage.input_tokens, usage.output_tokens, usage.cached_tokens))
             self._s2s_tool_tasks.add(task)
             task.add_done_callback(self._s2s_tool_tasks.discard)
 
-        usage = event.usage or {}
         if event.transcript or usage:
+            usage = usage or s2s_events.S2SUsage()
             convert_to_request_log(
                 event.transcript,
-                {
-                    "request_id": self.task_id,
-                    "sequence_id": -1,
-                    "s2s_usage": {
-                        key: usage.get(key, 0)
-                        for key in (
-                            "input_audio_tokens",
-                            "input_text_tokens",
-                            "output_audio_tokens",
-                            "output_text_tokens",
-                        )
-                    },
-                },
+                {"request_id": self.task_id, "sequence_id": -1, "s2s_usage": usage.modality_split()},
                 model=self.s2s_model,
                 component=LogComponent.S2S,
                 direction=LogDirection.RESPONSE,
                 is_cached=False,
                 run_id=self.run_id,
-                input_tokens=usage.get("input_tokens", 0),
-                output_tokens=usage.get("output_tokens", 0),
-                cached_tokens=usage.get("cached_tokens", 0),
+                input_tokens=usage.input_tokens,
+                output_tokens=usage.output_tokens,
+                cached_tokens=usage.cached_tokens,
             )
 
         # The end-of-stream sentinel makes the output handler emit its final mark, which is
@@ -7640,7 +7627,9 @@ class TaskManager(BaseManager):
                             "data": message["data"],
                             "start_time": time.time(),
                             "duration": calculate_audio_duration(
-                                len(message["data"]), self._s2s_out_rate, format=self._s2s_out_encoding
+                                len(message["data"]),
+                                self._s2s_output.sample_rate,
+                                format=self._s2s_output.encoding.value,
                             ),
                         }
                     )

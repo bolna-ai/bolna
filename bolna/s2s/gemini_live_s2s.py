@@ -16,6 +16,7 @@ from .events import (
     Interrupted,
     ResponseDone,
     S2SError,
+    S2SUsage,
     SessionExpiring,
     SessionReady,
     SessionResumed,
@@ -82,6 +83,7 @@ class GeminiLiveS2S(BaseS2SProvider):
         self._resumption_handle: Optional[str] = None
         self._reconnecting = False
         self._pending_tool_results: list = []
+        self._turn_usage = S2SUsage()
         self._current_response_transcript = ""
         self._turn_start_time: Optional[float] = None
         self._first_audio_recorded_this_turn = False
@@ -244,7 +246,11 @@ class GeminiLiveS2S(BaseS2SProvider):
                 continue
 
             if "usageMetadata" in message:
-                self._accumulate_usage(_map_usage(message["usageMetadata"]))
+                # Gemini reports usage in its own message, not on turnComplete, so hold it
+                # until the turn closes or the tokens never reach billing.
+                usage = _map_usage(message["usageMetadata"])
+                self._turn_usage = self._turn_usage + usage
+                self._accumulate_usage(usage)
 
             server_content = message.get("serverContent")
             if not server_content:
@@ -287,7 +293,8 @@ class GeminiLiveS2S(BaseS2SProvider):
                 self._current_response_transcript = ""
                 self._turn_start_time = None
                 self._first_audio_recorded_this_turn = False
-                yield ResponseDone(transcript=transcript, usage=None)
+                turn_usage, self._turn_usage = self._turn_usage, S2SUsage()
+                yield ResponseDone(transcript=transcript, usage=turn_usage)
 
     async def send_function_result(self, call_id: str, name: str, result: str) -> None:
         # Gemini wants a JSON object per response, and batches them in one toolResponse.
@@ -362,16 +369,17 @@ def _duration_to_ms(duration) -> Optional[int]:
         return None
 
 
-def _map_usage(usage: dict) -> dict:
+def _map_usage(usage: dict) -> S2SUsage:
     """Flatten Gemini usageMetadata, keeping the audio/text split that billing prices apart."""
-    mapped = {
-        "input_tokens": usage.get("promptTokenCount", 0) or 0,
-        "output_tokens": usage.get("responseTokenCount", 0) or 0,
-        "cached_tokens": usage.get("cachedContentTokenCount", 0) or 0,
-    }
+    by_modality = {}
     for prefix, field in (("input", "promptTokensDetails"), ("output", "responseTokensDetails")):
         for entry in usage.get(field) or []:
             modality = (entry.get("modality") or "").lower()
             if modality in ("audio", "text"):
-                mapped[f"{prefix}_{modality}_tokens"] = entry.get("tokenCount", 0) or 0
-    return mapped
+                by_modality[f"{prefix}_{modality}_tokens"] = entry.get("tokenCount", 0) or 0
+    return S2SUsage(
+        input_tokens=usage.get("promptTokenCount", 0) or 0,
+        output_tokens=usage.get("responseTokenCount", 0) or 0,
+        cached_tokens=usage.get("cachedContentTokenCount", 0) or 0,
+        **by_modality,
+    )

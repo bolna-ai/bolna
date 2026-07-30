@@ -15,6 +15,7 @@ from .events import (
     Interrupted,
     ResponseDone,
     S2SError,
+    S2SUsage,
     SessionReady,
     TranscriptDelta,
 )
@@ -301,20 +302,20 @@ class OpenAIRealtimeS2S(BaseS2SProvider):
             logger.error(f"Error sending to OpenAI Realtime: {e}")
             raise
 
-    def _extract_usage(self, event: dict) -> Optional[dict]:
+    def _extract_usage(self, event: dict) -> Optional[S2SUsage]:
         raw = (event.get("response") or {}).get("usage")
         if not raw:
             return None
         input_details = raw.get("input_token_details") or {}
         output_details = raw.get("output_token_details") or {}
-        usage = {
-            "input_tokens": raw.get("input_tokens", 0),
-            "output_tokens": raw.get("output_tokens", 0),
-            "cached_tokens": (input_details.get("cached_tokens") or 0),
-            "input_audio_tokens": input_details.get("audio_tokens", 0),
-            "output_audio_tokens": output_details.get("audio_tokens", 0),
-            "input_text_tokens": input_details.get("text_tokens", 0),
-            "output_text_tokens": output_details.get("text_tokens", 0),
-        }
-        self._accumulate_usage(usage)
-        return usage
+        return self._accumulate_usage(
+            S2SUsage(
+                input_tokens=raw.get("input_tokens", 0) or 0,
+                output_tokens=raw.get("output_tokens", 0) or 0,
+                cached_tokens=input_details.get("cached_tokens", 0) or 0,
+                input_audio_tokens=input_details.get("audio_tokens", 0) or 0,
+                input_text_tokens=input_details.get("text_tokens", 0) or 0,
+                output_audio_tokens=output_details.get("audio_tokens", 0) or 0,
+                output_text_tokens=output_details.get("text_tokens", 0) or 0,
+            )
+        )

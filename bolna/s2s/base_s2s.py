@@ -1,6 +1,8 @@
 from abc import ABC, abstractmethod
 from typing import AsyncGenerator, List, Optional
 
+from .events import S2SUsage
+
 
 class BaseS2SProvider(ABC):
     """Provider-agnostic interface for speech-to-speech models.
@@ -35,20 +37,11 @@ class BaseS2SProvider(ABC):
         self.connection_time: Optional[float] = None
         self.turn_latencies: list = []
         self.first_audio_latencies: list = []
-        self.usage_total: dict = {
-            "input_tokens": 0,
-            "output_tokens": 0,
-            "cached_tokens": 0,
-            "input_audio_tokens": 0,
-            "output_audio_tokens": 0,
-            "input_text_tokens": 0,
-            "output_text_tokens": 0,
-        }
+        self.usage_total = S2SUsage()
 
-    def _accumulate_usage(self, usage: dict) -> None:
-        for key, value in usage.items():
-            if key in self.usage_total:
-                self.usage_total[key] += value or 0
+    def _accumulate_usage(self, usage: S2SUsage) -> S2SUsage:
+        self.usage_total = self.usage_total + usage
+        return usage
 
     @abstractmethod
     async def connect(self) -> None:

@@ -18,6 +18,7 @@ from bolna.agent_manager.task_manager import TaskManager
 from bolna.enums import HangupReason
 from bolna.helpers.utils import pcm_to_ulaw
 from bolna.s2s import events as s2s_events
+from bolna.s2s.events import AudioEncoding, AudioFormat
 
 
 def _silence_pcm(samples=480):
@@ -69,8 +70,8 @@ def make_tm(*, io_provider="plivo", web=False, turn_based=False, in_rate=24000, 
     tm.tools = {"s2s": provider, "output": output, "input": inp}
     # __setup_output_handlers stamps this before the S2S loop starts.
     tm.sampling_rate = 8000 if tm._s2s_is_carrier_leg() else 24000
-    tm._s2s_in_encoding, tm._s2s_in_rate = tm._s2s_input_format()
-    tm._s2s_out_encoding, tm._s2s_out_rate = tm._s2s_output_format()
+    tm._s2s_input = tm._s2s_input_format()
+    tm._s2s_output = tm._s2s_output_format()
     return tm
 
 
@@ -80,20 +81,20 @@ class TestIOFormatSelection:
         # Plivo is the primary carrier and streams mu-law like the rest; treating it as
         # linear PCM would send noise to the model.
         tm = make_tm(io_provider=provider)
-        assert tm._s2s_input_format() == ("mulaw", 8000)
-        assert tm._s2s_output_format() == ("mulaw", 8000)
+        assert tm._s2s_input_format() == AudioFormat(AudioEncoding.MULAW, 8000)
+        assert tm._s2s_output_format() == AudioFormat(AudioEncoding.MULAW, 8000)
 
     def test_web_call_sends_16k_and_plays_back_24k(self):
         # The browser leg is asymmetric: encoding output at the input rate would play
         # the agent back at the wrong speed.
         tm = make_tm(io_provider="default", web=True)
-        assert tm._s2s_input_format() == ("pcm", 16000)
-        assert tm._s2s_output_format() == ("pcm", 24000)
+        assert tm._s2s_input_format() == AudioFormat(AudioEncoding.PCM, 16000)
+        assert tm._s2s_output_format() == AudioFormat(AudioEncoding.PCM, 24000)
 
     def test_dashboard_playground_matches_the_web_leg(self):
         tm = make_tm(io_provider="default", turn_based=True)
-        assert tm._s2s_input_format() == ("pcm", 16000)
-        assert tm._s2s_output_format() == ("pcm", 24000)
+        assert tm._s2s_input_format() == AudioFormat(AudioEncoding.PCM, 16000)
+        assert tm._s2s_output_format() == AudioFormat(AudioEncoding.PCM, 24000)
 
 
 class TestOutputHandlerSetup:
@@ -348,7 +349,7 @@ class TestUsageReporting:
     async def test_turn_usage_reaches_the_billing_hook(self):
         tm = make_tm()
         tm.on_turn_usage = AsyncMock()
-        usage = {"input_tokens": 11, "output_tokens": 22, "cached_tokens": 3}
+        usage = s2s_events.S2SUsage(input_tokens=11, output_tokens=22, cached_tokens=3)
         with patch("bolna.agent_manager.task_manager.convert_to_request_log"):
             await tm._s2s_finish_turn(s2s_events.ResponseDone(transcript="x", usage=usage))
         await asyncio.gather(*tm._s2s_tool_tasks, return_exceptions=True)

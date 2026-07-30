@@ -639,7 +639,7 @@ class S2SConfig(BaseModel):
     provider: str
     provider_config: Union[OpenAIRealtimeConfig, GeminiLiveConfig]
     # Suppresses inbound audio while the agent opens, so its own greeting cannot trip provider VAD.
-    welcome_audio_gate_ms: Optional[int] = 1500
+    welcome_audio_gate_ms: int = 1500
 
     @model_validator(mode="before")
     def preprocess(cls, values):
