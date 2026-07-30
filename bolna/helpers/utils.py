@@ -913,6 +913,11 @@ def pcm_to_ulaw(pcm_bytes):
     return ulaw_bytes
 
 
+def ulaw_to_pcm(ulaw_bytes):
+    """Convert 8-bit ulaw audio to 16-bit signed linear PCM."""
+    return audioop.ulaw2lin(ulaw_bytes, 2)  # 2 = sample width in bytes (16-bit)
+
+
 def audio_to_mulaw8k(audio, rate_hint=8000, format_hint=""):
     """One-shot synth output (base64 str / WAV / raw PCM) → mono 16-bit 8kHz mu-law.
     Undecodable compressed containers (MP3/Ogg/FLAC) return None — never raw noise."""
