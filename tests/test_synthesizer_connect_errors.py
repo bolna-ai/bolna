@@ -20,6 +20,7 @@ for _var in [
     os.environ.setdefault(_var, "test-key")
 
 import bolna.synthesizer as synthesizers  # noqa: E402
+from bolna.synthesizer.stream_synthesizer import CONNECT_TIMEOUT_SECONDS  # noqa: E402
 
 PROVIDERS = [
     ("Deepgram", {"voice_id": "v", "voice": "v"}),
@@ -64,14 +65,14 @@ def fake_connect(monkeypatch):
 
 
 @pytest.mark.parametrize("name,kwargs", PROVIDERS, ids=PROVIDER_IDS)
-def test_connect_disables_the_library_open_timeout(name, kwargs, fake_connect):
-    """websockets' own open_timeout would race the wait_for wrapped around it, and on
-    py3.10 it raises the builtin TimeoutError, which the timeout branch used to miss."""
+def test_connect_deadline_comes_from_open_timeout(name, kwargs, fake_connect):
+    """One deadline, owned by the library: open_timeout covers DNS, the TCP connect and the
+    opening handshake, and cleans up its own half-opened transport."""
     synth = _build(name, kwargs)
 
     assert asyncio.run(synth.establish_connection()) is not None
     assert fake_connect, f"{name} did not call websockets.connect"
-    assert fake_connect[0].get("open_timeout", "absent") is None
+    assert fake_connect[0].get("open_timeout") == CONNECT_TIMEOUT_SECONDS
 
 
 @pytest.mark.parametrize("name,kwargs", PROVIDERS, ids=PROVIDER_IDS)

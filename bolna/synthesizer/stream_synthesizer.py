@@ -29,6 +29,10 @@ from bolna.helpers.utils import create_ws_data_packet
 
 logger = configure_logger(__name__)
 
+# Per-attempt deadline handed to websockets' own open_timeout, which covers DNS, the TCP
+# connect and the opening handshake.
+CONNECT_TIMEOUT_SECONDS = 10.0
+
 # The caller hears silence while we retry, so the wall-clock budget bounds the
 # dead air regardless of whether the provider refuses instantly or hangs.
 MAX_CONNECTION_FAILURES = 6
