@@ -38,7 +38,7 @@ LANGUAGE_SWITCH_AUDIO_GAP_S = 0.2
 # delayed, so this is only paid when synthesis outruns the decide. Capped independently of the
 # decide timeout (sized for the slow tail) because past this point a wrong-language reply the
 # switch then truncates beats more dead air. Wall-clock backstop: the gate cannot wedge on it.
-LANGUAGE_SWITCH_MAX_HOLD_S = 3.5
+LANGUAGE_SWITCH_MAX_HOLD_S = 4.0
 
 # Soniox real-time STT
 SONIOX_WEBSOCKET_HOST = "stt-rt.soniox.com"

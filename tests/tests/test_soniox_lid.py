@@ -1,5 +1,8 @@
 """SonioxLID: tokens fold into one segment per utterance (flushed on <end>); lang = dominant tag,
-prob = that tag's token share (Soniox reports no language score of its own)."""
+prob = None always. Soniox reports no language score, and the token-share proxy we tried reads
+exactly 1.0 on essentially every segment (Soniox tags an utterance's tokens uniformly — verified
+across all prod QA calls, including a full English→Telugu-script transliteration), so it carried
+no information while trivially passing the detector-corroboration threshold."""
 
 from bolna.constants import SONIOX_ENDPOINT_TOKEN
 from bolna.lid.provider import LIDProvider
@@ -42,7 +45,7 @@ def test_segment_duration_spans_utterance_not_tokens():
     segs = d.buffer_segments()
     assert len(segs) == 1
     assert segs[0]["lang"] == "te"
-    assert segs[0]["prob"] == 1.0  # both tokens tagged te → full token share
+    assert segs[0]["prob"] is None  # soniox never reports a usable language probability
     assert segs[0]["ts"] is not None
 
 
@@ -78,7 +81,7 @@ def test_multiple_utterances_become_multiple_segments():
     segs = d.buffer_segments()
     assert [s["lang"] for s in segs] == ["te", "en"]
     assert d.buffer_language() == "en"  # latest
-    assert d.buffer_language_confidence() == 1.0  # the latest segment was single-language
+    assert d.buffer_language_confidence() is None  # soniox segments never carry a prob
 
 
 def test_region_tagged_language_normalized():
@@ -137,10 +140,11 @@ def test_telephony_audio_params():
     assert (web._audio_format, web._input_sr) == ("pcm_s16le", 16000)
 
 
-def test_prob_is_the_winning_tag_token_share():
-    # Soniox reports no language score, so the dominant tag's token share stands in for one:
-    # 3 of 4 tokens Marathi = 0.75. Without this the switch path's detector-corroboration check
-    # is permanently inert on Soniox (it requires a numeric prob).
+def test_prob_stays_none_even_with_uniform_tags():
+    # Deliberate: prob must stay None so detector corroboration is Sarvam-only. The token-share
+    # proxy read 1.0 on essentially every real segment (uniform tagging), including a full
+    # English→Telugu-script transliteration (QA 7c7d4b00) — maximal "confidence" precisely on
+    # the segments least worth trusting. lang still resolves to the dominant tag.
     d = _detector()
     d._handle_message(
         {
@@ -155,13 +159,13 @@ def test_prob_is_the_winning_tag_token_share():
     )
     segs = d.buffer_segments()
     assert segs[0]["lang"] == "mr"
-    assert segs[0]["prob"] == 0.75
-    assert d.buffer_language_confidence() == 0.75
+    assert segs[0]["prob"] is None
+    assert d.buffer_language_confidence() is None
 
 
-def test_mixed_tokens_yield_a_low_prob():
-    # An evenly split segment must NOT read as confident — this is what keeps corroboration from
-    # rubber-stamping code-mixed audio.
+def test_mixed_tokens_also_leave_prob_none():
+    # Evenly split segments carry no prob either — the corroboration path must see "no signal",
+    # never a number it could compare against a threshold.
     d = _detector()
     d._handle_message(
         {
@@ -172,7 +176,7 @@ def test_mixed_tokens_yield_a_low_prob():
             ]
         }
     )
-    assert d.buffer_language_confidence() == 0.5
+    assert d.buffer_language_confidence() is None
 
 
 def test_missing_timestamps_warn_and_zero_audio(caplog):

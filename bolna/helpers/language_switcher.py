@@ -17,6 +17,9 @@ DEFAULT_LANGUAGE_SWITCH_LLM = "claude-haiku-4-5-20251001"
 # Fire a second identical decide if the first hasn't answered by now. Above the p50 (~1.4s) so
 # the common turn never pays for two, below the tail it exists to cut. LANGUAGE_SWITCH_HEDGE_AFTER_S.
 DEFAULT_HEDGE_AFTER_S = 1.8
+# Substituted for LIVE in the turn prompt when no main-ASR turn exists (idle flush). The system
+# prompt names this exact string when voiding the empty-LIVE inference — keep them in sync.
+LIVE_UNAVAILABLE_MARKER = "(no turn from the language-locked recognizer — idle flush)"
 
 
 def resolve_switch_llm_credentials(model: str) -> tuple[str, str, str]:
@@ -136,6 +139,14 @@ class LanguageSwitcher:
         if not detector_transcript or not detector_transcript.strip():
             return None
 
+        # On idle-flush firings there IS no main-ASR turn — LIVE is empty because nobody
+        # produced one, not because the locked recognizer failed to decode foreign speech.
+        # Left as "" the judge reads it through the empty-LIVE-is-mismatch-evidence rule and
+        # a detector transliteration becomes "confirmed" by an absence we manufactured
+        # (QA 7c7d4b00: English "Hi, hi—what's up?" → Soniox Telugu-script → false switch).
+        # Telemetry keeps the raw empty string — only the prompt gets the marker.
+        live = (active_transcript or "").strip() or LIVE_UNAVAILABLE_MARKER
+
         messages = [
             self._system_message(),
             {
@@ -145,7 +156,7 @@ class LanguageSwitcher:
                     available_languages=", ".join(self.available_labels),
                     recent_turns=self._format_recent_turns(recent_turns),
                     detector_transcript=detector_transcript.strip(),
-                    active_transcript=(active_transcript or "").strip(),
+                    active_transcript=live,
                 ),
             },
         ]

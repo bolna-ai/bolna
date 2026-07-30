@@ -1930,6 +1930,13 @@ class TaskManager(BaseManager):
                 self.multilingual_prompts[lang_code] = f"\n## Agent Prompt:\n\n{enriched}\n{notes}\n\n## Transcript:\n"
             logger.info(f"Loaded multilingual prompts for languages: {list(self.multilingual_prompts.keys())}")
 
+        # Pin the STARTING language for LID-switch calls. Drift is not switch-only: QA showed
+        # the main LLM opening partly in Hindi before any switch ever happened (7c7d4b00) and
+        # closing in English after a clean all-Telugu run (a39f691c) — a switch-time-only note
+        # cannot cover either. Multilingual path only; single-language agents are untouched.
+        if self.language_switcher is not None and self.system_prompt.get("content"):
+            self.__apply_language_directive(self.language)
+
         # If using knowledge_agent, inject the prompt into agent config so agent can read it
         try:
             if self.__is_knowledgebase_agent() and "llm_agent" in self.task_config["tools_config"]:
@@ -5853,6 +5860,41 @@ class TaskManager(BaseManager):
             logger.error("LanguageSwitcher: handoff clip is a compressed container pydub can't decode — skipping")
         return clip
 
+    def __language_directive(self, label: str) -> str:
+        """Generic standing order pinned to the system prompt: reply ONLY in the active language.
+
+        Used whenever a richer switch-time note isn't available — tool-driven switches
+        (which pass no context_note) and the call's starting language. Starts with the
+        same "## Language note:" header as __switch_context_note so replacement logic
+        can find and strip whichever variant is currently installed.
+        """
+        name = LANGUAGE_NAMES.get(label, label)
+        return (
+            f"## Language note:\nRespond ONLY in {name} ('{label}') — every reply, including "
+            f"greetings, acknowledgments, and closing lines, must be entirely in {name}, "
+            f"regardless of the language of earlier conversation turns or the language these "
+            f"instructions are written in."
+        )
+
+    def __apply_language_directive(self, label: str, context_note: str = None) -> None:
+        """Install or refresh the language directive at the end of the system prompt.
+
+        Unconditional on purpose. The previous install was gated on a per-language prompt
+        variant existing AND a context_note being passed, which left the main LLM with no
+        standing language order on tool-driven switches and on agents without multilingual
+        prompt variants — the drift QA kept attributing to LID (a Hindi line mid-Telugu
+        call, an English closing line). Replacement, not accumulation: when no variant
+        exists for this label, the current prompt is reused with any prior note stripped.
+        """
+        base = self.multilingual_prompts.get(label)
+        if base is None:
+            current = self.system_prompt.get("content") or ""
+            marker_idx = current.find("\n\n## Language note:")
+            base = current[:marker_idx] if marker_idx != -1 else current
+        new_prompt = f"{base}\n\n{context_note or self.__language_directive(label)}"
+        self.conversation_history.update_system_prompt(new_prompt)
+        self.system_prompt["content"] = new_prompt
+
     def __switch_context_note(self, target: str, detector_transcript: str, reasoning: str = None) -> str:
         """Build the language note installed in the system prompt on a switch.
 
@@ -6000,13 +6042,11 @@ class TaskManager(BaseManager):
             if poke_event is not None:
                 poke_event.set()
 
-        if label in self.multilingual_prompts:
-            new_prompt = self.multilingual_prompts[label]
-            if context_note:
-                new_prompt = f"{new_prompt}\n\n{context_note}"
-            self.conversation_history.update_system_prompt(new_prompt)
-            self.system_prompt["content"] = new_prompt
-            logger.info(f"Switched system prompt to language '{label}'")
+        # Unconditional — the old `if label in self.multilingual_prompts` guard meant agents
+        # without per-language prompt variants never got ANY language order, and tool-driven
+        # switches (context_note=None) stripped whatever note a previous LID switch installed.
+        self.__apply_language_directive(label, context_note)
+        logger.info(f"Switched system prompt language directive to '{label}'")
 
         active_transcriber_info = (
             self.tools.get("transcriber").get_active_transcriber_info()
