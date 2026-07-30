@@ -200,6 +200,7 @@ class RimeSynthesizer(StreamSynthesizer):
                     self.ws_url,
                     additional_headers={"Authorization": f"Bearer {self.api_key}"},
                     ssl=get_ssl_context(self.ws_url),
+                    open_timeout=None,
                 ),
                 timeout=10.0,
             )
@@ -207,11 +208,11 @@ class RimeSynthesizer(StreamSynthesizer):
                 self.connection_time = round((time.perf_counter() - start_time) * 1000)
             logger.info(f"Connected to {self.ws_url}")
             return websocket
-        except asyncio.TimeoutError:
+        except (asyncio.TimeoutError, TimeoutError):
             logger.error("Timeout while connecting to Rime websocket")
             return None
         except Exception as e:
-            logger.error(f"Failed to connect to Rime: {e}")
+            logger.error(f"Failed to connect to Rime: {e!r}", exc_info=True)
             return None
 
     # ------------------------------------------------------------------

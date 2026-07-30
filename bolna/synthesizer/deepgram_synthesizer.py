@@ -207,6 +207,7 @@ class DeepgramSynthesizer(StreamSynthesizer):
                     self.ws_url,
                     additional_headers={"Authorization": f"Token {self.api_key}"},
                     ssl=get_ssl_context(self.ws_url),
+                    open_timeout=None,
                 ),
                 timeout=10.0,
             )
@@ -214,7 +215,7 @@ class DeepgramSynthesizer(StreamSynthesizer):
                 self.connection_time = round((time.perf_counter() - start_time) * 1000)
             logger.info(f"Connected to Deepgram TTS WebSocket: {self.ws_url}")
             return websocket
-        except asyncio.TimeoutError:
+        except (asyncio.TimeoutError, TimeoutError):
             logger.error("Timeout while connecting to Deepgram TTS WebSocket")
             return None
         except websockets.exceptions.InvalidStatusCode as e:
@@ -227,7 +228,7 @@ class DeepgramSynthesizer(StreamSynthesizer):
             self.connection_error = str(e)
             return None
         except Exception as e:
-            logger.error(f"Failed to connect to Deepgram TTS WebSocket: {e}")
+            logger.error(f"Failed to connect to Deepgram TTS WebSocket: {e!r}", exc_info=True)
             return None
 
     async def cleanup(self):

@@ -16,6 +16,7 @@ monitor_connection, cleanup — lives here.
 import asyncio
 import copy
 import json
+import random
 import time
 import traceback
 from collections import deque
@@ -28,8 +29,19 @@ from bolna.helpers.utils import create_ws_data_packet
 
 logger = configure_logger(__name__)
 
-# Maximum consecutive connection failures before giving up
-MAX_CONNECTION_FAILURES = 3
+# The caller hears silence while we retry, so the wall-clock budget bounds the
+# dead air regardless of whether the provider refuses instantly or hangs.
+MAX_CONNECTION_FAILURES = 6
+CONNECT_RETRY_BUDGET_SECONDS = 12.0
+CONNECT_BACKOFF_BASE_SECONDS = 0.25
+CONNECT_BACKOFF_MAX_SECONDS = 2.0
+
+
+def _connect_backoff(attempt):
+    """Jittered exponential backoff, so a provider-wide blip doesn't resynchronise every
+    live call onto the same retry instant."""
+    delay = min(CONNECT_BACKOFF_BASE_SECONDS * 2 ** (attempt - 1), CONNECT_BACKOFF_MAX_SECONDS)
+    return delay * (0.5 + random.random() / 2)
 
 
 class StreamSynthesizer(BaseSynthesizer):
@@ -314,26 +326,51 @@ class StreamSynthesizer(BaseSynthesizer):
     # ------------------------------------------------------------------
 
     async def monitor_connection(self):
-        consecutive_failures = 0
+        failures = 0
+        budget_started = None
 
-        while consecutive_failures < MAX_CONNECTION_FAILURES:
-            if not self._is_ws_connected():
-                logger.info(f"Re-establishing {self.provider_name} connection...")
-                result = await self.establish_connection()
-                if result is None:
-                    consecutive_failures += 1
-                    logger.warning(
-                        f"{self.provider_name} connection failed "
-                        f"(attempt {consecutive_failures}/{MAX_CONNECTION_FAILURES})"
-                    )
-                    if consecutive_failures >= MAX_CONNECTION_FAILURES:
-                        logger.error(f"Max connection failures reached for {self.provider_name}")
-                        self.connection_error = self.connection_error or "Max connection failures reached"
-                        break
-                else:
-                    self.websocket = result
-                    consecutive_failures = 0
-            await asyncio.sleep(1)
+        while not self.conversation_ended:
+            if self._is_ws_connected():
+                await asyncio.sleep(1)
+                continue
+
+            logger.info(f"Re-establishing {self.provider_name} connection...")
+            started = time.perf_counter()
+            websocket = await self.establish_connection()
+            took = time.perf_counter() - started
+
+            if websocket is not None:
+                self.websocket = websocket
+                retried = f" after {failures} failed attempt(s)" if failures else ""
+                logger.info(f"{self.provider_name} connected in {round(took * 1000)}ms{retried}")
+                failures = 0
+                budget_started = None
+                await asyncio.sleep(1)
+                continue
+
+            failures += 1
+            if budget_started is None:
+                budget_started = started
+            spent = time.perf_counter() - budget_started
+            # The per-attempt duration is what separates an instant refusal from a hung
+            # connect; they look identical once the call is dead.
+            logger.warning(
+                f"{self.provider_name} connection failed in {round(took * 1000)}ms "
+                f"(attempt {failures}/{MAX_CONNECTION_FAILURES}, "
+                f"{max(0.0, CONNECT_RETRY_BUDGET_SECONDS - spent):.1f}s of budget left)"
+            )
+
+            # Stop when another attempt as slow as this one would run past the budget,
+            # else a provider that hangs the connect overshoots by a whole timeout.
+            if failures >= MAX_CONNECTION_FAILURES or spent + took >= CONNECT_RETRY_BUDGET_SECONDS:
+                logger.error(
+                    f"Max connection failures reached for {self.provider_name} "
+                    f"after {failures} attempts over {spent:.1f}s"
+                )
+                self.connection_error = self.connection_error or "Max connection failures reached"
+                return
+
+            await asyncio.sleep(_connect_backoff(failures))
 
     # ------------------------------------------------------------------
     # cleanup() — cancel tasks and close WS

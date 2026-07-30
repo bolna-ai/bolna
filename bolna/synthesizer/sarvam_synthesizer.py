@@ -225,6 +225,7 @@ class SarvamSynthesizer(StreamSynthesizer):
                     self.ws_url,
                     additional_headers={"api-subscription-key": self.api_key},
                     ssl=get_ssl_context(self.ws_url),
+                    open_timeout=None,
                 ),
                 timeout=10.0,
             )
@@ -233,7 +234,7 @@ class SarvamSynthesizer(StreamSynthesizer):
                 self.connection_time = round((time.perf_counter() - start_time) * 1000)
             logger.info(f"Connected to {self.ws_url}")
             return websocket
-        except asyncio.TimeoutError:
+        except (asyncio.TimeoutError, TimeoutError):
             logger.error("Timeout while connecting to Sarvam TTS websocket")
             return None
         except InvalidHandshake as e:
@@ -247,7 +248,7 @@ class SarvamSynthesizer(StreamSynthesizer):
             self.connection_error = str(e)
             return None
         except Exception as e:
-            logger.error(f"Failed to connect to Sarvam TTS: {e}")
+            logger.error(f"Failed to connect to Sarvam TTS: {e!r}", exc_info=True)
             return None
 
     # ------------------------------------------------------------------

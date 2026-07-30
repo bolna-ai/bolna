@@ -339,7 +339,9 @@ class PixaSynthesizer(BaseSynthesizer):
                 headers["Authorization"] = f"Bearer {self.api_key}"
 
             websocket = await asyncio.wait_for(
-                websockets.connect(self.ws_url, additional_headers=headers, ssl=get_ssl_context(self.ws_url)),
+                websockets.connect(
+                    self.ws_url, additional_headers=headers, ssl=get_ssl_context(self.ws_url), open_timeout=None
+                ),
                 timeout=10.0,
             )
 
@@ -358,7 +360,7 @@ class PixaSynthesizer(BaseSynthesizer):
             logger.info(f"Connected to Pixa TTS at {self.ws_url}")
             return websocket
 
-        except asyncio.TimeoutError:
+        except (asyncio.TimeoutError, TimeoutError):
             logger.error("Timeout while connecting to Pixa websocket")
             return None
         except InvalidHandshake as e:
@@ -372,7 +374,7 @@ class PixaSynthesizer(BaseSynthesizer):
             self.connection_error = str(e)
             return None
         except Exception as e:
-            logger.error(f"Failed to connect to Pixa: {e}")
+            logger.error(f"Failed to connect to Pixa: {e!r}", exc_info=True)
             return None
 
     async def monitor_connection(self):

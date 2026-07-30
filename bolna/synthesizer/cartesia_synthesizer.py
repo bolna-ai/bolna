@@ -234,7 +234,7 @@ class CartesiaSynthesizer(StreamSynthesizer):
         try:
             start_time = time.perf_counter()
             websocket = await asyncio.wait_for(
-                websockets.connect(self.ws_url, ssl=get_ssl_context(self.ws_url)), timeout=10.0
+                websockets.connect(self.ws_url, ssl=get_ssl_context(self.ws_url), open_timeout=None), timeout=10.0
             )
             if not self.connection_time:
                 self.connection_time = round((time.perf_counter() - start_time) * 1000)
@@ -246,7 +246,7 @@ class CartesiaSynthesizer(StreamSynthesizer):
             else:
                 logger.info(f"Cartesia WebSocket connected connection_time={self.connection_time}ms")
             return websocket
-        except asyncio.TimeoutError:
+        except (asyncio.TimeoutError, TimeoutError):
             logger.error("Timeout while connecting to Cartesia websocket")
             return None
         except InvalidHandshake as e:
@@ -260,7 +260,7 @@ class CartesiaSynthesizer(StreamSynthesizer):
             self.connection_error = str(e)
             return None
         except Exception as e:
-            logger.error(f"Failed to connect to Cartesia: {e}")
+            logger.error(f"Failed to connect to Cartesia: {e!r}", exc_info=True)
             return None
 
     # ------------------------------------------------------------------
