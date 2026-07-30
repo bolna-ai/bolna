@@ -173,9 +173,7 @@ class OpenAIRealtimeS2S(BaseS2SProvider):
         return formatted
 
     async def send_audio(self, pcm_bytes: bytes) -> None:
-        await self._send(
-            {"type": "input_audio_buffer.append", "audio": base64.b64encode(pcm_bytes).decode("ascii")}
-        )
+        await self._send({"type": "input_audio_buffer.append", "audio": base64.b64encode(pcm_bytes).decode("ascii")})
 
     async def receive_events(self) -> AsyncGenerator:
         yield SessionReady(connection_time_ms=self.connection_time or 0.0)

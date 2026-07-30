@@ -316,9 +316,7 @@ class GeminiLiveS2S(BaseS2SProvider):
         await self._send(
             {
                 "clientContent": {
-                    "turns": [
-                        {"role": "user", "parts": [{"text": f"[The user pressed the keypad digits: {digits}]"}]}
-                    ],
+                    "turns": [{"role": "user", "parts": [{"text": f"[The user pressed the keypad digits: {digits}]"}]}],
                     "turnComplete": True,
                 }
             }

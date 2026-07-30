@@ -521,7 +521,7 @@ class TaskManager(BaseManager):
                     "buffer_size"
                 ]
         else:
-            if self.task_config["tools_config"]["llm_agent"] is not None:
+            if self.task_config["tools_config"].get("llm_agent") is not None:
                 if self.__is_knowledgebase_agent():
                     self.llm_agent_config = self.task_config["tools_config"]["llm_agent"]
                     self.llm_config = {
@@ -1141,10 +1141,7 @@ class TaskManager(BaseManager):
         return select_message_by_language(self.call_hangup_message_config, self.language)
 
     def __is_multiagent(self):
-        if self.task_config["task_type"] == "webhook":
-            return False
-        agent_type = self.task_config["tools_config"]["llm_agent"].get("agent_type", None)
-        return agent_type == "multiagent"
+        return self.__agent_type() == "multiagent"
 
     def __agent_type(self):
         """Configured llm_agent type, or None for webhook and speech-to-speech tasks."""
@@ -1902,7 +1899,7 @@ class TaskManager(BaseManager):
         if self.task_config["task_type"] == "webhook":
             return
 
-        agent_type = self.task_config["tools_config"]["llm_agent"].get("agent_type", "simple_llm_agent")
+        agent_type = (self.task_config["tools_config"].get("llm_agent") or {}).get("agent_type", "simple_llm_agent")
         self.is_local = local
         if task_id == 0:
             if (
@@ -7330,6 +7327,409 @@ class TaskManager(BaseManager):
         except Exception as e:
             logger.error(f"Error occurred in handling init event - {e}")
 
+    ########################
+    # Speech-to-speech conversation
+    ########################
+
+    def _s2s_io_format(self):
+        """(encoding, sample_rate) of the audio on both legs of the media stream.
+
+        Mirrors the encoding the transcriber path selects, so a config that works for the
+        ASR pipeline behaves identically here. Every carrier bridge streams 8k mu-law;
+        only the browser and FreeSWITCH legs carry linear PCM.
+        """
+        if self.turn_based_conversation:
+            provider = "playground"
+        elif self.is_web_based_call:
+            provider = WEB_BASED_CALL_PROVIDER
+        else:
+            provider = self.task_config["tools_config"]["input"]["provider"]
+
+        if provider in (
+            WEB_BASED_CALL_PROVIDER,
+            TelephonyProvider.FREESWITCH.value,
+            TelephonyProvider.DEFAULT.value,
+            "playground",
+        ):
+            return "pcm", 16000
+        return "mulaw", 8000
+
+    def _build_s2s_provider(self):
+        system_prompt = self.system_prompt
+        if isinstance(system_prompt, dict):
+            system_prompt = system_prompt.get("content", "")
+
+        tools = self.kwargs.get("api_tools", {}).get("tools") or []
+        if isinstance(tools, str):
+            tools = json.loads(tools)
+
+        api_key = self.kwargs.get("s2s_key") or os.getenv(
+            "GOOGLE_API_KEY" if self.s2s_provider_name == S2SProvider.GEMINI_LIVE.value else "OPENAI_API_KEY"
+        )
+        config = {k: v for k, v in self.s2s_provider_config.items() if v is not None}
+        config.pop("model", None)
+        config.pop("voice", None)
+        return SUPPORTED_S2S_PROVIDERS[self.s2s_provider_name](
+            system_prompt=system_prompt or "",
+            voice=self.s2s_provider_config.get("voice"),
+            model=self.s2s_model,
+            api_key=api_key,
+            tools=tools,
+            **config,
+        )
+
+    async def _run_s2s_conversation(self):
+        s2s = self._build_s2s_provider()
+        self.tools["s2s"] = s2s
+        self._s2s_encoding, self._s2s_rate = self._s2s_io_format()
+        self.sampling_rate = self._s2s_rate
+        self._s2s_tool_tasks = set()
+        self._s2s_hangup_after_response = False
+        self._s2s_pending_results = 0
+        self._s2s_welcome_gate_ms = int((self.s2s_config or {}).get("welcome_audio_gate_ms") or 1500)
+        self._s2s_started_at = time.time()
+
+        try:
+            await s2s.connect()
+        except Exception as e:
+            await self._report_provider_health(
+                "s2s", self.s2s_provider_name, self.s2s_model, False, phase="connect", blocking=True
+            )
+            raise LLMError(str(e), provider=self.s2s_provider_name, model=self.s2s_model)
+
+        logger.info(
+            f"S2S conversation started | provider={self.s2s_provider_name} model={self.s2s_model} "
+            f"io={self._s2s_encoding}@{self._s2s_rate} in={s2s.input_sample_rate} out={s2s.output_sample_rate}"
+        )
+
+        welcome = (self.kwargs.get("agent_welcome_message") or "").strip()
+        if welcome:
+            await s2s.trigger_response(
+                instructions=f"Open the conversation by saying exactly this, and nothing else: {welcome}"
+            )
+
+        self.output_task = asyncio.create_task(self._s2s_output_loop())
+        self.hangup_task = asyncio.create_task(self.__check_for_completion())
+        if self.conversation_config.get("dtmf_enabled", False):
+            self.tools["input"].is_dtmf_active = True
+            self.dtmf_task = asyncio.create_task(self._s2s_dtmf_loop())
+
+        loops = [
+            asyncio.create_task(self._s2s_audio_ingest_loop()),
+            asyncio.create_task(self._s2s_event_loop()),
+        ]
+        try:
+            await asyncio.gather(*loops)
+        except asyncio.CancelledError:
+            pass
+        finally:
+            self.conversation_ended = True
+            for task in loops:
+                task.cancel()
+            for task in list(self._s2s_tool_tasks):
+                task.cancel()
+            if self._s2s_tool_tasks:
+                await asyncio.gather(*self._s2s_tool_tasks, return_exceptions=True)
+            await s2s.disconnect()
+        logger.info("S2S conversation completed")
+
+    def _s2s_within_welcome_gate(self):
+        return (time.time() - self._s2s_started_at) * 1000 < self._s2s_welcome_gate_ms
+
+    async def _s2s_audio_ingest_loop(self):
+        """Caller audio to the model, resampled to whatever rate the provider declares."""
+        s2s = self.tools["s2s"]
+        sent = discarded = 0
+        while not self.conversation_ended:
+            try:
+                message = await asyncio.wait_for(self.audio_queue.get(), timeout=1.0)
+            except asyncio.TimeoutError:
+                continue
+
+            data = message.get("data")
+            if data is None:
+                if message.get("meta_info", {}).get("eos"):
+                    logger.info(f"S2S ingest: EOS received | sent={sent} discarded={discarded}")
+                    break
+                continue
+
+            # The agent's own greeting would otherwise echo back and trip the provider's VAD.
+            if self._s2s_within_welcome_gate():
+                discarded += 1
+                continue
+
+            pcm = ulaw_to_pcm(data) if self._s2s_encoding == "mulaw" else data
+            if self._s2s_rate != s2s.input_sample_rate:
+                pcm = resample(pcm, s2s.input_sample_rate, format="pcm", original_sample_rate=self._s2s_rate)
+
+            try:
+                await s2s.send_audio(pcm)
+            except Exception as e:
+                logger.error(f"S2S ingest: send_audio failed, ending conversation: {e}")
+                self.conversation_ended = True
+                break
+            sent += 1
+        logger.info(f"S2S ingest loop exited | sent={sent} discarded={discarded}")
+
+    async def _s2s_event_loop(self):
+        s2s = self.tools["s2s"]
+        async for event in s2s.receive_events():
+            if self.conversation_ended:
+                break
+
+            if isinstance(event, s2s_events.AudioDelta):
+                await self.buffered_output_queue.put(
+                    {"data": self._s2s_encode_output(event.data), "meta_info": self._s2s_meta()}
+                )
+                self.last_transmitted_timestamp = time.time()
+
+            elif isinstance(event, s2s_events.TranscriptDelta):
+                if event.is_final and event.content:
+                    logger.info(f"S2S agent: {event.content[:200]}")
+                    self.conversation_history.append_assistant(event.content)
+
+            elif isinstance(event, s2s_events.InputTranscript):
+                if event.is_final and event.content:
+                    logger.info(f"S2S caller: {event.content[:200]}")
+                    self.conversation_history.append_user(event.content)
+                    self.time_since_last_spoken_human_word = time.time()
+
+            elif isinstance(event, s2s_events.FunctionCall):
+                task = asyncio.create_task(self._s2s_execute_tool(event))
+                self._s2s_tool_tasks.add(task)
+                task.add_done_callback(self._s2s_tool_tasks.discard)
+
+            elif isinstance(event, s2s_events.Interrupted):
+                if self._s2s_within_welcome_gate():
+                    continue
+                logger.info("S2S: caller barged in, dropping queued audio")
+                await self._s2s_drop_queued_audio()
+
+            elif isinstance(event, s2s_events.ResponseDone):
+                await self._s2s_finish_turn(event)
+
+            elif isinstance(event, s2s_events.SessionReady):
+                await self._report_provider_health(
+                    "s2s", self.s2s_provider_name, self.s2s_model, True, event.connection_time_ms, phase="connect"
+                )
+
+            elif isinstance(event, s2s_events.SessionExpiring):
+                logger.info(f"S2S session expiring in {event.time_left_ms}ms, provider will resume it")
+
+            elif isinstance(event, s2s_events.SessionResumed):
+                logger.info(f"S2S session resumed in {event.reconnect_ms:.0f}ms")
+                await self._report_provider_health(
+                    "s2s", self.s2s_provider_name, self.s2s_model, True, event.reconnect_ms, phase="connect"
+                )
+
+            elif isinstance(event, s2s_events.FunctionCallCancelled):
+                logger.info(f"S2S: provider cancelled tool calls {event.call_ids}")
+
+            elif isinstance(event, s2s_events.S2SError):
+                logger.error(f"S2S error: {event.message} (code={event.code})")
+                if event.fatal:
+                    await self._report_provider_health(
+                        "s2s", self.s2s_provider_name, self.s2s_model, False, blocking=True
+                    )
+                    raise LLMError(event.message, provider=self.s2s_provider_name, model=self.s2s_model)
+
+    def _s2s_encode_output(self, pcm):
+        s2s = self.tools["s2s"]
+        if self._s2s_rate != s2s.output_sample_rate:
+            pcm = resample(pcm, self._s2s_rate, format="pcm", original_sample_rate=s2s.output_sample_rate)
+        return pcm_to_ulaw(pcm) if self._s2s_encoding == "mulaw" else pcm
+
+    def _s2s_meta(self, **extra):
+        meta = {
+            "io": self.tools["output"].get_provider() if not self.default_io else "default",
+            "sequence_id": -1,
+            "format": self._s2s_encoding,
+        }
+        if self._s2s_hangup_after_response:
+            meta["message_category"] = "agent_hangup"
+        meta.update(extra)
+        return meta
+
+    async def _s2s_drop_queued_audio(self):
+        if "output" in self.tools:
+            await self.tools["output"].handle_interruption()
+        while not self.buffered_output_queue.empty():
+            try:
+                self.buffered_output_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+
+    async def _s2s_finish_turn(self, event):
+        if event.usage and self.task_id == 0 and self.on_turn_usage:
+            task = asyncio.create_task(
+                self.on_turn_usage(
+                    event.usage.get("input_tokens", 0),
+                    event.usage.get("output_tokens", 0),
+                    event.usage.get("cached_tokens", 0),
+                )
+            )
+            self._s2s_tool_tasks.add(task)
+            task.add_done_callback(self._s2s_tool_tasks.discard)
+
+        if event.transcript:
+            convert_to_request_log(
+                event.transcript,
+                {"request_id": self.task_id, "sequence_id": -1},
+                model=self.s2s_model,
+                component=LogComponent.S2S,
+                direction=LogDirection.RESPONSE,
+                is_cached=False,
+                run_id=self.run_id,
+            )
+
+        # The end-of-stream sentinel makes the output handler emit its final mark, which is
+        # how the hangup path learns the audio actually reached the caller.
+        await self.buffered_output_queue.put(
+            {
+                "data": b"\x00",
+                "meta_info": self._s2s_meta(end_of_llm_stream=True, end_of_synthesizer_stream=True),
+            }
+        )
+
+        if self._s2s_hangup_after_response:
+            self._s2s_hangup_after_response = False
+            self.hangup_detail = HangupReason.END_CALL_TOOL
+            await self.process_call_hangup()
+
+    async def _s2s_output_loop(self):
+        try:
+            while not self.conversation_ended:
+                try:
+                    message = await asyncio.wait_for(self.buffered_output_queue.get(), timeout=1.0)
+                except asyncio.TimeoutError:
+                    continue
+
+                self.tools["input"].update_is_audio_being_played(True)
+                await self.tools["output"].handle(message)
+
+                if self.should_record and isinstance(message["data"], bytes) and message["data"] != b"\x00":
+                    self.conversation_recording["output"].append(
+                        {
+                            "data": message["data"],
+                            "start_time": time.time(),
+                            "duration": calculate_audio_duration(
+                                len(message["data"]), self.sampling_rate, format=self._s2s_encoding
+                            ),
+                        }
+                    )
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.error(f"S2S output loop error: {e}")
+
+    async def _s2s_dtmf_loop(self):
+        """Forward carrier keypad digits to the model as text; no provider sees our media leg."""
+        while not self.conversation_ended:
+            digits = await self.queues["dtmf"].get()
+            logger.info(f"S2S DTMF collected: {digits}")
+            ts_ms = round(time.time() * 1000 - self.conversation_start_init_ts, 2)
+            for digit in digits:
+                self.dtmf_events.append({"digit": digit, "ts_ms": ts_ms})
+            try:
+                await self.tools["s2s"].send_dtmf(digits)
+            except NotImplementedError:
+                logger.warning(f"{self.s2s_provider_name} cannot accept DTMF; digits dropped")
+            except Exception as e:
+                logger.error(f"S2S DTMF forward failed: {e}")
+
+    async def _s2s_execute_tool(self, event):
+        s2s = self.tools["s2s"]
+        meta_info = {"request_id": self.task_id, "sequence_id": -1, "turn_id": None}
+        tools_params = self.kwargs.get("api_tools", {}).get("tools_params", {}) or {}
+        params = tools_params.get(event.name, {}) or {}
+        try:
+            args = json.loads(event.arguments or "{}")
+        except ValueError:
+            args = {}
+
+        logger.info(f"S2S tool call: {event.name} args={args}")
+        convert_to_request_log(
+            json.dumps({"called_fun": event.name, **args}),
+            meta_info,
+            self.s2s_model,
+            LogComponent.FUNCTION_CALL,
+            direction=LogDirection.REQUEST,
+            is_cached=False,
+            run_id=self.run_id,
+        )
+
+        if event.name.startswith(END_CALL_FUNCTION_PREFIX):
+            self._s2s_hangup_after_response = True
+            result = json.dumps({"status": "success", "message": "Call is ending now. Say a brief goodbye."})
+        elif event.name.startswith("transfer_call"):
+            if self.has_transfer:
+                result = json.dumps({"status": "success", "message": "Transfer already in progress; wait silently."})
+            else:
+                self.has_transfer = True
+                await self._execute_transfer_call_webhook(
+                    event.name, params.get("url"), json.dumps(args), args, meta_info
+                )
+                result = json.dumps({"status": "success", "message": "Transfer initiated; wait silently."})
+        else:
+            result = await self._s2s_call_api_tool(event, args, params, meta_info)
+
+        convert_to_request_log(
+            result,
+            meta_info,
+            self.s2s_model,
+            LogComponent.FUNCTION_CALL,
+            direction=LogDirection.RESPONSE,
+            is_cached=False,
+            run_id=self.run_id,
+        )
+        await s2s.send_function_result(event.call_id, event.name, result)
+        await s2s.commit_function_results()
+
+    async def _s2s_call_api_tool(self, event, args, params, meta_info):
+        url = params.get("url")
+        if not url:
+            return json.dumps({"status": "error", "message": f"Tool '{event.name}' has no URL configured."})
+
+        method = (params.get("method") or "POST").lower()
+        call_log = self._start_api_call_detail(
+            called_fun=event.name,
+            url=url,
+            method=method,
+            param=params.get("param"),
+            headers=params.get("header"),
+            meta_info=meta_info,
+            runtime_args=args,
+            request_body=params.get("param"),
+            api_params=args,
+        )
+        try:
+            response = await trigger_api(
+                url=url,
+                method=method,
+                param=params.get("param"),
+                api_token=params.get("api_token"),
+                headers_data=params.get("header"),
+                meta_info=meta_info,
+                run_id=self.run_id,
+                return_response_metadata=True,
+                **args,
+            )
+        except asyncio.CancelledError:
+            self._finalize_api_call_detail(call_log, error="cancelled")
+            raise
+        except Exception as e:
+            self._finalize_api_call_detail(call_log, error=e)
+            return json.dumps({"status": "error", "message": str(e)})
+
+        self._finalize_api_call_detail(
+            call_log,
+            response=response.get("body"),
+            status_code=response.get("status_code"),
+            content_type=response.get("content_type"),
+            error=response.get("error"),
+        )
+        return str(response.get("body"))
+
     async def run(self):
         self._component_error = None  # Reset for each run
         self._error_logged = False
@@ -7340,39 +7740,48 @@ class TaskManager(BaseManager):
                 tasks = []
                 # tasks = [asyncio.create_task(self.tools['input'].handle())]
 
-                # In the case of web call we would play the first message once we receive the init event
-                if self.turn_based_conversation:
-                    self.first_message_task = asyncio.create_task(self.__first_message())
+                if self.__is_s2s():
+                    # One socket replaces the transcriber, LLM and synthesizer legs; the S2S
+                    # runner owns its own output, hangup and DTMF tasks.
+                    tasks.append(asyncio.create_task(self._run_s2s_conversation()))
+                else:
+                    # In the case of web call we would play the first message once we receive the init event
+                    if self.turn_based_conversation:
+                        self.first_message_task = asyncio.create_task(self.__first_message())
 
-                if not self.turn_based_conversation:
-                    self.first_message_passing_time = None
-                    self.handle_accumulated_message_task = asyncio.create_task(self.__handle_accumulated_message())
-                if "transcriber" in self.tools:
-                    tasks.append(asyncio.create_task(self._listen_transcriber()))
-                    self.transcriber_task = asyncio.create_task(self.tools["transcriber"].run())
+                    if not self.turn_based_conversation:
+                        self.first_message_passing_time = None
+                        self.handle_accumulated_message_task = asyncio.create_task(self.__handle_accumulated_message())
+                    if "transcriber" in self.tools:
+                        tasks.append(asyncio.create_task(self._listen_transcriber()))
+                        self.transcriber_task = asyncio.create_task(self.tools["transcriber"].run())
 
-                if self.turn_based_conversation and self._is_conversation_task():
-                    logger.info(
-                        "Since it's connected through dashboard, I'll run listen_llm_tas too in case user wants to simply text"
-                    )
-                    self.llm_queue_task = asyncio.create_task(self._listen_llm_input_queue())
+                    if self.turn_based_conversation and self._is_conversation_task():
+                        logger.info(
+                            "Since it's connected through dashboard, I'll run listen_llm_tas too in case user wants to simply text"
+                        )
+                        self.llm_queue_task = asyncio.create_task(self._listen_llm_input_queue())
 
-                if "synthesizer" in self.tools and self._is_conversation_task() and not self.turn_based_conversation:
-                    try:
-                        self.synthesizer_task = asyncio.create_task(self.__listen_synthesizer())
-                    except asyncio.CancelledError as e:
-                        logger.error(f"Synth task got cancelled {e}")
-                        traceback.print_exc()
+                    if (
+                        "synthesizer" in self.tools
+                        and self._is_conversation_task()
+                        and not self.turn_based_conversation
+                    ):
+                        try:
+                            self.synthesizer_task = asyncio.create_task(self.__listen_synthesizer())
+                        except asyncio.CancelledError as e:
+                            logger.error(f"Synth task got cancelled {e}")
+                            traceback.print_exc()
 
-                self.output_task = asyncio.create_task(self.__process_output_loop())
-                if not self.turn_based_conversation or self.enforce_streaming:
-                    self.hangup_task = asyncio.create_task(self.__check_for_completion())
+                    self.output_task = asyncio.create_task(self.__process_output_loop())
+                    if not self.turn_based_conversation or self.enforce_streaming:
+                        self.hangup_task = asyncio.create_task(self.__check_for_completion())
 
-                    if self.should_backchannel:
-                        self.backchanneling_task = asyncio.create_task(self.__check_for_backchanneling())
+                        if self.should_backchannel:
+                            self.backchanneling_task = asyncio.create_task(self.__check_for_backchanneling())
 
-                    if self.__is_graph_agent():
-                        self.event_listener_task = asyncio.create_task(self._listen_events())
+                        if self.__is_graph_agent():
+                            self.event_listener_task = asyncio.create_task(self._listen_events())
 
                 try:
                     await asyncio.gather(*tasks)

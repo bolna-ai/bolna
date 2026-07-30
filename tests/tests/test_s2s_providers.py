@@ -119,9 +119,9 @@ class TestOpenAISessionConfig:
         assert audio["output"]["voice"] == "marin"
 
     def test_server_vad_carries_tuning_params(self):
-        turn_detection = make_openai(vad_threshold=0.7, vad_silence_duration_ms=250)._build_session_config()[
-            "audio"
-        ]["input"]["turn_detection"]
+        turn_detection = make_openai(vad_threshold=0.7, vad_silence_duration_ms=250)._build_session_config()["audio"][
+            "input"
+        ]["turn_detection"]
         assert turn_detection["type"] == "server_vad"
         assert turn_detection["threshold"] == 0.7
         assert turn_detection["silence_duration_ms"] == 250
@@ -136,9 +136,7 @@ class TestOpenAISessionConfig:
         assert "reasoning" in make_openai(model="gpt-realtime-2.1", reasoning_effort="low")._build_session_config()
         assert "reasoning" in make_openai(model="gpt-realtime-2", reasoning_effort="low")._build_session_config()
         # gpt-realtime-1.5 has no reasoning and rejects the field.
-        assert (
-            "reasoning" not in make_openai(model="gpt-realtime-1.5", reasoning_effort="low")._build_session_config()
-        )
+        assert "reasoning" not in make_openai(model="gpt-realtime-1.5", reasoning_effort="low")._build_session_config()
 
     def test_tools_are_flattened_and_malformed_entries_dropped(self):
         provider = make_openai(
@@ -431,7 +429,9 @@ class TestGeminiClientMessages:
 
 class TestS2SConfigModel:
     def test_provider_selects_its_config_class(self):
-        assert isinstance(S2SConfig(provider="openai_realtime", provider_config={}).provider_config, OpenAIRealtimeConfig)
+        assert isinstance(
+            S2SConfig(provider="openai_realtime", provider_config={}).provider_config, OpenAIRealtimeConfig
+        )
         assert isinstance(S2SConfig(provider="gemini_live", provider_config={}).provider_config, GeminiLiveConfig)
 
     def test_defaults_track_the_current_recommended_models(self):
