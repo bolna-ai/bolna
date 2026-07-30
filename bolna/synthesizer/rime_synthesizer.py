@@ -9,7 +9,7 @@ import aiohttp
 import websockets
 from dotenv import load_dotenv
 
-from .stream_synthesizer import StreamSynthesizer
+from .stream_synthesizer import CONNECT_TIMEOUT_SECONDS, StreamSynthesizer
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.ssl_context import get_ssl_context
 from bolna.helpers.utils import convert_audio_to_wav
@@ -195,23 +195,21 @@ class RimeSynthesizer(StreamSynthesizer):
     async def establish_connection(self):
         try:
             start_time = time.perf_counter()
-            websocket = await asyncio.wait_for(
-                websockets.connect(
-                    self.ws_url,
-                    additional_headers={"Authorization": f"Bearer {self.api_key}"},
-                    ssl=get_ssl_context(self.ws_url),
-                ),
-                timeout=10.0,
+            websocket = await websockets.connect(
+                self.ws_url,
+                additional_headers={"Authorization": f"Bearer {self.api_key}"},
+                ssl=get_ssl_context(self.ws_url),
+                open_timeout=CONNECT_TIMEOUT_SECONDS,
             )
             if not self.connection_time:
                 self.connection_time = round((time.perf_counter() - start_time) * 1000)
             logger.info(f"Connected to {self.ws_url}")
             return websocket
-        except asyncio.TimeoutError:
+        except (asyncio.TimeoutError, TimeoutError):
             logger.error("Timeout while connecting to Rime websocket")
             return None
         except Exception as e:
-            logger.error(f"Failed to connect to Rime: {e}")
+            logger.error(f"Failed to connect to Rime: {e!r}", exc_info=True)
             return None
 
     # ------------------------------------------------------------------

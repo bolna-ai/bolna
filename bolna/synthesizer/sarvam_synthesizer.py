@@ -10,7 +10,7 @@ import aiohttp
 import websockets
 from websockets.exceptions import InvalidHandshake
 
-from .stream_synthesizer import StreamSynthesizer
+from .stream_synthesizer import CONNECT_TIMEOUT_SECONDS, StreamSynthesizer
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.ssl_context import get_ssl_context
 from bolna.helpers.utils import create_ws_data_packet, get_synth_audio_format, resample, wav_bytes_to_pcm
@@ -220,20 +220,18 @@ class SarvamSynthesizer(StreamSynthesizer):
     async def establish_connection(self):
         try:
             start_time = time.perf_counter()
-            websocket = await asyncio.wait_for(
-                websockets.connect(
-                    self.ws_url,
-                    additional_headers={"api-subscription-key": self.api_key},
-                    ssl=get_ssl_context(self.ws_url),
-                ),
-                timeout=10.0,
+            websocket = await websockets.connect(
+                self.ws_url,
+                additional_headers={"api-subscription-key": self.api_key},
+                ssl=get_ssl_context(self.ws_url),
+                open_timeout=CONNECT_TIMEOUT_SECONDS,
             )
             await websocket.send(json.dumps(self._config_message()))
             if not self.connection_time:
                 self.connection_time = round((time.perf_counter() - start_time) * 1000)
             logger.info(f"Connected to {self.ws_url}")
             return websocket
-        except asyncio.TimeoutError:
+        except (asyncio.TimeoutError, TimeoutError):
             logger.error("Timeout while connecting to Sarvam TTS websocket")
             return None
         except InvalidHandshake as e:
@@ -247,7 +245,7 @@ class SarvamSynthesizer(StreamSynthesizer):
             self.connection_error = str(e)
             return None
         except Exception as e:
-            logger.error(f"Failed to connect to Sarvam TTS: {e}")
+            logger.error(f"Failed to connect to Sarvam TTS: {e!r}", exc_info=True)
             return None
 
     # ------------------------------------------------------------------
