@@ -166,9 +166,10 @@ class Synthesizer(BaseModel):
     def preprocess(cls, values):
         provider = values.get("provider")
         config = values.get("provider_config", {})
+        config_values = config if isinstance(config, dict) else config.model_dump()
 
         if provider == "elevenlabs":
-            if not config.get("voice") or not config.get("voice_id"):
+            if not config_values.get("voice") or not config_values.get("voice_id"):
                 raise ValueError("ElevenLabs config requires 'voice' or 'voice_id'.")
             if isinstance(config, dict):
                 values["provider_config"] = ElevenLabsConfig(**config)
@@ -543,6 +544,9 @@ class LlmAgent(BaseModel):
             raise ValueError(f"Unsupported agent_type: {agent_type}")
 
         expected_type = valid_config_types[agent_type]
+
+        if isinstance(value, expected_type):
+            return value
 
         if not isinstance(value, dict):
             raise ValueError(f"llm_config must be a dict, got {type(value)}")
