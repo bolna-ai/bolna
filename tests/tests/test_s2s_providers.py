@@ -80,6 +80,10 @@ def make_gemini(**overrides):
     return GeminiLiveS2S(**defaults)
 
 
+def _b64(data):
+    return base64.b64encode(data).decode()
+
+
 def attach_ws(provider, frames):
     """Attach a socket that ends the provider's resume loop once the frames run out."""
     ws = FakeWS(frames)
@@ -354,6 +358,56 @@ class TestGeminiEventMapping:
         await drain(provider)
         assert provider.usage_total["input_tokens"] == 3
         assert provider.usage_total["output_tokens"] == 4
+
+    @pytest.mark.asyncio
+    async def test_usage_keeps_the_audio_text_split(self):
+        # Verbatim shape returned by gemini-3.1-flash-live-preview. Audio and text are
+        # priced ~4x apart, so collapsing the modalities would misprice every call.
+        provider = make_gemini()
+        attach_ws(
+            provider,
+            [
+                {
+                    "usageMetadata": {
+                        "promptTokenCount": 363,
+                        "responseTokenCount": 35,
+                        "totalTokenCount": 398,
+                        "promptTokensDetails": [
+                            {"modality": "TEXT", "tokenCount": 137},
+                            {"modality": "AUDIO", "tokenCount": 201},
+                        ],
+                        "responseTokensDetails": [{"modality": "AUDIO", "tokenCount": 35}],
+                    }
+                }
+            ],
+        )
+        await drain(provider)
+        assert provider.usage_total["input_text_tokens"] == 137
+        assert provider.usage_total["input_audio_tokens"] == 201
+        assert provider.usage_total["output_audio_tokens"] == 35
+
+    @pytest.mark.asyncio
+    async def test_first_audio_latency_measured_from_turn_start(self):
+        # The clock has to start when the turn is requested. Stamping it on the first audio
+        # part instead reported a flat 0ms against the live API.
+        provider = make_gemini()
+        provider._ws = FakeWS()
+        await provider.trigger_response(instructions="say hi")
+        assert provider._turn_start_time is not None
+
+        attach_ws(
+            provider,
+            [{"serverContent": {"modelTurn": {"parts": [{"inlineData": {"data": _b64(b"aud")}}]}}}],
+        )
+        await drain(provider)
+        assert provider.first_audio_latencies and provider.first_audio_latencies[0] > 0
+
+    @pytest.mark.asyncio
+    async def test_caller_transcript_starts_the_turn_clock(self):
+        provider = make_gemini()
+        attach_ws(provider, [{"serverContent": {"inputTranscription": {"text": "hello"}}}])
+        await drain(provider)
+        assert provider._turn_start_time is not None
 
 
 class TestGeminiSessionResumption:

@@ -258,6 +258,9 @@ class GeminiLiveS2S(BaseS2SProvider):
 
             transcription = server_content.get("inputTranscription")
             if transcription and transcription.get("text"):
+                # Gemini has no response.created, so the caller's transcript is the earliest
+                # signal that a turn is under way and is what first-audio latency measures from.
+                self._start_turn_clock()
                 yield InputTranscript(content=transcription["text"], is_final=True)
 
             transcription = server_content.get("outputTranscription")
@@ -270,9 +273,7 @@ class GeminiLiveS2S(BaseS2SProvider):
                 inline_data = part.get("inlineData")
                 if not inline_data or not inline_data.get("data"):
                     continue
-                if self._turn_start_time is None:
-                    self._turn_start_time = time.time()
-                if not self._first_audio_recorded_this_turn:
+                if self._turn_start_time and not self._first_audio_recorded_this_turn:
                     self.first_audio_latencies.append((time.time() - self._turn_start_time) * 1000)
                     self._first_audio_recorded_this_turn = True
                 yield AudioDelta(data=base64.b64decode(inline_data["data"]))
@@ -298,15 +299,23 @@ class GeminiLiveS2S(BaseS2SProvider):
             payload = {"result": result}
         self._pending_tool_results.append({"id": call_id, "name": name, "response": payload})
 
+    def _start_turn_clock(self) -> None:
+        """Mark the point a turn was requested, for first-audio and turn latency."""
+        if self._turn_start_time is None:
+            self._turn_start_time = time.time()
+            self._first_audio_recorded_this_turn = False
+
     async def commit_function_results(self) -> None:
         if not self._pending_tool_results:
             return
+        self._start_turn_clock()
         responses, self._pending_tool_results = self._pending_tool_results, []
         # Gemini resumes generating on its own once the results land, so there is no
         # separate trigger the way OpenAI needs response.create.
         await self._send({"toolResponse": {"functionResponses": responses}})
 
     async def trigger_response(self, instructions: Optional[str] = None) -> None:
+        self._start_turn_clock()
         text = instructions or "Greet the user as instructed."
         await self._send(
             {"clientContent": {"turns": [{"role": "user", "parts": [{"text": text}]}], "turnComplete": True}}
@@ -354,8 +363,15 @@ def _duration_to_ms(duration) -> Optional[int]:
 
 
 def _map_usage(usage: dict) -> dict:
-    return {
+    """Flatten Gemini usageMetadata, keeping the audio/text split that billing prices apart."""
+    mapped = {
         "input_tokens": usage.get("promptTokenCount", 0) or 0,
         "output_tokens": usage.get("responseTokenCount", 0) or 0,
         "cached_tokens": usage.get("cachedContentTokenCount", 0) or 0,
     }
+    for prefix, field in (("input", "promptTokensDetails"), ("output", "responseTokensDetails")):
+        for entry in usage.get(field) or []:
+            modality = (entry.get("modality") or "").lower()
+            if modality in ("audio", "text"):
+                mapped[f"{prefix}_{modality}_tokens"] = entry.get("tokenCount", 0) or 0
+    return mapped
