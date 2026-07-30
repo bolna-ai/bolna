@@ -7,6 +7,7 @@ from .enums import (
     TelephonyProvider,
     SynthesizerProvider,
     TranscriberProvider,
+    S2SProvider,
     ReasoningEffort,
     Verbosity,
     ExpressionOperator,
@@ -594,6 +595,65 @@ class ToolModel(BaseModel):
     tools_params: Dict[str, APIParams]
 
 
+class OpenAIRealtimeConfig(BaseModel):
+    model: str = "gpt-realtime-2.1"
+    voice: str = "marin"
+    turn_detection_type: str = "server_vad"
+    vad_threshold: Optional[float] = 0.5
+    vad_silence_duration_ms: Optional[int] = 500
+    vad_prefix_padding_ms: Optional[int] = 300
+    reasoning_effort: Optional[ReasoningEffort] = None
+    max_output_tokens: Optional[int] = None
+    transcription_model: Optional[str] = "gpt-4o-mini-transcribe"
+
+    @model_validator(mode="after")
+    def validate_reasoning(self):
+        if self.reasoning_effort:
+            if self.model not in MODEL_REASONING_EFFORT_MAP:
+                raise ValueError(f"reasoning_effort is not supported for realtime model '{self.model}'.")
+            validate_reasoning_effort_for_model(self.model, self.reasoning_effort.value)
+        return self
+
+
+class GeminiLiveConfig(BaseModel):
+    model: str = "gemini-3.1-flash-live-preview"
+    voice: str = "Kore"
+    language: Optional[str] = None
+    temperature: Optional[float] = None
+    start_sensitivity: Optional[str] = None
+    end_sensitivity: Optional[str] = None
+    vad_silence_duration_ms: Optional[int] = None
+    vad_prefix_padding_ms: Optional[int] = None
+    # Gemini closes an audio session at ~15 minutes, so both stay on unless explicitly disabled.
+    enable_session_resumption: bool = True
+    enable_context_compression: bool = True
+
+
+S2S_PROVIDER_CONFIGS = {
+    S2SProvider.OPENAI_REALTIME.value: OpenAIRealtimeConfig,
+    S2SProvider.GEMINI_LIVE.value: GeminiLiveConfig,
+}
+
+
+class S2SConfig(BaseModel):
+    provider: str
+    provider_config: Union[OpenAIRealtimeConfig, GeminiLiveConfig]
+    # Suppresses inbound audio while the agent opens, so its own greeting cannot trip provider VAD.
+    welcome_audio_gate_ms: Optional[int] = 1500
+
+    @model_validator(mode="before")
+    def preprocess(cls, values):
+        if not isinstance(values, dict):
+            return values
+        provider = values.get("provider")
+        validate_attribute(provider, S2SProvider.all_values())
+        config = values.get("provider_config") or {}
+        if isinstance(config, BaseModel):
+            config = config.model_dump()
+        values["provider_config"] = S2S_PROVIDER_CONFIGS[provider](**config)
+        return values
+
+
 class ToolsConfig(BaseModel):
     llm_agent: Optional[Union[LlmAgent, SimpleLlmAgent]] = None
     synthesizer: Optional[Synthesizer] = None
@@ -601,6 +661,7 @@ class ToolsConfig(BaseModel):
     input: Optional[IOModel] = None
     output: Optional[IOModel] = None
     api_tools: Optional[ToolModel] = None
+    s2s: Optional[S2SConfig] = None
     switch_tool_description: Optional[str] = None
     switch_handoff_messages: Optional[Dict[str, str]] = None
     agent_names: Optional[Dict[str, str]] = None

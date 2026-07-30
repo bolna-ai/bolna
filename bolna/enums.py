@@ -199,6 +199,7 @@ class HangupReason(str, Enum):
     SYNTHESIZER_ERROR = "synthesizer_error"
     LLM_ERROR = "llm_error"
     END_CALL_TOOL = "end_call_tool"
+    S2S_ERROR = "s2s_error"
 
     @classmethod
     def all_values(cls):
@@ -216,6 +217,7 @@ class LogComponent(str, Enum):
     LLM_LANGUAGE_DETECTION = "llm_language_detection"
     LLM_LANGUAGE_SWITCH = "llm_language_switch"
     LLM_VOICEMAIL = "llm_voicemail"
+    S2S = "s2s"
     SYNTHESIZER = "synthesizer"
     TRANSCRIBER = "transcriber"
     WARNING = "warning"
@@ -291,6 +293,17 @@ class NodeType(str, Enum):
     LLM = "llm"
     STATIC = "static"
     ROUTER = "router"
+
+
+class S2SProvider(str, Enum):
+    """Enum for speech-to-speech providers."""
+
+    OPENAI_REALTIME = "openai_realtime"
+    GEMINI_LIVE = "gemini_live"
+
+    @classmethod
+    def all_values(cls):
+        return [p.value for p in cls]
 
 
 class ToolScope(str, Enum):
