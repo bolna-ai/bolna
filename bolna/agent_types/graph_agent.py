@@ -1019,7 +1019,10 @@ class GraphAgent(BaseAgent):
     def _get_prompt_with_example(self, node: dict, detected_lang: str) -> str:
         """Get node prompt with the language directive (and example, when available) appended."""
         prompt = node.get("prompt", "")
-        examples = node.get("examples", {})
+        # `or {}`, not a .get default: agent JSONs carry "examples": null explicitly, and a
+        # .get default only covers a MISSING key. None here crashed generate() on every turn
+        # and the agent spoke the exception text (topaz 574cd2f9, 31/31 nodes examples:null).
+        examples = node.get("examples") or {}
 
         if detected_lang:
             # Directive is unconditional once the language is known. It used to be emitted only

@@ -6,6 +6,10 @@ Hindi. Cause: `_get_prompt_with_example` emitted the LANGUAGE GUIDELINES block o
 `detected_lang in node["examples"]`; nodes without examples dropped the language instruction
 entirely, and graph agents read no other language channel (`_build_messages` strips system
 messages from history, so the TaskManager-side pin never reaches them).
+
+QA 574cd2f9 (regression in the first fix): agent JSONs carry "examples": null EXPLICITLY, and
+`node.get("examples", {})` returns None for those — `.get` on it crashed generate() on every
+turn and the agent spoke the exception text. Hence `or {}` and the null tests below.
 """
 
 from unittest.mock import MagicMock
@@ -17,6 +21,16 @@ BUILD = GraphAgent._get_prompt_with_example
 
 def _prompt(node, lang):
     return BUILD(MagicMock(), node, lang)
+
+
+def test_examples_null_does_not_crash_and_still_gets_the_directive():
+    # The 574cd2f9 shape: "examples": null on the node (all 31 nodes of agent 005a0864).
+    out = _prompt({"prompt": "P", "examples": None}, "en")
+    assert "LANGUAGE GUIDELINES" in out and "English" in out
+
+
+def test_examples_null_without_language_is_the_bare_prompt():
+    assert _prompt({"prompt": "P", "examples": None}, None) == "P"
 
 
 def test_directive_without_any_examples():
