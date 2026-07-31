@@ -613,8 +613,10 @@ class TaskManager(BaseManager):
         self.conversation_config = None
 
         if task_id == 0:
-            provider_config = self.task_config["tools_config"]["synthesizer"].get("provider_config")
-            self.synthesizer_voice = provider_config["voice"]
+            # An S2S task carries no synthesizer block; its voice lives on the s2s config.
+            synthesizer_config = self.task_config["tools_config"].get("synthesizer") or {}
+            provider_config = synthesizer_config.get("provider_config") or {}
+            self.synthesizer_voice = provider_config.get("voice")
             self.hangup_detail = None
             self.end_call_primary = False  # set below if task_config opts in
 
@@ -659,7 +661,10 @@ class TaskManager(BaseManager):
             # for long pauses and rushing
             if self.conversation_config is not None:
                 # TODO need to get this for azure - for azure the subtraction would not happen
-                self.minimum_wait_duration = self.task_config["tools_config"]["transcriber"]["endpointing"]
+                # No transcriber on an S2S task: the provider owns endpointing.
+                self.minimum_wait_duration = (self.task_config["tools_config"].get("transcriber") or {}).get(
+                    "endpointing"
+                )
                 self.last_spoken_timestamp = time.time() * 1000
                 self.incremental_delay = self.conversation_config.get("incremental_delay", 100)
 
@@ -7337,28 +7342,35 @@ class TaskManager(BaseManager):
     # Speech-to-speech conversation
     ########################
 
-    def _s2s_is_carrier_leg(self):
-        """True when the media stream is a telephony bridge rather than a browser leg."""
+    def _s2s_telephony_provider(self):
+        """Carrier behind the media stream, or None for browser and playground legs."""
         if self.turn_based_conversation or self.is_web_based_call:
-            return False
-        return self.task_config["tools_config"]["input"]["provider"] in SUPPORTED_OUTPUT_TELEPHONY_HANDLERS
+            return None
+        provider = self.task_config["tools_config"]["input"]["provider"]
+        return provider if provider in SUPPORTED_OUTPUT_TELEPHONY_HANDLERS else None
+
+    def _s2s_is_carrier_leg(self):
+        return self._s2s_telephony_provider() is not None
 
     def _s2s_input_format(self):
         """Format of the caller audio arriving on audio_queue.
 
-        Mirrors what the transcriber path selects, so a config that works for the ASR
-        pipeline behaves identically here. Every carrier bridge streams 8k mu-law; the
-        browser and FreeSWITCH legs carry linear PCM at 16k.
+        Reads the same TelephonyProvider.mulaw_values() the transcribers use, so a carrier
+        that streams linear16 (plivo, exotel, vobiz) is not decoded as mu-law. Browser and
+        playground legs carry linear PCM at 16k.
         """
-        if self._s2s_is_carrier_leg():
+        provider = self._s2s_telephony_provider()
+        if provider is None:
+            return s2s_events.AudioFormat(s2s_events.AudioEncoding.PCM, 16000)
+        if provider in TelephonyProvider.mulaw_values():
             return s2s_events.AudioFormat(s2s_events.AudioEncoding.MULAW, 8000)
-        return s2s_events.AudioFormat(s2s_events.AudioEncoding.PCM, 16000)
+        return s2s_events.AudioFormat(s2s_events.AudioEncoding.PCM, 8000)
 
     def _s2s_output_format(self):
         """Format the output handler expects.
 
-        Not the mirror of the input: a web call sends 16k up and plays 24k back, so the
-        two legs are resolved separately.
+        Not the mirror of the input: plivo accepts mu-law while streaming linear16 up, and
+        a web call sends 16k up but plays 24k back, so the two legs resolve separately.
         """
         if self._s2s_is_carrier_leg():
             return s2s_events.AudioFormat(s2s_events.AudioEncoding.MULAW, 8000)
@@ -7463,6 +7475,9 @@ class TaskManager(BaseManager):
             if data is None:
                 if message.get("meta_info", {}).get("eos"):
                     logger.info(f"S2S ingest: EOS received | sent={sent} discarded={discarded}")
+                    # The provider goes quiet once audio stops, so the event loop would park
+                    # on its socket forever unless the hangup is published here.
+                    self.conversation_ended = True
                     break
                 continue
 
@@ -7556,6 +7571,9 @@ class TaskManager(BaseManager):
 
     def _s2s_meta(self, **extra):
         meta = {
+            # DefaultOutputHandler.handle indexes meta_info["type"] before anything else and
+            # swallows the KeyError by closing itself, silencing the whole browser leg.
+            "type": "audio",
             "io": self.tools["output"].get_provider() if not self.default_io else "default",
             "sequence_id": -1,
             "format": self._s2s_output.encoding.value,
@@ -7568,6 +7586,9 @@ class TaskManager(BaseManager):
     async def _s2s_drop_queued_audio(self):
         if "output" in self.tools:
             await self.tools["output"].handle_interruption()
+        # handle_interruption clears the pending final-chunk mark, and that mark's echo is
+        # the only thing that would otherwise flip this flag back off.
+        self.tools["input"].update_is_audio_being_played(False)
         while not self.buffered_output_queue.empty():
             try:
                 self.buffered_output_queue.get_nowait()
@@ -7674,8 +7695,8 @@ class TaskManager(BaseManager):
             run_id=self.run_id,
         )
 
-        if event.name.startswith(END_CALL_FUNCTION_PREFIX):
-            self._s2s_hangup_after_response = True
+        ends_call = event.name.startswith(END_CALL_FUNCTION_PREFIX)
+        if ends_call:
             result = json.dumps({"status": "success", "message": "Call is ending now. Say a brief goodbye."})
         elif event.name.startswith("transfer_call"):
             if self.has_transfer:
@@ -7700,6 +7721,10 @@ class TaskManager(BaseManager):
         )
         await s2s.send_function_result(event.call_id, event.name, result)
         await s2s.commit_function_results()
+        if ends_call:
+            # Armed only once the commit returns. commit waits on the tool-call turn's own
+            # response.done, so the next turn to complete is the goodbye, not this one.
+            self._s2s_hangup_after_response = True
 
     async def _s2s_call_api_tool(self, event, args, params, meta_info):
         url = params.get("url")
@@ -7945,12 +7970,20 @@ class TaskManager(BaseManager):
                 if hasattr(self, "transcriber_task") and self.transcriber_task is not None:
                     tasks_to_cancel.append(process_task_cancellation(self.transcriber_task, "transcriber_task"))
 
-            if self._is_conversation_task() and "transcriber" in self.tools and "synthesizer" in self.tools:
-                self.transcriber_latencies.connection_latency_ms = self.tools["transcriber"].connection_time
-                self.synthesizer_latencies.connection_latency_ms = self.tools["synthesizer"].connection_time
+            # An S2S task has neither transcriber nor synthesizer, but still owes the caller
+            # a conversation payload: transcript, hangup detail, recording, progression.
+            _has_asr_tts = "transcriber" in self.tools and "synthesizer" in self.tools
+            if self._is_conversation_task() and (_has_asr_tts or "s2s" in self.tools):
+                if _has_asr_tts:
+                    self.transcriber_latencies.connection_latency_ms = self.tools["transcriber"].connection_time
+                    self.synthesizer_latencies.connection_latency_ms = self.tools["synthesizer"].connection_time
 
-                self.transcriber_latencies.turn_latencies = self.tools["transcriber"].turn_latencies
-                self.synthesizer_latencies.turn_latencies = self.tools["synthesizer"].turn_latencies
+                    self.transcriber_latencies.turn_latencies = self.tools["transcriber"].turn_latencies
+                    self.synthesizer_latencies.turn_latencies = self.tools["synthesizer"].turn_latencies
+                elif "s2s" in self.tools:
+                    # One socket covers both legs, so its timings land on the LLM component.
+                    self.llm_latencies.connection_latency_ms = self.tools["s2s"].connection_time
+                    self.llm_latencies.turn_latencies = self.tools["s2s"].turn_latencies
 
                 # Annotate each transcriber turn with was_interrupted so callers
                 # can see which ASR turns had a user barge-in without cross-referencing
@@ -8020,7 +8053,9 @@ class TaskManager(BaseManager):
                     "call_sid": self.call_sid,
                     "stream_sid": self.stream_sid,
                     "transcriber_duration": self.transcriber_duration,
-                    "synthesizer_characters": self.tools["synthesizer"].get_synthesized_characters(),
+                    "synthesizer_characters": (
+                        self.tools["synthesizer"].get_synthesized_characters() if _has_asr_tts else 0
+                    ),
                     "ended_by_assistant": self.ended_by_assistant,
                     "latency_dict": {
                         "llm_latencies": self.llm_latencies.model_dump(),

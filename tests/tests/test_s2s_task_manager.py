@@ -15,7 +15,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from bolna.agent_manager.task_manager import TaskManager
-from bolna.enums import HangupReason
+from bolna.enums import HangupReason, TelephonyProvider
 from bolna.helpers.utils import pcm_to_ulaw
 from bolna.s2s import events as s2s_events
 from bolna.s2s.events import AudioEncoding, AudioFormat
@@ -76,12 +76,24 @@ def make_tm(*, io_provider="plivo", web=False, turn_based=False, in_rate=24000, 
 
 
 class TestIOFormatSelection:
-    @pytest.mark.parametrize("provider", ["plivo", "twilio", "exotel", "vobiz", "sip-trunk"])
-    def test_every_carrier_leg_is_8k_mulaw_both_ways(self, provider):
-        # Plivo is the primary carrier and streams mu-law like the rest; treating it as
-        # linear PCM would send noise to the model.
+    @pytest.mark.parametrize("provider", ["twilio", "sip-trunk"])
+    def test_mulaw_carriers_are_mulaw_both_ways(self, provider):
         tm = make_tm(io_provider=provider)
         assert tm._s2s_input_format() == AudioFormat(AudioEncoding.MULAW, 8000)
+        assert tm._s2s_output_format() == AudioFormat(AudioEncoding.MULAW, 8000)
+
+    @pytest.mark.parametrize("provider", ["plivo", "twilio", "exotel", "vobiz", "sip-trunk"])
+    def test_input_encoding_matches_what_the_transcribers_use(self, provider):
+        # TelephonyProvider.mulaw_providers() is the single source of truth. Assuming every
+        # carrier is mu-law fed linear PCM through ulaw_to_pcm and sent the model noise.
+        tm = make_tm(io_provider=provider)
+        expected = AudioEncoding.MULAW if provider in TelephonyProvider.mulaw_values() else AudioEncoding.PCM
+        assert tm._s2s_input_format() == AudioFormat(expected, 8000)
+
+    @pytest.mark.parametrize("provider", ["plivo", "exotel", "vobiz"])
+    def test_linear_carriers_stream_pcm_up_and_take_mulaw_down(self, provider):
+        tm = make_tm(io_provider=provider)
+        assert tm._s2s_input_format() == AudioFormat(AudioEncoding.PCM, 8000)
         assert tm._s2s_output_format() == AudioFormat(AudioEncoding.MULAW, 8000)
 
     def test_web_call_sends_16k_and_plays_back_24k(self):
@@ -131,10 +143,40 @@ class TestOutputHandlerSetup:
         assert self._setup("default", web=True).sampling_rate == 24000
 
 
+class TestLinearCarrierIngest:
+    @pytest.mark.asyncio
+    async def test_plivo_pcm_is_not_decoded_as_mulaw(self):
+        # The bug: ulaw_to_pcm() over linear PCM expands each 2-byte sample into two
+        # garbage samples, so the model heard noise at double duration on the primary carrier.
+        tm = make_tm(io_provider="plivo", in_rate=24000)
+        pcm_8k = _silence_pcm(160)  # 20ms @ 8kHz linear
+        await tm.audio_queue.put({"data": pcm_8k, "meta_info": {}})
+        await tm.audio_queue.put({"data": None, "meta_info": {"eos": True}})
+
+        await tm._s2s_audio_ingest_loop()
+
+        sent = tm.tools["s2s"].send_audio.await_args.args[0]
+        # 160 samples @8k -> 480 samples @24k -> 960 bytes. Mis-decoding would give 1920.
+        assert len(sent) == 960
+
+
+class TestLoopTermination:
+    @pytest.mark.asyncio
+    async def test_eos_ends_the_conversation_so_the_event_loop_can_exit(self):
+        # The event loop parks on the provider socket, which goes quiet after hangup. If EOS
+        # does not publish conversation_ended, gather() never returns and teardown stalls.
+        tm = make_tm()
+        await tm.audio_queue.put({"data": None, "meta_info": {"eos": True}})
+
+        await tm._s2s_audio_ingest_loop()
+
+        assert tm.conversation_ended is True
+
+
 class TestAudioIngest:
     @pytest.mark.asyncio
     async def test_mulaw_carrier_audio_is_decoded_and_upsampled(self):
-        tm = make_tm(io_provider="plivo", in_rate=24000)
+        tm = make_tm(io_provider="twilio", in_rate=24000)
         mulaw = pcm_to_ulaw(_silence_pcm(160))  # 20ms @ 8kHz
         await tm.audio_queue.put({"data": mulaw, "meta_info": {}})
         await tm.audio_queue.put({"data": None, "meta_info": {"eos": True}})
@@ -147,7 +189,7 @@ class TestAudioIngest:
 
     @pytest.mark.asyncio
     async def test_gemini_gets_16k_not_24k(self):
-        tm = make_tm(io_provider="plivo", in_rate=16000)
+        tm = make_tm(io_provider="twilio", in_rate=16000)
         await tm.audio_queue.put({"data": pcm_to_ulaw(_silence_pcm(160)), "meta_info": {}})
         await tm.audio_queue.put({"data": None, "meta_info": {"eos": True}})
 
@@ -169,7 +211,7 @@ class TestAudioIngest:
 
     @pytest.mark.asyncio
     async def test_welcome_gate_discards_inbound_audio(self):
-        tm = make_tm(io_provider="plivo")
+        tm = make_tm(io_provider="twilio")
         tm._s2s_welcome_gate_ms = 60_000
         tm._s2s_started_at = time.time()
         await tm.audio_queue.put({"data": pcm_to_ulaw(_silence_pcm(160)), "meta_info": {}})
@@ -200,6 +242,11 @@ class TestAudioOutput:
         tm._s2s_hangup_after_response = True
         assert tm._s2s_meta()["message_category"] == "agent_hangup"
 
+    def test_meta_carries_the_type_the_web_output_handler_indexes(self):
+        # DefaultOutputHandler.handle reads meta_info["type"] first and swallows the KeyError
+        # by closing itself, which silenced the entire browser leg with no error surfaced.
+        assert make_tm(io_provider="default", web=True)._s2s_meta()["type"] == "audio"
+
 
 class TestBargeIn:
     @pytest.mark.asyncio
@@ -212,6 +259,15 @@ class TestBargeIn:
 
         assert tm.buffered_output_queue.empty()
         tm.tools["output"].handle_interruption.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_barge_in_releases_the_audio_playing_flag(self):
+        # handle_interruption clears the pending final-chunk mark, and that mark's echo is
+        # the only thing that would flip this back off. Latched True, the inactivity
+        # watchdog never fires and the call stays open and billing.
+        tm = make_tm()
+        await tm._s2s_drop_queued_audio()
+        tm.tools["input"].update_is_audio_being_played.assert_called_with(False)
 
 
 class TestToolDispatch:
@@ -226,6 +282,24 @@ class TestToolDispatch:
         result = json.loads(tm.tools["s2s"].send_function_result.await_args.args[2])
         assert result["status"] == "success"
         tm.tools["s2s"].commit_function_results.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_hangup_is_armed_only_after_the_commit(self):
+        # Arming it before the commit let the tool-call turn's own response.done consume the
+        # flag, cutting the caller off before the goodbye was ever spoken. commit waits on
+        # that response.done, so anything armed after it can only fire on the goodbye.
+        tm = make_tm()
+        armed_at_commit = {}
+
+        async def record_state():
+            armed_at_commit["value"] = tm._s2s_hangup_after_response
+
+        tm.tools["s2s"].commit_function_results = AsyncMock(side_effect=record_state)
+        with patch("bolna.agent_manager.task_manager.convert_to_request_log"):
+            await tm._s2s_execute_tool(s2s_events.FunctionCall(name="end_call", call_id="c1", arguments="{}"))
+
+        assert armed_at_commit["value"] is False
+        assert tm._s2s_hangup_after_response is True
 
     @pytest.mark.asyncio
     async def test_hangup_runs_once_the_turn_completes(self):

@@ -262,6 +262,31 @@ class TestOpenAIEventMapping:
         assert not [e for e in await drain(provider) if isinstance(e, AudioDelta)]
 
     @pytest.mark.asyncio
+    async def test_recoverable_errors_do_not_kill_the_call(self):
+        # Cancelling an already-finished response and racing response.create are routine
+        # mid-call complaints. Treating them as fatal hung up live calls and marked the
+        # provider unhealthy in the circuit breaker.
+        provider = make_openai()
+        provider._ws = FakeWS(
+            [
+                {"type": "error", "error": {"message": "Cancellation failed", "code": "response_cancel_not_active"}},
+                {
+                    "type": "error",
+                    "error": {"message": "active response", "code": "conversation_already_has_active_response"},
+                },
+            ]
+        )
+        errors = [e for e in await drain(provider) if isinstance(e, S2SError)]
+        assert len(errors) == 2
+        assert all(not e.fatal for e in errors)
+
+    @pytest.mark.asyncio
+    async def test_unknown_errors_stay_fatal(self):
+        provider = make_openai()
+        provider._ws = FakeWS([{"type": "error", "error": {"message": "boom", "code": "server_error"}}])
+        assert next(e for e in await drain(provider) if isinstance(e, S2SError)).fatal is True
+
+    @pytest.mark.asyncio
     async def test_closed_socket_surfaces_as_error(self):
         provider = make_openai()
         ws = FakeWS([])

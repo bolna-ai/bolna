@@ -27,6 +27,17 @@ OPENAI_REALTIME_URL = "wss://api.openai.com/v1/realtime"
 # gpt-realtime-2 and its point releases accept reasoning.effort; 1.5 rejects it.
 REASONING_MODEL_PREFIXES = ("gpt-realtime-2",)
 
+# Turn-level complaints the session survives. Cancelling a response that already finished
+# and racing response.create against an active response both land here, and neither is a
+# reason to drop a live call or mark the provider unhealthy.
+RECOVERABLE_ERROR_CODES = frozenset(
+    {
+        "response_cancel_not_active",
+        "conversation_already_has_active_response",
+        "invalid_request_error",
+    }
+)
+
 
 class OpenAIRealtimeS2S(BaseS2SProvider):
     """OpenAI Realtime API speech-to-speech provider.
@@ -237,7 +248,12 @@ class OpenAIRealtimeS2S(BaseS2SProvider):
                 error = event.get("error", {})
                 # A failed response frees the turn; without this the next commit would stall.
                 self._response_done_event.set()
-                yield S2SError(message=error.get("message", "Unknown error"), code=error.get("code", ""))
+                code = error.get("code", "") or ""
+                yield S2SError(
+                    message=error.get("message", "Unknown error"),
+                    code=code,
+                    fatal=code not in RECOVERABLE_ERROR_CODES,
+                )
 
             else:
                 logger.debug(f"OpenAI Realtime unhandled event: {event_type}")
