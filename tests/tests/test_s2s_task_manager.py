@@ -172,6 +172,41 @@ class TestLoopTermination:
 
         assert tm.conversation_ended is True
 
+    @pytest.mark.asyncio
+    async def test_hangup_tears_down_while_the_provider_socket_is_still_quiet(self):
+        # conversation_ended alone does not wake a reader parked on a silent socket, so
+        # joining on both loops left the call hung: no teardown, no post-call, execution
+        # stuck in-progress until the provider's own session limit fired.
+        tm = make_tm(io_provider="default", web=True, in_rate=16000)
+        tm.conversation_config = {}
+        tm.s2s = SimpleNamespace(welcome_audio_gate_ms=0)
+        tm.kwargs["agent_welcome_message"] = ""
+        provider = tm.tools["s2s"]
+        provider.connect = AsyncMock()
+        provider.disconnect = AsyncMock()
+
+        async def never_speaks():
+            await asyncio.Event().wait()
+            yield  # pragma: no cover
+
+        provider.receive_events = never_speaks
+        await tm.audio_queue.put({"data": None, "meta_info": {"eos": True}})
+
+        with (
+            patch.object(TaskManager, "_build_s2s_provider", return_value=provider),
+            patch.object(TaskManager, "_s2s_output_loop", AsyncMock()),
+            patch.object(TaskManager, "_TaskManager__check_for_completion", AsyncMock()),
+        ):
+            runner = asyncio.create_task(tm._run_s2s_conversation())
+            # Deliberately not wait_for: the run loop swallows CancelledError, so a timeout
+            # cancellation would surface as a clean return and the hang would go unnoticed.
+            done, _ = await asyncio.wait({runner}, timeout=5)
+            if runner not in done:
+                runner.cancel()
+                pytest.fail("run loop did not tear down after the caller hung up")
+
+        provider.disconnect.assert_awaited_once()
+
 
 class TestAudioIngest:
     @pytest.mark.asyncio

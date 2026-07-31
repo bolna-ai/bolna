@@ -7444,7 +7444,12 @@ class TaskManager(BaseManager):
             asyncio.create_task(self._s2s_event_loop()),
         ]
         try:
-            await asyncio.gather(*loops)
+            # Either loop finishing ends the call — the caller hung up, or the provider
+            # socket closed. Waiting on both would park here for the rest of the session:
+            # a provider that has stopped being spoken to sends nothing to wake its reader.
+            done, _ = await asyncio.wait(loops, return_when=asyncio.FIRST_COMPLETED)
+            for task in done:
+                task.result()
         except asyncio.CancelledError:
             pass
         finally:
@@ -7455,6 +7460,7 @@ class TaskManager(BaseManager):
                 task.cancel()
             if self._s2s_tool_tasks:
                 await asyncio.gather(*self._s2s_tool_tasks, return_exceptions=True)
+            await asyncio.gather(*loops, return_exceptions=True)
             await s2s.disconnect()
         logger.info("S2S conversation completed")
 
