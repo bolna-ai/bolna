@@ -94,7 +94,12 @@ class GeminiLiveS2S(BaseS2SProvider):
 
     async def _open_session(self) -> None:
         url = f"{GEMINI_LIVE_URL}?key={self.api_key}"
+        started = time.time()
         self._ws = await websockets.connect(url, max_size=None)
+        # The handshake has three stages that fail differently — a blocked socket, a
+        # rejected setup, and a model that never acknowledges — and they are
+        # indistinguishable from one another once the call has already ended.
+        logger.debug(f"Gemini Live socket open in {round((time.time() - started) * 1000)}ms")
         await self._send({"setup": self._build_setup()})
 
         # Gemini requires setupComplete before any other client message.
@@ -103,6 +108,7 @@ class GeminiLiveS2S(BaseS2SProvider):
         if "setupComplete" not in message:
             error = message.get("error", {})
             raise ConnectionError(f"Gemini Live setup failed: {error.get('message', json.dumps(message)[:200])}")
+        logger.debug(f"Gemini Live setup acknowledged in {round((time.time() - started) * 1000)}ms")
 
     def _build_setup(self) -> dict:
         generation_config: dict = {

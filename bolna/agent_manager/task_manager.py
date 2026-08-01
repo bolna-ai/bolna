@@ -7427,9 +7427,23 @@ class TaskManager(BaseManager):
         self._s2s_turn_seq = 0
         self._s2s_playout_until = 0.0
 
+        logger.info(f"S2S connecting | provider={self.s2s_provider_name} model={self.s2s_model}")
         try:
             await s2s.connect()
+        except asyncio.CancelledError:
+            # CancelledError is a BaseException, so it skips the handler below and the one
+            # in run() swallows it. Without this line a call torn down mid-handshake ends
+            # with no error anywhere: no S2S start line, no exception, just a clean finish.
+            logger.error(
+                f"S2S connect cancelled after {round((time.time() - self._s2s_started_at) * 1000)}ms | "
+                f"provider={self.s2s_provider_name} model={self.s2s_model}"
+            )
+            raise
         except Exception as e:
+            logger.error(
+                f"S2S connect failed after {round((time.time() - self._s2s_started_at) * 1000)}ms | "
+                f"provider={self.s2s_provider_name} model={self.s2s_model} error={type(e).__name__}: {e}"
+            )
             await self._report_provider_health(
                 "s2s", self.s2s_provider_name, self.s2s_model, False, phase="connect", blocking=True
             )
@@ -7887,10 +7901,20 @@ class TaskManager(BaseManager):
                 try:
                     await asyncio.gather(*tasks)
                 except asyncio.CancelledError:
-                    pass
+                    # Cancellation is a normal hangup, but it also lands here when a task is
+                    # torn down before it ever got going, which is indistinguishable from a
+                    # clean finish in the log otherwise.
+                    logger.info(f"Conversation tasks cancelled | pending={sum(1 for t in tasks if not t.done())}")
                 except Exception as e:
                     if not isinstance(e, BolnaComponentError):
                         logger.error(f"Error: {e}")
+                    else:
+                        # Typed component errors were only ever written to the request log, so
+                        # a failed provider connect left nothing in the app log to find.
+                        logger.error(
+                            f"Component error | component={e.component} provider={e.provider} "
+                            f"model={e.model} error={e}"
+                        )
                     if self.run_id and not self._error_logged:
                         if isinstance(e, BolnaComponentError):
                             error_msg = format_error_message(e.component, e.provider or e.model or "-", str(e))
