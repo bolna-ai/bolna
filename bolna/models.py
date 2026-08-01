@@ -598,7 +598,13 @@ class ToolModel(BaseModel):
 class OpenAIRealtimeConfig(BaseModel):
     model: str = "gpt-realtime-2.1"
     voice: str = "marin"
-    turn_detection_type: str = "server_vad"
+    # semantic_vad scores whether the caller has actually finished from what they said, so
+    # it waits longer on a trailing "ummm" than on a finished sentence. That is the job the
+    # llm pipeline does with a word count and a phrase list, done by a model instead.
+    turn_detection_type: str = "semantic_vad"
+    # auto | low | medium | high. Lower gives the caller longer before the model takes over.
+    eagerness: Optional[str] = "auto"
+    # server_vad only; ignored under semantic_vad.
     vad_threshold: Optional[float] = 0.5
     vad_silence_duration_ms: Optional[int] = 500
     vad_prefix_padding_ms: Optional[int] = 300
@@ -623,7 +629,9 @@ class GeminiLiveConfig(BaseModel):
     temperature: Optional[float] = None
     start_sensitivity: Optional[str] = None
     end_sensitivity: Optional[str] = None
-    vad_silence_duration_ms: Optional[int] = None
+    # Gemini's guide puts the usable band at 500-800ms: below it utterances fragment and
+    # transcription quality drops, above it the caller waits on every reply.
+    vad_silence_duration_ms: Optional[int] = 600
     vad_prefix_padding_ms: Optional[int] = None
     # Gemini closes an audio session at ~15 minutes, so both stay on unless explicitly disabled.
     enable_session_resumption: bool = True

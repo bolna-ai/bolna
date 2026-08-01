@@ -58,7 +58,8 @@ class OpenAIRealtimeS2S(BaseS2SProvider):
         model: str,
         api_key: str,
         tools: Optional[List[dict]] = None,
-        turn_detection_type: str = "server_vad",
+        turn_detection_type: str = "semantic_vad",
+        eagerness: Optional[str] = "auto",
         vad_threshold: float = 0.5,
         vad_silence_duration_ms: int = 500,
         vad_prefix_padding_ms: int = 300,
@@ -77,6 +78,7 @@ class OpenAIRealtimeS2S(BaseS2SProvider):
             **kwargs,
         )
         self.turn_detection_type = turn_detection_type
+        self.eagerness = eagerness
         self.vad_threshold = vad_threshold
         self.vad_silence_duration_ms = vad_silence_duration_ms
         self.vad_prefix_padding_ms = vad_prefix_padding_ms
@@ -156,6 +158,9 @@ class OpenAIRealtimeS2S(BaseS2SProvider):
                     "silence_duration_ms": self.vad_silence_duration_ms,
                 }
             )
+        elif self.eagerness:
+            # How long the classifier lets a hesitant caller keep the floor.
+            turn_detection["eagerness"] = self.eagerness
 
         config: dict = {
             "type": "realtime",

@@ -169,18 +169,35 @@ class TestOpenAISessionConfig:
         assert audio["output"]["voice"] == "marin"
 
     def test_server_vad_carries_tuning_params(self):
-        turn_detection = make_openai(vad_threshold=0.7, vad_silence_duration_ms=250)._build_session_config()["audio"][
-            "input"
-        ]["turn_detection"]
+        turn_detection = make_openai(
+            turn_detection_type="server_vad", vad_threshold=0.7, vad_silence_duration_ms=250
+        )._build_session_config()["audio"]["input"]["turn_detection"]
         assert turn_detection["type"] == "server_vad"
         assert turn_detection["threshold"] == 0.7
         assert turn_detection["silence_duration_ms"] == 250
 
+    def test_semantic_vad_is_the_default_and_carries_eagerness(self):
+        # A semantic classifier decides whether the caller actually finished, which the
+        # llm pipeline approximates with a word count and a phrase list.
+        turn_detection = make_openai()._build_session_config()["audio"]["input"]["turn_detection"]
+        assert turn_detection == {"type": "semantic_vad", "eagerness": "auto"}
+
     def test_semantic_vad_omits_threshold_tuning(self):
-        turn_detection = make_openai(turn_detection_type="semantic_vad")._build_session_config()["audio"]["input"][
+        turn_detection = make_openai(turn_detection_type="semantic_vad", eagerness=None)._build_session_config()[
+            "audio"
+        ]["input"]["turn_detection"]
+        assert turn_detection == {"type": "semantic_vad"}
+
+    def test_eagerness_is_tunable(self):
+        turn_detection = make_openai(eagerness="low")._build_session_config()["audio"]["input"]["turn_detection"]
+        assert turn_detection["eagerness"] == "low"
+
+    def test_server_vad_still_supported_for_explicit_opt_in(self):
+        turn_detection = make_openai(turn_detection_type="server_vad")._build_session_config()["audio"]["input"][
             "turn_detection"
         ]
-        assert turn_detection == {"type": "semantic_vad"}
+        assert turn_detection["type"] == "server_vad"
+        assert "eagerness" not in turn_detection
 
     def test_reasoning_sent_only_for_reasoning_models(self):
         assert "reasoning" in make_openai(model="gpt-realtime-2.1", reasoning_effort="low")._build_session_config()

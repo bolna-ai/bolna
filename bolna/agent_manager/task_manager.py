@@ -7495,6 +7495,11 @@ class TaskManager(BaseManager):
             f"model_in={s2s.input_sample_rate} model_out={s2s.output_sample_rate}"
         )
 
+        # Restart the gate clock now the handshake is done. Measured connects run 400ms to
+        # 1600ms against a 1500ms gate, so timing it from before connect left the welcome
+        # message with most of its barge-in protection already spent.
+        self._s2s_started_at = time.time()
+
         welcome = (self.kwargs.get("agent_welcome_message") or "").strip()
         if welcome:
             await s2s.trigger_response(
@@ -7646,6 +7651,13 @@ class TaskManager(BaseManager):
                     continue
                 # The provider reports every speech start here, so this is only a barge-in
                 # when the agent still had the floor.
+                #
+                # InterruptionManager is used for accounting only, never to veto: by the
+                # time this event arrives the provider's own VAD has already stopped
+                # generating, so nothing decided here can give the agent the floor back.
+                # Whether a cough counts as a barge-in is tuned at the provider instead,
+                # via semantic_vad eagerness on OpenAI and endOfSpeechSensitivity on Gemini,
+                # both of which classify better than a word count and a phrase list.
                 self.interruption_manager.on_user_speech_started()
                 if self._s2s_agent_has_floor():
                     logger.info("S2S: caller barged in, dropping queued audio")
