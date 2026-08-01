@@ -238,11 +238,24 @@ SARVAM_MODEL_SAMPLING_RATE_MAPPING = {
 }
 
 # bulbul TTS requires a concrete target_language_code (no "unknown"/auto).
+SARVAM_TTS_SUPPORTED_LANGUAGES = {
+    "en-IN",
+    "hi-IN",
+    "bn-IN",
+    "ta-IN",
+    "te-IN",
+    "kn-IN",
+    "ml-IN",
+    "mr-IN",
+    "gu-IN",
+    "pa-IN",
+    "od-IN",
+}
+
 # Maya matches the voice case-sensitively; "ananya" is a 400.
 MAYA_TTS_SUPPORTED_VOICES = {"Ananya", "Arjun"}
 
-# "en" is Indian English. "auto" lets Maya detect per utterance, which is what
-# romanized and mixed-script text needs.
+# "en" is Indian English; "auto" lets Maya detect per utterance.
 MAYA_TTS_SUPPORTED_LANGUAGES = {
     "hi",
     "bn",
@@ -256,20 +269,6 @@ MAYA_TTS_SUPPORTED_LANGUAGES = {
     "te",
     "en",
     "auto",
-}
-
-SARVAM_TTS_SUPPORTED_LANGUAGES = {
-    "en-IN",
-    "hi-IN",
-    "bn-IN",
-    "ta-IN",
-    "te-IN",
-    "kn-IN",
-    "ml-IN",
-    "mr-IN",
-    "gu-IN",
-    "pa-IN",
-    "od-IN",
 }
 
 MODEL_REASONING_EFFORT_MAP = {
