@@ -8,6 +8,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from bolna.models import Synthesizer
+from bolna.providers import SUPPORTED_SYNTHESIZER_MODELS
 from bolna.synthesizer.maya_synthesizer import MAYA_NATIVE_SAMPLE_RATE, MayaSynthesizer
 
 KEY = "maya_sk_test_dummy"
@@ -48,10 +50,30 @@ def test_voice_case_is_corrected_because_maya_matches_it_exactly():
     assert _synth(voice=" Ananya ").voice == "Ananya"
 
 
-def test_voice_id_is_accepted_as_an_alias_for_voice():
-    # Configs written against the other providers' shape use voice_id; it must not
-    # silently fall through to the default voice.
-    assert _synth(voice_id="Arjun").voice == "Arjun"
+def test_voice_id_survives_the_config_model_and_reaches_the_synthesizer():
+    """The dashboard writes voice_id for every provider. A model without the field drops it
+    silently and the caller hears the default voice, so this covers the whole path rather
+    than the constructor alone."""
+    cfg = Synthesizer(
+        provider="maya",
+        provider_config={"voice_id": "Arjun", "voice": "Arjun", "model": "Maya 2 Native", "language": "en"},
+        stream=True,
+    ).model_dump()
+    cfg.pop("caching", None)
+    cfg.pop("provider")
+    provider_config = cfg.pop("provider_config")
+    assert provider_config["voice_id"] == "Arjun"
+
+    s = SUPPORTED_SYNTHESIZER_MODELS["maya"](
+        **cfg, **provider_config, caching=True, synthesizer_key=KEY, task_manager_instance=MagicMock()
+    )
+    assert s.voice == "Arjun"
+
+
+def test_auto_lets_maya_detect_the_language_per_utterance():
+    # Advertised in Maya's own rejection frame and accepted live; raising here would fail
+    # the call at construction time, with no audio.
+    assert _synth(language="auto").language == "auto"
 
 
 @pytest.mark.parametrize(
@@ -176,6 +198,22 @@ def test_an_interrupted_turn_does_not_leave_stale_priming_state():
     s.sent.clear()
     asyncio.run(s.sender("", 2, end_of_llm_stream=True))
     assert s.sent[0] == {"type": "text", "text": " ", "flush": False}
+
+
+def test_a_barge_in_during_the_connection_wait_stops_the_sender():
+    """_wait_for_ws() can span a barge-in without the task being cancelled. Without a second
+    check the sender resumes, sends the primer and flush, and Maya answers `end` — emitting
+    end-of-stream for a sequence the pipeline already retired."""
+    s = _synth()
+    retired = {"yet": False}
+    s.task_manager_instance.is_sequence_id_in_current_ids.side_effect = lambda _: not retired["yet"]
+
+    async def wait_then_retire():
+        retired["yet"] = True  # the barge-in lands while we are parked here
+
+    s._wait_for_ws = AsyncMock(side_effect=wait_then_retire)
+    asyncio.run(s.sender("text for a turn that gets interrupted", 1, end_of_llm_stream=True))
+    assert s.sent == []
 
 
 def test_stale_sequence_sends_nothing():

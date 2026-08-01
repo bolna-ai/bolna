@@ -16,6 +16,7 @@ import websockets
 from websockets.exceptions import InvalidHandshake
 
 from .stream_synthesizer import StreamSynthesizer
+from bolna.constants import MAYA_TTS_SUPPORTED_LANGUAGES, MAYA_TTS_SUPPORTED_VOICES
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.ssl_context import get_ssl_context
 from bolna.helpers.utils import pcm_to_ulaw, pcm_to_wav_bytes, resample
@@ -26,9 +27,6 @@ logger = configure_logger(__name__)
 MAYA_NATIVE_SAMPLE_RATE = 24000
 MULAW_SAMPLE_RATE = 8000
 
-MAYA_VOICES = {"Ananya", "Arjun"}
-# "en" is Indian English. Omit the field entirely for code-switching text.
-MAYA_LANGUAGES = {"hi", "bn", "gu", "kn", "ml", "mr", "or", "pa", "ta", "te", "en"}
 MAYA_DEFAULT_MODEL = "Maya 2 Native"
 
 # Maya and ISO 639-1 spell Odia "or"; bolna also carries the "od" variant.
@@ -80,7 +78,7 @@ class MayaSynthesizer(StreamSynthesizer):
     @staticmethod
     def _normalise_voice(voice):
         """Normalise to the documented casing; Maya matches case-sensitively."""
-        for known in MAYA_VOICES:
+        for known in MAYA_TTS_SUPPORTED_VOICES:
             if isinstance(voice, str) and voice.strip().lower() == known.lower():
                 return known
         return voice
@@ -94,10 +92,12 @@ class MayaSynthesizer(StreamSynthesizer):
         return _LANGUAGE_ALIASES.get(primary, primary)
 
     def _validate_options(self):
-        if self.voice not in MAYA_VOICES:
-            raise ValueError(f"Maya voice must be one of {sorted(MAYA_VOICES)}, got {self.voice!r}")
-        if self.language is not None and self.language not in MAYA_LANGUAGES:
-            raise ValueError(f"Maya language must be one of {sorted(MAYA_LANGUAGES)}, got {self.language!r}")
+        if self.voice not in MAYA_TTS_SUPPORTED_VOICES:
+            raise ValueError(f"Maya voice must be one of {sorted(MAYA_TTS_SUPPORTED_VOICES)}, got {self.voice!r}")
+        if self.language is not None and self.language not in MAYA_TTS_SUPPORTED_LANGUAGES:
+            raise ValueError(
+                f"Maya language must be one of {sorted(MAYA_TTS_SUPPORTED_LANGUAGES)}, got {self.language!r}"
+            )
 
     def get_sleep_time(self):
         return 0.01
@@ -150,7 +150,7 @@ class MayaSynthesizer(StreamSynthesizer):
         target = self._normalise_language(language)
         if target == self.language:
             return
-        if target not in MAYA_LANGUAGES:
+        if target not in MAYA_TTS_SUPPORTED_LANGUAGES:
             logger.info(f"Maya TTS: detected language {language!r} not supported, keeping {self.language!r}")
             return
         self.language = target
@@ -196,6 +196,12 @@ class MayaSynthesizer(StreamSynthesizer):
             await self._wait_for_ws()
 
             if text != "":
+                # The wait above can span a barge-in, which retires this sequence without
+                # cancelling the task. Re-check before anything reaches the socket.
+                if not self.should_synthesize_response(sequence_id):
+                    logger.info(f"Not synthesizing (inner): sequence_id {sequence_id} not current")
+                    await self.flush_synthesizer_stream()
+                    return
                 try:
                     if self.ws_send_time is None:
                         self.ws_send_time = time.perf_counter()
@@ -213,7 +219,6 @@ class MayaSynthesizer(StreamSynthesizer):
                 needs_priming = not self._turn_has_text
                 self._turn_has_text = False
                 try:
-                    self._discard_audio = False
                     if needs_priming:
                         # Maya only answers a flush with `end` when an utterance is open, and an
                         # empty text frame does not open one -- whitespace does, with no audio.

@@ -112,11 +112,11 @@ class PixaConfig(BaseModel):
 class MayaConfig(BaseModel):
     # "Ananya" (female) or "Arjun" (male) — the only two voices, both speak every language.
     # Case-sensitive: Maya rejects "ananya" with a 400.
-    voice: str = "Ananya"
-    model: Optional[str] = "Maya 2 Native"
-    # One of hi/bn/gu/kn/ml/mr/or/pa/ta/te/en ("en" is Indian English). Region-qualified
-    # codes ("en-IN") are reduced to the primary subtag. Set null for code-switching text,
-    # so each script keeps its own pronunciation rules instead of being forced to one.
+    voice_id: str
+    voice: str
+    model: str
+    # One of hi/bn/gu/kn/ml/mr/or/pa/ta/te/en/auto. "en" is Indian English, "auto" lets Maya
+    # detect per utterance. Region-qualified codes ("en-IN") reduce to the primary subtag.
     language: Optional[str] = "en"
 
 
