@@ -85,8 +85,6 @@ class GeminiLiveS2S(BaseS2SProvider):
         self._pending_tool_results: list = []
         self._turn_usage = S2SUsage()
         self._current_response_transcript = ""
-        self._turn_start_time: Optional[float] = None
-        self._first_audio_recorded_this_turn = False
 
     async def connect(self) -> None:
         started = time.time()
@@ -258,7 +256,7 @@ class GeminiLiveS2S(BaseS2SProvider):
 
             if server_content.get("interrupted"):
                 self._current_response_transcript = ""
-                self._turn_start_time = None
+                self.cancel_turn()
                 yield Interrupted()
                 continue
 
@@ -279,21 +277,16 @@ class GeminiLiveS2S(BaseS2SProvider):
                 inline_data = part.get("inlineData")
                 if not inline_data or not inline_data.get("data"):
                     continue
-                if self._turn_start_time and not self._first_audio_recorded_this_turn:
-                    self.first_audio_latencies.append((time.time() - self._turn_start_time) * 1000)
-                    self._first_audio_recorded_this_turn = True
+                self.record_first_audio()
                 yield AudioDelta(data=base64.b64decode(inline_data["data"]))
 
             if server_content.get("turnComplete"):
                 transcript = self._current_response_transcript.strip()
                 if transcript:
                     yield TranscriptDelta(content=transcript, is_final=True)
-                if self._turn_start_time:
-                    self.turn_latencies.append((time.time() - self._turn_start_time) * 1000)
-                self._current_response_transcript = ""
-                self._turn_start_time = None
-                self._first_audio_recorded_this_turn = False
                 turn_usage, self._turn_usage = self._turn_usage, S2SUsage()
+                self.end_turn(turn_usage)
+                self._current_response_transcript = ""
                 yield ResponseDone(transcript=transcript, usage=turn_usage)
 
     async def send_function_result(self, call_id: str, name: str, result: str) -> None:
@@ -307,10 +300,9 @@ class GeminiLiveS2S(BaseS2SProvider):
         self._pending_tool_results.append({"id": call_id, "name": name, "response": payload})
 
     def _start_turn_clock(self) -> None:
-        """Mark the point a turn was requested, for first-audio and turn latency."""
+        """Gemini can be prompted from several places; only the first one opens the turn."""
         if self._turn_start_time is None:
-            self._turn_start_time = time.time()
-            self._first_audio_recorded_this_turn = False
+            self.start_turn()
 
     async def commit_function_results(self) -> None:
         if not self._pending_tool_results:

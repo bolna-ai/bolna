@@ -1,3 +1,4 @@
+import time
 from abc import ABC, abstractmethod
 from typing import AsyncGenerator, List, Optional
 
@@ -38,10 +39,51 @@ class BaseS2SProvider(ABC):
         self.turn_latencies: list = []
         self.first_audio_latencies: list = []
         self.usage_total = S2SUsage()
+        self._turn_start_time: Optional[float] = None
+        self._turn_first_audio_ms: Optional[float] = None
 
     def _accumulate_usage(self, usage: S2SUsage) -> S2SUsage:
         self.usage_total = self.usage_total + usage
         return usage
+
+    def start_turn(self) -> None:
+        """Open the latency clock for one model response."""
+        self._turn_start_time = time.time()
+        self._turn_first_audio_ms = None
+
+    def cancel_turn(self) -> None:
+        """Drop the open turn: the caller barged in, so its timings never completed."""
+        self._turn_start_time = None
+        self._turn_first_audio_ms = None
+
+    def record_first_audio(self) -> None:
+        if self._turn_start_time is None or self._turn_first_audio_ms is not None:
+            return
+        self._turn_first_audio_ms = round((time.time() - self._turn_start_time) * 1000, 2)
+        self.first_audio_latencies.append(self._turn_first_audio_ms)
+
+    def end_turn(self, usage: Optional[S2SUsage] = None) -> None:
+        """Close the turn as an LLM-shaped latency entry.
+
+        Downstream observability reads turn_latencies as dicts keyed like the LLM
+        pipeline's, so an s2s turn has to arrive in that shape rather than as a
+        bare duration.
+        """
+        if self._turn_start_time is None:
+            return
+        entry = {
+            "sequence_id": len(self.turn_latencies),
+            "turn_id": len(self.turn_latencies),
+            "model": self.model,
+            "first_token_latency_ms": self._turn_first_audio_ms,
+            "total_stream_duration_ms": round((time.time() - self._turn_start_time) * 1000, 2),
+        }
+        if usage is not None:
+            entry["input_tokens"] = usage.input_tokens
+            entry["output_tokens"] = usage.output_tokens
+            entry["cached_tokens"] = usage.cached_tokens
+        self.turn_latencies.append(entry)
+        self.cancel_turn()
 
     @abstractmethod
     async def connect(self) -> None:

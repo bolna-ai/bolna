@@ -7870,7 +7870,9 @@ class TaskManager(BaseManager):
                     (
                         "transcriber_task",
                         TranscriberError,
-                        self.task_config.get("tools_config", {}).get("transcriber", {}).get("provider"),
+                        # An s2s task stores transcriber as an explicit None, so the key is
+                        # present and a default on .get() never fires.
+                        (self.task_config.get("tools_config", {}).get("transcriber") or {}).get("provider"),
                     ),
                 ]:
                     task = getattr(self, attr, None)

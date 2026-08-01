@@ -616,3 +616,89 @@ class TestS2SConfigModel:
 
     def test_reasoning_effort_accepted_for_reasoning_model(self):
         assert OpenAIRealtimeConfig(model="gpt-realtime-2.1", reasoning_effort="low").reasoning_effort == "low"
+
+
+class TestTurnLatencyRecords:
+    """turn_latencies feeds the same observability path as the LLM pipeline's, which
+    indexes each entry by key. Appending bare durations crashed post-call processing."""
+
+    @pytest.mark.asyncio
+    async def test_openai_turn_is_recorded_as_a_dict(self):
+        provider = make_openai()
+        attach_ws(
+            provider,
+            [
+                {"type": "response.created"},
+                {"type": "response.output_audio.delta", "delta": _b64(b"aud")},
+                {
+                    "type": "response.done",
+                    "response": {
+                        "usage": {
+                            "input_tokens": 30,
+                            "output_tokens": 12,
+                            "input_token_details": {"cached_tokens": 8},
+                        }
+                    },
+                },
+            ],
+        )
+        await drain(provider)
+
+        assert len(provider.turn_latencies) == 1
+        turn = provider.turn_latencies[0]
+        assert turn["sequence_id"] == 0
+        assert turn["model"] == provider.model
+        assert turn["first_token_latency_ms"] is not None
+        assert turn["total_stream_duration_ms"] >= turn["first_token_latency_ms"]
+        assert (turn["input_tokens"], turn["output_tokens"], turn["cached_tokens"]) == (30, 12, 8)
+
+    @pytest.mark.asyncio
+    async def test_gemini_turn_is_recorded_as_a_dict(self):
+        provider = make_gemini()
+        attach_ws(
+            provider,
+            [
+                # The caller speaking is what opens the turn; a model turn never arrives cold.
+                {"serverContent": {"inputTranscription": {"text": "hello"}}},
+                {"serverContent": {"modelTurn": {"parts": [{"inlineData": {"data": _b64(b"aud")}}]}}},
+                {"serverContent": {"turnComplete": True}},
+            ],
+        )
+        await drain(provider)
+
+        assert len(provider.turn_latencies) == 1
+        turn = provider.turn_latencies[0]
+        assert turn["sequence_id"] == 0
+        assert turn["model"] == provider.model
+        assert "total_stream_duration_ms" in turn
+
+    @pytest.mark.asyncio
+    async def test_barge_in_drops_the_turn_instead_of_recording_a_partial(self):
+        provider = make_openai()
+        attach_ws(
+            provider,
+            [
+                {"type": "response.created"},
+                {"type": "input_audio_buffer.speech_started"},
+                {"type": "response.done", "response": {}},
+            ],
+        )
+        await drain(provider)
+
+        assert provider.turn_latencies == []
+
+    @pytest.mark.asyncio
+    async def test_sequence_ids_increment_across_turns(self):
+        provider = make_openai()
+        attach_ws(
+            provider,
+            [
+                {"type": "response.created"},
+                {"type": "response.done", "response": {}},
+                {"type": "response.created"},
+                {"type": "response.done", "response": {}},
+            ],
+        )
+        await drain(provider)
+
+        assert [t["sequence_id"] for t in provider.turn_latencies] == [0, 1]

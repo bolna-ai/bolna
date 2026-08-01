@@ -84,8 +84,6 @@ class OpenAIRealtimeS2S(BaseS2SProvider):
 
         self._ws = None
         self._current_response_transcript = ""
-        self._turn_start_time: Optional[float] = None
-        self._first_audio_recorded_this_turn = False
         self._response_done_event = asyncio.Event()
         self._response_done_event.set()
 
@@ -201,9 +199,7 @@ class OpenAIRealtimeS2S(BaseS2SProvider):
             event_type = event.get("type", "")
 
             if event_type == "response.output_audio.delta":
-                if not self._first_audio_recorded_this_turn and self._turn_start_time:
-                    self.first_audio_latencies.append((time.time() - self._turn_start_time) * 1000)
-                    self._first_audio_recorded_this_turn = True
+                self.record_first_audio()
                 yield AudioDelta(data=base64.b64decode(event["delta"]))
 
             elif event_type == "response.output_audio_transcript.delta":
@@ -225,23 +221,21 @@ class OpenAIRealtimeS2S(BaseS2SProvider):
                 )
 
             elif event_type == "response.created":
-                self._turn_start_time = time.time()
-                self._first_audio_recorded_this_turn = False
+                self.start_turn()
                 self._response_done_event.clear()
 
             elif event_type == "response.done":
-                if self._turn_start_time:
-                    self.turn_latencies.append((time.time() - self._turn_start_time) * 1000)
-                    self._turn_start_time = None
+                usage = self._extract_usage(event)
+                self.end_turn(usage)
                 transcript = self._current_response_transcript.strip()
                 self._current_response_transcript = ""
                 self._response_done_event.set()
-                yield ResponseDone(transcript=transcript, usage=self._extract_usage(event))
+                yield ResponseDone(transcript=transcript, usage=usage)
 
             elif event_type == "input_audio_buffer.speech_started":
                 # Keep the transcript accumulated so far: the caller already heard that much,
                 # and response.done still needs to report it before clearing.
-                self._turn_start_time = None
+                self.cancel_turn()
                 yield Interrupted()
 
             elif event_type == "error":
