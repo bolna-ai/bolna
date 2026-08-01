@@ -7633,6 +7633,9 @@ class TaskManager(BaseManager):
     async def _s2s_finish_turn(self, event):
         if self._s2s_agent_speaking:
             self.interruption_manager.on_agent_speech_ended()
+            # A turn that produced audio and ran to completion is the agent recovering
+            # from whatever interrupted the previous one.
+            self.interruption_manager.on_successful_response_delivered(self._s2s_turn_seq)
             self._s2s_agent_speaking = False
         self._s2s_turn_seq += 1
 

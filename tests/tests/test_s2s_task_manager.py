@@ -378,6 +378,22 @@ class TestBargeInAccounting:
         tm.interruption_manager.on_agent_speech_ended.assert_called_once()
         assert tm._s2s_turn_seq == 1
 
+    @pytest.mark.asyncio
+    async def test_a_completed_turn_after_a_barge_in_counts_as_recovery(self):
+        tm = make_tm()
+        await self._run_events(
+            tm,
+            [
+                s2s_events.AudioDelta(data=_silence_pcm(4800)),
+                s2s_events.Interrupted(),
+                s2s_events.AudioDelta(data=_silence_pcm(4800)),
+                s2s_events.ResponseDone(transcript="sure", usage=None),
+            ],
+        )
+
+        tm.interruption_manager.on_interruption_triggered.assert_called_once()
+        tm.interruption_manager.on_successful_response_delivered.assert_called_once()
+
 
 class TestToolDispatch:
     @pytest.mark.asyncio
