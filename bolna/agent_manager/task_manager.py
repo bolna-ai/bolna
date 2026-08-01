@@ -7752,18 +7752,21 @@ class TaskManager(BaseManager):
             )
 
         if event.transcript or usage:
-            usage = usage or s2s_events.S2SUsage()
+            # A turn whose usage never arrived must stay distinguishable from one that
+            # genuinely spent nothing: passing zeros stamps it api_reported and billing
+            # then trusts a number the provider never sent.
+            split = (usage or s2s_events.S2SUsage()).modality_split()
             convert_to_request_log(
                 event.transcript,
-                {"request_id": self.task_id, "sequence_id": -1, "s2s_usage": usage.modality_split()},
+                {"request_id": self.task_id, "sequence_id": -1, "s2s_usage": split},
                 model=self.s2s_model,
                 component=LogComponent.S2S,
                 direction=LogDirection.RESPONSE,
                 is_cached=False,
                 run_id=self.run_id,
-                input_tokens=usage.input_tokens,
-                output_tokens=usage.output_tokens,
-                cached_tokens=usage.cached_tokens,
+                input_tokens=usage.input_tokens if usage else None,
+                output_tokens=usage.output_tokens if usage else None,
+                cached_tokens=usage.cached_tokens if usage else None,
             )
 
         # The end-of-stream sentinel makes the output handler emit its final mark, which is

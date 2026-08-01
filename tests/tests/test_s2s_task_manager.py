@@ -454,6 +454,33 @@ class TestStreamSidPropagation:
         tm.tools["output"].set_stream_sid.assert_not_awaited()
 
 
+class TestUsageAttribution:
+    """Billing reads usage_source to know whether it can trust the token counts."""
+
+    async def _finish(self, tm, usage):
+        with patch("bolna.agent_manager.task_manager.convert_to_request_log") as log:
+            await tm._s2s_finish_turn(s2s_events.ResponseDone(transcript="hi", usage=usage))
+        return log.call_args
+
+    @pytest.mark.asyncio
+    async def test_missing_usage_is_not_stamped_as_reported(self):
+        call = await self._finish(make_tm(), None)
+        assert call.kwargs["input_tokens"] is None
+        assert call.kwargs["output_tokens"] is None
+
+    @pytest.mark.asyncio
+    async def test_a_genuine_zero_turn_still_reports_zero(self):
+        call = await self._finish(make_tm(), s2s_events.S2SUsage())
+        assert call.kwargs["input_tokens"] == 0
+        assert call.kwargs["output_tokens"] == 0
+
+    @pytest.mark.asyncio
+    async def test_reported_usage_passes_through(self):
+        call = await self._finish(make_tm(), s2s_events.S2SUsage(input_tokens=11, output_tokens=3))
+        assert call.kwargs["input_tokens"] == 11
+        assert call.kwargs["output_tokens"] == 3
+
+
 class TestBackgroundTaskLifecycle:
     """Tool work runs detached, so a dropped exception or an uncancelled task is invisible."""
 
