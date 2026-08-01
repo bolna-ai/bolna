@@ -195,13 +195,15 @@ class MayaSynthesizer(StreamSynthesizer):
 
             await self._wait_for_ws()
 
+            # The wait above can span a barge-in, which retires this sequence without
+            # cancelling the task. Re-check before anything reaches the socket, including the
+            # flush branch: priming opens an utterance, so Maya would answer it with `end`.
+            if not self.should_synthesize_response(sequence_id):
+                logger.info(f"Not synthesizing (inner): sequence_id {sequence_id} not current")
+                await self.flush_synthesizer_stream()
+                return
+
             if text != "":
-                # The wait above can span a barge-in, which retires this sequence without
-                # cancelling the task. Re-check before anything reaches the socket.
-                if not self.should_synthesize_response(sequence_id):
-                    logger.info(f"Not synthesizing (inner): sequence_id {sequence_id} not current")
-                    await self.flush_synthesizer_stream()
-                    return
                 try:
                     if self.ws_send_time is None:
                         self.ws_send_time = time.perf_counter()

@@ -216,6 +216,22 @@ def test_a_barge_in_during_the_connection_wait_stops_the_sender():
     assert s.sent == []
 
 
+def test_an_empty_push_retired_during_the_wait_sends_nothing_either():
+    """The guard has to cover the flush branch too, not just the text branch: an empty final
+    push skips the text frame entirely, and priming would open an utterance that Maya answers
+    with `end` — an end-of-stream sentinel for a sequence the pipeline already dropped."""
+    s = _synth()
+    retired = {"yet": False}
+    s.task_manager_instance.is_sequence_id_in_current_ids.side_effect = lambda _: not retired["yet"]
+
+    async def wait_then_retire():
+        retired["yet"] = True
+
+    s._wait_for_ws = AsyncMock(side_effect=wait_then_retire)
+    asyncio.run(s.sender("", 1, end_of_llm_stream=True))
+    assert s.sent == []
+
+
 def test_stale_sequence_sends_nothing():
     s = _synth()
     s.task_manager_instance.is_sequence_id_in_current_ids.return_value = False
