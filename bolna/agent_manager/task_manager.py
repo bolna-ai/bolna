@@ -7411,6 +7411,8 @@ class TaskManager(BaseManager):
         self._s2s_pending_results = 0
         self._s2s_welcome_gate_ms = self.s2s.welcome_audio_gate_ms
         self._s2s_started_at = time.time()
+        self._s2s_agent_speaking = False
+        self._s2s_turn_seq = 0
 
         try:
             await s2s.connect()
@@ -7514,6 +7516,9 @@ class TaskManager(BaseManager):
                 break
 
             if isinstance(event, s2s_events.AudioDelta):
+                if not self._s2s_agent_speaking:
+                    self._s2s_agent_speaking = True
+                    self.interruption_manager.on_agent_speech_started(self._s2s_turn_seq)
                 await self.buffered_output_queue.put(
                     {"data": self._s2s_encode_output(event.data), "meta_info": self._s2s_meta()}
                 )
@@ -7529,6 +7534,7 @@ class TaskManager(BaseManager):
                     logger.info(f"S2S caller: {event.content[:200]}")
                     self.conversation_history.append_user(event.content)
                     self.time_since_last_spoken_human_word = time.time()
+                    self.interruption_manager.on_user_speech_ended()
 
             elif isinstance(event, s2s_events.FunctionCall):
                 task = asyncio.create_task(self._s2s_execute_tool(event))
@@ -7538,7 +7544,13 @@ class TaskManager(BaseManager):
             elif isinstance(event, s2s_events.Interrupted):
                 if self._s2s_within_welcome_gate():
                     continue
-                logger.info("S2S: caller barged in, dropping queued audio")
+                # The provider reports every speech start here, so this is only a barge-in
+                # when the agent actually had the floor.
+                self.interruption_manager.on_user_speech_started()
+                if self._s2s_agent_speaking:
+                    logger.info("S2S: caller barged in, dropping queued audio")
+                    self.interruption_manager.on_interruption_triggered()
+                    self._s2s_agent_speaking = False
                 await self._s2s_drop_queued_audio()
 
             elif isinstance(event, s2s_events.ResponseDone):
@@ -7602,6 +7614,11 @@ class TaskManager(BaseManager):
                 break
 
     async def _s2s_finish_turn(self, event):
+        if self._s2s_agent_speaking:
+            self.interruption_manager.on_agent_speech_ended()
+            self._s2s_agent_speaking = False
+        self._s2s_turn_seq += 1
+
         usage = event.usage
         if usage and self.task_id == 0 and self.on_turn_usage:
             task = asyncio.create_task(self.on_turn_usage(usage.input_tokens, usage.output_tokens, usage.cached_tokens))

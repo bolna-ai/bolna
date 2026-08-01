@@ -52,6 +52,9 @@ def make_tm(*, io_provider="plivo", web=False, turn_based=False, in_rate=24000, 
     tm._s2s_hangup_after_response = False
     tm._s2s_started_at = 0  # welcome gate already elapsed
     tm._s2s_welcome_gate_ms = 0
+    tm._s2s_agent_speaking = False
+    tm._s2s_turn_seq = 0
+    tm.interruption_manager = MagicMock()
     tm.last_transmitted_timestamp = 0
     tm.time_since_last_spoken_human_word = 0
 
@@ -303,6 +306,52 @@ class TestBargeIn:
         tm = make_tm()
         await tm._s2s_drop_queued_audio()
         tm.tools["input"].update_is_audio_being_played.assert_called_with(False)
+
+
+class TestBargeInAccounting:
+    """Barge-in counts drive the interruption stats on the call record. The provider
+    reports every speech start, so counting them all would inflate the rate."""
+
+    async def _run_events(self, tm, events):
+        async def stream():
+            for e in events:
+                yield e
+
+        tm.tools["s2s"].receive_events = stream
+        await tm._s2s_event_loop()
+
+    @pytest.mark.asyncio
+    async def test_speech_over_agent_audio_counts_as_an_interruption(self):
+        tm = make_tm()
+        await self._run_events(
+            tm, [s2s_events.AudioDelta(data=_silence_pcm(160)), s2s_events.Interrupted()]
+        )
+
+        tm.interruption_manager.on_interruption_triggered.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_speech_while_agent_is_silent_is_not_an_interruption(self):
+        tm = make_tm()
+        await self._run_events(tm, [s2s_events.Interrupted()])
+
+        tm.interruption_manager.on_interruption_triggered.assert_not_called()
+        tm.interruption_manager.on_user_speech_started.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_agent_speech_window_opens_once_per_turn_and_closes_on_done(self):
+        tm = make_tm()
+        await self._run_events(
+            tm,
+            [
+                s2s_events.AudioDelta(data=_silence_pcm(160)),
+                s2s_events.AudioDelta(data=_silence_pcm(160)),
+                s2s_events.ResponseDone(transcript="hi", usage=None),
+            ],
+        )
+
+        tm.interruption_manager.on_agent_speech_started.assert_called_once_with(0)
+        tm.interruption_manager.on_agent_speech_ended.assert_called_once()
+        assert tm._s2s_turn_seq == 1
 
 
 class TestToolDispatch:
