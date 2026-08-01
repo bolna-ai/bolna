@@ -519,6 +519,21 @@ class TestToolDispatch:
         assert tm.has_transfer is True
 
     @pytest.mark.asyncio
+    async def test_transfer_sends_the_configured_param_not_the_model_arguments(self):
+        # call_transfer_number is config, so the webhook cannot resolve a destination from
+        # the model's arguments.
+        tm = make_tm(tools_params={"transfer_call": {"url": None, "param": {"call_transfer_number": "+15550001"}}})
+        tm._execute_transfer_call_webhook = AsyncMock()
+        with patch("bolna.agent_manager.task_manager.convert_to_request_log"):
+            await tm._s2s_execute_tool(
+                s2s_events.FunctionCall(name="transfer_call", call_id="c1", arguments='{"reason":"wants a human"}')
+            )
+
+        _, _, param, resp, _ = tm._execute_transfer_call_webhook.await_args.args
+        assert param == {"call_transfer_number": "+15550001"}
+        assert resp == {"reason": "wants a human"}
+
+    @pytest.mark.asyncio
     async def test_duplicate_transfer_is_ignored(self):
         tm = make_tm(tools_params={"transfer_call": {"url": "https://hook.example/transfer"}})
         tm.has_transfer = True
@@ -546,6 +561,28 @@ class TestToolDispatch:
         assert api.await_args.kwargs["url"] == "https://api.example/book"
         assert api.await_args.kwargs["day"] == "mon"
         assert tm.tools["s2s"].send_function_result.await_args.args[2] == '{"ok":1}'
+
+    @pytest.mark.asyncio
+    async def test_custom_tool_forwards_the_configured_headers(self):
+        # The field is `headers` everywhere else; reading `header` sends every authenticated
+        # tool call without its Authorization header.
+        tm = make_tm(
+            tools_params={
+                "book": {"url": "https://api.example/book", "headers": {"Authorization": "Bearer tok"}},
+            }
+        )
+        tm._start_api_call_detail = MagicMock(return_value={})
+        tm._finalize_api_call_detail = MagicMock()
+        with (
+            patch("bolna.agent_manager.task_manager.convert_to_request_log"),
+            patch(
+                "bolna.agent_manager.task_manager.trigger_api",
+                new=AsyncMock(return_value={"body": "{}", "status_code": 200}),
+            ) as api,
+        ):
+            await tm._s2s_execute_tool(s2s_events.FunctionCall(name="book", call_id="c1", arguments="{}"))
+
+        assert api.await_args.kwargs["headers_data"] == {"Authorization": "Bearer tok"}
 
     @pytest.mark.asyncio
     async def test_unconfigured_tool_reports_an_error_instead_of_raising(self):

@@ -7806,8 +7806,11 @@ class TaskManager(BaseManager):
                 result = json.dumps({"status": "success", "message": "Transfer already in progress; wait silently."})
             else:
                 self.has_transfer = True
+                # param is the configured tool body, which is where call_transfer_number
+                # lives; the model's own arguments go in as the response, same as the llm
+                # path. Passing the arguments as both leaves the webhook no destination.
                 await self._execute_transfer_call_webhook(
-                    event.name, params.get("url"), json.dumps(args), args, meta_info
+                    event.name, params.get("url"), params.get("param"), args, meta_info
                 )
                 result = json.dumps({"status": "success", "message": "Transfer initiated; wait silently."})
         else:
@@ -7840,7 +7843,7 @@ class TaskManager(BaseManager):
             url=url,
             method=method,
             param=params.get("param"),
-            headers=params.get("header"),
+            headers=params.get("headers"),
             meta_info=meta_info,
             runtime_args=args,
             request_body=params.get("param"),
@@ -7852,7 +7855,7 @@ class TaskManager(BaseManager):
                 method=method,
                 param=params.get("param"),
                 api_token=params.get("api_token"),
-                headers_data=params.get("header"),
+                headers_data=params.get("headers"),
                 meta_info=meta_info,
                 run_id=self.run_id,
                 return_response_metadata=True,
