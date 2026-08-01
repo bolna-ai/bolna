@@ -7532,6 +7532,27 @@ class TaskManager(BaseManager):
             await s2s.disconnect()
         logger.info("S2S conversation completed")
 
+    def _s2s_track_task(self, task, call_id=None) -> None:
+        """Hold a reference to a background task and surface its failure.
+
+        A bare discard callback drops the exception along with the task, so a tool result
+        that never reached the model looked exactly like one that succeeded.
+        """
+        task.s2s_call_id = call_id
+        self._s2s_tool_tasks.add(task)
+        task.add_done_callback(self._s2s_on_task_done)
+
+    def _s2s_on_task_done(self, task) -> None:
+        self._s2s_tool_tasks.discard(task)
+        if task.cancelled():
+            return
+        exception = task.exception()
+        if exception is not None:
+            logger.error(
+                f"S2S background task failed | call_id={getattr(task, 's2s_call_id', None)} "
+                f"error={type(exception).__name__}: {exception}"
+            )
+
     def _s2s_extend_playout(self, chunk: bytes) -> None:
         """Advance the estimate of when the caller will have heard everything sent so far."""
         duration = calculate_audio_duration(
@@ -7618,9 +7639,7 @@ class TaskManager(BaseManager):
                     self.interruption_manager.on_user_speech_ended()
 
             elif isinstance(event, s2s_events.FunctionCall):
-                task = asyncio.create_task(self._s2s_execute_tool(event))
-                self._s2s_tool_tasks.add(task)
-                task.add_done_callback(self._s2s_tool_tasks.discard)
+                self._s2s_track_task(asyncio.create_task(self._s2s_execute_tool(event)), call_id=event.call_id)
 
             elif isinstance(event, s2s_events.Interrupted):
                 if self._s2s_within_welcome_gate():
@@ -7654,6 +7673,11 @@ class TaskManager(BaseManager):
 
             elif isinstance(event, s2s_events.FunctionCallCancelled):
                 logger.info(f"S2S: provider cancelled tool calls {event.call_ids}")
+                # The provider has discarded these ids. Letting the task run would fire a
+                # real side effect and then answer a call_id the model no longer knows.
+                for task in list(self._s2s_tool_tasks):
+                    if getattr(task, "s2s_call_id", None) in event.call_ids:
+                        task.cancel()
 
             elif isinstance(event, s2s_events.S2SError):
                 logger.error(f"S2S error: {event.message} (code={event.code})")
@@ -7711,9 +7735,9 @@ class TaskManager(BaseManager):
 
         usage = event.usage
         if usage and self.task_id == 0 and self.on_turn_usage:
-            task = asyncio.create_task(self.on_turn_usage(usage.input_tokens, usage.output_tokens, usage.cached_tokens))
-            self._s2s_tool_tasks.add(task)
-            task.add_done_callback(self._s2s_tool_tasks.discard)
+            self._s2s_track_task(
+                asyncio.create_task(self.on_turn_usage(usage.input_tokens, usage.output_tokens, usage.cached_tokens))
+            )
 
         if event.transcript or usage:
             usage = usage or s2s_events.S2SUsage()

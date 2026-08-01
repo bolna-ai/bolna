@@ -454,6 +454,80 @@ class TestStreamSidPropagation:
         tm.tools["output"].set_stream_sid.assert_not_awaited()
 
 
+class TestBackgroundTaskLifecycle:
+    """Tool work runs detached, so a dropped exception or an uncancelled task is invisible."""
+
+    async def _run_events(self, tm, events):
+        async def stream():
+            for e in events:
+                # Let a task spawned by the previous event actually reach its first await.
+                await asyncio.sleep(0.01)
+                yield e
+
+        tm.tools["s2s"].receive_events = stream
+        await tm._s2s_event_loop()
+
+    @pytest.mark.asyncio
+    async def test_cancelled_call_id_cancels_the_running_tool(self):
+        tm = make_tm(tools_params={"book": {"url": "https://api.example/book"}})
+        started = asyncio.Event()
+        spawned = []
+
+        async def slow_tool(event):
+            started.set()
+            spawned.append(asyncio.current_task())
+            await asyncio.sleep(30)
+
+        tm._s2s_execute_tool = slow_tool
+        await self._run_events(
+            tm,
+            [
+                s2s_events.FunctionCall(name="book", call_id="c1", arguments="{}"),
+                s2s_events.FunctionCallCancelled(call_ids=["c1"]),
+            ],
+        )
+        await asyncio.sleep(0.01)
+        # Left running it would POST the booking and then answer an id the model discarded.
+        assert started.is_set()
+        assert spawned[0].cancelled()
+
+    @pytest.mark.asyncio
+    async def test_unrelated_call_id_is_left_alone(self):
+        tm = make_tm(tools_params={"book": {"url": "https://api.example/book"}})
+
+        async def slow_tool(event):
+            await asyncio.sleep(30)
+
+        tm._s2s_execute_tool = slow_tool
+        await self._run_events(
+            tm,
+            [
+                s2s_events.FunctionCall(name="book", call_id="c1", arguments="{}"),
+                s2s_events.FunctionCallCancelled(call_ids=["other"]),
+            ],
+        )
+        await asyncio.sleep(0)
+        running = [t for t in tm._s2s_tool_tasks if not t.done()]
+        assert len(running) == 1
+        for t in running:
+            t.cancel()
+
+    @pytest.mark.asyncio
+    async def test_a_failing_tool_task_is_logged_not_swallowed(self, caplog):
+        tm = make_tm()
+
+        async def boom(event):
+            raise RuntimeError("socket gone")
+
+        tm._s2s_execute_tool = boom
+        with caplog.at_level("ERROR"):
+            await self._run_events(tm, [s2s_events.FunctionCall(name="book", call_id="c9", arguments="{}")])
+            await asyncio.sleep(0.05)
+
+        assert "socket gone" in caplog.text
+        assert "c9" in caplog.text
+
+
 class TestUserOnlinePrompt:
     """An s2s task has no synthesizer, so the shared path silently failed and recorded a
     line the caller never heard."""
