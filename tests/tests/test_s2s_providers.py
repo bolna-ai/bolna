@@ -702,3 +702,29 @@ class TestTurnLatencyRecords:
         await drain(provider)
 
         assert [t["sequence_id"] for t in provider.turn_latencies] == [0, 1]
+
+
+class TestLanguagePinning:
+    """Without a pinned language the provider auto-detects per utterance, which put a
+    caller's speech into the wrong script mid-call."""
+
+    def test_openai_sends_the_language_to_transcription(self):
+        transcription = make_openai(language="hi")._build_session_config()["audio"]["input"]["transcription"]
+        assert transcription["language"] == "hi"
+        assert transcription["model"] == "gpt-4o-mini-transcribe"
+
+    def test_openai_omits_language_when_unset(self):
+        transcription = make_openai()._build_session_config()["audio"]["input"]["transcription"]
+        assert "language" not in transcription
+
+    def test_gemini_sends_the_language_code(self):
+        setup = make_gemini(language="hi-IN")._build_setup()
+        assert setup["generationConfig"]["speechConfig"]["languageCode"] == "hi-IN"
+
+    def test_gemini_omits_language_when_unset(self):
+        setup = make_gemini()._build_setup()
+        assert "languageCode" not in setup["generationConfig"]["speechConfig"]
+
+    def test_language_is_exposed_on_both_provider_configs(self):
+        assert OpenAIRealtimeConfig(language="hi").language == "hi"
+        assert GeminiLiveConfig(language="hi-IN").language == "hi-IN"

@@ -64,6 +64,7 @@ class OpenAIRealtimeS2S(BaseS2SProvider):
         reasoning_effort: Optional[str] = None,
         max_output_tokens: Optional[int] = None,
         transcription_model: str = "gpt-4o-mini-transcribe",
+        language: Optional[str] = None,
         **kwargs,
     ):
         super().__init__(
@@ -81,6 +82,7 @@ class OpenAIRealtimeS2S(BaseS2SProvider):
         self.reasoning_effort = reasoning_effort
         self.max_output_tokens = max_output_tokens
         self.transcription_model = transcription_model
+        self.language = language
 
         self._ws = None
         self._current_response_transcript = ""
@@ -148,7 +150,13 @@ class OpenAIRealtimeS2S(BaseS2SProvider):
                 "input": {
                     "format": {"type": "audio/pcm", "rate": self.input_sample_rate},
                     "turn_detection": turn_detection,
-                    "transcription": {"model": self.transcription_model},
+                    # Without a language the model auto-detects per utterance and can
+                    # transcribe a caller into the wrong script mid-call.
+                    "transcription": (
+                        {"model": self.transcription_model, "language": self.language}
+                        if self.language
+                        else {"model": self.transcription_model}
+                    ),
                 },
                 "output": {
                     "format": {"type": "audio/pcm", "rate": self.output_sample_rate},

@@ -605,6 +605,7 @@ class OpenAIRealtimeConfig(BaseModel):
     reasoning_effort: Optional[ReasoningEffort] = None
     max_output_tokens: Optional[int] = None
     transcription_model: Optional[str] = "gpt-4o-mini-transcribe"
+    language: Optional[str] = None
 
     @model_validator(mode="after")
     def validate_reasoning(self):
