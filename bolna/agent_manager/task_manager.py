@@ -632,7 +632,10 @@ class TaskManager(BaseManager):
 
             # Enable DTMF flow
             dtmf_enabled = self.conversation_config.get("dtmf_enabled", False)
-            if dtmf_enabled:
+            # An s2s task starts its own consumer in _run_s2s_conversation. Starting this one
+            # too would race it for the same queue, and this one wins by being first: the
+            # digits get injected into the transcriber/LLM pipeline an s2s agent does not have.
+            if dtmf_enabled and not self.__is_s2s():
                 self.tools["input"].is_dtmf_active = True
                 self.dtmf_task = asyncio.create_task(self.inject_digits_to_conversation())
 
