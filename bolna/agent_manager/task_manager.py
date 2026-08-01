@@ -1306,7 +1306,12 @@ class TaskManager(BaseManager):
             tasks.append(self.tools["input"].handle())
 
             if not self.turn_based_conversation and not self.is_web_based_call:
-                tasks.append(self.__forced_first_message())
+                # An s2s model speaks its own greeting, so it takes the stream id but not
+                # the pre-rendered welcome audio it has no synthesizer to produce.
+                if self.__is_s2s():
+                    tasks.append(self._s2s_await_stream_sid())
+                else:
+                    tasks.append(self.__forced_first_message())
 
         if tasks:
             await asyncio.gather(*tasks)
@@ -1360,6 +1365,42 @@ class TaskManager(BaseManager):
             # masked the missing-freeswitch-handler case when a PyPI bolna shadowed the branch
             raise ValueError(f"Unsupported input provider: {self.task_config['tools_config']['input']['provider']}")
 
+    async def __await_stream_sid(self, timeout=10.0):
+        """Wait for the carrier's stream id and hand it to the output handler.
+
+        Nothing reaches the caller until the output handler holds this: it drops every
+        packet while stream_sid is None. Returns whether the id arrived in time.
+        """
+        # output_handler_set is not part of the wait: __setup_output_handlers runs in __init__,
+        # so it is already true by the time this task exists.
+        logger.info("Waiting for stream_sid before sending the welcome message")
+        try:
+            await asyncio.wait_for(self.tools["input"].stream_sid_ready.wait(), timeout)
+        except asyncio.TimeoutError:
+            logger.warning(f"Timeout reached while waiting for stream_sid after {timeout}s")
+            await self.__process_end_of_conversation()
+            return False
+
+        self.stream_sid_ts = time.time() * 1000
+        await self._report_stream_connect()
+        self.stream_sid = self.tools["input"].get_stream_sid()
+        await self.tools["output"].set_stream_sid(self.stream_sid)
+        return True
+
+    async def _s2s_await_stream_sid(self):
+        """Claim the stream id for an s2s call, which has no welcome audio to play.
+
+        The model speaks its own greeting, so the welcome path below is skipped — but it
+        was also the only thing propagating the stream id, and without it the output
+        handler silently discards the whole conversation.
+        """
+        try:
+            if await self.__await_stream_sid():
+                logger.info(f"Got stream sid for s2s conversation {self.stream_sid}")
+                self.tools["input"].is_welcome_message_played = True
+        except Exception as e:
+            logger.error(f"Exception in _s2s_await_stream_sid {str(e)}")
+
     async def __forced_first_message(self, timeout=10.0):
         logger.info(f"Executing the first message task")
         try:
@@ -1367,16 +1408,8 @@ class TaskManager(BaseManager):
             if delay_ms > 0:
                 logger.info(f"Welcome message delay set to {delay_ms} ms")
                 await asyncio.sleep(delay_ms / 1000)
-            # output_handler_set is not part of the wait: __setup_output_handlers runs in __init__,
-            # so it is already true by the time this task exists.
-            logger.info("Waiting for stream_sid before sending the welcome message")
-            try:
-                await asyncio.wait_for(self.tools["input"].stream_sid_ready.wait(), timeout)
-            except asyncio.TimeoutError:
-                logger.warning(f"Timeout reached while waiting for stream_sid after {timeout}s")
-                await self.__process_end_of_conversation()
+            if not await self.__await_stream_sid(timeout=timeout):
                 return
-            stream_sid = self.tools["input"].get_stream_sid()
 
             text = self.kwargs.get("agent_welcome_message", None)
             meta_info = {
@@ -1417,11 +1450,7 @@ class TaskManager(BaseManager):
             meta_info["is_final_chunk_of_entire_response"] = True
             message = create_ws_data_packet(audio_chunk, meta_info)
 
-            self.stream_sid_ts = time.time() * 1000
-            await self._report_stream_connect()
-            logger.info(f"Got stream sid and hence sending the first message {stream_sid}")
-            self.stream_sid = stream_sid
-            await self.tools["output"].set_stream_sid(stream_sid)
+            logger.info(f"Got stream sid and hence sending the first message {self.stream_sid}")
 
             if audio_chunk is None:
                 # No welcome message to play - mark as played immediately

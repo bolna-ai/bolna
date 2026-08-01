@@ -415,6 +415,46 @@ class TestWelcomeMessageMarking:
         assert tm._s2s_meta()["message_category"] == "agent_hangup"
 
 
+class TestStreamSidPropagation:
+    """The telephony output handler drops every packet while stream_sid is None, so an
+    s2s call that skips this claims a live carrier leg and plays to nobody."""
+
+    def _make_telephony_tm(self):
+        tm = make_tm()
+        tm.stream_sid = None
+        tm.stream_sid_ts = None
+        tm.output_handler_set = True
+        tm._report_stream_connect = AsyncMock()
+        tm.tools = {
+            "input": MagicMock(get_stream_sid=MagicMock(return_value="sid-abc")),
+            "output": MagicMock(set_stream_sid=AsyncMock()),
+        }
+        return tm
+
+    @pytest.mark.asyncio
+    async def test_s2s_hands_the_stream_sid_to_the_output_handler(self):
+        tm = self._make_telephony_tm()
+        await tm._s2s_await_stream_sid()
+        tm.tools["output"].set_stream_sid.assert_awaited_once_with("sid-abc")
+        assert tm.stream_sid == "sid-abc"
+
+    @pytest.mark.asyncio
+    async def test_s2s_marks_the_welcome_as_played(self):
+        tm = self._make_telephony_tm()
+        await tm._s2s_await_stream_sid()
+        # The model speaks the greeting itself, so no mark event is ever coming for it.
+        assert tm.tools["input"].is_welcome_message_played is True
+
+    @pytest.mark.asyncio
+    async def test_missing_stream_sid_ends_the_call_rather_than_hanging(self):
+        tm = self._make_telephony_tm()
+        tm.tools["input"].get_stream_sid.return_value = None
+        tm._TaskManager__process_end_of_conversation = AsyncMock()
+        await tm._TaskManager__await_stream_sid(timeout=0.05)
+        tm._TaskManager__process_end_of_conversation.assert_awaited_once()
+        tm.tools["output"].set_stream_sid.assert_not_awaited()
+
+
 class TestToolDispatch:
     @pytest.mark.asyncio
     async def test_end_call_defers_hangup_until_the_goodbye_finishes(self):
