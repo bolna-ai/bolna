@@ -728,3 +728,54 @@ class TestLanguagePinning:
     def test_language_is_exposed_on_both_provider_configs(self):
         assert OpenAIRealtimeConfig(language="hi").language == "hi"
         assert GeminiLiveConfig(language="hi-IN").language == "hi-IN"
+
+
+class TestGeminiToolSchema:
+    """Gemini rejects the entire setup frame over one unsupported schema key, so an
+    agent with tools never connected and the call ended before the first word."""
+
+    def _params(self, declarations):
+        return declarations[0]["parameters"]
+
+    def test_additional_properties_is_stripped_from_declarations(self):
+        tool = {
+            "name": "end_call",
+            "description": "End the call",
+            "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+        }
+        setup = make_gemini(tools=[tool])._build_setup()
+        assert "additionalProperties" not in self._params(setup["tools"][0]["functionDeclarations"])
+
+    def test_nested_schemas_are_cleaned_too(self):
+        tool = {
+            "name": "book",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "slot": {"type": "object", "properties": {}, "additionalProperties": False},
+                    "guests": {
+                        "type": "array",
+                        "items": {"type": "object", "properties": {}, "additionalProperties": False},
+                    },
+                },
+                "additionalProperties": False,
+            },
+        }
+        params = self._params(make_gemini(tools=[tool])._build_setup()["tools"][0]["functionDeclarations"])
+        assert "additionalProperties" not in params
+        assert "additionalProperties" not in params["properties"]["slot"]
+        assert "additionalProperties" not in params["properties"]["guests"]["items"]
+
+    def test_supported_schema_content_survives(self):
+        tool = {
+            "name": "lookup",
+            "parameters": {
+                "type": "object",
+                "properties": {"order_id": {"type": "string", "description": "the order"}},
+                "required": ["order_id"],
+                "additionalProperties": False,
+            },
+        }
+        params = self._params(make_gemini(tools=[tool])._build_setup()["tools"][0]["functionDeclarations"])
+        assert params["required"] == ["order_id"]
+        assert params["properties"]["order_id"] == {"type": "string", "description": "the order"}

@@ -7,7 +7,12 @@ from google import genai
 from google.genai import types
 from bolna.constants import default_thinking_level
 from bolna.helpers.logger_config import configure_logger
-from bolna.helpers.utils import now_ms, compute_function_pre_call_message, convert_to_request_log
+from bolna.helpers.utils import (
+    now_ms,
+    compute_function_pre_call_message,
+    convert_to_request_log,
+    clean_gemini_schema,
+)
 from .llm import BaseLLM
 from .types import LLMStreamChunk, LatencyData, FunctionCallPayload
 
@@ -29,18 +34,6 @@ def _usage_kwargs(usage) -> dict:
 
 
 class GeminiLLM(BaseLLM):
-    def _clean_schema(self, schema):
-        """Gemini Protos don't support additionalProperties."""
-        if not isinstance(schema, dict):
-            return schema
-        cleaned = {k: v for k, v in schema.items() if k != "additionalProperties"}
-        for k, v in cleaned.items():
-            if isinstance(v, dict):
-                cleaned[k] = self._clean_schema(v)
-            elif isinstance(v, list):
-                cleaned[k] = [self._clean_schema(i) if isinstance(i, dict) else i for i in v]
-        return cleaned
-
     def __init__(self, max_tokens=100, buffer_size=40, model="gemini-2.5-flash", temperature=0.1, **kwargs):
         super().__init__(max_tokens, buffer_size)
 
@@ -74,7 +67,7 @@ class GeminiLLM(BaseLLM):
                         types.FunctionDeclaration(
                             name=func["name"],
                             description=func["description"],
-                            parameters=self._clean_schema(func["parameters"]),
+                            parameters=clean_gemini_schema(func["parameters"]),
                         )
                     )
                 elif "name" in tool and "parameters" in tool:
@@ -82,7 +75,7 @@ class GeminiLLM(BaseLLM):
                         types.FunctionDeclaration(
                             name=tool["name"],
                             description=tool.get("description", ""),
-                            parameters=self._clean_schema(tool["parameters"]),
+                            parameters=clean_gemini_schema(tool["parameters"]),
                         )
                     )
 

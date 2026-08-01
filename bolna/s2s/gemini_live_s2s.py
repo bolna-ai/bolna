@@ -7,6 +7,7 @@ from typing import AsyncGenerator, List, Optional
 import websockets
 
 from bolna.helpers.logger_config import configure_logger
+from bolna.helpers.utils import clean_gemini_schema
 from .base_s2s import BaseS2SProvider
 from .events import (
     AudioDelta,
@@ -160,7 +161,9 @@ class GeminiLiveS2S(BaseS2SProvider):
             declaration = {"name": spec["name"], "description": spec.get("description", "")}
             parameters = spec.get("parameters")
             if parameters:
-                declaration["parameters"] = parameters
+                # An unsupported schema key does not just drop the tool: Gemini rejects the
+                # whole setup frame, so the call ends before the model ever connects.
+                declaration["parameters"] = clean_gemini_schema(parameters)
             declarations.append(declaration)
         return declarations
 

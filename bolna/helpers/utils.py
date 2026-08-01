@@ -1027,6 +1027,23 @@ def timestamp_ms() -> float:
     return time.time() * 1000
 
 
+def clean_gemini_schema(schema):
+    """Strip JSON Schema keys Gemini's proto-based Schema rejects.
+
+    Both the Gemini LLM and the Live API refuse a function declaration carrying
+    additionalProperties, and the Live API rejects the whole setup frame for it.
+    """
+    if not isinstance(schema, dict):
+        return schema
+    cleaned = {k: v for k, v in schema.items() if k != "additionalProperties"}
+    for k, v in cleaned.items():
+        if isinstance(v, dict):
+            cleaned[k] = clean_gemini_schema(v)
+        elif isinstance(v, list):
+            cleaned[k] = [clean_gemini_schema(i) if isinstance(i, dict) else i for i in v]
+    return cleaned
+
+
 def structure_system_prompt(
     system_prompt, run_id, assistant_id, call_sid, context_data, timezone, is_web_based_call=False
 ):
