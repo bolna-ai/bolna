@@ -7941,8 +7941,7 @@ class TaskManager(BaseManager):
                         # Typed component errors were only ever written to the request log, so
                         # a failed provider connect left nothing in the app log to find.
                         logger.error(
-                            f"Component error | component={e.component} provider={e.provider} "
-                            f"model={e.model} error={e}"
+                            f"Component error | component={e.component} provider={e.provider} model={e.model} error={e}"
                         )
                     if self.run_id and not self._error_logged:
                         if isinstance(e, BolnaComponentError):

@@ -325,9 +325,7 @@ class TestBargeInAccounting:
     @pytest.mark.asyncio
     async def test_speech_over_agent_audio_counts_as_an_interruption(self):
         tm = make_tm()
-        await self._run_events(
-            tm, [s2s_events.AudioDelta(data=_silence_pcm(4800)), s2s_events.Interrupted()]
-        )
+        await self._run_events(tm, [s2s_events.AudioDelta(data=_silence_pcm(4800)), s2s_events.Interrupted()])
 
         tm.interruption_manager.on_interruption_triggered.assert_called_once()
 
