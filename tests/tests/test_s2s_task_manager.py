@@ -277,6 +277,7 @@ class TestAudioOutput:
 
     def test_hangup_audio_is_tagged_so_it_bypasses_interruption_gating(self):
         tm = make_tm()
+        tm._s2s_turn_seq = 1  # past the welcome turn, which carries its own category
         assert "message_category" not in tm._s2s_meta()
         tm._s2s_hangup_after_response = True
         assert tm._s2s_meta()["message_category"] == "agent_hangup"
@@ -393,6 +394,25 @@ class TestBargeInAccounting:
 
         tm.interruption_manager.on_interruption_triggered.assert_called_once()
         tm.interruption_manager.on_successful_response_delivered.assert_called_once()
+
+
+class TestWelcomeMessageMarking:
+    """time_to_first_audio is derived from welcome_message_sent_ts, which the output
+    handlers stamp only when a packet is tagged as the welcome message."""
+
+    def test_first_turn_audio_is_tagged_as_the_welcome_message(self):
+        tm = make_tm()
+        assert tm._s2s_meta()["message_category"] == "agent_welcome_message"
+
+    def test_later_turns_are_not_tagged(self):
+        tm = make_tm()
+        tm._s2s_turn_seq = 1
+        assert "message_category" not in tm._s2s_meta()
+
+    def test_hangup_tagging_wins_over_the_welcome_tag(self):
+        tm = make_tm()
+        tm._s2s_hangup_after_response = True
+        assert tm._s2s_meta()["message_category"] == "agent_hangup"
 
 
 class TestToolDispatch:

@@ -7615,6 +7615,11 @@ class TaskManager(BaseManager):
         }
         if self._s2s_hangup_after_response:
             meta["message_category"] = "agent_hangup"
+        elif self._s2s_turn_seq == 0:
+            # The model speaks the greeting itself, so nothing else marks it. The output
+            # handlers stamp welcome_message_sent_ts off this, which is what
+            # time_to_first_audio reports.
+            meta["message_category"] = "agent_welcome_message"
         meta.update(extra)
         return meta
 
