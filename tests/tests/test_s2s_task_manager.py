@@ -54,6 +54,7 @@ def make_tm(*, io_provider="plivo", web=False, turn_based=False, in_rate=24000, 
     tm._s2s_welcome_gate_ms = 0
     tm._s2s_agent_speaking = False
     tm._s2s_turn_seq = 0
+    tm._s2s_playout_until = 0.0
     tm.interruption_manager = MagicMock()
     tm.last_transmitted_timestamp = 0
     tm.time_since_last_spoken_human_word = 0
@@ -324,10 +325,34 @@ class TestBargeInAccounting:
     async def test_speech_over_agent_audio_counts_as_an_interruption(self):
         tm = make_tm()
         await self._run_events(
-            tm, [s2s_events.AudioDelta(data=_silence_pcm(160)), s2s_events.Interrupted()]
+            tm, [s2s_events.AudioDelta(data=_silence_pcm(4800)), s2s_events.Interrupted()]
         )
 
         tm.interruption_manager.on_interruption_triggered.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_barge_in_over_the_tail_of_a_finished_response_still_counts(self):
+        # The model stops generating seconds before the caller stops hearing the response.
+        # Gating on the generation window missed every barge-in over that tail.
+        tm = make_tm()
+        await self._run_events(
+            tm,
+            [
+                s2s_events.AudioDelta(data=_silence_pcm(48000)),  # 2s of 24k audio still to play
+                s2s_events.ResponseDone(transcript="hi", usage=None),
+                s2s_events.Interrupted(),
+            ],
+        )
+
+        tm.interruption_manager.on_interruption_triggered.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_speech_after_the_response_finished_playing_is_not_an_interruption(self):
+        tm = make_tm()
+        tm._s2s_playout_until = time.time() - 1  # everything sent has already been heard
+        await self._run_events(tm, [s2s_events.Interrupted()])
+
+        tm.interruption_manager.on_interruption_triggered.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_speech_while_agent_is_silent_is_not_an_interruption(self):

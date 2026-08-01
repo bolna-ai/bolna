@@ -7413,6 +7413,7 @@ class TaskManager(BaseManager):
         self._s2s_started_at = time.time()
         self._s2s_agent_speaking = False
         self._s2s_turn_seq = 0
+        self._s2s_playout_until = 0.0
 
         try:
             await s2s.connect()
@@ -7465,6 +7466,21 @@ class TaskManager(BaseManager):
             await asyncio.gather(*loops, return_exceptions=True)
             await s2s.disconnect()
         logger.info("S2S conversation completed")
+
+    def _s2s_extend_playout(self, chunk: bytes) -> None:
+        """Advance the estimate of when the caller will have heard everything sent so far."""
+        duration = calculate_audio_duration(
+            len(chunk), self._s2s_output.sample_rate, format=self._s2s_output.encoding.value
+        )
+        self._s2s_playout_until = max(self._s2s_playout_until, time.time()) + duration
+
+    def _s2s_agent_has_floor(self) -> bool:
+        """Whether the caller is still hearing the agent.
+
+        The model finishes generating a turn seconds before its audio finishes playing, so
+        the generation window alone would miss barge-ins over the tail of a response.
+        """
+        return time.time() < self._s2s_playout_until
 
     def _s2s_within_welcome_gate(self):
         return (time.time() - self._s2s_started_at) * 1000 < self._s2s_welcome_gate_ms
@@ -7519,9 +7535,9 @@ class TaskManager(BaseManager):
                 if not self._s2s_agent_speaking:
                     self._s2s_agent_speaking = True
                     self.interruption_manager.on_agent_speech_started(self._s2s_turn_seq)
-                await self.buffered_output_queue.put(
-                    {"data": self._s2s_encode_output(event.data), "meta_info": self._s2s_meta()}
-                )
+                chunk = self._s2s_encode_output(event.data)
+                self._s2s_extend_playout(chunk)
+                await self.buffered_output_queue.put({"data": chunk, "meta_info": self._s2s_meta()})
                 self.last_transmitted_timestamp = time.time()
 
             elif isinstance(event, s2s_events.TranscriptDelta):
@@ -7545,12 +7561,13 @@ class TaskManager(BaseManager):
                 if self._s2s_within_welcome_gate():
                     continue
                 # The provider reports every speech start here, so this is only a barge-in
-                # when the agent actually had the floor.
+                # when the agent still had the floor.
                 self.interruption_manager.on_user_speech_started()
-                if self._s2s_agent_speaking:
+                if self._s2s_agent_has_floor():
                     logger.info("S2S: caller barged in, dropping queued audio")
                     self.interruption_manager.on_interruption_triggered()
                     self._s2s_agent_speaking = False
+                self._s2s_playout_until = 0.0
                 await self._s2s_drop_queued_audio()
 
             elif isinstance(event, s2s_events.ResponseDone):
