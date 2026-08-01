@@ -709,6 +709,15 @@ class TaskManager(BaseManager):
                     else None
                 )
 
+                if self.__is_s2s():
+                    # The s2s result below asks for the goodbye, so telling the model to say
+                    # one before the call too produced two goodbyes on every hangup.
+                    end_call_description = (
+                        "End the current call. Do not say goodbye before calling this "
+                        "function; you will be prompted to say it afterwards."
+                        + (f"\nCriteria for when to end: {cancellation_prompt}" if cancellation_prompt else "")
+                    )
+
                 self.end_call_primary = (
                     self.conversation_config.get("end_call_tool_mode") in ("primary", "primary_with_shadow_hangup")
                     and self.use_llm_to_determine_hangup
