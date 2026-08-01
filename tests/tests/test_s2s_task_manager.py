@@ -66,6 +66,7 @@ def make_tm(*, io_provider="plivo", web=False, turn_based=False, in_rate=24000, 
         send_dtmf=AsyncMock(),
         send_function_result=AsyncMock(),
         commit_function_results=AsyncMock(),
+        trigger_response=AsyncMock(),
     )
     output = SimpleNamespace(
         handle=AsyncMock(), handle_interruption=AsyncMock(), get_provider=MagicMock(return_value=io_provider)
@@ -451,6 +452,62 @@ class TestStreamSidPropagation:
         await tm._TaskManager__await_stream_sid(timeout=0.05)
         tm._TaskManager__process_end_of_conversation.assert_awaited_once()
         tm.tools["output"].set_stream_sid.assert_not_awaited()
+
+
+class TestUserOnlinePrompt:
+    """An s2s task has no synthesizer, so the shared path silently failed and recorded a
+    line the caller never heard."""
+
+    def _make_tm(self):
+        tm = make_tm()
+        tm.s2s_config = {"provider": "openai_realtime"}
+        tm.task_config["task_type"] = "conversation"
+        tm.check_if_user_online = True
+        tm.check_user_online_message_config = "Hey, are you still there"
+        tm.language = "en"
+        tm._synthesize = AsyncMock()
+        tm.conversation_history = MagicMock()
+        tm.tools["output"] = MagicMock(handle_interruption=AsyncMock(), get_provider=MagicMock(return_value="plivo"))
+        tm.tools["input"] = MagicMock(
+            is_audio_being_played_to_user=MagicMock(return_value=False),
+            reset_response_heard_by_user=MagicMock(),
+            update_is_audio_being_played=MagicMock(),
+        )
+        # Silence long enough for the online check, short enough to stay under the hangup.
+        tm.start_time = time.time()
+        tm.last_transmitted_timestamp = time.time() - 30
+        tm.time_since_last_spoken_human_word = time.time() - 30
+        tm.compute_last_ai_audio_timestamp = MagicMock(return_value=time.time() - 30)
+        tm._should_stall_hangup = MagicMock(return_value=False)
+        tm.trigger_user_online_message_after = 10
+        tm.hang_conversation_after = 0
+        tm.repeat_after_silence_seconds = 0
+        tm.asked_if_user_is_still_there = False
+        tm.hangup_triggered = False
+        tm.response_in_pipeline = False
+        tm.llm_task = None
+        tm.execute_function_call_task = None
+        return tm
+
+    async def _run_one_pass(self, tm):
+        runner = asyncio.create_task(tm._TaskManager__check_for_completion())
+        for _ in range(60):
+            await asyncio.sleep(0.05)
+            if tm.tools["s2s"].trigger_response.await_count or tm._synthesize.await_count:
+                break
+        runner.cancel()
+        await asyncio.gather(runner, return_exceptions=True)
+
+    @pytest.mark.asyncio
+    async def test_the_model_speaks_it_instead_of_the_synthesizer(self):
+        tm = self._make_tm()
+        await self._run_one_pass(tm)
+
+        tm.tools["s2s"].trigger_response.assert_awaited_once()
+        assert "still there" in tm.tools["s2s"].trigger_response.await_args.kwargs["instructions"]
+        # The shared path pushes a packet the caller never hears and then clears carrier audio.
+        tm._synthesize.assert_not_awaited()
+        tm.tools["output"].handle_interruption.assert_not_awaited()
 
 
 class TestToolDispatch:

@@ -7187,6 +7187,16 @@ class TaskManager(BaseManager):
                         self.check_user_online_message_config, self.language
                     )
 
+                    if self.__is_s2s():
+                        # The model owns the audio stream and there is no synthesizer to
+                        # render this. Pushing a packet through the path below left the
+                        # transcript claiming the agent spoke while the caller heard nothing.
+                        await self.tools["s2s"].trigger_response(
+                            instructions=f"Say exactly this, and nothing else: {user_online_message}"
+                        )
+                        self.conversation_history.append_assistant(user_online_message, exclude_from_llm=True)
+                        continue
+
                     self.tools["input"].reset_response_heard_by_user()
 
                     if self.should_record:
