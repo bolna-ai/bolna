@@ -2,6 +2,7 @@ import base64
 import json
 
 import pytest
+from unittest.mock import AsyncMock
 import websockets
 
 from bolna.models import GeminiLiveConfig, OpenAIRealtimeConfig, S2SConfig
@@ -287,13 +288,59 @@ class TestOpenAIEventMapping:
         assert next(e for e in await drain(provider) if isinstance(e, S2SError)).fatal is True
 
     @pytest.mark.asyncio
-    async def test_closed_socket_surfaces_as_error(self):
+    async def test_closed_socket_is_recovered_by_reconnecting(self):
         provider = make_openai()
         ws = FakeWS([])
         ws.close_after_drain = True
         provider._ws = ws
+
+        async def fake_connect():
+            provider._ws = FakeWS([])
+            provider._ws.close_after_drain = True
+            provider._closed = True  # second drop is treated as intentional, ending the loop
+
+        provider.connect = fake_connect
+        events = await drain(provider)
+        assert any(isinstance(e, SessionResumed) for e in events)
+        assert not [e for e in events if isinstance(e, S2SError)]
+
+    @pytest.mark.asyncio
+    async def test_intentional_disconnect_does_not_reconnect(self):
+        provider = make_openai()
+        ws = FakeWS([])
+        ws.close_after_drain = True
+        provider._ws = ws
+        provider._closed = True
+        provider.connect = AsyncMock()
+
+        events = await drain(provider)
+        assert not [e for e in events if isinstance(e, (S2SError, SessionResumed))]
+        provider.connect.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_failed_reconnect_is_fatal(self):
+        provider = make_openai()
+        ws = FakeWS([])
+        ws.close_after_drain = True
+        provider._ws = ws
+        provider.connect = AsyncMock(side_effect=ConnectionError("refused"))
+
         errors = [e for e in await drain(provider) if isinstance(e, S2SError)]
-        assert errors and errors[0].code == "connection_closed"
+        assert errors and errors[0].code == "reconnect_failed"
+
+    @pytest.mark.asyncio
+    async def test_reconnect_carries_the_transcript_into_the_new_prompt(self):
+        provider = make_openai()
+        provider._history = [("user", "my order is late"), ("assistant", "let me check")]
+        instructions = provider._build_session_config()["instructions"]
+        assert "my order is late" in instructions and "let me check" in instructions
+        # Otherwise the model greets the caller a second time after the drop.
+        assert "without greeting the caller again" in instructions
+
+    @pytest.mark.asyncio
+    async def test_first_connect_sends_the_bare_system_prompt(self):
+        provider = make_openai()
+        assert provider._build_session_config()["instructions"] == provider.system_prompt
 
     @pytest.mark.asyncio
     async def test_error_event_releases_the_turn_gate(self):

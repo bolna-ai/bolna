@@ -17,6 +17,7 @@ from .events import (
     S2SError,
     S2SUsage,
     SessionReady,
+    SessionResumed,
     TranscriptDelta,
 )
 
@@ -85,6 +86,8 @@ class OpenAIRealtimeS2S(BaseS2SProvider):
         self.language = language
 
         self._ws = None
+        self._closed = False
+        self._history: list = []
         self._current_response_transcript = ""
         self._response_done_event = asyncio.Event()
         self._response_done_event.set()
@@ -111,6 +114,18 @@ class OpenAIRealtimeS2S(BaseS2SProvider):
         await self._await_session_updated()
         self.connection_time = (time.time() - started) * 1000
         logger.info(f"OpenAI Realtime connected in {self.connection_time:.0f}ms | model={self.model}")
+
+    def _instructions(self) -> str:
+        """The system prompt, plus what has already been said when this is a reconnect."""
+        if not self._history:
+            return self.system_prompt
+        spoken = "\n".join(f"{role}: {text}" for role, text in self._history)
+        return (
+            f"{self.system_prompt}\n\n"
+            "The call is already in progress and was briefly interrupted. "
+            "Continue naturally without greeting the caller again. "
+            f"Conversation so far:\n{spoken}"
+        )
 
     async def _await_session_updated(self, timeout: float = 5.0) -> None:
         # A rejected session.update must surface at connect time; mid-call is too late to fall back.
@@ -145,7 +160,7 @@ class OpenAIRealtimeS2S(BaseS2SProvider):
         config: dict = {
             "type": "realtime",
             "output_modalities": ["audio"],
-            "instructions": self.system_prompt,
+            "instructions": self._instructions(),
             "audio": {
                 "input": {
                     "format": {"type": "audio/pcm", "rate": self.input_sample_rate},
@@ -195,11 +210,38 @@ class OpenAIRealtimeS2S(BaseS2SProvider):
 
     async def receive_events(self) -> AsyncGenerator:
         yield SessionReady(connection_time_ms=self.connection_time or 0.0)
-        try:
-            async for event in self._receive_events_impl():
-                yield event
-        except websockets.ConnectionClosed as e:
-            yield S2SError(message=f"WebSocket closed: code={e.code} reason={e.reason!r}", code="connection_closed")
+        while True:
+            try:
+                async for event in self._receive_events_impl():
+                    yield event
+                return
+            except websockets.ConnectionClosed as e:
+                if self._closed:
+                    return
+                logger.warning(f"OpenAI Realtime connection closed: code={e.code} reason={e.reason!r}")
+
+            # A drop mid-call used to end the call outright. Reconnecting costs the caller
+            # the in-flight turn, which the model regenerates from the replayed history.
+            try:
+                started = time.time()
+                await self._reconnect()
+                yield SessionResumed(reconnect_ms=(time.time() - started) * 1000)
+            except Exception as e:
+                yield S2SError(message=f"OpenAI Realtime reconnect failed: {e}", code="reconnect_failed")
+                return
+
+    async def _reconnect(self) -> None:
+        if self._ws:
+            try:
+                await self._ws.close()
+            except Exception:
+                pass
+            self._ws = None
+        # connect() rebuilds the session config, which carries the transcript so far in the
+        # instructions. OpenAI has no server-side resumption handle like Gemini's, and the
+        # shape for replaying an assistant turn as a conversation item is undocumented,
+        # so the prompt is the one surface that cannot be rejected mid-call.
+        await self.connect()
 
     async def _receive_events_impl(self) -> AsyncGenerator:
         async for raw in self._ws:
@@ -216,10 +258,15 @@ class OpenAIRealtimeS2S(BaseS2SProvider):
             elif event_type == "response.output_audio_transcript.done":
                 transcript = event.get("transcript", "")
                 self._current_response_transcript += transcript + " "
+                if transcript:
+                    self._history.append(("assistant", transcript))
                 yield TranscriptDelta(content=transcript, is_final=True)
 
             elif event_type == "conversation.item.input_audio_transcription.completed":
-                yield InputTranscript(content=event.get("transcript", ""), is_final=True)
+                transcript = event.get("transcript", "")
+                if transcript:
+                    self._history.append(("user", transcript))
+                yield InputTranscript(content=transcript, is_final=True)
 
             elif event_type == "response.function_call_arguments.done":
                 yield FunctionCall(
@@ -304,6 +351,8 @@ class OpenAIRealtimeS2S(BaseS2SProvider):
         await self.commit_function_results()
 
     async def disconnect(self) -> None:
+        # Marks the close as intentional so the reader does not treat it as a drop to recover from.
+        self._closed = True
         if self._ws:
             try:
                 await self._ws.close()
