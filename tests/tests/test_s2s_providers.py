@@ -376,6 +376,72 @@ class TestGeminiSetup:
         assert provider._build_setup()["tools"] == [{"functionDeclarations": [{"name": "book", "description": "d"}]}]
 
 
+class TestGeminiTranscriptBoundaries:
+    """Gemini streams both transcripts in fragments and only finalises the agent's at
+    turnComplete, so naive mapping splits one caller sentence into many turns and loses
+    every barged-in agent turn."""
+
+    @pytest.mark.asyncio
+    async def test_caller_fragments_become_one_final_turn(self):
+        provider = make_gemini()
+        attach_ws(
+            provider,
+            [
+                {"serverContent": {"inputTranscription": {"text": "I want "}}},
+                {"serverContent": {"inputTranscription": {"text": "to book "}}},
+                {"serverContent": {"inputTranscription": {"text": "a table"}}},
+                {"serverContent": {"outputTranscription": {"text": "Sure"}}},
+                {"serverContent": {"turnComplete": True}},
+            ],
+        )
+        finals = [e for e in await drain(provider) if isinstance(e, InputTranscript) and e.is_final]
+        assert [e.content for e in finals] == ["I want to book a table"]
+
+    @pytest.mark.asyncio
+    async def test_caller_turn_finalises_without_model_output(self):
+        provider = make_gemini()
+        attach_ws(
+            provider,
+            [
+                {"serverContent": {"inputTranscription": {"text": "hello?"}}},
+                {"serverContent": {"turnComplete": True}},
+            ],
+        )
+        finals = [e for e in await drain(provider) if isinstance(e, InputTranscript) and e.is_final]
+        assert [e.content for e in finals] == ["hello?"]
+
+    @pytest.mark.asyncio
+    async def test_barged_in_agent_turn_is_still_recorded(self):
+        provider = make_gemini()
+        attach_ws(
+            provider,
+            [
+                {"serverContent": {"outputTranscription": {"text": "Your order is "}}},
+                {"serverContent": {"outputTranscription": {"text": "on its way"}}},
+                {"serverContent": {"interrupted": True}},
+            ],
+        )
+        events = await drain(provider)
+        finals = [e for e in events if isinstance(e, TranscriptDelta) and e.is_final]
+        assert [e.content for e in finals] == ["Your order is on its way"]
+        assert any(isinstance(e, Interrupted) for e in events)
+
+    @pytest.mark.asyncio
+    async def test_interrupted_turn_does_not_leak_into_the_next_one(self):
+        provider = make_gemini()
+        attach_ws(
+            provider,
+            [
+                {"serverContent": {"outputTranscription": {"text": "first"}}},
+                {"serverContent": {"interrupted": True}},
+                {"serverContent": {"outputTranscription": {"text": "second"}}},
+                {"serverContent": {"turnComplete": True}},
+            ],
+        )
+        finals = [e.content for e in await drain(provider) if isinstance(e, TranscriptDelta) and e.is_final]
+        assert finals == ["first", "second"]
+
+
 class TestGeminiEventMapping:
     @pytest.mark.asyncio
     async def test_maps_server_content(self):

@@ -86,6 +86,13 @@ class GeminiLiveS2S(BaseS2SProvider):
         self._pending_tool_results: list = []
         self._turn_usage = S2SUsage()
         self._current_response_transcript = ""
+        self._current_input_transcript = ""
+
+    def _take_input_transcript(self) -> str:
+        """Return the caller's accumulated words and reset, so they are emitted once."""
+        text = self._current_input_transcript.strip()
+        self._current_input_transcript = ""
+        return text
 
     async def connect(self) -> None:
         started = time.time()
@@ -264,8 +271,14 @@ class GeminiLiveS2S(BaseS2SProvider):
                 continue
 
             if server_content.get("interrupted"):
+                partial = self._current_response_transcript.strip()
                 self._current_response_transcript = ""
                 self.cancel_turn()
+                if partial:
+                    # The final transcript is only emitted at turnComplete, which never
+                    # arrives for an interrupted turn, so what the caller actually heard
+                    # before barging in would go unrecorded.
+                    yield TranscriptDelta(content=partial, is_final=True)
                 yield Interrupted()
                 continue
 
@@ -274,7 +287,18 @@ class GeminiLiveS2S(BaseS2SProvider):
                 # Gemini has no response.created, so the caller's transcript is the earliest
                 # signal that a turn is under way and is what first-audio latency measures from.
                 self._start_turn_clock()
-                yield InputTranscript(content=transcription["text"], is_final=True)
+                # Gemini streams the caller's words in fragments with no finality flag.
+                # Marking each one final would record a single sentence as several turns.
+                self._current_input_transcript += transcription["text"]
+                yield InputTranscript(content=transcription["text"], is_final=False)
+
+            # The caller's utterance is complete once the model starts answering it.
+            if (server_content.get("outputTranscription") or {}).get("text") or (
+                server_content.get("modelTurn") or {}
+            ).get("parts"):
+                caller = self._take_input_transcript()
+                if caller:
+                    yield InputTranscript(content=caller, is_final=True)
 
             transcription = server_content.get("outputTranscription")
             if transcription and transcription.get("text"):
@@ -290,6 +314,10 @@ class GeminiLiveS2S(BaseS2SProvider):
                 yield AudioDelta(data=base64.b64decode(inline_data["data"]))
 
             if server_content.get("turnComplete"):
+                # Backstop for a turn that completed without the model ever answering.
+                caller = self._take_input_transcript()
+                if caller:
+                    yield InputTranscript(content=caller, is_final=True)
                 transcript = self._current_response_transcript.strip()
                 if transcript:
                     yield TranscriptDelta(content=transcript, is_final=True)
