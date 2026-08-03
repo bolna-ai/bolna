@@ -260,6 +260,10 @@ class TaskManager(BaseManager):
         # Optional per-provider health callback (circuit-breaker shadow); never affects the call.
         self.on_provider_health = kwargs.get("on_provider_health")
         self._cb_tasks = set()
+        self._cb_transcriber_connect_reported = False
+        self._cb_synthesizer_connect_reported = False
+        self._cb_stream_reported = False
+        self._cb_tts_last = None
 
         self.conversation_start_init_ts = time.time() * 1000
         self.llm_latencies = ComponentLatencies()
@@ -525,6 +529,9 @@ class TaskManager(BaseManager):
 
                 if "reasoning_effort" in self.llm_agent_config:
                     self.llm_config["reasoning_effort"] = self.llm_agent_config["reasoning_effort"]
+
+                if "reasoning_summary" in self.llm_agent_config:
+                    self.llm_config["reasoning_summary"] = self.llm_agent_config["reasoning_summary"]
 
                 if "thinking_budget" in self.llm_agent_config:
                     self.llm_config["thinking_budget"] = self.llm_agent_config["thinking_budget"]
@@ -1352,6 +1359,7 @@ class TaskManager(BaseManager):
                 stream_sid = self.tools["input"].get_stream_sid()
                 if stream_sid is not None and self.output_handler_set:
                     self.stream_sid_ts = time.time() * 1000
+                    await self._report_stream_connect()
                     logger.info(f"Got stream sid and hence sending the first message {stream_sid}")
                     self.stream_sid = stream_sid
                     await self.tools["output"].set_stream_sid(stream_sid)
@@ -1746,6 +1754,8 @@ class TaskManager(BaseManager):
                 injected_cfg["api_tools"] = self.kwargs["api_tools"]
             if "reasoning_effort" in self.kwargs:
                 injected_cfg["reasoning_effort"] = self.kwargs["reasoning_effort"]
+            if "reasoning_summary" in self.kwargs:
+                injected_cfg["reasoning_summary"] = self.kwargs["reasoning_summary"]
             if "service_tier" in self.kwargs:
                 injected_cfg["service_tier"] = self.kwargs["service_tier"]
             if "routing_reasoning_effort" in self.kwargs:
@@ -1785,6 +1795,8 @@ class TaskManager(BaseManager):
                 injected_cfg["api_tools"] = self.kwargs["api_tools"]
             if "reasoning_effort" in self.kwargs:
                 injected_cfg["reasoning_effort"] = self.kwargs["reasoning_effort"]
+            if "reasoning_summary" in self.kwargs:
+                injected_cfg["reasoning_summary"] = self.kwargs["reasoning_summary"]
             if "service_tier" in self.kwargs:
                 injected_cfg["service_tier"] = self.kwargs["service_tier"]
             if self.llm_config.get("use_responses_api"):
@@ -4395,17 +4407,18 @@ class TaskManager(BaseManager):
         else:
             logger.info(f"Need to separate out output task")
 
-    async def _report_provider_health(self, service, provider, model, ok, latency_ms=None, blocking=False):
+    async def _report_provider_health(self, service, provider, model, ok, latency_ms=None, phase=None, blocking=False):
         """Per-provider health signal for the circuit breaker (shadow). Never affects the call.
 
-        Fire-and-forget by default. On the error path pass blocking=True so the write lands before the
-        call tears down (a bare create_task would be cancelled by shutdown); the timeout keeps a slow
-        Redis from ever delaying teardown.
+        phase distinguishes connection setup ("connect") from per-turn processing ("process", the
+        default). Fire-and-forget by default. On the error path pass blocking=True so the write lands
+        before the call tears down (a bare create_task would be cancelled by shutdown); the timeout
+        keeps a slow Redis from ever delaying teardown.
         """
         if not self.on_provider_health or not provider:
             return
         try:
-            coro = self.on_provider_health(service, provider, model, ok, latency_ms)
+            coro = self.on_provider_health(service, provider, model, ok, latency_ms, phase)
             if blocking:
                 await asyncio.wait_for(coro, timeout=2)
                 return
@@ -4414,6 +4427,45 @@ class TaskManager(BaseManager):
             _cb.add_done_callback(self._cb_tasks.discard)
         except Exception:
             pass
+
+    def _active_tool(self, kind):
+        """Live pool member for a transcriber/synthesizer (or the tool itself when not pooled)."""
+        tool = self.tools.get(kind)
+        pool = getattr(tool, f"{kind}s", None)
+        if pool is not None and hasattr(tool, "active_label"):
+            return pool.get(tool.active_label, tool)
+        return tool
+
+    def _component_model(self, kind):
+        """Model of the live transcriber/synthesizer. None where the provider has no model (azure ASR)."""
+        return getattr(self._active_tool(kind), "model", None)
+
+    async def _report_component_health(self, service, provider, process_latency_ms, connect_flag):
+        """Per-turn ASR/TTS success for the shadow breaker, plus the connection latency once."""
+        if not self.on_provider_health or not provider:
+            return
+        # Must match the model the component errors report, or successes and failures split across members.
+        model = self._component_model(service)
+        if not getattr(self, connect_flag):
+            conn_ms = getattr(self._active_tool(service), "connection_time", None)
+            if conn_ms is not None:
+                setattr(self, connect_flag, True)
+                await self._report_provider_health(service, provider, model, True, conn_ms, phase="connect")
+        await self._report_provider_health(service, provider, model, True, process_latency_ms, phase="process")
+
+    async def _report_stream_connect(self):
+        """Media-stream (stream_sid) connect latency for the shadow breaker: telephony only, once/call."""
+        if not self.on_provider_health or self._cb_stream_reported or not self.stream_sid_ts:
+            return
+        provider = self.tools["input"].io_provider
+        if provider in (None, "default"):
+            return
+        self._cb_stream_reported = True
+        # welcome_message_delay is slept through before the poll; it is agent config, not carrier latency.
+        latency_ms = round(self.stream_sid_ts - self.conversation_start_init_ts - (self.welcome_message_delay or 0))
+        await self._report_provider_health(
+            "telephony_stream", provider, None, True, max(0, latency_ms), phase="connect"
+        )
 
     async def _end_call_on_component_error(self, error, hangup_detail):
         """End the call gracefully when a critical pipeline component fails.
@@ -4474,7 +4526,8 @@ class TaskManager(BaseManager):
         )
         if connection_error:
             await self._end_call_on_component_error(
-                TranscriberError(connection_error, provider=provider), HangupReason.TRANSCRIBER_CONNECTION_ERROR
+                TranscriberError(connection_error, provider=provider, model=self._component_model("transcriber")),
+                HangupReason.TRANSCRIBER_CONNECTION_ERROR,
             )
 
     async def _maybe_update_tts_language(self, meta_info):
@@ -4758,6 +4811,14 @@ class TaskManager(BaseManager):
                         transcriber_message = message["data"].get("content")
                         was_eager = message["data"].get("was_eager", False)
 
+                        # No process latency: transcribers store first-result latency inconsistently.
+                        await self._report_component_health(
+                            "transcriber",
+                            self.transcriber_provider,
+                            None,
+                            "_cb_transcriber_connect_reported",
+                        )
+
                         if was_eager and self.eager_llm_task is not None:
                             logger.info(f"EndOfTurn follows EagerEndOfTurn - using speculative LLM")
                             # Run side effects that _handle_transcriber_output normally handles,
@@ -4863,10 +4924,11 @@ class TaskManager(BaseManager):
             pass
         except Exception as e:
             provider = self.task_config["tools_config"]["transcriber"].get("provider")
+            model = self._component_model("transcriber")
             await self._end_call_on_component_error(
-                TranscriberError(str(e), provider=provider), HangupReason.TRANSCRIBER_ERROR
+                TranscriberError(str(e), provider=provider, model=model), HangupReason.TRANSCRIBER_ERROR
             )
-            raise TranscriberError(str(e), provider=provider) from e
+            raise TranscriberError(str(e), provider=provider, model=model) from e
 
     async def __process_http_transcription(self, message):
         meta_info = self.__get_updated_meta_info(message["meta_info"])
@@ -5907,6 +5969,17 @@ class TaskManager(BaseManager):
                             if self.stream:
                                 if meta_info.get("is_first_chunk", False):
                                     first_chunk_generation_timestamp = time.time()
+                                    # is_first_chunk re-stamps on every frame once the turn's text is flushed.
+                                    _ttfb = meta_info.get("synthesizer_latency")
+                                    _tts_key = (sequence_id, _ttfb)
+                                    if _tts_key != self._cb_tts_last:
+                                        self._cb_tts_last = _tts_key
+                                        await self._report_component_health(
+                                            "synthesizer",
+                                            self.synthesizer_provider,
+                                            round(_ttfb * 1000) if _ttfb is not None else None,
+                                            "_cb_synthesizer_connect_reported",
+                                        )
 
                                 if self.tools["output"].process_in_chunks(self.yield_chunks):
                                     number_of_chunks = math.ceil(len(message["data"]) / self.output_chunk_size)
@@ -5959,7 +6032,10 @@ class TaskManager(BaseManager):
                 except Exception as e:
                     self._turn_audio_flushed.set()
                     await self._end_call_on_component_error(
-                        SynthesizerError(str(e), provider=self.synthesizer_provider), HangupReason.SYNTHESIZER_ERROR
+                        SynthesizerError(
+                            str(e), provider=self.synthesizer_provider, model=self._component_model("synthesizer")
+                        ),
+                        HangupReason.SYNTHESIZER_ERROR,
                     )
                     break
 
@@ -5969,10 +6045,12 @@ class TaskManager(BaseManager):
             logger.info("Synthesizer task cancelled outside loop.")
             # await self.handle_cancellation("Synthesizer task was cancelled outside loop.")
         except Exception as e:
+            model = self._component_model("synthesizer")
             await self._end_call_on_component_error(
-                SynthesizerError(str(e), provider=self.synthesizer_provider), HangupReason.SYNTHESIZER_ERROR
+                SynthesizerError(str(e), provider=self.synthesizer_provider, model=model),
+                HangupReason.SYNTHESIZER_ERROR,
             )
-            raise SynthesizerError(str(e), provider=self.synthesizer_provider) from e
+            raise SynthesizerError(str(e), provider=self.synthesizer_provider, model=model) from e
         finally:
             await self.tools["synthesizer"].cleanup()
 

@@ -165,6 +165,7 @@ class OpenAiLLM(OpenAICompatibleLLM):
             max_tokens_key = "max_completion_tokens"
             self.model_args["reasoning_effort"] = kwargs.get("reasoning_effort") or default_reasoning_effort(model)
             self.model_args["verbosity"] = kwargs.get("verbosity", None) or Verbosity.LOW.value
+            self.reasoning_summary = kwargs.get("reasoning_summary")
 
         self.model_args.update({max_tokens_key: self.max_tokens, "temperature": self.temperature, "model": self.model})
 
