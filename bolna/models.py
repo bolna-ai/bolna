@@ -109,6 +109,17 @@ class PixaConfig(BaseModel):
     repetition_penalty: Optional[float] = 1.3
 
 
+class MayaConfig(BaseModel):
+    # "Ananya" (female) or "Arjun" (male) — the only two voices, both speak every language.
+    # Case-sensitive: Maya rejects "ananya" with a 400.
+    voice_id: str
+    voice: str
+    model: str
+    # One of hi/bn/gu/kn/ml/mr/or/pa/ta/te/en/auto. "en" is Indian English, "auto" lets Maya
+    # detect per utterance. Region-qualified codes ("en-IN") reduce to the primary subtag.
+    language: Optional[str] = "en"
+
+
 class AzureConfig(BaseModel):
     voice: str
     model: str
@@ -156,6 +167,7 @@ class Synthesizer(BaseModel):
         CartesiaConfig,
         DeepgramConfig,
         OpenAIConfig,
+        MayaConfig,
     ] = Field(union_mode="smart")
     stream: bool = False
     buffer_size: Optional[int] = 40  # 40 characters in a buffer
@@ -199,6 +211,9 @@ class Synthesizer(BaseModel):
         elif provider == "rime":
             if isinstance(config, dict):
                 values["provider_config"] = RimeConfig(**config)
+        elif provider == "maya":
+            if isinstance(config, dict):
+                values["provider_config"] = MayaConfig(**config)
 
         return values
 

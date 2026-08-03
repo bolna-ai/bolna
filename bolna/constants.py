@@ -252,6 +252,25 @@ SARVAM_TTS_SUPPORTED_LANGUAGES = {
     "od-IN",
 }
 
+# Maya matches the voice case-sensitively; "ananya" is a 400.
+MAYA_TTS_SUPPORTED_VOICES = {"Ananya", "Arjun"}
+
+# "en" is Indian English; "auto" lets Maya detect per utterance.
+MAYA_TTS_SUPPORTED_LANGUAGES = {
+    "hi",
+    "bn",
+    "gu",
+    "kn",
+    "ml",
+    "mr",
+    "or",
+    "pa",
+    "ta",
+    "te",
+    "en",
+    "auto",
+}
+
 MODEL_REASONING_EFFORT_MAP = {
     "gpt-5": [RE.MINIMAL, RE.LOW, RE.MEDIUM, RE.HIGH],
     "gpt-5-mini": [RE.MINIMAL, RE.LOW, RE.MEDIUM, RE.HIGH],
