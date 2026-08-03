@@ -6948,11 +6948,13 @@ class TaskManager(BaseManager):
             tasks_to_cancel.append(
                 process_task_cancellation(self._post_switch_fallback_task, "post_switch_fallback_task")
             )
+            # Started in __setup_tasks, so it outlives the gate below when a call ends
+            # before the first TTS turn.
+            tasks_to_cancel.append(
+                process_task_cancellation(self.synthesizer_monitor_task, "synthesizer_monitor_task")
+            )
             if "synthesizer" in self.tools and self.synthesizer_task is not None:
                 tasks_to_cancel.append(process_task_cancellation(self.synthesizer_task, "synthesizer_task"))
-                tasks_to_cancel.append(
-                    process_task_cancellation(self.synthesizer_monitor_task, "synthesizer_monitor_task")
-                )
                 for task in self.synthesizer_tasks:
                     tasks_to_cancel.append(process_task_cancellation(task, "synthesizer_task_item"))
                 self.synthesizer_tasks = []
@@ -7236,7 +7238,10 @@ class TaskManager(BaseManager):
                     output = {"status": self.webhook_response, "task_type": "webhook"}
 
             try:
-                await asyncio.gather(*tasks_to_cancel)
+                # Await every cancellation before the cleanup below clears tools.
+                for result in await asyncio.gather(*tasks_to_cancel, return_exceptions=True):
+                    if isinstance(result, BaseException):
+                        logger.error(f"Error during task cancellation: {result}")
             except Exception as e:
                 logger.error(f"Error during task cancellation: {e}")
             finally:
@@ -7280,6 +7285,16 @@ class TaskManager(BaseManager):
                 self.conversation_history = None
                 self.request_logs.clear()
                 self.function_tool_api_call_details.clear()
+                # Cancelled tasks and the voicemail handler both point back here, keeping the
+                # finished pipeline alive as a cycle until a full collection runs.
+                for attr_name, attr_value in list(vars(self).items()):
+                    if isinstance(attr_value, asyncio.Task):
+                        setattr(self, attr_name, None)
+                self.synthesizer_tasks = []
+                voicemail_handler = getattr(self, "voicemail_handler", None)
+                if voicemail_handler is not None:
+                    voicemail_handler.check_task = None
+                    voicemail_handler.tm = None
 
             return output
 
