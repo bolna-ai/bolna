@@ -79,11 +79,11 @@ class CartesiaConfig(BaseModel):
 
 
 class MurfConfig(BaseModel):
-    voice_id: str
     voice: str
     model: Optional[str] = "falcon-2"
     locale: Optional[str] = "en-US"
     style: Optional[str] = "Conversational"
+    base_url: Optional[str] = None  # e.g. global.api.murf.ai or https://in.api.murf.ai
     min_buffer_size: Optional[int] = 40
     max_buffer_delay_in_ms: Optional[int] = 0
     rate: Optional[int] = 0

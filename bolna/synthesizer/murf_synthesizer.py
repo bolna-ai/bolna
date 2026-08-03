@@ -15,11 +15,22 @@ from bolna.helpers.ssl_context import get_ssl_context
 
 logger = configure_logger(__name__)
 
+DEFAULT_MURF_HOST = "global.api.murf.ai"
+
+
+def _resolve_murf_host(base_url=None):
+    """Resolve Murf host from config or global default. Accepts host or full URL."""
+    host = (base_url or DEFAULT_MURF_HOST).strip()
+    for prefix in ("wss://", "ws://", "https://", "http://"):
+        if host.startswith(prefix):
+            host = host[len(prefix) :]
+            break
+    return host.split("/")[0] or DEFAULT_MURF_HOST
+
 
 class MurfSynthesizer(StreamSynthesizer):
     def __init__(
         self,
-        voice_id,
         voice,
         model="falcon-2",
         locale="en-US",
@@ -30,6 +41,7 @@ class MurfSynthesizer(StreamSynthesizer):
         buffer_size=400,
         synthesizer_key=None,
         caching=True,
+        base_url=None,
         min_buffer_size=40,
         max_buffer_delay_in_ms=0,
         rate=0,
@@ -43,8 +55,7 @@ class MurfSynthesizer(StreamSynthesizer):
             **kwargs,
         )
         self.api_key = os.environ["MURF_API_KEY"] if synthesizer_key is None else synthesizer_key
-        self.voice_id = voice_id or voice
-        self.voice = voice or voice_id
+        self.voice = voice
         self.model = model
         self.locale = locale
         self.style = style
@@ -63,7 +74,7 @@ class MurfSynthesizer(StreamSynthesizer):
         self.max_buffer_delay_in_ms = max_buffer_delay_in_ms
         self.stream = True
 
-        self.murf_host = os.getenv("MURF_API_HOST", "global.api.murf.ai")
+        self.murf_host = _resolve_murf_host(base_url)
         query = urlencode(
             {
                 "api-key": self.api_key,
@@ -116,7 +127,7 @@ class MurfSynthesizer(StreamSynthesizer):
         config_msg = {
             "context_id": self.context_id,
             "voice_config": {
-                "voiceId": self.voice_id,
+                "voiceId": self.voice,
                 "locale": self.locale,
                 "style": self.style,
                 "rate": self.rate,
