@@ -318,18 +318,20 @@ class GeminiLLM(BaseLLM):
 
                             if not self.gave_out_prefunction_call_message:
                                 pre_msg_config = self.api_params.get(fn_name, {}).get("pre_call_message")
-                                active_lang = (
-                                    meta_info.get("detected_language", self.language) if meta_info else self.language
-                                )
+                                detected_lang = meta_info.get("detected_language") if meta_info else None
+                                active_lang = detected_lang or self.language
                                 pre_msg = compute_function_pre_call_message(active_lang, fn_name, pre_msg_config)
-                                yield LLMStreamChunk(
-                                    data=pre_msg,
-                                    end_of_stream=True,
-                                    latency=latency_data,
-                                    function_name=fn_name,
-                                    function_message=pre_msg_config,
-                                )
                                 self.gave_out_prefunction_call_message = True
+                                # end_call and switch_language have no audible filler, so pre_msg is
+                                # empty/None — emitting it anyway sends a null chunk downstream.
+                                if pre_msg:
+                                    yield LLMStreamChunk(
+                                        data=pre_msg,
+                                        end_of_stream=True,
+                                        latency=latency_data,
+                                        function_name=fn_name,
+                                        function_message=pre_msg_config,
+                                    )
 
                             func_conf = self.api_params.get(fn_name, {})
 
