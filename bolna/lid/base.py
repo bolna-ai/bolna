@@ -223,9 +223,10 @@ class LIDBackend:
     def buffer_language_confidence(self):
         """Language probability of the current buffer_language (peek, no drain).
 
-        Sarvam reports a per-utterance score; Soniox has none, so it derives one from the
-        winning language's token share. None only when a backend supplies neither — callers
-        must treat None as "no evidence", never as low confidence.
+        Sarvam reports a per-utterance score. Soniox reports none and deliberately leaves
+        prob None (its token-share proxy read exactly 1.0 on essentially every segment, so
+        it carried no information — see soniox.py) — detector corroboration is therefore
+        Sarvam-only. Callers must treat None as "no evidence", never as low confidence.
         """
         return self._buffer_lang_prob
 

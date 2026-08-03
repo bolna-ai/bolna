@@ -215,22 +215,25 @@ def _mismatch(tm):
 def test_detector_mismatch_gate():
     tm = _tm(language="hi")
     pool = MagicMock(spec=TranscriberPool)
-    pool.lid_buffer_segments = MagicMock(return_value=[{"lang": "te"}])
-    pool.lid_buffer_max_segment_seconds = MagicMock(return_value=2.0)
+    pool.lid_buffer_segments = MagicMock(return_value=[{"lang": "te", "audio_s": 2.0}])
     pool.labels = ["hi", "te"]
     synth = MagicMock(spec=SynthesizerPool)
     synth.labels = ["hi", "te"]
     tm.tools = {"transcriber": pool, "synthesizer": synth}
     assert _mismatch(tm) is True
 
-    pool.lid_buffer_segments = MagicMock(return_value=[{"lang": "hi"}])  # same language
+    # A long active turn must not lend its duration to a mis-tagged fragment.
+    pool.lid_buffer_segments = MagicMock(return_value=[{"lang": "hi", "audio_s": 3.0}, {"lang": "te", "audio_s": 0.15}])
+    assert _mismatch(tm) is False
+
+    pool.lid_buffer_segments = MagicMock(return_value=[{"lang": "hi", "audio_s": 2.0}])  # same language
     assert _mismatch(tm) is False
 
     tm.language = "hi-IN"  # region-tagged active label still matches detector 'hi'
     assert _mismatch(tm) is False
     tm.language = "hi"
 
-    pool.lid_buffer_segments = MagicMock(return_value=[{"lang": "ta"}])  # unsupported by ASR pool
+    pool.lid_buffer_segments = MagicMock(return_value=[{"lang": "ta", "audio_s": 2.0}])  # unsupported by ASR pool
     assert _mismatch(tm) is False
 
     pool.lid_buffer_segments = MagicMock(return_value=[{"lang": "te"}])
@@ -252,8 +255,7 @@ async def test_spawn_arms_the_gate_so_the_eager_path_is_covered():
     # eager turn playing the old-language reply and then truncating it.
     tm = _tm(language="hi")
     pool = MagicMock(spec=TranscriberPool)
-    pool.lid_buffer_segments = MagicMock(return_value=[{"lang": "te"}])
-    pool.lid_buffer_max_segment_seconds = MagicMock(return_value=2.0)
+    pool.lid_buffer_segments = MagicMock(return_value=[{"lang": "te", "audio_s": 2.0}])
     pool.labels = ["hi", "te"]
     synth = MagicMock(spec=SynthesizerPool)
     synth.labels = ["hi", "te"]

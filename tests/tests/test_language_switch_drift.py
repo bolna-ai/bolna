@@ -62,6 +62,25 @@ def test_recent_turns_empty_when_no_history():
     assert _recent(_pool()) == []
 
 
+def test_recent_turns_duration_comes_from_the_detected_languages_own_segments():
+    # A one-borrowed-word turn inside a 2s active utterance must not read as 2s of that
+    # language.
+    rec = {
+        "flow": "llm_switch",
+        "detected_language": "en",
+        "buffered_max_segment_s": 2.0,
+        "detector_segments": [
+            {"lang": "hi", "audio_s": 2.0},
+            {"lang": "en", "audio_s": 0.3},
+        ],
+    }
+    assert _recent(_pool([rec])) == [("en", 0.3)]
+
+
+def test_recent_turns_duration_falls_back_to_buffer_max_without_segments():
+    assert _recent(_pool([_event("en", 1.5)])) == [("en", 1.5)]
+
+
 def test_formatting_exposes_duration_so_short_mistags_stay_non_evidence():
     fmt = LanguageSwitcher._format_recent_turns([("hi", 2.1), ("en", 0.4)])
     assert fmt == "hi(2.1), en(0.4)"
@@ -140,15 +159,15 @@ def test_region_tags_normalized_and_deduped():
 
 def test_untagged_segments_are_not_evidence():
     pool = _pool(segments=[{"lang": None}, {"lang": ""}])
-    assert _evidence(pool, "hi") == (False, [])
+    assert _evidence(pool, "hi") == (False, [], 0.0)
 
 
 def test_saw_tags_distinguishes_all_active_from_no_information():
     # Only "read the buffer, all active language" may skip a decide.
-    assert _evidence(_pool(segments=[{"lang": "hi"}]), "hi") == (True, [])
+    assert _evidence(_pool(segments=[{"lang": "hi"}]), "hi") == (True, [], 0.0)
     # A backend without buffer_segments returns [] — that is no information, so never skip:
     # skipping would make switching permanently inert on that backend.
-    assert _evidence(_pool(segments=[]), "hi") == (False, [])
+    assert _evidence(_pool(segments=[]), "hi") == (False, [], 0.0)
 
 
 def test_unreadable_segments_api_never_skips_and_never_raises():
@@ -156,9 +175,9 @@ def test_unreadable_segments_api_never_skips_and_never_raises():
     # stuck-language recovery for the whole call.
     pool = MagicMock(spec=TranscriberPool)
     pool.lid_buffer_segments.return_value = object()  # not iterable
-    assert _evidence(pool, "hi") == (False, [])
+    assert _evidence(pool, "hi") == (False, [], 0.0)
     pool.lid_buffer_segments.side_effect = AttributeError("no such method")
-    assert _evidence(pool, "hi") == (False, [])
+    assert _evidence(pool, "hi") == (False, [], 0.0)
 
 
 @pytest.mark.asyncio

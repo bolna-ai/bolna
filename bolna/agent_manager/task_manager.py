@@ -805,7 +805,15 @@ class TaskManager(BaseManager):
         # speech precisely when switching matters (QA 5765dd9f: tool switched to 'ta' from
         # Tamil-rendered text while the unbiased detector heard 'te'), and its silent history-side
         # races produced unexplained "Already speaking in X" tool responses in every QA round.
-        if not self.__language_switch_enabled():
+        # judge_dead: no API key resolved — re-inject the legacy tool so a flagged agent
+        # keeps SOME switch path instead of a judge that fails every decide.
+        judge_dead = self.language_switcher is not None and not getattr(self.language_switcher, "has_credentials", True)
+        if not self.__language_switch_enabled() or judge_dead:
+            if judge_dead:
+                logger.warning(
+                    "LanguageSwitcher has no resolvable API key — injecting the legacy switch_language "
+                    "tool as the fallback switch path for this call"
+                )
             self.__inject_switch_language_tool()
 
         # # setting llm
@@ -4715,11 +4723,6 @@ class TaskManager(BaseManager):
                             logger.info(
                                 f"Skipping speculative LLM: EagerEOT confidence {eot_confidence} below threshold {eager_eot_threshold}"
                             )
-                        elif self.language_switcher is not None and self.__detector_language_mismatch():
-                            # An eager reply would stream on the OLD voice before the switch
-                            logger.info(
-                                "Skipping speculative LLM: detector language mismatch — reply holds for the switch decision"
-                            )
                         elif (
                             eager_transcript
                             and self.tools["input"].welcome_message_played()
@@ -5064,14 +5067,28 @@ class TaskManager(BaseManager):
 
     @staticmethod
     def __recent_detected_turns(pool, limit: int = 4) -> list:
-        """(detected_language, longest_segment_s) for the last few Switch-LLM firings, oldest
-        first — the cross-turn evidence the judge needs to spot sustained drift. Read from the
-        telemetry we already append per firing, so it costs nothing extra to collect."""
+        """(detected_language, longest_segment_s OF THAT LANGUAGE) for the last few Switch-LLM
+        firings, oldest first — the cross-turn evidence the judge needs to spot sustained drift.
+        Read from the telemetry we already append per firing, so it costs nothing extra."""
+
+        def detected_lang_duration(r):
+            # Duration from the detected language's OWN segments, not the buffer max — else a
+            # one-borrowed-word turn reads as ~2s of "real speech" under rule 8's duration guard.
+            detected_short = (r.get("detected_language") or "").split("-")[0].lower()
+            segment_durations = [
+                float(seg.get("audio_s") or 0.0)
+                for seg in r.get("detector_segments") or []
+                if (seg.get("lang") or "").split("-")[0].lower() == detected_short
+            ]
+            if segment_durations:
+                return max(segment_durations)
+            return r.get("buffered_max_segment_s") or 0.0
+
         # Filter THEN slice: handoff and legacy records share this list, so slicing first let
         # them displace real turns — right after a switch the tail is all handoff records and the
         # judge got "(none)" exactly when drift evidence matters most.
         turns = [
-            (r.get("detected_language"), r.get("buffered_max_segment_s") or 0.0)
+            (r.get("detected_language"), detected_lang_duration(r))
             for r in pool.lid_detection_events
             if r.get("flow") == "llm_switch" and r.get("detected_language")
         ]
@@ -5106,7 +5123,8 @@ class TaskManager(BaseManager):
 
     @staticmethod
     def __buffered_language_evidence(pool, active_short: str) -> tuple:
-        """(saw_tags, foreign_languages) for the whole buffer, foreign oldest-first.
+        """(saw_tags, foreign_languages, foreign_max_segment_s) for the whole buffer,
+        foreign oldest-first, foreign_max_segment_s = longest FOREIGN-tagged segment.
 
         Unsupported tags count as foreign on purpose — rule 4 lets the judge remap a
         confusable-cluster mis-tag (kn↔te) onto a supported language.
@@ -5120,18 +5138,23 @@ class TaskManager(BaseManager):
         """
         foreign = []
         saw_tags = False
+        foreign_max_s = 0.0
         try:
             for segment in pool.lid_buffer_segments() or []:
                 lang = (segment.get("lang") or "").split("-")[0].lower()
                 if not lang:
                     continue
                 saw_tags = True
-                if lang != active_short and lang not in foreign:
-                    foreign.append(lang)
+                if lang != active_short:
+                    if lang not in foreign:
+                        foreign.append(lang)
+                    # Foreign segments only: the buffer-wide max let a long active turn lend
+                    # its duration to a mis-tagged fragment (armed the gate for a sure "stay").
+                    foreign_max_s = max(foreign_max_s, float(segment.get("audio_s") or 0.0))
         except (AttributeError, TypeError) as e:
             logger.warning(f"LanguageSwitcher: could not read detector segments ({e}) — will not skip the decide")
-            return False, []
-        return saw_tags, foreign
+            return False, [], 0.0
+        return saw_tags, foreign, foreign_max_s
 
     def __switch_decide_timeout_s(self) -> float:
         """Switch-LLM decide ceiling (the asyncio.wait_for around decide())."""
@@ -5181,17 +5204,15 @@ class TaskManager(BaseManager):
         # Read the WHOLE buffer, exactly as the idle watcher does. Reading only the newest tag
         # made a foreign turn whose tail fragment is mis-tagged as the active language look like
         # no mismatch at all, so its audio was never gated and got truncated mid-sentence.
-        _, foreign_langs = self.__buffered_language_evidence(pool, active_short)
+        saw_tags, foreign_langs, foreign_max_s = self.__buffered_language_evidence(pool, active_short)
         detected = next((lang for lang in foreign_langs if lang in pool.labels), None)
         if detected is None:
             return False
-        # Same substance bar the decide gates on: acknowledgment-length mis-tags end in
-        # gated:short_audio anyway, so don't cost the caller the settle+decide hold.
-        # (An explicit short by-name request still switches — via truncate, not hold.)
+        # Substance measured on the FOREIGN segments themselves, like __detector_corroborates.
         min_segment_s = float(
             os.getenv("LANGUAGE_SWITCH_MIN_SEGMENT_AUDIO_S", str(LANGUAGE_SWITCH_MIN_SEGMENT_AUDIO_S))
         )
-        if pool.lid_buffer_max_segment_seconds() < min_segment_s:
+        if foreign_max_s < min_segment_s:
             return False
         synth = self.tools.get("synthesizer")
         return not isinstance(synth, SynthesizerPool) or detected in synth.labels
@@ -5269,6 +5290,7 @@ class TaskManager(BaseManager):
         # 0.3-0.8s inter-segment gaps so we don't fire mid-utterance).
         mismatch_idle_flush_s = float(os.getenv("LANGUAGE_SWITCH_MISMATCH_IDLE_FLUSH_S", "1.2"))
         try:
+            skip_logged = False  # one skip line per buffer generation, not one per 2s re-poll
             while not self.conversation_ended:
                 # No switches once hangup / end-call / transfer is underway — a switch here
                 # truncates the goodbye and deadlocks teardown. Just as important: on these states
@@ -5286,6 +5308,7 @@ class TaskManager(BaseManager):
                     continue
                 age = pool.lid_buffer_age()
                 if age is None:
+                    skip_logged = False  # buffer drained — the next skip is news again
                     # Nothing buffered — sleep until speech actually arrives (event set
                     # on each detector segment) instead of polling. The timeout keeps
                     # the conversation_ended check alive and covers backends without
@@ -5304,7 +5327,7 @@ class TaskManager(BaseManager):
                 # Any foreign-tagged segment counts, not just the newest: a turn that opened in
                 # another language and ended on an active-language word is still evidence, and
                 # reading only the latest tag made it wait out the slower same-language window.
-                saw_tags, foreign_langs = self.__buffered_language_evidence(pool, active_short)
+                saw_tags, foreign_langs, foreign_max_s = self.__buffered_language_evidence(pool, active_short)
                 mismatch = bool(foreign_langs)
                 threshold = mismatch_idle_flush_s if mismatch else idle_flush_s
                 # An all-active-language buffer can only produce "stay", so firing would spend
@@ -5334,10 +5357,13 @@ class TaskManager(BaseManager):
                 # is how a switch gets this schedule recomputed for the new language's threshold
                 # instead of sleeping out the old one.
                 if nothing_to_decide and age >= threshold:
-                    logger.info(
-                        f"LanguageSwitcher: idle-flush skipped — buffer is all active language "
-                        f"('{active_short}', idle {age:.1f}s); no decide can change it"
-                    )
+                    if not skip_logged:
+                        # Once per buffer generation — this branch re-wakes every 2s otherwise.
+                        logger.info(
+                            f"LanguageSwitcher: idle-flush skipped — buffer is all active language "
+                            f"('{active_short}', idle {age:.1f}s); no decide can change it"
+                        )
+                        skip_logged = True
                     remaining = 2.0  # nothing pending; just wait for the next segment
                 else:
                     remaining = max(threshold - age, 0.05)
@@ -5348,6 +5374,7 @@ class TaskManager(BaseManager):
                 buffer_event.clear()
                 try:
                     await asyncio.wait_for(buffer_event.wait(), timeout=remaining)
+                    skip_logged = False  # event fired: new segment or a switch poke — re-evaluate loudly
                 except asyncio.TimeoutError:
                     pass
         except asyncio.CancelledError:
@@ -5606,6 +5633,11 @@ class TaskManager(BaseManager):
 
         # Truncate the in-flight old-language reply (barge-in cleanup) before switching.
         activity = self._inflight_response_activity()  # captured pre-truncation for telemetry
+        # Release the gate before cleanup: cleanup invalidates this sequence, so the output
+        # loop never re-polls it — the switched case wrote no playback_gate record at all.
+        held_gate = self.lid_playback_gate
+        if held_gate is not None:
+            self.__release_lid_playback_gate(held_gate, "decided")
         if self.function_call_in_flight:
             logger.info("LanguageSwitcher: in-flight function call — switching in parallel, not truncating the action")
             if target != self.language:
@@ -5892,7 +5924,10 @@ class TaskManager(BaseManager):
             f"prompt: preferred-language variables, per-language scripted questions or sample "
             f"responses, and instructions to speak 'as per' any language preference. When a "
             f"script exists in multiple languages, use the {name} version; when it only exists "
-            f"in another language, translate it into {name} and keep the meaning exact."
+            f"in another language, translate it into {name} and keep the meaning exact. "
+            f"Never translate or alter proper nouns, brand names, alphanumeric identifiers, "
+            f"digits, codes, or lines these instructions mark as verbatim/legal — read those "
+            f"exactly as written; they are language-neutral."
         )
 
     def __apply_language_directive(self, label: str, context_note: str = None) -> None:

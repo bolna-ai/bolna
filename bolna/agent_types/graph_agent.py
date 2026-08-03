@@ -1039,7 +1039,10 @@ class GraphAgent(BaseAgent):
                 f"variables, per-language scripted questions or sample responses, and instructions "
                 f"to speak 'as per' any language preference. When this prompt provides the same "
                 f"script in multiple languages, use the {lang_name} version; when it only exists "
-                f"in another language, translate it into {lang_name} and keep the meaning exact."
+                f"in another language, translate it into {lang_name} and keep the meaning exact. "
+                f"Never translate or alter proper nouns, brand names, alphanumeric identifiers, "
+                f"digits, codes, or lines this prompt marks as verbatim/legal — read those "
+                f"exactly as written; they are language-neutral."
             )
             if examples.get(detected_lang):
                 directive += (

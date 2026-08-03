@@ -74,7 +74,9 @@ class LanguageSwitcher:
                 logger.warning(f"LanguageSwitcher: no key for '{self.model}' — falling back to {default_model}")
                 self.model = default_model
                 switch_llm_key, switch_llm_base, switch_llm_version = fb_key, fb_base, fb_version
-        if not switch_llm_key.strip():
+        # Lets the task manager fall back to the legacy switch tool when the judge can't work.
+        self.has_credentials = bool(switch_llm_key.strip())
+        if not self.has_credentials:
             # Don't raise (would kill call setup); log — every decide would otherwise fail silently.
             logger.error(
                 f"LanguageSwitcher: no API key resolved for '{self.model}' — set LANGUAGE_SWITCH_LLM_API_KEY "
@@ -187,22 +189,26 @@ class LanguageSwitcher:
         async def attempt():
             return self._parse_json(await self._llm.generate(messages))
 
-        first = asyncio.create_task(attempt())
-        if hedge_after_s <= 0:
-            return await first
-
-        await asyncio.wait({first}, timeout=hedge_after_s)
-        if first.done() and first.exception() is None:
-            return first.result()
-        # Hedge on a SLOW first attempt and on a FAST-FAILED one alike: a 429 at 200ms is the case
-        # where a retry is cheapest, and returning its exception threw the whole decide away.
-        if first.done():
-            logger.info(f"LanguageSwitcher: first attempt failed ({first.exception()}) — retrying")
-        else:
-            logger.info(f"LanguageSwitcher: no decision in {hedge_after_s}s — hedging a second request")
-        second = asyncio.create_task(attempt())
-        pending = {first, second}
+        # Tasks created inside the try: cancellation of decide() itself must not strand a
+        # running attempt unowned (finally covers every await window).
+        first = None
+        second = None
         try:
+            first = asyncio.create_task(attempt())
+            if hedge_after_s <= 0:
+                return await first
+
+            await asyncio.wait({first}, timeout=hedge_after_s)
+            if first.done() and first.exception() is None:
+                return first.result()
+            # Hedge on a SLOW first attempt and on a FAST-FAILED one alike: a 429 at 200ms is the
+            # case where a retry is cheapest, and returning its exception threw the decide away.
+            if first.done():
+                logger.info(f"LanguageSwitcher: first attempt failed ({first.exception()}) — retrying")
+            else:
+                logger.info(f"LanguageSwitcher: no decision in {hedge_after_s}s — hedging a second request")
+            second = asyncio.create_task(attempt())
+            pending = {first, second}
             # First SUCCESSFUL reply wins; a failing straggler must not lose the other's answer.
             while pending:
                 done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
@@ -221,7 +227,7 @@ class LanguageSwitcher:
             return None
         finally:
             for task in (first, second):
-                if not task.done():
+                if task is not None and not task.done():
                     task.cancel()
 
     @staticmethod
