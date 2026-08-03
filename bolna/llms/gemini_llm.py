@@ -265,14 +265,15 @@ class GeminiLLM(BaseLLM):
         answer, buffer = "", ""
         self.started_streaming = False
         self.gave_out_prefunction_call_message = False
-        # Accumulated thought text parts from the current model turn (thinking models only)
         accumulated_thought_parts: list[str] = []
-        # Standalone thought_signature bytes received before the function_call Part
-        # (Gemini 3 streaming sends signature as a separate Part ahead of functionCall)
+        # Gemini 3 streams thought_signature as a standalone Part before the functionCall Part.
         pending_thought_signature: bytes | None = None
-        # usage_metadata repeats on every chunk with cumulative counts, and some models omit
-        # it on the final one, so keep the last non-empty value rather than the final chunk's.
+        # Keep last non-empty usage_metadata (some models omit it on the final chunk).
         stream_usage = None
+        # Accumulate fn args per call_id across chunks; dispatch once post-stream with full args.
+        _pending_fn_args: dict[str, dict] = {}
+        _pending_dispatch: dict[str, dict] = {}
+        _tool_dispatched = False
 
         try:
             response_stream = await self.client.aio.models.generate_content_stream(
@@ -315,13 +316,14 @@ class GeminiLLM(BaseLLM):
 
                         if part.function_call:
                             fn_name = part.function_call.name
-                            fn_args = dict(part.function_call.args) if part.function_call.args else {}
                             raw_id = part.function_call.id
                             call_id = raw_id or ("call_" + str(uuid.uuid4())[:8])
-                            # If Gemini didn't return a function_call id, rebuild the Part
-                            # with our generated id — otherwise the cached Part would have
-                            # id=None while the tool response carries the synthetic call_id,
-                            # which causes an id-mismatch 400 on the next turn.
+                            chunk_args = dict(part.function_call.args) if part.function_call.args else {}
+                            if call_id not in _pending_fn_args:
+                                _pending_fn_args[call_id] = {}
+                            _pending_fn_args[call_id].update(chunk_args)
+                            fn_args = _pending_fn_args[call_id]
+                            # Rebuild Part with synthetic id to avoid id=None mismatch 400 on next turn.
                             if not raw_id:
                                 inline_sig = getattr(part, "thought_signature", None)
                                 rebuilt_kwargs: dict = dict(
@@ -330,8 +332,6 @@ class GeminiLLM(BaseLLM):
                                 if inline_sig:
                                     rebuilt_kwargs["thought_signature"] = inline_sig
                                 part = types.Part(**rebuilt_kwargs)
-                            # Cache the Part so _prepare_history can reuse it intact —
-                            # thought_signature bytes cannot survive serialisation.
                             self._native_function_parts[call_id] = part
                             logger.info(
                                 f"[GeminiLLM] function_call detected fn={fn_name} call_id={call_id} args={list(fn_args.keys())} native_part_cached=True"
@@ -343,8 +343,6 @@ class GeminiLLM(BaseLLM):
                                 active_lang = detected_lang or self.language
                                 pre_msg = compute_function_pre_call_message(active_lang, fn_name, pre_msg_config)
                                 self.gave_out_prefunction_call_message = True
-                                # No audible filler for end_call or switch_language, and yielding
-                                # the empty result sends a null chunk downstream.
                                 if pre_msg:
                                     yield LLMStreamChunk(
                                         data=pre_msg,
@@ -354,87 +352,19 @@ class GeminiLLM(BaseLLM):
                                         function_message=pre_msg_config,
                                     )
 
-                            func_conf = self.api_params.get(fn_name, {})
-
-                            tool_spec = next(
-                                (
-                                    t
-                                    for t in self.bolna_tools_raw
-                                    if (t.get("type") == "function" and t["function"]["name"] == fn_name)
-                                    or (t.get("name") == fn_name)
-                                ),
-                                None,
-                            )
-                            if tool_spec:
-                                params_schema = (
-                                    tool_spec["function"]["parameters"]
-                                    if tool_spec.get("type") == "function"
-                                    else tool_spec.get("parameters", {})
-                                )
-                                required_keys = params_schema.get("required", [])
-                                if not all(k in fn_args for k in required_keys):
-                                    logger.warning(
-                                        f"Gemini tool call {fn_name} missing required params: {required_keys}, got: {list(fn_args.keys())}"
-                                    )
-                                    continue
-
-                            model_resp: list[dict] = []
-                            for thought_text in accumulated_thought_parts:
-                                model_resp.append({"type": "_gemini_thought", "text": thought_text})
-                            accumulated_thought_parts = []
-
-                            fn_entry: dict = {
-                                "id": call_id,
-                                "function": {"name": fn_name, "arguments": json.dumps(fn_args)},
-                                "type": "function",
-                            }
-                            # Per Google docs: thought_signature must be returned on the
-                            # same functionCall Part. In streaming Gemini 3 emits it as a
-                            # standalone Part just before the functionCall Part; Gemini 2.5
-                            # (when thinking on) puts it inline on the functionCall Part.
-                            sig_bytes = getattr(part, "thought_signature", None) or pending_thought_signature
-                            pending_thought_signature = None  # consumed
-                            if sig_bytes:
-                                fn_entry["thought_signature"] = base64.b64encode(sig_bytes).decode("utf-8")
-                                logger.info(
-                                    f"[GeminiLLM] thought_signature stored for fn={fn_name} call_id={call_id} bytes={len(sig_bytes)}"
-                                )
-                            model_resp.append(fn_entry)
-
-                            payload = FunctionCallPayload(
-                                url=func_conf.get("url"),
-                                method=(func_conf.get("method", "GET") or "GET").lower(),
-                                param=func_conf.get("param"),
-                                api_token=func_conf.get("api_token"),
-                                headers=func_conf.get("headers"),
-                                model_args={"model": self.model},
-                                meta_info=meta_info or {},
-                                called_fun=fn_name,
-                                model_response=model_resp,
-                                tool_call_id=call_id,
-                                textual_response=answer.strip() if answer else None,
-                            )
-                            for k, v in fn_args.items():
-                                setattr(payload, k, v)
-
-                            convert_to_request_log(
-                                json.dumps(fn_args),
-                                meta_info,
-                                self.model,
-                                "llm",
-                                direction="response",
-                                is_cached=False,
-                                run_id=self.run_id,
-                            )
-                            if latency_data and latency_data.total_stream_duration_ms is None:
-                                latency_data.total_stream_duration_ms = now_ms() - start_time
-                            yield LLMStreamChunk(
-                                data=payload,
-                                end_of_stream=False,
-                                latency=latency_data,
-                                is_function_call=True,
-                                **_usage_kwargs(stream_usage),
-                            )
+                            if call_id not in _pending_dispatch:
+                                model_resp_prefix: list[dict] = [
+                                    {"type": "_gemini_thought", "text": t} for t in accumulated_thought_parts
+                                ]
+                                accumulated_thought_parts = []
+                                sig_bytes = getattr(part, "thought_signature", None) or pending_thought_signature
+                                pending_thought_signature = None
+                                _pending_dispatch[call_id] = {
+                                    "fn_name": fn_name,
+                                    "func_conf": self.api_params.get(fn_name, {}),
+                                    "model_resp_prefix": model_resp_prefix,
+                                    "sig_bytes": sig_bytes,
+                                }
                             continue
 
                 # Regular text streaming
@@ -462,6 +392,82 @@ class GeminiLLM(BaseLLM):
         if latency_data and latency_data.total_stream_duration_ms is None:
             latency_data.total_stream_duration_ms = now_ms() - start_time
 
+        for call_id, ctx in _pending_dispatch.items():
+            fn_name = ctx["fn_name"]
+            fn_args = _pending_fn_args.get(call_id, {})
+            func_conf = ctx["func_conf"]
+
+            tool_spec = next(
+                (
+                    t
+                    for t in self.bolna_tools_raw
+                    if (t.get("type") == "function" and t["function"]["name"] == fn_name) or (t.get("name") == fn_name)
+                ),
+                None,
+            )
+            if tool_spec:
+                params_schema = (
+                    tool_spec["function"]["parameters"]
+                    if tool_spec.get("type") == "function"
+                    else tool_spec.get("parameters", {})
+                )
+                required_keys = params_schema.get("required", [])
+                if not all(k in fn_args for k in required_keys):
+                    missing = [k for k in required_keys if k not in fn_args]
+                    logger.warning(
+                        f"[GeminiLLM] Tool call {fn_name} still missing params after full stream: "
+                        f"missing={missing}, got={list(fn_args.keys())} — "
+                        f"dispatching anyway (OpenAI-parity; downstream will validate)"
+                    )
+
+            model_resp: list[dict] = list(ctx["model_resp_prefix"])
+            fn_entry: dict = {
+                "id": call_id,
+                "function": {"name": fn_name, "arguments": json.dumps(fn_args)},
+                "type": "function",
+            }
+            sig_bytes = ctx["sig_bytes"]
+            if sig_bytes:
+                fn_entry["thought_signature"] = base64.b64encode(sig_bytes).decode("utf-8")
+                logger.info(
+                    f"[GeminiLLM] thought_signature stored for fn={fn_name} call_id={call_id} bytes={len(sig_bytes)}"
+                )
+            model_resp.append(fn_entry)
+
+            payload = FunctionCallPayload(
+                url=func_conf.get("url"),
+                method=(func_conf.get("method", "GET") or "GET").lower(),
+                param=func_conf.get("param"),
+                api_token=func_conf.get("api_token"),
+                headers=func_conf.get("headers"),
+                model_args={"model": self.model},
+                meta_info=meta_info or {},
+                called_fun=fn_name,
+                model_response=model_resp,
+                tool_call_id=call_id,
+                textual_response=answer.strip() if answer else None,
+            )
+            for k, v in fn_args.items():
+                setattr(payload, k, v)
+
+            convert_to_request_log(
+                json.dumps(fn_args),
+                meta_info,
+                self.model,
+                "llm",
+                direction="response",
+                is_cached=False,
+                run_id=self.run_id,
+            )
+            _tool_dispatched = True
+            yield LLMStreamChunk(
+                data=payload,
+                end_of_stream=False,
+                latency=latency_data,
+                is_function_call=True,
+                **_usage_kwargs(stream_usage),
+            )
+
         reasoning_content = "\n".join(accumulated_thought_parts) if accumulated_thought_parts else None
 
         if synthesize and buffer.strip():
@@ -471,6 +477,11 @@ class GeminiLLM(BaseLLM):
                 latency=latency_data,
                 reasoning_content=reasoning_content,
                 **_usage_kwargs(stream_usage),
+            )
+        elif synthesize and not buffer.strip() and not _tool_dispatched:
+            logger.error(
+                "[GeminiLLM] Dead turn detected: synthesize=True, buffer empty, no tool dispatched. "
+                f"accumulated_args_keys={list(_pending_fn_args.keys())} answer={answer!r}"
             )
         elif not synthesize:
             yield LLMStreamChunk(
