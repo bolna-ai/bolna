@@ -799,8 +799,14 @@ class TaskManager(BaseManager):
         # switch; new: played to cover the switch → follow-up generation gap).
         self.switch_handoff_messages = self.task_config.get("tools_config", {}).get("switch_handoff_messages") or {}
         self.agent_names = self.task_config.get("tools_config", {}).get("agent_names") or {}
-        # Injected for BOTH flows — in the LLM-driven flow it's the fast path for explicit requests.
-        self.__inject_switch_language_tool()
+        # LEGACY FLOW ONLY, matching the design comment above: with the Switch LLM enabled the
+        # judge is the single switching authority. Injecting the tool alongside it made the main
+        # LLM a second, competing switcher deciding from main-ASR text — which mis-scripts foreign
+        # speech precisely when switching matters (QA 5765dd9f: tool switched to 'ta' from
+        # Tamil-rendered text while the unbiased detector heard 'te'), and its silent history-side
+        # races produced unexplained "Already speaking in X" tool responses in every QA round.
+        if not self.__language_switch_enabled():
+            self.__inject_switch_language_tool()
 
         # # setting llm
         # llm = self.__setup_llm(self.llm_config)
@@ -1409,8 +1415,10 @@ class TaskManager(BaseManager):
 
     def __inject_switch_language_tool(self):
         """Auto-inject the switch_language tool when multilingual pools are active.
-        Sole switch mechanism in the legacy flow; explicit-request fast path in the
-        LLM-driven flow."""
+
+        LEGACY flow only (call site gates on __language_switch_enabled): it is the sole
+        switch mechanism there. In the LLM-driven flow the judge is the single switching
+        authority and the main LLM carries no switch tool."""
         has_pool = isinstance(self.tools.get("transcriber"), TranscriberPool) or isinstance(
             self.tools.get("synthesizer"), SynthesizerPool
         )
@@ -5880,7 +5888,11 @@ class TaskManager(BaseManager):
             f"## Language note:\nRespond ONLY in {name} ('{label}') — every reply, including "
             f"greetings, acknowledgments, and closing lines, must be entirely in {name}, "
             f"regardless of the language of earlier conversation turns or the language these "
-            f"instructions are written in."
+            f"instructions are written in. This overrides every other language setting in this "
+            f"prompt: preferred-language variables, per-language scripted questions or sample "
+            f"responses, and instructions to speak 'as per' any language preference. When a "
+            f"script exists in multiple languages, use the {name} version; when it only exists "
+            f"in another language, translate it into {name} and keep the meaning exact."
         )
 
     def __apply_language_directive(self, label: str, context_note: str = None) -> None:

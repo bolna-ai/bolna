@@ -1034,7 +1034,12 @@ class GraphAgent(BaseAgent):
             directive = (
                 f"\n\nLANGUAGE GUIDELINES\n\nPlease make sure to generate replies ONLY in "
                 f"{lang_name} ('{detected_lang}') — every reply must be in {lang_name}, "
-                f"regardless of the language this prompt or the earlier conversation is written in."
+                f"regardless of the language this prompt or the earlier conversation is written in. "
+                f"This overrides EVERY other language setting in this prompt: preferred-language "
+                f"variables, per-language scripted questions or sample responses, and instructions "
+                f"to speak 'as per' any language preference. When this prompt provides the same "
+                f"script in multiple languages, use the {lang_name} version; when it only exists "
+                f"in another language, translate it into {lang_name} and keep the meaning exact."
             )
             if examples.get(detected_lang):
                 directive += (

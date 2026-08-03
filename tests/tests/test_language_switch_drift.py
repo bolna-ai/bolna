@@ -88,8 +88,9 @@ def test_turn_prompt_carries_recent_turns():
 def test_drift_rule_is_in_the_cacheable_system_prompt():
     # The rule belongs in the static block (cached); only the evidence varies per turn.
     assert "SUSTAINED DRIFT ACROSS TURNS IS A SWITCH" in LANGUAGE_SWITCH_SYSTEM_PROMPT
-    assert "RECENT TURNS" in LANGUAGE_SWITCH_SYSTEM_PROMPT
-    assert "RECENT TURNS" not in LANGUAGE_SWITCH_SYSTEM_PROMPT.split("SUSTAINED DRIFT")[0]
+    # Rule 8 must still carry the DEFINITION of the RECENT TURNS line format (other rules —
+    # 4a's flap check — may reference RECENT TURNS earlier, but only 8 explains its shape).
+    assert "RECENT TURNS lists earlier turns" in LANGUAGE_SWITCH_SYSTEM_PROMPT.split("SUSTAINED DRIFT")[1]
 
 
 @pytest.mark.asyncio

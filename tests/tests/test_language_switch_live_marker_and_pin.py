@@ -62,6 +62,13 @@ def test_system_prompt_names_the_exact_marker_string():
     assert LIVE_UNAVAILABLE_MARKER in LANGUAGE_SWITCH_SYSTEM_PROMPT
 
 
+def test_system_prompt_has_the_unstable_tags_stable_live_rule():
+    # Rule 4a (QA 5765dd9f): Sarvam flapped te→ml→mr on a Tamil speaker while the LIVE side held
+    # clean Tamil script — with the switch tool now legacy-only, the judge must be able to win
+    # this case from its own inputs.
+    assert "UNSTABLE UNBIASED TAGS + STABLE LIVE SCRIPT" in LANGUAGE_SWITCH_SYSTEM_PROMPT
+
+
 def test_system_prompt_covers_reverse_transliteration():
     # Rule 5 must handle English rendered in Indic script (the 7c7d4b00 failure), not just
     # romanized Indic mis-tagged as English.
