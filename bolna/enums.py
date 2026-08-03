@@ -57,6 +57,7 @@ class SynthesizerProvider(str, Enum):
     DEEPGRAM = "deepgram"
     AZURETTS = "azuretts"
     CARTESIA = "cartesia"
+    MURF = "murf"
     SMALLEST = "smallest"
     SARVAM = "sarvam"
     RIME = "rime"
