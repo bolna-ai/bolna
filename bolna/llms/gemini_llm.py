@@ -13,6 +13,20 @@ from .types import LLMStreamChunk, LatencyData, FunctionCallPayload
 logger = configure_logger(__name__)
 
 
+def _usage_kwargs(usage) -> dict:
+    """Map Gemini usage_metadata onto the LLMStreamChunk token fields."""
+    if not usage:
+        return {}
+    # Gemini keeps thinking tokens out of candidates_token_count; OpenAI folds them into
+    # output_tokens, so add them here to keep billing consistent across providers.
+    return {
+        "input_tokens": usage.prompt_token_count,
+        "output_tokens": (usage.candidates_token_count or 0) + (usage.thoughts_token_count or 0),
+        "reasoning_tokens": usage.thoughts_token_count,
+        "cached_tokens": usage.cached_content_token_count,
+    }
+
+
 class GeminiLLM(BaseLLM):
     def _clean_schema(self, schema):
         """Gemini Protos don't support additionalProperties."""
@@ -256,6 +270,9 @@ class GeminiLLM(BaseLLM):
         # Standalone thought_signature bytes received before the function_call Part
         # (Gemini 3 streaming sends signature as a separate Part ahead of functionCall)
         pending_thought_signature: bytes | None = None
+        # usage_metadata repeats on every chunk with cumulative counts, and some models omit
+        # it on the final one, so keep the last non-empty value rather than the final chunk's.
+        stream_usage = None
 
         try:
             response_stream = await self.client.aio.models.generate_content_stream(
@@ -272,6 +289,10 @@ class GeminiLLM(BaseLLM):
                         sequence_id=meta_info.get("sequence_id") if meta_info else None,
                         first_token_latency_ms=first_token_time - start_time,
                     )
+
+                # Read before the parts below, so a function_call yield carries this chunk's usage
+                if chunk.usage_metadata:
+                    stream_usage = chunk.usage_metadata
 
                 # Check for function calls, thought parts, and signature parts
                 if chunk.candidates and chunk.candidates[0].content and chunk.candidates[0].content.parts:
@@ -318,18 +339,20 @@ class GeminiLLM(BaseLLM):
 
                             if not self.gave_out_prefunction_call_message:
                                 pre_msg_config = self.api_params.get(fn_name, {}).get("pre_call_message")
-                                active_lang = (
-                                    meta_info.get("detected_language", self.language) if meta_info else self.language
-                                )
+                                detected_lang = meta_info.get("detected_language") if meta_info else None
+                                active_lang = detected_lang or self.language
                                 pre_msg = compute_function_pre_call_message(active_lang, fn_name, pre_msg_config)
-                                yield LLMStreamChunk(
-                                    data=pre_msg,
-                                    end_of_stream=True,
-                                    latency=latency_data,
-                                    function_name=fn_name,
-                                    function_message=pre_msg_config,
-                                )
                                 self.gave_out_prefunction_call_message = True
+                                # No audible filler for end_call or switch_language, and yielding
+                                # the empty result sends a null chunk downstream.
+                                if pre_msg:
+                                    yield LLMStreamChunk(
+                                        data=pre_msg,
+                                        end_of_stream=True,
+                                        latency=latency_data,
+                                        function_name=fn_name,
+                                        function_message=pre_msg_config,
+                                    )
 
                             func_conf = self.api_params.get(fn_name, {})
 
@@ -406,7 +429,11 @@ class GeminiLLM(BaseLLM):
                             if latency_data and latency_data.total_stream_duration_ms is None:
                                 latency_data.total_stream_duration_ms = now_ms() - start_time
                             yield LLMStreamChunk(
-                                data=payload, end_of_stream=False, latency=latency_data, is_function_call=True
+                                data=payload,
+                                end_of_stream=False,
+                                latency=latency_data,
+                                is_function_call=True,
+                                **_usage_kwargs(stream_usage),
                             )
                             continue
 
@@ -439,11 +466,19 @@ class GeminiLLM(BaseLLM):
 
         if synthesize and buffer.strip():
             yield LLMStreamChunk(
-                data=buffer, end_of_stream=True, latency=latency_data, reasoning_content=reasoning_content
+                data=buffer,
+                end_of_stream=True,
+                latency=latency_data,
+                reasoning_content=reasoning_content,
+                **_usage_kwargs(stream_usage),
             )
         elif not synthesize:
             yield LLMStreamChunk(
-                data=answer, end_of_stream=True, latency=latency_data, reasoning_content=reasoning_content
+                data=answer,
+                end_of_stream=True,
+                latency=latency_data,
+                reasoning_content=reasoning_content,
+                **_usage_kwargs(stream_usage),
             )
 
     async def generate(self, messages, request_json=False, ret_metadata=False):
