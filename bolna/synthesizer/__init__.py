@@ -10,4 +10,5 @@ from .rime_synthesizer import RimeSynthesizer
 from .smallest_synthesizer import SmallestSynthesizer
 from .sarvam_synthesizer import SarvamSynthesizer
 from .pixa_synthesizer import PixaSynthesizer
+from .maya_synthesizer import MayaSynthesizer
 from .synthesizer_pool import SynthesizerPool
