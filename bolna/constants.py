@@ -39,6 +39,11 @@ LANGUAGE_SWITCH_AUDIO_GAP_S = 0.2
 # decide timeout (sized for the slow tail) because past this point a wrong-language reply the
 # switch then truncates beats more dead air. Wall-clock backstop: the gate cannot wedge on it.
 LANGUAGE_SWITCH_MAX_HOLD_S = 4.0
+# Substance gate: a non-explicit switch needs at least one detector segment this long. Guards
+# against one-word mis-tags ("హాఁ" tagged wrong) switching the call. 0.8, not 1.0: Sarvam
+# splits real turns into sub-second fragments ("Yes yes"=0.928s + "Go ahead"=0.96s, QA 36afe241)
+# and the judge's correct verdicts were dying on the last 0.04-0.1s of a fragment.
+LANGUAGE_SWITCH_MIN_SEGMENT_AUDIO_S = 0.8
 
 # Soniox real-time STT
 SONIOX_WEBSOCKET_HOST = "stt-rt.soniox.com"

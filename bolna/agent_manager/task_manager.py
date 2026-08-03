@@ -31,6 +31,7 @@ from bolna.constants import (
     LANGUAGE_SWITCH_AUDIO_GAP_S,
     LANGUAGE_SWITCH_DECIDE_TIMEOUT_S,
     LANGUAGE_SWITCH_MAX_HOLD_S,
+    LANGUAGE_SWITCH_MIN_SEGMENT_AUDIO_S,
     LANGUAGE_SWITCH_SETTLE_MS,
     LLM_DEFAULT_CONFIGS,
     NON_EVIDENCE_MARK_TYPES,
@@ -5081,7 +5082,9 @@ class TaskManager(BaseManager):
             return False
         short_target = target.split("-")[0].lower()
         min_prob = float(os.getenv("LANGUAGE_SWITCH_DETECTOR_MIN_PROB", "0.8"))
-        min_segment_s = float(os.getenv("LANGUAGE_SWITCH_MIN_SEGMENT_AUDIO_S", "1.0"))
+        min_segment_s = float(
+            os.getenv("LANGUAGE_SWITCH_MIN_SEGMENT_AUDIO_S", str(LANGUAGE_SWITCH_MIN_SEGMENT_AUDIO_S))
+        )
         for segment in segments or []:
             lang = (segment.get("lang") or "").split("-")[0].lower()
             if lang != short_target:
@@ -5177,7 +5180,9 @@ class TaskManager(BaseManager):
         # Same substance bar the decide gates on: acknowledgment-length mis-tags end in
         # gated:short_audio anyway, so don't cost the caller the settle+decide hold.
         # (An explicit short by-name request still switches — via truncate, not hold.)
-        min_segment_s = float(os.getenv("LANGUAGE_SWITCH_MIN_SEGMENT_AUDIO_S", "1.0"))
+        min_segment_s = float(
+            os.getenv("LANGUAGE_SWITCH_MIN_SEGMENT_AUDIO_S", str(LANGUAGE_SWITCH_MIN_SEGMENT_AUDIO_S))
+        )
         if pool.lid_buffer_max_segment_seconds() < min_segment_s:
             return False
         synth = self.tools.get("synthesizer")
@@ -5576,7 +5581,9 @@ class TaskManager(BaseManager):
         # least one substantive segment — an explicit by-name request is legitimately short and
         # bypasses instead. Its bar defaults to min_conf, never above it: a stricter explicit
         # bar would reject the caller-asked case while admitting the incidental one.
-        min_segment_s = float(os.getenv("LANGUAGE_SWITCH_MIN_SEGMENT_AUDIO_S", "1.0"))
+        min_segment_s = float(
+            os.getenv("LANGUAGE_SWITCH_MIN_SEGMENT_AUDIO_S", str(LANGUAGE_SWITCH_MIN_SEGMENT_AUDIO_S))
+        )
         explicit_min_conf = float(os.getenv("LANGUAGE_SWITCH_EXPLICIT_MIN_CONFIDENCE", str(min_conf)))
         explicit_bypass = bool(decision.get("explicit_request")) and (target_conf or 0.0) >= explicit_min_conf
         if not explicit_bypass and buffered_max_segment_s < min_segment_s:
