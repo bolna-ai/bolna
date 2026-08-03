@@ -337,6 +337,12 @@ class GeminiLLM(BaseLLM):
                                 f"[GeminiLLM] function_call detected fn={fn_name} call_id={call_id} args={list(fn_args.keys())} native_part_cached=True"
                             )
 
+                            # task_manager dispatches on the function-call chunk and abandons this
+                            # generator, so the post-loop flush never runs.
+                            if synthesize and buffer.strip():
+                                yield LLMStreamChunk(data=buffer, end_of_stream=True, latency=latency_data)
+                                buffer = ""
+
                             if not self.gave_out_prefunction_call_message:
                                 pre_msg_config = self.api_params.get(fn_name, {}).get("pre_call_message")
                                 detected_lang = meta_info.get("detected_language") if meta_info else None
