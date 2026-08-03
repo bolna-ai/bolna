@@ -265,21 +265,14 @@ class GeminiLLM(BaseLLM):
         answer, buffer = "", ""
         self.started_streaming = False
         self.gave_out_prefunction_call_message = False
-        # Accumulated thought text parts from the current model turn (thinking models only)
         accumulated_thought_parts: list[str] = []
-        # Standalone thought_signature bytes received before the function_call Part
-        # (Gemini 3 streaming sends signature as a separate Part ahead of functionCall)
+        # Gemini 3 streams thought_signature as a standalone Part before the functionCall Part.
         pending_thought_signature: bytes | None = None
-        # usage_metadata repeats on every chunk with cumulative counts, and some models omit
-        # it on the final one, so keep the last non-empty value rather than the final chunk's.
+        # Keep last non-empty usage_metadata (some models omit it on the final chunk).
         stream_usage = None
-        # Gemini streams function-call args incrementally across chunks; accumulate them
-        # per call_id so we dispatch with the full merged arg set, not a partial snapshot.
+        # Accumulate fn args per call_id across chunks; dispatch once post-stream with full args.
         _pending_fn_args: dict[str, dict] = {}
-        # Deferred dispatch context keyed by call_id. We collect this during the stream and
-        # dispatch AFTER the stream ends so each tool call fires exactly once with complete args.
         _pending_dispatch: dict[str, dict] = {}
-        # Track whether any tool was dispatched this turn (for the end-of-stream safety net).
         _tool_dispatched = False
 
         try:
@@ -325,19 +318,12 @@ class GeminiLLM(BaseLLM):
                             fn_name = part.function_call.name
                             raw_id = part.function_call.id
                             call_id = raw_id or ("call_" + str(uuid.uuid4())[:8])
-                            # Merge args from this chunk into the accumulator for this call_id.
-                            # Gemini streams args across multiple chunks; we must not dispatch
-                            # until the stream finishes — but we still need to process the Part
-                            # object here to cache the native Part and handle pre-call messages.
                             chunk_args = dict(part.function_call.args) if part.function_call.args else {}
                             if call_id not in _pending_fn_args:
                                 _pending_fn_args[call_id] = {}
                             _pending_fn_args[call_id].update(chunk_args)
                             fn_args = _pending_fn_args[call_id]
-                            # If Gemini didn't return a function_call id, rebuild the Part
-                            # with our generated id — otherwise the cached Part would have
-                            # id=None while the tool response carries the synthetic call_id,
-                            # which causes an id-mismatch 400 on the next turn.
+                            # Rebuild Part with synthetic id to avoid id=None mismatch 400 on next turn.
                             if not raw_id:
                                 inline_sig = getattr(part, "thought_signature", None)
                                 rebuilt_kwargs: dict = dict(
@@ -346,8 +332,6 @@ class GeminiLLM(BaseLLM):
                                 if inline_sig:
                                     rebuilt_kwargs["thought_signature"] = inline_sig
                                 part = types.Part(**rebuilt_kwargs)
-                            # Cache the Part so _prepare_history can reuse it intact —
-                            # thought_signature bytes cannot survive serialisation.
                             self._native_function_parts[call_id] = part
                             logger.info(
                                 f"[GeminiLLM] function_call detected fn={fn_name} call_id={call_id} args={list(fn_args.keys())} native_part_cached=True"
@@ -359,8 +343,6 @@ class GeminiLLM(BaseLLM):
                                 active_lang = detected_lang or self.language
                                 pre_msg = compute_function_pre_call_message(active_lang, fn_name, pre_msg_config)
                                 self.gave_out_prefunction_call_message = True
-                                # No audible filler for end_call or switch_language, and yielding
-                                # the empty result sends a null chunk downstream.
                                 if pre_msg:
                                     yield LLMStreamChunk(
                                         data=pre_msg,
@@ -370,23 +352,13 @@ class GeminiLLM(BaseLLM):
                                         function_message=pre_msg_config,
                                     )
 
-                            # Collect dispatch context on the first occurrence of this call_id.
-                            # Dispatch is deferred to after the stream ends so every chunk's args
-                            # are merged first — this guarantees exactly one dispatch per call
-                            # with the fully assembled arg set (fixes the silent-turn bug where
-                            # early chunks had partial args and the old code dropped the turn).
                             if call_id not in _pending_dispatch:
-                                # Snapshot thought parts now; they belong to this function call.
                                 model_resp_prefix: list[dict] = [
-                                    {"type": "_gemini_thought", "text": t}
-                                    for t in accumulated_thought_parts
+                                    {"type": "_gemini_thought", "text": t} for t in accumulated_thought_parts
                                 ]
                                 accumulated_thought_parts = []
-                                # Capture sig_bytes from this Part / pending standalone signature.
-                                sig_bytes = (
-                                    getattr(part, "thought_signature", None) or pending_thought_signature
-                                )
-                                pending_thought_signature = None  # consumed
+                                sig_bytes = getattr(part, "thought_signature", None) or pending_thought_signature
+                                pending_thought_signature = None
                                 _pending_dispatch[call_id] = {
                                     "fn_name": fn_name,
                                     "func_conf": self.api_params.get(fn_name, {}),
@@ -420,9 +392,6 @@ class GeminiLLM(BaseLLM):
         if latency_data and latency_data.total_stream_duration_ms is None:
             latency_data.total_stream_duration_ms = now_ms() - start_time
 
-        # --- Deferred function-call dispatch ---
-        # Now that the stream is complete, _pending_fn_args[call_id] holds the fully merged
-        # arg set for every tool call Gemini emitted. Dispatch each exactly once.
         for call_id, ctx in _pending_dispatch.items():
             fn_name = ctx["fn_name"]
             fn_args = _pending_fn_args.get(call_id, {})
@@ -432,8 +401,7 @@ class GeminiLLM(BaseLLM):
                 (
                     t
                     for t in self.bolna_tools_raw
-                    if (t.get("type") == "function" and t["function"]["name"] == fn_name)
-                    or (t.get("name") == fn_name)
+                    if (t.get("type") == "function" and t["function"]["name"] == fn_name) or (t.get("name") == fn_name)
                 ),
                 None,
             )
@@ -511,8 +479,6 @@ class GeminiLLM(BaseLLM):
                 **_usage_kwargs(stream_usage),
             )
         elif synthesize and not buffer.strip() and not _tool_dispatched:
-            # Safety net: Gemini produced no text and no tool was dispatched — this turn
-            # would otherwise go completely silent. Log loudly so it is observable in Loki.
             logger.error(
                 "[GeminiLLM] Dead turn detected: synthesize=True, buffer empty, no tool dispatched. "
                 f"accumulated_args_keys={list(_pending_fn_args.keys())} answer={answer!r}"
