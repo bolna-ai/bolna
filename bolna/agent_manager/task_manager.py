@@ -1309,103 +1309,103 @@ class TaskManager(BaseManager):
             if delay_ms > 0:
                 logger.info(f"Welcome message delay set to {delay_ms} ms")
                 await asyncio.sleep(delay_ms / 1000)
+            # Wait for the stream to be usable before building anything. A connection that never
+            # carries a start frame keeps stream_sid None for the whole timeout, so any work inside
+            # this loop is paid ~100 times a second per such connection and thrown away.
             start_time = asyncio.get_running_loop().time()
+            logger.info("Waiting for stream_sid before sending the welcome message")
             while True:
-                elapsed_time = asyncio.get_running_loop().time() - start_time
-                if elapsed_time > timeout:
-                    await self.__process_end_of_conversation()
-                    logger.warning("Timeout reached while waiting for stream_sid")
-                    break
-
-                text = self.kwargs.get("agent_welcome_message", None)
-                meta_info = {
-                    "io": self.tools["output"].get_provider(),
-                    "message_category": "agent_welcome_message",
-                    "request_id": str(uuid.uuid4()),
-                    "cached": True,
-                    "sequence_id": -1,
-                    "format": self.task_config["tools_config"]["output"]["format"],
-                    "text": text,
-                    "end_of_llm_stream": True,
-                }
-                ws_data_packet = create_ws_data_packet(text, meta_info=meta_info)
-
-                meta_info = ws_data_packet["meta_info"]
-                text = ws_data_packet["data"]
-                meta_info["type"] = "audio"
-                meta_info["synthesizer_start_time"] = time.time()
-
-                audio_chunk = self.preloaded_welcome_audio if self.preloaded_welcome_audio else None
-                if meta_info["text"] == "":
-                    audio_chunk = None
-
-                # Convert to ulaw for Asterisk/sip-trunk provider (cached welcome is PCM)
-                if self.tools["output"].get_provider() == TelephonyProvider.SIP_TRUNK.value and audio_chunk:
-                    original_size = len(audio_chunk)
-                    audio_chunk = pcm_to_ulaw(audio_chunk)
-                    logger.info(
-                        f"[SIP-TRUNK] Converted welcome message PCM to ulaw: {original_size} bytes -> {len(audio_chunk)} bytes"
-                    )
-                    meta_info["format"] = "ulaw"
-                else:
-                    meta_info["format"] = "pcm"
-                meta_info["is_first_chunk"] = True
-                meta_info["end_of_synthesizer_stream"] = True
-                meta_info["chunk_id"] = 1
-                meta_info["is_first_chunk_of_entire_response"] = True
-                meta_info["is_final_chunk_of_entire_response"] = True
-                message = create_ws_data_packet(audio_chunk, meta_info)
-
                 stream_sid = self.tools["input"].get_stream_sid()
                 if stream_sid is not None and self.output_handler_set:
-                    self.stream_sid_ts = time.time() * 1000
-                    await self._report_stream_connect()
-                    logger.info(f"Got stream sid and hence sending the first message {stream_sid}")
-                    self.stream_sid = stream_sid
-                    await self.tools["output"].set_stream_sid(stream_sid)
-
-                    if audio_chunk is None:
-                        # No welcome message to play - mark as played immediately
-                        # so the system doesn't wait for a mark event that will never arrive
-                        logger.info("No welcome message audio to send, marking welcome message as played")
-                        self.tools["input"].is_welcome_message_played = True
-                    else:
-                        self.tools["input"].update_is_audio_being_played(True)
-                        self.conversation_history.append_welcome_message(text)
-                        convert_to_request_log(
-                            message=text,
-                            meta_info=meta_info,
-                            component=LogComponent.SYNTHESIZER,
-                            direction=LogDirection.RESPONSE,
-                            model=self.synthesizer_provider,
-                            is_cached=meta_info.get("is_cached", False),
-                            engine=self.tools["synthesizer"].get_engine(),
-                            run_id=self.run_id,
-                        )
-                        await self.tools["output"].handle(message)
-                        try:
-                            data = message.get("data")
-                            if data is not None:
-                                duration = calculate_audio_duration(
-                                    len(data), self.sampling_rate, format=message["meta_info"]["format"]
-                                )
-                                self.welcome_message_duration_ms = round(duration * 1000, 2)
-                                if self.should_record:
-                                    self.conversation_recording["output"].append(
-                                        {"data": data, "start_time": time.time(), "duration": duration}
-                                    )
-                        except Exception as e:
-                            duration = 0.256
-                            self.welcome_message_duration_ms = round(duration * 1000, 2)
-                            logger.error(
-                                "Exception in __forced_first_message for duration calculation: {}".format(str(e))
-                            )
                     break
-                else:
-                    logger.info(
-                        f"Stream id is still None ({stream_sid}) or output handler not set ({self.output_handler_set}), waiting..."
+                if asyncio.get_running_loop().time() - start_time > timeout:
+                    logger.warning(
+                        f"Timeout reached while waiting for stream_sid ({stream_sid})"
+                        f" / output handler ({self.output_handler_set})"
                     )
-                    await asyncio.sleep(0.01)
+                    await self.__process_end_of_conversation()
+                    return
+                await asyncio.sleep(0.01)
+
+            text = self.kwargs.get("agent_welcome_message", None)
+            meta_info = {
+                "io": self.tools["output"].get_provider(),
+                "message_category": "agent_welcome_message",
+                "request_id": str(uuid.uuid4()),
+                "cached": True,
+                "sequence_id": -1,
+                "format": self.task_config["tools_config"]["output"]["format"],
+                "text": text,
+                "end_of_llm_stream": True,
+            }
+            ws_data_packet = create_ws_data_packet(text, meta_info=meta_info)
+
+            meta_info = ws_data_packet["meta_info"]
+            text = ws_data_packet["data"]
+            meta_info["type"] = "audio"
+            meta_info["synthesizer_start_time"] = time.time()
+
+            audio_chunk = self.preloaded_welcome_audio if self.preloaded_welcome_audio else None
+            if meta_info["text"] == "":
+                audio_chunk = None
+
+            # Convert to ulaw for Asterisk/sip-trunk provider (cached welcome is PCM)
+            if self.tools["output"].get_provider() == TelephonyProvider.SIP_TRUNK.value and audio_chunk:
+                original_size = len(audio_chunk)
+                audio_chunk = pcm_to_ulaw(audio_chunk)
+                logger.info(
+                    f"[SIP-TRUNK] Converted welcome message PCM to ulaw: {original_size} bytes -> {len(audio_chunk)} bytes"
+                )
+                meta_info["format"] = "ulaw"
+            else:
+                meta_info["format"] = "pcm"
+            meta_info["is_first_chunk"] = True
+            meta_info["end_of_synthesizer_stream"] = True
+            meta_info["chunk_id"] = 1
+            meta_info["is_first_chunk_of_entire_response"] = True
+            meta_info["is_final_chunk_of_entire_response"] = True
+            message = create_ws_data_packet(audio_chunk, meta_info)
+
+            self.stream_sid_ts = time.time() * 1000
+            await self._report_stream_connect()
+            logger.info(f"Got stream sid and hence sending the first message {stream_sid}")
+            self.stream_sid = stream_sid
+            await self.tools["output"].set_stream_sid(stream_sid)
+
+            if audio_chunk is None:
+                # No welcome message to play - mark as played immediately
+                # so the system doesn't wait for a mark event that will never arrive
+                logger.info("No welcome message audio to send, marking welcome message as played")
+                self.tools["input"].is_welcome_message_played = True
+            else:
+                self.tools["input"].update_is_audio_being_played(True)
+                self.conversation_history.append_welcome_message(text)
+                convert_to_request_log(
+                    message=text,
+                    meta_info=meta_info,
+                    component=LogComponent.SYNTHESIZER,
+                    direction=LogDirection.RESPONSE,
+                    model=self.synthesizer_provider,
+                    is_cached=meta_info.get("is_cached", False),
+                    engine=self.tools["synthesizer"].get_engine(),
+                    run_id=self.run_id,
+                )
+                await self.tools["output"].handle(message)
+                try:
+                    data = message.get("data")
+                    if data is not None:
+                        duration = calculate_audio_duration(
+                            len(data), self.sampling_rate, format=message["meta_info"]["format"]
+                        )
+                        self.welcome_message_duration_ms = round(duration * 1000, 2)
+                        if self.should_record:
+                            self.conversation_recording["output"].append(
+                                {"data": data, "start_time": time.time(), "duration": duration}
+                            )
+                except Exception as e:
+                    duration = 0.256
+                    self.welcome_message_duration_ms = round(duration * 1000, 2)
+                    logger.error("Exception in __forced_first_message for duration calculation: {}".format(str(e)))
         except Exception as e:
             logger.error(f"Exception in __forced_first_message {str(e)}")
 
