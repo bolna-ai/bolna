@@ -5917,17 +5917,16 @@ class TaskManager(BaseManager):
         """
         name = LANGUAGE_NAMES.get(label, label)
         return (
-            f"## Language note:\nRespond ONLY in {name} ('{label}') — every reply, including "
-            f"greetings, acknowledgments, and closing lines, must be entirely in {name}, "
-            f"regardless of the language of earlier conversation turns or the language these "
-            f"instructions are written in. This overrides every other language setting in this "
-            f"prompt: preferred-language variables, per-language scripted questions or sample "
-            f"responses, and instructions to speak 'as per' any language preference. When a "
-            f"script exists in multiple languages, use the {name} version; when it only exists "
-            f"in another language, translate it into {name} and keep the meaning exact. "
-            f"Never translate or alter proper nouns, brand names, alphanumeric identifiers, "
-            f"digits, codes, or lines these instructions mark as verbatim/legal — read those "
-            f"exactly as written; they are language-neutral."
+            f"## Language note:\nThe user is now speaking {name} ('{label}'). From this point onward, "
+            f"respond only in {name}, regardless of the language used earlier in the conversation or "
+            f"elsewhere in this prompt. This instruction overrides all other language preferences, "
+            f"language-selection rules, and multilingual script variants. "
+            f"Immediately repeat the agent's last line before the language switch in {name} so the "
+            f"caller can follow, then continue the conversation from that point. "
+            f"For the remainder of the call, use only the {name} version of every question, FAQ, "
+            f"sample response, objection-handling response, and closing line. If a {name} version "
+            f"is not provided, translate the available version into clear, natural {name} while "
+            f"preserving its exact meaning."
         )
 
     def __apply_language_directive(self, label: str, context_note: str = None) -> None:
