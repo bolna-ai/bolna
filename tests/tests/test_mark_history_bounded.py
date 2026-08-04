@@ -4,6 +4,8 @@ Covers the mark-history record cap and its eviction reporting, the calibration a
 surviving eviction, end-of-call buffer release, and raw chunk-mark sampling.
 """
 
+import uuid
+
 import pytest
 
 from bolna.helpers import mark_event_meta_data as med
@@ -133,7 +135,8 @@ class TestShouldPersistChunkMarks:
 
     def test_sample_size_tracks_the_percentage(self, monkeypatch):
         monkeypatch.setattr(med, "PERSIST_CHUNK_MARKS_PCT", 10)
-        run_ids = [f"run-{i}" for i in range(2000)]
+        # uuid-shaped, matching the run_ids production actually buckets.
+        run_ids = [str(uuid.uuid5(uuid.NAMESPACE_URL, f"run-{i}")) for i in range(2000)]
         sampled = sum(1 for r in run_ids if should_persist_chunk_marks(r))
         assert 0.07 < sampled / len(run_ids) < 0.13
 

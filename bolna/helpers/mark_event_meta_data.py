@@ -1,8 +1,8 @@
 import asyncio
 import copy
-import hashlib
 import os
 import time
+import zlib
 from collections import OrderedDict
 from typing import Dict, List, Optional
 
@@ -34,7 +34,8 @@ def should_persist_chunk_marks(run_id: Optional[str]) -> bool:
     """Whether this call's raw chunk marks should be persisted alongside the aggregate.
 
     Bucketed on run_id so the decision is stable for a call and the sampled set is spread
-    evenly across traffic rather than clustered in time.
+    evenly across traffic rather than clustered in time. crc32 is the bucketing function
+    because this is a checksum over an opaque id, not a digest anything relies on.
     """
     if PERSIST_CHUNK_MARKS_PCT <= 0:
         return False
@@ -42,8 +43,7 @@ def should_persist_chunk_marks(run_id: Optional[str]) -> bool:
         return True
     if not run_id:
         return False
-    digest = hashlib.md5(str(run_id).encode(), usedforsecurity=False).hexdigest()
-    return int(digest[:8], 16) % 100 < PERSIST_CHUNK_MARKS_PCT
+    return zlib.crc32(str(run_id).encode()) % 100 < PERSIST_CHUNK_MARKS_PCT
 
 
 class SequenceStats(BaseModel):
