@@ -1309,23 +1309,16 @@ class TaskManager(BaseManager):
             if delay_ms > 0:
                 logger.info(f"Welcome message delay set to {delay_ms} ms")
                 await asyncio.sleep(delay_ms / 1000)
-            # Wait for the stream to be usable before building anything. A connection that never
-            # carries a start frame keeps stream_sid None for the whole timeout, so any work inside
-            # this loop is paid ~100 times a second per such connection and thrown away.
-            start_time = asyncio.get_running_loop().time()
+            # output_handler_set is not part of the wait: __setup_output_handlers runs in __init__,
+            # so it is already true by the time this task exists.
             logger.info("Waiting for stream_sid before sending the welcome message")
-            while True:
-                stream_sid = self.tools["input"].get_stream_sid()
-                if stream_sid is not None and self.output_handler_set:
-                    break
-                if asyncio.get_running_loop().time() - start_time > timeout:
-                    logger.warning(
-                        f"Timeout reached while waiting for stream_sid ({stream_sid})"
-                        f" / output handler ({self.output_handler_set})"
-                    )
-                    await self.__process_end_of_conversation()
-                    return
-                await asyncio.sleep(0.01)
+            try:
+                await asyncio.wait_for(self.tools["input"].stream_sid_ready.wait(), timeout)
+            except asyncio.TimeoutError:
+                logger.warning(f"Timeout reached while waiting for stream_sid after {timeout}s")
+                await self.__process_end_of_conversation()
+                return
+            stream_sid = self.tools["input"].get_stream_sid()
 
             text = self.kwargs.get("agent_welcome_message", None)
             meta_info = {

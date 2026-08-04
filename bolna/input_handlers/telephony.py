@@ -32,7 +32,8 @@ class TelephonyInputHandler(DefaultInputHandler):
             is_welcome_message_played=is_welcome_message_played,
             observable_variables=observable_variables,
         )
-        self.stream_sid = None
+        self._stream_sid = None
+        self.stream_sid_ready.clear()
         self.call_sid = None
         self.buffer = []
         self.message_count = 0
@@ -41,8 +42,18 @@ class TelephonyInputHandler(DefaultInputHandler):
         self.io_provider = None
         self.websocket_listen_task = None
 
+    @property
+    def stream_sid(self):
+        return self._stream_sid
+
+    @stream_sid.setter
+    def stream_sid(self, value):
+        self._stream_sid = value
+        if value is not None:
+            self.stream_sid_ready.set()
+
     def get_stream_sid(self):
-        return self.stream_sid
+        return self._stream_sid
 
     def get_call_sid(self):
         return self.call_sid

@@ -32,6 +32,9 @@ class DefaultInputHandler:
         self.input_types = input_types
         self.websocket_listen_task = None
         self.running = True
+        # set here because these handlers mint a stream id on demand; telephony clears it
+        self.stream_sid_ready = asyncio.Event()
+        self.stream_sid_ready.set()
         self.turn_based_conversation = turn_based_conversation
         self.queue = queue
         self.conversation_recording = conversation_recording
