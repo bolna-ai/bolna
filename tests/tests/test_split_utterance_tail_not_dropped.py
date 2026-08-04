@@ -45,6 +45,7 @@ def _make_tm(*, audio_playing, response_in_pipeline, function_call_in_flight=Fal
     tm.tools["input"].is_audio_being_played_to_user = MagicMock(return_value=audio_playing)
     tm.interruption_manager = InterruptionManager(number_of_words_for_interruption=2)
     tm._maybe_update_tts_language = AsyncMock()
+    tm._report_component_health = AsyncMock()
     tm._handle_transcriber_output = AsyncMock()
     tm._TaskManager__get_updated_meta_info = MagicMock(side_effect=lambda m: m)
     tm._TaskManager__cleanup_downstream_tasks = AsyncMock()
