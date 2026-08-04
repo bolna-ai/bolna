@@ -6680,6 +6680,7 @@ class TaskManager(BaseManager):
                 return
 
             start_time = asyncio.get_running_loop().time()
+            logger.info("Waiting for stream_sid before sending the first message")
             while True:
                 elapsed_time = asyncio.get_running_loop().time() - start_time
                 if elapsed_time > timeout:
@@ -6718,8 +6719,7 @@ class TaskManager(BaseManager):
                             await self._synthesize(create_ws_data_packet(text, meta_info=meta_info))
                         break
                     else:
-                        logger.info(f"Stream id is still None, so not passing it")
-                        await asyncio.sleep(0.01)  # Sleep for half a second to see if stream id goes past None
+                        await asyncio.sleep(0.01)
                 elif self.default_io:
                     logger.info(f"Shouldn't record")
                     # meta_info={'io': 'default', 'is_first_message': True, "request_id": str(uuid.uuid4()), "cached": True, "sequence_id": -1, 'format': 'wav'}
