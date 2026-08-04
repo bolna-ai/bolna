@@ -1,6 +1,9 @@
 import asyncio
 import copy
+import hashlib
+import os
 import time
+from collections import OrderedDict
 from typing import Dict, List, Optional
 
 from pydantic import BaseModel, Field
@@ -11,6 +14,36 @@ from bolna.helpers.logger_config import configure_logger
 logger = configure_logger(__name__)
 
 HIGH_DELAY_THRESHOLD = 2.0
+
+# Per-chunk mark records are kept for the whole call so post-call analysis can see what was
+# actually played, and nothing prunes them mid-call. The bound is on record count, not on age
+# or call duration, because repetition depth drives the count: an agent stuck re-sending the
+# same response grows this dict for as long as the call lasts, while a long but well-behaved
+# call stays flat. 1000 records covers roughly fifteen minutes of continuous agent speech.
+MAX_MARK_HISTORY = int(os.getenv("MAX_MARK_HISTORY", "1000"))
+
+# Raw chunk marks are ~90% of a latency_dict payload (11x the transcript), so they are sampled
+# per call rather than stored for every one. The mark_tracking aggregate is always kept.
+PERSIST_CHUNK_MARKS_PCT = int(os.getenv("PERSIST_CHUNK_MARKS_PCT", "0"))
+
+# Interrupts dump the pending mark ids; a stuck agent can leave hundreds pending.
+CLEAR_LOG_MARK_ID_LIMIT = 20
+
+
+def should_persist_chunk_marks(run_id: Optional[str]) -> bool:
+    """Whether this call's raw chunk marks should be persisted alongside the aggregate.
+
+    Bucketed on run_id so the decision is stable for a call and the sampled set is spread
+    evenly across traffic rather than clustered in time.
+    """
+    if PERSIST_CHUNK_MARKS_PCT <= 0:
+        return False
+    if PERSIST_CHUNK_MARKS_PCT >= 100:
+        return True
+    if not run_id:
+        return False
+    digest = hashlib.md5(str(run_id).encode(), usedforsecurity=False).hexdigest()
+    return int(digest[:8], 16) % 100 < PERSIST_CHUNK_MARKS_PCT
 
 
 class SequenceStats(BaseModel):
@@ -44,6 +77,13 @@ class MarkTrackingSummary(BaseModel):
     avg_delay_s: float = 0
     high_delay_count: int = 0
     per_sequence: List[SequenceSummary] = Field(default_factory=list)
+    # Send time of the call's first audio chunk. Kept here because it survives history
+    # eviction and is the calibration anchor recording analysis needs.
+    first_mark_sent_ts: Optional[float] = None
+    # Chunk-mark records still held vs evicted by the history cap, so a short raw mark list
+    # is distinguishable from a quiet call.
+    history_retained: int = 0
+    history_dropped: int = 0
 
 
 class MarkStats(BaseModel):
@@ -58,10 +98,13 @@ class MarkStats(BaseModel):
 
 
 class MarkEventMetaData:
-    def __init__(self):
+    def __init__(self, max_history: Optional[int] = None):
         self.mark_event_meta_data = {}
         self.previous_mark_event_meta_data = {}
-        self._mark_history: Dict[str, Dict] = {}
+        self._mark_history: "OrderedDict[str, Dict]" = OrderedDict()
+        self._max_history = MAX_MARK_HISTORY if max_history is None else max_history
+        self._history_dropped = 0
+        self._first_mark_sent_ts: Optional[float] = None
         self.counter = 0
         self.mark_changed = asyncio.Event()
         self._mark_stats = MarkStats()
@@ -96,7 +139,7 @@ class MarkEventMetaData:
         self.mark_event_meta_data[mark_id] = value
         duration = value.get("duration") or 0
         if value.get("type") != "pre_mark_message":
-            self._mark_history[mark_id] = value
+            self._record_history(mark_id, value)
         logger.info(
             "BOLNA_TRACE_MARK update mark_id=%s type=%s seq=%s turn=%s response_uid=%s group_uid=%s counter=%s dur=%.3f text_len=%s",
             mark_id,
@@ -128,6 +171,43 @@ class MarkEventMetaData:
                 turn_id = value.get("turn_id")
                 if turn_id is not None and entry.turn_id is None:
                     entry.turn_id = turn_id
+
+    def _record_history(self, mark_id, value):
+        """Append to the bounded per-chunk history, evicting the oldest record when full.
+
+        Records are stored by reference, so a later ack or interrupt flag written onto the same
+        dict stays visible here. Eviction drops only that reference — the live
+        mark_event_meta_data entry and the mark_tracking aggregate are unaffected, which is why
+        capping here costs nothing but detail on the pathological calls that hit the cap.
+        """
+        if self._first_mark_sent_ts is None and value.get("sent_ts"):
+            self._first_mark_sent_ts = value["sent_ts"]
+
+        self._mark_history[mark_id] = value
+        if len(self._mark_history) <= self._max_history:
+            return
+
+        while len(self._mark_history) > self._max_history:
+            self._mark_history.popitem(last=False)
+            self._history_dropped += 1
+        if self._history_dropped == 1:
+            # Once per call: past this point the raw mark list no longer covers the whole call.
+            logger.warning("mark history hit its %s-record cap, dropping oldest chunk marks", self._max_history)
+
+    def release_call_buffers(self):
+        """Free the post-call mark buffers once the call output has been snapshotted.
+
+        Every reader runs during the call or at snapshot time — get_chunk_marks and
+        get_mark_tracking_summary build the output, get_heard_text_for_* and
+        fetch_cleared_mark_event_data serve the interruption path. Teardown after the snapshot
+        (recording upload to S3, metrics, DB writes) runs for seconds with the TaskManager still
+        referenced, so holding these until it is collected keeps the pod's memory floor up for
+        no benefit.
+        """
+        self._mark_history.clear()
+        self.heard_text_by_turn.clear()
+        self.heard_text_by_response.clear()
+        self.previous_mark_event_meta_data = {}
 
     def record_ack(self, delay, sequence_id):
         self._mark_stats.total_acked += 1
@@ -190,10 +270,11 @@ class MarkEventMetaData:
 
     def clear_data(self):
         logger.info(f"Clearing mark meta data dict")
+        pending_ids = list(self.mark_event_meta_data.keys())
         logger.info(
             "BOLNA_TRACE_MARK clear pending=%s mark_ids=%s",
-            len(self.mark_event_meta_data),
-            list(self.mark_event_meta_data.keys()),
+            len(pending_ids),
+            pending_ids[:CLEAR_LOG_MARK_ID_LIMIT],
         )
         self.counter = 0
         self.drop_playout_estimate()
@@ -220,6 +301,9 @@ class MarkEventMetaData:
             max_delay_s=round(max(all_delays), 3) if all_delays else 0,
             avg_delay_s=round(sum(all_delays) / len(all_delays), 3) if all_delays else 0,
             high_delay_count=sum(1 for d in all_delays if d > HIGH_DELAY_THRESHOLD),
+            first_mark_sent_ts=self._first_mark_sent_ts,
+            history_retained=len(self._mark_history),
+            history_dropped=self._history_dropped,
         )
 
         for seq_id in sorted(stats.per_sequence.keys()):
@@ -255,6 +339,9 @@ class MarkEventMetaData:
         Returns one dict per agent audio chunk (excluding pre_mark_message), ordered
         by send counter. Each entry carries the actually-spoken text, send/ack
         timestamps, sequence/turn linkage, and an interruption flag.
+
+        Covers at most the last MAX_MARK_HISTORY chunks; get_mark_tracking_summary reports
+        how many were evicted, and the call's first send timestamp survives eviction there.
         """
         out = []
         for mark_id, data in self._mark_history.items():

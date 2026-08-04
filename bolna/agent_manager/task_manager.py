@@ -94,7 +94,7 @@ from bolna.helpers.utils import (
     enrich_context_with_time_variables,
 )
 from bolna.helpers.logger_config import configure_logger
-from ..helpers.mark_event_meta_data import MarkEventMetaData
+from ..helpers.mark_event_meta_data import MarkEventMetaData, should_persist_chunk_marks
 from ..helpers.observable_variable import ObservableVariable
 from .models import ComponentLatencies
 from .voicemail_handler import VoicemailHandler
@@ -2585,7 +2585,19 @@ class TaskManager(BaseManager):
         while not self.conversation_ended:
             mark_events = self.mark_event_meta_data.mark_event_meta_data
             mark_items_list = [{"mark_id": k, "mark_data": v} for k, v in mark_events.items()]
-            logger.info(f"current_list: {mark_items_list}")
+            # Summary, not the mark dicts: this loop re-runs on every mark change, so logging the
+            # whole pending list (each with its full text_synthesized) costs O(queue depth) bytes
+            # per iteration — O(n^2) per response, and at peak a third of all ws-server log volume.
+            _first_pending = mark_items_list[0]["mark_data"] if mark_items_list else {}
+            logger.info(
+                "wait_for_current_message pending=%s first_mark_id=%s type=%s seq=%s final=%s text_len=%s",
+                len(mark_items_list),
+                mark_items_list[0]["mark_id"] if mark_items_list else None,
+                _first_pending.get("type"),
+                _first_pending.get("sequence_id"),
+                _first_pending.get("is_final_chunk"),
+                len(_first_pending.get("text_synthesized", "") or ""),
+            )
 
             if not mark_items_list:
                 break
@@ -7046,7 +7058,15 @@ class TaskManager(BaseManager):
                         ),
                         "user_bot_latencies": _user_bot_latencies,
                         "mark_tracking": self.mark_event_meta_data.get_mark_tracking_summary(),
-                        "synthesizer_chunk_marks": self.mark_event_meta_data.get_chunk_marks(),
+                        # The raw per-chunk list dwarfs everything else in this payload (~90% of
+                        # latency_dict, and it is mirrored again into ClickHouse by CDC), so it is
+                        # kept only for the PERSIST_CHUNK_MARKS_PCT sample that recording analysis
+                        # needs. mark_tracking above always carries the aggregate.
+                        "synthesizer_chunk_marks": (
+                            self.mark_event_meta_data.get_chunk_marks()
+                            if should_persist_chunk_marks(self.run_id)
+                            else []
+                        ),
                     },
                     "hangup_detail": self.hangup_detail,
                     "has_transfer": self.has_transfer,
@@ -7204,6 +7224,10 @@ class TaskManager(BaseManager):
                 tasks_to_cancel.append(
                     process_task_cancellation(self.handle_accumulated_message_task, "handle_accumulated_message_task")
                 )
+
+                # Snapshot is complete, so the per-chunk mark buffers have no readers left. Free
+                # them before the recording upload below, which holds this TaskManager for seconds.
+                self.mark_event_meta_data.release_call_buffers()
 
                 output["recording_url"] = None
                 if self.should_record:
