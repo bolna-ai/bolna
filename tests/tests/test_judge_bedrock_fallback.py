@@ -90,3 +90,65 @@ def test_anthropic_default_is_unchanged(monkeypatch):
     assert sw.model == DEFAULT
     assert sw.has_credentials is True
     assert os.getenv("ANTHROPIC_API_KEY") == "k"
+
+
+def test_bedrock_claude_system_block_is_cacheable(monkeypatch):
+    # Without cache_control the full rules block reprocesses on every decide and the
+    # hedge doubles the miss; litellm translates it to Bedrock cachePoint for claude ids.
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
+    sw = LanguageSwitcher(available_labels=["en", "hi"], model=BEDROCK)
+    block = sw._system_message()["content"][0]
+    assert block.get("cache_control") == {"type": "ephemeral"}
+
+
+def test_non_claude_bedrock_model_gets_no_cache_block(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
+    sw = LanguageSwitcher(available_labels=["en", "hi"], model="bedrock/meta.llama3-70b")
+    block = sw._system_message()["content"][0]
+    assert "cache_control" not in block
+
+
+@pytest.mark.asyncio
+async def test_parsed_null_is_not_a_judge_failure(monkeypatch):
+    # json.loads("null") → None with no exception: the model validly declining,
+    # not a dead judge — it must never count toward the runtime fallback.
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
+    monkeypatch.setenv("LANGUAGE_SWITCH_HEDGE_AFTER_S", "0")
+    sw = LanguageSwitcher(available_labels=["en", "hi"], model=BEDROCK)
+    sw._log_decision = MagicMock()
+    sw._llm = MagicMock()
+    sw._llm.generate = AsyncMock(return_value="null")
+    for _ in range(4):
+        await sw.decide("hello", "", "hi")
+    assert sw.model == BEDROCK
+    assert sw._consecutive_failures == 0
+
+
+@pytest.mark.asyncio
+async def test_errored_attempts_still_trigger_the_fallback_when_hedged(monkeypatch):
+    # With hedging on, a dead judge returns None instead of raising (per-attempt exceptions
+    # are swallowed) — the errored-None path must still count as failure.
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
+    monkeypatch.setenv("LANGUAGE_SWITCH_HEDGE_AFTER_S", "0.01")
+    sw = LanguageSwitcher(available_labels=["en", "hi"], model=BEDROCK)
+    sw._log_decision = MagicMock()
+    sw._llm = MagicMock()
+    sw._llm.generate = AsyncMock(side_effect=Exception("AccessDeniedException"))
+    with patch("bolna.helpers.language_switcher.LiteLLM"):
+        await sw.decide("hello", "", "hi")
+        await sw.decide("hello", "", "hi")
+        assert sw.model == DEFAULT
+
+
+@pytest.mark.asyncio
+async def test_null_resets_an_error_streak(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
+    monkeypatch.setenv("LANGUAGE_SWITCH_HEDGE_AFTER_S", "0.01")
+    sw = LanguageSwitcher(available_labels=["en", "hi"], model=BEDROCK)
+    sw._log_decision = MagicMock()
+    sw._llm = MagicMock()
+    sw._llm.generate = AsyncMock(side_effect=[Exception("throttled"), "null", "null"])
+    await sw.decide("hello", "", "hi")  # errored first attempt; hedge parses null → valid decide
+    await sw.decide("hello", "", "hi")
+    assert sw._consecutive_failures == 0
+    assert sw.model == BEDROCK

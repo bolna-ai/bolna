@@ -298,3 +298,35 @@ async def test_shutdown_cancels_pending_reconnect(monkeypatch):
     d.start = AsyncMock()
     await d._shutdown_connection()
     assert d._reconnect_task.cancelled()
+
+
+class _FakeWS:
+    def __init__(self, frames):
+        self.frames = list(frames)
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if not self.frames:
+            raise StopAsyncIteration
+        return self.frames.pop(0)
+
+
+@pytest.mark.asyncio
+async def test_non_data_frames_counted_but_logged_once_per_type():
+    # VAD/event frames can be per-utterance traffic: count them all into unknown_frames
+    # (detector_health emits the total at cleanup) but WARN only on the first of each type.
+    import json
+    from unittest.mock import MagicMock, patch
+
+    lid = SarvamLID(on_language=None, config={"sarvam_api_key": "k"})
+    lid._ws = _FakeWS(
+        [json.dumps({"type": "events", "data": {}})] * 4 + [json.dumps({"type": "error", "message": "quota"})]
+    )
+    lid._schedule_reconnect = MagicMock()
+    with patch("bolna.lid.sarvam.logger") as log:
+        await lid._receiver_loop()
+    assert lid.unknown_frames == 5
+    warnings = [c for c in log.warning.call_args_list if "non-data frame" in str(c)]
+    assert len(warnings) == 2  # once for 'events', once for 'error' — not 5
