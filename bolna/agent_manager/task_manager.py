@@ -4005,6 +4005,13 @@ class TaskManager(BaseManager):
         if llm_response.strip() and self.llm_latencies.turn_latencies:
             self.llm_latencies.turn_latencies[-1]["response_text"] = llm_response.strip()
 
+        # No speakable text means no synthesizer audio, and __listen_synthesizer is the only
+        # place the success path clears this flag. Left set, it gates every silence-recovery
+        # branch in __check_for_completion.
+        if not llm_response.strip():
+            logger.info("LLM turn produced no speakable text; clearing response_in_pipeline")
+            self.response_in_pipeline = False
+
         # Collect RAG latency if present (from KnowledgeBaseAgent)
         if meta_info.get("rag_latency"):
             rag_latency = meta_info["rag_latency"]

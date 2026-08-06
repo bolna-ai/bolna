@@ -493,7 +493,15 @@ class OpenAICompatibleLLM(BaseLLM):
         return create_kwargs, responses_tools
 
     async def _generate_stream_responses(
-        self, messages, synthesize=True, request_json=False, meta_info=None, tool_choice=None, tools=None
+        self,
+        messages,
+        synthesize=True,
+        request_json=False,
+        meta_info=None,
+        tool_choice=None,
+        tools=None,
+        *,
+        retry_on_empty=True,
     ):
         if not messages:
             raise ValueError("No messages provided")
@@ -516,6 +524,8 @@ class OpenAICompatibleLLM(BaseLLM):
         service_tier = None
         llm_host = getattr(self, "llm_host", None)
         response_usage = None
+        incomplete = False
+        incomplete_reason = None
 
         try:
             stream = await self._responses_client.responses.create(**create_kwargs)
@@ -528,7 +538,7 @@ class OpenAICompatibleLLM(BaseLLM):
                     )
                 self.previous_response_id = None
                 async for chunk in self._generate_stream_responses(
-                    messages, synthesize, request_json, meta_info, tool_choice, tools
+                    messages, synthesize, request_json, meta_info, tool_choice, tools, retry_on_empty=retry_on_empty
                 ):
                     yield chunk
                 return
@@ -557,7 +567,9 @@ class OpenAICompatibleLLM(BaseLLM):
                 raise APIError(message=f"Response failed: {error_info}", request=None, body=None)
 
             if event.type == ResponseStreamEvent.INCOMPLETE:
-                logger.warning("Responses API stream incomplete, partial response returned")
+                incomplete = True
+                incomplete_reason = getattr(getattr(event.response, "incomplete_details", None), "reason", None)
+                logger.warning(f"Responses API stream incomplete, reason={incomplete_reason}")
                 self.invalidate_response_chain()
                 break
 
@@ -630,6 +642,21 @@ class OpenAICompatibleLLM(BaseLLM):
                 if hasattr(event.response, "usage") and event.response.usage:
                     response_usage = event.response.usage
                 break
+
+        # An incomplete response that emitted nothing leaves the turn silent. Nothing was
+        # yielded yet, so one clean retry on full history is safe; a reasoning model that
+        # spent its whole max_output_tokens budget on reasoning usually stays under it here.
+        if incomplete and not answer and not func_call_args and retry_on_empty:
+            logger.warning(f"Responses API returned no output (reason={incomplete_reason}), retrying once")
+            if isinstance(meta_info, dict):
+                meta_info.setdefault("_non_fatal_errors", []).append(
+                    {"error_type": "incomplete_empty_response", "error": incomplete_reason, "model": self.model}
+                )
+            async for chunk in self._generate_stream_responses(
+                messages, synthesize, request_json, meta_info, tool_choice, tools, retry_on_empty=False
+            ):
+                yield chunk
+            return
 
         if latency_data:
             latency_data.total_stream_duration_ms = now_ms() - start_time
