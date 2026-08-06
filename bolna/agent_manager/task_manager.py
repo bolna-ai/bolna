@@ -4848,10 +4848,11 @@ class TaskManager(BaseManager):
                                 self.interruption_manager.revalidate_sequence_id(self.eager_meta_info["sequence_id"])
                                 self.response_in_pipeline = True
                                 # Mirror the once-per-turn language-switch hook from
-                                # _handle_transcriber_output — the eager path skips that
-                                # method, and without this Flux agents would never run
-                                # the switch decision on eager turns.
-                                self._spawn_language_switch_decision(transcriber_message, meta_info)
+                                # _handle_transcriber_output — the eager path skips that method.
+                                # eager_meta_info, not the raw message meta: only it carries the
+                                # sequence_id the eager reply's audio plays under, and the playback
+                                # gate silently refuses to arm on a meta without one.
+                                self._spawn_language_switch_decision(transcriber_message, self.eager_meta_info)
                             self.llm_task = self.eager_llm_task
                             self.eager_llm_task = None
                             self.eager_meta_info = None
@@ -5620,10 +5621,23 @@ class TaskManager(BaseManager):
         )
         explicit_min_conf = float(os.getenv("LANGUAGE_SWITCH_EXPLICIT_MIN_CONFIDENCE", str(min_conf)))
         explicit_bypass = bool(decision.get("explicit_request")) and (target_conf or 0.0) >= explicit_min_conf
-        if not explicit_bypass and buffered_max_segment_s < min_segment_s:
+        # Foreign-segment max, not the buffer-lifetime max: the idle-flush skip leaves the buffer
+        # undrained, so a stale long ACTIVE-language segment could carry a short mis-tagged
+        # fragment past this gate (same per-foreign measure as __detector_language_mismatch).
+        active_short = (active or "").split("-")[0].lower()
+        foreign_max_segment_s = max(
+            (
+                float(s.get("audio_s") or 0.0)
+                for s in detector_segments
+                if (s.get("lang") or "").split("-")[0].lower() not in ("", active_short)
+            ),
+            default=0.0,
+        )
+        if not explicit_bypass and foreign_max_segment_s < min_segment_s:
             logger.info(
-                f"LanguageSwitcher: target '{target}' but longest segment "
-                f"{buffered_max_segment_s:.2f}s < {min_segment_s}s and no confident explicit request "
+                f"LanguageSwitcher: target '{target}' but longest foreign segment "
+                f"{foreign_max_segment_s:.2f}s < {min_segment_s}s (buffer max {buffered_max_segment_s:.2f}s) "
+                f"and no confident explicit request "
                 f"(explicit={decision.get('explicit_request')}, conf={target_conf}) — "
                 f"no switch (short audio is unreliable LID evidence; reason={reasoning})"
             )
