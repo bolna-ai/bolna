@@ -643,9 +643,7 @@ class OpenAICompatibleLLM(BaseLLM):
                     response_usage = event.response.usage
                 break
 
-        # An incomplete response that emitted nothing leaves the turn silent. Nothing was
-        # yielded yet, so one clean retry on full history is safe; a reasoning model that
-        # spent its whole max_output_tokens budget on reasoning usually stays under it here.
+        # Nothing was yielded yet, so a retry cannot duplicate speech.
         if incomplete and not answer and not func_call_args and retry_on_empty:
             logger.warning(f"Responses API returned no output (reason={incomplete_reason}), retrying once")
             if isinstance(meta_info, dict):

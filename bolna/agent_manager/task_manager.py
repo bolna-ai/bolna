@@ -3586,6 +3586,7 @@ class TaskManager(BaseManager):
         reasoning_tokens=None,
         cached_tokens=None,
         reasoning_content=None,
+        log_message=None,
     ):
         self.llm_response_generated = True
         # task 0 only, so aux LLMs (hangup/voicemail) never tally. Report input/output/cached so the
@@ -3595,7 +3596,8 @@ class TaskManager(BaseManager):
             self._usage_tasks.add(_usage_task)
             _usage_task.add_done_callback(self._usage_tasks.discard)
         convert_to_request_log(
-            message=llm_response,
+            # log_message explains a silent turn; the history below keeps the raw response.
+            message=log_message or llm_response,
             meta_info=meta_info,
             component=LogComponent.LLM,
             direction=LogDirection.RESPONSE,
@@ -3968,6 +3970,12 @@ class TaskManager(BaseManager):
         filler_message = compute_function_pre_call_message(
             meta_info.get("detected_language") or self.language, function_tool, function_tool_message
         )
+
+        empty_turn_detail = None
+        if not llm_response.strip():
+            reason = next((e.get("error") for e in meta_info.get("_non_fatal_errors", []) if e.get("error")), None)
+            empty_turn_detail = f"LLM returned no output ({reason})" if reason else "LLM returned no output"
+
         if self.stream and llm_response != filler_message:
             self.__store_into_history(
                 meta_info,
@@ -3979,6 +3987,7 @@ class TaskManager(BaseManager):
                 reasoning_tokens=actual_reasoning_tokens,
                 cached_tokens=actual_cached_tokens,
                 reasoning_content=actual_reasoning_content,
+                log_message=empty_turn_detail,
             )
         elif not self.stream:
             llm_response = llm_response.strip()
@@ -3988,7 +3997,7 @@ class TaskManager(BaseManager):
                 next_step, llm_response, should_bypass_synth, meta_info, is_function_call=should_trigger_function_call
             )
             convert_to_request_log(
-                message=llm_response,
+                message=empty_turn_detail or llm_response,
                 meta_info=meta_info,
                 component=LogComponent.LLM,
                 direction=LogDirection.RESPONSE,
@@ -4005,11 +4014,10 @@ class TaskManager(BaseManager):
         if llm_response.strip() and self.llm_latencies.turn_latencies:
             self.llm_latencies.turn_latencies[-1]["response_text"] = llm_response.strip()
 
-        # No speakable text means no synthesizer audio, and __listen_synthesizer is the only
-        # place the success path clears this flag. Left set, it gates every silence-recovery
-        # branch in __check_for_completion.
-        if not llm_response.strip():
-            logger.info("LLM turn produced no speakable text; clearing response_in_pipeline")
+        # Only __listen_synthesizer clears this on the success path, and a silent turn never
+        # reaches it, leaving every silence-recovery branch in __check_for_completion gated off.
+        if empty_turn_detail:
+            logger.info(f"{empty_turn_detail}; clearing response_in_pipeline")
             self.response_in_pipeline = False
 
         # Collect RAG latency if present (from KnowledgeBaseAgent)

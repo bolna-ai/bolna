@@ -668,8 +668,7 @@ class OpenAiLLM(OpenAICompatibleLLM):
                 yield chunk
             return
 
-        # Incomplete with nothing emitted leaves the turn silent. Nothing was yielded yet, so
-        # retry once over HTTP SSE on full history.
+        # Nothing was yielded yet, so a retry cannot duplicate speech.
         if incomplete and not answer and not func_call_args:
             logger.warning(f"WS Responses API returned no output (reason={incomplete_reason}), retrying once over HTTP")
             if isinstance(meta_info, dict):
