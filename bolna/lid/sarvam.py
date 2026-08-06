@@ -117,9 +117,13 @@ class SarvamLID(LIDBackend):
                 try:
                     data = json.loads(raw) if isinstance(raw, str) else {}
                     if data.get("type") != "data":
-                        # Error/quota/VAD frames were dropped silently, hiding a dead tap.
+                        # Counted always, logged once per frame type — VAD/event frames can be
+                        # per-utterance traffic; detector_health emits the total at cleanup.
                         self.unknown_frames += 1
-                        logger.warning(f"SarvamLID: non-data frame {str(raw)[:200]}")
+                        frame_type = str(data.get("type"))
+                        if frame_type not in self.unknown_frame_types_logged:
+                            self.unknown_frame_types_logged.add(frame_type)
+                            logger.warning(f"SarvamLID: non-data frame type={frame_type!r} {str(raw)[:200]}")
                     if data.get("type") == "data":
                         self.segments_received += 1
                         payload = data.get("data", {})

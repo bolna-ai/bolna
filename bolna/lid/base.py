@@ -46,6 +46,7 @@ class LIDBackend:
         self.chunks_dropped = 0
         self.segments_received = 0
         self.unknown_frames = 0
+        self.unknown_frame_types_logged = set()
         # Per-turn buffer: providers _accumulate() one segment per utterance, drained per turn.
         self._buffer_text = ""
         self._buffer_lang = None

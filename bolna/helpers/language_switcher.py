@@ -107,8 +107,13 @@ class LanguageSwitcher:
 
     def _system_message(self):
         # Static rules as a cacheable prefix (Anthropic cache_control; Azure caches automatically).
+        # Bedrock-hosted Claude also caches (litellm translates cache_control → cachePoint);
+        # scoped to claude ids so a non-Anthropic bedrock model never gets an unsupported block.
         block = {"type": "text", "text": LANGUAGE_SWITCH_SYSTEM_PROMPT}
-        if self.model.startswith(("anthropic/", "claude")):
+        cacheable = self.model.startswith(("anthropic/", "claude")) or (
+            self.model.startswith("bedrock/") and "claude" in self.model
+        )
+        if cacheable:
             block["cache_control"] = {"type": "ephemeral"}
         return {"role": "system", "content": [block]}
 
@@ -178,7 +183,11 @@ class LanguageSwitcher:
         try:
             result = await self._hedged_generate(messages)
             if result is None:
-                self._note_failure()
+                # A parsed `null` is the model validly declining, not a broken judge.
+                if self.last_generate_errored:
+                    self._note_failure()
+                else:
+                    self._consecutive_failures = 0
                 return None
             self._consecutive_failures = 0
             self.latency_ms = (time.time() - start_time) * 1000
@@ -223,6 +232,9 @@ class LanguageSwitcher:
         requests read the same cached prefix. 0 disables (single request)."""
         hedge_after_s = float(os.getenv("LANGUAGE_SWITCH_HEDGE_AFTER_S", str(DEFAULT_HEDGE_AFTER_S)))
         self.hedge_won = False  # per-decide; without the reset it stays True for the rest of the call
+        # Both-attempts-errored also returns None (exceptions are swallowed per-attempt), so this
+        # flag is how decide() tells a dead judge from a model that validly replied `null`.
+        self.last_generate_errored = False
 
         async def attempt():
             return self._parse_json(await self._llm.generate(messages))
@@ -262,6 +274,7 @@ class LanguageSwitcher:
                 if winner is not None:
                     self.hedge_won = winner is second
                     return winner.result()
+            self.last_generate_errored = True
             return None
         finally:
             for task in (first, second):

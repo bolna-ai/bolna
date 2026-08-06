@@ -5934,12 +5934,12 @@ class TaskManager(BaseManager):
             f"respond only in {name}, regardless of the language used earlier in the conversation or "
             f"elsewhere in this prompt. This instruction overrides all other language preferences, "
             f"language-selection rules, and multilingual script variants. "
-            f"Immediately repeat the agent's last line before the language switch in {name} so the "
-            f"caller can follow, then continue the conversation from that point. "
             f"For the remainder of the call, use only the {name} version of every question, FAQ, "
             f"sample response, objection-handling response, and closing line. If a {name} version "
             f"is not provided, translate the available version into clear, natural {name} while "
-            f"preserving its exact meaning."
+            f"preserving its exact meaning. Never translate or alter proper nouns, brand names, "
+            f"alphanumeric identifiers, digits, codes, or lines these instructions mark as "
+            f"verbatim/legal — read those exactly as written; they are language-neutral."
         )
 
     def __apply_language_directive(self, label: str, context_note: str = None) -> None:
@@ -5977,7 +5977,9 @@ class TaskManager(BaseManager):
             f"## Language note:\nThe caller is now speaking {target_name} ('{target}'). "
             f"From this point, respond ONLY in {target_name} — every reply must be in {target_name}, "
             f"regardless of the language of earlier conversation turns or the language these "
-            f'instructions are written in. Their latest message: "{detector_transcript}".'
+            f"instructions are written in. In your NEXT reply only, first briefly restate your "
+            f"previous line in {target_name} so the caller can follow, then continue from there. "
+            f'Their latest message: "{detector_transcript}".'
         )
         if reasoning:
             note += f" Reason: {reasoning}"
