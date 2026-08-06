@@ -1755,6 +1755,10 @@ class TaskManager(BaseManager):
                 injected_cfg["routing_reasoning_effort"] = self.kwargs["routing_reasoning_effort"]
             if "routing_max_tokens" in self.kwargs:
                 injected_cfg["routing_max_tokens"] = self.kwargs["routing_max_tokens"]
+            # Set when the caller serves the conversation LLM from a different backend than the agent's own.
+            for key in ("aux_model", "aux_provider", "route_routing_to_conversation"):
+                if key in self.kwargs:
+                    injected_cfg[key] = self.kwargs[key]
             if self.llm_config.get("use_responses_api"):
                 injected_cfg["use_responses_api"] = True
             if self.llm_config.get("compact_threshold"):
@@ -3691,6 +3695,23 @@ class TaskManager(BaseManager):
                                 "service_tier": routing_usage.get("service_tier"),
                             }
                         )
+
+                    # on_turn_usage meters the conversation LLM's backend; routing on azure means the routing
+                    # hop shares that backend, so its tokens draw on the same capacity.
+                    if (
+                        self.on_turn_usage
+                        and routing_info.get("routing_provider") == "azure"
+                        and routing_usage.get("input_tokens")
+                    ):
+                        _routing_task = asyncio.create_task(
+                            self.on_turn_usage(
+                                routing_usage.get("input_tokens"),
+                                routing_usage.get("output_tokens"),
+                                routing_usage.get("cached_tokens"),
+                            )
+                        )
+                        self._usage_tasks.add(_routing_task)
+                        _routing_task.add_done_callback(self._usage_tasks.discard)
 
                     if routing_info.get("node_history"):
                         self.routing_latencies["node_flow"] = list(routing_info["node_history"])
