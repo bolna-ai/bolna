@@ -100,6 +100,7 @@ class TranscriberPool:
         self._lid_provider_name = lid_provider
         self._lid_config = lid_config or {}
         self._lid: Optional[object] = None  # LIDProvider instance
+        self._lid_feed_error_logged = False
         self._lid_task: Optional[asyncio.Task] = None
         self._on_lid_switch = on_lid_switch
         self._lid_mode = _LID_MODE
@@ -235,7 +236,10 @@ class TranscriberPool:
                         try:
                             self._lid.feed(audio_data)
                         except Exception as e:
-                            logger.debug(f"TranscriberPool: LID feed error: {e}")
+                            # Was debug: a feed raising every chunk silently killed switching.
+                            if not self._lid_feed_error_logged:
+                                self._lid_feed_error_logged = True
+                                logger.warning(f"TranscriberPool: LID feed error: {e}")
         except asyncio.CancelledError:
             logger.info("TranscriberPool: audio router cancelled")
 
@@ -587,6 +591,41 @@ class TranscriberPool:
 
         return info
 
+    def _record_detector_health(self):
+        """Record a detector_health event when the tap produced NOTHING while the caller spoke.
+
+        Silent-failure only: a dead tap fires no decides, so it writes no telemetry at all and
+        looks identical to a call where nobody switched (topaz 389b16aa/df3479eb/5b063ddd).
+        """
+        lid = self._lid
+        segments = getattr(lid, "segments_received", None)
+        if segments is None or segments > 0:
+            return
+        # Main-ASR turns prove the caller actually spoke — without this a silent call
+        # (nobody said anything) would be reported as a broken detector.
+        user_turns = getattr(self.transcribers.get(self.active_label), "turn_counter", 0) or 0
+        if user_turns < 1:
+            return
+        self.lid_detection_events.append(
+            {
+                "type": "detector_health",
+                "ts": time.time(),
+                "provider": self._lid_provider_name,
+                "segments_received": 0,
+                "user_turns": user_turns,
+                "chunks_fed": getattr(lid, "chunks_fed", 0),
+                "chunks_dropped": getattr(lid, "chunks_dropped", 0),
+                "unknown_frames": getattr(lid, "unknown_frames", 0),
+                "ws_dead": bool(getattr(lid, "_dead", False)),
+                "reconnects": getattr(lid, "_reconnect_attempts", 0),
+            }
+        )
+        logger.warning(
+            f"TranscriberPool: LID tap produced NO segments across {user_turns} user turns "
+            f"(provider={self._lid_provider_name}, chunks_fed={getattr(lid, 'chunks_fed', 0)}, "
+            f"unknown_frames={getattr(lid, 'unknown_frames', 0)}) — language switching was inert"
+        )
+
     async def cleanup(self):
         """Clean up all transcribers, cancel pool tasks, and stop LID tap."""
         for task_name, task in [("router", self._router_task), ("keepalive", self._keepalive_task)]:
@@ -600,6 +639,7 @@ class TranscriberPool:
 
         # Stop LID tap
         if self._lid is not None:
+            self._record_detector_health()
             try:
                 await self._lid.stop()
                 logger.info("TranscriberPool: LID tap stopped")

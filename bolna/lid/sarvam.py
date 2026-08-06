@@ -116,7 +116,12 @@ class SarvamLID(LIDBackend):
             async for raw in self._ws:
                 try:
                     data = json.loads(raw) if isinstance(raw, str) else {}
+                    if data.get("type") != "data":
+                        # Error/quota/VAD frames were dropped silently, hiding a dead tap.
+                        self.unknown_frames += 1
+                        logger.warning(f"SarvamLID: non-data frame {str(raw)[:200]}")
                     if data.get("type") == "data":
+                        self.segments_received += 1
                         payload = data.get("data", {})
                         transcript = (payload.get("transcript") or "").strip()
                         lang = payload.get("language_code", "")

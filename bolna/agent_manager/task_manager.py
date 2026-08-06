@@ -5401,18 +5401,17 @@ class TaskManager(BaseManager):
         if len(labels) < 2:
             return
 
-        # Stale-decision guard: if the language changed while this decision waited on
-        # the lock, its inputs are invalid — the LIVE transcript and buffered detector
-        # speech were produced by the PRE-switch recognizer, but the prompt would label
-        # them as the new language's output. Acting on that mislabeled context is what
-        # caused the mr→hi→mr ping-pong in QA call 1a16da82 (the model saw clean
-        # Marathi attributed to the "hi-locked" ASR and switched back). Drop the
-        # decision and discard the stale buffered speech with it.
+        # Stale-decision guard: the language changed while this decision waited on the lock,
+        # so its LIVE transcript is mislabeled (it came from the PRE-switch recognizer) — that
+        # mislabeling caused the mr→hi→mr ping-pong in QA 1a16da82. Drop the DECISION only.
+        # The detector buffer is kept: the tap runs language-code=unknown, so its speech means
+        # the same before and after a switch, and draining it here deleted a caller's explicit
+        # "Can you speak in English?" mid-switch, costing a repeat + ~28s (QA 971254c0).
         if spawn_language is not None and spawn_language != self.language:
-            discarded, _ = pool.take_lid_transcript()
+            retained = pool.lid_buffer_age()
             logger.info(
                 f"LanguageSwitcher: language changed since capture ('{spawn_language}' → '{self.language}') — "
-                f"dropping stale decision (discarded buffer={discarded[:60]!r})"
+                f"dropping stale decision (detector buffer retained, age={retained})"
             )
             return None
 

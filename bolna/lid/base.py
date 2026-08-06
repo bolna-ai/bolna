@@ -40,6 +40,12 @@ class LIDBackend:
         self._last_reconnect_at = 0.0
         self._dead_drop_logged = False
         self._reconnect_task = None
+        # Health counters — a silent detector writes no decides, so these are the only
+        # evidence distinguishing "nothing to switch" from "the tap was dead".
+        self.chunks_fed = 0
+        self.chunks_dropped = 0
+        self.segments_received = 0
+        self.unknown_frames = 0
         # Per-turn buffer: providers _accumulate() one segment per utterance, drained per turn.
         self._buffer_text = ""
         self._buffer_lang = None
@@ -63,7 +69,9 @@ class LIDBackend:
             return
         try:
             self._queue.put_nowait(audio_bytes)
+            self.chunks_fed += 1
         except asyncio.QueueFull:
+            self.chunks_dropped += 1
             logger.debug(f"{self.__class__.__name__}: audio queue full — chunk dropped (backpressure)")
 
     async def stop(self):

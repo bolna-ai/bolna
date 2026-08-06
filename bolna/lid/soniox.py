@@ -89,6 +89,7 @@ class SonioxLID(LIDBackend):
                 f"end_ms={pending['end_ms']}) — audio_s=0 will read as short audio and block switching"
             )
         logger.info(f"SonioxLID segment: lang={lang!r} prob={prob} transcript={text[:60]!r} audio_s={audio_s:.3f}")
+        self.segments_received += 1
         self._accumulate(text, lang, audio_s, prob=prob)
         if self.on_language is not None and lang:
             asyncio.create_task(self.on_language(lang, None))  # legacy per-segment signal

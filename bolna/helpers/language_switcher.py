@@ -20,6 +20,8 @@ DEFAULT_HEDGE_AFTER_S = 1.8
 # Substituted for LIVE in the turn prompt when no main-ASR turn exists (idle flush). The system
 # prompt names this exact string when voiding the empty-LIVE inference — keep them in sync.
 LIVE_UNAVAILABLE_MARKER = "(no turn from the language-locked recognizer — idle flush)"
+# Consecutive decide failures before swapping a broken judge for the API-key default.
+RUNTIME_FALLBACK_AFTER = 2
 
 
 def resolve_switch_llm_credentials(model: str) -> tuple[str, str, str]:
@@ -31,6 +33,10 @@ def resolve_switch_llm_credentials(model: str) -> tuple[str, str, str]:
     key = os.getenv("LANGUAGE_SWITCH_LLM_API_KEY") or ""
     base = os.getenv("LANGUAGE_SWITCH_LLM_API_BASE") or ""
     version = os.getenv("LANGUAGE_SWITCH_LLM_API_VERSION") or ""
+    if model.startswith("bedrock/"):
+        # Auth is the instance IAM role via boto3 — an api_key here would be wrong, and an
+        # empty one must NOT read as "no credentials" (see has_credentials in __init__).
+        return "", base, version
     if model.startswith("azure/"):
         key = key or os.getenv("AZURE_OPENAI_API_KEY") or ""
         base = base or os.getenv("AZURE_OPENAI_ENDPOINT") or ""
@@ -68,14 +74,20 @@ class LanguageSwitcher:
         # leaving switching inert for the flagged org. Fall back to the default judge, which
         # switching depends on, rather than shipping a dead judge.
         default_model = f"anthropic/{DEFAULT_LANGUAGE_SWITCH_LLM}"
-        if not switch_llm_key.strip() and self.model != default_model:
+        self._is_bedrock = self.model.startswith("bedrock/")
+        if not switch_llm_key.strip() and not self._is_bedrock and self.model != default_model:
             fb_key, fb_base, fb_version = resolve_switch_llm_credentials(default_model)
             if fb_key.strip():
                 logger.warning(f"LanguageSwitcher: no key for '{self.model}' — falling back to {default_model}")
                 self.model = default_model
                 switch_llm_key, switch_llm_base, switch_llm_version = fb_key, fb_base, fb_version
-        # Lets the task manager fall back to the legacy switch tool when the judge can't work.
-        self.has_credentials = bool(switch_llm_key.strip())
+        # Bedrock authenticates via the instance IAM role, so an empty key is expected there.
+        self.has_credentials = bool(switch_llm_key.strip()) or self._is_bedrock
+        # Runtime fallback state: a Bedrock permission/throttle failure only surfaces at invoke
+        # time, and every failed decide means no switch at all — swap to the API-key judge after
+        # a few consecutive failures rather than staying dead for the rest of the call.
+        self._consecutive_failures = 0
+        self._runtime_fallback_done = False
         if not self.has_credentials:
             # Don't raise (would kill call setup); log — every decide would otherwise fail silently.
             logger.error(
@@ -166,7 +178,9 @@ class LanguageSwitcher:
         try:
             result = await self._hedged_generate(messages)
             if result is None:
+                self._note_failure()
                 return None
+            self._consecutive_failures = 0
             self.latency_ms = (time.time() - start_time) * 1000
             logger.info(
                 f"LanguageSwitcher decision: {result} (latency_ms={self.latency_ms:.0f}, hedge_won={self.hedge_won})"
@@ -175,7 +189,31 @@ class LanguageSwitcher:
             return result
         except Exception as e:
             logger.error(f"LanguageSwitcher decision error: {e}")
+            self._note_failure()
             return None
+
+    def _note_failure(self):
+        """Swap a persistently failing judge for the API-key default (Bedrock IAM/throttle
+        errors only surface at invoke time, and every failed decide means no switch at all)."""
+        self._consecutive_failures += 1
+        if self._runtime_fallback_done or self._consecutive_failures < RUNTIME_FALLBACK_AFTER:
+            return
+        default_model = f"anthropic/{DEFAULT_LANGUAGE_SWITCH_LLM}"
+        if self.model == default_model:
+            return
+        key, base, version = resolve_switch_llm_credentials(default_model)
+        if not key.strip():
+            return
+        logger.warning(
+            f"LanguageSwitcher: {self._consecutive_failures} consecutive failures on '{self.model}' — "
+            f"falling back to {default_model} for the rest of this call"
+        )
+        self.model = default_model
+        self._is_bedrock = False
+        self._runtime_fallback_done = True
+        self._llm = LiteLLM(
+            model=self.model, max_tokens=200, temperature=0.0, llm_key=key, base_url=base, api_version=version
+        )
 
     async def _hedged_generate(self, messages) -> dict | None:
         """First parsed reply wins. A second identical request fires after HEDGE_AFTER_S if the
