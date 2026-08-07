@@ -1519,6 +1519,10 @@ class TaskManager(BaseManager):
                         "language_switch_lid_provider"
                     ) or os.getenv("LID_PROVIDER", "sarvam")
                     lid_config = {"telephony_provider": provider}
+                    # Sarvam-only model override (language_switch_saaras_v4_lid flag).
+                    lid_model = self.task_config.get("tools_config", {}).get("language_switch_lid_model")
+                    if lid_model:
+                        lid_config["sarvam_model"] = lid_model
                     switch_enabled = self.__language_switch_enabled()
                     if switch_enabled:
                         # language_switch_llm (from the azure flag) overrides the model; absent → default.
@@ -1542,7 +1546,8 @@ class TaskManager(BaseManager):
                     logger.info(
                         f"TranscriberPool created with labels={list(transcribers.keys())}, "
                         f"active='{active_label}', language_switch_enabled={switch_enabled}, "
-                        f"lid_provider={LID_PROVIDER!r}, legacy_lid_heuristic={not switch_enabled}"
+                        f"lid_provider={LID_PROVIDER!r}, lid_model={lid_model or 'default'}, "
+                        f"legacy_lid_heuristic={not switch_enabled}"
                     )
                     if switch_enabled:
                         # Idle-flush fallback: recovers the stuck-language deadlock where
@@ -5346,7 +5351,7 @@ class TaskManager(BaseManager):
                 # produced nothing for the whole cap — the flag is stale, fire anyway.
                 caller_speaking = bool(getattr(self.interruption_manager, "callee_speaking", False))
                 if caller_speaking and age < LANGUAGE_SWITCH_SPEAKING_STALE_CAP_S:
-                    await asyncio.sleep(0.2)
+                    await asyncio.sleep(0.1)
                     continue
                 if age >= threshold and not nothing_to_decide:
                     logger.info(

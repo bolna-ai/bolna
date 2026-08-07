@@ -322,11 +322,24 @@ async def test_non_data_frames_counted_but_logged_once_per_type():
 
     lid = SarvamLID(on_language=None, config={"sarvam_api_key": "k"})
     lid._ws = _FakeWS(
-        [json.dumps({"type": "events", "data": {}})] * 4 + [json.dumps({"type": "error", "message": "quota"})]
+        [json.dumps({"type": "events", "data": {}})] * 4 + [json.dumps({"type": "error", "message": "quota"})] * 3
     )
     lid._schedule_reconnect = MagicMock()
     with patch("bolna.lid.sarvam.logger") as log:
         await lid._receiver_loop()
-    assert lid.unknown_frames == 5
+    # "events" frames are requested VAD signals — benign, never counted or warned.
+    assert lid.unknown_frames == 3
     warnings = [c for c in log.warning.call_args_list if "non-data frame" in str(c)]
-    assert len(warnings) == 2  # once for 'events', once for 'error' — not 5
+    assert len(warnings) == 1  # once for 'error' — not per frame, and never for 'events'
+
+
+def test_detector_model_defaults_to_v3():
+    lid = SarvamLID(on_language=None, config={"sarvam_api_key": "k"})
+    assert "model=saaras:v3" in lid._build_url()
+
+
+def test_detector_model_override_via_config():
+    # tools_config["language_switch_lid_model"] (saaras-v4 feature flag) arrives as sarvam_model.
+    lid = SarvamLID(on_language=None, config={"sarvam_api_key": "k", "sarvam_model": "saaras:v4"})
+    assert "model=saaras:v4" in lid._build_url()
+    assert "language-code=unknown" in lid._build_url()  # unbiased mode is not affected
