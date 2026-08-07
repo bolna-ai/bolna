@@ -28,6 +28,13 @@ AUDIO_BATCH_MS = 80
 # time to act on it. Overridable via env.
 HANGUP_SETTLE_S = float(os.environ.get("SIP_HANGUP_SETTLE_S", "0.5"))
 
+# Max wait for Asterisk to confirm (QUEUE_DRAINED) that it has played out everything we
+# sent, before HANGUP cuts the tail off the goodbye. Overridable via env.
+HANGUP_DRAIN_TIMEOUT_S = float(os.environ.get("SIP_HANGUP_DRAIN_TIMEOUT_S", "2.0"))
+
+# Extra wait after QUEUE_DRAINED for the far-end jitter buffer. Overridable via env.
+HANGUP_DRAIN_SETTLE_S = float(os.environ.get("SIP_HANGUP_DRAIN_SETTLE_S", "0.5"))
+
 # Submit accumulated DTMF digits after this much inter-digit silence (reset on each
 # keypress), or immediately when '#' is pressed. Overridable via env.
 DTMF_INTERDIGIT_TIMEOUT_S = float(os.environ.get("SIP_DTMF_INTERDIGIT_TIMEOUT_S", "3"))
@@ -98,6 +105,7 @@ class SipTrunkInputHandler(TelephonyInputHandler):
         self.ptime = 20
         self._pending_stream_sid = None  # promoted to stream_sid on first audio frame
         self._dtmf_timer_task = None  # inter-digit timeout for DTMF accumulation
+        self._queue_drained = asyncio.Event()  # set by Asterisk's QUEUE_DRAINED event
 
         input_config = self._get_input_config()
         self._expected_format = (input_config.get("audio_format") or input_config.get("format") or "ulaw").lower()
@@ -143,9 +151,38 @@ class SipTrunkInputHandler(TelephonyInputHandler):
         except Exception as e:
             logger.error(f"Error sending HANGUP: {e}")
 
+    async def _await_playback_drained(self):
+        """Hold HANGUP until Asterisk reports its frame queue empty.
+
+        Audio is handed over faster than real time, so at teardown part of the goodbye is
+        usually still buffered in Asterisk and HANGUP would discard it. Bounded, and a
+        no-op once the queue is already empty.
+        """
+        listen_task = self.websocket_listen_task
+        if listen_task is None or listen_task.done():
+            return  # receive loop is gone (caller hung up first) — nothing can answer
+
+        self._queue_drained.clear()
+        try:
+            await self.websocket.send_text("REPORT_QUEUE_DRAINED")
+        except Exception as e:
+            logger.info(f"REPORT_QUEUE_DRAINED not sent for channel {self.channel_id}: {e}")
+            return
+
+        try:
+            await asyncio.wait_for(self._queue_drained.wait(), timeout=HANGUP_DRAIN_TIMEOUT_S)
+        except asyncio.TimeoutError:
+            logger.warning(
+                f"QUEUE_DRAINED not received within {HANGUP_DRAIN_TIMEOUT_S}s for channel "
+                f"{self.channel_id}; hanging up anyway"
+            )
+            return
+        await asyncio.sleep(HANGUP_DRAIN_SETTLE_S)
+
     async def stop_handler(self):
         """Stop and disconnect; Asterisk closes quickly after HANGUP."""
         logger.info(f"Stopping sip-trunk handler for channel {self.channel_id}")
+        await self._await_playback_drained()
         self.running = False
         self._cancel_dtmf_timer()
         await self.disconnect_stream()
@@ -330,9 +367,9 @@ class SipTrunkInputHandler(TelephonyInputHandler):
             logger.debug(f"Asterisk control: {event}")
             return
         if event == "QUEUE_DRAINED" or "QUEUE_DRAINED" in event:
-            # At 1x pacing, playback completion is tracked by the output handler's
-            # send-loop drain detection — QUEUE_DRAINED is informational only.
-            logger.debug(f"QUEUE_DRAINED for channel {self.channel_id} (informational)")
+            # Only requested at teardown, to gate HANGUP on real playout completion.
+            self._queue_drained.set()
+            logger.info(f"QUEUE_DRAINED for channel {self.channel_id}")
             return
         if event or parsed:
             logger.debug(f"Asterisk control: {text} -> event={event}")

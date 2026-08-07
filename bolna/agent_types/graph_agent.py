@@ -110,14 +110,21 @@ class GraphAgent(BaseAgent):
         # Initialize main LLM for response generation (supports api_tools/function calling + real streaming)
         self.llm = self._initialize_llm()
 
-        # Initialize LLMs for hangup and voicemail detection
+        # Hangup/voicemail run on OpenAiLLM, which has no Azure support, so an Azure conversation LLM
+        # cannot serve them and they fall back to the platform OpenAI key.
+        aux_provider = self.config.get("aux_provider") or self.config.get("provider") or "openai"
+        aux_model = (self.config.get("aux_model") or self.llm_model or "").split("/", 1)[-1]
         llm_kwargs = {}
-        if self.llm_key:
-            llm_kwargs["llm_key"] = self.llm_key
-        if self.base_url:
-            llm_kwargs["base_url"] = self.base_url
+        if aux_provider == "azure" and os.getenv("OPENAI_API_KEY"):
+            llm_kwargs["llm_key"] = os.getenv("OPENAI_API_KEY")
+        else:
+            # No platform key to fall back to, so keep the agent's own creds rather than fail construction.
+            if self.llm_key:
+                llm_kwargs["llm_key"] = self.llm_key
+            if self.base_url:
+                llm_kwargs["base_url"] = self.base_url
         self.conversation_completion_llm = OpenAiLLM(
-            model=os.getenv("CHECK_FOR_COMPLETION_LLM", self.llm_model or "gpt-4o-mini"), **llm_kwargs
+            model=os.getenv("CHECK_FOR_COMPLETION_LLM", aux_model or "gpt-4o-mini"), **llm_kwargs
         )
         self.voicemail_llm = OpenAiLLM(model=os.getenv("VOICEMAIL_DETECTION_LLM", "gpt-4.1-mini"), **llm_kwargs)
 
@@ -238,6 +245,16 @@ class GraphAgent(BaseAgent):
         # Auto-detect provider if not specified
         if not self.routing_provider:
             self.routing_provider = "groq" if groq_available else "openai"
+
+        # Point routing at whatever backend the conversation LLM ended up on. Groq routing stays put: it is
+        # the faster hop and does not share the conversation provider anyway.
+        if self.config.get("route_routing_to_conversation") and not (
+            self.routing_provider == "groq" and groq_available
+        ):
+            self.routing_provider = self.config.get("provider") or self.routing_provider
+            conv_model = self.config.get("model")
+            if conv_model:
+                self.routing_model = conv_model.split("/", 1)[-1]
 
         if self.routing_provider == "groq":
             if groq_available:
