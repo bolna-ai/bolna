@@ -32,6 +32,7 @@ from bolna.constants import (
     LANGUAGE_SWITCH_DECIDE_TIMEOUT_S,
     LANGUAGE_SWITCH_MAX_HOLD_S,
     LANGUAGE_SWITCH_MIN_SEGMENT_AUDIO_S,
+    LANGUAGE_SWITCH_SPEAKING_STALE_CAP_S,
     LANGUAGE_SWITCH_SETTLE_MS,
     LLM_DEFAULT_CONFIGS,
     NON_EVIDENCE_MARK_TYPES,
@@ -2139,9 +2140,12 @@ class TaskManager(BaseManager):
         language-switch path passes None because on a confirmed switch every
         pending response is stale old-language output.
         """
+        # tools.get: a decide racing teardown reaches this after cleanup removed the input
+        # tool — a KeyError here loses the whole telemetry record.
+        input_tool = self.tools.get("input")
         return {
             "response_in_pipeline": self.response_in_pipeline,
-            "audio_playing": self.tools["input"].is_audio_being_played_to_user(),
+            "audio_playing": input_tool.is_audio_being_played_to_user() if input_tool is not None else False,
             "pending_marks": self._has_interruptible_mark_activity(),
             "pending_sequences": self.interruption_manager.has_pending_responses_excluding(exclude_sequence_id),
             "pending_generation": (self.llm_task is not None and not self.llm_task.done())
@@ -5336,11 +5340,19 @@ class TaskManager(BaseManager):
                 # deliberately does NOT drain: if the main ASR later delivers this turn, the
                 # turn-boundary decide still sees the full transcript.
                 nothing_to_decide = saw_tags and not mismatch
+                # Mid-utterance suppression: interims flowing means the main turn is coming and
+                # will drain this buffer — firing now slices the utterance across two decides.
+                # Stale-flag escape: the flag claims speech but the detector (same audio) has
+                # produced nothing for the whole cap — the flag is stale, fire anyway.
+                caller_speaking = bool(getattr(self.interruption_manager, "callee_speaking", False))
+                if caller_speaking and age < LANGUAGE_SWITCH_SPEAKING_STALE_CAP_S:
+                    await asyncio.sleep(0.2)
+                    continue
                 if age >= threshold and not nothing_to_decide:
                     logger.info(
                         f"LanguageSwitcher: idle-flush — detector speech idle {age:.1f}s with no main turn "
-                        f"(buffered_lang={buffered_lang!r}, active={self.language!r}, threshold={threshold}s); "
-                        f"running switch decision"
+                        f"(buffered_lang={buffered_lang!r}, active={self.language!r}, threshold={threshold}s, "
+                        f"caller_speaking={caller_speaking}); running switch decision"
                     )
                     await self.handle_language_switch(spawn_language=self.language)
                     # Spin-guard: a healthy decision drains the buffer (age → None) and the loop
@@ -5442,6 +5454,40 @@ class TaskManager(BaseManager):
         # One selection, used by BOTH the speculative copy and the real history append —
         idle_flush_user_text = trailing_utterance_text(detector_segments) or detector_transcript
         active = self.language
+
+        # Foreign-segment max, not the buffer-lifetime max: the idle-flush skip leaves the buffer
+        # undrained, so a stale long ACTIVE-language segment could otherwise carry a short
+        # mis-tagged fragment past the substance gate below.
+        active_short = (active or "").split("-")[0].lower()
+        foreign_max_segment_s = max(
+            (
+                float(s.get("audio_s") or 0.0)
+                for s in detector_segments
+                if (s.get("lang") or "").split("-")[0].lower() not in ("", active_short)
+            ),
+            default=0.0,
+        )
+        min_segment_s = float(
+            os.getenv("LANGUAGE_SWITCH_MIN_SEGMENT_AUDIO_S", str(LANGUAGE_SWITCH_MIN_SEGMENT_AUDIO_S))
+        )
+        # Late arm: the spawn-time arm reads the buffer at one instant, and an idle-flush decide's
+        # drain (or a segment landing just after) leaves it empty there — the reply then plays in
+        # the old language while this decide runs. Arm here from the drained evidence instead.
+        stale_gate = self.lid_playback_gate
+        if stale_gate is not None and stale_gate["task"].done():
+            # Its audio finished before the decide did, so no chunk ever polled it open —
+            # left in place it would block this arm forever (only chunk polls release).
+            self.__release_lid_playback_gate(stale_gate, "decided")
+        if (
+            self.lid_playback_gate is None
+            and detected_lang
+            and detected_lang != active
+            and detected_lang in labels
+            and foreign_max_segment_s >= min_segment_s
+        ):
+            late_synth = self.tools.get("synthesizer")
+            if not isinstance(late_synth, SynthesizerPool) or detected_lang in late_synth.labels:
+                self.__arm_lid_playback_gate((meta_info or {}).get("sequence_id"), asyncio.current_task())
 
         # Speculative follow-up: generate the reply on the main LLM in parallel with the
         spec_task = None
@@ -5616,23 +5662,8 @@ class TaskManager(BaseManager):
         # least one substantive segment — an explicit by-name request is legitimately short and
         # bypasses instead. Its bar defaults to min_conf, never above it: a stricter explicit
         # bar would reject the caller-asked case while admitting the incidental one.
-        min_segment_s = float(
-            os.getenv("LANGUAGE_SWITCH_MIN_SEGMENT_AUDIO_S", str(LANGUAGE_SWITCH_MIN_SEGMENT_AUDIO_S))
-        )
         explicit_min_conf = float(os.getenv("LANGUAGE_SWITCH_EXPLICIT_MIN_CONFIDENCE", str(min_conf)))
         explicit_bypass = bool(decision.get("explicit_request")) and (target_conf or 0.0) >= explicit_min_conf
-        # Foreign-segment max, not the buffer-lifetime max: the idle-flush skip leaves the buffer
-        # undrained, so a stale long ACTIVE-language segment could carry a short mis-tagged
-        # fragment past this gate (same per-foreign measure as __detector_language_mismatch).
-        active_short = (active or "").split("-")[0].lower()
-        foreign_max_segment_s = max(
-            (
-                float(s.get("audio_s") or 0.0)
-                for s in detector_segments
-                if (s.get("lang") or "").split("-")[0].lower() not in ("", active_short)
-            ),
-            default=0.0,
-        )
         if not explicit_bypass and foreign_max_segment_s < min_segment_s:
             logger.info(
                 f"LanguageSwitcher: target '{target}' but longest foreign segment "

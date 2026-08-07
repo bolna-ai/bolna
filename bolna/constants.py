@@ -43,6 +43,10 @@ LANGUAGE_SWITCH_MAX_HOLD_S = 4.0
 # Guards against one-word mis-tags switching the call. Sarvam splits real turns into sub-second
 # fragments, so correct verdicts were dying just under the bar (1.0 → 0.8 → 0.7).
 LANGUAGE_SWITCH_MIN_SEGMENT_AUDIO_S = 0.7
+# Idle-flush suppression: while main-ASR interims say the caller is mid-utterance, defer the
+# flush (the coming turn will drain the buffer). Past this buffer age the speaking flag is
+# treated as stale — the detector hears the same audio and has produced nothing that long.
+LANGUAGE_SWITCH_SPEAKING_STALE_CAP_S = 2.5
 
 # Soniox real-time STT
 SONIOX_WEBSOCKET_HOST = "stt-rt.soniox.com"

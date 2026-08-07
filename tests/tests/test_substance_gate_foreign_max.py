@@ -124,3 +124,89 @@ def test_eager_call_site_passes_eager_meta_info():
     call = re.search(r"self\._spawn_language_switch_decision\(([^)]*)\)", eager_block)
     assert call is not None
     assert "self.eager_meta_info" in call.group(1)
+
+
+@pytest.mark.asyncio
+async def test_gate_armed_late_from_drained_evidence(monkeypatch):
+    # Spawn-time arming can miss (idle-flush drain emptied the buffer at that instant);
+    # the decide must arm from what it drained so the old-language reply can't play.
+    tm = _tm(
+        monkeypatch,
+        segments=[{"lang": "mr", "prob": 0.9, "audio_s": 1.4}],
+        buffer_max=1.4,
+    )
+    tm.lid_playback_gate = None
+    tm._TaskManager__arm_lid_playback_gate = TaskManager._TaskManager__arm_lid_playback_gate.__get__(tm, TaskManager)
+    tm.language_switcher.decide = AsyncMock(
+        return_value={"target_language": None, "target_confidence": 0.0, "reasoning": "stay"}
+    )
+    run = TaskManager._TaskManager__run_language_switch.__get__(tm, TaskManager)
+    await run("garbled", {"sequence_id": 7}, "hi")
+    assert tm.lid_playback_gate is not None
+    assert tm.lid_playback_gate["sequence_id"] == 7  # keyed to the reply that must wait
+
+
+@pytest.mark.asyncio
+async def test_no_late_arm_without_substantive_foreign_evidence(monkeypatch):
+    tm = _tm(
+        monkeypatch,
+        segments=[{"lang": "mr", "prob": 0.9, "audio_s": 0.3}],
+        buffer_max=0.3,
+    )
+    tm.lid_playback_gate = None
+    tm._TaskManager__arm_lid_playback_gate = TaskManager._TaskManager__arm_lid_playback_gate.__get__(tm, TaskManager)
+    tm.language_switcher.decide = AsyncMock(
+        return_value={"target_language": None, "target_confidence": 0.0, "reasoning": "stay"}
+    )
+    run = TaskManager._TaskManager__run_language_switch.__get__(tm, TaskManager)
+    await run("garbled", {"sequence_id": 7}, "hi")
+    assert tm.lid_playback_gate is None
+
+
+@pytest.mark.asyncio
+async def test_live_gate_is_not_clobbered_by_late_arm(monkeypatch):
+    # A gate whose decide is still running (the spawn-time arm for this very turn) must win.
+    tm = _tm(
+        monkeypatch,
+        segments=[{"lang": "mr", "prob": 0.9, "audio_s": 1.4}],
+        buffer_max=1.4,
+    )
+    live_task = MagicMock()
+    live_task.done.return_value = False
+    sentinel = {"sequence_id": 3, "task": live_task, "armed_at": 0.0, "language": "hi", "deadline": 1e18}
+    tm.lid_playback_gate = sentinel
+    tm._TaskManager__arm_lid_playback_gate = TaskManager._TaskManager__arm_lid_playback_gate.__get__(tm, TaskManager)
+    tm.language_switcher.decide = AsyncMock(
+        return_value={"target_language": None, "target_confidence": 0.0, "reasoning": "stay"}
+    )
+    run = TaskManager._TaskManager__run_language_switch.__get__(tm, TaskManager)
+    await run("garbled", {"sequence_id": 7}, "hi")
+    assert tm.lid_playback_gate is sentinel  # spawn-time gate wins
+
+
+@pytest.mark.asyncio
+async def test_stale_done_gate_is_retired_and_rearmed(monkeypatch):
+    # A finished decide's gate that no chunk ever polled (its audio had already played) must
+    # not block late arming forever — only chunk polls release gates otherwise.
+    tm = _tm(
+        monkeypatch,
+        segments=[{"lang": "mr", "prob": 0.9, "audio_s": 1.4}],
+        buffer_max=1.4,
+    )
+    done_task = MagicMock()
+    done_task.done.return_value = True
+    tm.lid_playback_gate = {"sequence_id": 3, "task": done_task, "armed_at": 0.0, "language": "hi", "deadline": 1e18}
+    for name in ("arm_lid_playback_gate", "release_lid_playback_gate"):
+        attr = f"_TaskManager__{name}"
+        setattr(tm, attr, getattr(TaskManager, attr).__get__(tm, TaskManager))
+    tm.language_switcher.decide = AsyncMock(
+        return_value={"target_language": None, "target_confidence": 0.0, "reasoning": "stay"}
+    )
+    run = TaskManager._TaskManager__run_language_switch.__get__(tm, TaskManager)
+    await run("garbled", {"sequence_id": 7}, "hi")
+    assert tm.lid_playback_gate is not None
+    assert tm.lid_playback_gate["sequence_id"] == 7  # stale gate retired, new one armed
+    outcomes = [
+        e.get("outcome") for e in tm.tools["transcriber"].lid_detection_events if e.get("type") == "playback_gate"
+    ]
+    assert "decided" in outcomes  # the stale gate was released with telemetry, not dropped

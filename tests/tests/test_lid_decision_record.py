@@ -126,3 +126,21 @@ def test_inflight_activity_captures_truncation_state():
 
 def test_inflight_activity_defaults_to_empty():
     assert _record()["inflight_activity"] == {}
+
+
+def test_inflight_activity_survives_removed_input_tool():
+    # A decide racing teardown reaches telemetry after cleanup removed the input tool;
+    # a KeyError here lost the whole record.
+    from unittest.mock import MagicMock
+
+    from bolna.agent_manager.task_manager import TaskManager
+
+    tm = MagicMock()
+    tm.response_in_pipeline = False
+    tm.tools = {}
+    tm._has_interruptible_mark_activity = MagicMock(return_value=False)
+    tm.interruption_manager.has_pending_responses_excluding.return_value = False
+    tm.llm_task = None
+    tm.execute_function_call_task = None
+    activity = TaskManager._inflight_response_activity(tm)
+    assert activity["audio_playing"] is False
