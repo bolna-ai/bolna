@@ -5,12 +5,16 @@ Sends audio to Asterisk in bursts as it arrives from TTS (like Plivo/Twilio).
 Each response is bracketed START_MEDIA_BUFFERING … STOP_MEDIA_BUFFERING: START
 lets Asterisk reframe/retime for smooth RTP, STOP flushes the buffer to RTP so
 even a short isolated response (e.g. the welcome message) plays immediately
-instead of waiting for later audio. Server-side duration tracking knows when
-playback ends without relying on QUEUE_DRAINED. FLUSH_MEDIA on interrupt.
-Generation counter drops stale audio after interruption.
+instead of waiting for later audio. FLUSH_MEDIA on interrupt. Generation counter
+drops stale audio after interruption.
 
-Asterisk has no mark echo, so playback completion is duration-based: a finish
-timer is scheduled on the final chunk (first_send + total_audio_duration + settle).
+Playback completion is mark-driven, same as Twilio/Plivo: each chunk is followed by
+MARK_MEDIA <mark_id>, which Asterisk queues in-band behind that audio and echoes as
+MEDIA_MARK_PROCESSED once it reaches the front of the playout queue (Asterisk 22.6+).
+The duration estimate (first_send + total_audio_duration + settle) is kept only as a
+fallback for when the echo doesn't arrive, and logs a warning when it has to act — it
+runs early, because it assumes playout starts the instant the first frame is sent.
+
 The synthesizer emits the final audio chunk and a trailing null-byte sentinel both
 with is_final=True; both reach _schedule_finish, which is harmless because
 _response_audio_duration is reset only on a new sequence_id or on interruption
@@ -55,11 +59,16 @@ ULAW_BYTES_PER_SECOND = 8000
 # it never re-overflows the queue.  Set SIP_MAX_SEND_RATE_FACTOR=0 to disable.
 MAX_SEND_RATE_FACTOR = float(os.environ.get("SIP_MAX_SEND_RATE_FACTOR", "1.5"))
 
+# Tags for _local_audio_queue entries. Audio and marks share one queue so an XOFF pause
+# can't let a mark overtake the audio it belongs to.
+AUDIO_ENTRY = "audio"
+MARK_ENTRY = "mark"
+
 
 class SipTrunkOutputHandler(TelephonyOutputHandler):
     """
     Sends ulaw audio to Asterisk in bursts — Asterisk buffers and retimes.
-    Server-side duration tracking for playback completion.
+    Playback completion via MARK_MEDIA echo, with duration tracking as fallback.
     FLUSH_MEDIA on interrupt. XOFF/XON for backpressure safety.
     """
 
@@ -168,11 +177,22 @@ class SipTrunkOutputHandler(TelephonyOutputHandler):
         self._finish_playback(reason="duration-complete")
 
     def _finish_playback(self, reason: str = "duration-complete") -> None:
-        """Process all pending marks and clear playback state."""
+        """Fallback completion: ack whatever Asterisk never echoed and clear playback state.
+
+        Normally a no-op — MEDIA_MARK_PROCESSED completes playback first. It only does real
+        work when the mark echo is missing or late, and says so loudly, because acking on an
+        estimate is what lets HANGUP cut a goodbye short.
+        """
         if not self.input_handler or not self.input_handler.mark_event_meta_data:
             return
         remaining = list(self.input_handler.mark_event_meta_data.mark_event_meta_data.keys())
-        logger.info(f"sip-trunk: _finish_playback reason={reason}, {len(remaining)} mark(s)")
+        if not remaining and not self.input_handler.is_audio_being_played_to_user():
+            logger.info(f"sip-trunk: playback completed by mark echo before the {reason} timer")
+            return
+        logger.warning(
+            f"sip-trunk: completing playback from the duration estimate, not Asterisk's mark echo "
+            f"(reason={reason}, {len(remaining)} unacked mark(s))"
+        )
         for mid in remaining:
             self.input_handler.process_mark_message({"name": mid})
         if self.input_handler.is_audio_being_played_to_user():
@@ -221,7 +241,7 @@ class SipTrunkOutputHandler(TelephonyOutputHandler):
             if gen != self._flush_generation:
                 return "stale"
             if self.queue_full:
-                self._local_audio_queue.appendleft(chunk[offset:])
+                self._local_audio_queue.appendleft((AUDIO_ENTRY, chunk[offset:]))
                 return "queue_full"
             end = min(offset + MAX_WS_FRAME_BYTES, len(chunk))
             if self._response_first_send == 0.0:
@@ -231,9 +251,9 @@ class SipTrunkOutputHandler(TelephonyOutputHandler):
             offset = end
         return "sent"
 
-    def _register_mark(self, meta_info: dict, is_final: bool, audio_duration: float) -> None:
-        """Record per-mark metadata (same contract as Plivo/Twilio) so latency / heard-text
-        tracking works against Asterisk's duration-based playback completion."""
+    def _register_mark(self, meta_info: dict, is_final: bool, audio_duration: float) -> str:
+        """Record per-mark metadata (same contract as Plivo/Twilio) and return the mark id
+        so the caller can hand it to Asterisk via MARK_MEDIA."""
         message_category = meta_info.get("message_category", "agent_response")
         mark_id = meta_info.get("mark_id") or str(uuid.uuid4())
         self.mark_event_meta_data.update_data(
@@ -248,6 +268,18 @@ class SipTrunkOutputHandler(TelephonyOutputHandler):
                 "sent_ts": time.time(),
             },
         )
+        return mark_id
+
+    async def _emit_mark(self, mark_id: str) -> None:
+        """Ask Asterisk to echo this mark once the audio ahead of it has been played out.
+
+        Queued behind parked audio during XOFF: MARK_MEDIA is a TEXT frame and would
+        otherwise overtake the binary audio it marks, echoing back early.
+        """
+        if self.queue_full or self._local_audio_queue:
+            self._local_audio_queue.append((MARK_ENTRY, mark_id))
+        else:
+            await self._send_control("MARK_MEDIA", {"id": mark_id})
 
     # ------------------------------------------------------------------
     # Interruption
@@ -305,13 +337,18 @@ class SipTrunkOutputHandler(TelephonyOutputHandler):
                     self._local_audio_queue.clear()
                     self._pending_finish = False
                     return
-                chunk = self._local_audio_queue.popleft()
-                if not chunk:
+                kind, payload = self._local_audio_queue.popleft()
+                if not payload:
                     continue
                 if self._closed:
                     return
+                if kind == MARK_ENTRY:
+                    # In-band with the audio around it, so Asterisk echoes it at the right
+                    # playout position rather than the moment XOFF lifted.
+                    await self._send_control("MARK_MEDIA", {"id": payload})
+                    continue
                 try:
-                    status = await self._send_frames(chunk, gen)
+                    status = await self._send_frames(payload, gen)
                 except Exception as e:
                     logger.debug(f"sip-trunk drain send_bytes stopped: {e}")
                     return
@@ -355,7 +392,7 @@ class SipTrunkOutputHandler(TelephonyOutputHandler):
             await self._send_control("STOP_MEDIA_BUFFERING")
             self._start_buffering_sent = False
 
-    # sip-trunk sends audio as raw binary frames and acks marks via duration tracking,
+    # sip-trunk sends audio as raw binary frames and marks as MARK_MEDIA TEXT frames,
     # so the JSON media/mark framing used by Twilio/Plivo is intentionally unused here.
     async def form_media_message(self, audio_data, audio_format="wav"):
         return None
@@ -431,7 +468,7 @@ class SipTrunkOutputHandler(TelephonyOutputHandler):
                 # If XOFF is active or a drain is in flight, queue locally to preserve
                 # ordering; otherwise send now (re-queues the remainder on a mid-send XOFF).
                 if self.queue_full or self._local_audio_queue:
-                    self._local_audio_queue.append(audio_chunk)
+                    self._local_audio_queue.append((AUDIO_ENTRY, audio_chunk))
                 else:
                     if self._closed:
                         return
@@ -442,9 +479,12 @@ class SipTrunkOutputHandler(TelephonyOutputHandler):
                         logger.debug(f"sip-trunk send_bytes stopped: {e}")
                         return
 
-            # Register mark metadata (same contract as Plivo/Twilio)
+            # Register mark metadata (same contract as Plivo/Twilio) and ask Asterisk to
+            # echo it back once this chunk reaches the front of its playout queue.
             if self.mark_event_meta_data:
-                self._register_mark(meta_info, is_final, audio_duration)
+                mark_id = self._register_mark(meta_info, is_final, audio_duration)
+                if gen == self._flush_generation:
+                    await self._emit_mark(mark_id)
 
                 if is_final:
                     if self._local_audio_queue:
