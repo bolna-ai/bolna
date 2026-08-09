@@ -26,6 +26,7 @@ from bolna.llms.types import LLMStreamChunk, LatencyData
 from bolna.llms import OpenAiLLM
 from bolna.providers import SUPPORTED_LLM_PROVIDERS
 from bolna.prompts import VOICEMAIL_DETECTION_PROMPT
+from bolna.exceptions import LLMError
 
 from typing import List, Tuple, AsyncGenerator, Optional, Dict, Any
 
@@ -130,11 +131,10 @@ class GraphAgent(BaseAgent):
 
     def _initialize_llm(self):
         """Initialize LLM with api_tools support (same pattern as KnowledgeBaseAgent)."""
+        provider = self.config.get("provider") or self.config.get("llm_provider", "openai")
         try:
-            provider = self.config.get("provider") or self.config.get("llm_provider", "openai")
             if provider not in SUPPORTED_LLM_PROVIDERS:
-                logger.warning(f"Unknown provider: {provider}, using openai")
-                provider = "openai"
+                raise ValueError(f"Unsupported LLM provider: {provider}")
 
             llm_kwargs = {
                 "model": self.llm_model,
@@ -161,9 +161,13 @@ class GraphAgent(BaseAgent):
 
             llm_class = SUPPORTED_LLM_PROVIDERS[provider]
             return llm_class(**llm_kwargs)
-        except Exception as e:
-            logger.error(f"Failed to create LLM: {e}, falling back to default OpenAiLLM")
-            return OpenAiLLM(model=self.llm_model or "gpt-4o-mini", llm_key=self.llm_key or os.getenv("OPENAI_API_KEY"))
+        except Exception as exc:
+            logger.exception(f"Failed to initialize configured LLM provider '{provider}' with model '{self.llm_model}'")
+            raise LLMError(
+                "Failed to initialize configured LLM",
+                provider=provider,
+                model=self.llm_model,
+            ) from exc
 
     @staticmethod
     def _extract_rag_collections(rag_config: Dict) -> List[str]:
