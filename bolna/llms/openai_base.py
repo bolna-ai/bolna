@@ -7,6 +7,7 @@ from openai import BadRequestError, APIError
 
 from bolna.constants import GPT5_MODEL_PREFIX
 from bolna.enums import ChatRole, ResponseStreamEvent, ResponseItemType, LogComponent, LogDirection
+from bolna.exceptions import LLMIncompleteError
 from bolna.helpers.utils import (
     convert_to_request_log,
     compute_function_pre_call_message,
@@ -559,7 +560,7 @@ class OpenAICompatibleLLM(BaseLLM):
             if event.type == ResponseStreamEvent.INCOMPLETE:
                 logger.warning("Responses API stream incomplete, partial response returned")
                 self.invalidate_response_chain()
-                break
+                raise LLMIncompleteError("Responses API stream incomplete")  # task_manager flushes pipeline
 
             if not first_token_time and event.type in (
                 ResponseStreamEvent.OUTPUT_TEXT_DELTA,

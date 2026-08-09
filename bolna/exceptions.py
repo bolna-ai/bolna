@@ -21,3 +21,8 @@ class SynthesizerError(BolnaComponentError):
 class TranscriberError(BolnaComponentError):
     def __init__(self, message, provider=None, model=None):
         super().__init__(message, component="transcriber", provider=provider, model=model)
+
+
+class LLMIncompleteError(Exception):
+    """OpenAI response.incomplete — stream cut short (token limit / content filter). Recoverable."""
+    pass

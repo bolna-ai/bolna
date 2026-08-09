@@ -58,7 +58,7 @@ from bolna.enums import (
     ChatRole,
     ToolScope,
 )
-from bolna.exceptions import BolnaComponentError, LLMError, SynthesizerError, TranscriberError
+from bolna.exceptions import BolnaComponentError, LLMError, LLMIncompleteError, SynthesizerError, TranscriberError
 from bolna.prompts import *
 from bolna.helpers.language_detector import LanguageDetector
 from bolna.helpers.language_switcher import LanguageSwitcher
@@ -4171,6 +4171,10 @@ class TaskManager(BaseManager):
                 await self._process_conversation_task(message, sequence, meta_info)
             else:
                 logger.error("unsupported task type: {}".format(self.task_config["task_type"]))
+            self.llm_task = None
+        except LLMIncompleteError:
+            # Stream ended early — flush pipeline and let the call continue.
+            await self.__cleanup_downstream_tasks()
             self.llm_task = None
         except BolnaComponentError as e:
             self.response_in_pipeline = False

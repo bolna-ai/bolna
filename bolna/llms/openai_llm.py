@@ -23,6 +23,7 @@ from websockets.protocol import State as WSState
 
 from bolna.constants import DEFAULT_LANGUAGE_CODE, GPT5_MODEL_PREFIX, default_reasoning_effort
 from bolna.enums import ResponseStreamEvent, ResponseItemType, Verbosity
+from bolna.exceptions import LLMIncompleteError
 from bolna.helpers.ssl_context import get_ssl_context
 from bolna.helpers.utils import compute_function_pre_call_message, now_ms
 from .openai_base import OpenAICompatibleLLM
@@ -572,7 +573,7 @@ class OpenAiLLM(OpenAICompatibleLLM):
                 if evt_type == ResponseStreamEvent.INCOMPLETE:
                     logger.warning("WS Responses API stream incomplete")
                     self.invalidate_response_chain()
-                    break
+                    raise LLMIncompleteError("WS Responses API stream incomplete")  # task_manager flushes pipeline
 
                 if not first_token_time and evt_type in (
                     ResponseStreamEvent.OUTPUT_TEXT_DELTA,
