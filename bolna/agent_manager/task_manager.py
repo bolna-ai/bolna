@@ -4335,6 +4335,9 @@ class TaskManager(BaseManager):
         )
         if not self.tools["input"].welcome_message_played():
             logger.info(f"Welcome message is playing while spoken: {transcriber_message}")
+            # A machine greeting plays out under the welcome audio, so a transcript dropped here is
+            # the only voicemail signal the call produces.
+            self._trigger_voicemail_check(transcriber_message, meta_info, is_final=True)
             self._retire_dropped_response(meta_info, "welcome_still_playing")
             return
 
@@ -4629,6 +4632,7 @@ class TaskManager(BaseManager):
                         if not self.tools["input"].welcome_message_played():
                             if self.discard_pre_welcome_utterance:
                                 self._speech_started_before_welcome = True
+                            self._trigger_voicemail_check(message["data"].get("content", ""), meta_info, is_final=False)
                             continue
 
                         # Post-welcome interim → clear stale flag set by pre-welcome SpeechStarted (welcome-audio bleed).
