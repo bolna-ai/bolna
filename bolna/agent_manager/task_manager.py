@@ -2808,11 +2808,17 @@ class TaskManager(BaseManager):
         self.conversation_ended = True
         self.ended_by_assistant = True
 
-        # Cancel any running LLM / function-call tasks so they don't add
-        # phantom responses to the transcript after the call has ended.
+        # Cancel any running LLM / function-call tasks so they don't add phantom responses to
+        # the transcript after the call has ended. The end_call tool reaches this from inside
+        # llm_task itself, where cancelling would raise CancelledError at the first await below
+        # and lose the hangup. Dropping the reference is enough there: every path left in that
+        # task bails on conversation_ended.
         if self.llm_task is not None and not self.llm_task.done():
-            logger.info("__process_end_of_conversation: Cancelling LLM task")
-            self.llm_task.cancel()
+            if self.llm_task is asyncio.current_task():
+                logger.info("__process_end_of_conversation: teardown runs inside the LLM task, not cancelling it")
+            else:
+                logger.info("__process_end_of_conversation: Cancelling LLM task")
+                self.llm_task.cancel()
             self.llm_task = None
 
         # Turn-based chat clears its spinner only on the <end_of_stream> marker. When the
@@ -4027,8 +4033,15 @@ class TaskManager(BaseManager):
         # TODO : Write a better check for completion prompt
 
         # Hangup detection - now supported for all agent types including graph_agent.
-        # Skipped when end_call is the primary hangup; those agents hang up via the tool.
-        if self.use_llm_to_determine_hangup and not self.turn_based_conversation and not self.end_call_primary:
+        # Skipped when end_call is the primary hangup; those agents hang up via the tool. Also
+        # skipped once the call is over: a node-scoped end_call tears down inside this task and
+        # returns here, where asking the LLM whether to hang up is a request nobody can act on.
+        if (
+            self.use_llm_to_determine_hangup
+            and not self.turn_based_conversation
+            and not self.end_call_primary
+            and not self.conversation_ended
+        ):
             completion_res, metadata = await self.tools["llm_agent"].check_for_completion(
                 messages, self.check_for_completion_prompt, meta_info=meta_info
             )
