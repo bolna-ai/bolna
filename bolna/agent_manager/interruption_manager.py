@@ -32,6 +32,7 @@ class InterruptionManager:
         self.required_delay_before_speaking: float = 0
         self.incremental_delay: int = incremental_delay
         self.utterance_end_time: float = -1
+        self.last_interim_ts: float = -1
 
         # Configuration
         self.number_of_words_for_interruption: int = number_of_words_for_interruption
@@ -153,6 +154,7 @@ class InterruptionManager:
     def on_interim_transcript_received(self) -> None:
         """Called on each interim transcript to update timing state."""
         self.let_remaining_audio_pass_through = False
+        self.last_interim_ts = time.time()
 
         if self.time_since_first_interim_result == -1:
             self.time_since_first_interim_result = time.time() * 1000
@@ -175,6 +177,7 @@ class InterruptionManager:
         self.callee_speaking = False
         self.let_remaining_audio_pass_through = True
         self.time_since_first_interim_result = -1
+        self.last_interim_ts = -1
 
         now_s = time.time()
         if update_utterance_time:
@@ -465,6 +468,13 @@ class InterruptionManager:
     def get_turn_id(self) -> int:
         """Returns current turn ID."""
         return self.turn_id
+
+    def user_speech_staleness_s(self) -> float:
+        """Seconds since the last interim, or since VAD speech-start if none, -1 when not speaking."""
+        if not self.callee_speaking:
+            return -1
+        anchor = self.last_interim_ts if self.last_interim_ts > 0 else self.callee_speaking_start_time
+        return time.time() - anchor if anchor > 0 else -1
 
     def get_user_speaking_duration(self) -> float:
         """Returns how long user has been speaking in seconds."""

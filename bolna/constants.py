@@ -48,6 +48,10 @@ LANGUAGE_SWITCH_MIN_SEGMENT_AUDIO_S = 0.7
 # treated as stale — the detector hears the same audio and has produced nothing that long.
 LANGUAGE_SWITCH_SPEAKING_STALE_CAP_S = 2.5
 
+# Past this much caller silence, callee_speaking is stale and held audio ships. Deepgram closes a
+# healthy turn within utterance_end_ms (1s floor), so a real speaker stays well inside this.
+STUCK_AUDIO_GATE_RELEASE_S = 3.0
+
 # Soniox real-time STT
 SONIOX_WEBSOCKET_HOST = "stt-rt.soniox.com"
 SONIOX_ENDPOINT_TOKEN = "<end>"  # sentinel token emitted when the speaker stops
