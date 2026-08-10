@@ -573,6 +573,9 @@ class TaskManager(BaseManager):
         # Records every language switch — manual tool call (legacy) or LLM-driven
         # (triggered_by="lid_llm") — used post-call for precision / latency analysis.
         self.language_switch_events: list[dict] = []
+        # Request/usage snapshot of the in-flight speculative follow-up; emitted as
+        # normal LLM logs only when the speculation is committed (spoken).
+        self.lid_spec_capture = None
         # Legacy-flow handoff state (populated by __inject_switch_language_tool
         # when the LLM-driven switch flow is NOT enabled for this call).
         self.switch_handoff_messages = {}
@@ -5326,6 +5329,7 @@ class TaskManager(BaseManager):
             if spec is not None and not spec.done():
                 spec.cancel()
                 logger.info("LanguageSwitcher: speculative follow-up discarded")
+            self.lid_spec_capture = None
 
     async def __lid_idle_watcher(self):
         """Recover the stuck-language deadlock.
@@ -5840,6 +5844,7 @@ class TaskManager(BaseManager):
                 return None
             if spec_text:
                 self.conversation_history.append_assistant(spec_text)
+                self.__log_committed_speculation(spec_text)
                 synth_meta = {
                     "io": self.tools["output"].get_provider(),
                     "request_id": str(uuid.uuid4()),
@@ -6073,6 +6078,53 @@ class TaskManager(BaseManager):
             note += f" Reason: {reasoning}"
         return note
 
+    def __log_committed_speculation(self, spec_text: str):
+        """Emit the committed speculative follow-up's LLM request/response logs, latency
+        and token usage exactly like a normal turn. Runs only on the commit path —
+        discarded speculations are never logged."""
+        capture = self.lid_spec_capture
+        self.lid_spec_capture = None
+        if not capture:
+            return
+        # Telemetry only — never let a logging failure break the audible follow-up.
+        try:
+            spec_meta = capture["meta_info"]
+            model = self.llm_config.get("model") if self.llm_config else None
+            convert_to_request_log(
+                message=capture["request_message"],
+                meta_info=spec_meta,
+                model=model,
+                component=LogComponent.LLM,
+                direction=LogDirection.REQUEST,
+                run_id=self.run_id,
+            )
+            convert_to_request_log(
+                message=spec_text,
+                meta_info=spec_meta,
+                model=model,
+                component=LogComponent.LLM,
+                direction=LogDirection.RESPONSE,
+                run_id=self.run_id,
+                input_tokens=capture["input_tokens"],
+                output_tokens=capture["output_tokens"],
+                reasoning_tokens=capture["reasoning_tokens"],
+                cached_tokens=capture["cached_tokens"],
+            )
+            if capture["latency"]:
+                latency_dict = capture["latency"].model_dump()
+                self._stamp_llm_latency_dict(
+                    latency_dict,
+                    spec_meta,
+                    capture["input_tokens"],
+                    capture["output_tokens"],
+                    capture["reasoning_tokens"],
+                    capture["cached_tokens"],
+                    response_text=spec_text,
+                )
+                self.llm_latencies.turn_latencies.append(latency_dict)
+        except Exception as e:
+            logger.error(f"LanguageSwitcher: failed to log committed speculation: {e!r}")
+
     async def __speculative_followup_text(
         self, target_label: str, detector_transcript: str, active_transcript: str = "", idle_user_text: str = ""
     ) -> str:
@@ -6108,8 +6160,11 @@ class TaskManager(BaseManager):
             "sequence_id": -1,
             "turn_id": None,
             "origin": "language_switch_speculation",
+            "llm_start_time": time.time(),
         }
         text = ""
+        input_tokens = output_tokens = reasoning_tokens = cached_tokens = None
+        latency_info = None
         async for llm_message in self.tools["llm_agent"].generate(messages, synthesize=False, meta_info=spec_meta):
             if isinstance(llm_message, dict):
                 # pre-call request logs / routing info — irrelevant to speculation
@@ -6117,11 +6172,34 @@ class TaskManager(BaseManager):
             if getattr(llm_message, "is_function_call", False):
                 logger.info("LanguageSwitcher: speculative follow-up wants a tool call — aborting speculation")
                 return ""
+            if getattr(llm_message, "input_tokens", None) is not None:
+                input_tokens = llm_message.input_tokens
+            if getattr(llm_message, "output_tokens", None) is not None:
+                output_tokens = llm_message.output_tokens
+            if getattr(llm_message, "reasoning_tokens", None) is not None:
+                reasoning_tokens = llm_message.reasoning_tokens
+            if getattr(llm_message, "cached_tokens", None) is not None:
+                cached_tokens = llm_message.cached_tokens
+            if getattr(llm_message, "latency", None):
+                latency_info = llm_message.latency
             if llm_message.data:
                 text += " " + llm_message.data
             if llm_message.end_of_stream:
                 break
-        return text.strip()
+        text = text.strip()
+        if text:
+            # Request/usage snapshot for the commit path — logged like a normal turn
+            # ONLY if this speculation is actually spoken; discards stay unlogged.
+            self.lid_spec_capture = {
+                "meta_info": spec_meta,
+                "request_message": format_messages(messages, use_system_prompt=True, include_tools=True),
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "reasoning_tokens": reasoning_tokens,
+                "cached_tokens": cached_tokens,
+                "latency": latency_info,
+            }
+        return text
 
     async def __generate_switch_followup(self, messages, followup_meta_info, next_step):
         """Generate the post-switch follow-up response (runs outside language_switch_lock).
