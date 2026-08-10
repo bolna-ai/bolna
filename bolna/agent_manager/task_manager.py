@@ -4033,8 +4033,15 @@ class TaskManager(BaseManager):
         # TODO : Write a better check for completion prompt
 
         # Hangup detection - now supported for all agent types including graph_agent.
-        # Skipped when end_call is the primary hangup; those agents hang up via the tool.
-        if self.use_llm_to_determine_hangup and not self.turn_based_conversation and not self.end_call_primary:
+        # Skipped when end_call is the primary hangup; those agents hang up via the tool. Also
+        # skipped once the call is over: a node-scoped end_call tears down inside this task and
+        # returns here, where asking the LLM whether to hang up is a request nobody can act on.
+        if (
+            self.use_llm_to_determine_hangup
+            and not self.turn_based_conversation
+            and not self.end_call_primary
+            and not self.conversation_ended
+        ):
             completion_res, metadata = await self.tools["llm_agent"].check_for_completion(
                 messages, self.check_for_completion_prompt, meta_info=meta_info
             )
