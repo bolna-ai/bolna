@@ -63,6 +63,14 @@ class SonioxLID(LIDBackend):
         text = pending["text"].strip()
         if not text:
             return
+        # prob stays None on purpose: Soniox returns no language score, and the winner's
+        # token-share proxy we tried instead reads exactly 1.0 on essentially every segment
+        # (Soniox tags an utterance's tokens uniformly — verified across all prod QA calls,
+        # including a full English→Telugu-script transliteration). A constant 1.0 carries no
+        # information but trivially passes the detector-corroboration threshold, silently
+        # LOWERING the switch confidence gate on the exact segments least worth trusting.
+        # None keeps corroboration Sarvam-only, where the probability is a real model score.
+        prob = None
         if pending["lang_counts"]:
             # Dominant token language; tie → latest seen.
             best = max(pending["lang_counts"].values())
@@ -73,9 +81,16 @@ class SonioxLID(LIDBackend):
         if pending["start_ms"] is not None and pending["end_ms"] is not None:
             audio_s = max(0.0, (pending["end_ms"] - pending["start_ms"]) / 1000.0)
         else:
+            # Every substance gate keys on segment duration, so a systematic 0.0 here silently
+            # disables switching (every turn reads as short audio) — warn rather than fail quietly.
             audio_s = 0.0
-        logger.info(f"SonioxLID segment: lang={lang!r} transcript={text[:60]!r} audio_s={audio_s:.3f}")
-        self._accumulate(text, lang, audio_s, prob=None)
+            logger.warning(
+                f"SonioxLID: segment has no token timestamps (start_ms={pending['start_ms']}, "
+                f"end_ms={pending['end_ms']}) — audio_s=0 will read as short audio and block switching"
+            )
+        logger.info(f"SonioxLID segment: lang={lang!r} prob={prob} transcript={text[:60]!r} audio_s={audio_s:.3f}")
+        self.segments_received += 1
+        self._accumulate(text, lang, audio_s, prob=prob)
         if self.on_language is not None and lang:
             asyncio.create_task(self.on_language(lang, None))  # legacy per-segment signal
 

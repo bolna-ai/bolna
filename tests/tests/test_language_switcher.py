@@ -250,7 +250,7 @@ def test_system_prompt_contains_all_rules():
         "flip SCRIPT mid-turn",
         "Judge the language by the words, not the script",
         "CODE-MIXING IS NOT A SWITCH",
-        "one function word does not create a matrix",
+        "one B function word trailing an otherwise non-B turn",
         "explicit_request",
         "target_confidence",
         "detection_confidence",

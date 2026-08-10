@@ -15,7 +15,6 @@ def _record(**overrides):
         outcome="switched",
         fired_at=1000.0,
         now=1001.5,
-        speculate=False,
         active_transcript="garbled hi text",
         active="hi",
         detector_transcript="how much money can I make",
@@ -49,12 +48,9 @@ def test_latency_and_fired_at():
 
 
 def test_path_derivation():
-    # streak (speculate) wins regardless of transcript.
-    assert _record(speculate=True, active_transcript="x")["path"] == "streak"
-    # non-streak with a live transcript = turn-boundary.
-    assert _record(speculate=False, active_transcript="x")["path"] == "turn_boundary"
-    # non-streak with no live transcript = idle-flush.
-    assert _record(speculate=False, active_transcript="")["path"] == "idle_flush"
+    # A live transcript = turn-boundary; none = idle-flush.
+    assert _record(active_transcript="x")["path"] == "turn_boundary"
+    assert _record(active_transcript="")["path"] == "idle_flush"
 
 
 def test_switched_record_carries_context_note_and_timestamp():
@@ -130,3 +126,21 @@ def test_inflight_activity_captures_truncation_state():
 
 def test_inflight_activity_defaults_to_empty():
     assert _record()["inflight_activity"] == {}
+
+
+def test_inflight_activity_survives_removed_input_tool():
+    # A decide racing teardown reaches telemetry after cleanup removed the input tool;
+    # a KeyError here lost the whole record.
+    from unittest.mock import MagicMock
+
+    from bolna.agent_manager.task_manager import TaskManager
+
+    tm = MagicMock()
+    tm.response_in_pipeline = False
+    tm.tools = {}
+    tm._has_interruptible_mark_activity = MagicMock(return_value=False)
+    tm.interruption_manager.has_pending_responses_excluding.return_value = False
+    tm.llm_task = None
+    tm.execute_function_call_task = None
+    activity = TaskManager._inflight_response_activity(tm)
+    assert activity["audio_playing"] is False

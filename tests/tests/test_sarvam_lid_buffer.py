@@ -298,3 +298,48 @@ async def test_shutdown_cancels_pending_reconnect(monkeypatch):
     d.start = AsyncMock()
     await d._shutdown_connection()
     assert d._reconnect_task.cancelled()
+
+
+class _FakeWS:
+    def __init__(self, frames):
+        self.frames = list(frames)
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if not self.frames:
+            raise StopAsyncIteration
+        return self.frames.pop(0)
+
+
+@pytest.mark.asyncio
+async def test_non_data_frames_counted_but_logged_once_per_type():
+    # VAD/event frames can be per-utterance traffic: count them all into unknown_frames
+    # (detector_health emits the total at cleanup) but WARN only on the first of each type.
+    import json
+    from unittest.mock import MagicMock, patch
+
+    lid = SarvamLID(on_language=None, config={"sarvam_api_key": "k"})
+    lid._ws = _FakeWS(
+        [json.dumps({"type": "events", "data": {}})] * 4 + [json.dumps({"type": "error", "message": "quota"})] * 3
+    )
+    lid._schedule_reconnect = MagicMock()
+    with patch("bolna.lid.sarvam.logger") as log:
+        await lid._receiver_loop()
+    # "events" frames are requested VAD signals — benign, never counted or warned.
+    assert lid.unknown_frames == 3
+    warnings = [c for c in log.warning.call_args_list if "non-data frame" in str(c)]
+    assert len(warnings) == 1  # once for 'error' — not per frame, and never for 'events'
+
+
+def test_detector_model_defaults_to_v3():
+    lid = SarvamLID(on_language=None, config={"sarvam_api_key": "k"})
+    assert "model=saaras:v3" in lid._build_url()
+
+
+def test_detector_model_override_via_config():
+    # tools_config["language_switch_lid_model"] (saaras-v4 feature flag) arrives as sarvam_model.
+    lid = SarvamLID(on_language=None, config={"sarvam_api_key": "k", "sarvam_model": "saaras:v4"})
+    assert "model=saaras:v4" in lid._build_url()
+    assert "language-code=unknown" in lid._build_url()  # unbiased mode is not affected

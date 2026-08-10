@@ -1,4 +1,8 @@
-"""SonioxLID: tokens fold into one segment per utterance (flushed on <end>); lang = dominant tag, prob None."""
+"""SonioxLID: tokens fold into one segment per utterance (flushed on <end>); lang = dominant tag,
+prob = None always. Soniox reports no language score, and the token-share proxy we tried reads
+exactly 1.0 on essentially every segment (Soniox tags an utterance's tokens uniformly — verified
+across all prod QA calls, including a full English→Telugu-script transliteration), so it carried
+no information while trivially passing the detector-corroboration threshold."""
 
 from bolna.constants import SONIOX_ENDPOINT_TOKEN
 from bolna.lid.provider import LIDProvider
@@ -41,7 +45,7 @@ def test_segment_duration_spans_utterance_not_tokens():
     segs = d.buffer_segments()
     assert len(segs) == 1
     assert segs[0]["lang"] == "te"
-    assert segs[0]["prob"] is None  # soniox has no language probability
+    assert segs[0]["prob"] is None  # soniox never reports a usable language probability
     assert segs[0]["ts"] is not None
 
 
@@ -77,7 +81,7 @@ def test_multiple_utterances_become_multiple_segments():
     segs = d.buffer_segments()
     assert [s["lang"] for s in segs] == ["te", "en"]
     assert d.buffer_language() == "en"  # latest
-    assert d.buffer_language_confidence() is None
+    assert d.buffer_language_confidence() is None  # soniox segments never carry a prob
 
 
 def test_region_tagged_language_normalized():
@@ -134,3 +138,59 @@ def test_telephony_audio_params():
     assert (twilio._audio_format, twilio._input_sr) == ("mulaw", 8000)
     web = SonioxLID(None, {})
     assert (web._audio_format, web._input_sr) == ("pcm_s16le", 16000)
+
+
+def test_prob_stays_none_even_with_uniform_tags():
+    # Deliberate: prob must stay None so detector corroboration is Sarvam-only. The token-share
+    # proxy read 1.0 on essentially every real segment (uniform tagging), including a full
+    # English→Telugu-script transliteration (QA 7c7d4b00) — maximal "confidence" precisely on
+    # the segments least worth trusting. lang still resolves to the dominant tag.
+    d = _detector()
+    d._handle_message(
+        {
+            "tokens": [
+                _tok("mala", "mr", start_ms=0, end_ms=400),
+                _tok(" samajla", "mr", end_ms=800),
+                _tok(" nahi", "mr", end_ms=1200),
+                _tok(" okay", "en", end_ms=1600),
+                _tok(SONIOX_ENDPOINT_TOKEN),
+            ]
+        }
+    )
+    segs = d.buffer_segments()
+    assert segs[0]["lang"] == "mr"
+    assert segs[0]["prob"] is None
+    assert d.buffer_language_confidence() is None
+
+
+def test_mixed_tokens_also_leave_prob_none():
+    # Evenly split segments carry no prob either — the corroboration path must see "no signal",
+    # never a number it could compare against a threshold.
+    d = _detector()
+    d._handle_message(
+        {
+            "tokens": [
+                _tok("haan", "hi", start_ms=0, end_ms=500),
+                _tok(" okay", "en", end_ms=1100),
+                _tok(SONIOX_ENDPOINT_TOKEN),
+            ]
+        }
+    )
+    assert d.buffer_language_confidence() is None
+
+
+def test_missing_timestamps_warn_and_zero_audio(caplog):
+    # audio_s=0 reads as short audio at every substance gate, which silently disables switching —
+    # it must be loud.
+    d = _detector()
+    with caplog.at_level("WARNING"):
+        d._handle_message({"tokens": [_tok("haan", "hi"), _tok(SONIOX_ENDPOINT_TOKEN)]})
+    assert d.buffer_max_segment_seconds() == 0.0
+    assert any("no token timestamps" in r.message for r in caplog.records)
+
+
+def test_untagged_tokens_leave_prob_none():
+    # No language tags at all → no evidence, not low confidence. Callers must distinguish these.
+    d = _detector()
+    d._handle_message({"tokens": [_tok("hello", start_ms=0, end_ms=1200), _tok(SONIOX_ENDPOINT_TOKEN)]})
+    assert d.buffer_language_confidence() is None

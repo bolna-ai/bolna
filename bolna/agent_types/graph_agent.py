@@ -26,6 +26,7 @@ from bolna.llms.types import LLMStreamChunk, LatencyData
 from bolna.llms import OpenAiLLM
 from bolna.providers import SUPPORTED_LLM_PROVIDERS
 from bolna.prompts import VOICEMAIL_DETECTION_PROMPT
+from bolna.constants import LANGUAGE_NAMES
 
 from typing import List, Tuple, AsyncGenerator, Optional, Dict, Any
 
@@ -1016,15 +1017,44 @@ class GraphAgent(BaseAgent):
         return next((node for node in self.config.get("nodes", []) if node["id"] == node_id), None)
 
     def _get_prompt_with_example(self, node: dict, detected_lang: str) -> str:
-        """Get node prompt with language-specific example appended."""
+        """Get node prompt with the language directive (and example, when available) appended."""
         prompt = node.get("prompt", "")
-        examples = node.get("examples", {})
+        # `or {}`, not a .get default: agent JSONs carry "examples": null explicitly, and a
+        # .get default only covers a MISSING key. None here crashed generate() on every turn
+        # and the agent spoke the exception text (topaz 574cd2f9, 31/31 nodes examples:null).
+        examples = node.get("examples") or {}
+
+        if detected_lang:
+            # Directive is unconditional once the language is known. It used to be emitted only
+            # when the node had an example for that language, so a node without examples (or
+            # without THIS language's example) silently dropped ALL language instruction — after
+            # an LID switch the pools flipped but replies stayed in the node prompt's authored
+            # language (QA 78c4c4a4: hi→en switch, every reply still Hindi).
+            lang_name = LANGUAGE_NAMES.get(detected_lang, detected_lang)
+            directive = (
+                f"\n\nLANGUAGE GUIDELINES\n\nThe user is now speaking {lang_name} ('{detected_lang}'). "
+                f"From this point onward, respond only in {lang_name}, regardless of the language used "
+                f"earlier in the conversation or elsewhere in this prompt. This instruction overrides "
+                f"all other language preferences, language-selection rules, and multilingual script "
+                f"variants in this prompt: preferred-language variables, per-language scripted "
+                f"questions or sample responses, and instructions to speak 'as per' any language "
+                f"preference. For the remainder of the call, use only the {lang_name} version of every "
+                f"question, FAQ, sample response, objection-handling response, and closing line. If a "
+                f"{lang_name} version is not provided, translate the available version into clear, "
+                f"natural {lang_name} while preserving its exact meaning. "
+                f"Never translate or alter proper nouns, brand names, alphanumeric identifiers, "
+                f"digits, codes, or lines this prompt marks as verbatim/legal — read those "
+                f"exactly as written; they are language-neutral."
+            )
+            if examples.get(detected_lang):
+                directive += (
+                    f" You can refer to the example given below to generate a reply in the "
+                    f'given language. Example response: "{examples[detected_lang]}"'
+                )
+            return f"{prompt}{directive}"
 
         if not examples:
             return prompt
-
-        if detected_lang and detected_lang in examples:
-            return f'{prompt}\n\nLANGUAGE GUIDELINES\n\nPlease make sure to generate replies in the {detected_lang} language only. You can refer to the example given below to generate a reply in the given language. Example response: "{examples[detected_lang]}"'
 
         # Language not yet detected — include all examples
         example_lines = [f'  {lang.upper()}: "{text}"' for lang, text in examples.items()]
