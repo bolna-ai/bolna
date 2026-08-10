@@ -2824,23 +2824,15 @@ class TaskManager(BaseManager):
             except Exception as e:
                 logger.warning(f"Failed to flush end_of_stream marker before closing chat output handler: {e}")
 
-        # For sip-trunk, send HANGUP to Asterisk before closing the output handler.
-        # set_hangup_sent() schedules send_hangup() as an async task, but by the time
-        # that task runs _closed is already True (set by close() below), making the
-        # WebSocket send a no-op. Awaiting send_hangup() directly here guarantees the
-        # HANGUP command reaches Asterisk before the handler is closed.
-        if "output" in self.tools and self.tools["output"] is not None:
-            output_handler = self.tools["output"]
-            if hasattr(output_handler, "send_hangup") and not output_handler.hangup_sent():
-                try:
-                    await output_handler.send_hangup()
-                except Exception as e:
-                    logger.warning(f"sip-trunk send_hangup before close failed: {e}")
-
-        # Close output handler to prevent sends after websocket close
+        # Close output handler to prevent sends after websocket close. This only sets a
+        # flag — the WebSocket stays open, so stop_handler() below can still hang up.
         if "output" in self.tools and self.tools["output"] is not None:
             self.tools["output"].close()
 
+        # stop_handler() is the single hangup path. On sip-trunk it first waits for Asterisk
+        # to finish playing out what it has buffered, then sends HANGUP. Hanging up from here
+        # instead would cut the agent's goodbye short — Asterisk is handed audio faster than
+        # real time, so a chunk of it is still queued when the conversation ends.
         await self.tools["input"].stop_handler()
         logger.info("Stopped input handler")
         if "transcriber" in self.tools and not self.turn_based_conversation:
