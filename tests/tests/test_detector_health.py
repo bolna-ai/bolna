@@ -16,6 +16,7 @@ RECORD = TranscriberPool._record_detector_health
 def _pool(segments_received, user_turns, provider="sarvam", **lid_extra):
     pool = MagicMock(spec=TranscriberPool)
     pool.lid_detection_events = []
+    pool._detector_health_recorded = False
     pool._lid_provider_name = provider
     pool.active_label = "mr"
     lid = MagicMock()

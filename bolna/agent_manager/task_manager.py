@@ -5055,14 +5055,22 @@ class TaskManager(BaseManager):
             return False
         return True
 
-    def __release_lid_playback_gate(self, gate: dict, outcome: str) -> None:
+    def __release_lid_playback_gate(self, gate: dict, outcome: str, clear: bool = True) -> None:
         """Open the gate once and record how long it held and why it opened.
 
         The generation hold this replaced wrote reply_hold records; without an equivalent there is
         no way to tell a gate that worked (outcome=decided, held < deadline) from one that expired
         and leaked the old language, nor to compute the played/dropped ratio.
+
+        clear=False records telemetry but leaves the gate HOLDING: the switch path needs the hold
+        to survive until cleanup invalidates the sequence, else a 50ms output-loop poll in that
+        window ships the old-language audio the gate existed to stop.
         """
-        self.lid_playback_gate = None  # one-shot: open and forget
+        if clear:
+            self.lid_playback_gate = None  # one-shot: open and forget
+        if gate.get("recorded"):
+            return  # telemetry already written by the clear=False release
+        gate["recorded"] = True
         held_ms = round((time.monotonic() - gate["armed_at"]) * 1000, 1)
         logger.info(f"LanguageSwitcher: playback gate opened ({outcome}) after {held_ms}ms")
         self.__record_lid_event(
@@ -5082,23 +5090,23 @@ class TaskManager(BaseManager):
         Read from the telemetry we already append per firing, so it costs nothing extra."""
 
         def detected_lang_duration(r):
-            # Duration from the detected language's OWN segments, not the buffer max — else a
-            # one-borrowed-word turn reads as ~2s of "real speech" under rule 8's duration guard.
+            # Duration from the detected language's OWN segments only. No fallback to the
+            # buffer max: when NO segment carries the detected tag, the detector never heard
+            # that language — borrowing another language's duration handed rule 8 fake
+            # "real speech" entries (e.g. en(2.5) built entirely from hi-tagged audio).
             detected_short = (r.get("detected_language") or "").split("-")[0].lower()
             segment_durations = [
                 float(seg.get("audio_s") or 0.0)
                 for seg in r.get("detector_segments") or []
                 if (seg.get("lang") or "").split("-")[0].lower() == detected_short
             ]
-            if segment_durations:
-                return max(segment_durations)
-            return r.get("buffered_max_segment_s") or 0.0
+            return max(segment_durations) if segment_durations else 0.0
 
         # Filter THEN slice: handoff and legacy records share this list, so slicing first let
         # them displace real turns — right after a switch the tail is all handoff records and the
         # judge got "(none)" exactly when drift evidence matters most.
         turns = [
-            (r.get("detected_language"), detected_lang_duration(r))
+            (r.get("detected_language"), detected_lang_duration(r), r.get("switched_to"))
             for r in pool.lid_detection_events
             if r.get("flow") == "llm_switch" and r.get("detected_language")
         ]
@@ -5226,6 +5234,24 @@ class TaskManager(BaseManager):
             return False
         synth = self.tools.get("synthesizer")
         return not isinstance(synth, SynthesizerPool) or detected in synth.labels
+
+    def __snapshot_lid_events(self) -> list:
+        """lid_detection_events for task_output, with detector_health flushed FIRST.
+
+        The pool's cleanup() also records health, but cleanup is only awaited at the
+        tasks_to_cancel gather — after this snapshot — so a record written there never
+        reached the DB (log-only). Recording here, idempotently, closes that gap.
+        """
+        pool = self.tools.get("transcriber")
+        if pool is None:
+            return []
+        record = getattr(pool, "_record_detector_health", None)
+        if callable(record):
+            try:
+                record()
+            except Exception as e:
+                logger.warning(f"detector_health record failed: {e}")
+        return list(getattr(pool, "lid_detection_events", []))
 
     def __record_lid_event(self, record: dict) -> None:
         """Append a metrics record to the pool's lid_detection_events (persisted to
@@ -5684,10 +5710,14 @@ class TaskManager(BaseManager):
         activity = self._inflight_response_activity()  # captured pre-truncation for telemetry
         # Release the gate before cleanup: cleanup invalidates this sequence, so the output
         # loop never re-polls it — the switched case wrote no playback_gate record at all.
+        # Record now (held_ms is honest here) but keep HOLDING until the sequence is invalid —
+        # clearing early left a window where the output loop shipped the held old-language audio.
         held_gate = self.lid_playback_gate
         if held_gate is not None:
-            self.__release_lid_playback_gate(held_gate, "decided")
+            self.__release_lid_playback_gate(held_gate, "decided", clear=False)
         if self.function_call_in_flight:
+            # Not truncating: this reply is meant to keep playing, so open the gate now.
+            self.lid_playback_gate = None
             logger.info("LanguageSwitcher: in-flight function call — switching in parallel, not truncating the action")
             if target != self.language:
                 context_note = self.__switch_context_note(target, detector_transcript, reasoning)
@@ -5705,6 +5735,8 @@ class TaskManager(BaseManager):
             if "input" in self.tools:
                 self.tools["input"].update_is_audio_being_played(False)
             await self.__cleanup_downstream_tasks()
+            # Sequence invalidated — the held audio can no longer ship; safe to open the gate.
+            self.lid_playback_gate = None
             if activity.get("audio_playing"):
                 # Brief silence between cutting the old-language audio and the first
                 # new-language audio, so one voice doesn't slam into the next.
@@ -5718,6 +5750,8 @@ class TaskManager(BaseManager):
                         emit_lid_decision("gated:hangup", inflight_activity=activity)
                         return None
 
+        # No-activity path reaches here without cleanup — nothing was pending, so opening is safe.
+        self.lid_playback_gate = None
         # Re-read after the truncate: a concurrent decision may have switched while we
         # were clearing, so re-check against the live language before applying.
         current = self.language
@@ -7263,7 +7297,7 @@ class TaskManager(BaseManager):
                     "conversation_time": time.time() - self.start_time,
                     "label_flow": self.label_flow,
                     "function_tool_api_call_details": copy.deepcopy(self.function_tool_api_call_details),
-                    "lid_detection_events": list(getattr(self.tools.get("transcriber"), "lid_detection_events", [])),
+                    "lid_detection_events": list(self.__snapshot_lid_events()),
                     "asr_lid_events": self._collect_flux_lid_events(),
                     "language_switch_events": list(self.language_switch_events),
                     "call_sid": self.call_sid,
@@ -7327,7 +7361,7 @@ class TaskManager(BaseManager):
                     "non_fatal_llm_error_events": list(self.non_fatal_llm_error_events),
                     "language_switch_events": list(self.language_switch_events),
                     "transfer_call_events": list(self.transfer_call_events),
-                    "lid_detection_events": list(getattr(self.tools.get("transcriber"), "lid_detection_events", [])),
+                    "lid_detection_events": list(self.__snapshot_lid_events()),
                     "asr_lid_events": self._collect_flux_lid_events(),
                     "transcriber_error_events": list(self.transcriber_error_events),
                     "transcriber_reconnect_count": getattr(self.tools.get("transcriber"), "reconnect_count", 0),

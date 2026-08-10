@@ -286,15 +286,20 @@ class LanguageSwitcher:
 
     @staticmethod
     def _format_recent_turns(recent_turns) -> str:
-        """`hi(2.1), en(1.8), en(0.4)` — the prompt weighs each entry's duration, so a run of
-        sub-second acknowledgment mis-tags reads differently from real sustained speech."""
+        """`hi(2.1), en(1.8)→en, en(0.4)` — duration weighs each entry, and `→xx` marks the
+        firing that switched the agent (so pre-switch drift reads as stale, not fresh)."""
         if not recent_turns:
             return "(none)"
         parts = []
-        for lang, seconds in recent_turns:
+        for entry in recent_turns:
+            lang, seconds = entry[0], entry[1]
+            switched_to = entry[2] if len(entry) > 2 else None
             if not lang:
                 continue
-            parts.append(f"{lang}({float(seconds or 0.0):.1f})")
+            part = f"{lang}({float(seconds or 0.0):.1f})"
+            if switched_to:
+                part += f"→{switched_to}"
+            parts.append(part)
         return ", ".join(parts) if parts else "(none)"
 
     @staticmethod

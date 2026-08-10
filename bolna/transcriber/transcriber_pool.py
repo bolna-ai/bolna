@@ -101,6 +101,7 @@ class TranscriberPool:
         self._lid_config = lid_config or {}
         self._lid: Optional[object] = None  # LIDProvider instance
         self._lid_feed_error_logged = False
+        self._detector_health_recorded = False
         self._lid_task: Optional[asyncio.Task] = None
         self._on_lid_switch = on_lid_switch
         self._lid_mode = _LID_MODE
@@ -598,6 +599,8 @@ class TranscriberPool:
         looks identical to a call where nobody switched (topaz 389b16aa/df3479eb/5b063ddd).
         """
         lid = self._lid
+        if lid is None or self._detector_health_recorded:
+            return
         segments = getattr(lid, "segments_received", None)
         if segments is None or segments > 0:
             return
@@ -606,6 +609,7 @@ class TranscriberPool:
         user_turns = getattr(self.transcribers.get(self.active_label), "turn_counter", 0) or 0
         if user_turns < 1:
             return
+        self._detector_health_recorded = True
         self.lid_detection_events.append(
             {
                 "type": "detector_health",

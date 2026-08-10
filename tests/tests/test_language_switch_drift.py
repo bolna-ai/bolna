@@ -36,7 +36,7 @@ def _foreign(pool, active):
 
 
 def _event(lang, seconds, flow="llm_switch"):
-    return {"flow": flow, "detected_language": lang, "buffered_max_segment_s": seconds}
+    return {"flow": flow, "detected_language": lang, "detector_segments": [{"lang": lang, "audio_s": seconds}]}
 
 
 # ---- cross-turn evidence (issue 2) ----
@@ -44,18 +44,18 @@ def _event(lang, seconds, flow="llm_switch"):
 
 def test_recent_turns_read_from_existing_telemetry():
     pool = _pool([_event("hi", 2.1), _event("en", 1.8), _event("en", 1.6)])
-    assert _recent(pool) == [("hi", 2.1), ("en", 1.8), ("en", 1.6)]
+    assert _recent(pool) == [("hi", 2.1, None), ("en", 1.8, None), ("en", 1.6, None)]
 
 
 def test_recent_turns_ignores_legacy_heuristic_records():
     # Legacy records have a different shape; mixing them would feed the judge nonsense.
     pool = _pool([{"lang": "te", "suppressed_reason": "cooldown"}, _event("en", 1.5)])
-    assert _recent(pool) == [("en", 1.5)]
+    assert _recent(pool) == [("en", 1.5, None)]
 
 
 def test_recent_turns_is_bounded_and_oldest_first():
     pool = _pool([_event(lang, 1.0) for lang in ("hi", "hi", "en", "en", "en")])
-    assert [lang for lang, _ in _recent(pool, limit=3)] == ["en", "en", "en"]
+    assert [entry[0] for entry in _recent(pool, limit=3)] == ["en", "en", "en"]
 
 
 def test_recent_turns_empty_when_no_history():
@@ -74,11 +74,14 @@ def test_recent_turns_duration_comes_from_the_detected_languages_own_segments():
             {"lang": "en", "audio_s": 0.3},
         ],
     }
-    assert _recent(_pool([rec])) == [("en", 0.3)]
+    assert _recent(_pool([rec])) == [("en", 0.3, None)]
 
 
-def test_recent_turns_duration_falls_back_to_buffer_max_without_segments():
-    assert _recent(_pool([_event("en", 1.5)])) == [("en", 1.5)]
+def test_recent_turns_duration_is_zero_without_matching_segments():
+    # No fallback to the buffer max: with no en-tagged segment the detector never heard
+    # English — borrowing another language's duration fed rule 8 fake "real speech".
+    rec = {"flow": "llm_switch", "detected_language": "en", "buffered_max_segment_s": 1.5, "detector_segments": []}
+    assert _recent(_pool([rec])) == [("en", 0.0, None)]
 
 
 def test_formatting_exposes_duration_so_short_mistags_stay_non_evidence():
