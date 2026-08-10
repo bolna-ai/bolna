@@ -26,6 +26,9 @@ from bolna.helpers.utils import create_ws_data_packet, timestamp_ms
 load_dotenv()
 logger = configure_logger(__name__)
 
+# saaras models that transcribe directly on /speech-to-text; older ones need the translate endpoint.
+SAARAS_TRANSCRIBE_MODELS = {"saaras:v3", "saaras:v4"}
+
 
 class SarvamTranscriber(BaseTranscriber):
     def __init__(
@@ -121,7 +124,7 @@ class SarvamTranscriber(BaseTranscriber):
 
         # old saaras models use translate endpoint, saarika models use transcription endpoint
         # saaras:v3 supports direct transcription
-        if self.model.startswith("saaras") and self.model != "saaras:v3":
+        if self.model.startswith("saaras") and self.model not in SAARAS_TRANSCRIBE_MODELS:
             self.api_url = f"https://{self.api_host}/speech-to-text-translate"
             ws_url = f"wss://{self.api_host}/speech-to-text-translate/ws"
 
