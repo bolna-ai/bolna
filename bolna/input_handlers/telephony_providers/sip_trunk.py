@@ -186,10 +186,15 @@ class SipTrunkInputHandler(TelephonyInputHandler):
     async def stop_handler(self):
         """Stop and disconnect; Asterisk closes quickly after HANGUP."""
         logger.info(f"Stopping sip-trunk handler for channel {self.channel_id}")
-        await self._await_playback_drained()
-        self.running = False
-        self._cancel_dtmf_timer()
-        await self.disconnect_stream()
+        try:
+            await self._await_playback_drained()
+        finally:
+            # The drain wait is the only suspension point between entering teardown and the
+            # hangup, so sending HANGUP from finally is what keeps a cancelled teardown from
+            # leaving the caller on a live channel.
+            self.running = False
+            self._cancel_dtmf_timer()
+            await self.disconnect_stream()
         await asyncio.sleep(HANGUP_SETTLE_S)
         try:
             await self.websocket.close()
