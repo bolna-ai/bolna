@@ -2808,11 +2808,17 @@ class TaskManager(BaseManager):
         self.conversation_ended = True
         self.ended_by_assistant = True
 
-        # Cancel any running LLM / function-call tasks so they don't add
-        # phantom responses to the transcript after the call has ended.
+        # Cancel any running LLM / function-call tasks so they don't add phantom responses to
+        # the transcript after the call has ended. The end_call tool reaches this from inside
+        # llm_task itself, where cancelling would raise CancelledError at the first await below
+        # and lose the hangup. Dropping the reference is enough there: every path left in that
+        # task bails on conversation_ended.
         if self.llm_task is not None and not self.llm_task.done():
-            logger.info("__process_end_of_conversation: Cancelling LLM task")
-            self.llm_task.cancel()
+            if self.llm_task is asyncio.current_task():
+                logger.info("__process_end_of_conversation: teardown runs inside the LLM task, not cancelling it")
+            else:
+                logger.info("__process_end_of_conversation: Cancelling LLM task")
+                self.llm_task.cancel()
             self.llm_task = None
 
         # Turn-based chat clears its spinner only on the <end_of_stream> marker. When the

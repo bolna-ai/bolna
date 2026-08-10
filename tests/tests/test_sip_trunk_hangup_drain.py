@@ -130,6 +130,25 @@ async def test_no_drain_wait_when_receive_loop_already_gone():
 
 
 @pytest.mark.asyncio
+async def test_hangup_still_sent_when_teardown_is_cancelled_during_the_drain():
+    # Teardown is routinely cancelled mid-flight (the end_call tool tears the call down from
+    # inside the LLM task). Losing HANGUP here leaves the caller on a live channel until the
+    # far end gives up, so it has to go out even on the way past a CancelledError.
+    ws = _FakeWebSocket()
+    listen_task = asyncio.create_task(_live_task())
+    handler = _make_handler(ws, listen_task)
+
+    stopping = asyncio.create_task(handler.stop_handler())
+    await asyncio.sleep(0.05)  # let it reach the drain wait
+    stopping.cancel()
+    await asyncio.gather(stopping, return_exceptions=True)
+    listen_task.cancel()
+
+    assert ws.sent == ["REPORT_QUEUE_DRAINED", "HANGUP"]
+    assert handler.running is False
+
+
+@pytest.mark.asyncio
 async def test_hangup_still_sent_when_report_cannot_be_delivered():
     ws = _FakeWebSocket(fail_send=True)
     listen_task = asyncio.create_task(_live_task())
