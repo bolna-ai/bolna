@@ -37,9 +37,9 @@ from dotenv import load_dotenv
 logger = configure_logger(__name__)
 load_dotenv()
 
-# Asterisk's max WebSocket frame size is 65,500 bytes. Chunks larger than this
-# cause "Cannot fit huge websocket frame" and kill the connection.
-MAX_WS_FRAME_BYTES = 60000  # leave headroom below 65,500
+# One frame must arrive within the 10 short reads ws_safe_read() allows or Asterisk drops
+# the call; a proxy relaying in ~4 KB chunks costs one read each.
+MAX_WS_FRAME_BYTES = int(os.environ.get("SIP_MAX_WS_FRAME_BYTES", "8000"))  # 1 s of ulaw
 
 # Extra buffer after estimated playback end before clearing is_audio_being_played.
 # Accounts for Asterisk's internal retiming and RTP jitter buffer.
