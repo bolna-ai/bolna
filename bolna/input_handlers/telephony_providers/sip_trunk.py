@@ -63,6 +63,10 @@ def _parse_asterisk_control_message(text: str) -> dict:
         # "QUEUE_DRAINED" have no space — guarding on `" " in text` dropped them entirely.
         if tokens and ":" not in tokens[0] and "event" not in result:
             result["event"] = tokens[0]
+            # Events carrying a bare correlation id ("MEDIA_MARK_PROCESSED <uuid>") put it
+            # in the second token, with no "key:value" shape to pick it up.
+            if len(tokens) > 1 and ":" not in tokens[1] and "correlation_id" not in result:
+                result["correlation_id"] = tokens[1]
 
     event = (result.get("event") or result.get("command") or "").upper().replace(" ", "_")
     if event:
@@ -363,8 +367,24 @@ class SipTrunkInputHandler(TelephonyInputHandler):
                 task.add_done_callback(_on_drain_done)
             logger.info(f"MEDIA_XON for channel {self.channel_id}")
             return
+        if event == "MEDIA_MARK_PROCESSED":
+            # Asterisk queues the mark in-band behind the audio it follows, so this lands
+            # when that audio has been dequeued for RTP — the same contract as a Twilio or
+            # Plivo mark echo. Routed through the shared path so latency and heard-text
+            # tracking work identically across providers.
+            mark_id = parsed.get("correlation_id")
+            if mark_id:
+                self.process_mark_message({"name": mark_id})
+            else:
+                logger.warning(f"MEDIA_MARK_PROCESSED without a mark id for channel {self.channel_id}: {text}")
+            return
         if event == "STATUS" or "MEDIA_BUFFERING_COMPLETED" in event:
             logger.debug(f"Asterisk control: {event}")
+            return
+        if event == "ERROR":
+            # Asterisk rejects a command (e.g. anything media-related in passthrough mode)
+            # with this. Silently swallowing it once hid a dead REPORT_QUEUE_DRAINED gate.
+            logger.warning(f"Asterisk rejected a command for channel {self.channel_id}: {text}")
             return
         if event == "QUEUE_DRAINED" or "QUEUE_DRAINED" in event:
             # Only requested at teardown, to gate HANGUP on real playout completion.
