@@ -47,6 +47,9 @@ class LiteLLM(BaseLLM):
                 self.model_args["api_key"] = kwargs["llm_key"]
             if kwargs.get("api_version", None):
                 self.model_args["api_version"] = kwargs["api_version"]
+            if kwargs.get("aws_region_name", None):
+                # Bedrock models: region for boto3 under litellm (no per-box aws config needed).
+                self.model_args["aws_region_name"] = kwargs["aws_region_name"]
 
         self.custom_tools = kwargs.get("api_tools", None)
         logger.info(f"API Tools {self.custom_tools}")

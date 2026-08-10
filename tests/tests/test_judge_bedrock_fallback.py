@@ -152,3 +152,23 @@ async def test_null_resets_an_error_streak(monkeypatch):
     await sw.decide("hello", "", "hi")
     assert sw._consecutive_failures == 0
     assert sw.model == BEDROCK
+
+
+def test_bedrock_region_defaults_to_ap_south_1(monkeypatch):
+    monkeypatch.delenv("AWS_REGION", raising=False)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
+    sw = LanguageSwitcher(available_labels=["en", "hi"], model=BEDROCK)
+    assert sw._llm.model_args.get("aws_region_name") == "ap-south-1"
+
+
+def test_bedrock_region_env_override_wins(monkeypatch):
+    monkeypatch.setenv("AWS_REGION", "us-east-1")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
+    sw = LanguageSwitcher(available_labels=["en", "hi"], model=BEDROCK)
+    assert sw._llm.model_args.get("aws_region_name") == "us-east-1"
+
+
+def test_non_bedrock_judge_carries_no_region(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
+    sw = LanguageSwitcher(available_labels=["en", "hi"])
+    assert "aws_region_name" not in sw._llm.model_args

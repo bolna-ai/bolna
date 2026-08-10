@@ -22,6 +22,8 @@ DEFAULT_HEDGE_AFTER_S = 1.8
 LIVE_UNAVAILABLE_MARKER = "(no turn from the language-locked recognizer — idle flush)"
 # Consecutive decide failures before swapping a broken judge for the API-key default.
 RUNTIME_FALLBACK_AFTER = 2
+# Bedrock region when neither AWS_REGION nor a box-level aws config provides one.
+BEDROCK_DEFAULT_REGION = "ap-south-1"
 
 
 def resolve_switch_llm_credentials(model: str) -> tuple[str, str, str]:
@@ -103,6 +105,7 @@ class LanguageSwitcher:
             llm_key=switch_llm_key,
             base_url=switch_llm_base,
             api_version=switch_llm_version,
+            aws_region_name=(os.getenv("AWS_REGION") or BEDROCK_DEFAULT_REGION) if self._is_bedrock else None,
         )
 
     def _system_message(self):
