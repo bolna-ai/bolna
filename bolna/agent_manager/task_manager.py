@@ -4621,6 +4621,9 @@ class TaskManager(BaseManager):
                         and message["data"].get("type", "") == "interim_transcript_received"
                     ):
                         self.time_since_last_spoken_human_word = time.time()
+                        # Before every early exit below: an interim is proof the caller is still
+                        # talking, so it must refresh liveness even when this turn ignores it.
+                        self.interruption_manager.note_user_liveness()
                         if temp_transcriber_message == message["data"].get("content"):
                             logger.info("Received the same transcript as the previous one we have hence continuing")
                             continue

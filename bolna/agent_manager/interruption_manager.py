@@ -154,7 +154,6 @@ class InterruptionManager:
     def on_interim_transcript_received(self) -> None:
         """Called on each interim transcript to update timing state."""
         self.let_remaining_audio_pass_through = False
-        self.last_interim_ts = time.time()
 
         if self.time_since_first_interim_result == -1:
             self.time_since_first_interim_result = time.time() * 1000
@@ -469,11 +468,15 @@ class InterruptionManager:
         """Returns current turn ID."""
         return self.turn_id
 
+    def note_user_liveness(self) -> None:
+        """Record that an interim arrived, whether or not this turn acts on it."""
+        self.last_interim_ts = time.time()
+
     def user_speech_staleness_s(self) -> float:
-        """Seconds since the last interim, or since VAD speech-start if none, -1 when not speaking."""
+        """Seconds since the last interim, or since speech start if none yet, -1 when not speaking."""
         if not self.callee_speaking:
             return -1
-        anchor = self.last_interim_ts if self.last_interim_ts > 0 else self.callee_speaking_start_time
+        anchor = max(self.last_interim_ts, self.callee_speaking_start_time)
         return time.time() - anchor if anchor > 0 else -1
 
     def get_user_speaking_duration(self) -> float:
