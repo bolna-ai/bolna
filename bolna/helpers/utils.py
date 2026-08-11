@@ -832,7 +832,12 @@ def convert_to_request_log(
                 log["graph_routing_metadata"] = graph_routing_metadata
             else:
                 log["graph_routing_metadata"] = meta_info.get("llm_metadata", {})
-        case LogComponent.LLM_HANGUP | LogComponent.LLM_VOICEMAIL | LogComponent.LLM_LANGUAGE_DETECTION:
+        case (
+            LogComponent.LLM_HANGUP
+            | LogComponent.LLM_VOICEMAIL
+            | LogComponent.LLM_LANGUAGE_DETECTION
+            | LogComponent.LLM_LANGUAGE_SWITCH
+        ):
             log["latency"] = meta_info.get("llm_latency", None) if direction == LogDirection.RESPONSE else None
             if direction == LogDirection.RESPONSE:
                 log["input_tokens"] = input_tokens or 0

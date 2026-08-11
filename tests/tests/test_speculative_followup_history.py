@@ -55,11 +55,12 @@ async def test_replaces_garbled_trailing_user_turn():
     h.append_assistant("Hello, how can I help?")
     h.append_user("Kana Rohit Prakaran")  # garbled wrong-language ASR of the Tamil turn
 
-    text = await _spec(_make_tm(h, _capturing_generate(captured)))(
+    text, capture = await _spec(_make_tm(h, _capturing_generate(captured)))(
         "en", "I want to talk in English", "Kana Rohit Prakaran"
     )
 
     assert text == "reply text"
+    assert capture is not None
     msgs = captured["messages"]
     assert captured["synthesize"] is False
     user_turns = [m for m in msgs if m.get("role") == "user"]
@@ -167,5 +168,6 @@ async def test_aborts_and_returns_empty_on_function_call():
     h = ConversationHistory(initial_history=[{"role": "system", "content": "base prompt"}])
     h.append_user("garbled")
 
-    text = await _spec(_make_tm(h, generate))("en", "detector text", "garbled")
+    text, capture = await _spec(_make_tm(h, generate))("en", "detector text", "garbled")
     assert text == ""
+    assert capture is None
