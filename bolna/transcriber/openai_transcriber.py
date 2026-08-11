@@ -88,7 +88,9 @@ class OpenAITranscriber(BaseTranscriber):
         self._turn_start_epoch_ms = None
         # Saved at commit time so the receiver can still identify the turn after
         # _reset_turn_state() clears current_turn_id (e.g. utterance timeout race).
-        self._last_committed_turn_id: Optional[str] = None
+        self._last_committed_turn_id: Optional[int] = None
+        # turn_id of the last entry written to turn_latencies, to keep those keys unique
+        self._last_latency_turn_id = None
 
         self._speech_active = False
         self._silence_start_time: Optional[float] = None
@@ -166,7 +168,7 @@ class OpenAITranscriber(BaseTranscriber):
             # cleared current_turn_id before we got here (shouldn't happen after the
             # _reset_turn_state fix, but guard anyway).
             self.turn_counter += 1
-            self.current_turn_id = f"turn_{self.turn_counter}"
+            self.current_turn_id = self.turn_counter
             logger.warning(f"_commit_turn: assigned fallback turn_id {self.current_turn_id}")
         self._last_committed_turn_id = self.current_turn_id
         try:
@@ -328,7 +330,7 @@ class OpenAITranscriber(BaseTranscriber):
                         self._final_transcript_event.clear()
                         self._audio_appended_since_commit = False
                         self.turn_counter += 1
-                        self.current_turn_id = f"turn_{self.turn_counter}"
+                        self.current_turn_id = self.turn_counter
                         self.current_turn_start_time = time.perf_counter()
                         self._turn_start_epoch_ms = timestamp_ms()
                         self.current_turn_interim_details = []
@@ -410,6 +412,14 @@ class OpenAITranscriber(BaseTranscriber):
                             # most reliable identifier — current_turn_id may already point
                             # to the next turn if the sender started speaking immediately.
                             turn_id = self._last_committed_turn_id or self.current_turn_id or item_id
+                            # OpenAI can emit several transcription items for one committed turn.
+                            # Reusing the id gave turn_latencies duplicate keys, so any consumer
+                            # keying on turn_id silently lost all but the last. Give the extras a
+                            # fresh id — they are genuinely distinct transcripts with distinct times.
+                            if turn_id is not None and turn_id == self._last_latency_turn_id:
+                                self.turn_counter += 1
+                                turn_id = self.turn_counter
+                            self._last_latency_turn_id = turn_id
                             logger.info(f"Transcript completed for turn {turn_id}: {transcript[:80]}")
                             if self.current_turn_start_time:
                                 total_ms = round((time.perf_counter() - self.current_turn_start_time) * 1000)
@@ -457,7 +467,7 @@ class OpenAITranscriber(BaseTranscriber):
                     elif event_type == "input_audio_buffer.speech_started":
                         self._speech_active = True
                         self.turn_counter += 1
-                        self.current_turn_id = f"turn_{self.turn_counter}"
+                        self.current_turn_id = self.turn_counter
                         self.current_turn_start_time = time.perf_counter()
                         self._turn_start_epoch_ms = timestamp_ms()
                         self.current_turn_interim_details = []

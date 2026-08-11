@@ -5943,7 +5943,7 @@ class TaskManager(BaseManager):
                     run_id=self.run_id,
                 )
             self.__enqueue_chunk(clip, 0, 1, handoff_meta)
-            self.conversation_history.append_assistant(handoff_text)
+            self.conversation_history.append_assistant(handoff_text, sequence_id=-1, message_category="handoff")
             self.__record_lid_event({"type": "handoff", "source": "prewarmed", "target": target})
             logger.info(f"LanguageSwitcher: playing pre-warmed handoff clip: {handoff_text!r}")
             return
@@ -5951,7 +5951,7 @@ class TaskManager(BaseManager):
         # Cold cache → live synthesis on the target voice (socket already warm).
         handoff_meta.update({"cached": False, "format": "pcm", "end_of_llm_stream": True})
         await self._synthesize(create_ws_data_packet(handoff_text, meta_info=handoff_meta))
-        self.conversation_history.append_assistant(handoff_text)
+        self.conversation_history.append_assistant(handoff_text, sequence_id=-1, message_category="handoff")
         self.__record_lid_event({"type": "handoff", "source": "live", "target": target})
         logger.info(f"LanguageSwitcher: playing handoff to cover reply generation: {handoff_text!r}")
 
@@ -7031,7 +7031,12 @@ class TaskManager(BaseManager):
                             "end_of_llm_stream": True,
                         }
                         await self._synthesize(create_ws_data_packet(user_online_message, meta_info=meta_info))
-                    self.conversation_history.append_assistant(user_online_message, exclude_from_llm=True)
+                    self.conversation_history.append_assistant(
+                        user_online_message,
+                        exclude_from_llm=True,
+                        sequence_id=-1,
+                        message_category="is_user_online_message",
+                    )
 
                     # Explicitly reset the audio flag after synthesizing the prompt.
                     # handle_interruption() below sends clearAudio to Plivo and wipes the
@@ -7500,6 +7505,9 @@ class TaskManager(BaseManager):
                     "interruption_stats": output["latency_dict"]["interruption_stats"],
                     "user_bot_latencies": copy.deepcopy(output["latency_dict"]["user_bot_latencies"]),
                     "mark_tracking": output["latency_dict"]["mark_tracking"],
+                    # Only record of when template speech (are-you-still-there, tool fillers,
+                    # handoffs, goodbyes) was actually spoken — it has no LLM turn to anchor to.
+                    "synthesizer_chunk_marks": copy.deepcopy(output["latency_dict"]["synthesizer_chunk_marks"]),
                     "hangup_triggered_ms": round(self.hangup_triggered_at * 1000 - self.conversation_start_init_ts, 2)
                     if self.hangup_triggered_at
                     else None,
