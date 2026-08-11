@@ -411,25 +411,22 @@ class ElevenlabsSynthesizer(StreamSynthesizer):
                     return None
 
 
-# Out-of-preset floats are accepted silently, so snap before sending.
+# v3 takes three discrete stability values; anything else is accepted and silently snapped.
 STABILITY_PRESETS = (0.0, 0.5, 1.0)
 DEFAULT_STABILITY = 0.5
 
-# Bounds the abandoned socket's closing handshake. The websockets default is 10s, which is
-# far longer than a barge-in redial should ever wait on a half-open connection.
 CLOSE_TIMEOUT = 1
 RECONNECT_POLL_INTERVAL = 0.05
-
-# The 20s idle cap is not adjustable here: inactivity_timeout is ignored on this endpoint.
+# The endpoint ignores inactivity_timeout and drops idle sockets at 20s.
 KEEP_ALIVE_INTERVAL = 8
 
 
 class ElevenlabsV3Synthesizer(ElevenlabsSynthesizer):
-    """Eleven v3, which 403s on multi-stream-input and is served only from text-to-dialogue.
+    """Eleven v3, served only from the text-to-dialogue endpoint.
 
     Voices register in a first message rather than the URL, text goes as ``inputs`` arrays,
-    turns end on ``is_final_audio_for_turn``, and there are no contexts. Everything outside
-    the wire protocol is inherited.
+    turns end on ``is_final_audio_for_turn``, and there are no contexts. The endpoint has no
+    way to cancel a turn, so an interruption closes the socket and dials a replacement.
     """
 
     def __init__(self, *args, **kwargs):
@@ -438,20 +435,17 @@ class ElevenlabsV3Synthesizer(ElevenlabsSynthesizer):
             f"wss://{self.elevenlabs_host}/v1/text-to-dialogue/stream-input"
             f"?model_id={self.model}&output_format={self.wire_format}&sync_alignment=true"
         )
-        # No optimize_streaming_latency: v3 rejects the query param with a 400, which would
-        # leave welcome messages and handoff clips silent.
+        # v3 rejects optimize_streaming_latency with a 400.
         self.api_url = f"https://{self.elevenlabs_host}/v1/text-to-speech/{self.voice}/stream?output_format="
-        # Snapped once here so the inherited HTTP path renders welcome clips at the same
-        # stability the streamed conversation uses. temperature is Optional on ElevenLabsConfig
-        # and the stored dict reaches the constructor unvalidated, so a null lands here.
+        # Snapped once so the inherited HTTP path matches the streamed voice. temperature is
+        # optional in the config and reaches the constructor unvalidated, so it may be None.
         stability = DEFAULT_STABILITY if self.temperature is None else self.temperature
         self.temperature = min(STABILITY_PRESETS, key=lambda preset: abs(preset - stability))
-        # Nulled so no inherited code path reads a context this endpoint does not have.
+        # This endpoint has no contexts; nulled so no inherited path reads one.
         self.context_id = None
         self.current_turn_context_id = None
         self._new_turn_pending = True
-        # Set while a barge-in teardown is in flight, so a socket close we caused is told
-        # apart from one the provider caused. Without it both look identical to the sender.
+        # Tells a close we caused apart from one the provider caused.
         self._interrupted = False
         self._connect_lock = asyncio.Lock()
         self._keep_alive_task = None
@@ -483,8 +477,7 @@ class ElevenlabsV3Synthesizer(ElevenlabsSynthesizer):
             if hasattr(websocket, "response") and hasattr(websocket.response, "headers"):
                 self.ws_trace_id = websocket.response.headers.get("x-trace-id")
                 logger.info(f"Elevenlabs v3 WebSocket connected trace_id={self.ws_trace_id}")
-            # First message only. stability is the sole setting v3 honours; similarity_boost,
-            # speed and style measurably do nothing.
+            # First message only. stability is the sole setting v3 honours.
             await websocket.send(
                 json.dumps(
                     {
@@ -495,8 +488,7 @@ class ElevenlabsV3Synthesizer(ElevenlabsSynthesizer):
             )
             self._last_send_time = time.perf_counter()
             self._new_turn_pending = True
-            # The barge-in teardown is over once its replacement is up, so a close after
-            # this point is the provider's and must be reported rather than swallowed.
+            # Teardown is over once a replacement is up.
             self._interrupted = False
             if not self.connection_time:
                 self.connection_time = round((time.perf_counter() - start_time) * 1000)
@@ -518,8 +510,7 @@ class ElevenlabsV3Synthesizer(ElevenlabsSynthesizer):
             return None
 
     async def _ensure_connection(self):
-        """Reconnect if down, serialised so the barge-in redial and the monitor loop
-        cannot both dial and leak a socket."""
+        """Reconnect if down, serialised so two callers cannot both dial and leak a socket."""
         async with self._connect_lock:
             if self._is_ws_connected():
                 return True
@@ -568,9 +559,8 @@ class ElevenlabsV3Synthesizer(ElevenlabsSynthesizer):
     async def handle_interruption(self):
         """Drop the socket, since no control message on this endpoint cancels a turn.
 
-        Does no network I/O: task_manager awaits this inside barge-in cleanup, and both
-        close() and connect() can block for their full timeouts. The socket is detached
-        synchronously so the receiver stops reading the interrupted turn's frames at once,
+        Does no network I/O, because the caller awaits this on the interruption path. The
+        socket is detached synchronously so the receiver stops reading the abandoned turn,
         then closed and replaced on a background task.
         """
         try:
@@ -580,16 +570,16 @@ class ElevenlabsV3Synthesizer(ElevenlabsSynthesizer):
             old_ws, self.websocket = self.websocket, None
             if self._reconnect_task and not self._reconnect_task.done():
                 self._reconnect_task.cancel()
-            # Referenced so the task cannot be garbage collected before it reconnects.
+            # Referenced so the task is not garbage collected before it reconnects.
             self._reconnect_task = asyncio.create_task(self._recycle_socket(old_ws))
         except Exception as e:
             logger.info(f"Error handling ElevenLabs v3 interruption: {e}")
 
     def _classify_lost_socket(self, where):
-        """A send found no socket. Ours to abandon quietly, or the provider's to report.
+        """Classify a lost socket: ours to abandon quietly, the provider's to report.
 
-        Reporting matters: a swallowed provider drop leaves the turn with no end-of-stream,
-        so the final mark never reaches the caller and is_audio_being_played stays latched.
+        A swallowed provider drop would leave the turn with no end-of-stream, so the final
+        mark never reaches the output handler and playback stays marked as in progress.
         """
         self._new_turn_pending = True
         if self._interrupted:
@@ -620,9 +610,8 @@ class ElevenlabsV3Synthesizer(ElevenlabsSynthesizer):
                 await self.flush_synthesizer_stream()
                 return
 
-            # Tighter than the 1s default: every barge-in redials, so the next turn (the
-            # hangup goodbye especially) would otherwise wait a full poll tick on a socket
-            # that reconnects in about 200ms.
+            # Tighter than the 1s default: every barge-in redials, and the next turn should
+            # not wait a full poll tick on a socket that reconnects in about 200ms.
             await self._wait_for_ws(poll_interval=RECONNECT_POLL_INTERVAL)
 
             if text != "":
@@ -635,15 +624,14 @@ class ElevenlabsV3Synthesizer(ElevenlabsSynthesizer):
                         if self.ws_send_time is None:
                             self.ws_send_time = time.perf_counter()
                             logger.info(f"WS send trace_id={self.ws_trace_id} first_text_sent")
-                        # Only the turn's first fragment closes the previous prosody segment;
-                        # per-fragment new_turn would break intonation inside one utterance.
+                        # Only the first fragment of a turn; per-fragment new_turn would
+                        # break intonation inside one utterance.
                         payload = {"text": text_chunk, "voice_id": self.voice}
                         if self._new_turn_pending:
                             payload["new_turn"] = True
                             self._new_turn_pending = False
                         ws = self.websocket
                         if ws is None:
-                            # Detached by handle_interruption between the wait and this send.
                             self._classify_lost_socket("mid-send")
                             return
                         await ws.send(json.dumps({"inputs": [payload]}))
@@ -659,8 +647,8 @@ class ElevenlabsV3Synthesizer(ElevenlabsSynthesizer):
             if end_of_llm_stream:
                 self.last_text_sent = True
                 try:
-                    # Generates everything buffered and closes the turn with
-                    # is_final_audio_for_turn. close_socket would end the session, not the turn.
+                    # Closes the turn with is_final_audio_for_turn. close_socket would end
+                    # the session rather than the turn.
                     ws = self.websocket
                     if ws is None:
                         self._classify_lost_socket("before flush")
@@ -736,8 +724,8 @@ class ElevenlabsV3Synthesizer(ElevenlabsSynthesizer):
                         text_spoken = ""
                     yield chunk, text_spoken
 
-                # Standalone message, no audio, once per flush. The only per-turn end marker:
-                # is_final arrives only when the session closes.
+                # Standalone message, no audio, once per flush. The only per-turn end
+                # marker; is_final arrives only when the session closes.
                 if data.get("is_final_audio_for_turn"):
                     logger.info(f"WS recv is_final_audio_for_turn trace_id={self.ws_trace_id}")
                     audio_chunk_count = 0
@@ -751,10 +739,9 @@ class ElevenlabsV3Synthesizer(ElevenlabsSynthesizer):
                 if self._interrupted:
                     logger.info("ElevenLabs v3 WebSocket closed by barge-in, waiting for reconnect")
                 else:
-                    # Dropped with a turn in flight, i.e. after the flush went out but before
-                    # is_final_audio_for_turn came back. Close the turn out, or nothing stamps
-                    # end_of_synthesizer_stream, the final mark never reaches the caller's
-                    # provider and is_audio_being_played stays latched for the rest of the call.
+                    # Dropped after the flush but before is_final_audio_for_turn. End the turn
+                    # explicitly, or nothing stamps end_of_synthesizer_stream and playback
+                    # stays marked as in progress for the rest of the call.
                     logger.error("ElevenLabs v3 WebSocket dropped by provider, ending the turn")
                     if self.last_text_sent:
                         yield b"\x00", ""
