@@ -442,6 +442,7 @@ class ElevenlabsV3Synthesizer(ElevenlabsSynthesizer):
         self._new_turn_pending = True
         self._connect_lock = asyncio.Lock()
         self._keep_alive_task = None
+        self._reconnect_task = None
         self._last_send_time = time.perf_counter()
 
     def get_sleep_time(self):
@@ -562,7 +563,9 @@ class ElevenlabsV3Synthesizer(ElevenlabsSynthesizer):
             self._new_turn_pending = True
             if self._is_ws_connected():
                 await self.websocket.close()
-            asyncio.create_task(self._ensure_connection())
+            # Held on the instance: a bare create_task can be garbage collected mid-flight,
+            # which would drop the redial and leave the next turn waiting on monitor_connection.
+            self._reconnect_task = asyncio.create_task(self._ensure_connection())
         except Exception as e:
             logger.info(f"Error handling ElevenLabs v3 interruption: {e}")
 
@@ -600,6 +603,14 @@ class ElevenlabsV3Synthesizer(ElevenlabsSynthesizer):
                             self._new_turn_pending = False
                         await self.websocket.send(json.dumps({"inputs": [payload]}))
                         self._last_send_time = time.perf_counter()
+                    except websockets.exceptions.ConnectionClosed:
+                        # Expected, not a failure: barge-in closes the socket mid-turn because
+                        # this endpoint has no cancel. Treating it as a connection error would
+                        # surface as SynthesizerError and hang the call up on every interruption.
+                        # The reconnect is already in flight, so just abandon this turn.
+                        logger.info("ElevenLabs v3 socket closed mid-send, abandoning turn")
+                        self._new_turn_pending = True
+                        return
                     except Exception as e:
                         logger.info(f"Error sending chunk: {e}")
                         self.connection_error = str(e)
@@ -613,6 +624,9 @@ class ElevenlabsV3Synthesizer(ElevenlabsSynthesizer):
                     # the whole session, not the turn.
                     await self.websocket.send(json.dumps({"flush": True}))
                     self._last_send_time = time.perf_counter()
+                    self._new_turn_pending = True
+                except websockets.exceptions.ConnectionClosed:
+                    logger.info("ElevenLabs v3 socket closed before flush, abandoning turn")
                     self._new_turn_pending = True
                 except Exception as e:
                     logger.info(f"Error sending end-of-stream signal: {e}")
@@ -708,7 +722,9 @@ class ElevenlabsV3Synthesizer(ElevenlabsSynthesizer):
                 await asyncio.sleep(0.1)
 
     async def cleanup(self):
-        if self._keep_alive_task:
-            self._keep_alive_task.cancel()
-            self._keep_alive_task = None
+        for task in (self._keep_alive_task, self._reconnect_task):
+            if task:
+                task.cancel()
+        self._keep_alive_task = None
+        self._reconnect_task = None
         await super().cleanup()
