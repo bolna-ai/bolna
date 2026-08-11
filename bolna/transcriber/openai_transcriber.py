@@ -420,6 +420,7 @@ class OpenAITranscriber(BaseTranscriber):
                                 self.turn_counter += 1
                                 turn_id = self.turn_counter
                             self._last_latency_turn_id = turn_id
+                            self.meta_info["asr_turn_id"] = turn_id  # appends, so no base-class stamp
                             logger.info(f"Transcript completed for turn {turn_id}: {transcript[:80]}")
                             if self.current_turn_start_time:
                                 total_ms = round((time.perf_counter() - self.current_turn_start_time) * 1000)

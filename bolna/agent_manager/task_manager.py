@@ -4394,7 +4394,8 @@ class TaskManager(BaseManager):
                 meta_info.get("response_uid"),
             )
 
-        self.conversation_history.append_user(transcriber_message, turn_id=meta_info.get("turn_id"))
+        # asr_turn_id, not meta_info["turn_id"] — that one counts responses, not ASR turns.
+        self.conversation_history.append_user(transcriber_message, asr_turn_id=meta_info.get("asr_turn_id"))
         logger.info(
             "BOLNA_TRACE_TM append_user seq=%s turn=%s response_uid=%s history_len=%s text=%r",
             meta_info.get("sequence_id"),
