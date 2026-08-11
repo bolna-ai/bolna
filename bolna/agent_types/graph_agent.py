@@ -66,9 +66,6 @@ class GraphAgent(BaseAgent):
         self.agent_information = self.config.get("agent_information")
         self.current_node_id = self.config.get("current_node_id")
         self.context_data = self.config.get("context_data") or {}
-        # Expose execution_id as a prompt/routing variable. It is call-unique, so it is
-        # only ever substituted where a node explicitly references {execution_id}; unused,
-        # the rendered prompt is byte-identical and the prompt cache is untouched.
         execution_id = self.config.get("execution_id")
         if execution_id and isinstance(self.context_data.get("recipient_data"), dict):
             self.context_data["recipient_data"]["execution_id"] = execution_id
