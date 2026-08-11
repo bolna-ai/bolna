@@ -5859,7 +5859,9 @@ class TaskManager(BaseManager):
                 logger.info("LanguageSwitcher: hangup during speculation — not speaking follow-up")
                 return None
             if spec_text:
-                self.conversation_history.append_assistant(spec_text)
+                # Tagged here, not via _stage_assistant_history — this append bypasses staging,
+                # so without the tag the row cannot anchor to its own playback burst.
+                self.conversation_history.append_assistant(spec_text, message_category="language_switch_followup")
                 self.__log_committed_speculation(spec_text, spec_capture)
                 synth_meta = {
                     "io": self.tools["output"].get_provider(),
