@@ -260,8 +260,13 @@ class SipTrunkOutputHandler(TelephonyOutputHandler):
             self._send_in_flight = False
 
     def has_unsent_audio(self) -> bool:
-        """Audio accepted but not yet written to Asterisk (mid-send or XOFF-parked)."""
-        return self._send_in_flight or bool(self._local_audio_queue)
+        """Audio accepted but not yet written to Asterisk (mid-send or XOFF-parked).
+
+        XOFF-parked audio is only counted while the handler is open: close() runs before
+        stop_handler() and drain_local_queue() bails once _closed, so after close that
+        audio can never be sent — waiting on it would stall teardown for the full cap.
+        """
+        return self._send_in_flight or (not self._closed and bool(self._local_audio_queue))
 
     def _register_mark(self, meta_info: dict, is_final: bool, audio_duration: float) -> str:
         """Record per-mark metadata (same contract as Plivo/Twilio) and return the mark id
