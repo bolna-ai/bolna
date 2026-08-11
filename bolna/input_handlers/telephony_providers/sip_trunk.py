@@ -205,8 +205,7 @@ class SipTrunkInputHandler(TelephonyInputHandler):
             await asyncio.wait_for(self._queue_drained.wait(), timeout=timeout)
         except asyncio.TimeoutError:
             logger.warning(
-                f"QUEUE_DRAINED not received within {timeout:.1f}s for channel "
-                f"{self.channel_id}; hanging up anyway"
+                f"QUEUE_DRAINED not received within {timeout:.1f}s for channel {self.channel_id}; hanging up anyway"
             )
             return
         await asyncio.sleep(HANGUP_DRAIN_SETTLE_S)
