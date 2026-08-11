@@ -409,3 +409,306 @@ class ElevenlabsSynthesizer(StreamSynthesizer):
                 else:
                     logger.error(f"Error: {response.status} - {await response.text()}")
                     return None
+
+
+# v3 stability is a three-way preset (creative/natural/robust), not a continuous dial.
+# The API accepts out-of-preset floats silently, so snap before sending.
+STABILITY_PRESETS = (0.0, 0.5, 1.0)
+
+# The socket is dropped after 20s of client silence and, unlike multi-stream-input,
+# the inactivity_timeout query param is ignored. Heartbeat well inside that window.
+KEEP_ALIVE_INTERVAL = 8
+
+
+class ElevenlabsV3Synthesizer(ElevenlabsSynthesizer):
+    """Eleven v3 over the text-to-dialogue socket.
+
+    v3 is rejected (403) on the multi-stream-input endpoint the v1 synthesizer uses, so it
+    gets its own WebSocket protocol: voice registration in a first message instead of the
+    URL path, ``inputs`` arrays instead of bare ``text``, ``is_final_audio_for_turn``
+    instead of ``isFinal``, and no contexts at all. Everything that isn't the wire
+    protocol — wire format selection, audio post-processing, HTTP fallbacks — is inherited.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.ws_url = (
+            f"wss://{self.elevenlabs_host}/v1/text-to-dialogue/stream-input"
+            f"?model_id={self.model}&output_format={self.wire_format}&sync_alignment=true"
+        )
+        # No contexts on this endpoint; null the parent's context state so nothing reads it.
+        self.context_id = None
+        self.current_turn_context_id = None
+        self._new_turn_pending = True
+        self._connect_lock = asyncio.Lock()
+        self._keep_alive_task = None
+        self._last_send_time = time.perf_counter()
+
+    def get_sleep_time(self):
+        return 0.01
+
+    def _on_push(self, meta_info, text):
+        """No context to mint — turn boundaries are marked with new_turn on the wire."""
+        return
+
+    # ------------------------------------------------------------------
+    # Connection
+    # ------------------------------------------------------------------
+
+    async def establish_connection(self):
+        try:
+            start_time = time.perf_counter()
+            websocket = await asyncio.wait_for(
+                websockets.connect(
+                    self.ws_url,
+                    ssl=get_ssl_context(self.ws_url),
+                    additional_headers={"xi-api-key": self.api_key},
+                ),
+                timeout=10.0,
+            )
+            if hasattr(websocket, "response") and hasattr(websocket.response, "headers"):
+                self.ws_trace_id = websocket.response.headers.get("x-trace-id")
+                logger.info(f"Elevenlabs v3 WebSocket connected trace_id={self.ws_trace_id}")
+            # voices and voice_settings are read from the first message only. Only stability
+            # is honoured by v3 — similarity_boost, speed and style measurably do nothing.
+            await websocket.send(
+                json.dumps(
+                    {
+                        "voices": [self.voice],
+                        "voice_settings": {"stability": self._snapped_stability()},
+                    }
+                )
+            )
+            self._last_send_time = time.perf_counter()
+            # A fresh socket has no half-sent turn, so the next input opens a new one.
+            self._new_turn_pending = True
+            if not self.connection_time:
+                self.connection_time = round((time.perf_counter() - start_time) * 1000)
+            logger.info(f"Connected to {self.ws_url}")
+            return websocket
+        except asyncio.TimeoutError:
+            logger.error("Timeout while connecting to ElevenLabs v3 websocket")
+            return None
+        except InvalidHandshake as e:
+            error_msg = str(e)
+            if "401" in error_msg or "403" in error_msg:
+                logger.error(f"ElevenLabs v3 authentication failed: invalid or expired API key - {e}")
+            else:
+                logger.error(f"ElevenLabs v3 handshake failed: {e}")
+            self.connection_error = str(e)
+            return None
+        except Exception as e:
+            logger.error(f"Failed to connect to ElevenLabs v3: {e}")
+            return None
+
+    def _snapped_stability(self):
+        return min(STABILITY_PRESETS, key=lambda preset: abs(preset - self.temperature))
+
+    async def _ensure_connection(self):
+        """Reconnect if the socket is down. Serialised so the barge-in redial and the
+        monitor loop can't both dial and leak one of the two sockets."""
+        async with self._connect_lock:
+            if self._is_ws_connected():
+                return True
+            websocket = await self.establish_connection()
+            if websocket is None:
+                return False
+            self.websocket = websocket
+            return True
+
+    async def monitor_connection(self):
+        consecutive_failures = 0
+        while consecutive_failures < 3:
+            if not self._is_ws_connected():
+                logger.info("Re-establishing ElevenLabs v3 connection...")
+                if await self._ensure_connection():
+                    consecutive_failures = 0
+                else:
+                    consecutive_failures += 1
+                    logger.warning(f"ElevenLabs v3 connection failed (attempt {consecutive_failures}/3)")
+                    if consecutive_failures >= 3:
+                        logger.error("Max connection failures reached for ElevenLabs v3")
+                        self.connection_error = self.connection_error or "Max connection failures reached"
+                        break
+            if self._keep_alive_task is None or self._keep_alive_task.done():
+                self._keep_alive_task = asyncio.create_task(self._keep_alive_loop())
+            await asyncio.sleep(1)
+
+    async def _keep_alive_loop(self):
+        """Hold the socket open through long stretches of caller speech."""
+        while not self.conversation_ended and not self.connection_error:
+            await asyncio.sleep(1)
+            if not self._is_ws_connected():
+                continue
+            if time.perf_counter() - self._last_send_time < KEEP_ALIVE_INTERVAL:
+                continue
+            try:
+                await self.websocket.send(json.dumps({"keep_alive": True}))
+                self._last_send_time = time.perf_counter()
+            except Exception as e:
+                logger.info(f"ElevenLabs v3 keep_alive failed: {e}")
+
+    # ------------------------------------------------------------------
+    # Interruption
+    # ------------------------------------------------------------------
+
+    async def handle_interruption(self):
+        """There is no way to cancel a turn on this endpoint — no close_context
+        equivalent, and no control message stops generation — so the socket goes and a
+        replacement is dialled in the background. Awaiting the redial here would stall
+        barge-in cleanup for up to the 10s connect timeout."""
+        try:
+            self.current_turn_start_time = None
+            self._new_turn_pending = True
+            if self._is_ws_connected():
+                await self.websocket.close()
+            asyncio.create_task(self._ensure_connection())
+        except Exception as e:
+            logger.info(f"Error handling ElevenLabs v3 interruption: {e}")
+
+    # ------------------------------------------------------------------
+    # sender / receiver
+    # ------------------------------------------------------------------
+
+    async def sender(self, text, sequence_id, end_of_llm_stream=False):
+        try:
+            if self.conversation_ended:
+                return
+            if not self.should_synthesize_response(sequence_id):
+                logger.info(f"Not synthesizing: sequence_id {sequence_id} not current")
+                await self.flush_synthesizer_stream()
+                return
+
+            await self._wait_for_ws()
+
+            if text != "":
+                for text_chunk in self.text_chunker(text):
+                    if not self.should_synthesize_response(sequence_id):
+                        logger.info(f"Not synthesizing (inner): sequence_id {sequence_id} not current")
+                        await self.flush_synthesizer_stream()
+                        return
+                    try:
+                        if self.ws_send_time is None:
+                            self.ws_send_time = time.perf_counter()
+                            logger.info(f"WS send trace_id={self.ws_trace_id} first_text_sent")
+                        # new_turn closes the previous prosody segment. Only the first
+                        # fragment of a turn carries it — setting it per fragment would
+                        # break intonation within a single utterance.
+                        payload = {"text": text_chunk, "voice_id": self.voice}
+                        if self._new_turn_pending:
+                            payload["new_turn"] = True
+                            self._new_turn_pending = False
+                        await self.websocket.send(json.dumps({"inputs": [payload]}))
+                        self._last_send_time = time.perf_counter()
+                    except Exception as e:
+                        logger.info(f"Error sending chunk: {e}")
+                        self.connection_error = str(e)
+                        return
+
+            if end_of_llm_stream:
+                self.last_text_sent = True
+                try:
+                    # flush forces generation of everything buffered and makes the server
+                    # close the turn with is_final_audio_for_turn. close_socket would end
+                    # the whole session, not the turn.
+                    await self.websocket.send(json.dumps({"flush": True}))
+                    self._last_send_time = time.perf_counter()
+                    self._new_turn_pending = True
+                except Exception as e:
+                    logger.info(f"Error sending end-of-stream signal: {e}")
+                    self.connection_error = str(e)
+
+        except asyncio.CancelledError:
+            logger.info("Sender task was cancelled.")
+        except Exception as e:
+            logger.error(f"Unexpected error in sender: {e}")
+
+    async def receiver(self):
+        """Yields (audio_chunk, text_spoken) tuples, or (b'\\x00', '') for end-of-stream."""
+        audio_chunk_count = 0
+        not_connected_since = None
+        consecutive_errors = 0
+        max_consecutive_errors = 10
+        while True:
+            try:
+                if self.conversation_ended:
+                    return
+                if not self._is_ws_connected():
+                    if self.connection_error:
+                        return
+                    now = time.perf_counter()
+                    if not_connected_since is None:
+                        not_connected_since = now
+                    elif now - not_connected_since > 30:
+                        logger.error("ElevenLabs v3 receiver: WebSocket never connected after 30s, giving up.")
+                        self.connection_error = self.connection_error or "WebSocket never connected"
+                        return
+                    await asyncio.sleep(0.10)
+                    continue
+                else:
+                    not_connected_since = None
+
+                recv_start = time.perf_counter()
+                response = await self.websocket.recv()
+                recv_duration = (time.perf_counter() - recv_start) * 1000
+                data = json.loads(response)
+                consecutive_errors = 0
+
+                if data.get("error"):
+                    logger.error(f"ElevenLabs v3 error: {data.get('error')} - {data.get('message')}")
+                    self.connection_error = data.get("message") or data.get("error")
+                    return
+
+                if data.get("audio"):
+                    if self.ws_send_time is not None:
+                        audio_chunk_count += 1
+                        if audio_chunk_count == 1:
+                            time_since_send = (time.perf_counter() - self.ws_send_time) * 1000
+                            logger.info(
+                                f"WS recv FIRST trace_id={self.ws_trace_id} recv_wait={recv_duration:.0f}ms "
+                                f"time_since_send={time_since_send:.0f}ms"
+                            )
+                        elif recv_duration > 200:
+                            logger.info(
+                                f"WS recv SLOW chunk={audio_chunk_count} trace_id={self.ws_trace_id} "
+                                f"recv_wait={recv_duration:.0f}ms"
+                            )
+                    chunk = base64.b64decode(data["audio"])
+                    try:
+                        text_spoken = "".join(data.get("alignment", {}).get("chars", []))
+                    except Exception:
+                        text_spoken = ""
+                    yield chunk, text_spoken
+
+                # Sent once per flush as a standalone message with no audio. This is the
+                # only per-turn end marker; is_final arrives only when the session closes.
+                if data.get("is_final_audio_for_turn"):
+                    logger.info(f"WS recv is_final_audio_for_turn trace_id={self.ws_trace_id}")
+                    audio_chunk_count = 0
+                    yield b"\x00", ""
+
+            except websockets.exceptions.ConnectionClosed:
+                # Expected on barge-in, which closes the socket because the endpoint has no
+                # cancel. Keep looping so the reconnect is picked up instead of ending the
+                # generate() stream for the rest of the call.
+                if self.conversation_ended or self.connection_error:
+                    return
+                logger.info("ElevenLabs v3 WebSocket closed, waiting for reconnect")
+                audio_chunk_count = 0
+                await asyncio.sleep(0.05)
+            except Exception as e:
+                consecutive_errors += 1
+                logger.error(f"Error occurred in receiver - {e}")
+                if consecutive_errors >= max_consecutive_errors:
+                    logger.error(
+                        f"ElevenLabs v3 receiver: {consecutive_errors} consecutive errors, giving up to avoid busy-spin."
+                    )
+                    self.connection_error = self.connection_error or str(e)
+                    return
+                await asyncio.sleep(0.1)
+
+    async def cleanup(self):
+        if self._keep_alive_task:
+            self._keep_alive_task.cancel()
+            self._keep_alive_task = None
+        await super().cleanup()

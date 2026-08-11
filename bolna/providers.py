@@ -1,6 +1,7 @@
 from .synthesizer import (
     PollySynthesizer,
     ElevenlabsSynthesizer,
+    ElevenlabsV3Synthesizer,
     OPENAISynthesizer,
     DeepgramSynthesizer,
     AzureSynthesizer,
@@ -45,9 +46,17 @@ from .output_handlers import (
 from .llms import OpenAiLLM, LiteLLM, AzureLLM, GeminiLLM
 from .enums import TelephonyProvider, SynthesizerProvider, TranscriberProvider, LLMProvider
 
+
+def elevenlabs_synthesizer(**kwargs):
+    """Eleven v3 is served only from the text-to-dialogue socket; multi-stream-input 403s
+    on those model ids. Everything else stays on the original synthesizer."""
+    cls = ElevenlabsV3Synthesizer if kwargs.get("model", "").startswith("eleven_v3") else ElevenlabsSynthesizer
+    return cls(**kwargs)
+
+
 SUPPORTED_SYNTHESIZER_MODELS = {
     SynthesizerProvider.POLLY.value: PollySynthesizer,
-    SynthesizerProvider.ELEVENLABS.value: ElevenlabsSynthesizer,
+    SynthesizerProvider.ELEVENLABS.value: elevenlabs_synthesizer,
     SynthesizerProvider.OPENAI.value: OPENAISynthesizer,
     SynthesizerProvider.DEEPGRAM.value: DeepgramSynthesizer,
     SynthesizerProvider.AZURETTS.value: AzureSynthesizer,
