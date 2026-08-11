@@ -1,9 +1,4 @@
-"""Eleven v3 on the text-to-dialogue socket, and the split that keeps it off v1's back.
-
-v1 and v3 are siblings under ElevenlabsBase rather than one extending the other, so most of
-these lock in that neither can drift into the other: v1 keeps its endpoint, its contexts and
-its settings, and v3 keeps its own turn lifecycle.
-"""
+"""Eleven v3 on the text-to-dialogue socket, and the boundary that keeps it clear of v1."""
 
 import asyncio
 import base64

@@ -20,11 +20,7 @@ logger = configure_logger(__name__)
 
 
 class ElevenlabsBase(StreamSynthesizer):
-    """Shared ElevenLabs plumbing: credentials, wire format, and the one-shot HTTP path.
-
-    The two subclasses speak different socket protocols and share nothing below this
-    line, so each owns its own ws_url, api_url and turn lifecycle.
-    """
+    """Credentials, wire format and HTTP synthesis shared by the ElevenLabs synthesizers."""
 
     def __init__(
         self,
@@ -412,12 +408,7 @@ KEEP_ALIVE_INTERVAL = 8
 
 
 class ElevenlabsV3Synthesizer(ElevenlabsBase):
-    """Eleven v3, served only from the text-to-dialogue endpoint.
-
-    Voices register in a first message rather than the URL, text goes as ``inputs`` arrays,
-    turns end on ``is_final_audio_for_turn``, and there are no contexts. The endpoint has no
-    way to cancel a turn, so an interruption closes the socket and dials a replacement.
-    """
+    """Eleven v3 over the text-to-dialogue socket: one flush per turn, no contexts."""
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -548,12 +539,9 @@ class ElevenlabsV3Synthesizer(ElevenlabsBase):
     # ------------------------------------------------------------------
 
     async def handle_interruption(self):
-        """Drop the socket, since no control message on this endpoint cancels a turn.
-
-        Does no network I/O, because the caller awaits this on the interruption path. The
-        socket is detached synchronously so the receiver stops reading the abandoned turn,
-        then closed and replaced on a background task.
-        """
+        """Drop the socket and dial a replacement, since nothing here cancels a turn."""
+        # No network I/O: the caller awaits this on the interruption path. Detaching the
+        # socket synchronously also stops the receiver reading the abandoned turn.
         try:
             self.current_turn_start_time = None
             self._new_turn_pending = True
@@ -567,11 +555,9 @@ class ElevenlabsV3Synthesizer(ElevenlabsBase):
             logger.info(f"Error handling ElevenLabs v3 interruption: {e}")
 
     def _classify_lost_socket(self, where):
-        """Classify a lost socket: ours to abandon quietly, the provider's to report.
-
-        A swallowed provider drop would leave the turn with no end-of-stream, so the final
-        mark never reaches the output handler and playback stays marked as in progress.
-        """
+        """Classify a lost socket: ours to abandon quietly, the provider's to report."""
+        # A swallowed provider drop leaves the turn with no end-of-stream, so the final mark
+        # never reaches the output handler and playback stays marked as in progress.
         self._new_turn_pending = True
         if self._interrupted:
             logger.info(f"ElevenLabs v3 socket closed by barge-in {where}, abandoning turn")
