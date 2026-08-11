@@ -59,6 +59,9 @@ class StreamSynthesizer(BaseSynthesizer):
         self.current_turn_start_time = None
         self.current_turn_id = None
         self.current_sequence_id = None
+        # Canned speech (handoff, goodbye, ...) has no turn_id; the category is the only
+        # way downstream can attribute its latency entry to the message that was spoken.
+        self.current_message_category = None
         self.current_tts_start_ms = None
         self.current_turn_ttfb = None
         self.ws_send_time = None
@@ -194,6 +197,7 @@ class StreamSynthesizer(BaseSynthesizer):
             logger.info(f"Push new_turn text_len={len(meta_info.get('text', '') or '')}")
         self.current_turn_id = meta_info.get("turn_id")
         self.current_sequence_id = meta_info.get("sequence_id")
+        self.current_message_category = meta_info.get("message_category")
         # Eager stub — captured even if turn never produces audio (e.g. TTS WS drop).
         # _record_turn_latency() upserts by sequence_id on completion, replacing this entry.
         self._upsert_turn_latency(
@@ -201,6 +205,7 @@ class StreamSynthesizer(BaseSynthesizer):
                 "turn_id": self.current_turn_id,
                 "sequence_id": self.current_sequence_id,
                 "tts_start_ms": self.current_tts_start_ms,
+                "message_category": self.current_message_category,
             }
         )
 
@@ -297,11 +302,13 @@ class StreamSynthesizer(BaseSynthesizer):
                         "first_result_latency_ms": round((self.current_turn_ttfb or 0) * 1000),
                         "total_stream_duration_ms": round(total_stream_duration * 1000),
                         "characters": self.current_sequence_chars,
+                        "message_category": self.current_message_category,
                     }
                 )
                 self.current_turn_start_time = None
                 self.current_turn_id = None
                 self.current_sequence_id = None
+                self.current_message_category = None
                 self.current_tts_start_ms = None
                 self.ws_send_time = None
                 self.current_turn_ttfb = None
@@ -358,6 +365,7 @@ class StreamSynthesizer(BaseSynthesizer):
                         "sequence_id": self.current_sequence_id,
                         "tts_start_ms": self.current_tts_start_ms,
                         "cancelled_at_ms": _cancelled_at,
+                        "message_category": self.current_message_category,
                     }
                 )
             except Exception as e:
