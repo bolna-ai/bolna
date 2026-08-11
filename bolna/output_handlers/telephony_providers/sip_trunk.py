@@ -104,6 +104,10 @@ class SipTrunkOutputHandler(TelephonyOutputHandler):
         # Asterisk buffering state
         self._start_buffering_sent: bool = False
 
+        # True while _send_frames is writing a chunk — sends are rate-limited, so a
+        # large chunk stays in flight for seconds and teardown must not hang up over it.
+        self._send_in_flight: bool = False
+
         # XOFF/XON: local queue when Asterisk signals backpressure
         self._local_audio_queue: deque = deque()
         # Serialize drains so a second MEDIA_XON can't run a drain concurrently with an
@@ -236,20 +240,33 @@ class SipTrunkOutputHandler(TelephonyOutputHandler):
                          at the front of _local_audio_queue (preserves ordering)
           "stale"      — a FLUSH_MEDIA/interruption bumped the generation; nothing more sent
         """
-        offset = 0
-        while offset < len(chunk):
-            if gen != self._flush_generation:
-                return "stale"
-            if self.queue_full:
-                self._local_audio_queue.appendleft((AUDIO_ENTRY, chunk[offset:]))
-                return "queue_full"
-            end = min(offset + MAX_WS_FRAME_BYTES, len(chunk))
-            if self._response_first_send == 0.0:
-                self._response_first_send = time.monotonic()
-            await self.websocket.send_bytes(chunk[offset:end])
-            await self._rate_limit(end - offset)
-            offset = end
-        return "sent"
+        self._send_in_flight = True
+        try:
+            offset = 0
+            while offset < len(chunk):
+                if gen != self._flush_generation:
+                    return "stale"
+                if self.queue_full:
+                    self._local_audio_queue.appendleft((AUDIO_ENTRY, chunk[offset:]))
+                    return "queue_full"
+                end = min(offset + MAX_WS_FRAME_BYTES, len(chunk))
+                if self._response_first_send == 0.0:
+                    self._response_first_send = time.monotonic()
+                await self.websocket.send_bytes(chunk[offset:end])
+                await self._rate_limit(end - offset)
+                offset = end
+            return "sent"
+        finally:
+            self._send_in_flight = False
+
+    def has_unsent_audio(self) -> bool:
+        """Audio accepted but not yet written to Asterisk (mid-send or XOFF-parked).
+
+        XOFF-parked audio is only counted while the handler is open: close() runs before
+        stop_handler() and drain_local_queue() bails once _closed, so after close that
+        audio can never be sent — waiting on it would stall teardown for the full cap.
+        """
+        return self._send_in_flight or (not self._closed and bool(self._local_audio_queue))
 
     def _register_mark(self, meta_info: dict, is_final: bool, audio_duration: float) -> str:
         """Record per-mark metadata (same contract as Plivo/Twilio) and return the mark id
@@ -409,8 +426,8 @@ class SipTrunkOutputHandler(TelephonyOutputHandler):
 
     async def handle(self, ws_data_packet):
         """Send audio to Asterisk in bursts; track playback completion by accumulated
-        duration. Pipeline: convert → reset-on-new-sequence → buffer-gate → send (or
-        XOFF-queue) → register mark → schedule finish on the final chunk.
+        duration. Pipeline: convert → reset-on-new-sequence → buffer-gate → register
+        mark → send (or XOFF-queue) → emit mark → schedule finish on the final chunk.
         """
         if self._closed:
             return
@@ -465,6 +482,13 @@ class SipTrunkOutputHandler(TelephonyOutputHandler):
                 if gen != self._flush_generation:
                     return
 
+            # Register the mark BEFORE sending: the send is rate-limited, so a large
+            # chunk stays in flight for seconds, and the hangup gate reads "no pending
+            # marks" as "everything heard" — registering after the send lets HANGUP
+            # cut off a chunk that is still being written.
+            mark_id = self._register_mark(meta_info, is_final, audio_duration) if self.mark_event_meta_data else None
+
+            if has_audio:
                 # If XOFF is active or a drain is in flight, queue locally to preserve
                 # ordering; otherwise send now (re-queues the remainder on a mid-send XOFF).
                 if self.queue_full or self._local_audio_queue:
@@ -479,10 +503,9 @@ class SipTrunkOutputHandler(TelephonyOutputHandler):
                         logger.debug(f"sip-trunk send_bytes stopped: {e}")
                         return
 
-            # Register mark metadata (same contract as Plivo/Twilio) and ask Asterisk to
-            # echo it back once this chunk reaches the front of its playout queue.
-            if self.mark_event_meta_data:
-                mark_id = self._register_mark(meta_info, is_final, audio_duration)
+            # Ask Asterisk to echo the mark back once this chunk reaches the front of
+            # its playout queue (same contract as Plivo/Twilio).
+            if mark_id is not None:
                 if gen == self._flush_generation:
                     await self._emit_mark(mark_id)
 

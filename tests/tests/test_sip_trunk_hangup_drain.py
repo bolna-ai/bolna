@@ -56,6 +56,7 @@ def fast_timings(monkeypatch):
     monkeypatch.setattr(sip_trunk_input, "HANGUP_DRAIN_TIMEOUT_S", 0.30)
     monkeypatch.setattr(sip_trunk_input, "HANGUP_DRAIN_SETTLE_S", 0.05)
     monkeypatch.setattr(sip_trunk_input, "HANGUP_SETTLE_S", 0.0)
+    monkeypatch.setattr(sip_trunk_input, "HANGUP_DRAIN_MAX_WAIT_S", 3.0)
 
 
 @pytest.mark.asyncio
@@ -146,6 +147,68 @@ async def test_hangup_still_sent_when_teardown_is_cancelled_during_the_drain():
 
     assert ws.sent == ["REPORT_QUEUE_DRAINED", "HANGUP"]
     assert handler.running is False
+
+
+@pytest.mark.asyncio
+async def test_drain_waits_for_output_handler_to_finish_writing():
+    # The output handler paces sends at 1.5x real time, so a long goodbye is often still
+    # being WRITTEN at teardown. Asking Asterisk for QUEUE_DRAINED before the tail is even
+    # sent would hang up over it.
+    ws = _FakeWebSocket()
+    listen_task = asyncio.create_task(_live_task())
+    handler = _make_handler(ws, listen_task)
+
+    class _FakeOutput:
+        unsent = True
+
+        def has_unsent_audio(self):
+            return self.unsent
+
+    output = _FakeOutput()
+    handler.output_handler_ref = output
+
+    async def _finish_sending_then_drain():
+        await asyncio.sleep(0.15)
+        assert ws.sent == []  # REPORT_QUEUE_DRAINED must not go out while still writing
+        output.unsent = False
+        await asyncio.sleep(0.15)
+        await handler._handle_control_message("QUEUE_DRAINED")
+
+    sender = asyncio.create_task(_finish_sending_then_drain())
+    start = asyncio.get_running_loop().time()
+    await handler.stop_handler()
+    elapsed = asyncio.get_running_loop().time() - start
+    await sender
+    listen_task.cancel()
+
+    assert ws.sent == ["REPORT_QUEUE_DRAINED", "HANGUP"]
+    assert elapsed > 0.30  # held through the write (0.15s) and the playout (0.15s)
+
+
+@pytest.mark.asyncio
+async def test_drain_timeout_scales_with_pending_mark_durations():
+    # A flat grace clips any goodbye whose unplayed tail is longer than it; the wait must
+    # cover what the pending marks say is still queued in Asterisk.
+    ws = _FakeWebSocket()
+    listen_task = asyncio.create_task(_live_task())
+    handler = _make_handler(ws, listen_task)
+
+    class _Meta:
+        mark_event_meta_data = {
+            "m1": {"type": "agent_response", "duration": 0.5},
+            "m2": {"type": "agent_response", "duration": 0.3},
+        }
+
+    handler.mark_event_meta_data = _Meta()
+
+    start = asyncio.get_running_loop().time()
+    await asyncio.wait_for(handler.stop_handler(), timeout=5.0)
+    elapsed = asyncio.get_running_loop().time() - start
+    listen_task.cancel()
+
+    assert ws.sent == ["REPORT_QUEUE_DRAINED", "HANGUP"]
+    # 0.8s of unplayed audio + 0.3s grace, not the bare 0.3s grace.
+    assert 1.0 < elapsed < 2.0
 
 
 @pytest.mark.asyncio

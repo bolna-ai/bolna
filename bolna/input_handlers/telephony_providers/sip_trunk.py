@@ -7,6 +7,7 @@ Ref: https://docs.asterisk.org/Configuration/Channel-Drivers/WebSocket/
 import asyncio
 import json
 import os
+import time
 import traceback
 from bolna.input_handlers.telephony import TelephonyInputHandler
 from bolna.helpers.utils import create_ws_data_packet
@@ -28,9 +29,15 @@ AUDIO_BATCH_MS = 80
 # time to act on it. Overridable via env.
 HANGUP_SETTLE_S = float(os.environ.get("SIP_HANGUP_SETTLE_S", "0.5"))
 
-# Max wait for Asterisk to confirm (QUEUE_DRAINED) that it has played out everything we
-# sent, before HANGUP cuts the tail off the goodbye. Overridable via env.
+# Grace on top of the unplayed-audio estimate when waiting for Asterisk to confirm
+# (QUEUE_DRAINED) that it has played out everything we sent, before HANGUP cuts the
+# tail off the goodbye. Overridable via env.
 HANGUP_DRAIN_TIMEOUT_S = float(os.environ.get("SIP_HANGUP_DRAIN_TIMEOUT_S", "2.0"))
+
+# Hard ceiling on the whole teardown drain (finish writing + play out). Asterisk's own
+# frame queue caps at ~24s of audio, so anything beyond this is a stuck signal, not a
+# long goodbye. Overridable via env.
+HANGUP_DRAIN_MAX_WAIT_S = float(os.environ.get("SIP_HANGUP_DRAIN_MAX_WAIT_S", "30.0"))
 
 # Extra wait after QUEUE_DRAINED for the far-end jitter buffer. Overridable via env.
 HANGUP_DRAIN_SETTLE_S = float(os.environ.get("SIP_HANGUP_DRAIN_SETTLE_S", "0.5"))
@@ -155,16 +162,33 @@ class SipTrunkInputHandler(TelephonyInputHandler):
         except Exception as e:
             logger.error(f"Error sending HANGUP: {e}")
 
+    def _unplayed_audio_estimate(self) -> float:
+        """Seconds of audio registered but not yet confirmed played, from pending marks."""
+        meta = getattr(self, "mark_event_meta_data", None)
+        if not meta:
+            return 0.0
+        events = meta.mark_event_meta_data
+        return sum(v.get("duration") or 0.0 for v in events.values() if v.get("type") != "pre_mark_message")
+
     async def _await_playback_drained(self):
         """Hold HANGUP until Asterisk reports its frame queue empty.
 
         Audio is handed over faster than real time, so at teardown part of the goodbye is
-        usually still buffered in Asterisk and HANGUP would discard it. Bounded, and a
-        no-op once the queue is already empty.
+        usually still buffered in Asterisk — and, because sends are rate-limited, part of
+        it may not even have been written yet. Wait for the output handler to finish
+        writing, then wait for QUEUE_DRAINED for as long as the pending-mark durations
+        say is left to play. Bounded, and a no-op once the queue is already empty.
         """
         listen_task = self.websocket_listen_task
         if listen_task is None or listen_task.done():
             return  # receive loop is gone (caller hung up first) — nothing can answer
+
+        deadline = time.monotonic() + HANGUP_DRAIN_MAX_WAIT_S
+
+        output = getattr(self, "output_handler_ref", None)
+        if output is not None and hasattr(output, "has_unsent_audio"):
+            while output.has_unsent_audio() and time.monotonic() < deadline:
+                await asyncio.sleep(0.1)
 
         self._queue_drained.clear()
         try:
@@ -173,12 +197,15 @@ class SipTrunkInputHandler(TelephonyInputHandler):
             logger.info(f"REPORT_QUEUE_DRAINED not sent for channel {self.channel_id}: {e}")
             return
 
+        timeout = max(
+            HANGUP_DRAIN_TIMEOUT_S,
+            min(self._unplayed_audio_estimate() + HANGUP_DRAIN_TIMEOUT_S, deadline - time.monotonic()),
+        )
         try:
-            await asyncio.wait_for(self._queue_drained.wait(), timeout=HANGUP_DRAIN_TIMEOUT_S)
+            await asyncio.wait_for(self._queue_drained.wait(), timeout=timeout)
         except asyncio.TimeoutError:
             logger.warning(
-                f"QUEUE_DRAINED not received within {HANGUP_DRAIN_TIMEOUT_S}s for channel "
-                f"{self.channel_id}; hanging up anyway"
+                f"QUEUE_DRAINED not received within {timeout:.1f}s for channel {self.channel_id}; hanging up anyway"
             )
             return
         await asyncio.sleep(HANGUP_DRAIN_SETTLE_S)
