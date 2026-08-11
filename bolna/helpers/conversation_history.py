@@ -27,8 +27,10 @@ class ConversationHistory:
 
         self._interim = copy.deepcopy(self._messages)
 
-    def append_user(self, content: str):
-        self._messages.append({"role": ChatRole.USER, "content": content})
+    def append_user(self, content: str, **kwargs):
+        # kwargs (turn_id) let consumers correlate a user turn to its ASR turn by id
+        # instead of by text. LLM adapters ignore/strip unknown message keys.
+        self._messages.append({"role": ChatRole.USER, "content": content, **kwargs})
 
     def replace_last_user(self, expected_content: str, new_content: str) -> bool:
         """Replace the most recent user message's content, but only if it still matches

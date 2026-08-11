@@ -4394,7 +4394,7 @@ class TaskManager(BaseManager):
                 meta_info.get("response_uid"),
             )
 
-        self.conversation_history.append_user(transcriber_message)
+        self.conversation_history.append_user(transcriber_message, turn_id=meta_info.get("turn_id"))
         logger.info(
             "BOLNA_TRACE_TM append_user seq=%s turn=%s response_uid=%s history_len=%s text=%r",
             meta_info.get("sequence_id"),
