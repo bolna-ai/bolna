@@ -19,7 +19,13 @@ from bolna.memory.cache.inmemory_scalar_cache import InmemoryScalarCache
 logger = configure_logger(__name__)
 
 
-class ElevenlabsSynthesizer(StreamSynthesizer):
+class ElevenlabsBase(StreamSynthesizer):
+    """Shared ElevenLabs plumbing: credentials, wire format, and the one-shot HTTP path.
+
+    The two subclasses speak different socket protocols and share nothing below this
+    line, so each owns its own ws_url, api_url and turn lifecycle.
+    """
+
     def __init__(
         self,
         voice,
@@ -59,6 +65,8 @@ class ElevenlabsSynthesizer(StreamSynthesizer):
             self.cache = InmemoryScalarCache()
 
         self.elevenlabs_host = os.getenv("ELEVENLABS_API_HOST", "api.elevenlabs.io")
+        # Set from the x-trace-id response header on connect; both sockets log against it.
+        self.ws_trace_id = None
         if self.use_mulaw:
             self.wire_format = "ulaw_8000"
             self.wire_pcm_rate = None
@@ -70,29 +78,6 @@ class ElevenlabsSynthesizer(StreamSynthesizer):
             rate = int(self.sampling_rate)
             self.wire_pcm_rate = rate if rate in (16000, 22050, 24000, 44100) else 24000
             self.wire_format = f"pcm_{self.wire_pcm_rate}"
-        self.ws_url = (
-            f"wss://{self.elevenlabs_host}/v1/text-to-speech/{self.voice}/multi-stream-input"
-            f"?model_id={self.model}&output_format={self.wire_format}"
-            f"&inactivity_timeout=170&sync_alignment=true&optimize_streaming_latency=4"
-        )
-        self.api_url = f"https://{self.elevenlabs_host}/v1/text-to-speech/{self.voice}/stream?optimize_streaming_latency=2&output_format="
-
-        # One context per turn: closed at end_of_llm_stream and on interruption, so each
-        # turn gets a fresh context_id. Closing frees the slot, staying well under
-        # ElevenLabs' 5-concurrent-context cap.
-        self.context_id = None
-        self.context_ids_to_ignore = set()
-        self._eos_context_id = None  # context the last end-of-stream was emitted for
-        self.current_turn_context_id = None  # survives close_context, unlike context_id
-        self.ws_send_time = None
-        self.ws_trace_id = None
-        self.current_turn_ttfb = None
-        self.eos_accum_context_id = None  # context whose spoken chars are being accumulated
-        self.eos_accum_text = ""  # spoken-so-far for that context (end-of-stream match)
-
-    # ------------------------------------------------------------------
-    # StreamSynthesizer hooks
-    # ------------------------------------------------------------------
 
     def _get_audio_format(self):
         return "mulaw" if self.wire_format == "ulaw_8000" else "wav"
@@ -109,23 +94,74 @@ class ElevenlabsSynthesizer(StreamSynthesizer):
         audio, text_synthesized = item
         return audio, {"text_synthesized": text_synthesized}
 
+    def _get_output_format(self):
+        return self.wire_format
+
+    async def synthesize(self, text):
+        return await self._generate_http(text, format="mp3_44100_128")
+
+    async def synthesize_telephony_clip(self, text):
+        """One-shot render in the telephony wire format (mu-law 8000) — no
+        decode/transcode step (and no ffmpeg), unlike the MP3 the plain synthesize()
+        returns. None on non-mulaw configs so callers fall back to synthesize()."""
+        if not self.use_mulaw:
+            return None
+        return await self._generate_http(text)
+
+    async def _generate_http(self, text, format=None):
+        payload = {
+            "text": text,
+            "model_id": self.model,
+            "voice_settings": {
+                "stability": self.temperature,
+                "similarity_boost": self.similarity_boost,
+                "optimize_streaming_latency": 3,
+                "speed": self.speed,
+                "style": self.style,
+            },
+        }
+        headers = {"xi-api-key": self.api_key}
+        fmt = format or self._get_output_format()
+        url = f"{self.api_url}{fmt}"
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, headers=headers, json=payload) as response:
+                if response.status == 200:
+                    return await response.read()
+                else:
+                    logger.error(f"Error: {response.status} - {await response.text()}")
+                    return None
+
+
+class ElevenlabsSynthesizer(ElevenlabsBase):
+    """Eleven v1/v2 models over the multi-stream-input socket, one context per turn."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.ws_url = (
+            f"wss://{self.elevenlabs_host}/v1/text-to-speech/{self.voice}/multi-stream-input"
+            f"?model_id={self.model}&output_format={self.wire_format}"
+            f"&inactivity_timeout=170&sync_alignment=true&optimize_streaming_latency=4"
+        )
+        self.api_url = f"https://{self.elevenlabs_host}/v1/text-to-speech/{self.voice}/stream?optimize_streaming_latency=2&output_format="
+
+        # One context per turn: closed at end_of_llm_stream and on interruption, so each
+        # turn gets a fresh context_id. Closing frees the slot, staying well under
+        # ElevenLabs' 5-concurrent-context cap.
+        self.context_id = None
+        self.context_ids_to_ignore = set()
+        self._eos_context_id = None  # context the last end-of-stream was emitted for
+        self.current_turn_context_id = None  # survives close_context, unlike context_id
+        self.ws_send_time = None
+        self.current_turn_ttfb = None
+        self.eos_accum_context_id = None  # context whose spoken chars are being accumulated
+        self.eos_accum_text = ""  # spoken-so-far for that context (end-of-stream match)
+
     def _on_push(self, meta_info, text):
         # Mint only for pushes that will actually synthesize — a superseded push must not
         # advance current_turn_context_id, or the prior turn's real isFinal gets suppressed.
         if not self.context_id and self.should_synthesize_response(meta_info.get("sequence_id")):
             self.context_id = str(uuid.uuid4())
             self.current_turn_context_id = self.context_id
-
-    # ------------------------------------------------------------------
-    # Format helper
-    # ------------------------------------------------------------------
-
-    def _get_output_format(self):
-        return self.wire_format
-
-    # ------------------------------------------------------------------
-    # Interruption
-    # ------------------------------------------------------------------
 
     async def handle_interruption(self):
         try:
@@ -143,10 +179,6 @@ class ElevenlabsSynthesizer(StreamSynthesizer):
                 self.context_id = None
         except Exception:
             pass
-
-    # ------------------------------------------------------------------
-    # sender / receiver
-    # ------------------------------------------------------------------
 
     async def sender(self, text, sequence_id, end_of_llm_stream=False):
         try:
@@ -326,10 +358,6 @@ class ElevenlabsSynthesizer(StreamSynthesizer):
                 # Back off so a persistent error can't peg the event loop.
                 await asyncio.sleep(0.1)
 
-    # ------------------------------------------------------------------
-    # Connection
-    # ------------------------------------------------------------------
-
     async def establish_connection(self):
         try:
             start_time = time.perf_counter()
@@ -372,44 +400,6 @@ class ElevenlabsSynthesizer(StreamSynthesizer):
             logger.error(f"Failed to connect to ElevenLabs: {e}")
             return None
 
-    # ------------------------------------------------------------------
-    # HTTP fallback
-    # ------------------------------------------------------------------
-
-    async def synthesize(self, text):
-        return await self._generate_http(text, format="mp3_44100_128")
-
-    async def synthesize_telephony_clip(self, text):
-        """One-shot render in the telephony wire format (mu-law 8000) — no
-        decode/transcode step (and no ffmpeg), unlike the MP3 the plain synthesize()
-        returns. None on non-mulaw configs so callers fall back to synthesize()."""
-        if not self.use_mulaw:
-            return None
-        return await self._generate_http(text)
-
-    async def _generate_http(self, text, format=None):
-        payload = {
-            "text": text,
-            "model_id": self.model,
-            "voice_settings": {
-                "stability": self.temperature,
-                "similarity_boost": self.similarity_boost,
-                "optimize_streaming_latency": 3,
-                "speed": self.speed,
-                "style": self.style,
-            },
-        }
-        headers = {"xi-api-key": self.api_key}
-        fmt = format or self._get_output_format()
-        url = f"{self.api_url}{fmt}"
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, headers=headers, json=payload) as response:
-                if response.status == 200:
-                    return await response.read()
-                else:
-                    logger.error(f"Error: {response.status} - {await response.text()}")
-                    return None
-
 
 # v3 takes three discrete stability values; anything else is accepted and silently snapped.
 STABILITY_PRESETS = (0.0, 0.5, 1.0)
@@ -421,7 +411,7 @@ RECONNECT_POLL_INTERVAL = 0.05
 KEEP_ALIVE_INTERVAL = 8
 
 
-class ElevenlabsV3Synthesizer(ElevenlabsSynthesizer):
+class ElevenlabsV3Synthesizer(ElevenlabsBase):
     """Eleven v3, served only from the text-to-dialogue endpoint.
 
     Voices register in a first message rather than the URL, text goes as ``inputs`` arrays,
@@ -457,10 +447,6 @@ class ElevenlabsV3Synthesizer(ElevenlabsSynthesizer):
 
     def get_sleep_time(self):
         return 0.01
-
-    def _on_push(self, meta_info, text):
-        """No context to mint; turn boundaries are marked with new_turn on the wire."""
-        return
 
     # ------------------------------------------------------------------
     # Connection
