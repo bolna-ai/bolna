@@ -432,6 +432,12 @@ class ElevenlabsV3Synthesizer(ElevenlabsSynthesizer):
             f"wss://{self.elevenlabs_host}/v1/text-to-dialogue/stream-input"
             f"?model_id={self.model}&output_format={self.wire_format}&sync_alignment=true"
         )
+        # No optimize_streaming_latency: v3 rejects the query param with a 400, which would
+        # leave welcome messages and handoff clips silent.
+        self.api_url = f"https://{self.elevenlabs_host}/v1/text-to-speech/{self.voice}/stream?output_format="
+        # Snapped once here so the inherited HTTP path renders welcome clips at the same
+        # stability the streamed conversation uses.
+        self.temperature = min(STABILITY_PRESETS, key=lambda preset: abs(preset - self.temperature))
         # Nulled so no inherited code path reads a context this endpoint does not have.
         self.context_id = None
         self.current_turn_context_id = None
@@ -472,7 +478,7 @@ class ElevenlabsV3Synthesizer(ElevenlabsSynthesizer):
                 json.dumps(
                     {
                         "voices": [self.voice],
-                        "voice_settings": {"stability": self._snapped_stability()},
+                        "voice_settings": {"stability": self.temperature},
                     }
                 )
             )
@@ -496,9 +502,6 @@ class ElevenlabsV3Synthesizer(ElevenlabsSynthesizer):
         except Exception as e:
             logger.error(f"Failed to connect to ElevenLabs v3: {e}")
             return None
-
-    def _snapped_stability(self):
-        return min(STABILITY_PRESETS, key=lambda preset: abs(preset - self.temperature))
 
     async def _ensure_connection(self):
         """Reconnect if down, serialised so the barge-in redial and the monitor loop
