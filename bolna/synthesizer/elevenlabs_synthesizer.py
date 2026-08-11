@@ -447,6 +447,9 @@ class ElevenlabsV3Synthesizer(ElevenlabsSynthesizer):
         self._new_turn_pending = True
         # Tells a close we caused apart from one the provider caused.
         self._interrupted = False
+        # last_text_sent stays true between turns, so it cannot say whether a turn is still
+        # open. This does, and keeps a dropped socket from ending an already-ended turn twice.
+        self._turn_eos_emitted = True
         self._connect_lock = asyncio.Lock()
         self._keep_alive_task = None
         self._reconnect_task = None
@@ -512,6 +515,8 @@ class ElevenlabsV3Synthesizer(ElevenlabsSynthesizer):
     async def _ensure_connection(self):
         """Reconnect if down, serialised so two callers cannot both dial and leak a socket."""
         async with self._connect_lock:
+            if self.conversation_ended:
+                return False
             if self._is_ws_connected():
                 return True
             websocket = await self.establish_connection()
@@ -522,7 +527,7 @@ class ElevenlabsV3Synthesizer(ElevenlabsSynthesizer):
 
     async def monitor_connection(self):
         consecutive_failures = 0
-        while consecutive_failures < 3:
+        while consecutive_failures < 3 and not self.conversation_ended:
             if not self._is_ws_connected():
                 logger.info("Re-establishing ElevenLabs v3 connection...")
                 if await self._ensure_connection():
@@ -623,6 +628,7 @@ class ElevenlabsV3Synthesizer(ElevenlabsSynthesizer):
                     try:
                         if self.ws_send_time is None:
                             self.ws_send_time = time.perf_counter()
+                            self._turn_eos_emitted = False
                             logger.info(f"WS send trace_id={self.ws_trace_id} first_text_sent")
                         # Only the first fragment of a turn; per-fragment new_turn would
                         # break intonation inside one utterance.
@@ -729,6 +735,7 @@ class ElevenlabsV3Synthesizer(ElevenlabsSynthesizer):
                 if data.get("is_final_audio_for_turn"):
                     logger.info(f"WS recv is_final_audio_for_turn trace_id={self.ws_trace_id}")
                     audio_chunk_count = 0
+                    self._turn_eos_emitted = True
                     yield b"\x00", ""
 
             except websockets.exceptions.ConnectionClosed:
@@ -743,7 +750,8 @@ class ElevenlabsV3Synthesizer(ElevenlabsSynthesizer):
                     # explicitly, or nothing stamps end_of_synthesizer_stream and playback
                     # stays marked as in progress for the rest of the call.
                     logger.error("ElevenLabs v3 WebSocket dropped by provider, ending the turn")
-                    if self.last_text_sent:
+                    if self.last_text_sent and not self._turn_eos_emitted:
+                        self._turn_eos_emitted = True
                         yield b"\x00", ""
                 audio_chunk_count = 0
                 await asyncio.sleep(0.05)
