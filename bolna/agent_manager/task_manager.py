@@ -2835,7 +2835,14 @@ class TaskManager(BaseManager):
                 break
 
         if self.hangup_message_queued and not web_call_timeout:
-            self.history.append({"role": "assistant", "content": self.call_hangup_message})
+            self.history.append(
+                {
+                    "role": "assistant",
+                    "content": self.call_hangup_message,
+                    "sequence_id": -1,
+                    "message_category": "agent_hangup",
+                }
+            )
 
         self.conversation_ended = True
         self.ended_by_assistant = True
@@ -4255,6 +4262,7 @@ class TaskManager(BaseManager):
             "content": content,
             "turn_id": turn_id,
             "response_uid": response_uid,
+            "message_category": meta_info.get("message_category"),
         }
         logger.info(
             "BOLNA_TRACE_TM stage_assistant_history seq=%s turn=%s response_uid=%s text_len=%s",
@@ -4277,7 +4285,10 @@ class TaskManager(BaseManager):
 
         self._committed_assistant_sequences.add(sequence_id)
         self.conversation_history.append_assistant(
-            staged["content"], turn_id=staged["turn_id"], response_uid=staged["response_uid"]
+            staged["content"],
+            turn_id=staged["turn_id"],
+            response_uid=staged["response_uid"],
+            message_category=staged.get("message_category"),
         )
         if staged["turn_id"] is not None:
             self._turn_msg_map[staged["turn_id"]] = self.conversation_history.messages[-1]
@@ -7561,14 +7572,17 @@ class TaskManager(BaseManager):
                 }
                 for _tt in output["progression_data"]["transcriber_latencies"].get("turn_latencies", []):
                     _tid = _tt.get("turn_id")
-                    if not isinstance(_tid, int) or _tid in _ub_turns or not _tt.get("final_transcript"):
+                    # Any id will do — OpenAI's are strings ("turn_3"), Deepgram's are ints.
+                    # Requiring int here silently dropped every Whisper turn from this stamp.
+                    if _tid is None or _tid in _ub_turns or not _tt.get("final_transcript"):
                         continue
                     _u_start = _tt.get("asr_turn_start_ms")
                     if _u_start is None:
                         _u_start = _tt.get("asr_start_ms")
+                    # No fallback to asr_finalized_ms: that is when ASR returned, not when the
+                    # caller stopped. Substituting it made "ASR time" compute to exactly 0 and
+                    # could place the end before the start. None means unknown.
                     _u_end = _tt.get("user_speech_end_ms")
-                    if _u_end is None:
-                        _u_end = _tt.get("asr_finalized_ms")
                     output["progression_data"]["user_bot_latencies"].append(
                         {
                             "turn_id": _tid,

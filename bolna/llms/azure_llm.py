@@ -22,6 +22,7 @@ from bolna.helpers.utils import convert_to_request_log, compute_function_pre_cal
 from .openai_base import OpenAICompatibleLLM
 from .tool_call_accumulator import ToolCallAccumulator
 from .types import LLMStreamChunk, LatencyData
+from .message_models import strip_internal_keys
 from bolna.helpers.logger_config import configure_logger
 
 logger = configure_logger(__name__)
@@ -129,7 +130,7 @@ class AzureLLM(OpenAICompatibleLLM):
         model_args = {
             **self.model_args,
             "response_format": response_format,
-            "messages": messages,
+            "messages": strip_internal_keys(messages),
             "stream": True,
             "stream_options": {"include_usage": True},
         }

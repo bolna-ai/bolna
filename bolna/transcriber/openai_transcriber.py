@@ -88,7 +88,7 @@ class OpenAITranscriber(BaseTranscriber):
         self._turn_start_epoch_ms = None
         # Saved at commit time so the receiver can still identify the turn after
         # _reset_turn_state() clears current_turn_id (e.g. utterance timeout race).
-        self._last_committed_turn_id: Optional[int] = None
+        self._last_committed_turn_id: Optional[str] = None
         # turn_id of the last entry written to turn_latencies, to keep those keys unique
         self._last_latency_turn_id = None
 
@@ -168,7 +168,7 @@ class OpenAITranscriber(BaseTranscriber):
             # cleared current_turn_id before we got here (shouldn't happen after the
             # _reset_turn_state fix, but guard anyway).
             self.turn_counter += 1
-            self.current_turn_id = self.turn_counter
+            self.current_turn_id = f"turn_{self.turn_counter}"
             logger.warning(f"_commit_turn: assigned fallback turn_id {self.current_turn_id}")
         self._last_committed_turn_id = self.current_turn_id
         try:
@@ -330,7 +330,7 @@ class OpenAITranscriber(BaseTranscriber):
                         self._final_transcript_event.clear()
                         self._audio_appended_since_commit = False
                         self.turn_counter += 1
-                        self.current_turn_id = self.turn_counter
+                        self.current_turn_id = f"turn_{self.turn_counter}"
                         self.current_turn_start_time = time.perf_counter()
                         self._turn_start_epoch_ms = timestamp_ms()
                         self.current_turn_interim_details = []
@@ -418,7 +418,7 @@ class OpenAITranscriber(BaseTranscriber):
                             # fresh id — they are genuinely distinct transcripts with distinct times.
                             if turn_id is not None and turn_id == self._last_latency_turn_id:
                                 self.turn_counter += 1
-                                turn_id = self.turn_counter
+                                turn_id = f"turn_{self.turn_counter}"
                             self._last_latency_turn_id = turn_id
                             self.meta_info["asr_turn_id"] = turn_id  # appends, so no base-class stamp
                             logger.info(f"Transcript completed for turn {turn_id}: {transcript[:80]}")
@@ -468,7 +468,7 @@ class OpenAITranscriber(BaseTranscriber):
                     elif event_type == "input_audio_buffer.speech_started":
                         self._speech_active = True
                         self.turn_counter += 1
-                        self.current_turn_id = self.turn_counter
+                        self.current_turn_id = f"turn_{self.turn_counter}"
                         self.current_turn_start_time = time.perf_counter()
                         self._turn_start_epoch_ms = timestamp_ms()
                         self.current_turn_interim_details = []
