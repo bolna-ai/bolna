@@ -127,6 +127,30 @@ async def test_mark_media_is_sent_after_the_audio_it_marks():
 
 
 @pytest.mark.asyncio
+async def test_mark_is_registered_before_the_first_frame_is_written():
+    # Sends are rate-limited, so a large chunk stays in flight for seconds. The hangup
+    # gate reads "no pending marks" as "everything heard" — if the mark only appears
+    # after the send, teardown can hang up over a chunk that is still being written.
+    meta = MarkEventMetaData()
+    inp = _FakeInputHandler(meta)
+
+    class _SnoopWS(_FakeWebSocket):
+        marks_at_first_frame = None
+
+        async def send_bytes(self, data):
+            if self.marks_at_first_frame is None:
+                self.marks_at_first_frame = dict(meta.mark_event_meta_data)
+            await super().send_bytes(data)
+
+    ws = _SnoopWS()
+    out = _make_output_handler(ws, inp)
+
+    await out.handle(_audio_packet(b"\xff" * 800))
+
+    assert ws.marks_at_first_frame, "mark must be pending before the first frame is written"
+
+
+@pytest.mark.asyncio
 async def test_mark_is_queued_behind_parked_audio_during_xoff():
     # MARK_MEDIA is a TEXT frame; sending it while audio sits in the local queue would put
     # it ahead of that audio in Asterisk's queue and echo back early.
