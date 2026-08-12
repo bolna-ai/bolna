@@ -1,7 +1,7 @@
 from .base_synthesizer import BaseSynthesizer
 from .stream_synthesizer import StreamSynthesizer
 from .polly_synthesizer import PollySynthesizer
-from .elevenlabs_synthesizer import ElevenlabsSynthesizer
+from .elevenlabs_synthesizer import ElevenlabsSynthesizer, ElevenlabsV3Synthesizer
 from .openai_synthesizer import OPENAISynthesizer
 from .deepgram_synthesizer import DeepgramSynthesizer
 from .azure_synthesizer import AzureSynthesizer
