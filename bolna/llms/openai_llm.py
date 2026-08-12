@@ -26,6 +26,7 @@ from bolna.enums import ResponseStreamEvent, ResponseItemType, Verbosity
 from bolna.helpers.ssl_context import get_ssl_context
 from bolna.helpers.utils import compute_function_pre_call_message, now_ms
 from .openai_base import OpenAICompatibleLLM
+from .message_models import strip_internal_keys
 from .tool_call_accumulator import ToolCallAccumulator
 from .types import APIParams, LLMStreamChunk, LatencyData
 from bolna.helpers.logger_config import configure_logger
@@ -238,7 +239,7 @@ class OpenAiLLM(OpenAICompatibleLLM):
         model_args = {
             **self.model_args,
             "response_format": response_format,
-            "messages": messages,
+            "messages": strip_internal_keys(messages),
             "stream": True,
             "stream_options": {"include_usage": True},
         }
@@ -449,7 +450,12 @@ class OpenAiLLM(OpenAICompatibleLLM):
 
         try:
             completion = await self.async_client.chat.completions.create(
-                model=self.model, temperature=0.0, messages=messages, stream=False, response_format=response_format
+                model=self.model,
+                temperature=0.0,
+                # Same guarantee as the streaming path: bookkeeping keys never reach the wire.
+                messages=strip_internal_keys(messages),
+                stream=False,
+                response_format=response_format,
             )
             res = completion.choices[0].message.content
             if ret_metadata:

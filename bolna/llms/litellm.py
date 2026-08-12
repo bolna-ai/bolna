@@ -12,6 +12,7 @@ from bolna.helpers.utils import convert_to_request_log, compute_function_pre_cal
 from .llm import BaseLLM
 from .tool_call_accumulator import ToolCallAccumulator
 from .types import LLMStreamChunk, LatencyData
+from .message_models import strip_internal_keys
 from bolna.helpers.logger_config import configure_logger
 
 logger = configure_logger(__name__)
@@ -70,7 +71,7 @@ class LiteLLM(BaseLLM):
         first_token_time = None
 
         model_args = self.model_args.copy()
-        model_args["messages"] = messages
+        model_args["messages"] = strip_internal_keys(messages)
         model_args["stream"] = True
         model_args["stop"] = ["User:"]
 
@@ -191,7 +192,7 @@ class LiteLLM(BaseLLM):
         text = ""
         model_args = self.model_args.copy()
         model_args["model"] = self.model
-        model_args["messages"] = messages
+        model_args["messages"] = strip_internal_keys(messages)
         model_args["stream"] = stream
 
         if request_json:

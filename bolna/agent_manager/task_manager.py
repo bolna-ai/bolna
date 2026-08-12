@@ -214,6 +214,14 @@ _NON_NODE_RESPONSE_CATEGORIES = frozenset(
 )
 
 
+def asr_id_to_int(value):
+    """Coerce OpenAI's "turn_3" ASR ids to int (Deepgram's are already ints); unparseable -> None."""
+    if isinstance(value, str):
+        digits = "".join(filter(str.isdigit, value))
+        return int(digits) if digits else None
+    return value
+
+
 def trailing_utterance_text(segments, gap_seconds=4.0):
     """Text of the caller's LAST utterance: trailing detector segments in the same
     language, back to a real silence boundary. Breaks on either a gap > gap_seconds
@@ -2835,7 +2843,14 @@ class TaskManager(BaseManager):
                 break
 
         if self.hangup_message_queued and not web_call_timeout:
-            self.history.append({"role": "assistant", "content": self.call_hangup_message})
+            self.history.append(
+                {
+                    "role": "assistant",
+                    "content": self.call_hangup_message,
+                    "sequence_id": -1,
+                    "message_category": "agent_hangup",
+                }
+            )
 
         self.conversation_ended = True
         self.ended_by_assistant = True
@@ -4255,6 +4270,7 @@ class TaskManager(BaseManager):
             "content": content,
             "turn_id": turn_id,
             "response_uid": response_uid,
+            "message_category": meta_info.get("message_category"),
         }
         logger.info(
             "BOLNA_TRACE_TM stage_assistant_history seq=%s turn=%s response_uid=%s text_len=%s",
@@ -4277,7 +4293,10 @@ class TaskManager(BaseManager):
 
         self._committed_assistant_sequences.add(sequence_id)
         self.conversation_history.append_assistant(
-            staged["content"], turn_id=staged["turn_id"], response_uid=staged["response_uid"]
+            staged["content"],
+            turn_id=staged["turn_id"],
+            response_uid=staged["response_uid"],
+            message_category=staged.get("message_category"),
         )
         if staged["turn_id"] is not None:
             self._turn_msg_map[staged["turn_id"]] = self.conversation_history.messages[-1]
@@ -4394,7 +4413,10 @@ class TaskManager(BaseManager):
                 meta_info.get("response_uid"),
             )
 
-        self.conversation_history.append_user(transcriber_message)
+        # asr_turn_id (int-coerced), not meta_info["turn_id"] — that one counts responses, not ASR turns.
+        self.conversation_history.append_user(
+            transcriber_message, asr_turn_id=asr_id_to_int(meta_info.get("asr_turn_id"))
+        )
         logger.info(
             "BOLNA_TRACE_TM append_user seq=%s turn=%s response_uid=%s history_len=%s text=%r",
             meta_info.get("sequence_id"),
@@ -4774,7 +4796,13 @@ class TaskManager(BaseManager):
                             self.eager_llm_task = asyncio.create_task(
                                 self._run_llm_task(create_ws_data_packet(eager_transcript, meta_info))
                             )
-                            self.history.append({"role": "user", "content": eager_transcript})
+                            # Committed user row when EndOfTurn(was_eager) skips _handle_transcriber_output.
+                            # meta_info["asr_turn_id"] is stale until EndOfTurn, so read the live id.
+                            eager_user_row = {"role": "user", "content": eager_transcript}
+                            eager_asr_turn_id = asr_id_to_int(getattr(active_transcriber, "current_turn_id", None))
+                            if eager_asr_turn_id is not None:
+                                eager_user_row["asr_turn_id"] = eager_asr_turn_id
+                            self.history.append(eager_user_row)
                         else:
                             logger.info(f"Skipping speculative LLM (audio playing or welcome not done)")
 
@@ -5847,7 +5875,9 @@ class TaskManager(BaseManager):
                 logger.info("LanguageSwitcher: hangup during speculation — not speaking follow-up")
                 return None
             if spec_text:
-                self.conversation_history.append_assistant(spec_text)
+                # Tagged here, not via _stage_assistant_history — this append bypasses staging,
+                # so without the tag the row cannot anchor to its own playback burst.
+                self.conversation_history.append_assistant(spec_text, message_category="language_switch_followup")
                 self.__log_committed_speculation(spec_text, spec_capture)
                 synth_meta = {
                     "io": self.tools["output"].get_provider(),
@@ -5943,7 +5973,7 @@ class TaskManager(BaseManager):
                     run_id=self.run_id,
                 )
             self.__enqueue_chunk(clip, 0, 1, handoff_meta)
-            self.conversation_history.append_assistant(handoff_text)
+            self.conversation_history.append_assistant(handoff_text, sequence_id=-1, message_category="handoff")
             self.__record_lid_event({"type": "handoff", "source": "prewarmed", "target": target})
             logger.info(f"LanguageSwitcher: playing pre-warmed handoff clip: {handoff_text!r}")
             return
@@ -5951,7 +5981,7 @@ class TaskManager(BaseManager):
         # Cold cache → live synthesis on the target voice (socket already warm).
         handoff_meta.update({"cached": False, "format": "pcm", "end_of_llm_stream": True})
         await self._synthesize(create_ws_data_packet(handoff_text, meta_info=handoff_meta))
-        self.conversation_history.append_assistant(handoff_text)
+        self.conversation_history.append_assistant(handoff_text, sequence_id=-1, message_category="handoff")
         self.__record_lid_event({"type": "handoff", "source": "live", "target": target})
         logger.info(f"LanguageSwitcher: playing handoff to cover reply generation: {handoff_text!r}")
 
@@ -7031,7 +7061,12 @@ class TaskManager(BaseManager):
                             "end_of_llm_stream": True,
                         }
                         await self._synthesize(create_ws_data_packet(user_online_message, meta_info=meta_info))
-                    self.conversation_history.append_assistant(user_online_message, exclude_from_llm=True)
+                    self.conversation_history.append_assistant(
+                        user_online_message,
+                        exclude_from_llm=True,
+                        sequence_id=-1,
+                        message_category="is_user_online_message",
+                    )
 
                     # Explicitly reset the audio flag after synthesizing the prompt.
                     # handle_interruption() below sends clearAudio to Plivo and wipes the
@@ -7500,6 +7535,10 @@ class TaskManager(BaseManager):
                     "interruption_stats": output["latency_dict"]["interruption_stats"],
                     "user_bot_latencies": copy.deepcopy(output["latency_dict"]["user_bot_latencies"]),
                     "mark_tracking": output["latency_dict"]["mark_tracking"],
+                    # Only record of when template speech (are-you-still-there, tool fillers,
+                    # handoffs, goodbyes) was actually spoken — it has no LLM turn to anchor to.
+                    # Shared ref like mark_tracking — get_chunk_marks builds fresh dicts, nothing mutates them.
+                    "synthesizer_chunk_marks": output["latency_dict"]["synthesizer_chunk_marks"],
                     "hangup_triggered_ms": round(self.hangup_triggered_at * 1000 - self.conversation_start_init_ts, 2)
                     if self.hangup_triggered_at
                     else None,
@@ -7551,15 +7590,19 @@ class TaskManager(BaseManager):
                     if _ub.get("turn_id") is not None
                 }
                 for _tt in output["progression_data"]["transcriber_latencies"].get("turn_latencies", []):
-                    _tid = _tt.get("turn_id")
-                    if not isinstance(_tid, int) or _tid in _ub_turns or not _tt.get("final_transcript"):
+                    # _ub_turns holds ints; "turn_3" in {3} is always False, which duplicated every
+                    # covered Whisper turn. Compare/store as int (progression copy only).
+                    _tid = asr_id_to_int(_tt.get("turn_id"))
+                    _tt["turn_id"] = _tid
+                    if _tid is None or _tid in _ub_turns or not _tt.get("final_transcript"):
                         continue
                     _u_start = _tt.get("asr_turn_start_ms")
                     if _u_start is None:
                         _u_start = _tt.get("asr_start_ms")
+                    # No fallback to asr_finalized_ms: that is when ASR returned, not when the
+                    # caller stopped. Substituting it made "ASR time" compute to exactly 0 and
+                    # could place the end before the start. None means unknown.
                     _u_end = _tt.get("user_speech_end_ms")
-                    if _u_end is None:
-                        _u_end = _tt.get("asr_finalized_ms")
                     output["progression_data"]["user_bot_latencies"].append(
                         {
                             "turn_id": _tid,
@@ -7608,7 +7651,8 @@ class TaskManager(BaseManager):
 
                 _tts_turns = (output["latency_dict"]["synthesizer_latencies"] or {}).get("turn_latencies", [])
                 for _t in _tts_turns:
-                    _t.pop("tts_start_ms", None)
+                    for _f in ("tts_start_ms", "message_category"):
+                        _t.pop(_f, None)
 
                 for _e in output["latency_dict"]["user_bot_latencies"]:
                     for _f in ("user_first_start_ms", "agent_end_ms"):

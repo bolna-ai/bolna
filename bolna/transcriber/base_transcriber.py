@@ -26,6 +26,9 @@ class BaseTranscriber:
 
     def _upsert_turn_latency(self, entry: dict) -> None:
         """Replace existing turn_latencies entry with matching turn_id, or append if new."""
+        # task_manager overwrites meta_info["turn_id"] with its own counter, so publish the ASR id separately.
+        if entry.get("turn_id") is not None and isinstance(self.meta_info, dict):
+            self.meta_info["asr_turn_id"] = entry["turn_id"]
         for i, t in enumerate(self.turn_latencies):
             if t.get("turn_id") == entry.get("turn_id"):
                 self.turn_latencies[i] = entry
