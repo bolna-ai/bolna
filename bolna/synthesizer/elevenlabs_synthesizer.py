@@ -397,14 +397,13 @@ class ElevenlabsSynthesizer(ElevenlabsBase):
             return None
 
 
-# v3 takes three discrete stability values; anything else is accepted and silently snapped.
+# v3 accepts any stability value but only these three change anything.
 STABILITY_PRESETS = (0.0, 0.5, 1.0)
 DEFAULT_STABILITY = 0.5
-
-CLOSE_TIMEOUT = 1
-RECONNECT_POLL_INTERVAL = 0.05
+CLOSE_TIMEOUT_S = 1
+RECONNECT_POLL_INTERVAL_S = 0.05
 # The endpoint ignores inactivity_timeout and drops idle sockets at 20s.
-KEEP_ALIVE_INTERVAL = 8
+KEEP_ALIVE_INTERVAL_S = 8
 
 
 class ElevenlabsV3Synthesizer(ElevenlabsBase):
@@ -422,9 +421,6 @@ class ElevenlabsV3Synthesizer(ElevenlabsBase):
         # optional in the config and reaches the constructor unvalidated, so it may be None.
         stability = DEFAULT_STABILITY if self.temperature is None else self.temperature
         self.temperature = min(STABILITY_PRESETS, key=lambda preset: abs(preset - stability))
-        # This endpoint has no contexts; nulled so no inherited path reads one.
-        self.context_id = None
-        self.current_turn_context_id = None
         self._new_turn_pending = True
         # Tells a close we caused apart from one the provider caused.
         self._interrupted = False
@@ -438,10 +434,6 @@ class ElevenlabsV3Synthesizer(ElevenlabsBase):
 
     def get_sleep_time(self):
         return 0.01
-
-    # ------------------------------------------------------------------
-    # Connection
-    # ------------------------------------------------------------------
 
     async def establish_connection(self):
         try:
@@ -526,17 +518,13 @@ class ElevenlabsV3Synthesizer(ElevenlabsBase):
             await asyncio.sleep(1)
             if not self._is_ws_connected():
                 continue
-            if time.perf_counter() - self._last_send_time < KEEP_ALIVE_INTERVAL:
+            if time.perf_counter() - self._last_send_time < KEEP_ALIVE_INTERVAL_S:
                 continue
             try:
                 await self.websocket.send(json.dumps({"keep_alive": True}))
                 self._last_send_time = time.perf_counter()
             except Exception as e:
                 logger.info(f"ElevenLabs v3 keep_alive failed: {e}")
-
-    # ------------------------------------------------------------------
-    # Interruption
-    # ------------------------------------------------------------------
 
     async def handle_interruption(self):
         """Drop the socket and dial a replacement, since nothing here cancels a turn."""
@@ -569,14 +557,10 @@ class ElevenlabsV3Synthesizer(ElevenlabsBase):
         """Close the abandoned socket and dial its replacement, off the barge-in path."""
         if old_ws is not None:
             try:
-                await asyncio.wait_for(old_ws.close(), timeout=CLOSE_TIMEOUT)
+                await asyncio.wait_for(old_ws.close(), timeout=CLOSE_TIMEOUT_S)
             except Exception:
                 pass
         await self._ensure_connection()
-
-    # ------------------------------------------------------------------
-    # sender / receiver
-    # ------------------------------------------------------------------
 
     async def sender(self, text, sequence_id, end_of_llm_stream=False):
         try:
@@ -589,7 +573,7 @@ class ElevenlabsV3Synthesizer(ElevenlabsBase):
 
             # Tighter than the 1s default: every barge-in redials, and the next turn should
             # not wait a full poll tick on a socket that reconnects in about 200ms.
-            await self._wait_for_ws(poll_interval=RECONNECT_POLL_INTERVAL)
+            await self._wait_for_ws(poll_interval=RECONNECT_POLL_INTERVAL_S)
 
             if text != "":
                 for text_chunk in self.text_chunker(text):
