@@ -539,14 +539,9 @@ class TaskManager(BaseManager):
                         "temperature": self.llm_agent_config["temperature"],
                     }
 
-                if "reasoning_effort" in self.llm_agent_config:
-                    self.llm_config["reasoning_effort"] = self.llm_agent_config["reasoning_effort"]
-
-                if "reasoning_summary" in self.llm_agent_config:
-                    self.llm_config["reasoning_summary"] = self.llm_agent_config["reasoning_summary"]
-
-                if "thinking_budget" in self.llm_agent_config:
-                    self.llm_config["thinking_budget"] = self.llm_agent_config["thinking_budget"]
+                for key in ("reasoning_effort", "verbosity", "reasoning_summary", "thinking_budget"):
+                    if key in self.llm_agent_config:
+                        self.llm_config[key] = self.llm_agent_config[key]
 
                 if self.llm_agent_config.get("use_responses_api") or any(
                     p in self.llm_config.get("model", "") for p in RESPONSES_API_MODEL_PREFIXES
