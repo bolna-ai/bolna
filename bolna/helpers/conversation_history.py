@@ -28,23 +28,8 @@ class ConversationHistory:
         self._interim = copy.deepcopy(self._messages)
 
     def append_user(self, content: str, **kwargs):
-        """kwargs (asr_turn_id) let consumers correlate a user turn to its ASR turn by id
-        rather than by text.
-
-        history is passed to the LLM unfiltered (azure_llm.py:132, litellm.py:73/194), so what
-        happens to an extra key depends on the adapter. Measured on litellm 1.84.0 via each
-        provider's real transform_request():
-          - rebuilt from known keys, so the key is dropped: anthropic, bedrock, ollama, Gemini
-            (_prepare_history), and the Responses adapter (ChatMessage is pydantic with the
-            default extra="ignore");
-          - forwarded verbatim in the request body: azure/openai and the OpenAI-compatible
-            litellm providers (cohere, groq, deepseek, openrouter, together_ai, perplexity,
-            fireworks_ai, deepinfra, vllm). These rely on the server ignoring unknown message
-            keys, which OpenAI-compatible APIs do.
-        Forwarding is not new — assistant messages have carried turn_id/response_uid for
-        months (643 such messages across 145/150 sampled prod calls, zero failures, Azure).
-        Prod evidence covers Azure only; the other nine are untested against a live endpoint.
-        """
+        """kwargs (asr_turn_id) correlate a user turn to its ASR turn by id rather than by text.
+        LLM adapters call strip_internal_keys() before sending, so extras never reach a provider."""
         self._messages.append({"role": ChatRole.USER, "content": content, **kwargs})
 
     def replace_last_user(self, expected_content: str, new_content: str) -> bool:

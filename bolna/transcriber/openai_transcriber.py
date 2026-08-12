@@ -412,10 +412,8 @@ class OpenAITranscriber(BaseTranscriber):
                             # most reliable identifier — current_turn_id may already point
                             # to the next turn if the sender started speaking immediately.
                             turn_id = self._last_committed_turn_id or self.current_turn_id or item_id
-                            # OpenAI can emit several transcription items for one committed turn.
-                            # Reusing the id gave turn_latencies duplicate keys, so any consumer
-                            # keying on turn_id silently lost all but the last. Give the extras a
-                            # fresh id — they are genuinely distinct transcripts with distinct times.
+                            # OpenAI emits several items per committed turn; reusing one id made
+                            # turn_latencies upserts clobber each other, so extras get a fresh id.
                             if turn_id is not None and turn_id == self._last_latency_turn_id:
                                 self.turn_counter += 1
                                 turn_id = f"turn_{self.turn_counter}"
