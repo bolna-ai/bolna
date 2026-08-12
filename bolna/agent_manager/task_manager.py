@@ -41,6 +41,7 @@ from bolna.constants import (
     END_CALL_TOOL_DEFINITION,
     RESPONSES_API_MODEL_PREFIXES,
     STALL_HANGUP_FLOOR_S,
+    STUCK_AUDIO_GATE_RELEASE_S,
     WEB_BASED_CALL_PROVIDER,
     WEBCALL_TTS_SAMPLE_RATE,
 )
@@ -4620,6 +4621,9 @@ class TaskManager(BaseManager):
                         and message["data"].get("type", "") == "interim_transcript_received"
                     ):
                         self.time_since_last_spoken_human_word = time.time()
+                        # Before every early exit below: an interim is proof the caller is still
+                        # talking, so it must refresh liveness even when this turn ignores it.
+                        self.interruption_manager.note_user_liveness()
                         if temp_transcriber_message == message["data"].get("content"):
                             logger.info("Received the same transcript as the previous one we have hence continuing")
                             continue
@@ -6759,6 +6763,16 @@ class TaskManager(BaseManager):
                         break  # Exit inner loop, skip to next message
 
                     elif status == "WAIT":
+                        # Nothing clears callee_speaking if the turn's transcriber was retired
+                        # mid-turn or never finalized, and the frame would be held for the call.
+                        staleness = self.interruption_manager.user_speech_staleness_s()
+                        if staleness > STUCK_AUDIO_GATE_RELEASE_S:
+                            logger.warning(
+                                f"Releasing stuck audio gate: callee_speaking held {staleness:.1f}s "
+                                f"with no interim (sequence_id={sequence_id})"
+                            )
+                            self.interruption_manager.on_user_speech_ended(update_utterance_time=False)
+                            continue
                         # Grace period active - hold and retry
                         await asyncio.sleep(0.05)
                         # Continue inner loop to re-check status
