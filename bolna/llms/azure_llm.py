@@ -334,7 +334,12 @@ class AzureLLM(OpenAICompatibleLLM):
 
         try:
             completion = await self.async_client.chat.completions.create(
-                model=self.model, temperature=0.0, messages=messages, stream=False, response_format=response_format
+                model=self.model,
+                temperature=0.0,
+                # Same guarantee as the streaming path: bookkeeping keys never reach the wire.
+                messages=strip_internal_keys(messages),
+                stream=False,
+                response_format=response_format,
             )
 
             res = completion.choices[0].message.content
