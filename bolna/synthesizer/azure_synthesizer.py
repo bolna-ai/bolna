@@ -227,12 +227,15 @@ class AzureSynthesizer(BaseSynthesizer):
 
                         self._stamp_first_chunk(meta_info)
 
-                        if done_event.is_set() and chunk_queue.empty():
+                        is_last_chunk_of_text = done_event.is_set() and chunk_queue.empty()
+                        if is_last_chunk_of_text:
                             self._stamp_end_of_stream(meta_info)
 
                         meta_info["text"] = text
                         meta_info["format"] = "wav"
-                        meta_info["text_synthesized"] = f"{text} "
+                        # Only the closing chunk carries the text: the heard-text accumulator
+                        # concatenates text_synthesized per acked mark.
+                        meta_info["text_synthesized"] = f"{text} " if is_last_chunk_of_text else ""
                         self._stamp_mark_id(meta_info)
                         yield create_ws_data_packet(chunk, meta_info)
 
