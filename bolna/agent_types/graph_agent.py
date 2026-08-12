@@ -66,6 +66,9 @@ class GraphAgent(BaseAgent):
         self.agent_information = self.config.get("agent_information")
         self.current_node_id = self.config.get("current_node_id")
         self.context_data = self.config.get("context_data") or {}
+        execution_id = self.config.get("execution_id")
+        if execution_id and isinstance(self.context_data.get("recipient_data"), dict):
+            self.context_data["recipient_data"]["execution_id"] = execution_id
         self.variable_types = self.config.get("variable_types") or {}
         self.llm_model = self.config.get("model")
 

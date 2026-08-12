@@ -1792,6 +1792,7 @@ class TaskManager(BaseManager):
             injected_cfg["buffer_size"] = self.task_config["tools_config"]["synthesizer"].get("buffer_size")
             injected_cfg["language"] = self.language
             injected_cfg["turn_based_conversation"] = self.turn_based_conversation
+            injected_cfg["execution_id"] = self.run_id
 
             llm_agent = GraphAgent(injected_cfg)
             logger.info("Graph agent created with rag-proxy-server support")
