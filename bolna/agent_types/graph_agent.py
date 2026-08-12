@@ -350,11 +350,14 @@ class GraphAgent(BaseAgent):
     def _build_transition_tools_for_edges(self, edges: list, allow_stay: bool = True) -> list:
         """allow_stay=False omits stay_on_current_node so the model must pick a real edge."""
         tools = []
+        prompt_context = self._prompt_context()
         for edge in edges:
             func_name = self._edge_function_name(edge)
             func_description = (
                 edge.get("function_description") or f"Call this function when: {edge.get('condition', '')}"
             )
+            if prompt_context:
+                func_description = update_prompt_with_context(func_description, prompt_context)
 
             parameters = {"type": "object", "properties": {}, "required": []}
             if edge.get("parameters"):
@@ -813,7 +816,12 @@ class GraphAgent(BaseAgent):
             except Exception as e:
                 logger.debug(f"Variable substitution in routing_instructions failed: {e}")
 
+        # Substituted with the same frozen context the spoken prompt uses: the router
+        # otherwise reads "{Name}" while the conversation history shows the real value.
         node_objective = node.get("prompt") or node.get("description") or ""
+        prompt_context = self._prompt_context()
+        if prompt_context:
+            node_objective = update_prompt_with_context(node_objective, prompt_context)
         system_prompt = f"""Routing Guidelines: \n {instructions}\n Current Node: {node["id"]}{context_section} \n Node Objective: {node_objective}\n\n Node Conversation History:\n"""
 
         logger.debug(f"Routing system prompt:\n{system_prompt}")
