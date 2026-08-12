@@ -4101,6 +4101,15 @@ class TaskManager(BaseManager):
         self._hangup_processing = True
         self.hangup_triggered = True
         message = self.call_hangup_message if not self.voicemail_handler.detected else ""
+        if self.__is_s2s():
+            # The model already spoke the goodbye, prompted by the end_call result below,
+            # and there is no synthesizer to render one here. Queueing this would push a
+            # packet the caller never hears and leave the call waiting on its mark.
+            self.hangup_message_queued = False
+            self.hangup_triggered_at = time.time()
+            await self.__process_end_of_conversation()
+            return
+
         if not message or message.strip() == "":
             self.hangup_message_queued = False  # No hangup message to wait for
             self.hangup_triggered_at = time.time()
@@ -7849,7 +7858,19 @@ class TaskManager(BaseManager):
 
         ends_call = event.name.startswith(END_CALL_FUNCTION_PREFIX)
         if ends_call:
-            result = json.dumps({"status": "success", "message": "Call is ending now. Say a brief goodbye."})
+            # A configured hangup message is the goodbye for an s2s call: there is no
+            # synthesizer to play it separately, so the model has to speak it.
+            goodbye = self.call_hangup_message
+            result = json.dumps(
+                {
+                    "status": "success",
+                    "message": (
+                        f"Call is ending now. Say exactly this, and nothing else: {goodbye}"
+                        if goodbye and goodbye.strip()
+                        else "Call is ending now. Say a brief goodbye."
+                    ),
+                }
+            )
         elif event.name.startswith("transfer_call"):
             if self.has_transfer:
                 result = json.dumps({"status": "success", "message": "Transfer already in progress; wait silently."})
@@ -7863,6 +7884,11 @@ class TaskManager(BaseManager):
                 )
                 result = json.dumps({"status": "success", "message": "Transfer initiated; wait silently."})
         else:
+            # Without this the caller hears dead air for as long as the endpoint takes, and
+            # the are-you-still-there watchdog fires into the gap.
+            filler = compute_function_pre_call_message(self.language, event.name, params.get("pre_call_message"))
+            if filler:
+                await s2s.trigger_response(instructions=f"Say exactly this, and nothing else: {filler}")
             result = await self._s2s_call_api_tool(event, args, params, meta_info)
 
         convert_to_request_log(

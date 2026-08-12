@@ -58,6 +58,8 @@ def make_tm(*, io_provider="plivo", web=False, turn_based=False, in_rate=24000, 
     tm.interruption_manager = MagicMock()
     tm.last_transmitted_timestamp = 0
     tm.time_since_last_spoken_human_word = 0
+    tm._language = "en"
+    tm.call_hangup_message_config = None
 
     provider = SimpleNamespace(
         input_sample_rate=in_rate,
@@ -553,6 +555,62 @@ class TestBackgroundTaskLifecycle:
 
         assert "socket gone" in caplog.text
         assert "c9" in caplog.text
+
+
+class TestHangupAndFillerParity:
+    """An s2s task has no synthesizer, so anything the llm path renders itself has to be
+    spoken by the model instead."""
+
+    @pytest.mark.asyncio
+    async def test_configured_hangup_message_becomes_the_models_goodbye(self):
+        tm = make_tm()
+        tm.call_hangup_message_config = "Thanks for calling Acme, goodbye."
+        tm.language = "en"
+        with patch("bolna.agent_manager.task_manager.convert_to_request_log"):
+            await tm._s2s_execute_tool(s2s_events.FunctionCall(name="end_call", call_id="c1", arguments="{}"))
+
+        sent = tm.tools["s2s"].send_function_result.await_args.args[2]
+        assert "Thanks for calling Acme, goodbye." in sent
+
+    @pytest.mark.asyncio
+    async def test_default_goodbye_when_none_configured(self):
+        tm = make_tm()
+        tm.call_hangup_message_config = None
+        tm.language = "en"
+        with patch("bolna.agent_manager.task_manager.convert_to_request_log"):
+            await tm._s2s_execute_tool(s2s_events.FunctionCall(name="end_call", call_id="c1", arguments="{}"))
+
+        assert "brief goodbye" in tm.tools["s2s"].send_function_result.await_args.args[2]
+
+    @pytest.mark.asyncio
+    async def test_api_tool_speaks_a_filler_before_the_request(self):
+        # The endpoint can take seconds; without this the caller hears dead air.
+        tm = make_tm(tools_params={"book": {"url": "https://api.example/book", "pre_call_message": "One moment."}})
+        tm.language = "en"
+        tm._start_api_call_detail = MagicMock(return_value={})
+        tm._finalize_api_call_detail = MagicMock()
+        with (
+            patch("bolna.agent_manager.task_manager.convert_to_request_log"),
+            patch(
+                "bolna.agent_manager.task_manager.trigger_api",
+                new=AsyncMock(return_value={"body": "{}", "status_code": 200}),
+            ),
+        ):
+            await tm._s2s_execute_tool(s2s_events.FunctionCall(name="book", call_id="c1", arguments="{}"))
+
+        tm.tools["s2s"].trigger_response.assert_awaited_once()
+        assert "One moment." in tm.tools["s2s"].trigger_response.await_args.kwargs["instructions"]
+
+    @pytest.mark.asyncio
+    async def test_end_call_gets_no_filler(self):
+        tm = make_tm()
+        tm.call_hangup_message_config = None
+        tm.language = "en"
+        with patch("bolna.agent_manager.task_manager.convert_to_request_log"):
+            await tm._s2s_execute_tool(s2s_events.FunctionCall(name="end_call", call_id="c1", arguments="{}"))
+
+        # The goodbye is the response; a filler would talk over it.
+        tm.tools["s2s"].trigger_response.assert_not_awaited()
 
 
 class TestUserOnlinePrompt:
