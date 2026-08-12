@@ -498,7 +498,14 @@ class OpenAiLLM(OpenAICompatibleLLM):
             return {"type": "text"}
 
     async def _generate_stream_ws_responses(
-        self, messages, synthesize=True, request_json=False, meta_info=None, tool_choice=None, tools=None, _server_error_attempt=0
+        self,
+        messages,
+        synthesize=True,
+        request_json=False,
+        meta_info=None,
+        tool_choice=None,
+        tools=None,
+        _server_error_attempt=0,
     ):
         """Stream via persistent WebSocket — same interface as _generate_stream_responses."""
         if not messages:
