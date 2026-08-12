@@ -380,8 +380,10 @@ class SarvamTranscriber(BaseTranscriber):
                             self.final_transcript = " ".join(filter(None, [self.final_transcript, transcript.strip()]))
                             # Segments can arrive AFTER END_SPEECH closed the turn (short
                             # utterances) — backfill the closed entry, else it stores null text.
-                            if self.current_turn_id is None and self.turn_latencies and not self.turn_latencies[-1].get(
-                                "final_transcript"
+                            if (
+                                self.current_turn_id is None
+                                and self.turn_latencies
+                                and not self.turn_latencies[-1].get("final_transcript")
                             ):
                                 self.turn_latencies[-1]["final_transcript"] = self.final_transcript
 
