@@ -26,7 +26,7 @@ from bolna.llms.types import LLMStreamChunk, LatencyData
 from bolna.llms import OpenAiLLM
 from bolna.providers import SUPPORTED_LLM_PROVIDERS
 from bolna.prompts import VOICEMAIL_DETECTION_PROMPT
-from bolna.constants import LANGUAGE_NAMES
+from bolna.constants import GPT5_MODEL_PREFIX, LANGUAGE_NAMES, canonical_model, default_reasoning_effort
 
 from typing import List, Tuple, AsyncGenerator, Optional, Dict, Any
 
@@ -857,10 +857,13 @@ class GraphAgent(BaseAgent):
                 "parallel_tool_calls": False,
             }
 
-            if self.routing_model and self.routing_model.startswith("gpt-5"):
+            routing_model = canonical_model(self.routing_model)
+            if routing_model.startswith(GPT5_MODEL_PREFIX):
                 routing_kwargs["max_completion_tokens"] = self.routing_max_tokens or 150
-                routing_kwargs["reasoning_effort"] = self.routing_reasoning_effort or os.getenv(
-                    "GPT5_ROUTING_REASONING_EFFORT", "minimal"
+                routing_kwargs["reasoning_effort"] = (
+                    self.routing_reasoning_effort
+                    or os.getenv("GPT5_ROUTING_REASONING_EFFORT")
+                    or default_reasoning_effort(routing_model)
                 )
             else:
                 routing_kwargs["max_tokens"] = self.routing_max_tokens or 250
