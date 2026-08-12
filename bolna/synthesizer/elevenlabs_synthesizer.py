@@ -422,7 +422,6 @@ class ElevenlabsV3Synthesizer(ElevenlabsBase):
         stability = DEFAULT_STABILITY if self.temperature is None else self.temperature
         self.temperature = min(STABILITY_PRESETS, key=lambda preset: abs(preset - stability))
         self._new_turn_pending = True
-        # Tells a close we caused apart from one the provider caused.
         self._interrupted = False
         # last_text_sent stays true between turns, so it cannot say whether a turn is still
         # open. This does, and keeps a dropped socket from ending an already-ended turn twice.
@@ -703,8 +702,7 @@ class ElevenlabsV3Synthesizer(ElevenlabsBase):
                     logger.info("ElevenLabs v3 WebSocket closed by barge-in, waiting for reconnect")
                 else:
                     # Dropped after the flush but before is_final_audio_for_turn. End the turn
-                    # explicitly, or nothing stamps end_of_synthesizer_stream and playback
-                    # stays marked as in progress for the rest of the call.
+                    # explicitly, or playback stays marked as in progress for the whole call.
                     logger.error("ElevenLabs v3 WebSocket dropped by provider, ending the turn")
                     if self.last_text_sent and not self._turn_eos_emitted:
                         self._turn_eos_emitted = True
