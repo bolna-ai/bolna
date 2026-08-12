@@ -7147,8 +7147,7 @@ class TaskManager(BaseManager):
                     f"(audio_playing=False, no pending generation, response_in_pipeline={self.response_in_pipeline}) "
                     f"- forcing hangup"
                 )
-                self.hangup_detail = HangupReason.INACTIVITY_TIMEOUT
-                await self.process_call_hangup()
+                await self._hangup_after_goodbye(HangupReason.INACTIVITY_TIMEOUT)
                 break
 
             # Draining audio needs no term here: every branch below is gated on
@@ -7176,8 +7175,7 @@ class TaskManager(BaseManager):
                 logger.info(
                     f"{time_since_last_spoken_ai_word} seconds since AI last spoke and {time_since_user_last_spoke} seconds since user last spoke, both exceed {self.hang_conversation_after}s timeout - hanging up"
                 )
-                self.hangup_detail = HangupReason.INACTIVITY_TIMEOUT
-                await self.process_call_hangup()
+                await self._hangup_after_goodbye(HangupReason.INACTIVITY_TIMEOUT)
                 break
 
             elif (
@@ -7545,6 +7543,22 @@ class TaskManager(BaseManager):
             await asyncio.gather(*loops, return_exceptions=True)
             await s2s.disconnect()
         logger.info("S2S conversation completed")
+
+    async def _hangup_after_goodbye(self, reason) -> None:
+        """End the call, letting an s2s model speak the configured goodbye first.
+
+        process_call_hangup cannot do this itself: the post-response hangup it would arm
+        routes straight back into it, so the second entry hits the in-progress guard and
+        the call never ends. Arming it here lets the model finish the goodbye and the
+        ordinary end-of-turn path close the call exactly once.
+        """
+        self.hangup_detail = reason
+        message = self.call_hangup_message if not self.voicemail_handler.detected else ""
+        if self.__is_s2s() and message and message.strip():
+            self._s2s_hangup_after_response = True
+            await self.tools["s2s"].trigger_response(instructions=f"Say exactly this, and nothing else: {message}")
+            return
+        await self.process_call_hangup()
 
     def _s2s_track_task(self, task, call_id=None) -> None:
         """Hold a reference to a background task and surface its failure.

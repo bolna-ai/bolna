@@ -613,6 +613,50 @@ class TestHangupAndFillerParity:
         tm.tools["s2s"].trigger_response.assert_not_awaited()
 
 
+class TestInactivityHangupParity:
+    """The llm path speaks call_hangup_message on a silence timeout; s2s has no
+    synthesizer, so the model has to say it or the caller is cut off mid-silence."""
+
+    def _make_tm(self, message):
+        tm = make_tm()
+        tm.s2s_config = {"provider": "openai_realtime"}
+        tm.task_config["task_type"] = "conversation"
+        tm.call_hangup_message_config = message
+        tm.voicemail_handler = MagicMock(detected=False)
+        tm.process_call_hangup = AsyncMock()
+        return tm
+
+    @pytest.mark.asyncio
+    async def test_model_speaks_the_goodbye_then_the_turn_end_hangs_up(self):
+        tm = self._make_tm("Thanks for calling, goodbye.")
+        await tm._hangup_after_goodbye(HangupReason.INACTIVITY_TIMEOUT)
+
+        assert "Thanks for calling, goodbye." in tm.tools["s2s"].trigger_response.await_args.kwargs["instructions"]
+        # Arming the flag is what ends the call, once, after the goodbye plays.
+        assert tm._s2s_hangup_after_response is True
+        # Calling it here would re-enter and trip the in-progress guard.
+        tm.process_call_hangup.assert_not_awaited()
+        assert tm.hangup_detail == HangupReason.INACTIVITY_TIMEOUT
+
+    @pytest.mark.asyncio
+    async def test_no_configured_message_hangs_up_directly(self):
+        tm = self._make_tm(None)
+        await tm._hangup_after_goodbye(HangupReason.INACTIVITY_TIMEOUT)
+
+        tm.tools["s2s"].trigger_response.assert_not_awaited()
+        tm.process_call_hangup.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_voicemail_skips_the_goodbye(self):
+        tm = self._make_tm("Thanks for calling, goodbye.")
+        tm.voicemail_handler.detected = True
+        await tm._hangup_after_goodbye(HangupReason.INACTIVITY_TIMEOUT)
+
+        # Talking to a machine, so no goodbye and no waiting for one.
+        tm.tools["s2s"].trigger_response.assert_not_awaited()
+        tm.process_call_hangup.assert_awaited_once()
+
+
 class TestUserOnlinePrompt:
     """An s2s task has no synthesizer, so the shared path silently failed and recorded a
     line the caller never heard."""
