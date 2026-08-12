@@ -16,6 +16,9 @@ OPENAI_TRANSCRIBER_UTTERANCE_TIMEOUT_S = 0.5
 # ElevenLabs realtime (scribe_v2_realtime) accepts up to 50 keyterms for biasing.
 ELEVENLABS_REALTIME_MAX_KEYTERMS = 50
 
+# Deepgram rejects utterance_end_ms below 1000.
+DEEPGRAM_UTTERANCE_END_MS_MIN = 1000
+
 # Deepgram Flux defaults — all overridable via agent transcriber config
 DEEPGRAM_FLUX_EOT_THRESHOLD = 0.7  # confidence to declare end-of-turn
 DEEPGRAM_FLUX_EAGER_EOT_THRESHOLD = 0.5  # confidence to trigger speculative LLM early

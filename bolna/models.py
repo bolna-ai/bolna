@@ -134,6 +134,8 @@ class Transcriber(BaseModel):
     sampling_rate: Optional[int] = 16000
     encoding: Optional[str] = "linear16"
     endpointing: Optional[int] = 500
+    # Deepgram UtteranceEnd fallback (word-gap based). Defaults to max(1000, endpointing).
+    utterance_end_ms: Optional[int] = None
     keywords: Optional[str] = None
     task: Optional[str] = "transcribe"
     provider: Optional[str] = "deepgram"
