@@ -16,6 +16,7 @@ from bolna.helpers.ssl_context import get_ssl_context
 from bolna.helpers.utils import create_ws_data_packet, timestamp_ms
 from bolna.enums import TelephonyProvider
 from bolna.constants import (
+    DEEPGRAM_UTTERANCE_END_MS_MIN,
     DEEPGRAM_FLUX_EOT_THRESHOLD,
     DEEPGRAM_FLUX_EAGER_EOT_THRESHOLD,
     DEEPGRAM_FLUX_EOT_TIMEOUT_MS,
@@ -50,7 +51,13 @@ class DeepgramTranscriber(BaseTranscriber):
         super().__init__(input_queue)
         self.endpointing = endpointing
         self.endpointing_ms = int(endpointing)
-        self.utterance_end_ms = 1000 if self.endpointing_ms < 1000 else self.endpointing_ms
+        # UtteranceEnd fallback, measured on word gaps not silence — configurable per agent
+        # so it can be lengthened without touching endpointing. Unconfigured: max(1000, ep).
+        configured_utterance_end = kwargs.get("utterance_end_ms")
+        self.utterance_end_ms = max(
+            DEEPGRAM_UTTERANCE_END_MS_MIN,
+            int(configured_utterance_end) if configured_utterance_end else self.endpointing_ms,
+        )
         self.language = language
         self.stream = stream
         self.provider = telephony_provider
