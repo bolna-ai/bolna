@@ -35,6 +35,8 @@ def make_tm(*, io_provider="plivo", web=False, turn_based=False, in_rate=24000, 
     tm.conversation_ended = False
     tm.should_record = False
     tm.has_transfer = False
+    tm.hangup_triggered = False
+    tm._end_call_in_progress = False
     tm.hangup_detail = None
     tm.on_turn_usage = None
     tm.on_provider_health = None

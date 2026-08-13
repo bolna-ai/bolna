@@ -7,7 +7,7 @@ from typing import AsyncGenerator, List, Optional
 import websockets
 
 from bolna.helpers.logger_config import configure_logger
-from .base_s2s import BaseS2SProvider
+from .base_s2s import MAX_RECONNECT_ATTEMPTS, RECONNECT_DELAY_S, BaseS2SProvider
 from .events import (
     AudioDelta,
     FunctionCall,
@@ -35,9 +35,10 @@ RECOVERABLE_ERROR_CODES = frozenset(
     {
         "response_cancel_not_active",
         "conversation_already_has_active_response",
-        "invalid_request_error",
     }
 )
+# A rejected field or a malformed tool schema arrives as a type, with no code to match above.
+RECOVERABLE_ERROR_TYPES = frozenset({"invalid_request_error"})
 
 
 class OpenAIRealtimeS2S(BaseS2SProvider):
@@ -215,15 +216,27 @@ class OpenAIRealtimeS2S(BaseS2SProvider):
 
     async def receive_events(self) -> AsyncGenerator:
         yield SessionReady(connection_time_ms=self.connection_time or 0.0)
+        attempts = 0
         while True:
             try:
                 async for event in self._receive_events_impl():
+                    attempts = 0  # the session is producing traffic again
                     yield event
                 return
             except websockets.ConnectionClosed as e:
                 if self._closed:
                     return
                 logger.warning(f"OpenAI Realtime connection closed: code={e.code} reason={e.reason!r}")
+
+            attempts += 1
+            if attempts > MAX_RECONNECT_ATTEMPTS:
+                yield S2SError(
+                    message=f"OpenAI Realtime closed {attempts} times without recovering",
+                    code="reconnect_exhausted",
+                )
+                return
+            if attempts > 1:
+                await asyncio.sleep(RECONNECT_DELAY_S)
 
             # A drop mid-call used to end the call outright. Reconnecting costs the caller
             # the in-flight turn, which the model regenerates from the replayed history.
@@ -302,12 +315,11 @@ class OpenAIRealtimeS2S(BaseS2SProvider):
                 error = event.get("error", {})
                 # A failed response frees the turn; without this the next commit would stall.
                 self._response_done_event.set()
-                code = error.get("code", "") or ""
-                yield S2SError(
-                    message=error.get("message", "Unknown error"),
-                    code=code,
-                    fatal=code not in RECOVERABLE_ERROR_CODES,
-                )
+                code = error.get("code") or ""
+                error_type = error.get("type") or ""
+                # A codeless error is not worth a dropped call; a dead session closes its socket.
+                fatal = bool(code) and code not in RECOVERABLE_ERROR_CODES and error_type not in RECOVERABLE_ERROR_TYPES
+                yield S2SError(message=error.get("message", "Unknown error"), code=code, fatal=fatal)
 
             else:
                 logger.debug(f"OpenAI Realtime unhandled event: {event_type}")

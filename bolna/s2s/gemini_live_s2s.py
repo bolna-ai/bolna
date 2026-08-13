@@ -8,7 +8,7 @@ import websockets
 
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.utils import clean_gemini_schema
-from .base_s2s import BaseS2SProvider
+from .base_s2s import MAX_RECONNECT_ATTEMPTS, RECONNECT_DELAY_S, BaseS2SProvider
 from .events import (
     AudioDelta,
     FunctionCall,
@@ -190,9 +190,11 @@ class GeminiLiveS2S(BaseS2SProvider):
 
     async def receive_events(self) -> AsyncGenerator:
         yield SessionReady(connection_time_ms=self.connection_time or 0.0)
+        attempts = 0
         while not self._closed:
             try:
                 async for event in self._receive_events_impl():
+                    attempts = 0  # the session is producing traffic again
                     yield event
                 # Clean server close: resume if we still have a handle.
                 if self._closed:
@@ -205,6 +207,16 @@ class GeminiLiveS2S(BaseS2SProvider):
             if not self._can_resume():
                 yield S2SError(message="Gemini Live session ended and cannot be resumed", code="session_ended")
                 return
+
+            attempts += 1
+            if attempts > MAX_RECONNECT_ATTEMPTS:
+                yield S2SError(
+                    message=f"Gemini Live closed {attempts} times without recovering",
+                    code="reconnect_exhausted",
+                )
+                return
+            if attempts > 1:
+                await asyncio.sleep(RECONNECT_DELAY_S)
             try:
                 started = time.time()
                 await self._resume_session()

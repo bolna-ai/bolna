@@ -4,6 +4,11 @@ from typing import AsyncGenerator, List, Optional
 
 from .events import S2SUsage
 
+# Without a cap, a provider that closes every connection is re-dialled for the whole call.
+# The first retry skips the delay so a single transient drop costs the caller nothing extra.
+MAX_RECONNECT_ATTEMPTS = 5
+RECONNECT_DELAY_S = 0.5
+
 
 class BaseS2SProvider(ABC):
     """Provider-agnostic interface for speech-to-speech models.

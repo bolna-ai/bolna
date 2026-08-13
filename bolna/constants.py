@@ -52,6 +52,11 @@ LANGUAGE_SWITCH_SPEAKING_STALE_CAP_S = 2.5
 # healthy turn within utterance_end_ms (1s floor), so a real speaker stays well inside this.
 STUCK_AUDIO_GATE_RELEASE_S = 3.0
 
+# Above __await_stream_sid's own 10s timeout, so that path is what ends the call.
+S2S_STREAM_SID_TIMEOUT_S = 12.0
+# How long an armed goodbye gets before the call is closed without it.
+S2S_GOODBYE_TIMEOUT_S = 10.0
+
 # Soniox real-time STT
 SONIOX_WEBSOCKET_HOST = "stt-rt.soniox.com"
 SONIOX_ENDPOINT_TOKEN = "<end>"  # sentinel token emitted when the speaker stops

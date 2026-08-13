@@ -40,6 +40,8 @@ from bolna.constants import (
     END_CALL_FUNCTION_PREFIX,
     END_CALL_TOOL_DEFINITION,
     RESPONSES_API_MODEL_PREFIXES,
+    S2S_GOODBYE_TIMEOUT_S,
+    S2S_STREAM_SID_TIMEOUT_S,
     STALL_HANGUP_FLOOR_S,
     STUCK_AUDIO_GATE_RELEASE_S,
     WEB_BASED_CALL_PROVIDER,
@@ -781,8 +783,8 @@ class TaskManager(BaseManager):
                     minimum_wait_duration=self.minimum_wait_duration,
                 )
 
-                # Backchanneling
-                self.should_backchannel = self.conversation_config.get("backchanneling", False)
+                # Backchanneling presets are keyed on a synthesizer voice, which s2s has none of.
+                self.should_backchannel = self.conversation_config.get("backchanneling", False) and not self.__is_s2s()
                 self.backchanneling_task = None
                 self.backchanneling_start_delay = self.conversation_config.get("backchanneling_start_delay", 5)
                 self.backchanneling_message_gap = self.conversation_config.get(
@@ -1398,6 +1400,7 @@ class TaskManager(BaseManager):
             if await self.__await_stream_sid():
                 logger.info(f"Got stream sid for s2s conversation {self.stream_sid}")
                 self.tools["input"].is_welcome_message_played = True
+                self._s2s_stream_ready.set()
         except Exception as e:
             logger.error(f"Exception in _s2s_await_stream_sid {str(e)}")
 
@@ -1913,9 +1916,8 @@ class TaskManager(BaseManager):
         self.s2s = S2SConfig(**self.s2s_config)
         self.s2s_provider_name = self.s2s.provider
         self.s2s_model = self.s2s.provider_config.model
-        # A goodbye message would need TTS, which an S2S agent has no synthesizer for.
-        # The model speaks its own goodbye before end_call instead.
-        self.call_hangup_message_config = None
+        # Not in _run_s2s_conversation: message_task_new sets this and is scheduled first.
+        self._s2s_stream_ready = asyncio.Event()
         logger.info(f"S2S agent configured | provider={self.s2s_provider_name} model={self.s2s_model}")
 
     def __setup_tasks(self, llm=None, agent_type=None, assistant_config=None):
@@ -7502,13 +7504,20 @@ class TaskManager(BaseManager):
             f"model_in={s2s.input_sample_rate} model_out={s2s.output_sample_rate}"
         )
 
-        # Restart the gate clock now the handshake is done. Measured connects run 400ms to
-        # 1600ms against a 1500ms gate, so timing it from before connect left the welcome
-        # message with most of its barge-in protection already spent.
-        self._s2s_started_at = time.time()
-
         welcome = (self.kwargs.get("agent_welcome_message") or "").strip()
+        if welcome and not self.turn_based_conversation and not self.is_web_based_call:
+            # The output handler drops every packet until it holds the stream id, so a
+            # greeting sent before that loses its opening words.
+            try:
+                await asyncio.wait_for(self._s2s_stream_ready.wait(), timeout=S2S_STREAM_SID_TIMEOUT_S)
+            except asyncio.TimeoutError:
+                logger.warning("S2S: no stream_sid before the greeting, skipping it")
+                welcome = ""
+
         if welcome:
+            # Gate clock starts with the greeting: measured connects run 400ms to 1600ms
+            # against a 1500ms gate, so timing it earlier spent the barge-in protection.
+            self._s2s_started_at = time.time()
             await s2s.trigger_response(
                 instructions=f"Open the conversation by saying exactly this, and nothing else: {welcome}"
             )
@@ -7557,8 +7566,18 @@ class TaskManager(BaseManager):
         if self.__is_s2s() and message and message.strip():
             self._s2s_hangup_after_response = True
             await self.tools["s2s"].trigger_response(instructions=f"Say exactly this, and nothing else: {message}")
+            # Our caller stops watching the call once this returns.
+            self._s2s_track_task(asyncio.create_task(self._s2s_hangup_if_goodbye_never_comes()))
             return
         await self.process_call_hangup()
+
+    async def _s2s_hangup_if_goodbye_never_comes(self) -> None:
+        """Close the call if the armed goodbye never arrives."""
+        await asyncio.sleep(S2S_GOODBYE_TIMEOUT_S)
+        if self._s2s_hangup_after_response and not self.conversation_ended:
+            logger.warning(f"S2S goodbye not delivered in {S2S_GOODBYE_TIMEOUT_S}s, hanging up without it")
+            self._s2s_hangup_after_response = False
+            await self.process_call_hangup()
 
     def _s2s_track_task(self, task, call_id=None) -> None:
         """Hold a reference to a background task and surface its failure.
@@ -7621,6 +7640,11 @@ class TaskManager(BaseManager):
 
             # The agent's own greeting would otherwise echo back and trip the provider's VAD.
             if self._s2s_within_welcome_gate():
+                discarded += 1
+                continue
+
+            # Same gate the transcriber path uses: no answering over a handed-off call.
+            if self._should_ignore_transcriber_input():
                 discarded += 1
                 continue
 
@@ -7803,17 +7827,19 @@ class TaskManager(BaseManager):
 
         if self._s2s_hangup_after_response:
             self._s2s_hangup_after_response = False
-            self.hangup_detail = HangupReason.END_CALL_TOOL
+            # _hangup_after_goodbye already stamped its own reason before arming this.
+            if self.hangup_detail is None:
+                self.hangup_detail = HangupReason.END_CALL_TOOL
             await self.process_call_hangup()
 
     async def _s2s_output_loop(self):
-        try:
-            while not self.conversation_ended:
-                try:
-                    message = await asyncio.wait_for(self.buffered_output_queue.get(), timeout=1.0)
-                except asyncio.TimeoutError:
-                    continue
+        while not self.conversation_ended:
+            try:
+                message = await asyncio.wait_for(self.buffered_output_queue.get(), timeout=1.0)
+            except asyncio.TimeoutError:
+                continue
 
+            try:
                 self.tools["input"].update_is_audio_being_played(True)
                 await self.tools["output"].handle(message)
 
@@ -7829,10 +7855,9 @@ class TaskManager(BaseManager):
                             ),
                         }
                     )
-        except asyncio.CancelledError:
-            raise
-        except Exception as e:
-            logger.error(f"S2S output loop error: {e}")
+            except Exception as e:
+                # Nothing re-creates this task, so exiting leaves the caller in silence.
+                logger.error(f"S2S output loop error, dropped one packet: {e}")
 
     async def _s2s_dtmf_loop(self):
         """Forward carrier keypad digits to the model as text; no provider sees our media leg."""
