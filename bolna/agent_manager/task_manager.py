@@ -1390,7 +1390,7 @@ class TaskManager(BaseManager):
     async def _s2s_await_stream_sid(self):
         """Claim the stream id for an s2s call, which has no welcome audio to play.
 
-        The model speaks its own greeting, so the welcome path below is skipped — but it
+        The model speaks its own greeting, so the welcome path below is skipped, but it
         was also the only thing propagating the stream id, and without it the output
         handler silently discards the whole conversation.
         """
@@ -4326,7 +4326,7 @@ class TaskManager(BaseManager):
                 )
                 _transfer_end_recorded = True
             finally:
-                # CancelledError (BaseException) bypasses except — ensure transfer_end is
+                # CancelledError (BaseException) bypasses except, so ensure transfer_end is
                 # always recorded so it appears in progression_data even if the task is
                 # cancelled mid-flight when Plivo terminates the call.
                 if not _transfer_end_recorded:
@@ -7524,7 +7524,7 @@ class TaskManager(BaseManager):
             asyncio.create_task(self._s2s_event_loop()),
         ]
         try:
-            # Either loop finishing ends the call — the caller hung up, or the provider
+            # Either loop finishing ends the call: the caller hung up, or the provider
             # socket closed. Waiting on both would park here for the rest of the session:
             # a provider that has stopped being spoken to sends nothing to wake its reader.
             done, _ = await asyncio.wait(loops, return_when=asyncio.FIRST_COMPLETED)

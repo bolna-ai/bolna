@@ -104,8 +104,8 @@ class GeminiLiveS2S(BaseS2SProvider):
         url = f"{GEMINI_LIVE_URL}?key={self.api_key}"
         started = time.time()
         self._ws = await websockets.connect(url, max_size=None)
-        # The handshake has three stages that fail differently — a blocked socket, a
-        # rejected setup, and a model that never acknowledges — and they are
+        # The handshake has three stages that fail differently: a blocked socket, a
+        # rejected setup, and a model that never acknowledges, and they are
         # indistinguishable from one another once the call has already ended.
         logger.debug(f"Gemini Live socket open in {round((time.time() - started) * 1000)}ms")
         await self._send({"setup": self._build_setup()})
