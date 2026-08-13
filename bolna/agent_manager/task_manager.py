@@ -7125,8 +7125,12 @@ class TaskManager(BaseManager):
             # window as busy so we don't synthesize "are you still there" over the
             # upcoming follow-up response. hang_conversation_after intentionally remains
             # ungated so a truly hung task still triggers the inactivity hangup.
-            has_pending_generation = (self.llm_task is not None and not self.llm_task.done()) or (
-                self.execute_function_call_task is not None and not self.execute_function_call_task.done()
+            has_pending_generation = (
+                (self.llm_task is not None and not self.llm_task.done())
+                or (self.execute_function_call_task is not None and not self.execute_function_call_task.done())
+                # An s2s tool call lives here instead, and outlasting the floor would otherwise
+                # read as no forward progress and hang up mid-tool.
+                or any(not task.done() for task in getattr(self, "_s2s_tool_tasks", ()))
             )
 
             time_since_last_spoken_ai_word = time.time() - self.compute_last_ai_audio_timestamp()
@@ -7688,6 +7692,9 @@ class TaskManager(BaseManager):
                     logger.info(f"S2S caller: {event.content[:200]}")
                     self.conversation_history.append_user(event.content)
                     self.time_since_last_spoken_human_word = time.time()
+                    # Cleared here rather than in the output loop: the prompt's audio is not
+                    # distinguishable from any other turn, but the caller answering is.
+                    self.asked_if_user_is_still_there = False
                     self.interruption_manager.on_user_speech_ended()
 
             elif isinstance(event, s2s_events.FunctionCall):
@@ -7938,6 +7945,7 @@ class TaskManager(BaseManager):
             # commit; Gemini sends its toolResponse and returns, so a turnComplete arriving
             # between the two would hang up before the goodbye is spoken.
             self._s2s_hangup_after_response = True
+            self._s2s_track_task(asyncio.create_task(self._s2s_hangup_if_goodbye_never_comes()))
 
     async def _s2s_before_tool_request(self, event, args, params, meta_info):
         """Pre-call webhook and filler, the same two things the llm path does before a tool."""

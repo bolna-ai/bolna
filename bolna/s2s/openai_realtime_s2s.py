@@ -217,7 +217,9 @@ class OpenAIRealtimeS2S(BaseS2SProvider):
                 async for event in self._receive_events_impl():
                     attempts = 0  # the session is producing traffic again
                     yield event
-                return
+                # A normal close ends the iterator without raising, so this is a drop too.
+                if self._closed:
+                    return
             except websockets.ConnectionClosed as e:
                 if self._closed:
                     return

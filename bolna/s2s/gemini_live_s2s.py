@@ -82,7 +82,7 @@ class GeminiLiveS2S(BaseS2SProvider):
         self._resumption_handle: Optional[str] = None
         self._reconnecting = False
         self._pending_tool_results: list = []
-        self._turn_usage = S2SUsage()
+        self._turn_usage: Optional[S2SUsage] = None
         self._current_response_transcript = ""
         self._current_input_transcript = ""
 
@@ -269,7 +269,7 @@ class GeminiLiveS2S(BaseS2SProvider):
                 # Gemini reports usage in its own message, not on turnComplete, so hold it
                 # until the turn closes or the tokens never reach billing.
                 usage = _map_usage(message["usageMetadata"])
-                self._turn_usage = self._turn_usage + usage
+                self._turn_usage = (self._turn_usage or S2SUsage()) + usage
                 self._accumulate_usage(usage)
 
             server_content = message.get("serverContent")
@@ -326,7 +326,7 @@ class GeminiLiveS2S(BaseS2SProvider):
                 transcript = self._current_response_transcript.strip()
                 if transcript:
                     yield TranscriptDelta(content=transcript, is_final=True)
-                turn_usage, self._turn_usage = self._turn_usage, S2SUsage()
+                turn_usage, self._turn_usage = self._turn_usage, None
                 self.end_turn(turn_usage)
                 self._current_response_transcript = ""
                 yield ResponseDone(transcript=transcript, usage=turn_usage)

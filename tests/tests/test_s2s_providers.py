@@ -285,14 +285,15 @@ class TestOpenAIEventMapping:
         # mid-call complaints. Treating them as fatal hung up live calls and marked the
         # provider unhealthy in the circuit breaker.
         provider = make_openai()
-        provider._ws = FakeWS(
+        attach_ws(
+            provider,
             [
                 {"type": "error", "error": {"message": "Cancellation failed", "code": "response_cancel_not_active"}},
                 {
                     "type": "error",
                     "error": {"message": "active response", "code": "conversation_already_has_active_response"},
                 },
-            ]
+            ],
         )
         errors = [e for e in await drain(provider) if isinstance(e, S2SError)]
         assert len(errors) == 2
