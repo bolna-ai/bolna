@@ -48,6 +48,124 @@ class DictWithMissing(dict):
 # Server-owned telephony ids; never exposed to the model (prompt var, {placeholder}, or tool param).
 SERVER_OWNED_CALL_IDENTIFIERS = frozenset({"call_sid", "stream_sid"})
 
+# A variable path: an identifier, optionally followed by .key / .0 / [key] segments.
+# Kept public so dashboard-backend and the frontend can mirror it without drifting.
+VARIABLE_PATH = r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z0-9_]+|\[[^\[\]{}]+\])*"
+
+# One pass over a prompt: {{path}} is tried before {path} so the new syntax wins.
+# Anything that is not a variable path — a JSON literal, an empty {} — matches nothing and
+# is copied through untouched. That is what makes JSON in prompts safe.
+#
+# `spec` keeps legacy {price:.2f} format specs working; it is single-brace only, since the
+# double-brace syntax is new and has no legacy specs to honour.
+#
+# Deliberately NO blanket {{ -> { unescaping. Nested JSON ends in }} ({"a": {"b": 1}}),
+# so unescaping would silently eat a closing brace from every nested payload — the exact
+# case this change exists to support. The cost is that a prompt which used {{...}} purely
+# to escape a literal brace now keeps both braces; that is visible, not data loss, and
+# only affects non-identifier content (an identifier still unescapes, see render_prompt).
+PROMPT_TOKEN_PATTERN = re.compile(
+    r"\{\{\s*(?P<double>" + VARIABLE_PATH + r")\s*\}\}|\{(?P<single>" + VARIABLE_PATH + r")(?P<spec>:[^{}]*)?\}"
+)
+
+
+def resolve_variable_path(path, data):
+    """Walk a dotted/indexed path through nested dicts and lists.
+
+    Returns (found, value). `a.b.c`, `a.0.b` and the legacy `a[b][c]` all resolve.
+    """
+    current = data
+    for part in path.replace("[", ".").replace("]", "").split("."):
+        if not part:
+            continue
+        if isinstance(current, dict):
+            if part not in current:
+                return False, None
+            current = current[part]
+        elif isinstance(current, (list, tuple)):
+            if not part.lstrip("-").isdigit():
+                return False, None
+            index = int(part)
+            if not -len(current) <= index < len(current):
+                return False, None
+            current = current[index]
+        else:
+            return False, None
+    return True, current
+
+
+def render_variable_value(value, as_json=False):
+    """Stringify a resolved value.
+
+    as_json is set only for the {{path}} syntax, where dicts and lists become real JSON
+    (a Python repr emits single quotes and True/None, which the model cannot parse).
+    The legacy {path} syntax keeps str(), because prod recipient_data already carries
+    object-valued variables — product_details, items, cart_data_json, nearest_store —
+    and switching those to JSON would change output on live calls.
+    """
+    if isinstance(value, str):
+        return value
+    if as_json and isinstance(value, (dict, list, tuple)):
+        try:
+            return json.dumps(value, ensure_ascii=False, default=str)
+        except (TypeError, ValueError):
+            return str(value)
+    return str(value)
+
+
+def render_prompt(template, data, missing=""):
+    """Substitute {{path}} and {path} variables into a prompt.
+
+    Replaces str.format_map, which parsed every brace and therefore raised on any
+    JSON literal in the prompt — and because callers swallowed that exception, one
+    JSON snippet silently left EVERY variable in the prompt unsubstituted.
+
+    An unresolved {{path}} unescapes to {path}, preserving the legacy meaning of a
+    double-braced identifier. An unresolved {path} renders `missing`, matching the
+    previous DictWithMissing.
+
+    missing=None is partial-fill mode: substitute only what resolves and leave every
+    other token byte-identical. Agent template seeding needs this, because its leftover
+    placeholders are the runtime variables and must survive to the live call.
+    """
+    if not template or not isinstance(template, str):
+        return template
+    if not isinstance(data, dict):
+        data = {}
+
+    def substitute(match):
+        double = match.group("double")
+        path = double if double is not None else match.group("single")
+        spec = match.group("spec")
+        found, value = resolve_variable_path(path, data)
+        if not found:
+            # A spec-bearing token that does not resolve stays literal rather than
+            # rendering `missing`: it is far more likely pseudo-JSON a prompt is
+            # describing ("{name: string}") than a variable, and deleting that
+            # would be silent content loss.
+            if missing is None or spec:
+                return match.group(0)
+            return "{" + path + "}" if double is not None else missing
+        if spec:
+            # Partial fill leaves specs for the live render — applying one here would bake a
+            # seed-time value into the stored template and drop the runtime placeholder.
+            if missing is None:
+                return match.group(0)
+            try:
+                return format(value, spec[1:])
+            except Exception:
+                # Any failure keeps the token literal. Deliberately broad: an escaping
+                # exception would hit the outer handler and lose EVERY variable in the
+                # prompt — the exact format_map behaviour this function replaces.
+                return match.group(0)
+        return render_variable_value(value, as_json=double is not None)
+
+    try:
+        return PROMPT_TOKEN_PATTERN.sub(substitute, template)
+    except Exception as e:
+        logger.error(f"render_prompt failed, returning template unchanged: {e}")
+        return template
+
 
 def load_file(file_path, is_json=False):
     data = None
@@ -335,16 +453,11 @@ def enrich_context_with_time_variables(context_data, timezone):
 
 
 def update_prompt_with_context(prompt, context_data):
-    try:
-        if not context_data or not isinstance(context_data.get("recipient_data"), dict):
-            return prompt.format_map(DictWithMissing({}))
-        # A {call_sid}/{stream_sid} template renders empty instead of leaking the real id.
-        recipient_data = {
-            k: v for k, v in context_data["recipient_data"].items() if k not in SERVER_OWNED_CALL_IDENTIFIERS
-        }
-        return prompt.format_map(DictWithMissing(recipient_data))
-    except Exception as e:
-        return prompt
+    if not context_data or not isinstance(context_data.get("recipient_data"), dict):
+        return render_prompt(prompt, {})
+    # A {call_sid}/{stream_sid} template renders empty instead of leaking the real id.
+    recipient_data = {k: v for k, v in context_data["recipient_data"].items() if k not in SERVER_OWNED_CALL_IDENTIFIERS}
+    return render_prompt(prompt, recipient_data)
 
 
 async def get_prompt_responses(assistant_id, local=False):
