@@ -5,7 +5,7 @@ from typing import AsyncGenerator, List, Optional
 from .events import S2SUsage
 
 # Without a cap, a provider that closes every connection is re-dialled for the whole call.
-# The first retry skips the delay so a single transient drop costs the caller nothing extra.
+# The first retry skips the delay, so a single transient drop costs the caller nothing.
 MAX_RECONNECT_ATTEMPTS = 5
 RECONNECT_DELAY_S = 0.5
 
@@ -13,10 +13,8 @@ RECONNECT_DELAY_S = 0.5
 class BaseS2SProvider(ABC):
     """Provider-agnostic interface for speech-to-speech models.
 
-    TaskManager interacts only through this contract, so a new provider drops in by
-    subclassing and declaring its audio rates. Rates are declared per provider rather
-    than assumed: OpenAI Realtime takes 24kHz input, Gemini Live takes 16kHz, and both
-    emit 24kHz. Callers resample against these attributes instead of hardcoding.
+    Each provider declares its own audio rates; callers resample against those attributes
+    rather than hardcoding, since the two providers differ on input rate.
     """
 
     input_sample_rate: int
@@ -65,12 +63,7 @@ class BaseS2SProvider(ABC):
         self.first_audio_latencies.append(self._turn_first_audio_ms)
 
     def end_turn(self, usage: Optional[S2SUsage] = None) -> None:
-        """Close the turn as an LLM-shaped latency entry.
-
-        Downstream observability reads turn_latencies as dicts keyed like the LLM
-        pipeline's, so an s2s turn has to arrive in that shape rather than as a
-        bare duration.
-        """
+        """Close the turn as an LLM-shaped latency entry, which is the shape observability reads."""
         if self._turn_start_time is None:
             return
         entry = {

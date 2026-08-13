@@ -715,8 +715,8 @@ class TaskManager(BaseManager):
                 )
 
                 if self.__is_s2s():
-                    # The s2s result below asks for the goodbye, so telling the model to say
-                    # one before the call too produced two goodbyes on every hangup.
+                    # The end_call result asks for the goodbye, so asking for one here too
+                    # would have the model say it twice.
                     end_call_description = (
                         "End the current call. Do not say goodbye before calling this "
                         "function; you will be prompted to say it afterwards."
@@ -7196,9 +7196,8 @@ class TaskManager(BaseManager):
                     )
 
                     if self.__is_s2s():
-                        # The model owns the audio stream and there is no synthesizer to
-                        # render this. Pushing a packet through the path below left the
-                        # transcript claiming the agent spoke while the caller heard nothing.
+                        # The model owns the audio stream and there is no synthesizer to render
+                        # this, so the path below would log speech the caller never hears.
                         await self.tools["s2s"].trigger_response(
                             instructions=f"Say exactly this, and nothing else: {user_online_message}"
                         )
@@ -7479,9 +7478,8 @@ class TaskManager(BaseManager):
         try:
             await s2s.connect()
         except asyncio.CancelledError:
-            # CancelledError is a BaseException, so it skips the handler below and the one
-            # in run() swallows it. Without this line a call torn down mid-handshake ends
-            # with no error anywhere: no S2S start line, no exception, just a clean finish.
+            # CancelledError is a BaseException, so it skips the handler below and run()
+            # swallows it, leaving a call torn down mid-handshake with no error recorded.
             logger.error(
                 f"S2S connect cancelled after {round((time.time() - self._s2s_started_at) * 1000)}ms | "
                 f"provider={self.s2s_provider_name} model={self.s2s_model}"
@@ -7516,8 +7514,8 @@ class TaskManager(BaseManager):
                 welcome = ""
 
         if welcome:
-            # Gate clock starts with the greeting: measured connects run 400ms to 1600ms
-            # against a 1500ms gate, so timing it earlier spent the barge-in protection.
+            # Gate clock starts with the greeting: a connect can take longer than the gate
+            # itself, so timing it from before connect leaves no barge-in protection.
             self._s2s_started_at = time.time()
             self._s2s_welcome_sent = True
             await s2s.trigger_response(
@@ -7535,9 +7533,8 @@ class TaskManager(BaseManager):
             asyncio.create_task(self._s2s_event_loop()),
         ]
         try:
-            # Either loop finishing ends the call: the caller hung up, or the provider
-            # socket closed. Waiting on both would park here for the rest of the session:
-            # a provider that has stopped being spoken to sends nothing to wake its reader.
+            # Either loop finishing ends the call. Waiting on both would park here: a
+            # provider that has stopped being spoken to sends nothing to wake its reader.
             done, _ = await asyncio.wait(loops, return_when=asyncio.FIRST_COMPLETED)
             for task in done:
                 task.result()
@@ -7700,14 +7697,9 @@ class TaskManager(BaseManager):
                 if self._s2s_within_welcome_gate():
                     continue
                 # The provider reports every speech start here, so this is only a barge-in
-                # when the agent still had the floor.
-                #
-                # InterruptionManager is used for accounting only, never to veto: by the
-                # time this event arrives the provider's own VAD has already stopped
-                # generating, so nothing decided here can give the agent the floor back.
-                # Whether a cough counts as a barge-in is tuned at the provider instead,
-                # via semantic_vad eagerness on OpenAI and endOfSpeechSensitivity on Gemini,
-                # both of which classify better than a word count and a phrase list.
+                # when the agent still had the floor. InterruptionManager is accounting only:
+                # the provider's VAD has already stopped generating, so nothing decided here
+                # can give the agent the floor back. Barge-in sensitivity is tuned provider-side.
                 self.interruption_manager.on_user_speech_started()
                 if self._s2s_agent_has_floor():
                     logger.info("S2S: caller barged in, dropping queued audio")
@@ -7769,8 +7761,7 @@ class TaskManager(BaseManager):
             meta["message_category"] = "agent_hangup"
         elif self._s2s_turn_seq == 0 and self._s2s_welcome_sent:
             # The model speaks the greeting itself, so nothing else marks it. The output
-            # handlers stamp welcome_message_sent_ts off this, which is what
-            # time_to_first_audio reports.
+            # handlers stamp welcome_message_sent_ts off this, which time_to_first_audio reads.
             meta["message_category"] = "agent_welcome_message"
         meta.update(extra)
         return meta
@@ -7803,9 +7794,8 @@ class TaskManager(BaseManager):
             )
 
         if event.transcript or usage:
-            # A turn whose usage never arrived must stay distinguishable from one that
-            # genuinely spent nothing: passing zeros stamps it api_reported and billing
-            # then trusts a number the provider never sent.
+            # A turn whose usage never arrived must stay distinguishable from one that spent
+            # nothing: zeros would stamp it api_reported and billing would trust that.
             split = (usage or s2s_events.S2SUsage()).modality_split()
             convert_to_request_log(
                 event.transcript,

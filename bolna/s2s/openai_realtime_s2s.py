@@ -28,9 +28,8 @@ OPENAI_REALTIME_URL = "wss://api.openai.com/v1/realtime"
 # gpt-realtime-2 and its point releases accept reasoning.effort; 1.5 rejects it.
 REASONING_MODEL_PREFIXES = ("gpt-realtime-2",)
 
-# Turn-level complaints the session survives. Cancelling a response that already finished
-# and racing response.create against an active response both land here, and neither is a
-# reason to drop a live call or mark the provider unhealthy.
+# Turn-level complaints the session survives: neither is a reason to drop a live call or
+# mark the provider unhealthy.
 RECOVERABLE_ERROR_CODES = frozenset(
     {
         "response_cancel_not_active",
@@ -42,11 +41,7 @@ RECOVERABLE_ERROR_TYPES = frozenset({"invalid_request_error"})
 
 
 class OpenAIRealtimeS2S(BaseS2SProvider):
-    """OpenAI Realtime API speech-to-speech provider.
-
-    Targets the GA protocol only. The Realtime beta was removed from the API on
-    2026-05-12, so the beta event aliases (response.audio.*) are gone.
-    """
+    """OpenAI Realtime API speech-to-speech provider, GA protocol only."""
 
     input_sample_rate = 24000
     output_sample_rate = 24000
@@ -238,8 +233,7 @@ class OpenAIRealtimeS2S(BaseS2SProvider):
             if attempts > 1:
                 await asyncio.sleep(RECONNECT_DELAY_S)
 
-            # A drop mid-call used to end the call outright. Reconnecting costs the caller
-            # the in-flight turn, which the model regenerates from the replayed history.
+            # Costs the caller the in-flight turn, which the model regenerates from history.
             try:
                 started = time.time()
                 await self._reconnect()
@@ -255,10 +249,8 @@ class OpenAIRealtimeS2S(BaseS2SProvider):
             except Exception:
                 pass
             self._ws = None
-        # connect() rebuilds the session config, which carries the transcript so far in the
-        # instructions. OpenAI has no server-side resumption handle like Gemini's, and the
-        # shape for replaying an assistant turn as a conversation item is undocumented,
-        # so the prompt is the one surface that cannot be rejected mid-call.
+        # OpenAI has no resumption handle like Gemini's, so state is restored by rebuilding
+        # the session config, whose instructions carry the transcript so far.
         await self.connect()
 
     async def _receive_events_impl(self) -> AsyncGenerator:
@@ -353,8 +345,7 @@ class OpenAIRealtimeS2S(BaseS2SProvider):
         await self._send(payload)
 
     async def send_dtmf(self, digits: str) -> None:
-        # bolna terminates telephony itself, so the provider never sees the carrier's DTMF
-        # frames. Inject the digits as user text instead.
+        # bolna terminates telephony, so the provider never sees the carrier's DTMF frames.
         await self._send(
             {
                 "type": "conversation.item.create",

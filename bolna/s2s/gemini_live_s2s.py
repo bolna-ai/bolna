@@ -35,10 +35,8 @@ GEMINI_LIVE_URL = (
 class GeminiLiveS2S(BaseS2SProvider):
     """Gemini Live API speech-to-speech provider.
 
-    Gemini caps an audio-only session at roughly 15 minutes, which is well inside the
-    length of a normal call. The session is therefore resumed transparently: the server
-    hands out a resumption handle, warns via goAway before it closes, and the reconnect
-    restores conversation state so the caller never notices.
+    Gemini caps an audio-only session at roughly 15 minutes, well inside a normal call, so
+    the session is resumed transparently off the handle the server issues.
     """
 
     input_sample_rate = 16000
@@ -104,9 +102,6 @@ class GeminiLiveS2S(BaseS2SProvider):
         url = f"{GEMINI_LIVE_URL}?key={self.api_key}"
         started = time.time()
         self._ws = await websockets.connect(url, max_size=None)
-        # The handshake has three stages that fail differently: a blocked socket, a
-        # rejected setup, and a model that never acknowledges, and they are
-        # indistinguishable from one another once the call has already ended.
         logger.debug(f"Gemini Live socket open in {round((time.time() - started) * 1000)}ms")
         await self._send({"setup": self._build_setup()})
 
@@ -196,7 +191,6 @@ class GeminiLiveS2S(BaseS2SProvider):
                 async for event in self._receive_events_impl():
                     attempts = 0  # the session is producing traffic again
                     yield event
-                # Clean server close: resume if we still have a handle.
                 if self._closed:
                     return
             except websockets.ConnectionClosed as e:
@@ -287,9 +281,8 @@ class GeminiLiveS2S(BaseS2SProvider):
                 self._current_response_transcript = ""
                 self.cancel_turn()
                 if partial:
-                    # The final transcript is only emitted at turnComplete, which never
-                    # arrives for an interrupted turn, so what the caller actually heard
-                    # before barging in would go unrecorded.
+                    # turnComplete never arrives for an interrupted turn, so without this
+                    # what the caller heard before barging in goes unrecorded.
                     yield TranscriptDelta(content=partial, is_final=True)
                 yield Interrupted()
                 continue

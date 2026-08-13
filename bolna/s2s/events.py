@@ -88,7 +88,7 @@ class FunctionCall:
 
 @dataclass
 class FunctionCallCancelled:
-    """Provider withdrew tool calls it had previously requested."""
+    """Provider withdrew tool calls it requested."""
 
     call_ids: list
 
