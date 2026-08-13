@@ -22,9 +22,6 @@ class BaseS2SProvider(ABC):
     input_sample_rate: int
     output_sample_rate: int = 24000
 
-    # DTMF is telephony-only and not offered by every provider.
-    supports_dtmf: bool = False
-
     def __init__(
         self,
         *,

@@ -4102,16 +4102,15 @@ class TaskManager(BaseManager):
 
         self._hangup_processing = True
         self.hangup_triggered = True
-        message = self.call_hangup_message if not self.voicemail_handler.detected else ""
         if self.__is_s2s():
-            # The model already spoke the goodbye, prompted by the end_call result below,
-            # and there is no synthesizer to render one here. Queueing this would push a
-            # packet the caller never hears and leave the call waiting on its mark.
+            # The model has already spoken the goodbye by now, prompted by the end_call result
+            # or _hangup_after_goodbye, and there is no synthesizer to render one here anyway.
             self.hangup_message_queued = False
             self.hangup_triggered_at = time.time()
             await self.__process_end_of_conversation()
             return
 
+        message = self.call_hangup_message if not self.voicemail_handler.detected else ""
         if not message or message.strip() == "":
             self.hangup_message_queued = False  # No hangup message to wait for
             self.hangup_triggered_at = time.time()
@@ -7407,7 +7406,7 @@ class TaskManager(BaseManager):
         if self.turn_based_conversation or self.is_web_based_call:
             return None
         provider = self.task_config["tools_config"]["input"]["provider"]
-        return provider if provider in SUPPORTED_OUTPUT_TELEPHONY_HANDLERS else None
+        return provider if provider in SUPPORTED_INPUT_TELEPHONY_HANDLERS else None
 
     def _s2s_is_carrier_leg(self):
         return self._s2s_telephony_provider() is not None
@@ -7944,8 +7943,10 @@ class TaskManager(BaseManager):
         await s2s.send_function_result(event.call_id, event.name, result)
         await s2s.commit_function_results()
         if ends_call:
-            # Armed only once the commit returns. commit waits on the tool-call turn's own
-            # response.done, so the next turn to complete is the goodbye, not this one.
+            # Armed only once the commit returns, so the next turn to complete is the goodbye.
+            # OpenAI guarantees that by awaiting the tool-call turn's response.done inside
+            # commit; Gemini sends its toolResponse and returns, so a turnComplete arriving
+            # between the two would hang up before the goodbye is spoken.
             self._s2s_hangup_after_response = True
 
     async def _s2s_before_tool_request(self, event, args, params, meta_info):
