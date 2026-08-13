@@ -54,6 +54,7 @@ def make_tm(*, io_provider="plivo", web=False, turn_based=False, in_rate=24000, 
     tm._s2s_hangup_after_response = False
     tm._s2s_started_at = 0  # welcome gate already elapsed
     tm._s2s_welcome_gate_ms = 0
+    tm._s2s_welcome_sent = True
     tm._s2s_agent_speaking = False
     tm._s2s_turn_seq = 0
     tm._s2s_playout_until = 0.0

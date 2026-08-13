@@ -7470,6 +7470,7 @@ class TaskManager(BaseManager):
         self._s2s_hangup_after_response = False
         self._s2s_pending_results = 0
         self._s2s_welcome_gate_ms = self.s2s.welcome_audio_gate_ms
+        self._s2s_welcome_sent = False
         self._s2s_started_at = time.time()
         self._s2s_agent_speaking = False
         self._s2s_turn_seq = 0
@@ -7495,6 +7496,7 @@ class TaskManager(BaseManager):
             await self._report_provider_health(
                 "s2s", self.s2s_provider_name, self.s2s_model, False, phase="connect", blocking=True
             )
+            self.hangup_detail = HangupReason.S2S_ERROR
             raise LLMError(str(e), provider=self.s2s_provider_name, model=self.s2s_model)
 
         logger.info(
@@ -7518,6 +7520,7 @@ class TaskManager(BaseManager):
             # Gate clock starts with the greeting: measured connects run 400ms to 1600ms
             # against a 1500ms gate, so timing it earlier spent the barge-in protection.
             self._s2s_started_at = time.time()
+            self._s2s_welcome_sent = True
             await s2s.trigger_response(
                 instructions=f"Open the conversation by saying exactly this, and nothing else: {welcome}"
             )
@@ -7616,7 +7619,8 @@ class TaskManager(BaseManager):
         return time.time() < self._s2s_playout_until
 
     def _s2s_within_welcome_gate(self):
-        return (time.time() - self._s2s_started_at) * 1000 < self._s2s_welcome_gate_ms
+        # No greeting means no echo of one to guard against, so the caller is never gated.
+        return self._s2s_welcome_sent and (time.time() - self._s2s_started_at) * 1000 < self._s2s_welcome_gate_ms
 
     async def _s2s_audio_ingest_loop(self):
         """Caller audio to the model, resampled to whatever rate the provider declares."""
@@ -7744,6 +7748,7 @@ class TaskManager(BaseManager):
                     await self._report_provider_health(
                         "s2s", self.s2s_provider_name, self.s2s_model, False, blocking=True
                     )
+                    self.hangup_detail = HangupReason.S2S_ERROR
                     raise LLMError(event.message, provider=self.s2s_provider_name, model=self.s2s_model)
 
     def _s2s_encode_output(self, pcm):
@@ -7763,7 +7768,7 @@ class TaskManager(BaseManager):
         }
         if self._s2s_hangup_after_response:
             meta["message_category"] = "agent_hangup"
-        elif self._s2s_turn_seq == 0:
+        elif self._s2s_turn_seq == 0 and self._s2s_welcome_sent:
             # The model speaks the greeting itself, so nothing else marks it. The output
             # handlers stamp welcome_message_sent_ts off this, which is what
             # time_to_first_audio reports.
@@ -7915,6 +7920,7 @@ class TaskManager(BaseManager):
                 result = json.dumps({"status": "success", "message": "Transfer already in progress; wait silently."})
             else:
                 self.has_transfer = True
+                await self._s2s_before_tool_request(event, args, params, meta_info)
                 # param is the configured tool body, which is where call_transfer_number
                 # lives; the model's own arguments go in as the response, same as the llm
                 # path. Passing the arguments as both leaves the webhook no destination.
@@ -7923,11 +7929,7 @@ class TaskManager(BaseManager):
                 )
                 result = json.dumps({"status": "success", "message": "Transfer initiated; wait silently."})
         else:
-            # Without this the caller hears dead air for as long as the endpoint takes, and
-            # the are-you-still-there watchdog fires into the gap.
-            filler = compute_function_pre_call_message(self.language, event.name, params.get("pre_call_message"))
-            if filler:
-                await s2s.trigger_response(instructions=f"Say exactly this, and nothing else: {filler}")
+            await self._s2s_before_tool_request(event, args, params, meta_info)
             result = await self._s2s_call_api_tool(event, args, params, meta_info)
 
         convert_to_request_log(
@@ -7945,6 +7947,17 @@ class TaskManager(BaseManager):
             # Armed only once the commit returns. commit waits on the tool-call turn's own
             # response.done, so the next turn to complete is the goodbye, not this one.
             self._s2s_hangup_after_response = True
+
+    async def _s2s_before_tool_request(self, event, args, params, meta_info):
+        """Pre-call webhook and filler, the same two things the llm path does before a tool."""
+        webhook_url = params.get("pre_call_webhook_url")
+        if webhook_url:
+            self.fire_pre_call_webhook(webhook_url, event.name, args, meta_info, params.get("pre_call_webhook_param"))
+        # Without this the caller hears dead air for as long as the tool takes, and the
+        # are-you-still-there watchdog fires into the gap.
+        filler = compute_function_pre_call_message(self.language, event.name, params.get("pre_call_message"))
+        if filler:
+            await self.tools["s2s"].trigger_response(instructions=f"Say exactly this, and nothing else: {filler}")
 
     async def _s2s_call_api_tool(self, event, args, params, meta_info):
         url = params.get("url")
