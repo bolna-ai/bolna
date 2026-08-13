@@ -429,8 +429,10 @@ class TestStreamSidPropagation:
         tm.stream_sid_ts = None
         tm.output_handler_set = True
         tm._report_stream_connect = AsyncMock()
+        ready = asyncio.Event()
+        ready.set()
         tm.tools = {
-            "input": MagicMock(get_stream_sid=MagicMock(return_value="sid-abc")),
+            "input": MagicMock(get_stream_sid=MagicMock(return_value="sid-abc"), stream_sid_ready=ready),
             "output": MagicMock(set_stream_sid=AsyncMock()),
         }
         return tm
@@ -452,7 +454,7 @@ class TestStreamSidPropagation:
     @pytest.mark.asyncio
     async def test_missing_stream_sid_ends_the_call_rather_than_hanging(self):
         tm = self._make_telephony_tm()
-        tm.tools["input"].get_stream_sid.return_value = None
+        tm.tools["input"].stream_sid_ready = asyncio.Event()  # never set: carrier never reports
         tm._TaskManager__process_end_of_conversation = AsyncMock()
         await tm._TaskManager__await_stream_sid(timeout=0.05)
         tm._TaskManager__process_end_of_conversation.assert_awaited_once()
