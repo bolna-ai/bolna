@@ -328,6 +328,29 @@ def default_reasoning_effort(model: str) -> str:
     return supported[0].value
 
 
+GEMINI_THINKING_LEVEL_MAP = {
+    "gemini-3-flash-preview": [RE.MINIMAL, RE.LOW, RE.MEDIUM, RE.HIGH],
+    "gemini-3.1-flash-lite": [RE.MINIMAL, RE.LOW, RE.MEDIUM, RE.HIGH],
+    "gemini-3.1-flash-lite-preview": [RE.MINIMAL, RE.LOW, RE.MEDIUM, RE.HIGH],
+    "gemini-3.1-pro-preview": [RE.LOW, RE.MEDIUM, RE.HIGH],
+    "gemini-3.5-flash": [RE.MINIMAL, RE.LOW, RE.MEDIUM, RE.HIGH],
+    "gemini-3.5-flash-lite": [RE.MINIMAL, RE.LOW, RE.MEDIUM, RE.HIGH],
+    "gemini-3.6-flash": [RE.MINIMAL, RE.LOW, RE.MEDIUM, RE.HIGH],
+    "gemini-3.7-flash": [RE.LOW, RE.MEDIUM, RE.HIGH],
+}
+
+
+def default_thinking_level(model: str) -> str:
+    """Lowest-latency thinking level the Gemini 3.x model supports.
+
+    Unknown models fall back to "low", the only level the whole 3.x family accepts.
+    """
+    supported = GEMINI_THINKING_LEVEL_MAP.get(model.rsplit("/", 1)[-1])
+    if not supported:
+        return RE.LOW.value
+    return supported[0].value
+
+
 def canonical_model(name: str) -> str:
     """The known model a deployment serves, e.g. 'ptu-gpt-5.4-mini' -> 'gpt-5.4-mini'.
 
