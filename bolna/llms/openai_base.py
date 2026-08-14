@@ -500,7 +500,6 @@ class OpenAICompatibleLLM(BaseLLM):
         meta_info=None,
         tool_choice=None,
         tools=None,
-        *,
         retry_on_empty=True,
     ):
         if not messages:
