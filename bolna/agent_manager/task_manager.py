@@ -3973,7 +3973,10 @@ class TaskManager(BaseManager):
 
         empty_turn_detail = None
         if not llm_response.strip():
-            reason = next((e.get("error") for e in meta_info.get("_non_fatal_errors", []) if e.get("error")), None)
+            # Newest first: a turn that recovered from a stale response id and then came back empty
+            # records both, and the later error is the one that silenced it.
+            errors = meta_info.get("_non_fatal_errors", [])
+            reason = next((e.get("error") for e in reversed(errors) if e.get("error")), None)
             empty_turn_detail = f"LLM returned no output ({reason})" if reason else "LLM returned no output"
 
         if self.stream and llm_response != filler_message:
