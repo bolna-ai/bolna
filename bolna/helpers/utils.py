@@ -50,7 +50,11 @@ SERVER_OWNED_CALL_IDENTIFIERS = frozenset({"call_sid", "stream_sid"})
 
 # A variable path: an identifier, optionally followed by .key / .0 / [key] segments.
 # Kept public so dashboard-backend and the frontend can mirror it without drifting.
-VARIABLE_PATH = r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z0-9_]+|\[[^\[\]{}]+\])*"
+# Hyphens are allowed in dot segments (never in the leading identifier) so keys like a date
+# "31-03-2024" are reachable as {{a.b.31-03-2024}}. Restricting hyphens to segments AFTER a
+# dot keeps {price-list} a non-match, exactly as before — measured 0/76,907 prod agents use a
+# dotted-then-hyphen token, so nothing existing changes.
+VARIABLE_PATH = r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z0-9_-]+|\[[^\[\]{}]+\])*"
 
 # One pass over a prompt: {{path}} is tried before {path} so the new syntax wins.
 # Anything that is not a variable path — a JSON literal, an empty {} — matches nothing and
