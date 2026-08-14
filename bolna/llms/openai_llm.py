@@ -663,7 +663,7 @@ class OpenAiLLM(OpenAICompatibleLLM):
             logger.error(f"WS streaming error: {e}, falling back to HTTP SSE")
             self.invalidate_response_chain()
             async for chunk in self._generate_stream_responses(
-                messages, synthesize, request_json, meta_info, tool_choice
+                messages, synthesize, request_json, meta_info, tool_choice, tools
             ):
                 yield chunk
             return
