@@ -68,15 +68,41 @@ PROMPT_TOKEN_PATTERN = re.compile(
 )
 
 
+def parse_json_container(value):
+    """A JSON object/array that arrived as a string -> the parsed container, else unchanged.
+
+    Callers hand us variables in whatever shape their transport produced: the web-call panel
+    parses JSON client-side, but a telephony /call payload (or any API caller) commonly sends
+    the same value as a JSON *string*. Only objects and arrays are accepted — a bare number or
+    quoted string stays a string, so "720" never silently becomes an int.
+    """
+    if not isinstance(value, str):
+        return value
+    trimmed = value.strip()
+    if not trimmed.startswith("{") and not trimmed.startswith("["):
+        return value
+    try:
+        parsed = json.loads(trimmed)
+    except (ValueError, TypeError):
+        return value
+    return parsed if isinstance(parsed, (dict, list)) else value
+
+
 def resolve_variable_path(path, data):
     """Walk a dotted/indexed path through nested dicts and lists.
 
     Returns (found, value). `a.b.c`, `a.0.b` and the legacy `a[b][c]` all resolve.
+
+    A stringified JSON payload is parsed ONLY when a path actually walks into it. Doing it
+    here rather than at ingress is what keeps existing prompts byte-identical: a bare {var}
+    or {{var}} never triggers parsing, so a string-valued variable still renders as the exact
+    string it always did.
     """
     current = data
     for part in path.replace("[", ".").replace("]", "").split("."):
         if not part:
             continue
+        current = parse_json_container(current)
         if isinstance(current, dict):
             if part not in current:
                 return False, None

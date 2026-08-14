@@ -6,6 +6,7 @@ silently went unsubstituted.
 """
 
 from bolna.helpers.utils import (
+    parse_json_container,
     render_prompt,
     render_variable_value,
     resolve_variable_path,
@@ -223,3 +224,56 @@ class TestUpdatePromptWithContext:
 
     def test_json_survives_with_no_context(self):
         assert update_prompt_with_context('{"a": 1}', None) == '{"a": 1}'
+
+
+class TestStringifiedJsonVariables:
+    """Telephony /call and API callers commonly send a nested variable as a JSON *string* —
+    only the web-call panel parses client-side. Nested paths must still resolve, WITHOUT
+    changing what a bare {var} renders.
+    """
+
+    STR_DATA = {
+        "prior": '{"score": 720, "loans": [{"amount": 5000, "status": "closed"}]}',
+        "product_details": '{"name": "Shirt", "price": 100}',
+        "items": '[{"sku": "A1"}, {"sku": "B2"}]',
+        "price": "12.5",
+        "note": "not json at all",
+    }
+
+    def test_nested_path_walks_into_a_json_string(self):
+        assert render_prompt("{{prior.score}}", self.STR_DATA) == "720"
+        assert render_prompt("{{prior.loans.0.amount}}", self.STR_DATA) == "5000"
+        assert render_prompt("{{prior.loans.0.status}}", self.STR_DATA) == "closed"
+
+    def test_legacy_bracket_path_also_walks_in(self):
+        assert render_prompt("{prior[loans][0][amount]}", self.STR_DATA) == "5000"
+
+    def test_json_array_string_indexes(self):
+        assert render_prompt("{{items.1.sku}}", self.STR_DATA) == "B2"
+
+    def test_bare_variable_is_NOT_parsed(self):
+        # No path walked -> no parsing -> renders the exact string it always did.
+        for template in ("{product_details}", "{{product_details}}"):
+            assert render_prompt(template, self.STR_DATA) == self.STR_DATA["product_details"]
+
+    def test_numeric_string_is_never_coerced(self):
+        assert render_prompt("{price}", self.STR_DATA) == "12.5"
+
+    def test_non_json_string_path_still_fails_cleanly(self):
+        assert render_prompt("{{note.deeper}}", self.STR_DATA) == "{note.deeper}"
+
+    def test_malformed_json_string_path_fails_cleanly(self):
+        assert render_prompt("{{broken.x}}", {"broken": '{"unclosed": '}) == "{broken.x}"
+
+
+class TestParseJsonContainer:
+    def test_object_and_array_are_parsed(self):
+        assert parse_json_container('{"a": 1}') == {"a": 1}
+        assert parse_json_container("[1, 2]") == [1, 2]
+
+    def test_scalars_and_non_strings_pass_through(self):
+        for value in ("720", "hello", '"quoted"', 42, None, {"a": 1}):
+            assert parse_json_container(value) == value
+
+    def test_malformed_json_passes_through(self):
+        assert parse_json_container('{"unclosed": ') == '{"unclosed": '
