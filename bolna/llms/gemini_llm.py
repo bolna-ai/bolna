@@ -5,6 +5,7 @@ import base64
 from typing import AsyncIterable
 from google import genai
 from google.genai import types
+from bolna.constants import default_thinking_level
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.utils import now_ms, compute_function_pre_call_message, convert_to_request_log
 from .llm import BaseLLM
@@ -192,44 +193,24 @@ class GeminiLLM(BaseLLM):
         return system_instruction, history
 
     def _get_thinking_config(self) -> "types.ThinkingConfig | None":
-        """
-        Return the correct ThinkingConfig per model family based on Google docs:
+        """Thinking knob per family: 3.x takes thinking_level, 2.5 takes thinking_budget.
 
-        Gemini 3.x  → use thinking_level (NOT thinking_budget)
-          - Pro    : level="low"     (minimum; "minimal" not supported for Pro)
-          - Flash/Lite: level="minimal" (near-off; avoids thought_signature overhead)
-
-        Gemini 2.5  → use thinking_budget
-          - Pro    : budget=128      (minimum; cannot disable)
-          - Flash  : budget=0        (fully off; range 0-24576)
-          - Flash-Lite: budget=0     (fully off; range 512-24576 but 0 disables)
-
-        If the user explicitly passed a thinking_budget > 0, honour it (2.5 models).
+        Sending either one to the other family is a 400, so an explicit budget only
+        applies to 2.5.
         """
         m = self.model
 
-        # User explicitly set a budget — honour it for 2.5 models only.
-        # Gemini 3.x uses thinking_level, not thinking_budget; passing budget to 3.x causes 400s.
         if self.thinking_budget and self.thinking_budget > 0 and "2.5" in m:
             return types.ThinkingConfig(thinking_budget=self.thinking_budget, include_thoughts=True)
 
-        # --- Gemini 3.x family: use thinking_level ---
         if m.startswith("gemini-3"):
-            if "pro" in m:
-                # Pro cannot disable thinking; "minimal" is not supported — use "low"
-                return types.ThinkingConfig(thinking_level="low", include_thoughts=True)
-            else:
-                # Flash / Flash-Lite: "minimal" is closest to off, avoids thought_signature cost
-                return types.ThinkingConfig(thinking_level="minimal", include_thoughts=True)
+            return types.ThinkingConfig(thinking_level=default_thinking_level(m), include_thoughts=True)
 
-        # --- Gemini 2.5 family: use thinking_budget ---
         if "2.5" in m:
             if "pro" in m:
-                # Pro cannot disable thinking; minimum budget is 128
+                # Pro cannot disable thinking; 128 is its floor.
                 return types.ThinkingConfig(thinking_budget=128, include_thoughts=True)
-            else:
-                # Flash / Flash-Lite: disable with 0
-                return types.ThinkingConfig(thinking_budget=0)
+            return types.ThinkingConfig(thinking_budget=0)
 
         return None
 
