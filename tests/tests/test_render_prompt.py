@@ -277,3 +277,28 @@ class TestParseJsonContainer:
 
     def test_malformed_json_passes_through(self):
         assert parse_json_container('{"unclosed": ') == '{"unclosed": '
+
+
+class TestHyphenatedKeys:
+    """Real payloads key objects by date ("31-03-2024"), so dot segments allow hyphens.
+    Hyphens are permitted ONLY after a dot — the leading identifier still cannot contain one,
+    which is what keeps {price-list} a non-match (0/76,907 prod agents use a dotted-hyphen token).
+    """
+
+    DATA = {"cc": {"history": [{"31-03-2024": 628}]}, "price": 10, "name": "A"}
+
+    def test_hyphenated_key_via_dots(self):
+        assert render_prompt("{{cc.history.0.31-03-2024}}", self.DATA) == "628"
+
+    def test_hyphenated_key_via_brackets_still_works(self):
+        assert render_prompt("{cc[history][0][31-03-2024]}", self.DATA) == "628"
+
+    def test_leading_identifier_hyphen_is_still_not_a_variable(self):
+        assert render_prompt("{price-list}", self.DATA) == "{price-list}"
+
+    def test_pseudo_json_with_hyphen_key_untouched(self):
+        template = "Return {name: string, age-x: number}"
+        assert render_prompt(template, self.DATA) == template
+
+    def test_json_literal_with_hyphen_key_untouched(self):
+        assert render_prompt('{"a-b": 1}', self.DATA) == '{"a-b": 1}'
