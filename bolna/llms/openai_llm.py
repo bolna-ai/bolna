@@ -535,6 +535,8 @@ class OpenAiLLM(OpenAICompatibleLLM):
         ws_service_tier = None
         llm_host = self.llm_host
         response_usage = None
+        incomplete = False
+        incomplete_reason = None
 
         try:
             async for evt in self._ws_transport.stream_response(create_params):
@@ -576,7 +578,9 @@ class OpenAiLLM(OpenAICompatibleLLM):
                     raise APIError(message=f"Response failed: {error_info}", request=None, body=None)
 
                 if evt_type == ResponseStreamEvent.INCOMPLETE:
-                    logger.warning("WS Responses API stream incomplete")
+                    incomplete = True
+                    incomplete_reason = ((evt.get("response") or {}).get("incomplete_details") or {}).get("reason")
+                    logger.warning(f"WS Responses API stream incomplete, reason={incomplete_reason}")
                     self.invalidate_response_chain()
                     break
 
@@ -659,7 +663,20 @@ class OpenAiLLM(OpenAICompatibleLLM):
             logger.error(f"WS streaming error: {e}, falling back to HTTP SSE")
             self.invalidate_response_chain()
             async for chunk in self._generate_stream_responses(
-                messages, synthesize, request_json, meta_info, tool_choice
+                messages, synthesize, request_json, meta_info, tool_choice, tools
+            ):
+                yield chunk
+            return
+
+        # Nothing was yielded yet, so a retry cannot duplicate speech.
+        if incomplete and not answer and not func_call_args:
+            logger.warning(f"WS Responses API returned no output (reason={incomplete_reason}), retrying once over HTTP")
+            if isinstance(meta_info, dict):
+                meta_info.setdefault("_non_fatal_errors", []).append(
+                    {"error_type": "incomplete_empty_response", "error": incomplete_reason, "model": self.model}
+                )
+            async for chunk in self._generate_stream_responses(
+                messages, synthesize, request_json, meta_info, tool_choice, tools, retry_on_empty=False
             ):
                 yield chunk
             return
