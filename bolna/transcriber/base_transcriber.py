@@ -23,6 +23,14 @@ class BaseTranscriber:
         self.turn_latencies = []
         self.connection_error = None
         self.is_transcript_sent_for_processing = False
+        self.standby = False
+
+    def quiesce(self):
+        """Go on pool standby: this transcriber hears only keepalive silence from here."""
+        self.standby = True
+
+    def resume(self):
+        self.standby = False
 
     def _upsert_turn_latency(self, entry: dict) -> None:
         """Replace existing turn_latencies entry with matching turn_id, or append if new."""

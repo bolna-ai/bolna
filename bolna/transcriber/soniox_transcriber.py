@@ -237,6 +237,27 @@ class SonioxTranscriber(BaseTranscriber):
         )
         logger.info(f"Soniox: starting new turn with turn_id {self.current_turn_id}")
 
+    def quiesce(self):
+        # The in-flight turn is not lost: switch() hands current_turn_id to the incoming
+        # transcriber, so a stub kept here would just duplicate the id that one reports.
+        super().quiesce()
+        if self.current_turn_id is not None:
+            self.turn_latencies = [
+                t
+                for t in self.turn_latencies
+                if t.get("turn_id") != self.current_turn_id or t.get("asr_finalized_epoch_ms") is not None
+            ]
+        self._reset_turn_state()
+
+    def resume(self):
+        # Keeps current_turn_id, which switch() sets just before this call, so the
+        # inherited utterance finalizes under its original id.
+        super().resume()
+        self.final_transcript = ""
+        self.current_turn_interim_details = []
+        self.last_interim_time = None
+        self.is_transcript_sent_for_processing = False
+
     def _reset_turn_state(self):
         self._turn_first_speech_epoch_ms = None
         self.current_turn_interim_details = []
@@ -314,6 +335,13 @@ class SonioxTranscriber(BaseTranscriber):
                         non_final_text += text
 
                 has_content = bool(new_final_text or non_final_text)
+
+                if self.standby:
+                    # Keepalive silence plus whatever Soniox is still refining from before
+                    # the switch. Drain it to keep the socket warm, but stay silent.
+                    new_final_text = ""
+                    has_content = False
+                    endpoint_hit = False
 
                 if has_content and self.current_turn_id is None:
                     self._start_turn()

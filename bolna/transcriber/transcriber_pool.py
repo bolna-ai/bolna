@@ -67,8 +67,9 @@ class TranscriberPool:
                           Each instance already has its own private input_queue set.
             shared_input_queue: the original audio_queue from TaskManager that
                                 receives raw audio packets from the input handler.
-            output_queue: the shared transcriber_output_queue (all transcribers
-                          write to the same one).
+            output_queue: the shared transcriber_output_queue that TaskManager
+                          consumes. Each transcriber is re-pointed at a private
+                          queue and fanned in through _forward_output.
             active_label: which transcriber label should receive audio initially.
             multilingual_config: raw multilingual config dict from task_config
             lid_provider: "sarvam" | None (disables LID tap)
@@ -87,6 +88,17 @@ class TranscriberPool:
         if active_label not in self.transcribers:
             raise ValueError(f"active_label '{active_label}' not in transcribers: {list(self.transcribers.keys())}")
         self.active_label = active_label
+
+        # Transcribers are constructed against the shared output queue, so anything a
+        # standby emits reaches TaskManager as if the caller had spoken.
+        self._transcriber_queues = {}
+        for label, transcriber in self.transcribers.items():
+            private_queue = asyncio.Queue()
+            transcriber.transcriber_output_queue = private_queue
+            self._transcriber_queues[label] = private_queue
+            transcriber.standby = label != active_label
+        self._fanin_tasks: list[asyncio.Task] = []
+
         self._router_task = None
         self._keepalive_task = None
         self._multilingual_config = multilingual_config
@@ -202,6 +214,9 @@ class TranscriberPool:
             logger.info(f"TranscriberPool: starting transcriber '{label}'")
             await transcriber.run()
 
+        for label, queue in self._transcriber_queues.items():
+            self._fanin_tasks.append(asyncio.create_task(self._forward_output(label, queue)))
+
         self._router_task = asyncio.create_task(self._audio_router())
         self._keepalive_task = asyncio.create_task(self._standby_keepalive())
         logger.info(f"TranscriberPool: audio router started, active='{self.active_label}'")
@@ -243,6 +258,27 @@ class TranscriberPool:
                                 logger.warning(f"TranscriberPool: LID feed error: {e}")
         except asyncio.CancelledError:
             logger.info("TranscriberPool: audio router cancelled")
+
+    @staticmethod
+    def _packet_kind(packet):
+        data = packet.get("data") if isinstance(packet, dict) else None
+        return data.get("type") if isinstance(data, dict) else data
+
+    async def _forward_output(self, label, queue):
+        """Forward one transcriber's output to the shared queue, dropping standby speech."""
+        try:
+            while True:
+                packet = await queue.get()
+                kind = self._packet_kind(packet)
+                # Connection-closed passes from any label: TaskManager bills standby sockets
+                # off it and uses it to tell a dead standby from a dead active one.
+                if label == self.active_label or kind == "transcriber_connection_closed":
+                    await self.output_queue.put(packet)
+                    continue
+                if kind != "interim_transcript_received":
+                    logger.info(f"TranscriberPool: dropped '{kind}' from standby '{label}'")
+        except asyncio.CancelledError:
+            logger.info(f"TranscriberPool: output forwarder for '{label}' cancelled")
 
     async def _standby_keepalive(self):
         """Periodically send silence frames to standby transcribers.
@@ -571,10 +607,17 @@ class TranscriberPool:
             # event on the new transcriber will increment the counter normally.
             old_transcriber = self.transcribers[old]
             inherited_turn_counter = getattr(old_transcriber, "turn_counter", 0)
+            inherited_turn_id = getattr(old_transcriber, "current_turn_id", None)
             if hasattr(target, "turn_counter"):
                 target.turn_counter = inherited_turn_counter
-            if hasattr(target, "current_turn_id") and getattr(old_transcriber, "current_turn_id", None) is not None:
-                target.current_turn_id = old_transcriber.current_turn_id
+            if hasattr(target, "current_turn_id") and inherited_turn_id is not None:
+                target.current_turn_id = inherited_turn_id
+
+            # After the inherited state is read above: quiesce() clears it. The outgoing
+            # transcriber keeps a live session for switch-back, so without this its
+            # half-recognized utterance resurfaces later as a phantom user turn.
+            target.resume()
+            old_transcriber.quiesce()
 
             self.active_label = label
             logger.info(f"TranscriberPool: switched {old} -> {label} (inherited turn_counter={inherited_turn_counter})")
@@ -632,7 +675,9 @@ class TranscriberPool:
 
     async def cleanup(self):
         """Clean up all transcribers, cancel pool tasks, and stop LID tap."""
-        for task_name, task in [("router", self._router_task), ("keepalive", self._keepalive_task)]:
+        pool_tasks = [("router", self._router_task), ("keepalive", self._keepalive_task)]
+        pool_tasks += [(f"output forwarder {i}", t) for i, t in enumerate(self._fanin_tasks)]
+        for task_name, task in pool_tasks:
             if task and not task.done():
                 task.cancel()
                 try:

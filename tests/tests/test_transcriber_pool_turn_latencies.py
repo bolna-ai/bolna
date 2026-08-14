@@ -9,13 +9,14 @@ mis-paired the user transcript with the wrong agent turn in the latency dict.
 import asyncio
 from unittest.mock import AsyncMock
 
+from bolna.transcriber.base_transcriber import BaseTranscriber
 from bolna.transcriber.transcriber_pool import TranscriberPool
 
 
-class FakeTranscriber:
+class FakeTranscriber(BaseTranscriber):
     def __init__(self, turn_latencies):
+        super().__init__(asyncio.Queue())
         self.run = AsyncMock()
-        self.input_queue = asyncio.Queue()
         self.transcription_task = None
         self.turn_latencies = turn_latencies
 

@@ -8,13 +8,14 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from bolna.transcriber.base_transcriber import BaseTranscriber
 from bolna.transcriber.transcriber_pool import TranscriberPool
 
 
-class FakeTranscriber:
+class FakeTranscriber(BaseTranscriber):
     def __init__(self):
+        super().__init__(asyncio.Queue())
         self.run = AsyncMock()
-        self.input_queue = asyncio.Queue()
         self.transcription_task = None
 
 
