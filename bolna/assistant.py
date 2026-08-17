@@ -26,21 +26,25 @@ class Assistant:
         tools_config_args["input"] = {"format": "wav", "provider": "default"}
 
         tools_config_args["output"] = {"format": "wav", "provider": "default"}
-        if transcriber is None:
-            pipelines.append(["llm"])
-            tools_config_args["transcriber"] = transcriber
+        tools_config_args["transcriber"] = transcriber
+        tools_config_args["synthesizer"] = synthesizer
 
-        pipeline = ["transcriber", "llm"]
-        if synthesizer is not None:
-            pipeline.append("synthesizer")
-            tools_config_args["synthesizer"] = synthesizer
-        pipelines.append(pipeline)
+        if transcriber is not None:
+            audio_pipeline = ["transcriber", "llm"]
+            if synthesizer is not None:
+                audio_pipeline.append("synthesizer")
+            pipelines.append(audio_pipeline)
 
-        if enable_textual_input:
+        if enable_textual_input or transcriber is None:
             pipelines.append(["llm"])
 
         toolchain = ToolsChainModel(execution="parallel", pipelines=pipelines)
-        task = Task(tools_config=ToolsConfig(**tools_config_args), toolchain=toolchain, task_type=task_type).dict()
+        task = Task(
+            tools_config=ToolsConfig(**tools_config_args),
+            toolchain=toolchain,
+            task_type=task_type,
+            task_config=ConversationConfig(),
+        ).model_dump()
         self.tasks.append(task)
 
     async def execute(self):

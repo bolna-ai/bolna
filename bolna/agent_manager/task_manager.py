@@ -300,6 +300,8 @@ class TaskManager(BaseManager):
         self._committed_assistant_sequences: set = set()
 
         self.task_config = task
+        transcriber_config = self.task_config["tools_config"].get("transcriber") or {}
+        synthesizer_config = self.task_config["tools_config"].get("synthesizer") or {}
 
         self.timezone = pytz.timezone(DEFAULT_TIMEZONE)
         self.language = DEFAULT_LANGUAGE_CODE
@@ -496,10 +498,9 @@ class TaskManager(BaseManager):
         # Tasks
         self.extracted_data = None
         self.summarized_data = None
-        self.stream = (
-            self.task_config["tools_config"]["synthesizer"] is not None
-            and self.task_config["tools_config"]["synthesizer"]["stream"]
-        ) and (self.enforce_streaming or not self.turn_based_conversation)
+        self.stream = bool(synthesizer_config.get("stream")) and (
+            self.enforce_streaming or not self.turn_based_conversation
+        )
 
         self.is_local = False
         self.llm_config = None
@@ -510,9 +511,7 @@ class TaskManager(BaseManager):
         if self.__is_multiagent():
             for agent, config in self.task_config["tools_config"]["llm_agent"]["llm_config"]["agent_map"].items():
                 self.llm_config_map[agent] = config.copy()
-                self.llm_config_map[agent]["buffer_size"] = self.task_config["tools_config"]["synthesizer"][
-                    "buffer_size"
-                ]
+                self.llm_config_map[agent]["buffer_size"] = synthesizer_config.get("buffer_size")
         else:
             if self.task_config["tools_config"]["llm_agent"] is not None:
                 if self.__is_knowledgebase_agent():
@@ -521,7 +520,7 @@ class TaskManager(BaseManager):
                         "model": self.llm_agent_config["llm_config"]["model"],
                         "max_tokens": self.llm_agent_config["llm_config"]["max_tokens"],
                         "provider": self.llm_agent_config["llm_config"]["provider"],
-                        "buffer_size": self.task_config["tools_config"]["synthesizer"].get("buffer_size"),
+                        "buffer_size": synthesizer_config.get("buffer_size"),
                         "temperature": self.llm_agent_config["llm_config"]["temperature"],
                     }
                 elif self.__is_graph_agent():
@@ -530,7 +529,7 @@ class TaskManager(BaseManager):
                         "model": self.llm_agent_config["llm_config"]["model"],
                         "max_tokens": self.llm_agent_config["llm_config"]["max_tokens"],
                         "provider": self.llm_agent_config["llm_config"]["provider"],
-                        "buffer_size": self.task_config["tools_config"]["synthesizer"].get("buffer_size"),
+                        "buffer_size": synthesizer_config.get("buffer_size"),
                         "temperature": self.llm_agent_config["llm_config"]["temperature"],
                     }
                 else:
@@ -605,8 +604,8 @@ class TaskManager(BaseManager):
         self.conversation_config = None
 
         if task_id == 0:
-            provider_config = self.task_config["tools_config"]["synthesizer"].get("provider_config")
-            self.synthesizer_voice = provider_config["voice"]
+            provider_config = synthesizer_config.get("provider_config") or {}
+            self.synthesizer_voice = provider_config.get("voice")
             self.hangup_detail = None
             self.end_call_primary = False  # set below if task_config opts in
 
@@ -651,7 +650,7 @@ class TaskManager(BaseManager):
             # for long pauses and rushing
             if self.conversation_config is not None:
                 # TODO need to get this for azure - for azure the subtraction would not happen
-                self.minimum_wait_duration = self.task_config["tools_config"]["transcriber"]["endpointing"]
+                self.minimum_wait_duration = transcriber_config.get("endpointing", 0)
                 self.last_spoken_timestamp = time.time() * 1000
                 self.incremental_delay = self.conversation_config.get("incremental_delay", 100)
 
@@ -790,7 +789,7 @@ class TaskManager(BaseManager):
         # setting transcriber and synthesizer in parallel
         self.__setup_transcriber()
         self.__setup_synthesizer(self.llm_config)
-        if not self.turn_based_conversation and task_id == 0:
+        if not self.turn_based_conversation and task_id == 0 and "synthesizer" in self.tools:
             self.synthesizer_monitor_task = asyncio.create_task(self.tools["synthesizer"].monitor_connection())
 
         # Language switching, gated per call by the LANGUAGE_SWITCH feature flag
@@ -1208,6 +1207,7 @@ class TaskManager(BaseManager):
 
     def __setup_output_handlers(self, turn_based_conversation, output_queue):
         output_kwargs = {"websocket": self.websocket}
+        synthesizer_config = self.task_config["tools_config"].get("synthesizer") or {}
 
         if self.task_config["tools_config"]["output"] is None:
             logger.info("Not setting up any output handler as it is none")
@@ -1224,10 +1224,12 @@ class TaskManager(BaseManager):
                 if self.task_config["tools_config"]["output"]["provider"] in SUPPORTED_OUTPUT_TELEPHONY_HANDLERS.keys():
                     output_kwargs["mark_event_meta_data"] = self.mark_event_meta_data
                     logger.info(f"Making sure that the sampling rate for output handler is 8000")
-                    self.task_config["tools_config"]["synthesizer"]["provider_config"]["sampling_rate"] = 8000
+                    if synthesizer_config:
+                        synthesizer_config["provider_config"]["sampling_rate"] = 8000
                     # sip-trunk (Asterisk) uses ulaw; other telephony use pcm (handler converts to mulaw)
                     if self.task_config["tools_config"]["output"]["provider"] == TelephonyProvider.SIP_TRUNK.value:
-                        self.task_config["tools_config"]["synthesizer"]["audio_format"] = "ulaw"
+                        if synthesizer_config:
+                            synthesizer_config["audio_format"] = "ulaw"
                         logger.info(f"Setting synthesizer audio format to ulaw for Asterisk sip-trunk")
                         # Pass input handler to output handler so it can simulate mark events
                         input_handler = self.tools.get("input")
@@ -1238,11 +1240,14 @@ class TaskManager(BaseManager):
                             f"Passing input_handler to sip-trunk output handler for mark event simulation: {input_handler is not None}"
                         )
                     else:
-                        self.task_config["tools_config"]["synthesizer"]["audio_format"] = "pcm"
+                        if synthesizer_config:
+                            synthesizer_config["audio_format"] = "pcm"
                 else:
-                    self.task_config["tools_config"]["synthesizer"]["provider_config"]["sampling_rate"] = 24000
+                    if synthesizer_config:
+                        synthesizer_config["provider_config"]["sampling_rate"] = 24000
                     output_kwargs["queue"] = output_queue
-                self.sampling_rate = self.task_config["tools_config"]["synthesizer"]["provider_config"]["sampling_rate"]
+                if synthesizer_config:
+                    self.sampling_rate = synthesizer_config["provider_config"]["sampling_rate"]
 
             if self.task_config["tools_config"]["output"]["provider"] == "default":
                 output_kwargs["is_web_based_call"] = self.is_web_based_call
@@ -1601,13 +1606,13 @@ class TaskManager(BaseManager):
             logger.error(f"Something went wrong with starting transcriber {e}")
 
     def __setup_synthesizer(self, llm_config=None):
-        if self._is_conversation_task():
+        synth_config = self.task_config["tools_config"]["synthesizer"]
+        if self._is_conversation_task() and synth_config is not None:
+            transcriber_config = self.task_config["tools_config"].get("transcriber") or {}
             self.kwargs["use_turbo"] = (
-                self.task_config["tools_config"]["transcriber"]["language"] == DEFAULT_LANGUAGE_CODE
+                transcriber_config.get("language", DEFAULT_LANGUAGE_CODE) == DEFAULT_LANGUAGE_CODE
             )
-        if self.task_config["tools_config"]["synthesizer"] is not None:
-            synth_config = self.task_config["tools_config"]["synthesizer"]
-
+        if synth_config is not None:
             # --- Multilingual pool path ---
             if "multilingual" in synth_config:
                 multilingual = synth_config["multilingual"]
@@ -1792,7 +1797,7 @@ class TaskManager(BaseManager):
                 injected_cfg["use_responses_api"] = True
             if self.llm_config.get("compact_threshold"):
                 injected_cfg["compact_threshold"] = self.llm_config["compact_threshold"]
-            injected_cfg["buffer_size"] = self.task_config["tools_config"]["synthesizer"].get("buffer_size")
+            injected_cfg["buffer_size"] = (self.task_config["tools_config"].get("synthesizer") or {}).get("buffer_size")
             injected_cfg["language"] = self.language
             injected_cfg["turn_based_conversation"] = self.turn_based_conversation
             injected_cfg["execution_id"] = self.run_id
@@ -1830,7 +1835,7 @@ class TaskManager(BaseManager):
                 injected_cfg["use_responses_api"] = True
             if self.llm_config.get("compact_threshold"):
                 injected_cfg["compact_threshold"] = self.llm_config["compact_threshold"]
-            injected_cfg["buffer_size"] = self.task_config["tools_config"]["synthesizer"].get("buffer_size")
+            injected_cfg["buffer_size"] = (self.task_config["tools_config"].get("synthesizer") or {}).get("buffer_size")
             injected_cfg["language"] = self.language
 
             llm_agent = KnowledgeBaseAgent(injected_cfg)
