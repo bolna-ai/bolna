@@ -45,7 +45,17 @@ class AzureSynthesizer(BaseSynthesizer):
         self.subscription_key = kwargs.get("synthesizer_key", os.getenv("AZURE_SPEECH_KEY"))
         self.region = kwargs.get("region", os.getenv("AZURE_SPEECH_REGION"))
         self.speech_config = speechsdk.SpeechConfig(subscription=self.subscription_key, region=self.region)
-        self.speech_config.set_speech_synthesis_output_format(speechsdk.SpeechSynthesisOutputFormat.Raw8Khz16BitMonoPcm)
+        # Follow the transport's rate (telephony 8k, web/freeswitch 24k) — hardcoding 8k made
+        # webcalls play Azure audio at 3x speed (the player runs raw PCM at 24k).
+        output_formats = {
+            8000: speechsdk.SpeechSynthesisOutputFormat.Raw8Khz16BitMonoPcm,
+            16000: speechsdk.SpeechSynthesisOutputFormat.Raw16Khz16BitMonoPcm,
+            24000: speechsdk.SpeechSynthesisOutputFormat.Raw24Khz16BitMonoPcm,
+            44100: speechsdk.SpeechSynthesisOutputFormat.Raw44100Hz16BitMonoPcm,
+            48000: speechsdk.SpeechSynthesisOutputFormat.Raw48Khz16BitMonoPcm,
+        }
+        chosen = output_formats.get(int(sampling_rate), speechsdk.SpeechSynthesisOutputFormat.Raw8Khz16BitMonoPcm)
+        self.speech_config.set_speech_synthesis_output_format(chosen)
         self.speech_config.speech_synthesis_voice_name = self.voice
 
         self.latency_stats = {
