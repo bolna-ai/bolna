@@ -302,3 +302,35 @@ class TestHyphenatedKeys:
 
     def test_json_literal_with_hyphen_key_untouched(self):
         assert render_prompt('{"a-b": 1}', self.DATA) == '{"a-b": 1}'
+
+
+class TestUnresolvedNestedPathLogging:
+    """Mirrors dashboard-backend tests/test_prompt_variables.py — keep both in sync.
+
+    A failed nested path leaves a literal token in the prompt, invisible until the agent reads
+    "{prior.score}" aloud. Reproduces prod run aafd4625, where `list` arrived as the Python repr
+    "['apple', 'bananna']" (single quotes) and so could not be parsed as JSON.
+    """
+
+    def test_python_repr_container_is_diagnosed_and_value_never_logged(self, caplog):
+        import logging
+
+        with caplog.at_level(logging.INFO):
+            assert render_prompt("{{list.0}}", {"list": "['apple', 'bananna']"}) == "{list.0}"
+        assert "not valid JSON" in caplog.text
+        assert "apple" not in caplog.text
+
+    def test_valid_json_resolves_and_logs_nothing(self, caplog):
+        import logging
+
+        with caplog.at_level(logging.INFO):
+            assert render_prompt("{{list.0}}", {"list": '["apple", "bananna"]'}) == "apple"
+        assert "prompt variable unresolved" not in caplog.text
+
+    def test_flat_miss_and_partial_fill_stay_silent(self, caplog):
+        import logging
+
+        with caplog.at_level(logging.INFO):
+            assert render_prompt("{nope}", {"a": 1}) == ""
+            assert render_prompt("{{a.b}}", {}, missing=None) == "{{a.b}}"
+        assert "prompt variable unresolved" not in caplog.text
