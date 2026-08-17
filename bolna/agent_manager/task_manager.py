@@ -276,6 +276,8 @@ class TaskManager(BaseManager):
         self.kwargs["task_manager_instance"] = self
         # Optional load-signal callback (set by the caller only for PTU-served calls).
         self.on_turn_usage = kwargs.get("on_turn_usage")
+        # Fired instead of on_turn_usage when another backend served the turn.
+        self.on_overflow = kwargs.get("on_overflow")
         self._usage_tasks = set()  # strong refs so fire-and-forget tallies aren't GC'd before they run
         # Optional per-provider health callback (circuit-breaker shadow); never affects the call.
         self.on_provider_health = kwargs.get("on_provider_health")
@@ -3596,10 +3598,12 @@ class TaskManager(BaseManager):
         self.llm_response_generated = True
         # task 0 only, so aux LLMs (hangup/voicemail) never tally, and never an overflowed turn,
         # which ran on another backend. Cached is exempt and output is weighted by the consumer.
-        if self.task_id == 0 and self.on_turn_usage and input_tokens and not overflowed:
-            _usage_task = asyncio.create_task(self.on_turn_usage(input_tokens, output_tokens, cached_tokens))
-            self._usage_tasks.add(_usage_task)
-            _usage_task.add_done_callback(self._usage_tasks.discard)
+        if self.task_id == 0 and input_tokens:
+            cb = self.on_overflow if overflowed else self.on_turn_usage
+            if cb:
+                _usage_task = asyncio.create_task(cb(input_tokens, output_tokens, cached_tokens))
+                self._usage_tasks.add(_usage_task)
+                _usage_task.add_done_callback(self._usage_tasks.discard)
         convert_to_request_log(
             # log_message explains a silent turn; the history below keeps the raw response.
             message=log_message or llm_response,
@@ -6173,9 +6177,10 @@ class TaskManager(BaseManager):
                 reasoning_tokens=capture["reasoning_tokens"],
                 cached_tokens=capture["cached_tokens"],
             )
-            if self.task_id == 0 and self.on_turn_usage and capture["input_tokens"] and not capture["overflowed"]:
+            _spec_cb = self.on_overflow if capture["overflowed"] else self.on_turn_usage
+            if self.task_id == 0 and _spec_cb and capture["input_tokens"]:
                 usage_task = asyncio.create_task(
-                    self.on_turn_usage(capture["input_tokens"], capture["output_tokens"], capture["cached_tokens"])
+                    _spec_cb(capture["input_tokens"], capture["output_tokens"], capture["cached_tokens"])
                 )
                 self._usage_tasks.add(usage_task)
                 usage_task.add_done_callback(self._usage_tasks.discard)
