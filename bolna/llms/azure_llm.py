@@ -10,6 +10,7 @@ from openai import (
     AuthenticationError,
     PermissionDeniedError,
     NotFoundError,
+    APIStatusError,
     RateLimitError,
     APIError,
     APIConnectionError,
@@ -27,6 +28,10 @@ from bolna.helpers.logger_config import configure_logger
 
 logger = configure_logger(__name__)
 load_dotenv()
+
+
+# What Azure's own spillover treats as overflow-worthy.
+OVERFLOW_STATUSES = (429, 500, 503)
 
 
 class AzureLLM(OpenAICompatibleLLM):
@@ -83,13 +88,17 @@ class AzureLLM(OpenAICompatibleLLM):
 
         http_client = get_shared_http_client(base_url=azure_endpoint, http2=False)
 
-        # No SDK retries: a 429 should reach the overflow immediately, not after two backoffs.
+        overflow = kwargs.get("overflow_llm") or {}
+        has_overflow = bool(overflow.get("api_key") and overflow.get("base_url") and overflow.get("model"))
+
+        # Retries stay on unless there is an overflow to fall to, where waiting out two backoffs
+        # would only add dead air before we move the turn anyway.
         self.async_client = AsyncAzureOpenAI(
             azure_endpoint=azure_endpoint,
             api_key=api_key,
             api_version=api_version,
             http_client=http_client,
-            max_retries=0,
+            **({"max_retries": 0} if has_overflow else {}),
         )
 
         self.run_id = kwargs.get("run_id", None)
@@ -97,10 +106,9 @@ class AzureLLM(OpenAICompatibleLLM):
 
         # Fallback backend for turns the provisioned deployment cannot serve.
         self._overflow_client = None
-        overflow = kwargs.get("overflow_llm") or {}
         # The model is required rather than derived: a deployment name need not resemble the model
         # it serves, so a guess would post something the overflow backend rejects.
-        if overflow.get("api_key") and overflow.get("base_url") and overflow.get("model"):
+        if has_overflow:
             self._overflow_model = overflow["model"]
             self._overflow_service_tier = overflow.get("service_tier") or "priority"
             self._overflow_client = AsyncOpenAI(
@@ -141,11 +149,11 @@ class AzureLLM(OpenAICompatibleLLM):
                 yield chunk
 
     async def _create_completion(self, model_args):
-        """Start a completion, overflowing to the fallback backend on a 429. Returns (completion, overflowed)."""
+        """Start a completion, overflowing when the pool cannot serve it. Returns (completion, overflowed)."""
         try:
             return await self.async_client.chat.completions.create(**model_args), False
-        except RateLimitError:
-            if self._overflow_client is None:
+        except APIStatusError as e:
+            if self._overflow_client is None or e.status_code not in OVERFLOW_STATUSES:
                 raise
             overflow_args = {
                 **model_args,
