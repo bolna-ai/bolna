@@ -60,4 +60,6 @@ class LLMStreamChunk(BaseModel):
     output_tokens: Optional[int] = None
     reasoning_tokens: Optional[int] = None
     cached_tokens: Optional[int] = None
+    # Served by the overflow backend rather than the primary, so this turn placed no load on it.
+    overflowed: bool = False
     reasoning_content: Optional[str] = None

@@ -140,11 +140,13 @@ class AzureLLM(OpenAICompatibleLLM):
         A 429 here means the provisioned deployment is full, not broken. Without an overflow
         target the error propagates and the caller ends the conversation.
         """
+        self._turn_overflowed = False
         try:
             return await self.async_client.chat.completions.create(**model_args)
         except RateLimitError:
             if self._overflow_client is None:
                 raise
+            self._turn_overflowed = True
             overflow_args = {
                 **model_args,
                 "model": self._overflow_model,
@@ -340,6 +342,7 @@ class AzureLLM(OpenAICompatibleLLM):
 
         # Extract actual token counts from stream usage
         usage_kwargs = {}
+        usage_kwargs["overflowed"] = getattr(self, "_turn_overflowed", False)
         if stream_usage:
             usage_kwargs["input_tokens"] = getattr(stream_usage, "prompt_tokens", None)
             usage_kwargs["output_tokens"] = getattr(stream_usage, "completion_tokens", None)

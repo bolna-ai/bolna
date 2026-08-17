@@ -3587,11 +3587,13 @@ class TaskManager(BaseManager):
         cached_tokens=None,
         reasoning_content=None,
         log_message=None,
+        overflowed=False,
     ):
         self.llm_response_generated = True
-        # task 0 only, so aux LLMs (hangup/voicemail) never tally. Report input/output/cached so the
-        # consumer can compute normalized load (cached is exempt, output is weighted).
-        if self.task_id == 0 and self.on_turn_usage and input_tokens:
+        # task 0 only, so aux LLMs (hangup/voicemail) never tally, and never an overflowed turn: it
+        # ran on another backend and placed no load on the pool being metered. Report input/output/
+        # cached so the consumer can compute normalized load (cached is exempt, output is weighted).
+        if self.task_id == 0 and self.on_turn_usage and input_tokens and not overflowed:
             _usage_task = asyncio.create_task(self.on_turn_usage(input_tokens, output_tokens, cached_tokens))
             self._usage_tasks.add(_usage_task)
             _usage_task.add_done_callback(self._usage_tasks.discard)
@@ -3644,6 +3646,7 @@ class TaskManager(BaseManager):
             None,
             None,
         )
+        actual_overflowed = False
         actual_reasoning_content = None
         synthesize = True
         if should_bypass_synth:
@@ -3850,6 +3853,8 @@ class TaskManager(BaseManager):
                     actual_reasoning_tokens = llm_message.reasoning_tokens
                 if llm_message.cached_tokens is not None:
                     actual_cached_tokens = llm_message.cached_tokens
+                if llm_message.overflowed:
+                    actual_overflowed = True
                 if llm_message.reasoning_content is not None:
                     actual_reasoning_content = llm_message.reasoning_content
 
@@ -3890,6 +3895,7 @@ class TaskManager(BaseManager):
                             reasoning_tokens=actual_reasoning_tokens,
                             cached_tokens=actual_cached_tokens,
                             reasoning_content=actual_reasoning_content,
+                            overflowed=actual_overflowed,
                         )
                     try:
                         await self.__execute_function_call(next_step=next_step, **data.model_dump())
@@ -3991,6 +3997,7 @@ class TaskManager(BaseManager):
                 cached_tokens=actual_cached_tokens,
                 reasoning_content=actual_reasoning_content,
                 log_message=empty_turn_detail,
+                overflowed=actual_overflowed,
             )
         elif not self.stream:
             llm_response = llm_response.strip()
