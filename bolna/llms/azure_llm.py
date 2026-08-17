@@ -134,10 +134,7 @@ class AzureLLM(OpenAICompatibleLLM):
                 yield chunk
 
     async def _create_completion(self, model_args):
-        """Start a completion, moving the turn to the overflow backend on a 429.
-
-        Returns (completion, overflowed).
-        """
+        """Start a completion, overflowing to the fallback backend on a 429. Returns (completion, overflowed)."""
         try:
             return await self.async_client.chat.completions.create(**model_args), False
         except RateLimitError:
