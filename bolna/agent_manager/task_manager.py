@@ -276,6 +276,8 @@ class TaskManager(BaseManager):
         self.kwargs["task_manager_instance"] = self
         # Optional load-signal callback (set by the caller only for PTU-served calls).
         self.on_turn_usage = kwargs.get("on_turn_usage")
+        # Fired instead of on_turn_usage when another backend served the turn.
+        self.on_overflow = kwargs.get("on_overflow")
         self._usage_tasks = set()  # strong refs so fire-and-forget tallies aren't GC'd before they run
         # Optional per-provider health callback (circuit-breaker shadow); never affects the call.
         self.on_provider_health = kwargs.get("on_provider_health")
@@ -1780,6 +1782,8 @@ class TaskManager(BaseManager):
                 injected_cfg["reasoning_summary"] = self.kwargs["reasoning_summary"]
             if "service_tier" in self.kwargs:
                 injected_cfg["service_tier"] = self.kwargs["service_tier"]
+            if "overflow_llm" in self.kwargs:
+                injected_cfg["overflow_llm"] = self.kwargs["overflow_llm"]
             if "routing_reasoning_effort" in self.kwargs:
                 injected_cfg["routing_reasoning_effort"] = self.kwargs["routing_reasoning_effort"]
             if "routing_max_tokens" in self.kwargs:
@@ -1826,6 +1830,8 @@ class TaskManager(BaseManager):
                 injected_cfg["reasoning_summary"] = self.kwargs["reasoning_summary"]
             if "service_tier" in self.kwargs:
                 injected_cfg["service_tier"] = self.kwargs["service_tier"]
+            if "overflow_llm" in self.kwargs:
+                injected_cfg["overflow_llm"] = self.kwargs["overflow_llm"]
             if self.llm_config.get("use_responses_api"):
                 injected_cfg["use_responses_api"] = True
             if self.llm_config.get("compact_threshold"):
@@ -3587,14 +3593,17 @@ class TaskManager(BaseManager):
         cached_tokens=None,
         reasoning_content=None,
         log_message=None,
+        overflowed=False,
     ):
         self.llm_response_generated = True
-        # task 0 only, so aux LLMs (hangup/voicemail) never tally. Report input/output/cached so the
-        # consumer can compute normalized load (cached is exempt, output is weighted).
-        if self.task_id == 0 and self.on_turn_usage and input_tokens:
-            _usage_task = asyncio.create_task(self.on_turn_usage(input_tokens, output_tokens, cached_tokens))
-            self._usage_tasks.add(_usage_task)
-            _usage_task.add_done_callback(self._usage_tasks.discard)
+        # task 0 only, so aux LLMs (hangup/voicemail) never tally, and never an overflowed turn,
+        # which ran on another backend. Cached is exempt and output is weighted by the consumer.
+        if self.task_id == 0 and input_tokens:
+            cb = self.on_overflow if overflowed else self.on_turn_usage
+            if cb:
+                _usage_task = asyncio.create_task(cb(input_tokens, output_tokens, cached_tokens))
+                self._usage_tasks.add(_usage_task)
+                _usage_task.add_done_callback(self._usage_tasks.discard)
         convert_to_request_log(
             # log_message explains a silent turn; the history below keeps the raw response.
             message=log_message or llm_response,
@@ -3644,6 +3653,7 @@ class TaskManager(BaseManager):
             None,
             None,
         )
+        actual_overflowed = False
         actual_reasoning_content = None
         synthesize = True
         if should_bypass_synth:
@@ -3758,13 +3768,14 @@ class TaskManager(BaseManager):
 
                     # on_turn_usage meters the conversation LLM's backend; routing on azure means the routing
                     # hop shares that backend, so its tokens draw on the same capacity.
+                    _routing_cb = self.on_overflow if routing_usage.get("overflowed") else self.on_turn_usage
                     if (
-                        self.on_turn_usage
+                        _routing_cb
                         and routing_info.get("routing_provider") == "azure"
                         and routing_usage.get("input_tokens")
                     ):
                         _routing_task = asyncio.create_task(
-                            self.on_turn_usage(
+                            _routing_cb(
                                 routing_usage.get("input_tokens"),
                                 routing_usage.get("output_tokens"),
                                 routing_usage.get("cached_tokens"),
@@ -3850,6 +3861,8 @@ class TaskManager(BaseManager):
                     actual_reasoning_tokens = llm_message.reasoning_tokens
                 if llm_message.cached_tokens is not None:
                     actual_cached_tokens = llm_message.cached_tokens
+                if llm_message.overflowed:
+                    actual_overflowed = True
                 if llm_message.reasoning_content is not None:
                     actual_reasoning_content = llm_message.reasoning_content
 
@@ -3890,6 +3903,7 @@ class TaskManager(BaseManager):
                             reasoning_tokens=actual_reasoning_tokens,
                             cached_tokens=actual_cached_tokens,
                             reasoning_content=actual_reasoning_content,
+                            overflowed=actual_overflowed,
                         )
                     try:
                         await self.__execute_function_call(next_step=next_step, **data.model_dump())
@@ -3991,6 +4005,7 @@ class TaskManager(BaseManager):
                 cached_tokens=actual_cached_tokens,
                 reasoning_content=actual_reasoning_content,
                 log_message=empty_turn_detail,
+                overflowed=actual_overflowed,
             )
         elif not self.stream:
             llm_response = llm_response.strip()
@@ -6163,9 +6178,10 @@ class TaskManager(BaseManager):
                 reasoning_tokens=capture["reasoning_tokens"],
                 cached_tokens=capture["cached_tokens"],
             )
-            if self.task_id == 0 and self.on_turn_usage and capture["input_tokens"]:
+            _spec_cb = self.on_overflow if capture["overflowed"] else self.on_turn_usage
+            if self.task_id == 0 and _spec_cb and capture["input_tokens"]:
                 usage_task = asyncio.create_task(
-                    self.on_turn_usage(capture["input_tokens"], capture["output_tokens"], capture["cached_tokens"])
+                    _spec_cb(capture["input_tokens"], capture["output_tokens"], capture["cached_tokens"])
                 )
                 self._usage_tasks.add(usage_task)
                 usage_task.add_done_callback(self._usage_tasks.discard)
@@ -6259,6 +6275,7 @@ class TaskManager(BaseManager):
         }
         text = ""
         input_tokens = output_tokens = reasoning_tokens = cached_tokens = None
+        overflowed = False
         latency_info = None
         async for llm_message in self.tools["llm_agent"].generate(messages, synthesize=False, meta_info=spec_meta):
             if isinstance(llm_message, dict):
@@ -6275,6 +6292,8 @@ class TaskManager(BaseManager):
                 reasoning_tokens = llm_message.reasoning_tokens
             if getattr(llm_message, "cached_tokens", None) is not None:
                 cached_tokens = llm_message.cached_tokens
+            if getattr(llm_message, "overflowed", False):
+                overflowed = True
             if getattr(llm_message, "latency", None):
                 latency_info = llm_message.latency
             if llm_message.data:
@@ -6291,6 +6310,7 @@ class TaskManager(BaseManager):
             "output_tokens": output_tokens,
             "reasoning_tokens": reasoning_tokens,
             "cached_tokens": cached_tokens,
+            "overflowed": overflowed,
             "latency": latency_info,
         }
         return text, capture
