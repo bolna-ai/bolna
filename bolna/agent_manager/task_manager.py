@@ -1780,6 +1780,8 @@ class TaskManager(BaseManager):
                 injected_cfg["reasoning_summary"] = self.kwargs["reasoning_summary"]
             if "service_tier" in self.kwargs:
                 injected_cfg["service_tier"] = self.kwargs["service_tier"]
+            if "overflow_llm" in self.kwargs:
+                injected_cfg["overflow_llm"] = self.kwargs["overflow_llm"]
             if "routing_reasoning_effort" in self.kwargs:
                 injected_cfg["routing_reasoning_effort"] = self.kwargs["routing_reasoning_effort"]
             if "routing_max_tokens" in self.kwargs:
@@ -1826,6 +1828,8 @@ class TaskManager(BaseManager):
                 injected_cfg["reasoning_summary"] = self.kwargs["reasoning_summary"]
             if "service_tier" in self.kwargs:
                 injected_cfg["service_tier"] = self.kwargs["service_tier"]
+            if "overflow_llm" in self.kwargs:
+                injected_cfg["overflow_llm"] = self.kwargs["overflow_llm"]
             if self.llm_config.get("use_responses_api"):
                 injected_cfg["use_responses_api"] = True
             if self.llm_config.get("compact_threshold"):
@@ -6169,7 +6173,7 @@ class TaskManager(BaseManager):
                 reasoning_tokens=capture["reasoning_tokens"],
                 cached_tokens=capture["cached_tokens"],
             )
-            if self.task_id == 0 and self.on_turn_usage and capture["input_tokens"]:
+            if self.task_id == 0 and self.on_turn_usage and capture["input_tokens"] and not capture["overflowed"]:
                 usage_task = asyncio.create_task(
                     self.on_turn_usage(capture["input_tokens"], capture["output_tokens"], capture["cached_tokens"])
                 )
@@ -6265,6 +6269,7 @@ class TaskManager(BaseManager):
         }
         text = ""
         input_tokens = output_tokens = reasoning_tokens = cached_tokens = None
+        overflowed = False
         latency_info = None
         async for llm_message in self.tools["llm_agent"].generate(messages, synthesize=False, meta_info=spec_meta):
             if isinstance(llm_message, dict):
@@ -6281,6 +6286,8 @@ class TaskManager(BaseManager):
                 reasoning_tokens = llm_message.reasoning_tokens
             if getattr(llm_message, "cached_tokens", None) is not None:
                 cached_tokens = llm_message.cached_tokens
+            if getattr(llm_message, "overflowed", False):
+                overflowed = True
             if getattr(llm_message, "latency", None):
                 latency_info = llm_message.latency
             if llm_message.data:
@@ -6297,6 +6304,7 @@ class TaskManager(BaseManager):
             "output_tokens": output_tokens,
             "reasoning_tokens": reasoning_tokens,
             "cached_tokens": cached_tokens,
+            "overflowed": overflowed,
             "latency": latency_info,
         }
         return text, capture

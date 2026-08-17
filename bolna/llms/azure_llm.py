@@ -83,8 +83,13 @@ class AzureLLM(OpenAICompatibleLLM):
 
         http_client = get_shared_http_client(base_url=azure_endpoint, http2=False)
 
+        # No SDK retries: a 429 should reach the overflow immediately, not after two backoffs.
         self.async_client = AsyncAzureOpenAI(
-            azure_endpoint=azure_endpoint, api_key=api_key, api_version=api_version, http_client=http_client
+            azure_endpoint=azure_endpoint,
+            api_key=api_key,
+            api_version=api_version,
+            http_client=http_client,
+            max_retries=0,
         )
 
         self.run_id = kwargs.get("run_id", None)
@@ -93,9 +98,11 @@ class AzureLLM(OpenAICompatibleLLM):
         # Fallback backend for turns the provisioned deployment cannot serve.
         self._overflow_client = None
         overflow = kwargs.get("overflow_llm") or {}
-        if overflow.get("api_key") and overflow.get("base_url"):
-            self._overflow_model = overflow.get("model") or self.model
-            self._overflow_service_tier = overflow.get("service_tier", "priority")
+        # The model is required rather than derived: a deployment name need not resemble the model
+        # it serves, so a guess would post something the overflow backend rejects.
+        if overflow.get("api_key") and overflow.get("base_url") and overflow.get("model"):
+            self._overflow_model = overflow["model"]
+            self._overflow_service_tier = overflow.get("service_tier") or "priority"
             self._overflow_client = AsyncOpenAI(
                 api_key=overflow["api_key"],
                 base_url=overflow["base_url"],
@@ -331,6 +338,7 @@ class AzureLLM(OpenAICompatibleLLM):
                     _pd = getattr(stream_usage, "prompt_tokens_details", None)
                     if _pd:
                         fc_chunk.cached_tokens = getattr(_pd, "cached_tokens", None)
+                    fc_chunk.overflowed = turn_overflowed
                 yield fc_chunk
 
         # Extract actual token counts from stream usage
