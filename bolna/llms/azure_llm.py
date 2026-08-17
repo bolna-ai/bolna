@@ -30,8 +30,15 @@ logger = configure_logger(__name__)
 load_dotenv()
 
 
-# What Azure's own spillover treats as overflow-worthy.
-OVERFLOW_STATUSES = (429, 500, 503)
+def _should_overflow(error) -> bool:
+    """Whether another backend is worth trying: saturation, a server fault, or no connection.
+
+    Mirrors what the SDK retries that an overflow-enabled client gives up, so nothing the retry
+    used to absorb is left without a second chance.
+    """
+    if isinstance(error, APIConnectionError):
+        return True
+    return isinstance(error, APIStatusError) and (error.status_code == 429 or error.status_code >= 500)
 
 
 class AzureLLM(OpenAICompatibleLLM):
@@ -152,8 +159,8 @@ class AzureLLM(OpenAICompatibleLLM):
         """Start a completion, overflowing when the pool cannot serve it. Returns (completion, overflowed)."""
         try:
             return await self.async_client.chat.completions.create(**model_args), False
-        except APIStatusError as e:
-            if self._overflow_client is None or e.status_code not in OVERFLOW_STATUSES:
+        except (APIStatusError, APIConnectionError) as e:
+            if self._overflow_client is None or not _should_overflow(e):
                 raise
             overflow_args = {
                 **model_args,
@@ -346,7 +353,7 @@ class AzureLLM(OpenAICompatibleLLM):
                     _pd = getattr(stream_usage, "prompt_tokens_details", None)
                     if _pd:
                         fc_chunk.cached_tokens = getattr(_pd, "cached_tokens", None)
-                    fc_chunk.overflowed = turn_overflowed
+                fc_chunk.overflowed = turn_overflowed
                 yield fc_chunk
 
         # Extract actual token counts from stream usage
