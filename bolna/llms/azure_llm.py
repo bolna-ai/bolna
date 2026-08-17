@@ -90,8 +90,7 @@ class AzureLLM(OpenAICompatibleLLM):
         self.run_id = kwargs.get("run_id", None)
         self.llm_host = urlparse(azure_endpoint).netloc if azure_endpoint else None
 
-        # Where a turn goes when the provisioned deployment is saturated. Azure answers 429 before
-        # any token streams, so the turn can be re-issued elsewhere with nothing to reconcile.
+        # Fallback backend for turns the provisioned deployment cannot serve.
         self._overflow_client = None
         overflow = kwargs.get("overflow_llm") or {}
         if overflow.get("api_key") and overflow.get("base_url"):
@@ -135,25 +134,22 @@ class AzureLLM(OpenAICompatibleLLM):
                 yield chunk
 
     async def _create_completion(self, model_args):
-        """Start a completion, moving the turn to the overflow backend if the pool is saturated.
+        """Start a completion, moving the turn to the overflow backend on a 429.
 
-        A 429 here means the provisioned deployment is full, not broken. Without an overflow
-        target the error propagates and the caller ends the conversation.
+        Returns (completion, overflowed).
         """
-        self._turn_overflowed = False
         try:
-            return await self.async_client.chat.completions.create(**model_args)
+            return await self.async_client.chat.completions.create(**model_args), False
         except RateLimitError:
             if self._overflow_client is None:
                 raise
-            self._turn_overflowed = True
             overflow_args = {
                 **model_args,
                 "model": self._overflow_model,
                 "service_tier": self._overflow_service_tier,
             }
             logger.warning(f"Azure OpenAI saturated, overflowing turn to {self._overflow_model} run_id={self.run_id}")
-            return await self._overflow_client.chat.completions.create(**overflow_args)
+            return await self._overflow_client.chat.completions.create(**overflow_args), True
 
     async def _generate_stream_chat(
         self, messages, synthesize=True, request_json=False, meta_info=None, tool_choice=None, tools=None
@@ -197,7 +193,7 @@ class AzureLLM(OpenAICompatibleLLM):
         stream_usage = None
 
         try:
-            completion_stream = await self._create_completion(model_args)
+            completion_stream, turn_overflowed = await self._create_completion(model_args)
         except BadRequestError as e:
             logger.error(f"Azure OpenAI bad request: {e}")
             raise
@@ -342,7 +338,7 @@ class AzureLLM(OpenAICompatibleLLM):
 
         # Extract actual token counts from stream usage
         usage_kwargs = {}
-        usage_kwargs["overflowed"] = getattr(self, "_turn_overflowed", False)
+        usage_kwargs["overflowed"] = turn_overflowed
         if stream_usage:
             usage_kwargs["input_tokens"] = getattr(stream_usage, "prompt_tokens", None)
             usage_kwargs["output_tokens"] = getattr(stream_usage, "completion_tokens", None)
@@ -369,7 +365,7 @@ class AzureLLM(OpenAICompatibleLLM):
         response_format = self.get_response_format(request_json)
 
         try:
-            completion = await self._create_completion(
+            completion, _ = await self._create_completion(
                 {
                     "model": self.model,
                     "temperature": 0.0,

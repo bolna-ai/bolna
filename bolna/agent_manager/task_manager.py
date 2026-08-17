@@ -3590,9 +3590,8 @@ class TaskManager(BaseManager):
         overflowed=False,
     ):
         self.llm_response_generated = True
-        # task 0 only, so aux LLMs (hangup/voicemail) never tally, and never an overflowed turn: it
-        # ran on another backend and placed no load on the pool being metered. Report input/output/
-        # cached so the consumer can compute normalized load (cached is exempt, output is weighted).
+        # task 0 only, so aux LLMs (hangup/voicemail) never tally, and never an overflowed turn,
+        # which ran on another backend. Cached is exempt and output is weighted by the consumer.
         if self.task_id == 0 and self.on_turn_usage and input_tokens and not overflowed:
             _usage_task = asyncio.create_task(self.on_turn_usage(input_tokens, output_tokens, cached_tokens))
             self._usage_tasks.add(_usage_task)
