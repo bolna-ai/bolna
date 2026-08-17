@@ -152,7 +152,7 @@ class StreamSynthesizer(BaseSynthesizer):
         if self.stream:
             await self._push_stream(message)
         else:
-            self.internal_queue.put_nowait(copy.deepcopy(message))
+            await super().push(copy.deepcopy(message))
 
     async def _push_stream(self, message):
         meta_info = message.get("meta_info")
@@ -314,6 +314,7 @@ class StreamSynthesizer(BaseSynthesizer):
                 self.current_turn_ttfb = None
                 self.current_sequence_chars = 0
         except Exception:
+            logger.warning("Error recording turn latency", exc_info=True)
             pass
 
     # ------------------------------------------------------------------
