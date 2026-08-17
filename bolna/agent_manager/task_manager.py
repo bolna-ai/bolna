@@ -2168,8 +2168,10 @@ class TaskManager(BaseManager):
             or (self.execute_function_call_task is not None and not self.execute_function_call_task.done()),
         }
 
-    async def sync_history(self, mark_events_data, interruption_processed_at):
-        """Sync history to reflect only what was actually spoken. Uses confirmed text or falls back to pending marks."""
+    async def sync_history(self, mark_events_data, interruption_processed_at, extend_with_playback_estimate=False):
+        """Sync history to reflect only what was actually spoken. Uses confirmed text or falls back to pending marks.
+        extend_with_playback_estimate: end-of-call only — credit the unACKed tail when the wall
+        clock since the last ACK covers its full duration (marks can lag playback and get lost)."""
         try:
             mark_events_data = list(mark_events_data)
             target_turn_id = self._get_latest_turn_id_from_marks(mark_events_data)
@@ -2210,6 +2212,31 @@ class TaskManager(BaseManager):
             logger.info(f"sync_history: response_heard len={len(response_heard) if response_heard else 0}")
             if response_heard:
                 logger.info(f"response_heard (last 10 chars): {response_heard[-10:]}")
+
+            if extend_with_playback_estimate and response_heard:
+                pending_tail = []
+                for mark_id, mark_data in mark_events_data:
+                    text = mark_data.get("text_synthesized", "")
+                    if mark_data.get("type") in ["pre_mark_message", "backchanneling"] or not text:
+                        continue
+                    if target_turn_id is not None and mark_data.get("turn_id") != target_turn_id:
+                        continue
+                    pending_tail.append({"text": text, "duration": mark_data.get("duration", 0)})
+                last_ack_ts = self.mark_event_meta_data.get_last_ack_ts_for_turn(target_turn_id)
+                if pending_tail and last_ack_ts:
+                    # All-or-nothing: credit only when playback provably finished; mid-chunk
+                    # hangup keeps the strict ACK trim (never stamp a partial guess).
+                    tail_play_time = max(0.0, interruption_processed_at - last_ack_ts)
+                    pending_duration = sum(chunk["duration"] or 0 for chunk in pending_tail)
+                    if tail_play_time >= pending_duration > 0:
+                        tail_text = "".join(chunk["text"] for chunk in pending_tail)
+                        logger.info(
+                            f"sync_history: crediting fully-played unacked tail "
+                            f"({pending_duration:.2f}s audio, {tail_play_time:.2f}s elapsed, {len(tail_text)} chars)"
+                        )
+                        # Restore the stripped chunk-boundary space or the exact-match trim drops the tail.
+                        joiner = "" if (response_heard[-1:].isspace() or tail_text[:1].isspace()) else " "
+                        response_heard += joiner + tail_text
 
             if not response_heard:
                 pending_marks = [{"mark_id": k, "mark_data": v} for k, v in mark_events_data]
@@ -7368,7 +7395,11 @@ class TaskManager(BaseManager):
                 has_pending_marks = len(self.mark_event_meta_data.mark_event_meta_data) > 0
                 has_response_heard = bool(self.tools["input"].response_heard_by_user)
                 if has_pending_marks or has_response_heard:
-                    await self.sync_history(self.mark_event_meta_data.mark_event_meta_data.items(), time.time())
+                    await self.sync_history(
+                        self.mark_event_meta_data.mark_event_meta_data.items(),
+                        time.time(),
+                        extend_with_playback_estimate=True,
+                    )
                 self.tools["input"].reset_response_heard_by_user()
                 logger.info("Conversation completed")
                 self.conversation_ended = True

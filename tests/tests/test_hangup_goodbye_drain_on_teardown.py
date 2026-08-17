@@ -162,6 +162,6 @@ async def test_wait_is_bounded_when_marks_never_ack():
 def test_run_gates_terminal_sync_on_in_flight_hangup():
     src = inspect.getsource(TaskManager.run)
     gate_idx = src.find("if self.hangup_triggered and not self.conversation_ended:")
-    sync_idx = src.find("await self.sync_history(self.mark_event_meta_data.mark_event_meta_data.items(), time.time())")
+    sync_idx = src.find("await self.sync_history(\n                        self.mark_event_meta_data.mark_event_meta_data.items(),")
     assert gate_idx != -1 and sync_idx != -1
     assert gate_idx < sync_idx
