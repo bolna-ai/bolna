@@ -35,6 +35,11 @@ class BaseSynthesizer:
                 return
         self.turn_latencies.append(entry)
 
+    async def synthesize_pcm_clip(self, text, sample_rate):
+        """One-shot render as raw mono 16-bit PCM at sample_rate, or None when the provider
+        can't produce it natively — callers then fall back to synthesize() + audio_to_pcm()."""
+        return None
+
     async def synthesize_telephony_clip(self, text):
         """One-shot render of `text` as raw mu-law 8000 bytes, or None when the provider
         can't produce that natively — the caller then falls back to synthesize() +

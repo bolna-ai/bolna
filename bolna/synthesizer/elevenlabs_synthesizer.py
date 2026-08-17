@@ -96,6 +96,12 @@ class ElevenlabsBase(StreamSynthesizer):
     async def synthesize(self, text):
         return await self._generate_http(text, format="mp3_44100_128")
 
+    async def synthesize_pcm_clip(self, text, sample_rate):
+        # ElevenLabs renders pcm_16000/22050/24000/44100 natively — no MP3 decode needed.
+        if int(sample_rate) not in (16000, 22050, 24000, 44100):
+            return None
+        return await self._generate_http(text, format=f"pcm_{int(sample_rate)}")
+
     async def synthesize_telephony_clip(self, text):
         """One-shot render in the telephony wire format (mu-law 8000) — no
         decode/transcode step (and no ffmpeg), unlike the MP3 the plain synthesize()

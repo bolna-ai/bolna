@@ -71,6 +71,8 @@ def _tm(cache=None):
     tm._synthesize = AsyncMock()
     # Bind the real text builder so the handoff text is a str, not a MagicMock.
     tm._TaskManager__handoff_text_for = TaskManager._TaskManager__handoff_text_for.__get__(tm, TaskManager)
+    # Bind the real wire helper so the provider drives mulaw-vs-pcm, not a truthy MagicMock.
+    tm._TaskManager__handoff_mulaw_wire = TaskManager._TaskManager__handoff_mulaw_wire.__get__(tm, TaskManager)
     return tm
 
 
@@ -196,11 +198,100 @@ async def test_clips_cached_across_calls_per_voice_and_text():
 
 
 @pytest.mark.asyncio
-async def test_freeswitch_skips_mulaw_cache_and_live_synthesizes():
-    """42b5f89b: the cached clip is mu-law@8k; FS plays raw PCM@24k, so pushing it produced a
-    silent zero-duration handoff. On non-mulaw transports the clip must be ignored."""
-    tm = _tm(cache={"te": b"\x7f" * 800})
+async def test_freeswitch_pushes_clip_as_pcm():
+    """42b5f89b: prewarm renders the clip in the call's wire format, so on FS the cached clip
+    is raw PCM@24k and is pushed directly with format=pcm (never mislabeled mulaw)."""
+    tm = _tm(cache={"te": b"\x00\x01" * 2400})
     tm.tools["output"].get_provider = MagicMock(return_value="freeswitch")
     await _play(tm)
-    tm._TaskManager__enqueue_chunk.assert_not_called()
-    tm._synthesize.assert_awaited_once()
+    tm._synthesize.assert_not_awaited()
+    chunk, i, n, meta = tm._TaskManager__enqueue_chunk.call_args[0]
+    assert chunk == b"\x00\x01" * 2400
+    assert meta["format"] == "pcm"
+    assert meta["type"] == "audio"
+
+
+@pytest.mark.asyncio
+async def test_prewarm_renders_pcm_for_non_mulaw_wire():
+    # On web/FS the prewarm must render PCM@24k — native one-shot preferred, converter fallback.
+    tm = _tm()
+    tm.tools["output"].get_provider = MagicMock(return_value="freeswitch")
+    tm.switch_handoff_messages = {"te": "Telugu {language}.", "hi": "Hindi {language}."}
+
+    native = MagicMock(spec=["synthesize", "synthesize_pcm_clip"])
+    native.synthesize = AsyncMock()
+    native.synthesize_pcm_clip = AsyncMock(return_value=b"\x00\x01" * 2400)
+
+    fallback = MagicMock(spec=["synthesize"])  # no pcm one-shot → synthesize() + audio_to_pcm
+    fallback.synthesize = AsyncMock(return_value=_wav_bytes(rate=16000))
+    tm._TaskManager__handoff_clip_to_pcm = TaskManager._TaskManager__handoff_clip_to_pcm.__get__(tm, TaskManager)
+
+    pool = MagicMock(spec=SynthesizerPool)
+    pool.active_label = "hi"
+    pool.synthesizers = {"te": native, "hi": fallback}
+    tm.tools["synthesizer"] = pool
+
+    await TaskManager._TaskManager__prewarm_handoff_clips.__get__(tm, TaskManager)()
+
+    native.synthesize_pcm_clip.assert_awaited_once()
+    native.synthesize.assert_not_awaited()
+    assert tm.handoff_audio_cache["te"] == b"\x00\x01" * 2400
+    # 0.1s WAV@16k converted to PCM@24k ≈ 0.1 * 24000 * 2 bytes (resampler may round a sample)
+    assert abs(len(tm.handoff_audio_cache["hi"]) - 4800) <= 4
+
+
+@pytest.mark.asyncio
+async def test_prewarm_discards_error_sentinel_micro_clips():
+    # deepgram's _generate_http returns truthy b"\x00" on non-200 — must not be cached.
+    tm = _tm()
+    tm.switch_handoff_messages = {"te": "Telugu {language}."}
+    synth = MagicMock(spec=["synthesize", "synthesize_telephony_clip"])
+    synth.synthesize_telephony_clip = AsyncMock(return_value=b"\x00\x00")
+    pool = MagicMock(spec=SynthesizerPool)
+    pool.active_label = "hi"
+    pool.synthesizers = {"te": synth}
+    tm.tools["synthesizer"] = pool
+
+    await TaskManager._TaskManager__prewarm_handoff_clips.__get__(tm, TaskManager)()
+
+    assert "te" not in tm.handoff_audio_cache  # falls back to live synth at play time
+
+
+@pytest.mark.asyncio
+async def test_clip_cache_keys_are_wire_specific():
+    # A telephony call must never reuse a web call's PCM clip (and vice versa).
+    synth = MagicMock(spec=["synthesize", "synthesize_telephony_clip", "synthesize_pcm_clip", "voice_id"])
+    synth.voice_id = "voice-1"
+    synth.synthesize_telephony_clip = AsyncMock(return_value=b"\x7f" * 800)
+    synth.synthesize_pcm_clip = AsyncMock(return_value=b"\x00\x01" * 2400)
+    pool = MagicMock(spec=SynthesizerPool)
+    pool.active_label = "hi"
+    pool.synthesizers = {"te": synth}
+
+    tm_tel = _tm()
+    tm_tel.switch_handoff_messages = {"te": "Telugu {language}."}
+    tm_tel.tools["synthesizer"] = pool
+    await TaskManager._TaskManager__prewarm_handoff_clips.__get__(tm_tel, TaskManager)()
+
+    tm_web = _tm()
+    tm_web.tools["output"].get_provider = MagicMock(return_value="freeswitch")
+    tm_web.switch_handoff_messages = {"te": "Telugu {language}."}
+    tm_web.tools["synthesizer"] = pool
+    await TaskManager._TaskManager__prewarm_handoff_clips.__get__(tm_web, TaskManager)()
+
+    assert tm_tel.handoff_audio_cache["te"] == b"\x7f" * 800
+    assert tm_web.handoff_audio_cache["te"] == b"\x00\x01" * 2400
+
+
+@pytest.mark.asyncio
+async def test_elevenlabs_pcm_clip_uses_native_pcm_format():
+    from bolna.synthesizer.elevenlabs_synthesizer import ElevenlabsSynthesizer
+
+    s = MagicMock(spec=["_generate_http"])
+    s._generate_http = AsyncMock(return_value=b"\x00\x01" * 100)
+    clip_fn = ElevenlabsSynthesizer.synthesize_pcm_clip.__get__(s, ElevenlabsSynthesizer)
+
+    assert await clip_fn("hello", 24000) == b"\x00\x01" * 100
+    s._generate_http.assert_awaited_once_with("hello", format="pcm_24000")
+
+    assert await clip_fn("hello", 8000) is None  # unsupported rate → converter fallback

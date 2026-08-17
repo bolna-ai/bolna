@@ -913,8 +913,8 @@ def pcm_to_ulaw(pcm_bytes):
     return ulaw_bytes
 
 
-def audio_to_mulaw8k(audio, rate_hint=8000, format_hint=""):
-    """One-shot synth output (base64 str / WAV / raw PCM) → mono 16-bit 8kHz mu-law.
+def decode_audio_segment(audio, rate_hint=8000, format_hint=""):
+    """One-shot synth output (base64 str / WAV / raw PCM) → AudioSegment.
     Undecodable compressed containers (MP3/Ogg/FLAC) return None — never raw noise."""
     import base64
 
@@ -922,7 +922,7 @@ def audio_to_mulaw8k(audio, rate_hint=8000, format_hint=""):
         audio = base64.b64decode(audio)
     try:
         # Explicit format for WAV takes pydub's native reader — no ffprobe/ffmpeg.
-        segment = AudioSegment.from_file(io.BytesIO(audio), format="wav" if audio[:4] == b"RIFF" else None)
+        return AudioSegment.from_file(io.BytesIO(audio), format="wav" if audio[:4] == b"RIFF" else None)
     except Exception:
         if (
             audio[:3] == b"ID3"
@@ -933,9 +933,24 @@ def audio_to_mulaw8k(audio, rate_hint=8000, format_hint=""):
         # Headerless audio: trust the caller's declared rate/format.
         if "law" in str(format_hint or ""):
             audio = audioop.ulaw2lin(audio, 2)
-        segment = AudioSegment(data=audio, sample_width=2, frame_rate=int(rate_hint or 8000), channels=1)
+        return AudioSegment(data=audio, sample_width=2, frame_rate=int(rate_hint or 8000), channels=1)
+
+
+def audio_to_mulaw8k(audio, rate_hint=8000, format_hint=""):
+    """One-shot synth output → mono 16-bit 8kHz mu-law, or None if undecodable."""
+    segment = decode_audio_segment(audio, rate_hint, format_hint)
+    if segment is None:
+        return None
     segment = segment.set_frame_rate(8000).set_channels(1).set_sample_width(2)
     return pcm_to_ulaw(segment.raw_data)
+
+
+def audio_to_pcm(audio, sample_rate, rate_hint=8000, format_hint=""):
+    """One-shot synth output → mono 16-bit raw PCM at sample_rate, or None if undecodable."""
+    segment = decode_audio_segment(audio, rate_hint, format_hint)
+    if segment is None:
+        return None
+    return segment.set_frame_rate(int(sample_rate)).set_channels(1).set_sample_width(2).raw_data
 
 
 def soniox_ws_url(host):
