@@ -30,7 +30,7 @@ logger = configure_logger(__name__)
 load_dotenv()
 
 
-def _should_overflow(error) -> bool:
+def should_overflow(error) -> bool:
     """Whether another backend is worth trying: saturation, a server fault, or no connection.
 
     Mirrors what the SDK retries that an overflow-enabled client gives up, so nothing the retry
@@ -160,7 +160,7 @@ class AzureLLM(OpenAICompatibleLLM):
         try:
             return await self.async_client.chat.completions.create(**model_args), False
         except (APIStatusError, APIConnectionError) as e:
-            if self._overflow_client is None or not _should_overflow(e):
+            if self._overflow_client is None or not should_overflow(e):
                 raise
             overflow_args = {
                 **model_args,

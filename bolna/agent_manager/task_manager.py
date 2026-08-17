@@ -3768,13 +3768,14 @@ class TaskManager(BaseManager):
 
                     # on_turn_usage meters the conversation LLM's backend; routing on azure means the routing
                     # hop shares that backend, so its tokens draw on the same capacity.
+                    _routing_cb = self.on_overflow if routing_usage.get("overflowed") else self.on_turn_usage
                     if (
-                        self.on_turn_usage
+                        _routing_cb
                         and routing_info.get("routing_provider") == "azure"
                         and routing_usage.get("input_tokens")
                     ):
                         _routing_task = asyncio.create_task(
-                            self.on_turn_usage(
+                            _routing_cb(
                                 routing_usage.get("input_tokens"),
                                 routing_usage.get("output_tokens"),
                                 routing_usage.get("cached_tokens"),

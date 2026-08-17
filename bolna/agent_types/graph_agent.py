@@ -24,7 +24,8 @@ from bolna.helpers.expression_evaluator import evaluate_edge_expression, describ
 from bolna.enums import EdgeConditionType, NodeType, ToolScope
 from bolna.llms.types import LLMStreamChunk, LatencyData
 from bolna.llms import OpenAiLLM
-from bolna.llms.azure_llm import _should_overflow
+from bolna.llms.azure_llm import should_overflow
+from bolna.llms.http_client_pool import get_shared_http_client
 from bolna.providers import SUPPORTED_LLM_PROVIDERS
 from bolna.prompts import VOICEMAIL_DETECTION_PROMPT
 from bolna.constants import GPT5_MODEL_PREFIX, LANGUAGE_NAMES, canonical_model, default_reasoning_effort
@@ -246,16 +247,19 @@ class GraphAgent(BaseAgent):
         }
 
     def _routing_create(self, routing_kwargs):
-        """Run the routing hop, moving it to the overflow backend when the pool cannot serve it."""
+        """Run the routing hop, moving it off the pool when it cannot serve. Returns (response, overflowed)."""
         try:
-            return self.routing_client.chat.completions.create(**routing_kwargs)
+            return self.routing_client.chat.completions.create(**routing_kwargs), False
         except (APIStatusError, APIConnectionError) as e:
-            if getattr(self, "_routing_overflow_client", None) is None or not _should_overflow(e):
+            if getattr(self, "_routing_overflow_client", None) is None or not should_overflow(e):
                 raise
             logger.warning(f"Routing hop saturated, overflowing to {self._routing_overflow_model}")
-            return self._routing_overflow_client.chat.completions.create(
-                **{**routing_kwargs, "model": self._routing_overflow_model}
-            )
+            overflow_kwargs = {
+                **routing_kwargs,
+                "model": self._routing_overflow_model,
+                "service_tier": self._routing_overflow_tier,
+            }
+            return self._routing_overflow_client.chat.completions.create(**overflow_kwargs), True
 
     def _init_routing_client(self):
         """Initialize routing client. Uses Groq if available, else OpenAI."""
@@ -296,7 +300,12 @@ class GraphAgent(BaseAgent):
             self._routing_overflow_client = None
             if overflow.get("api_key") and overflow.get("base_url") and overflow.get("model"):
                 self._routing_overflow_model = overflow["model"]
-                self._routing_overflow_client = OpenAI(api_key=overflow["api_key"], base_url=overflow["base_url"])
+                self._routing_overflow_tier = overflow.get("service_tier") or "priority"
+                self._routing_overflow_client = OpenAI(
+                    api_key=overflow["api_key"],
+                    base_url=overflow["base_url"],
+                    http_client=get_shared_http_client(base_url=overflow["base_url"], http2=False),
+                )
             # Same trade as the conversation client: with somewhere to fall to, waiting out the
             # SDK's retries only adds silence on a hop the caller is already waiting through.
             self.routing_client = AzureOpenAI(
@@ -906,7 +915,7 @@ class GraphAgent(BaseAgent):
 
             self._routing_reasoning_effort_used = routing_kwargs.get("reasoning_effort")
 
-            response = await asyncio.to_thread(self._routing_create, routing_kwargs)
+            response, routing_overflowed = await asyncio.to_thread(self._routing_create, routing_kwargs)
             latency_ms = (time.perf_counter() - start_time) * 1000
 
             # Extract token usage from routing LLM call
@@ -922,6 +931,7 @@ class GraphAgent(BaseAgent):
                     if response.usage.prompt_tokens_details
                     else None,
                     "service_tier": getattr(response, "service_tier", None),
+                    "overflowed": routing_overflowed,
                 }
 
             # Extract the function call
