@@ -25,6 +25,7 @@ from bolna.enums import EdgeConditionType, NodeType, ToolScope
 from bolna.llms.types import LLMStreamChunk, LatencyData
 from bolna.llms import OpenAiLLM
 from bolna.llms.azure_llm import should_overflow
+from bolna.llms.http_client_pool import get_shared_sync_http_client
 from bolna.providers import SUPPORTED_LLM_PROVIDERS
 from bolna.prompts import VOICEMAIL_DETECTION_PROMPT
 from bolna.constants import GPT5_MODEL_PREFIX, LANGUAGE_NAMES, canonical_model, default_reasoning_effort
@@ -254,7 +255,11 @@ class GraphAgent(BaseAgent):
             if cfg is None or not should_overflow(e):
                 raise
             if self._routing_overflow_client is None:
-                self._routing_overflow_client = OpenAI(api_key=cfg["api_key"], base_url=cfg["base_url"])
+                self._routing_overflow_client = OpenAI(
+                    api_key=cfg["api_key"],
+                    base_url=cfg["base_url"],
+                    http_client=get_shared_sync_http_client(base_url=cfg["base_url"], http2=False),
+                )
             logger.warning(f"Routing hop saturated, overflowing to {cfg['model']}")
             overflow_kwargs = {
                 **routing_kwargs,
