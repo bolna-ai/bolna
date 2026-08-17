@@ -25,7 +25,6 @@ from bolna.enums import EdgeConditionType, NodeType, ToolScope
 from bolna.llms.types import LLMStreamChunk, LatencyData
 from bolna.llms import OpenAiLLM
 from bolna.llms.azure_llm import should_overflow
-from bolna.llms.http_client_pool import get_shared_http_client
 from bolna.providers import SUPPORTED_LLM_PROVIDERS
 from bolna.prompts import VOICEMAIL_DETECTION_PROMPT
 from bolna.constants import GPT5_MODEL_PREFIX, LANGUAGE_NAMES, canonical_model, default_reasoning_effort
@@ -251,13 +250,16 @@ class GraphAgent(BaseAgent):
         try:
             return self.routing_client.chat.completions.create(**routing_kwargs), False
         except (APIStatusError, APIConnectionError) as e:
-            if getattr(self, "_routing_overflow_client", None) is None or not should_overflow(e):
+            cfg = getattr(self, "_routing_overflow_cfg", None)
+            if cfg is None or not should_overflow(e):
                 raise
-            logger.warning(f"Routing hop saturated, overflowing to {self._routing_overflow_model}")
+            if self._routing_overflow_client is None:
+                self._routing_overflow_client = OpenAI(api_key=cfg["api_key"], base_url=cfg["base_url"])
+            logger.warning(f"Routing hop saturated, overflowing to {cfg['model']}")
             overflow_kwargs = {
                 **routing_kwargs,
-                "model": self._routing_overflow_model,
-                "service_tier": self._routing_overflow_tier,
+                "model": cfg["model"],
+                "service_tier": cfg.get("service_tier") or "priority",
             }
             return self._routing_overflow_client.chat.completions.create(**overflow_kwargs), True
 
@@ -297,22 +299,19 @@ class GraphAgent(BaseAgent):
             azure_endpoint = self.base_url or os.getenv("AZURE_OPENAI_ENDPOINT")
             api_version = self.config.get("api_version") or os.getenv("AZURE_OPENAI_API_VERSION", "2024-12-01-preview")
             overflow = self.config.get("overflow_llm") or {}
+            # Held as config and built on first use: overflowing is the rare path, so a client per
+            # agent would carry a connection pool that almost never sees traffic.
+            self._routing_overflow_cfg = (
+                overflow if overflow.get("api_key") and overflow.get("base_url") and overflow.get("model") else None
+            )
             self._routing_overflow_client = None
-            if overflow.get("api_key") and overflow.get("base_url") and overflow.get("model"):
-                self._routing_overflow_model = overflow["model"]
-                self._routing_overflow_tier = overflow.get("service_tier") or "priority"
-                self._routing_overflow_client = OpenAI(
-                    api_key=overflow["api_key"],
-                    base_url=overflow["base_url"],
-                    http_client=get_shared_http_client(base_url=overflow["base_url"], http2=False),
-                )
             # Same trade as the conversation client: with somewhere to fall to, waiting out the
             # SDK's retries only adds silence on a hop the caller is already waiting through.
             self.routing_client = AzureOpenAI(
                 azure_endpoint=azure_endpoint,
                 api_key=self.llm_key,
                 api_version=api_version,
-                **({"max_retries": 0} if self._routing_overflow_client else {}),
+                **({"max_retries": 0} if self._routing_overflow_cfg else {}),
             )
             if self.routing_model:
                 self.routing_model = self.routing_model.split("/", 1)[-1]
