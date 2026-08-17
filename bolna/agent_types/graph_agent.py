@@ -299,14 +299,12 @@ class GraphAgent(BaseAgent):
             azure_endpoint = self.base_url or os.getenv("AZURE_OPENAI_ENDPOINT")
             api_version = self.config.get("api_version") or os.getenv("AZURE_OPENAI_API_VERSION", "2024-12-01-preview")
             overflow = self.config.get("overflow_llm") or {}
-            # Held as config and built on first use: overflowing is the rare path, so a client per
-            # agent would carry a connection pool that almost never sees traffic.
+            # Built on first use: overflowing is rare, and an unused client still holds a pool.
             self._routing_overflow_cfg = (
                 overflow if overflow.get("api_key") and overflow.get("base_url") and overflow.get("model") else None
             )
             self._routing_overflow_client = None
-            # Same trade as the conversation client: with somewhere to fall to, waiting out the
-            # SDK's retries only adds silence on a hop the caller is already waiting through.
+            # Same trade as the conversation client, on a hop the caller is already waiting through.
             self.routing_client = AzureOpenAI(
                 azure_endpoint=azure_endpoint,
                 api_key=self.llm_key,

@@ -31,11 +31,7 @@ load_dotenv()
 
 
 def should_overflow(error) -> bool:
-    """Whether another backend is worth trying: saturation, a server fault, or no connection.
-
-    Mirrors what the SDK retries that an overflow-enabled client gives up, so nothing the retry
-    used to absorb is left without a second chance.
-    """
+    """Whether another backend is worth trying: saturation, a server fault, or no connection."""
     if isinstance(error, APIConnectionError):
         return True
     return isinstance(error, APIStatusError) and (error.status_code == 429 or error.status_code >= 500)
@@ -98,8 +94,7 @@ class AzureLLM(OpenAICompatibleLLM):
         overflow = kwargs.get("overflow_llm") or {}
         has_overflow = bool(overflow.get("api_key") and overflow.get("base_url") and overflow.get("model"))
 
-        # Retries stay on unless there is an overflow to fall to, where waiting out two backoffs
-        # would only add dead air before we move the turn anyway.
+        # Retries stay on unless there is an overflow to fall to, which serves the same purpose faster.
         self.async_client = AsyncAzureOpenAI(
             azure_endpoint=azure_endpoint,
             api_key=api_key,
@@ -113,8 +108,7 @@ class AzureLLM(OpenAICompatibleLLM):
 
         # Fallback backend for turns the provisioned deployment cannot serve.
         self._overflow_client = None
-        # The model is required rather than derived: a deployment name need not resemble the model
-        # it serves, so a guess would post something the overflow backend rejects.
+        # Required, not derived: a deployment name need not resemble the model it serves.
         if has_overflow:
             self._overflow_model = overflow["model"]
             self._overflow_service_tier = overflow.get("service_tier") or "priority"
