@@ -6011,8 +6011,18 @@ class TaskManager(BaseManager):
             "sequence_id": -1,
             "message_category": "handoff",
             "text": handoff_text,
+            "type": "audio",
         }
-        clip = self.handoff_audio_cache.get(target)
+        # The cache holds mu-law@8k clips — telephony wire format. Web/freeswitch play raw
+        # PCM@24k, so the clip is unusable there (42b5f89b: silent handoff); live-synthesize.
+        mulaw_transport = self.tools["output"].get_provider() in (
+            TelephonyProvider.PLIVO.value,
+            TelephonyProvider.TWILIO.value,
+            TelephonyProvider.EXOTEL.value,
+            TelephonyProvider.VOBIZ.value,
+            TelephonyProvider.SIP_TRUNK.value,
+        )
+        clip = self.handoff_audio_cache.get(target) if mulaw_transport else None
         if clip:
             # Pre-warmed mu-law clip pushed straight to telephony. Both end-flags required
             handoff_meta.update(

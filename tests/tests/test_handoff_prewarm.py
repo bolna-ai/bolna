@@ -193,3 +193,14 @@ async def test_clips_cached_across_calls_per_voice_and_text():
     await TaskManager._TaskManager__prewarm_handoff_clips.__get__(tm2, TaskManager)()
     assert synth.synthesize_telephony_clip.await_count == 1  # cache hit, no re-render
     assert tm2.handoff_audio_cache["te"] == b"\x7f" * 800
+
+
+@pytest.mark.asyncio
+async def test_freeswitch_skips_mulaw_cache_and_live_synthesizes():
+    """42b5f89b: the cached clip is mu-law@8k; FS plays raw PCM@24k, so pushing it produced a
+    silent zero-duration handoff. On non-mulaw transports the clip must be ignored."""
+    tm = _tm(cache={"te": b"\x7f" * 800})
+    tm.tools["output"].get_provider = MagicMock(return_value="freeswitch")
+    await _play(tm)
+    tm._TaskManager__enqueue_chunk.assert_not_called()
+    tm._synthesize.assert_awaited_once()
