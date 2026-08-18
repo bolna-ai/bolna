@@ -156,11 +156,8 @@ def _inject_end_call_tool(api_tools, *, scope, nodes, description=None):
 
 
 def is_alphanumeric_readout(text: str) -> bool:
-    """True when a turn is a code/number readout, not language evidence (judge rule 3a).
-
-    ≥1 digit-bearing token and ≤2 other tokens = the caller supplying DATA ("ये B1।",
-    "21 65 11 69. Hello."); bare letters never count ("I want English" must not trip this).
-    """
+    """Code/number readout, not language evidence (judge rule 3a): ≥1 digit-bearing token and
+    ≤2 others. Bare letters never count, so "I want English" must not trip this."""
     tokens = re.findall(r"\w+", text or "", flags=re.UNICODE)
     if not tokens:
         return False
@@ -4520,21 +4517,14 @@ class TaskManager(BaseManager):
             self.llm_task = None
             self.interruption_manager.invalidate_pending_responses()
             self._drop_all_staged_assistant_history("llm_task_cancelled_for_new_speech_final")
-            # Re-register the current sequence_id (already allocated by
-            # __get_updated_meta_info) so the new response's audio is not blocked
+            # Re-register the seq_id allocated by __get_updated_meta_info, else the audio blocks.
             self.interruption_manager.revalidate_sequence_id(meta_info["sequence_id"])
 
-        # Always revalidate the new sequence_id — if the old task already
-        # completed and invalidate_pending_responses was called from the
-        # interruption path, the new seq_id would otherwise never be added
-        # back to sequence_ids, causing all audio to be BLOCKed permanently.
+        # Unconditional: if the old task completed and the interruption path invalidated
+        # responses, the new seq_id would never be re-added and all audio would stay BLOCKed.
         self.interruption_manager.revalidate_sequence_id(meta_info["sequence_id"])
         self.response_in_pipeline = True
-        # Once-per-turn language-switch decision (no-op unless gated on); background
-        # task so it never delays the main LLM. When the detector already tagged this
-        # Gates this turn's AUDIO (not its generation) when the detector disagrees with the
-        # active language — see _spawn_language_switch_decision, which arms it for both this
-        # path and the eager one.
+        # Background once-per-turn switch decision; gates this turn's AUDIO, not its generation.
         self._spawn_language_switch_decision(transcriber_message, meta_info)
         self.llm_task = asyncio.create_task(self._run_llm_task(transcriber_package))
 
@@ -4632,10 +4622,8 @@ class TaskManager(BaseManager):
                 logger.info(f"Merged transcript with unheard response: {transcriber_message}")
             if any(activity.values()):
                 await self.__cleanup_downstream_tasks()
-            # cleanup invalidates all pending sequence ids. The current turn's
-            # sequence_id was already allocated by __get_updated_meta_info, so
-            # we must re-register it or the fresh LLM response will later be
-            # dropped in _synthesize as an invalid sequence.
+            # Cleanup invalidates every pending seq id; re-register this turn's or _synthesize
+            # later drops the fresh response as an invalid sequence.
             self.interruption_manager.revalidate_sequence_id(current_sequence_id)
             logger.info(
                 "BOLNA_TRACE_TM revalidated_current_seq_after_cleanup seq=%s turn=%s response_uid=%s",

@@ -1,11 +1,5 @@
-"""Rule-3a alphanumeric veto + settle-window regeneration.
-
-From prod b381ba0a (VBL barcode readout): (1) the judge switched hi→en at 0.92 on
-"This B1" — an alphanumeric readout rule 3a forbids switching on; (2) each fragment
-final ("ये B1।", "V1", "21, 65, 11, 69") cancelled the in-flight generation, shattering
-one answer across many synth turns. The veto blocks (1) deterministically; the settle
-window collapses (2) into a single regeneration of the merged utterance.
-"""
+"""Rule-3a alphanumeric veto + settle-window regeneration (prod b381ba0a: judge switched
+hi→en on "This B1", and each fragment final shattered one answer across synth turns)."""
 
 import asyncio
 from unittest.mock import AsyncMock, MagicMock
