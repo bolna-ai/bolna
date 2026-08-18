@@ -137,7 +137,11 @@ class AzureTranscriber(BaseTranscriber):
                     self.audio_frame_timestamps.append((frame_start, frame_end, send_timestamp))
                     self.num_frames += 1
 
-                    self.push_stream.write(ws_data_packet.get("data"))
+                    # None while a reconnect swaps the connection. That audio has nowhere to
+                    # go, but the pump has to survive the gap to serve the new stream.
+                    push_stream = self.push_stream
+                    if push_stream is not None:
+                        push_stream.write(ws_data_packet.get("data"))
         except Exception as e:
             exc_type, exc_obj, exc_tb = sys.exc_info()
             logger.error(f"Error occurred in send_audio_to_transcriber - {e} at {exc_tb.tb_lineno}")
