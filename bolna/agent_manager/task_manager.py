@@ -158,14 +158,8 @@ def _inject_end_call_tool(api_tools, *, scope, nodes, description=None):
 def is_alphanumeric_readout(text: str) -> bool:
     """True when a turn is a code/number readout, not language evidence (judge rule 3a).
 
-    Code enforcement of the prompt rule the judge violated on prod call b381ba0a
-    ("This B1" -> switched hi->en at 0.92): a turn built around digit-bearing tokens
-    ("B1", "V1", "21, 65, 11, 69") is the caller supplying DATA. Shape: at least one
-    digit-bearing token and at most two other tokens — catches a readout wrapped in
-    filler ("ये B1।", "21 65 11 69. Hello.") while leaving any turn with a real
-    grammatical frame to the judge. Bare letters do NOT count as code ("I want
-    English" must never trip this). Vetoing a switch is fail-safe: worst case a
-    legitimate switch waits for the caller's next substantive turn.
+    ≥1 digit-bearing token and ≤2 other tokens = the caller supplying DATA ("ये B1।",
+    "21 65 11 69. Hello."); bare letters never count ("I want English" must not trip this).
     """
     tokens = re.findall(r"\w+", text or "", flags=re.UNICODE)
     if not tokens:
@@ -2511,9 +2505,8 @@ class TaskManager(BaseManager):
         logger.info(f"Cleaning up downstream task")
         start_time = time.time()
         self._cancel_in_flight_llm_response()
-        # A pending settle-window regeneration belongs to the turn being torn down —
-        # whoever is cleaning (barge-in, LID switch) supersedes it. The overlapped
-        # final path re-arms AFTER this cleanup, so ordering keeps the newest turn.
+        # A pending regen belongs to the turn being torn down; the overlapped final
+        # path re-arms after this cleanup, so the newest turn always wins.
         if self.regen_settle_task is not None and not self.regen_settle_task.done():
             self.regen_settle_task.cancel()
         self.regen_settle_payload = None
@@ -4618,8 +4611,7 @@ class TaskManager(BaseManager):
 
         current_sequence_id = meta_info.get("sequence_id")
         activity = self._inflight_response_activity(exclude_sequence_id=current_sequence_id)
-        # A live settle timer counts as overlap: the previous fragment's regeneration hasn't
-        # started yet, so this final must merge into it instead of racing it.
+        # A live settle timer counts as overlap — this final merges into the pending regen.
         settle_pending = self.regen_settle_task is not None and not self.regen_settle_task.done()
         overlapped = next_task == "llm" and (any(activity.values()) or settle_pending)
         if overlapped:
@@ -4671,10 +4663,8 @@ class TaskManager(BaseManager):
         if next_task == "llm":
             meta_info["origin"] = "transcriber"
             if overlapped:
-                # The caller's speech overlapped an in-flight response, so more finals are
-                # likely still coming (multi-part utterances: codes, numbers, dictation).
-                # Debounce: regenerate ONCE after finals stop, against the merged turn,
-                # instead of a cut/regenerate cycle per fragment.
+                # Overlapped speech means more finals are likely coming — regenerate once
+                # after they settle instead of a cut/regenerate cycle per fragment.
                 self.arm_regen_settle(transcriber_message, meta_info)
             else:
                 self.kickoff_llm_generation(transcriber_message, meta_info)
@@ -5980,10 +5970,8 @@ class TaskManager(BaseManager):
             emit_lid_decision("gated:short_audio")
             return
 
-        # Rule-3a enforcement: a code/number readout is never language evidence. The prompt
-        # already says this is absolute, but the judge can still read "This B1" as English
-        # (prod b381ba0a, conf 0.92) — a deterministic veto here is the backstop. An explicit
-        # by-name request keeps its rule-1 precedence via the same bypass as the substance gate.
+        # Rule-3a backstop: the judge can still read "This B1" as English (prod b381ba0a);
+        # explicit by-name requests keep rule-1 precedence via the substance gate's bypass.
         if not explicit_bypass and is_alphanumeric_readout(detector_transcript):
             logger.info(
                 f"LanguageSwitcher: target '{target}' vetoed — rule-3a alphanumeric readout "
