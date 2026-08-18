@@ -2168,10 +2168,33 @@ class TaskManager(BaseManager):
             or (self.execute_function_call_task is not None and not self.execute_function_call_task.done()),
         }
 
+    def estimate_played_text_for_time(self, pending_chunks, actual_play_time):
+        """Credit whole chunks that fit in actual_play_time, then a word-trimmed proportional
+        slice of the chunk the clock lands in."""
+        played_text = []
+        cumulative_duration = 0
+        for chunk in pending_chunks:
+            if cumulative_duration >= actual_play_time:
+                break
+            chunk_duration = chunk["duration"]
+            if cumulative_duration + chunk_duration <= actual_play_time:
+                played_text.append(chunk["text"])
+            else:
+                remaining_time = actual_play_time - cumulative_duration
+                proportion = remaining_time / chunk_duration if chunk_duration > 0 else 0
+                char_count = int(len(chunk["text"]) * proportion)
+                partial_text = chunk["text"][:char_count]
+                if partial_text and char_count < len(chunk["text"]):
+                    partial_text = self._trim_partial_to_complete_words(partial_text)
+                if partial_text:
+                    played_text.append(partial_text)
+            cumulative_duration += chunk_duration
+        return "".join(played_text)
+
     async def sync_history(self, mark_events_data, interruption_processed_at, extend_with_playback_estimate=False):
         """Sync history to reflect only what was actually spoken. Uses confirmed text or falls back to pending marks.
-        extend_with_playback_estimate: end-of-call only — credit the unACKed tail when the wall
-        clock since the last ACK covers its full duration (marks can lag playback and get lost)."""
+        extend_with_playback_estimate: end-of-call only — credit the unACKed tail proportionally
+        to the wall clock elapsed since the last ACK (marks can lag playback and get lost)."""
         try:
             mark_events_data = list(mark_events_data)
             target_turn_id = self._get_latest_turn_id_from_marks(mark_events_data)
@@ -2217,22 +2240,20 @@ class TaskManager(BaseManager):
                 pending_tail = []
                 for mark_id, mark_data in mark_events_data:
                     text = mark_data.get("text_synthesized", "")
-                    if mark_data.get("type") in ["pre_mark_message", "backchanneling"] or not text:
+                    if mark_data.get("type") in NON_EVIDENCE_MARK_TYPES or not text:
                         continue
                     if target_turn_id is not None and mark_data.get("turn_id") != target_turn_id:
                         continue
                     pending_tail.append({"text": text, "duration": mark_data.get("duration", 0)})
                 last_ack_ts = self.mark_event_meta_data.get_last_ack_ts_for_turn(target_turn_id)
                 if pending_tail and last_ack_ts:
-                    # All-or-nothing: credit only when playback provably finished; mid-chunk
-                    # hangup keeps the strict ACK trim (never stamp a partial guess).
+                    # Proportional by the wall clock since the last ACK. The ACK itself lags true
+                    # playout end, so this window under-credits — it can't stamp unheard text.
                     tail_play_time = max(0.0, interruption_processed_at - last_ack_ts)
-                    pending_duration = sum(chunk["duration"] or 0 for chunk in pending_tail)
-                    if tail_play_time >= pending_duration > 0:
-                        tail_text = "".join(chunk["text"] for chunk in pending_tail)
+                    tail_text = self.estimate_played_text_for_time(pending_tail, tail_play_time)
+                    if tail_text:
                         logger.info(
-                            f"sync_history: crediting fully-played unacked tail "
-                            f"({pending_duration:.2f}s audio, {tail_play_time:.2f}s elapsed, {len(tail_text)} chars)"
+                            f"sync_history: crediting unacked tail ({tail_play_time:.2f}s elapsed, {len(tail_text)} chars)"
                         )
                         # Restore the stripped chunk-boundary space or the exact-match trim drops the tail.
                         joiner = "" if (response_heard[-1:].isspace() or tail_text[:1].isspace()) else " "
@@ -2262,27 +2283,9 @@ class TaskManager(BaseManager):
                         elapsed_time = interruption_processed_at - self.tools["input"].get_current_mark_started_time()
                         actual_play_time = max(0, elapsed_time)
 
-                    played_text = []
-                    cumulative_duration = 0
-                    for chunk in pending_chunks:
-                        if cumulative_duration >= actual_play_time:
-                            break
-                        chunk_duration = chunk["duration"]
-                        if cumulative_duration + chunk_duration <= actual_play_time:
-                            played_text.append(chunk["text"])
-                        else:
-                            remaining_time = actual_play_time - cumulative_duration
-                            proportion = remaining_time / chunk_duration if chunk_duration > 0 else 0
-                            char_count = int(len(chunk["text"]) * proportion)
-                            partial_text = chunk["text"][:char_count]
-                            if partial_text and char_count < len(chunk["text"]):
-                                partial_text = self._trim_partial_to_complete_words(partial_text)
-                            if partial_text:
-                                played_text.append(partial_text)
-                        cumulative_duration += chunk_duration
-
-                    if played_text:
-                        response_heard = "".join(played_text)
+                    estimated = self.estimate_played_text_for_time(pending_chunks, actual_play_time)
+                    if estimated:
+                        response_heard = estimated
                         logger.info(
                             f"Estimated played text (last 10 chars): {response_heard[-10:]}, len={len(response_heard)}"
                         )

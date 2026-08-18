@@ -250,7 +250,9 @@ class MarkEventMetaData:
         return self.previous_mark_event_meta_data
 
     def get_last_ack_ts_for_turn(self, turn_id) -> Optional[float]:
-        """Wall-clock of the turn's last ACKed chunk — the playback clock's last confirmed point."""
+        """Wall-clock of the turn's last ACKed chunk — the playback clock's last confirmed point.
+        audio_playing_until can't serve here: it is a send-time estimate, not per-turn, and is
+        zeroed by drop_playout_estimate; crediting needs the turn's last confirmed instant."""
         if turn_id is None:
             return None
         ack_times = [
