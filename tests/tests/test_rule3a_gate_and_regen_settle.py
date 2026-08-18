@@ -8,6 +8,7 @@ import pytest
 
 from bolna.agent_manager.task_manager import TaskManager, is_alphanumeric_readout
 from bolna.constants import LLM_REGEN_SETTLE_S
+from bolna.helpers.utils import safe_log_text
 
 
 # ── rule-3a helper ───────────────────────────────────────────────────────────────
@@ -108,3 +109,19 @@ async def test_fire_with_cleared_payload_is_noop():
     tm.regen_settle_payload = None  # cleared by a race with cleanup
     await asyncio.sleep(LLM_REGEN_SETTLE_S + 0.15)
     assert tm.kickoff_calls == []
+
+
+# ── log sanitization (CodeQL log-injection) ──────────────────────────────────────
+
+
+def test_safe_log_text_blocks_forged_entries():
+    evil = "hello\n2026-08-18 05:00:00 INFO {task_manager} FAKE granted\r\x1b[31m"
+    out = safe_log_text(evil)
+    assert "\n" not in out and "\r" not in out and "\x1b" not in out
+
+
+def test_safe_log_text_preserves_speech_and_truncates():
+    assert safe_log_text("ये B1। 21 65") == "ये B1। 21 65"
+    assert safe_log_text(None) == ""
+    assert len(safe_log_text("x" * 500)) == 120
+    assert len(safe_log_text("x" * 500, 80)) == 80
