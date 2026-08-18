@@ -1251,6 +1251,10 @@ class GraphAgent(BaseAgent):
         else:
             prompt = node_prompt
 
+        # Labels the turns that follow as messages, so they read as the call so far and not
+        # as more instructions.
+        prompt = f"{prompt}\n\n## Conversation History"
+
         # RAG depends on the latest message, so it goes in a trailing message rather
         # than the system prompt, keeping [system + history] a cacheable prefix.
         rag_message = None
