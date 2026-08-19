@@ -9,9 +9,11 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from bolna.agent_types.graph_agent import GraphAgent
-from bolna.constants import MODEL_REASONING_EFFORT_MAP
+from bolna.constants import GPT5_MODEL_PREFIX, MODEL_REASONING_EFFORT_MAP
 
-GPT5_MODELS = sorted(MODEL_REASONING_EFFORT_MAP)
+# Routing only sends reasoning_effort for the gpt-5 family. The map also carries the
+# realtime speech-to-speech models, which accept an effort but are never a routing model.
+GPT5_MODELS = sorted(m for m in MODEL_REASONING_EFFORT_MAP if m.startswith(GPT5_MODEL_PREFIX))
 AZURE_DEPLOYMENT_FORMS = ["azure/gpt-5.4-mini", "ptu-gpt-5.4-mini"]
 
 
