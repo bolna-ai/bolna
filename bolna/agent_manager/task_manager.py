@@ -5737,6 +5737,9 @@ class TaskManager(BaseManager):
             return
         # One selection, used by BOTH the speculative copy and the real history append —
         idle_flush_user_text = trailing_utterance_text(detector_segments) or detector_transcript
+        # Snapshot before the multi-second decide: if a user turn lands meanwhile, the
+        # idle-flush append below would duplicate it (prod 43571cba / 8e98dbc2).
+        history_signature_at_decide = self.conversation_history.user_turn_signature()
         active = self.language
 
         # Foreign-segment max, not the buffer-lifetime max: the idle-flush skip leaves the buffer
@@ -6048,6 +6051,14 @@ class TaskManager(BaseManager):
                 logger.info(
                     f"LanguageSwitcher: corrected user turn to detector transcript {detector_transcript[:80]!r}"
                 )
+        elif self.conversation_history.user_turn_signature() != history_signature_at_decide:
+            # A main turn for this audio landed during the decide — appending would duplicate
+            # it and re-route the graph on phantom input; answer the real turn instead.
+            transcript_corrected = False
+            logger.info(
+                "LanguageSwitcher: idle-flush skipped — user turn arrived during decide; "
+                "generating follow-up for the latest turn"
+            )
         else:
             # Reply to the caller's LAST utterance, not the whole buffer — with the
             self.conversation_history.append_user(idle_flush_user_text)
