@@ -1692,6 +1692,7 @@ class TaskManager(BaseManager):
                     TelephonyProvider.TWILIO.value,
                     TelephonyProvider.EXOTEL.value,
                     TelephonyProvider.VOBIZ.value,
+                    TelephonyProvider.TELNYX.value,
                     TelephonyProvider.SIP_TRUNK.value,
                 )
                 synthesizer_kwargs = self.kwargs.copy()
@@ -1777,6 +1778,7 @@ class TaskManager(BaseManager):
                 TelephonyProvider.TWILIO.value,
                 TelephonyProvider.EXOTEL.value,
                 TelephonyProvider.VOBIZ.value,
+                TelephonyProvider.TELNYX.value,
                 TelephonyProvider.SIP_TRUNK.value,
             )
             synthesizer_kwargs = self.kwargs.copy()
