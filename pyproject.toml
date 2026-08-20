@@ -6,7 +6,11 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "bolna"
+<<<<<<< HEAD
 version = "0.10.204"
+=======
+version = "0.10.201"
+>>>>>>> cb7c23bf (bump: version 0.10.201)
 readme = "README.md"
 authors = [
     { name = "Prateek Sachan", email = "ps@prateeksachan.com" }
