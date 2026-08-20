@@ -102,8 +102,8 @@ def _mock_routing_response(function_name, function_args_dict):
 
 
 def _uncond_intent_config():
-    """A normal node with both an intent edge and an unconditional default: the shape where
-    the intent edge used to be silently dead."""
+    """A node carrying both an intent edge and an unconditional default: the shape in which an
+    intent edge is most easily left dead."""
     return {
         "nodes": [
             {

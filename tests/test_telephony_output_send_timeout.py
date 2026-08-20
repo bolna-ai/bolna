@@ -1,16 +1,10 @@
-"""A telephony provider's media WebSocket can go half-dead: the underlying TCP
-connection stops delivering ACKs without ever sending a close frame, so
-`websocket.send_text()` never raises and never returns.
+"""A telephony provider's media WebSocket can go half-dead: the TCP connection stops delivering
+ACKs without ever sending a close frame, so websocket.send_text() never raises and never returns.
 
-`__cleanup_downstream_tasks()` awaits `output.handle_interruption()` first,
-ahead of task cancellation and history sync, with nothing above it bounding
-the wait. Production incident: execution 88eeeb50-dadb-4abc-8f79-fd34cb6bac61
-(Plivo, 2026-08-17) froze there for ~10.5 minutes with a lost transcript
-because Plivo's own idle-stream detection was the only thing that ever ended
-the call.
-
-These tests simulate a send that never resolves and assert the call site
-still finishes within bounds instead of hanging indefinitely.
+__cleanup_downstream_tasks() awaits output.handle_interruption() ahead of task cancellation and
+history sync, with nothing above it bounding the wait, so the call can hang until the provider's
+own idle-stream detection ends it. These tests simulate a send that never resolves and assert the
+call site still finishes within bounds.
 """
 
 import asyncio

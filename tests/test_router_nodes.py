@@ -704,8 +704,8 @@ class TestRouterFixes:
 
 
 class TestFirstDeliveryHold:
-    """A node entered by a transition must speak its first question before it can route out
-    (BOLNA-1582): an utterance arriving before that first TTS turn is delivered is context only."""
+    """A node entered by a transition speaks its first question before it can route out; an
+    utterance arriving before that first TTS turn is delivered is context only."""
 
     def _nodes(self):
         return [

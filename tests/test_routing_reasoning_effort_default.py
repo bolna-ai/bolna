@@ -1,8 +1,8 @@
 """Routing reasoning_effort must be one the routing model actually accepts.
 
-The default used to be a hardcoded "minimal", which only gpt-5, gpt-5-mini and gpt-5-nano
-accept, so routing was rejected by the provider on gpt-5.1 and later. The gpt-5 family check
-also read the raw model name, missing Azure deployment names entirely.
+"minimal" is accepted only by gpt-5, gpt-5-mini and gpt-5-nano, so it cannot be the blanket
+default. The gpt-5 family check reads the resolved model rather than the raw name, or Azure
+deployment names miss it entirely.
 """
 
 import pytest

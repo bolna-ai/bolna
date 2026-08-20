@@ -115,7 +115,7 @@ def test_end_call_node_scoped_absent_on_intermediate_present_and_forced_on_termi
 
 
 def test_end_call_global_present_on_intermediate_node():
-    """GLOBAL scope reproduces the original behavior: end_call offered everywhere."""
+    """GLOBAL scope offers end_call on every node."""
     nodes = [
         {"id": "escalation", "edges": []},
         {"id": "goodbye", "function_call": "end_call", "edges": []},

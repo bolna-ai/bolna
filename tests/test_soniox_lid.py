@@ -142,10 +142,10 @@ def test_telephony_audio_params():
 
 
 def test_prob_stays_none_even_with_uniform_tags():
-    # Deliberate: prob must stay None so detector corroboration is Sarvam-only. The token-share
-    # proxy read 1.0 on essentially every real segment (uniform tagging), including a full
-    # English→Telugu-script transliteration (QA 7c7d4b00) — maximal "confidence" precisely on
-    # the segments least worth trusting. lang still resolves to the dominant tag.
+    # Deliberate: prob stays None so detector corroboration is Sarvam-only. Uniform tagging
+    # makes the token-share proxy read 1.0 on nearly every segment, including transliterations,
+    # so it reports maximal confidence exactly where it is least earned. lang still resolves to
+    # the dominant tag.
     d = _detector()
     d._handle_message(
         {

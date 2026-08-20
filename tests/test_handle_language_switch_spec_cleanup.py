@@ -1,15 +1,9 @@
-"""Regression tests for handle_language_switch's speculative-follow-up cleanup.
+"""handle_language_switch cancels its own speculative follow-up, never a later turn's.
 
-`__run_language_switch` spawns a speculative follow-up task and stores it on the
-shared slot `self._spec_followup_task`. The follow-up generation then runs OUTSIDE
-`language_switch_lock`, so a second per-turn decision can acquire the lock and
-overwrite that slot while the first handler is still generating. If the first
-handler's finally re-reads the shared attribute, it cancels the WRONG task (the
-next turn's live speculation) and leaks its own.
-
-The fix: each handler claims its own task into a local the instant its decision
-unwinds — lock released but no await since, so the slot is still ours — and cancels
-that local in finally. These tests pin that behavior, including the exception path.
+__run_language_switch stores the task on the shared slot self._spec_followup_task, then generates
+outside language_switch_lock, so a second per-turn decision can overwrite that slot mid-flight.
+Each handler therefore claims its task into a local the instant its decision unwinds and cancels
+that local in finally, including on the exception path.
 """
 
 import asyncio

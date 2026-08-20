@@ -1,16 +1,10 @@
-"""
-Tests for the _turn_audio_flushed asyncio.Event lifecycle in TaskManager.
+"""The _turn_audio_flushed event lifecycle: cleared on synthesizer entry, set once the turn's
+audio has left.
 
-Validates that the event is correctly cleared/set across:
-  - Normal streaming flow (clear on synth entry → set on end_of_synthesizer_stream in output loop)
-  - Normal non-streaming flow (clear on synth entry → set on end_of_synthesizer_stream in __listen_synthesizer)
-  - BLOCK path (audio discarded by interruption manager → event still set)
-  - Cleanup/interruption path (__cleanup_downstream_tasks → event set)
-  - Error path in _synthesize (synth push fails → event stays cleared → 3s timeout)
-  - Error path in __listen_synthesizer (generate() throws → event stays cleared → 3s timeout)
-
-These tests work directly with asyncio.Event to simulate the lifecycle
-without instantiating the full TaskManager (which requires extensive wiring).
+Covers the streaming and non-streaming flows, the BLOCK path where the interruption manager
+discards the audio, cleanup and interruption, and the two error paths where the event stays
+cleared so the waiter falls through on its timeout rather than hanging. Driven against
+asyncio.Event directly, since the full TaskManager wiring is not what is under test.
 """
 
 import asyncio

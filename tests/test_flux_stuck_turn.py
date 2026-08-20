@@ -1,16 +1,10 @@
-"""Tests for the Flux stuck-turn watchdog (Layer 1).
+"""The Flux stuck-turn watchdog.
 
-Repros:
-- prod run 906511cf — a Flux turn opened from an Update interim, the server then went
-  application-silent (no further Flux events) so EndOfTurn never arrived, callee_speaking
-  stayed True, and the agent's audio was held forever.
-- prod run 9c9dc030 — same stuck turn, but Deepgram kept the socket chatty with
-  empty-transcript Updates, so message-arrival liveness never detected the stall; the
-  buffered interims ('Ok', 'तो') were real user speech that never reached the LLM.
-
-The watchdog must therefore key on transcript progress (last_interim_time), and on release
-must force-finalize buffered words so they reach the LLM — falling back to a bare
-speech_ended (no phantom transcript) only when the stuck turn produced no text.
+A turn opened from an Update interim hangs when EndOfTurn never arrives, holding callee_speaking
+true and the agent's audio with it. The socket may stay chatty with empty-transcript Updates, so
+message-arrival liveness cannot see the stall — the watchdog keys on transcript progress instead.
+On release it force-finalizes buffered words so they reach the LLM, falling back to a bare
+speech_ended only when the turn produced no text.
 """
 
 import asyncio

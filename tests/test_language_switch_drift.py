@@ -1,9 +1,9 @@
-"""Cross-turn drift evidence (QA "inability to self-correct") + the same-language idle-flush skip.
+"""Cross-turn drift evidence and the same-language idle-flush skip.
 
-The judge used to see ONLY the current turn, so rule 6 correctly rejected a lone "no" on every
-turn and a caller who had actually changed language could never accumulate evidence — the agent
-could not self-correct unless the caller named a language out loud. RECENT TURNS supplies that
-missing state, carrying each turn's duration so acknowledgment mis-tags stay non-evidence.
+A judge seeing only the current turn rejects a lone "no" every time, so a caller who has changed
+language can never accumulate evidence and the agent cannot self-correct unless they name a
+language out loud. RECENT TURNS supplies that state, carrying each turn's duration so
+acknowledgment mis-tags stay non-evidence.
 """
 
 from unittest.mock import MagicMock
@@ -182,8 +182,8 @@ def test_unreadable_segments_api_never_skips_and_never_raises():
 
 
 async def test_watcher_skips_the_decide_when_buffer_is_all_active_language(monkeypatch):
-    # Observed in QA 10a13255: idle-flush fired with buffered_lang == active == 'en' and the judge
-    # could only answer "stay" — ~2s of decide latency and lock hold for a foregone conclusion.
+    # When buffered_lang already equals the active language the judge can only answer "stay",
+    # so the decide latency and lock hold buy nothing.
     import asyncio
 
     from unittest.mock import AsyncMock

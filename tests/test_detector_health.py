@@ -1,9 +1,9 @@
-"""detector_health telemetry: emitted ONLY when the LID tap produced nothing while the
-caller demonstrably spoke.
+"""detector_health telemetry, emitted only when the LID tap produced nothing while the caller
+demonstrably spoke.
 
-Topaz 389b16aa/df3479eb/5b063ddd: tap connected, socket alive, caller spoke several turns,
-yet zero detector segments — so zero decides, so zero telemetry. The call was indistinguishable
-from one where nobody switched. Presence of this record is the signal.
+A tap that connects and stays alive but yields no segments produces no decides and so no
+telemetry, leaving the call indistinguishable from one where nobody switched. The presence of
+this record is the signal.
 """
 
 from unittest.mock import MagicMock

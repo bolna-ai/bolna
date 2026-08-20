@@ -1,11 +1,8 @@
-"""Regression: a hangup goodbye must not be cut off (and its transcript trimmed
-to a partial prefix) when the transcriber socket idle-closes mid-goodbye.
+"""A hangup goodbye must survive the transcriber socket idle-closing mid-goodbye.
 
-Reproduces the failure where end_call generated a 7.2s goodbye, the transcriber
-connection closed ~3.4s in, _listen_transcriber broke (hangup_triggered set),
-gather() returned, and run()'s terminal sync_history trimmed the goodbye to its
-heard prefix ("...whenever you are"). The fix waits for the goodbye to drain
-before the terminal sync_history.
+When _listen_transcriber breaks on that close, gather() returns and run()'s terminal sync_history
+would otherwise trim the goodbye to the prefix the caller had heard so far. Teardown waits for the
+goodbye to drain first.
 """
 
 import asyncio

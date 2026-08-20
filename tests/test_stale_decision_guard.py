@@ -1,13 +1,9 @@
-"""Stale-decision guard drops the DECISION but keeps the detector buffer.
+"""The stale-decision guard drops the decision but keeps the detector buffer.
 
-QA 971254c0: the caller said "क्या बोल रहे हैं आप?" then immediately "Can you speak in
-English?". The first segment alone drove an mr→hi switch; the English request landed in the
-buffer during the decide and was deleted by this guard ("discarded buffer='Can you speak in
-English? Police'"). The caller had to repeat it ~28s later.
-
-The LIVE transcript IS invalid after a switch (it came from the pre-switch recognizer — that
-mislabeling caused the 1a16da82 ping-pong), but the detector runs language-code=unknown, so its
-speech means the same before and after.
+The LIVE transcript is invalid after a switch because it came from the pre-switch recognizer, and
+trusting it causes switch ping-pong. The detector runs with language-code unknown, so its speech
+means the same before and after — discarding the buffer too would delete a request the caller made
+during the decide and force them to repeat it.
 """
 
 import asyncio

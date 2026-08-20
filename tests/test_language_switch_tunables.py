@@ -30,8 +30,8 @@ def _tm(tools_config=None):
 
 
 def test_decide_timeout_default_clears_observed_tail():
-    # QA 972632b5 recorded 5.8s/5.9s decides; the buffer is drained before the decide, so a
-    # timeout loses that utterance outright. The default must sit above the observed tail.
+    # The buffer is drained before the decide, so a timeout loses that utterance outright.
+    # The default has to sit above the judge's slow tail.
     assert LANGUAGE_SWITCH_DECIDE_TIMEOUT_S >= 6.0
     assert _tm()._TaskManager__switch_decide_timeout_s() == LANGUAGE_SWITCH_DECIDE_TIMEOUT_S
 

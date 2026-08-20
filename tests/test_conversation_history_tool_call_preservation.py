@@ -1,14 +1,9 @@
-"""Regression tests for BLT-018 — a tool call being emitted/executed twice.
+"""A tool call must be recorded once, so the follow-up generation never re-issues it.
 
-Root cause: attach_tool_calls_to_turn creates a uid-less assistant *placeholder* carrying the
-tool_calls; if the heard-audio materialization (sync_history -> upsert_assistant_for_response)
-then can't find that turn by response_uid, it used to APPEND a duplicate plain-text assistant.
-That duplicate lands between the tool-call assistant and its tool result, so _sanitize_tool_messages
-(run inside get_copy() before every LLM request) strips the tool_calls and drops the tool result.
-The follow-up generation then sees no record the tool ran and re-issues it.
-
-The fix: upsert_assistant_for_response adopts the uid-less placeholder for the same turn_id
-(filling content + response_uid, preserving tool_calls) instead of duplicating the turn.
+attach_tool_calls_to_turn creates a uid-less assistant placeholder carrying the tool_calls, and
+upsert_assistant_for_response adopts that placeholder for the same turn_id rather than appending
+a second assistant turn. A duplicate landing between the tool-call assistant and its tool result
+would make _sanitize_tool_messages strip the tool_calls and drop the result.
 """
 
 from bolna.helpers.conversation_history import ConversationHistory
@@ -41,8 +36,8 @@ def _assistant_tool_call_pair_intact(llm_messages):
 
 
 def test_tool_call_survives_heard_audio_materialization_race():
-    # BLT-018 repro: staged text dropped -> attach makes a uid-less placeholder ->
-    # heard-audio upsert runs BEFORE the tool result is appended.
+    # Staged text dropped, so attach makes a uid-less placeholder and the heard-audio upsert
+    # runs before the tool result is appended.
     h = ConversationHistory([{"role": ChatRole.SYSTEM, "content": "sys"}])
     h.append_user("please reschedule")
     h.attach_tool_calls_to_turn(8, TOOL_CALLS)  # placeholder: content=None, tool_calls, turn 8, no uid

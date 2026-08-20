@@ -1,7 +1,7 @@
 """Hedged decide: a second identical request cuts the tail without raising the decide timeout.
 
-The judge's slowness is a per-request tail (most decides 1.3-2.7s, observed tail 5.9s), not a slow
-model, so a fresh request usually beats the straggler. The common turn must never pay for two.
+The judge's slowness is a per-request tail rather than a slow model, so a fresh request usually
+beats the straggler. The common turn must never pay for two.
 """
 
 import asyncio

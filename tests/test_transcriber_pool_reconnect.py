@@ -67,8 +67,8 @@ async def test_switch_time_reconnects_do_not_starve_active_budget():
 
 
 async def test_reconnect_active_refused_after_eos():
-    # The active transcriber closing AFTER eos is the hangup teardown trigger —
-    # reconnecting it resurrects a zombie call (QA f544513a: 33 min post-hangup).
+    # The active transcriber closing after eos is the hangup teardown trigger, so reconnecting
+    # it resurrects a call that should be over.
     pool, transcribers = _pool()
     pool.call_ended = True
     assert await pool.reconnect_active() is False

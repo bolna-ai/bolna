@@ -1,14 +1,14 @@
-"""Recent-turns evidence quality + playback-gate lifecycle + detector_health persistence.
+"""Recent-turns evidence quality, playback-gate lifecycle, and detector_health persistence.
 
 - A turn whose segments never carried the judge's detected language must not borrow another
-  language's duration into RECENT TURNS (fake `en(2.5)` built from hi-tagged audio).
-- Switch firings are marked `→xx` so pre-switch drift reads as stale.
-- The switch path records gate telemetry immediately but keeps HOLDING until the sequence is
-  invalidated — clearing early let a 50ms output-loop poll ship the held old-language audio.
-- detector_health must be flushed into the task_output snapshot (pool cleanup runs only at the
-  tasks_to_cancel gather, after the snapshot — a record written there never persisted).
-- The undrained detector buffer is age-bounded so a skipped generation cannot lend its
-  duration or text to a later turn.
+  language's duration into RECENT TURNS.
+- Switch firings are marked with the target language so pre-switch drift reads as stale.
+- The switch path records gate telemetry immediately but keeps holding until the sequence is
+  invalidated; clearing early lets an output-loop poll ship the held old-language audio.
+- detector_health is flushed into the task_output snapshot, because pool cleanup runs at the
+  tasks_to_cancel gather, after the snapshot is taken.
+- The undrained detector buffer is age-bounded so a skipped generation cannot lend its duration
+  or text to a later turn.
 """
 
 import time

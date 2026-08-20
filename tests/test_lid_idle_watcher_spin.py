@@ -1,13 +1,10 @@
-"""Regression: the LID idle-flush watcher must never busy-spin the event loop.
+"""The LID idle-flush watcher must never busy-spin the event loop.
 
-Jul 2026 transcript-missing incident: on a multilingual (llm_language_switch) call,
-when has_transfer / _end_call_in_progress was set, __run_language_switch abandoned the
-decision PRE-drain, so the aged detector buffer stayed >= threshold and __lid_idle_watcher
-re-fired it every iteration with no awaiting yield — a synchronous spin that pegged and
-blocked the pod's event loop, starving co-tenant calls of media/TTS (silence, empty
-transcript). Two guards fix it: (1) the loop-top skip now covers the full ignore-input
-condition, not just hangup; (2) a spin-guard forces a yield whenever a fire leaves the
-buffer undrained.
+A fire that leaves the detector buffer undrained keeps the buffer at or above threshold, so the
+watcher re-fires every iteration with no awaiting yield — a synchronous spin that blocks the
+pod's event loop and starves co-tenant calls of media. Two guards hold: the loop-top skip covers
+the whole ignore-input condition rather than hangup alone, and a spin-guard forces a yield
+whenever a fire leaves the buffer undrained.
 """
 
 import asyncio

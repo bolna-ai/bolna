@@ -120,7 +120,7 @@ class TestIOFormatSelection:
 
 
 class TestOutputHandlerSetup:
-    """__setup_output_handlers runs before the S2S loop and used to stamp synthesizer config."""
+    """__setup_output_handlers runs before the S2S loop, which has no synthesizer to configure."""
 
     def _setup(self, output_provider, *, web=False):
         tm = TaskManager.__new__(TaskManager)

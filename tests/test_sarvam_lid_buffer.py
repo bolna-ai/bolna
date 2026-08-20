@@ -178,7 +178,8 @@ async def test_graceful_close_marks_dead_and_schedules_reconnect():
     d._reconnect = AsyncMock()
     await d._receiver_loop()
     await asyncio.sleep(0)  # let the scheduled reconnect task run
-    # Previously the async-for just ended: no _dead flag, no log, silent mute.
+    # A socket close has to mark the detector dead and schedule a reconnect, or the tap goes
+    # silently mute.
     assert d._dead is True
     d._reconnect.assert_awaited_once()
 

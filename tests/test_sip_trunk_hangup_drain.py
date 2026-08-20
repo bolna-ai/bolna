@@ -1,8 +1,7 @@
-"""Regression: the sip-trunk hangup must not cut off audio still buffered in Asterisk.
+"""The sip-trunk hangup must not cut off audio still buffered in Asterisk.
 
-Asterisk gets audio faster than real time (the output handler paces at 1.5x), so when
-teardown runs on the output handler's duration estimate, roughly a third of a long
-goodbye is still sitting in Asterisk's frame queue. HANGUP discards it. The fix asks
+The output handler paces faster than real time, so a duration estimate says the goodbye is done
+while a good part of it is still in Asterisk's frame queue, and HANGUP discards it. Teardown asks
 Asterisk for a QUEUE_DRAINED report and holds HANGUP until it lands.
 """
 

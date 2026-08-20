@@ -1,12 +1,10 @@
 """sip-trunk playback completion is driven by Asterisk's mark echo, not a duration guess.
 
-Asterisk 22.6+ queues MARK_MEDIA in-band behind the audio it follows and echoes
-MEDIA_MARK_PROCESSED once that audio reaches the front of the playout queue. Before this,
-completion was estimated as first_send + audio_duration + 0.1s, which runs early — Asterisk
-is handed audio at 1.5x real time, so the tail was still queued when HANGUP discarded it.
-
-The duration timer is kept as a fallback for when the echo never arrives, so these tests
-pin both paths and the ordering rule that keeps a mark from overtaking its own audio.
+Asterisk queues MARK_MEDIA in-band behind the audio it follows and echoes MEDIA_MARK_PROCESSED
+once that audio reaches the front of the playout queue. A duration estimate runs early, because
+Asterisk is handed audio faster than real time, and the tail is still queued when HANGUP discards
+it. The timer stays as a fallback for when the echo never arrives, so both paths are pinned here
+along with the ordering rule that keeps a mark from overtaking its own audio.
 """
 
 import asyncio

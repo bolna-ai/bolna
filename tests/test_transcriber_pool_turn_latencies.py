@@ -31,7 +31,7 @@ def _pool(transcribers, active):
 
 
 def test_turn_latencies_sorted_across_switched_instances():
-    # Post-switch, 'en' holds turn_3 and 'hi' turns 1-2; dict order would give 3,1,2 (QA 4c3dd300).
+    # Post-switch, 'en' holds turn_3 and 'hi' turns 1-2, so dict order would give 3,1,2.
     transcribers = {
         "en": FakeTranscriber([{"turn_id": "turn_3", "asr_start_epoch_ms": 3000}]),
         "hi": FakeTranscriber(

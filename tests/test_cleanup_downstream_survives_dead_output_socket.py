@@ -1,15 +1,8 @@
-"""End-to-end reproduction of execution 88eeeb50-dadb-4abc-8f79-fd34cb6bac61.
+"""__cleanup_downstream_tasks must return even when the output socket is half-dead.
 
-__cleanup_downstream_tasks() awaits self.tools["output"].handle_interruption()
-first, ahead of task cancellation, history sync, and flag resets. With a real
-PlivoOutputHandler wired to a half-dead socket (send_text never resolves,
-never raises), that await used to block forever — freezing _listen_transcriber
-and, transitively, everything gated on cleanup ever returning (the completion
-watchdog kept early-`continue`ing on stale response_in_pipeline/audio flags).
-
-This proves the fix at the level that actually broke in production: cleanup
-must return, cancel the pipeline tasks, and reset state within the send
-timeout — not hang indefinitely.
+It awaits output.handle_interruption() ahead of task cancellation, history sync and flag
+resets, so an unbounded await there freezes _listen_transcriber and everything gated on
+cleanup returning. The send timeout is what bounds it.
 """
 
 import asyncio

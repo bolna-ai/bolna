@@ -1,13 +1,10 @@
-"""The switch_language tool belongs to the LEGACY flow only.
+"""The switch_language tool belongs to the legacy flow only.
 
-With the Switch LLM enabled, the judge is the single switching authority — injecting the
-tool alongside it made the main LLM a second, competing switcher deciding from main-ASR
-text, which mis-scripts foreign speech exactly when switching matters (QA 5765dd9f: tool
-switched to 'ta' from Tamil-rendered text while the unbiased detector heard 'te'), and
-its races with the judge produced unexplained "Already speaking in X" tool responses.
-
-The injection method itself is legacy machinery; these tests pin the CALL-SITE gate by
-exercising the same predicate + injection pair the constructor runs.
+With the Switch LLM enabled the judge is the single switching authority. Injecting the tool
+alongside it makes the main LLM a second, competing switcher deciding from main-ASR text, which
+mis-scripts foreign speech exactly when switching matters, and races the judge into unexplained
+"Already speaking in X" tool responses. The injection method is legacy machinery, so these tests
+pin the call-site gate by exercising the same predicate and injection pair the constructor runs.
 """
 
 from unittest.mock import MagicMock

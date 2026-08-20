@@ -1,11 +1,9 @@
-"""Idle-flush mid-utterance suppression.
+"""Idle-flush suppression while the caller is mid-utterance.
 
-The watcher fired 1.2s after a detector segment even while main-ASR interims showed the
-caller mid-sentence — slicing one utterance across two decides (an idle-flush judging the
-opening ack, then the turn-boundary decide waiting out its lock). While callee_speaking is
-true the flush defers; past LANGUAGE_SWITCH_SPEAKING_STALE_CAP_S of buffer age the flag is
-treated as stale (the detector hears the same audio and produced nothing that long) and the
-flush fires anyway, so a wedged final can never starve the safety net.
+Firing during an utterance slices it across two decides, so while callee_speaking is true the
+flush defers. Past LANGUAGE_SWITCH_SPEAKING_STALE_CAP_S of buffer age the flag is treated as
+stale — the detector hears the same audio and produced nothing for that long — and the flush
+fires anyway, so a wedged final can never starve the safety net.
 """
 
 import asyncio

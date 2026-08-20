@@ -1,15 +1,9 @@
-"""Guards the end_call hangup actuation against barge-in resurrection.
+"""A barge-in must not resurrect the conversation once end_call has fired.
 
-Reproduces the failure where the end_call tool fired and generated a goodbye,
-but a user barge-in cancelled the conversation turn task before the disconnect
-ran. hangup_triggered was never set, so the transcriber kept feeding new turns
-and the agent looped goodbyes until the user dropped (actual_hangup_reason
-stayed null in the experiment outcome).
-
-The fix: _end_call_in_progress is set the instant the end_call tool fires
-(before the goodbye is generated), and _listen_transcriber drops user speech
-while a hangup or end_call actuation is underway, so barge-in can no longer
-cancel the in-flight hangup.
+_end_call_in_progress is set the instant the tool fires, before the goodbye is generated, and
+_listen_transcriber drops user speech while a hangup or end_call actuation is underway.
+Otherwise a barge-in cancels the turn task before the disconnect runs, hangup_triggered is
+never set, and the agent loops goodbyes until the caller drops.
 """
 
 import asyncio

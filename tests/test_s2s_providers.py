@@ -273,7 +273,7 @@ class TestOpenAIEventMapping:
         assert next(e for e in events if isinstance(e, ResponseDone)).transcript == "your balance is"
 
     async def test_beta_audio_event_is_no_longer_understood(self):
-        # The Realtime beta was removed on 2026-05-12; keeping its aliases would be dead code.
+        # The Realtime beta is gone, so its event aliases would be dead code.
         provider = make_openai()
         provider._ws = FakeWS([{"type": "response.audio.delta", "delta": base64.b64encode(b"x").decode()}])
         assert not [e for e in await drain(provider) if isinstance(e, AudioDelta)]

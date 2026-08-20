@@ -111,8 +111,8 @@ def test_gate_still_holds_outside_hangup():
 
 
 def test_transcript_still_ignored_during_hangup():
-    """Precondition the fix relies on: while hangup drains the goodbye, transcriber input
-    is still dropped, so a late interim cannot start a new turn or clear the mark queue."""
+    """While hangup drains the goodbye, transcriber input stays dropped, so a late interim
+    cannot start a new turn or clear the mark queue."""
     im = _im_with_speaking_user()
     tm = _ignore_tm(im, end_call_in_progress=True)
     asyncio.run(_drive_listen_transcriber(tm, [INTERIM]))

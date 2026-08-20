@@ -1,15 +1,9 @@
-"""Graph agents: the language directive must reach the node prompt whenever the language is
-known — not only when the node happens to carry an example for that language.
+"""Graph agents: the language directive reaches the node prompt whenever the language is known,
+not only when the node happens to carry an example for that language.
 
-QA 78c4c4a4: LID switched hi→en (pools, corrected turn — all correct), but every reply stayed
-Hindi. Cause: `_get_prompt_with_example` emitted the LANGUAGE GUIDELINES block only when
-`detected_lang in node["examples"]`; nodes without examples dropped the language instruction
-entirely, and graph agents read no other language channel (`_build_messages` strips system
-messages from history, so the TaskManager-side pin never reaches them).
-
-QA 574cd2f9 (regression in the first fix): agent JSONs carry "examples": null EXPLICITLY, and
-`node.get("examples", {})` returns None for those — `.get` on it crashed generate() on every
-turn and the agent spoke the exception text. Hence `or {}` and the null tests below.
+_get_prompt_with_example is the only language channel a graph agent has — _build_messages strips
+system messages from history, so the TaskManager-side pin never reaches it. Nodes may also carry
+an explicit "examples": null, so the lookup has to tolerate None rather than crash generate().
 """
 
 from unittest.mock import MagicMock
@@ -24,7 +18,7 @@ def _prompt(node, lang):
 
 
 def test_examples_null_does_not_crash_and_still_gets_the_directive():
-    # The 574cd2f9 shape: "examples": null on the node (all 31 nodes of agent 005a0864).
+    # Agent JSONs carry "examples": null explicitly, so the lookup must tolerate None.
     out = _prompt({"prompt": "P", "examples": None}, "en")
     assert "LANGUAGE GUIDELINES" in out and "English" in out
 
@@ -34,7 +28,7 @@ def test_examples_null_without_language_is_the_bare_prompt():
 
 
 def test_directive_without_any_examples():
-    # The QA 78c4c4a4 case: node has no examples, language known → directive must still appear.
+    # No examples on the node, language known: the directive must still appear.
     out = _prompt({"prompt": "आप सहायक हैं।"}, "en")
     assert "LANGUAGE GUIDELINES" in out
     assert "English" in out and "'en'" in out

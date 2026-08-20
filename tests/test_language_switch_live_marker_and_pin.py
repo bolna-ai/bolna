@@ -1,14 +1,12 @@
-"""QA-driven fixes: the idle-flush LIVE marker (QA 7c7d4b00) and the always-on language pin
-(QA 2fb6315f / a39f691c / 7c7d4b00 drift).
+"""The idle-flush LIVE marker and the always-on language pin.
 
-Marker: on idle-flush firings there is no main-ASR turn, so LIVE is empty because nobody
-produced one — left as "" the judge reads it through the empty-LIVE-is-mismatch-evidence rule
-and a detector transliteration gets "confirmed" by an absence we manufactured.
+Marker: an idle-flush firing has no main-ASR turn, so LIVE is empty because nobody produced one.
+Left as "" the judge reads it through the empty-LIVE-is-mismatch-evidence rule and confirms a
+detector transliteration against an absence.
 
-Pin: the language directive used to be installed only when a per-language prompt variant
-existed AND a context_note was passed — tool-driven switches stripped it and agents without
-multilingual variants never had one, so the main LLM drifted (a Hindi line mid-Telugu call,
-an English closing line) and QA attributed the drift to LID.
+Pin: the language directive is installed whether or not a per-language prompt variant and a
+context_note exist, otherwise tool-driven switches strip it and agents without multilingual
+variants never get one, and the main LLM drifts languages mid-call.
 """
 
 from unittest.mock import MagicMock
@@ -60,15 +58,14 @@ def test_system_prompt_names_the_exact_marker_string():
 
 
 def test_system_prompt_has_the_unstable_tags_stable_live_rule():
-    # Rule 4a (QA 5765dd9f): Sarvam flapped te→ml→mr on a Tamil speaker while the LIVE side held
-    # clean Tamil script — with the switch tool now legacy-only, the judge must be able to win
-    # this case from its own inputs.
+    # Rule 4a: unbiased tags can flap across languages while the LIVE side holds one clean
+    # script, and the judge has to win that case from its own inputs.
     assert "UNSTABLE UNBIASED TAGS + STABLE LIVE SCRIPT" in LANGUAGE_SWITCH_SYSTEM_PROMPT
 
 
 def test_system_prompt_covers_reverse_transliteration():
-    # Rule 5 must handle English rendered in Indic script (the 7c7d4b00 failure), not just
-    # romanized Indic mis-tagged as English.
+    # Rule 5 covers English rendered in Indic script, not just romanized Indic mis-tagged as
+    # English.
     assert "వాట్సాప్" in LANGUAGE_SWITCH_SYSTEM_PROMPT
 
 
