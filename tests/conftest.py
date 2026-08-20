@@ -1,6 +1,12 @@
 """Fixtures shared by more than one test module."""
 
-import pytest
+import os
+
+# Must precede any import that pulls in litellm: it otherwise fetches its model-price map over
+# the network at import time, so the suite would not run offline.
+os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "True")
+
+import pytest  # noqa: E402
 from unittest.mock import AsyncMock, MagicMock
 
 from bolna.agent_manager.task_manager import TaskManager

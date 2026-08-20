@@ -3,6 +3,8 @@
 import hashlib
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
 from bolna.models import GraphNode
 from bolna.enums import NodeType
 from bolna.agent_types.graph_agent import GraphAgent
@@ -150,6 +152,25 @@ def _make_agent(config_overrides=None):
     return agent
 
 
+def _no_transition_routing():
+    """A routing response with no tool call: the judge chose to stay on the node."""
+    message = MagicMock()
+    message.tool_calls = None
+    choice = MagicMock()
+    choice.message = message
+    response = MagicMock()
+    response.choices = [choice]
+    response.usage = None
+    return response, False
+
+
+@pytest.fixture(autouse=True)
+def _routing_stays_offline():
+    """Intent edges consult the routing LLM; expression edges are still decided locally."""
+    with patch("asyncio.to_thread", new_callable=AsyncMock, return_value=_no_transition_routing()):
+        yield
+
+
 class TestStaticNodeDispatch:
     async def test_static_node_yields_static_message_and_hash(self):
         agent = _make_agent()
@@ -235,19 +256,25 @@ class TestSilenceRepeats:
         assert agent._silence_repeats == 1
 
     async def test_silence_counter_resets_on_transition(self):
-        agent = _make_agent({"current_node_id": "sales"})
-        agent._silence_repeats = 5
+        """The new node gets a fresh silence budget, not the one the caller exhausted."""
+        agent = _make_agent()
+        agent._silence_repeats = 3  # trips greeting's `_silence_repeats gte 3` expression edge
 
-        history = [{"role": "user", "content": "hello"}]
-        transitioned = False
-        async for chunk in agent.generate(history):
-            if "routing_info" in chunk and chunk["routing_info"].get("transitioned"):
-                transitioned = True
+        async for _ in agent.generate([{"role": "user", "content": "hello"}]):
+            pass
 
-        if not transitioned:
-            assert agent._silence_repeats == 5
-        else:
-            assert agent._silence_repeats == 0
+        assert agent.current_node_id == "goodbye"
+        assert agent._silence_repeats == 0
+
+    async def test_silence_counter_survives_a_turn_that_stays_put(self):
+        agent = _make_agent()
+        agent._silence_repeats = 1
+
+        async for _ in agent.generate([{"role": "user", "content": "hello"}]):
+            pass
+
+        assert agent.current_node_id == "greeting"
+        assert agent._silence_repeats == 1
 
     async def test_silence_repeats_in_context_data(self):
         agent = _make_agent()

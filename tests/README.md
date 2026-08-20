@@ -23,3 +23,6 @@ Test doubles stay local to the module that uses them. A helper only earns a plac
 A test that needs a live provider credential belongs in `tests/manual/`, whose scripts pytest
 does not collect. Mark a collected test `@pytest.mark.integration` if it dials out, so it can
 be deselected with `-m 'not integration'`.
+
+The collected suite runs with no network. Stub the routing call rather than letting a graph
+agent reach a provider — a live call makes the test slow, flaky, and dependent on a key.
