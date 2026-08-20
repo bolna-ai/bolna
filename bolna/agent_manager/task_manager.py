@@ -501,6 +501,10 @@ class TaskManager(BaseManager):
         self.transcriber_duration = 0
         self.synthesizer_characters = 0
         self.ended_by_assistant = False
+        # False until the caller's own words land in conversation history as a user turn.
+        # Synthetic user turns (silence nudges, injected prompts) deliberately do not set it,
+        # so a call where only the agent ever spoke stays False.
+        self.user_spoke = False
         self.start_time = time.time()
 
         # Tasks
@@ -3973,6 +3977,7 @@ class TaskManager(BaseManager):
         self._append_eager_llm_stub(meta_info)
 
         if self.turn_based_conversation:
+            self.user_spoke = True
             self.history.append({"role": "user", "content": message["data"]})
         messages = self.conversation_history.get_copy()
 
@@ -4568,6 +4573,7 @@ class TaskManager(BaseManager):
                 meta_info.get("response_uid"),
             )
 
+        self.user_spoke = True
         # asr_turn_id (int-coerced), not meta_info["turn_id"] — that one counts responses, not ASR turns.
         self.conversation_history.append_user(
             transcriber_message, asr_turn_id=asr_id_to_int(meta_info.get("asr_turn_id"))
@@ -5995,6 +6001,7 @@ class TaskManager(BaseManager):
                     f"LanguageSwitcher: corrected user turn to detector transcript {detector_transcript[:80]!r}"
                 )
         else:
+            self.user_spoke = True
             # Reply to the caller's LAST utterance, not the whole buffer — with the
             self.conversation_history.append_user(idle_flush_user_text)
             logger.info(
@@ -7690,6 +7697,7 @@ class TaskManager(BaseManager):
             elif isinstance(event, s2s_events.InputTranscript):
                 if event.is_final and event.content:
                     logger.info(f"S2S caller: {event.content[:200]}")
+                    self.user_spoke = True
                     self.conversation_history.append_user(event.content)
                     self.time_since_last_spoken_human_word = time.time()
                     # Cleared here rather than in the output loop: the prompt's audio is not
@@ -8300,6 +8308,7 @@ class TaskManager(BaseManager):
                         self.tools["synthesizer"].get_synthesized_characters() if _has_asr_tts else 0
                     ),
                     "ended_by_assistant": self.ended_by_assistant,
+                    "user_spoke": self.user_spoke,
                     "latency_dict": {
                         "llm_latencies": self.llm_latencies.model_dump(),
                         "transcriber_latencies": self.transcriber_latencies.model_dump(),
