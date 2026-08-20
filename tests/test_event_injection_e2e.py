@@ -194,6 +194,8 @@ def _make_task_manager(agent=None, **overrides):
     interruption_manager.get_next_sequence_id.return_value = 1
     interruption_manager.get_turn_id.return_value = "turn-1"
     interruption_manager.is_valid_sequence.return_value = True
+    # A silent caller: _listen_events defers proactive speech while the user is talking.
+    interruption_manager.is_user_speaking.return_value = False
     tm.interruption_manager = interruption_manager
 
     tm.tools = {
@@ -329,6 +331,31 @@ class TestListenEventsIntegration:
         call_args = tm._proactive_generate_for_event.call_args
         assert call_args[0][0]["event"] == "link_opened"
         assert call_args[0][1]["matched"] is True
+
+    async def test_event_does_not_talk_over_a_speaking_caller(self):
+        """The node still transitions, but the answer is left to the caller's in-flight turn."""
+        agent = _make_graph_agent()
+        tm = _make_task_manager(agent=agent)
+        tm.interruption_manager.is_user_speaking.return_value = True
+        tm._proactive_generate_for_event = AsyncMock()
+
+        await _run_listener_and_process(tm, [{"event": "link_opened"}])
+
+        assert agent.current_node_id == "verify_details"
+        tm._proactive_generate_for_event.assert_not_awaited()
+
+    async def test_deferred_event_still_arms_the_new_node_silence_timer(self):
+        """Without this the agent sits mute on the new node instead of re-prompting."""
+        agent = _make_graph_agent()
+        tm = _make_task_manager(agent=agent)
+        tm.interruption_manager.is_user_speaking.return_value = True
+        tm._proactive_generate_for_event = AsyncMock()
+
+        events = [{"event": "link_opened"}, {"event": "details_verified"}, {"event": "payment_initiated"}]
+        await _run_listener_and_process(tm, events)
+
+        assert agent.current_node_id == "awaiting_payment"
+        assert tm.repeat_after_silence_seconds == 20
 
     async def test_event_sets_node_entry_index(self):
         """After event transition, current_node_entry_index should be set to history length."""
@@ -533,17 +560,31 @@ class TestProactiveGenerateLLMNode:
 
 
 class TestGenerateProactive:
-    async def test_sends_bos_and_eos(self):
-        """Should send BOS and EOS packets to output handler."""
+    async def test_runs_the_llm_on_an_empty_turn_tagged_proactive(self):
+        """No user text drives the turn, and the category is what billing and logs read."""
         agent = _make_graph_agent()
         tm = _make_task_manager(agent=agent)
         tm._run_llm_task = AsyncMock()
 
         await tm._generate_proactive()
 
-        output_calls = tm.tools["output"].handle.call_args_list
-        assert output_calls[0][0][0]["data"] == "<beginning_of_stream>"
-        assert output_calls[-1][0][0]["data"] == "<end_of_stream>"
+        packet = tm._run_llm_task.await_args[0][0]
+        assert packet["data"] == ""
+        assert packet["meta_info"]["message_category"] == "event_proactive"
+
+    async def test_tracks_the_llm_task_so_barge_in_can_cancel_it(self):
+        agent = _make_graph_agent()
+        tm = _make_task_manager(agent=agent)
+        seen = {}
+
+        async def capture(msg):
+            seen["task"] = tm.llm_task
+
+        tm._run_llm_task = capture
+
+        await tm._generate_proactive()
+
+        assert seen["task"] is not None
 
     async def test_sets_response_in_pipeline(self):
         """Should set response_in_pipeline before running LLM task."""

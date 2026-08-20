@@ -97,7 +97,8 @@ def _mock_routing_response(function_name, function_args_dict):
     mock_choice.message = mock_message
     mock_response = MagicMock()
     mock_response.choices = [mock_choice]
-    return mock_response
+    # _routing_create hands back (response, overflowed).
+    return mock_response, False
 
 
 def _uncond_intent_config():
