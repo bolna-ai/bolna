@@ -3,8 +3,8 @@ Generate a mixed Hindi / Tamil / Telugu WAV file for SarvamLID testing.
 Requires: gtts, pydub, ffmpeg
 
 Usage:
-    python3 tests/create_test_audio.py [output_path]
-    # default output: tests/mixed_lid_test.wav
+    python3 tests/manual/create_test_audio.py [output_path]
+    # default output: tests/manual/mixed_lid_test.wav
 """
 
 import sys
@@ -35,7 +35,7 @@ def make_segment(lang: str, text: str) -> AudioSegment:
 
 
 def main():
-    out_path = sys.argv[1] if len(sys.argv) > 1 else "tests/mixed_lid_test.wav"
+    out_path = sys.argv[1] if len(sys.argv) > 1 else "tests/manual/mixed_lid_test.wav"
 
     silence = AudioSegment.silent(duration=SILENCE_MS, frame_rate=16000)
     combined = AudioSegment.silent(duration=500, frame_rate=16000)  # leading silence

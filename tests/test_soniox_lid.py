@@ -132,6 +132,7 @@ def test_soniox_inherits_turn_buffer_api():
 
 
 def test_telephony_audio_params():
+    """Encoding and sample rate follow the telephony provider; web calls default to 16k PCM."""
     plivo = SonioxLID(None, {"telephony_provider": "plivo"})
     assert (plivo._audio_format, plivo._input_sr) == ("pcm_s16le", 8000)
     twilio = SonioxLID(None, {"telephony_provider": "twilio"})

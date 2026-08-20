@@ -1,19 +1,31 @@
-"""Guard: no Python 3.11+-only `asyncio.timeout()` in runtime code — prod is 3.10, where it
-raises AttributeError and cut live calls (QA 6525d51a). Checks source text, since the dev venv
-is 3.11+ and wouldn't hit the path."""
+"""Guard: no Python 3.11+-only `asyncio.timeout()` in runtime code.
+
+The runtime is 3.10, where it raises AttributeError mid-call. Checks source text rather than
+behaviour, because the dev venv may be newer and would never reach the failing path.
+"""
 
 import pathlib
 import re
 
-BOLNA_ROOT = pathlib.Path(__file__).resolve().parents[2] / "bolna"
+BOLNA_ROOT = pathlib.Path(__file__).resolve().parents[1] / "bolna"
 
 # `asyncio.timeout(` — the 3.11+ timeout context manager. `asyncio.wait_for(` is fine (all versions).
 FORBIDDEN = re.compile(r"\basyncio\.timeout\s*\(")
 
 
+def _runtime_sources():
+    return sorted(BOLNA_ROOT.rglob("*.py"))
+
+
+def test_guard_actually_reads_the_package():
+    """Without this, a moved test file makes the scan below pass while inspecting nothing."""
+    assert BOLNA_ROOT.is_dir(), f"{BOLNA_ROOT} is not the bolna package"
+    assert len(_runtime_sources()) > 50
+
+
 def test_no_asyncio_timeout_context_manager():
     offenders = []
-    for path in BOLNA_ROOT.rglob("*.py"):
+    for path in _runtime_sources():
         text = path.read_text(encoding="utf-8", errors="ignore")
         for i, line in enumerate(text.splitlines(), 1):
             code = line.split("#", 1)[0]  # ignore comments — flag the call, not a mention

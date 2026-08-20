@@ -203,6 +203,7 @@ def _mismatch(tm):
 
 
 def test_detector_mismatch_gate():
+    """A mismatch needs one segment carrying both the foreign tag and the substance itself."""
     tm = _tm(language="hi")
     pool = MagicMock(spec=TranscriberPool)
     pool.lid_buffer_segments = MagicMock(return_value=[{"lang": "te", "audio_s": 2.0}])

@@ -2,7 +2,7 @@
 Standalone test for SarvamLID language detection.
 
 Usage:
-    python tests/test_sarvam_lid.py <path_to_wav>
+    python tests/manual/sarvam_lid_smoke.py <path_to_wav>
 
 The WAV file should be mono (any sample rate — auto-detected).
 Ideally contains Hindi, Tamil, and Telugu speech segments.
@@ -11,6 +11,7 @@ Requires SARVAM_API_KEY env var (or .env file in repo root).
 """
 
 import asyncio
+import pathlib
 import sys
 import time
 import wave
@@ -19,7 +20,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-sys.path.insert(0, ".")
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
 from bolna.lid.sarvam import SarvamLID
 
 CHUNK_DURATION_S = 0.2  # 200ms per chunk, matching sarvam_transcriber
@@ -93,7 +94,7 @@ async def run(wav_path: str, fast: bool = False):
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("Usage: python tests/test_sarvam_lid.py <path_to_wav> [--fast]")
+        print("Usage: python tests/manual/sarvam_lid_smoke.py <path_to_wav> [--fast]")
         sys.exit(1)
     fast_mode = "--fast" in sys.argv
     asyncio.run(run(sys.argv[1], fast=fast_mode))

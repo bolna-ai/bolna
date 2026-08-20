@@ -9,7 +9,7 @@ What it does:
 
 Run:
     cd /path/to/bolna
-    OPENAI_API_KEY=sk-... python tests/test_openai_transcriber.py [path/to/speech.wav]
+    OPENAI_API_KEY=sk-... python tests/manual/openai_transcriber_smoke.py [path/to/speech.wav]
 
 The WAV file must be mono or stereo PCM, any sample rate — the transcriber resamples.
 If no WAV is provided the script synthesises a 440 Hz sine-wave "speech" chunk instead.
@@ -18,12 +18,13 @@ If no WAV is provided the script synthesises a 440 Hz sine-wave "speech" chunk i
 import asyncio
 import sys
 import time
+import pathlib
 import wave
 import struct
 import math
 import os
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
 
 from bolna.transcriber.openai_transcriber import OpenAITranscriber
 
