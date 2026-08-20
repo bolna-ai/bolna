@@ -79,6 +79,18 @@ class CartesiaConfig(BaseModel):
     speed: Optional[float] = 1.0
 
 
+class MurfConfig(BaseModel):
+    voice: str
+    model: Optional[str] = "falcon-2"
+    locale: Optional[str] = "en-US"
+    style: Optional[str] = "Conversational"
+    base_url: Optional[str] = None  # e.g. global.api.murf.ai or https://in.api.murf.ai
+    min_buffer_size: Optional[int] = 40
+    max_buffer_delay_in_ms: Optional[int] = 0
+    rate: Optional[int] = 0
+    pitch: Optional[int] = 0
+
+
 class RimeConfig(BaseModel):
     voice_id: str
     language: str
@@ -166,6 +178,7 @@ class Synthesizer(BaseModel):
         SarvamConfig,
         PixaConfig,
         CartesiaConfig,
+        MurfConfig,
         DeepgramConfig,
         OpenAIConfig,
         MayaConfig,
@@ -191,6 +204,9 @@ class Synthesizer(BaseModel):
         elif provider == "cartesia":
             if isinstance(config, dict):
                 values["provider_config"] = CartesiaConfig(**config)
+        elif provider == "murf":
+            if isinstance(config, dict):
+                values["provider_config"] = MurfConfig(**config)
         elif provider == "polly":
             if isinstance(config, dict):
                 values["provider_config"] = PollyConfig(**config)
