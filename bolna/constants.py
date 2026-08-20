@@ -52,6 +52,11 @@ LANGUAGE_SWITCH_SPEAKING_STALE_CAP_S = 2.5
 # healthy turn within utterance_end_ms (1s floor), so a real speaker stays well inside this.
 STUCK_AUDIO_GATE_RELEASE_S = 3.0
 
+# Above __await_stream_sid's own 10s timeout, so that path is what ends the call.
+S2S_STREAM_SID_TIMEOUT_S = 12.0
+# How long an armed goodbye gets before the call is closed without it.
+S2S_GOODBYE_TIMEOUT_S = 10.0
+
 # Soniox real-time STT
 SONIOX_WEBSOCKET_HOST = "stt-rt.soniox.com"
 SONIOX_ENDPOINT_TOKEN = "<end>"  # sentinel token emitted when the speaker stops
@@ -317,6 +322,10 @@ MODEL_REASONING_EFFORT_MAP = {
     "gpt-5.6-sol": [RE.NONE, RE.LOW, RE.MEDIUM, RE.HIGH, RE.XHIGH],
     "gpt-5.6-terra": [RE.NONE, RE.LOW, RE.MEDIUM, RE.HIGH, RE.XHIGH],
     "gpt-5.6-luna": [RE.NONE, RE.LOW, RE.MEDIUM, RE.HIGH, RE.XHIGH],
+    # Realtime speech-to-speech. gpt-realtime-1.5 has no reasoning and is deliberately absent.
+    "gpt-realtime-2": [RE.MINIMAL, RE.LOW, RE.MEDIUM, RE.HIGH, RE.XHIGH],
+    "gpt-realtime-2.1": [RE.MINIMAL, RE.LOW, RE.MEDIUM, RE.HIGH, RE.XHIGH],
+    "gpt-realtime-2.1-mini": [RE.MINIMAL, RE.LOW, RE.MEDIUM, RE.HIGH, RE.XHIGH],
 }
 
 
@@ -325,6 +334,29 @@ def default_reasoning_effort(model: str) -> str:
     supported = MODEL_REASONING_EFFORT_MAP.get(model)
     if not supported or RE.MINIMAL in supported:
         return RE.MINIMAL.value
+    return supported[0].value
+
+
+GEMINI_THINKING_LEVEL_MAP = {
+    "gemini-3-flash-preview": [RE.MINIMAL, RE.LOW, RE.MEDIUM, RE.HIGH],
+    "gemini-3.1-flash-lite": [RE.MINIMAL, RE.LOW, RE.MEDIUM, RE.HIGH],
+    "gemini-3.1-flash-lite-preview": [RE.MINIMAL, RE.LOW, RE.MEDIUM, RE.HIGH],
+    "gemini-3.1-pro-preview": [RE.LOW, RE.MEDIUM, RE.HIGH],
+    "gemini-3.5-flash": [RE.MINIMAL, RE.LOW, RE.MEDIUM, RE.HIGH],
+    "gemini-3.5-flash-lite": [RE.MINIMAL, RE.LOW, RE.MEDIUM, RE.HIGH],
+    "gemini-3.6-flash": [RE.MINIMAL, RE.LOW, RE.MEDIUM, RE.HIGH],
+    "gemini-3.7-flash": [RE.LOW, RE.MEDIUM, RE.HIGH],
+}
+
+
+def default_thinking_level(model: str) -> str:
+    """Lowest-latency thinking level the Gemini 3.x model supports.
+
+    Unknown models fall back to "low", the only level the whole 3.x family accepts.
+    """
+    supported = GEMINI_THINKING_LEVEL_MAP.get(model.rsplit("/", 1)[-1])
+    if not supported:
+        return RE.LOW.value
     return supported[0].value
 
 

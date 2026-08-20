@@ -359,6 +359,9 @@ def _make_transfer_self(tool_conf):
         _extract_api_call_runtime_args=MagicMock(return_value={}),
         _finalize_api_call_detail=MagicMock(),
     )
+    # The POST itself lives in _execute_transfer_call_webhook; bind the real one so the
+    # branch still runs end to end.
+    me._execute_transfer_call_webhook = types.MethodType(TaskManager._execute_transfer_call_webhook, me)
     return me
 
 
@@ -414,10 +417,12 @@ async def test_transfer_call_skips_pre_call_webhook_when_no_url():
 
 
 def test_transfer_branch_fires_before_transfer_post():
-    """Source guard: the transfer_call branch must call fire_pre_call_webhook, and do so
-    before the transfer POST (session.post), so the webhook genuinely precedes the transfer."""
+    """Source guard: the transfer_call branch must call fire_pre_call_webhook before it
+    hands off to the webhook POST, so the webhook genuinely precedes the transfer."""
     src = inspect.getsource(TaskManager._TaskManager__execute_function_call)
     transfer_idx = src.index('if called_fun.startswith("transfer_call")')
     fire_idx = src.index("fire_pre_call_webhook", transfer_idx)
-    post_idx = src.index("session.post", transfer_idx)
-    assert transfer_idx < fire_idx < post_idx, "pre-call webhook must fire inside transfer branch, before the POST"
+    handoff_idx = src.index("_execute_transfer_call_webhook", transfer_idx)
+    assert transfer_idx < fire_idx < handoff_idx, "pre-call webhook must fire before the transfer POST"
+    # The POST now lives in the extracted helper.
+    assert "session.post" in inspect.getsource(TaskManager._execute_transfer_call_webhook)

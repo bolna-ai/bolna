@@ -438,11 +438,19 @@ def get_required_input_types(task):
     input_types = dict()
     for i, chain in enumerate(task["toolchain"]["pipelines"]):
         first_model = chain[0]
-        if chain[0] == "transcriber":
+        # An s2s pipeline takes caller audio directly, with no transcriber in front of it.
+        if chain[0] in ("transcriber", "s2s"):
             input_types["audio"] = i
         elif chain[0] == "synthesizer" or chain[0] == "llm":
             input_types["text"] = i
     return input_types
+
+
+def is_s2s_agent(task):
+    """True when a task runs speech-to-speech instead of the transcriber/LLM/synthesizer chain."""
+    if not isinstance(task, dict):
+        return False
+    return bool((task.get("tools_config") or {}).get("s2s"))
 
 
 def format_messages(messages, use_system_prompt=False, include_tools=False):
@@ -791,6 +799,18 @@ async def write_request_logs(message, run_id):
             None,
         ]
         metadata = message.get("graph_routing_metadata", {})
+    elif message["component"] == LogComponent.S2S:
+        component_details = [
+            message_data,
+            message.get("input_tokens", 0),
+            message.get("output_tokens", 0),
+            None,
+            message.get("latency", None),
+            False,
+            None,
+            None,
+        ]
+        metadata = message.get("s2s_metadata", {})
     elif message["component"] == LogComponent.ERROR:
         component_details = [message_data, None, None, None, message.get("latency", None), False, None, None]
         metadata = message.get("error_metadata", {})
@@ -983,6 +1003,21 @@ def convert_to_request_log(
                     else UsageSource.ESTIMATED.value
                 )
                 log["llm_metadata"] = llm_metadata
+        case LogComponent.S2S:
+            log["latency"] = meta_info.get("s2s_latency", None) if direction == LogDirection.RESPONSE else None
+            if direction == LogDirection.RESPONSE:
+                log["input_tokens"] = input_tokens or 0
+                log["output_tokens"] = output_tokens or 0
+                # Audio and text are priced apart, so the split has to survive to billing.
+                s2s_metadata = dict(meta_info.get("s2s_usage") or {})
+                if cached_tokens:
+                    s2s_metadata["cached_tokens"] = cached_tokens
+                s2s_metadata["usage_source"] = (
+                    UsageSource.API_REPORTED.value
+                    if (input_tokens is not None or output_tokens is not None)
+                    else UsageSource.ESTIMATED.value
+                )
+                log["s2s_metadata"] = s2s_metadata
         case LogComponent.SYNTHESIZER:
             log["latency"] = meta_info.get("synthesizer_latency", None) if direction == LogDirection.RESPONSE else None
         case LogComponent.TRANSCRIBER:
@@ -1090,6 +1125,11 @@ def pcm_to_ulaw(pcm_bytes):
     return ulaw_bytes
 
 
+def ulaw_to_pcm(ulaw_bytes):
+    """Convert 8-bit ulaw audio to 16-bit signed linear PCM."""
+    return audioop.ulaw2lin(ulaw_bytes, 2)  # 2 = sample width in bytes (16-bit)
+
+
 def audio_to_mulaw8k(audio, rate_hint=8000, format_hint=""):
     """One-shot synth output (base64 str / WAV / raw PCM) → mono 16-bit 8kHz mu-law.
     Undecodable compressed containers (MP3/Ogg/FLAC) return None — never raw noise."""
@@ -1162,6 +1202,23 @@ def now_ms() -> float:
 
 def timestamp_ms() -> float:
     return time.time() * 1000
+
+
+def clean_gemini_schema(schema):
+    """Strip JSON Schema keys Gemini's proto-based Schema rejects.
+
+    Both the Gemini LLM and the Live API refuse a function declaration carrying
+    additionalProperties, and the Live API rejects the whole setup frame for it.
+    """
+    if not isinstance(schema, dict):
+        return schema
+    cleaned = {k: v for k, v in schema.items() if k != "additionalProperties"}
+    for k, v in cleaned.items():
+        if isinstance(v, dict):
+            cleaned[k] = clean_gemini_schema(v)
+        elif isinstance(v, list):
+            cleaned[k] = [clean_gemini_schema(i) if isinstance(i, dict) else i for i in v]
+    return cleaned
 
 
 def structure_system_prompt(
