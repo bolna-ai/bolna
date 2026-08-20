@@ -2076,6 +2076,14 @@ class TaskManager(BaseManager):
                 extraction_json = (
                     task.get("tools_config").get("llm_agent", {}).get("llm_config", {}).get("extraction_json")
                 )
+                # The schema is inserted into EXTRACTION_PROMPT as a .format() ARGUMENT, so
+                # str.format never looks inside it and a {{customer_name}} written into an
+                # extraction description was reaching the model as literal braces. Graph agents
+                # already render their extraction instructions (graph_agent.py); this brings the
+                # classic path in line. Safe on a JSON schema: render_prompt substitutes only
+                # real variable patterns and copies JSON literals through untouched.
+                if isinstance(extraction_json, str):
+                    extraction_json = update_prompt_with_context(extraction_json, self.context_data)
                 prompt = EXTRACTION_PROMPT.format(current_date, current_time, self.timezone, extraction_json)
                 return {"system_prompt": prompt}
             elif task_type == "summarization":
@@ -3318,6 +3326,11 @@ class TaskManager(BaseManager):
                     handoff_text = handoff_template.replace("{agent_name}", target_agent_name).replace(
                         "{language}", language_display
                     )
+                    # Prompt variables were never substituted on this surface: only the two
+                    # runtime placeholders above were replaced, so a customer's {customer_name}
+                    # reached TTS as literal braces. Rendered AFTER those replaces so the
+                    # runtime agent/language values win over any same-named prompt variable.
+                    handoff_text = update_prompt_with_context(handoff_text, self.context_data)
                     meta_info_handoff = {
                         "io": self.tools["output"].get_provider(),
                         "request_id": str(uuid.uuid4()),
@@ -6232,9 +6245,13 @@ class TaskManager(BaseManager):
         template = self.switch_handoff_messages.get(label, "")
         if not template:
             return ""
-        return template.replace("{agent_name}", self._get_voice_name_for_label(label)).replace(
+        text = template.replace("{agent_name}", self._get_voice_name_for_label(label)).replace(
             "{language}", LANGUAGE_NAMES.get(label, label)
         )
+        # Same reason as the legacy-flow handoff: render prompt variables after the two
+        # runtime placeholders, so {customer_name} in a handoff message resolves instead of
+        # being spoken as literal braces.
+        return update_prompt_with_context(text, self.context_data)
 
     def __handoff_mulaw_wire(self) -> bool:
         """True on telephony (mu-law@8k clip), False on web/freeswitch (raw PCM@24k)."""
