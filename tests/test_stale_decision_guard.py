@@ -4,57 +4,44 @@ The LIVE transcript is invalid after a switch because it came from the pre-switc
 trusting it causes switch ping-pong. The detector runs with language-code unknown, so its speech
 means the same before and after — discarding the buffer too would delete a request the caller made
 during the decide and force them to repeat it.
+
+The guard keys on the language the decide was spawned on, so it fires only once that language is
+no longer active. An unrecorded spawn language must leave the switch path alone.
 """
 
-import asyncio
-from unittest.mock import AsyncMock, MagicMock
-
-
 from bolna.agent_manager.task_manager import TaskManager
-from bolna.transcriber.transcriber_pool import TranscriberPool
 
 RUN = TaskManager._TaskManager__run_language_switch
+LIVE = "garbled hi"
+META = {"sequence_id": 1}
 
 
-def _tm(spawn_language, current_language):
-    tm = MagicMock()
-    tm.conversation_ended = False
-    tm._should_ignore_transcriber_input = MagicMock(return_value=False)
-    tm.language = current_language
-    tm.language_switcher = MagicMock()
-    pool = MagicMock(spec=TranscriberPool)
-    pool.labels = ["en", "hi", "mr"]
-    pool.lid_buffer_age.return_value = 1.4
-    pool.take_lid_transcript = MagicMock(return_value=("Can you speak in English?", "en"))
-    tm.tools = {"transcriber": pool}
-    return tm, pool
+async def test_stale_decision_is_dropped_but_the_buffer_survives(language_switch_tm):
+    """Spawned on "mr" while "hi" is active: the decision goes, the caller's speech stays."""
+    tm = language_switch_tm()
+
+    result = await RUN(tm, LIVE, META, "mr")
+
+    assert result is None
+    tm.switch_language.assert_not_awaited()
+    tm.tools["transcriber"].take_lid_transcript.assert_not_called()
 
 
-async def test_stale_decision_keeps_the_detector_buffer():
-    tm, pool = _tm(spawn_language="mr", current_language="hi")
-    result = await RUN(tm, "", None, spawn_language="mr")
-    assert result is None  # decision still dropped
-    pool.take_lid_transcript.assert_not_called()  # ...but the speech survives
+async def test_a_current_spawn_language_runs_the_switch(language_switch_tm):
+    """The guard must not swallow the ordinary case it shares a code path with."""
+    tm = language_switch_tm()
+
+    await RUN(tm, LIVE, META, "hi")
+
+    tm.switch_language.assert_awaited_once()
+    tm.tools["transcriber"].take_lid_transcript.assert_called()
 
 
-async def test_non_stale_decision_is_not_short_circuited():
-    tm, pool = _tm(spawn_language="hi", current_language="hi")
-    tm.language_switcher.decide = AsyncMock(return_value=None)
-    # Reaches past the guard (settle/drain path); we only assert it did not early-return None
-    # at the guard itself, which take_lid_transcript being reachable would show.
-    try:
-        await asyncio.wait_for(RUN(tm, "", None, spawn_language="hi"), timeout=2)
-    except (asyncio.TimeoutError, Exception):
-        pass
-    assert True  # no exception from the guard branch
+async def test_unrecorded_spawn_language_leaves_the_switch_alone(language_switch_tm):
+    """Idle-flush passes no spawn language, and a missing one is not evidence of staleness."""
+    tm = language_switch_tm()
 
+    await RUN(tm, LIVE, META, None)
 
-async def test_guard_inert_when_no_spawn_language_recorded():
-    # Idle-flush calls pass spawn_language explicitly; a None must never trip the guard.
-    tm, pool = _tm(spawn_language=None, current_language="hi")
-    tm.language_switcher.decide = AsyncMock(return_value=None)
-    try:
-        await asyncio.wait_for(RUN(tm, "", None, spawn_language=None), timeout=2)
-    except (asyncio.TimeoutError, Exception):
-        pass
-    pool.take_lid_transcript.assert_not_called()
+    tm.switch_language.assert_awaited_once()
+    tm.tools["transcriber"].take_lid_transcript.assert_called()
