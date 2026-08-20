@@ -157,6 +157,29 @@ async def test_commit_reports_on_turn_usage():
     assert reported == [(120, 30, 100)]
 
 
+async def test_overflowed_commit_reports_to_on_overflow_not_turn_usage():
+    """Spend served off the provisioned deployment is tallied separately from billed turns."""
+    tm = _commit_tm()
+    billed, overflow = [], []
+
+    async def on_turn_usage(input_tokens, output_tokens, cached_tokens):
+        billed.append((input_tokens, output_tokens, cached_tokens))
+
+    async def on_overflow(input_tokens, output_tokens, cached_tokens):
+        overflow.append((input_tokens, output_tokens, cached_tokens))
+
+    tm.on_turn_usage = on_turn_usage
+    tm.on_overflow = on_overflow
+
+    with patch("bolna.agent_manager.task_manager.convert_to_request_log"):
+        _log_commit(tm)("telugu reply", _capture(overflowed=True))
+        for task in list(tm._usage_tasks):
+            await task
+
+    assert overflow == [(120, 30, 100)]
+    assert billed == []
+
+
 def test_commit_latency_entry_gets_real_seq_and_origin():
     latency = MagicMock()
     latency.model_dump.return_value = {"sequence_id": -1, "first_token_latency_ms": 90.0}

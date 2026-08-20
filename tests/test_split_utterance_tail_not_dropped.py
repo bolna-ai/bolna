@@ -1,13 +1,8 @@
-"""Short speech_final transcripts must not be dropped while the agent is only
-thinking (response_in_pipeline=True, no audio playing).
+"""A short speech_final tail must survive the agent merely thinking.
 
-Reproduces call 032a233d: Deepgram force-finalized "hello" mid-utterance and
-dispatched it to the LLM; the real speech_final tail "हिंदी में" (2 words) arrived
-1s later and was discarded as a "false interruption" because the guard counted
-response_in_pipeline as audio playing. The user's request for Hindi never
-reached the LLM. The fix: only actual audio playback gates the drop —
-_handle_transcriber_output already merges the tail and supersedes the in-flight
-LLM turn (pop_and_merge_user + cancel/regenerate).
+Only actual audio playback may gate the false-interruption drop: while
+response_in_pipeline is true but nothing is playing, _handle_transcriber_output merges the
+tail and supersedes the in-flight turn, so dropping it would lose the user's real request.
 """
 
 import asyncio
@@ -48,6 +43,7 @@ def _make_tm(*, audio_playing, response_in_pipeline, function_call_in_flight=Fal
     tm._TaskManager__get_updated_meta_info = MagicMock(side_effect=lambda m: m)
     tm._TaskManager__cleanup_downstream_tasks = AsyncMock()
     tm._end_call_on_component_error = AsyncMock()
+    tm._report_component_health = AsyncMock()
     tm.task_config = {"tools_config": {"transcriber": {"provider": "deepgram"}}}
     tm._should_ignore_transcriber_input = TaskManager._should_ignore_transcriber_input.__get__(tm, TaskManager)
     tm._listen_transcriber = TaskManager._listen_transcriber.__get__(tm, TaskManager)
@@ -63,7 +59,7 @@ async def _drive(tm, message=_TAIL_FINAL):
 
 
 async def test_tail_processed_while_llm_generating_no_audio():
-    # The 032a233d repro: agent thinking, nothing playing — tail must reach the LLM path.
+    # Agent thinking, nothing playing: the tail must reach the LLM path.
     tm = _make_tm(audio_playing=False, response_in_pipeline=True)
     await _drive(tm)
     tm._handle_transcriber_output.assert_awaited_once()

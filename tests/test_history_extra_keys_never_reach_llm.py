@@ -1,8 +1,8 @@
 """Conversation history carries bookkeeping keys (asr_turn_id, response_uid, turn_id,
 message_category) that must never reach a provider.
 
-Only the anthropic-family transformers and the Responses adapter rebuild the payload from
-known keys; the nine OpenAI-compatible providers forward the message dict verbatim, so the
+Some transformers and the Responses adapter rebuild the payload from known keys; the
+remaining OpenAI-compatible providers forward the message dict verbatim, so the
 LLM adapters strip before sending. These tests pin both halves — what litellm does on its
 own, and what bolna actually puts on the wire.
 """
@@ -72,6 +72,7 @@ def test_responses_api_input_drops_extra_keys():
     [
         ("anthropic", "claude-3-5-sonnet-20241022"),
         ("bedrock", "anthropic.claude-3-5-sonnet-20240620-v1:0"),
+        ("cohere", "command-r"),
     ],
 )
 def test_litellm_rebuilding_providers_drop_extra_keys(provider, model):
@@ -82,7 +83,6 @@ def test_litellm_rebuilding_providers_drop_extra_keys(provider, model):
 @pytest.mark.parametrize(
     "provider,model",
     [
-        ("cohere", "command-r"),
         ("groq", "llama-3.1-8b-instant"),
         ("deepseek", "deepseek-chat"),
         ("openrouter", "openai/gpt-4o-mini"),
