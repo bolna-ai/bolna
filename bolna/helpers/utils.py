@@ -1,4 +1,5 @@
 from datetime import datetime
+from functools import lru_cache
 from typing import Union, Optional
 import json
 import asyncio
@@ -458,6 +459,13 @@ def mp3_bytes_to_pcm(mp3_bytes, target_sample_rate=8000):
     return audio.raw_data
 
 
+@lru_cache(maxsize=32)
+def _resample_fir(up, down):
+    """resample_poly's default kaiser design, cached per ratio; it applies its own up scaling."""
+    max_rate = max(up, down)
+    return scipy.signal.firwin(20 * max_rate + 1, 1.0 / max_rate, window=("kaiser", 5.0)).astype(np.float32)
+
+
 def resample(audio_bytes, target_sample_rate, format="mp3", pcm_channels=1, original_sample_rate=None):
     """
     Resample audio bytes
@@ -479,7 +487,8 @@ def resample(audio_bytes, target_sample_rate, format="mp3", pcm_channels=1, orig
         if pcm_channels > 1:
             audio_array = audio_array.reshape(-1, pcm_channels)
         g = math.gcd(original_sample_rate, target_sample_rate)
-        resampled = scipy.signal.resample_poly(audio_array, target_sample_rate // g, original_sample_rate // g, axis=0)
+        up, down = target_sample_rate // g, original_sample_rate // g
+        resampled = scipy.signal.resample_poly(audio_array, up, down, axis=0, window=_resample_fir(up, down))
         return np.clip(resampled, -32768, 32767).astype(np.int16).tobytes()
 
     # Handle other formats (wav, mp3, etc.) via pydub
