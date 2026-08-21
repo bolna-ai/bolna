@@ -99,6 +99,7 @@ from bolna.helpers.utils import (
     yield_chunks_from_memory,
     process_task_cancellation,
     audio_to_mulaw8k,
+    audio_to_pcm,
     pcm_to_ulaw,
     ulaw_to_pcm,
     format_error_message,
@@ -1687,13 +1688,7 @@ class TaskManager(BaseManager):
 
                 # Telephony providers expect mulaw@8000Hz — force use_mulaw for all synths in the pool
                 output_provider = self.task_config["tools_config"]["output"]["provider"]
-                is_telephony = output_provider in (
-                    TelephonyProvider.PLIVO.value,
-                    TelephonyProvider.TWILIO.value,
-                    TelephonyProvider.EXOTEL.value,
-                    TelephonyProvider.VOBIZ.value,
-                    TelephonyProvider.SIP_TRUNK.value,
-                )
+                is_telephony = output_provider in SUPPORTED_OUTPUT_TELEPHONY_HANDLERS
                 synthesizer_kwargs = self.kwargs.copy()
                 if is_telephony:
                     synthesizer_kwargs["use_mulaw"] = True
@@ -1742,7 +1737,8 @@ class TaskManager(BaseManager):
 
                 # Pre-render every language's handoff clip on its own voice (background;
                 if self.language_switcher is not None and not self.turn_based_conversation:
-                    if self.task_config["tools_config"]["output"]["provider"] != "default":
+                    # "default" has one wire format only on the web path.
+                    if self.task_config["tools_config"]["output"]["provider"] != "default" or self.is_web_based_call:
                         self.handoff_prewarm_task = asyncio.create_task(self.__prewarm_handoff_clips())
 
                 if self.task_config["tools_config"]["llm_agent"] is not None and llm_config is not None:
@@ -1772,13 +1768,7 @@ class TaskManager(BaseManager):
             # the multilingual-pool path above. Synths that honor the kwarg (e.g. cartesia)
             # would otherwise stream raw PCM that telephony plays as mulaw → loud static.
             output_provider = self.task_config["tools_config"]["output"]["provider"]
-            is_telephony = output_provider in (
-                TelephonyProvider.PLIVO.value,
-                TelephonyProvider.TWILIO.value,
-                TelephonyProvider.EXOTEL.value,
-                TelephonyProvider.VOBIZ.value,
-                TelephonyProvider.SIP_TRUNK.value,
-            )
+            is_telephony = output_provider in SUPPORTED_OUTPUT_TELEPHONY_HANDLERS
             synthesizer_kwargs = self.kwargs.copy()
             if is_telephony:
                 synthesizer_kwargs["use_mulaw"] = True
@@ -6103,13 +6093,14 @@ class TaskManager(BaseManager):
             "sequence_id": -1,
             "message_category": "handoff",
             "text": handoff_text,
+            "type": "audio",
         }
         clip = self.handoff_audio_cache.get(target)
         if clip:
-            # Pre-warmed mu-law clip pushed straight to telephony. Both end-flags required
+            # Pre-warmed wire-format clip pushed straight to the transport. Both end-flags required
             handoff_meta.update(
                 {
-                    "format": "mulaw",
+                    "format": "mulaw" if self.__handoff_mulaw_wire() else "pcm",
                     "end_of_llm_stream": True,
                     "end_of_synthesizer_stream": True,
                     "is_first_chunk": True,
@@ -6148,12 +6139,19 @@ class TaskManager(BaseManager):
             "{language}", LANGUAGE_NAMES.get(label, label)
         )
 
+    def __handoff_mulaw_wire(self) -> bool:
+        """True on telephony (mu-law@8k clip), False on web/freeswitch (raw PCM@24k)."""
+        return self.tools["output"].get_provider() in SUPPORTED_OUTPUT_TELEPHONY_HANDLERS
+
     async def __prewarm_handoff_clips(self):
         """Pre-render each language's handoff on its own voice via one-shot synthesize().
         Clips are static for the call; non-active labels first (likely first targets)."""
         pool = self.tools.get("synthesizer")
         if not isinstance(pool, SynthesizerPool):
             return
+
+        # A call has exactly one transport, so render in its wire format only.
+        mulaw_wire = self.__handoff_mulaw_wire()
 
         async def render(label, synth):
             text = self.__handoff_text_for(label)
@@ -6163,23 +6161,40 @@ class TaskManager(BaseManager):
                 synth.__class__.__name__,
                 getattr(synth, "voice_id", None) or getattr(synth, "voice", None),
                 text,
+                "mulaw" if mulaw_wire else f"pcm{WEBCALL_TTS_SAMPLE_RATE}",
             )
             cached = HANDOFF_CLIP_CACHE.get(cache_key)
             if cached:
                 self.handoff_audio_cache[label] = cached
                 return
+            # Under ~50ms is a failed one-shot returning a sentinel, not a clip.
+            min_clip_bytes = 400 if mulaw_wire else 2400
             try:
                 clip = None
-                # Prefer a native mu-law 8000 one-shot when the provider offers it.
-                telephony_one_shot = getattr(synth, "synthesize_telephony_clip", None)
-                if telephony_one_shot is not None:
-                    clip = await telephony_one_shot(text)
+                # Prefer a native one-shot in the wire format when the provider offers it.
+                if mulaw_wire:
+                    telephony_one_shot = getattr(synth, "synthesize_telephony_clip", None)
+                    if telephony_one_shot is not None:
+                        clip = await telephony_one_shot(text)
+                else:
+                    pcm_one_shot = getattr(synth, "synthesize_pcm_clip", None)
+                    if pcm_one_shot is not None:
+                        clip = await pcm_one_shot(text, WEBCALL_TTS_SAMPLE_RATE)
+                # Before the fallback, so synthesize() still gets its turn.
+                if clip and len(clip) < min_clip_bytes:
+                    logger.warning(
+                        f"LanguageSwitcher: one-shot for '{label}' returned {len(clip)}B — falling back to synthesize()"
+                    )
+                    clip = None
                 if not clip:
                     audio = await synth.synthesize(text)
                     if not audio:
                         return
                     # pydub decode shells out to ffprobe/ffmpeg — keep it off the event loop.
-                    clip = await asyncio.to_thread(self.__handoff_clip_to_mulaw, synth, audio)
+                    clip = await asyncio.to_thread(self.__handoff_clip_convert, synth, audio, mulaw_wire)
+                if clip and len(clip) < min_clip_bytes:
+                    logger.error(f"LanguageSwitcher: handoff clip for '{label}' is {len(clip)}B — discarding")
+                    return
                 if clip:
                     self.handoff_audio_cache[label] = clip
                     if len(HANDOFF_CLIP_CACHE) >= HANDOFF_CLIP_CACHE_MAX:
@@ -6192,14 +6207,21 @@ class TaskManager(BaseManager):
 
         await asyncio.gather(*(render(label, synth) for label, synth in pool.synthesizers.items()))
 
-    def __handoff_clip_to_mulaw(self, synth, audio):
-        clip = audio_to_mulaw8k(
-            audio,
-            rate_hint=getattr(synth, "sampling_rate", 0) or getattr(synth, "sample_rate", 0) or 8000,
-            format_hint=getattr(synth, "format", "") or "",
-        )
+    def __handoff_clip_convert(self, synth, audio, mulaw_wire):
+        """Decode a one-shot render into the wire format. Blocking — run off-loop."""
+        kwargs = {
+            "rate_hint": getattr(synth, "sampling_rate", 0) or getattr(synth, "sample_rate", 0) or 8000,
+            "format_hint": getattr(synth, "format", "") or "",
+        }
+        if mulaw_wire:
+            clip = audio_to_mulaw8k(audio, **kwargs)
+        else:
+            clip = audio_to_pcm(audio, target_sample_rate=WEBCALL_TTS_SAMPLE_RATE, **kwargs)
         if clip is None:
-            logger.error("LanguageSwitcher: handoff clip is a compressed container pydub can't decode — skipping")
+            logger.error(
+                f"LanguageSwitcher: handoff clip for {synth.__class__.__name__} is a compressed container "
+                f"pydub can't decode into {'mulaw' if mulaw_wire else 'pcm'} — skipping"
+            )
         return clip
 
     def __language_directive(self, label: str) -> str:
