@@ -2,7 +2,7 @@
 
 A turn opened from an Update interim hangs when EndOfTurn never arrives, holding callee_speaking
 true and the agent's audio with it. The socket may stay chatty with empty-transcript Updates, so
-message-arrival liveness cannot see the stall — the watchdog keys on transcript progress instead.
+message-arrival liveness cannot see the stall, so the watchdog keys on transcript progress.
 On release it force-finalizes buffered words so they reach the LLM, falling back to a bare
 speech_ended only when the turn produced no text.
 """

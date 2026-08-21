@@ -2,7 +2,7 @@
 
 Every turn of a KB agent queries RAG before the LLM runs, so a dead service would add its
 timeout to each turn. After a run of failures the client stops calling and returns an empty
-context — the agent answers without the knowledge base rather than leaving dead air. Recovery is
+context, so the agent answers without the knowledge base rather than leaving dead air. Recovery is
 probed by a single request, not by every concurrent turn at once.
 """
 

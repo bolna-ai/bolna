@@ -2,7 +2,7 @@
 
 Firing during an utterance slices it across two decides, so while callee_speaking is true the
 flush defers. Past LANGUAGE_SWITCH_SPEAKING_STALE_CAP_S of buffer age the flag is treated as
-stale — the detector hears the same audio and produced nothing for that long — and the flush
+stale, since the detector hears the same audio and produced nothing for that long, and the flush
 fires anyway, so a wedged final can never starve the safety net.
 """
 

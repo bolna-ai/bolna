@@ -2,7 +2,7 @@
 
 The LIVE transcript is invalid after a switch because it came from the pre-switch recognizer, and
 trusting it causes switch ping-pong. The detector runs with language-code unknown, so its speech
-means the same before and after — discarding the buffer too would delete a request the caller made
+means the same before and after. Discarding the buffer too would delete a request the caller made
 during the decide and force them to repeat it.
 
 The guard keys on the language the decide was spawned on, so it fires only once that language is

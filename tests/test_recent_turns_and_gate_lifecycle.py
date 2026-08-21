@@ -78,7 +78,7 @@ async def test_switch_path_holds_gate_until_cleanup(language_switch_tm):
 
     tm = language_switch_tm(audio_playing=True)
     live_task = MagicMock()
-    live_task.done.return_value = False  # a live decide — must not be retired as stale
+    live_task.done.return_value = False  # a live decide, must not be retired as stale
     gate = {"sequence_id": 1, "task": live_task, "armed_at": time.monotonic(), "language": "hi", "deadline": 1e18}
     tm.lid_playback_gate = gate
     tm._TaskManager__release_lid_playback_gate = TaskManager._TaskManager__release_lid_playback_gate.__get__(

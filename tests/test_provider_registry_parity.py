@@ -1,7 +1,7 @@
 """Every provider the config layer can name must resolve to a class here.
 
 A provider offered in the catalog but missing from a registry fails only when a call actually
-picks it, on that call, in production. The reverse — a registry key no enum names — is a handler
+picks it, on that call, in production. The reverse, a registry key no enum names, is a handler
 nothing can ever reach.
 """
 

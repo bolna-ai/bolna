@@ -1,7 +1,7 @@
 """Barge-in truncation: history must record what the caller actually heard, not what was generated.
 
 A trim is addressed by turn_id or response_uid so a late barge-in can never rewrite an older
-assistant turn — a missing or unmatched address skips the trim rather than guessing. When nothing
+assistant turn: a missing or unmatched address skips the trim rather than guessing. When nothing
 was heard the assistant turn is removed outright, along with the tool result it would otherwise
 orphan, so the next LLM request carries no record of speech the caller never received.
 """

@@ -1,7 +1,7 @@
 """Graph agents: the language directive reaches the node prompt whenever the language is known,
 not only when the node happens to carry an example for that language.
 
-_get_prompt_with_example is the only language channel a graph agent has — _build_messages strips
+_get_prompt_with_example is the only language channel a graph agent has, since _build_messages strips
 system messages from history, so the TaskManager-side pin never reaches it. Nodes may also carry
 an explicit "examples": null, so the lookup has to tolerate None rather than crash generate().
 """

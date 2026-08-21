@@ -2,7 +2,7 @@
 
 Arguments arrive split across chunks, so they must be rejoined in order or the tool receives
 malformed JSON. A call whose required arguments never arrived must not run at all, and the
-user-facing filler must be offered exactly once — a second one talks over the first.
+user-facing filler must be offered exactly once, since a second one talks over the first.
 """
 
 from types import SimpleNamespace

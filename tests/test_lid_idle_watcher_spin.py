@@ -1,7 +1,7 @@
 """The LID idle-flush watcher must never busy-spin the event loop.
 
 A fire that leaves the detector buffer undrained keeps the buffer at or above threshold, so the
-watcher re-fires every iteration with no awaiting yield — a synchronous spin that blocks the
+watcher re-fires every iteration with no awaiting yield, a synchronous spin that blocks the
 pod's event loop and starves co-tenant calls of media. Two guards hold: the loop-top skip covers
 the whole ignore-input condition rather than hangup alone, and a spin-guard forces a yield
 whenever a fire leaves the buffer undrained.
