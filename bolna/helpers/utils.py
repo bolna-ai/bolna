@@ -459,7 +459,7 @@ def mp3_bytes_to_pcm(mp3_bytes, target_sample_rate=8000):
     return audio.raw_data
 
 
-@lru_cache(maxsize=None)
+@lru_cache(maxsize=32)
 def _resample_fir(up, down):
     """resample_poly's default kaiser design, cached per ratio; it applies its own up scaling."""
     max_rate = max(up, down)
