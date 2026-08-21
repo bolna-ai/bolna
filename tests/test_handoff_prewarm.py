@@ -191,7 +191,6 @@ async def test_clips_cached_across_calls_per_voice_and_text():
     assert tm2.handoff_audio_cache["te"] == b"\x7f" * 800
 
 
-@pytest.mark.asyncio
 async def test_freeswitch_pushes_clip_as_pcm():
     """42b5f89b: on FS the clip is PCM@24k, pushed as format=pcm, never mislabeled."""
     tm = _tm(cache={"te": b"\x00\x01" * 2400})
@@ -204,7 +203,6 @@ async def test_freeswitch_pushes_clip_as_pcm():
     assert meta["type"] == "audio"
 
 
-@pytest.mark.asyncio
 async def test_prewarm_renders_pcm_for_non_mulaw_wire():
     # On web/FS the prewarm must render PCM@24k — native one-shot preferred, converter fallback.
     tm = _tm()
@@ -233,7 +231,6 @@ async def test_prewarm_renders_pcm_for_non_mulaw_wire():
     assert abs(len(tm.handoff_audio_cache["hi"]) - 4800) <= 4
 
 
-@pytest.mark.asyncio
 async def test_prewarm_discards_error_sentinel_micro_clips():
     # deepgram's _generate_http returns truthy b"\x00" on non-200 — must not be cached.
     tm = _tm()
@@ -250,7 +247,6 @@ async def test_prewarm_discards_error_sentinel_micro_clips():
     assert "te" not in tm.handoff_audio_cache  # falls back to live synth at play time
 
 
-@pytest.mark.asyncio
 async def test_clip_cache_keys_are_wire_specific():
     # A telephony call must never reuse a web call's PCM clip (and vice versa).
     synth = MagicMock(spec=["synthesize", "synthesize_telephony_clip", "synthesize_pcm_clip", "voice_id"])
@@ -276,7 +272,6 @@ async def test_clip_cache_keys_are_wire_specific():
     assert tm_web.handoff_audio_cache["te"] == b"\x00\x01" * 2400
 
 
-@pytest.mark.asyncio
 async def test_elevenlabs_pcm_clip_uses_native_pcm_format():
     from bolna.synthesizer.elevenlabs_synthesizer import ElevenlabsSynthesizer
 
@@ -290,7 +285,6 @@ async def test_elevenlabs_pcm_clip_uses_native_pcm_format():
     assert await clip_fn("hello", 8000) is None  # unsupported rate → converter fallback
 
 
-@pytest.mark.asyncio
 async def test_one_shot_sentinel_falls_back_to_synthesize():
     """A truthy-but-tiny one-shot is a failed render — synthesize() must still run."""
     tm = _tm()
@@ -313,7 +307,6 @@ async def test_one_shot_sentinel_falls_back_to_synthesize():
     assert len(tm.handoff_audio_cache["te"]) == 1600  # 0.2s @ 8kHz mu-law
 
 
-@pytest.mark.asyncio
 async def test_short_fallback_clip_still_discarded():
     """The size floor still applies to the converter result — a too-short clip is dropped."""
     tm = _tm()
@@ -334,7 +327,6 @@ async def test_short_fallback_clip_still_discarded():
     assert "te" not in tm.handoff_audio_cache
 
 
-@pytest.mark.asyncio
 async def test_mulaw_stream_synth_still_prewarms_on_pcm_wire():
     """use_mulaw is the streaming wire, not the one-shot: pixa/rime return WAV anyway."""
     tm = _tm()
@@ -371,7 +363,6 @@ def test_handoff_mulaw_wire_tracks_output_handler_registry():
         assert wire() is False, provider
 
 
-@pytest.mark.asyncio
 async def test_cartesia_pcm_clip_uses_raw_pcm_output_format():
     from bolna.synthesizer.cartesia_synthesizer import CartesiaSynthesizer
 

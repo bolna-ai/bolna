@@ -65,7 +65,6 @@ def make_tm(*, activity_values=None):
     return tm
 
 
-@pytest.mark.asyncio
 async def test_rapid_fragments_regenerate_once_with_last_merge():
     tm = make_tm()
     # Three fragments inside the window — like a barcode readout.
@@ -83,7 +82,6 @@ async def test_rapid_fragments_regenerate_once_with_last_merge():
     assert tm.regen_settle_payload is None
 
 
-@pytest.mark.asyncio
 async def test_settle_fires_after_quiet_window():
     tm = make_tm()
     tm.arm_regen_settle("hello there", {"sequence_id": 2, "turn_id": 2})
@@ -92,7 +90,6 @@ async def test_settle_fires_after_quiet_window():
     assert len(tm.kickoff_calls) == 1
 
 
-@pytest.mark.asyncio
 async def test_cancelled_settle_never_generates():
     tm = make_tm()
     tm.arm_regen_settle("stale", {"sequence_id": 2, "turn_id": 2})
@@ -102,7 +99,6 @@ async def test_cancelled_settle_never_generates():
     assert tm.kickoff_calls == []
 
 
-@pytest.mark.asyncio
 async def test_fire_with_cleared_payload_is_noop():
     tm = make_tm()
     tm.arm_regen_settle("x", {"sequence_id": 2})
@@ -111,7 +107,6 @@ async def test_fire_with_cleared_payload_is_noop():
     assert tm.kickoff_calls == []
 
 
-@pytest.mark.asyncio
 async def test_regen_settle_armed_tracks_timer_lifecycle():
     tm = make_tm()
     assert tm.regen_settle_armed() is False  # nothing armed
