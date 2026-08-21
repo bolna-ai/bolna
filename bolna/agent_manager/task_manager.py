@@ -2071,7 +2071,7 @@ class TaskManager(BaseManager):
                 extraction_json = (
                     task.get("tools_config").get("llm_agent", {}).get("llm_config", {}).get("extraction_json")
                 )
-                # Schema goes in as a .format() argument, so variables inside it reached the model as literal braces.
+                # Schema is a .format() argument, so str.format never reaches variables inside it.
                 if isinstance(extraction_json, str):
                     extraction_json = update_prompt_with_context(extraction_json, self.context_data)
                 prompt = EXTRACTION_PROMPT.format(current_date, current_time, self.timezone, extraction_json)

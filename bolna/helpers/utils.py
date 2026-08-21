@@ -158,13 +158,11 @@ def log_unresolved_nested_path(path, data):
 def render_prompt(template, data, missing=""):
     """Substitute {{path}} and {path} variables into a prompt.
 
-    Replaces str.format_map, which parsed every brace and therefore raised on any
-    JSON literal in the prompt — and because callers swallowed that exception, one
-    JSON snippet silently left EVERY variable in the prompt unsubstituted.
+    Only recognised variable patterns are substituted, so a JSON literal or an
+    unresolvable format spec passes through untouched.
 
     An unresolved {{path}} unescapes to {path}, preserving the legacy meaning of a
-    double-braced identifier. An unresolved {path} renders `missing`, matching the
-    previous DictWithMissing.
+    double-braced identifier. An unresolved {path} renders `missing`.
 
     missing=None is partial-fill mode: substitute only what resolves and leave every
     other token byte-identical. Agent template seeding needs this, because its leftover
@@ -195,7 +193,7 @@ def render_prompt(template, data, missing=""):
             try:
                 return format(value, spec[1:])
             except Exception:
-                # Broad on purpose: an escaping error upstream would lose every variable, as format_map did.
+                # Broad on purpose: an escaping error here would otherwise lose every variable in the prompt.
                 return match.group(0)
         return render_variable_value(value, as_json=double is not None)
 
