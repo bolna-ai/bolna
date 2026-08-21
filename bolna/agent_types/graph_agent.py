@@ -47,7 +47,7 @@ logger = configure_logger(__name__)
 _DETERMINISTIC_REASONING_PREFIX = "deterministic:"
 _ROUTER_REASONING_PREFIX = f"{_DETERMINISTIC_REASONING_PREFIX}router:"
 # The router's rationale is explanatory only, and its tokens sit on a live turn's critical path.
-_ROUTING_REASONING_ENABLED = os.getenv("GRAPH_ROUTING_REASONING", "").strip().lower() in ("1", "true", "yes")
+_ROUTER_RATIONALE_ENABLED = os.getenv("GRAPH_ROUTER_RATIONALE", "").strip().lower() in ("1", "true", "yes")
 _PROMPT_VAR_PATTERN = re.compile(r"\{([a-zA-Z_][a-zA-Z0-9_]*)\}")
 
 # Time variables frozen per call for the conversation prompt; see _prompt_context.
@@ -405,7 +405,7 @@ class GraphAgent(BaseAgent):
                     }
                     parameters["required"].append(param_name)
 
-            if _ROUTING_REASONING_ENABLED:
+            if _ROUTER_RATIONALE_ENABLED:
                 parameters["properties"]["reasoning"] = {
                     "type": "string",
                     "description": "Brief explanation of why this routing decision was made",
@@ -426,7 +426,7 @@ class GraphAgent(BaseAgent):
 
         if allow_stay:
             stay_properties = {}
-            if _ROUTING_REASONING_ENABLED:
+            if _ROUTER_RATIONALE_ENABLED:
                 stay_properties["reasoning"] = {
                     "type": "string",
                     "description": "Brief explanation of why this routing decision was made",
