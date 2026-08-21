@@ -48,6 +48,11 @@ LANGUAGE_SWITCH_MIN_SEGMENT_AUDIO_S = 0.7
 # treated as stale — the detector hears the same audio and has produced nothing that long.
 LANGUAGE_SWITCH_SPEAKING_STALE_CAP_S = 2.5
 
+# Debounce for overlapped finals: one regenerate after this quiet window instead of per fragment.
+LLM_REGEN_SETTLE_S = 0.7
+# Class-name prefixes whose endpointing rules out an in-window final: they skip the debounce.
+REGEN_SETTLE_EXCLUDED_TRANSCRIBERS = ("deepgram",)
+
 # Past this much caller silence, callee_speaking is stale and held audio ships. Deepgram closes a
 # healthy turn within utterance_end_ms (1s floor), so a real speaker stays well inside this.
 STUCK_AUDIO_GATE_RELEASE_S = 3.0

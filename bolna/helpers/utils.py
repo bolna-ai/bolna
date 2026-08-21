@@ -64,6 +64,11 @@ def write_json_file(file_path, data):
         json.dump(data, file, indent=4, ensure_ascii=False)
 
 
+def safe_log_text(text, limit=120):
+    """Strip control chars from caller text and truncate — blocks forged log entries."""
+    return re.sub(r"[\x00-\x1f\x7f]+", " ", str(text or ""))[:limit]
+
+
 def create_ws_data_packet(data, meta_info=None, is_md5_hash=False, llm_generated=False):
     metadata = copy.deepcopy(meta_info)
     if meta_info is not None:  # It'll be none in case we connect through dashboard playground

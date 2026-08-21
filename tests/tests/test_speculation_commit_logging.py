@@ -55,6 +55,7 @@ def _capture(**overrides):
         "output_tokens": 30,
         "reasoning_tokens": None,
         "cached_tokens": 100,
+        "overflowed": False,
         "latency": None,
     }
     base.update(overrides)
