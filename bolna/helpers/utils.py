@@ -47,6 +47,164 @@ class DictWithMissing(dict):
 # Server-owned telephony ids; never exposed to the model (prompt var, {placeholder}, or tool param).
 SERVER_OWNED_CALL_IDENTIFIERS = frozenset({"call_sid", "stream_sid"})
 
+# Public so dashboard/frontend mirror it; hyphens in dot segments only, keeping {price-list} a non-match.
+VARIABLE_PATH = r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z0-9_-]+|\[[^\[\]{}]+\])*"
+
+# {{path}} before {path}; non-paths match nothing so JSON survives, and there is no {{ -> { unescaping.
+PROMPT_TOKEN_PATTERN = re.compile(
+    r"\{\{\s*(?P<double>" + VARIABLE_PATH + r")\s*\}\}|\{(?P<single>" + VARIABLE_PATH + r")(?P<spec>:[^{}]*)?\}"
+)
+
+
+def parse_json_container(value):
+    """A JSON object/array that arrived as a string -> the parsed container, else unchanged.
+
+    Callers hand us variables in whatever shape their transport produced: the web-call panel
+    parses JSON client-side, but a telephony /call payload (or any API caller) commonly sends
+    the same value as a JSON *string*. Only objects and arrays are accepted — a bare number or
+    quoted string stays a string, so "720" never silently becomes an int.
+    """
+    if not isinstance(value, str):
+        return value
+    trimmed = value.strip()
+    if not trimmed.startswith("{") and not trimmed.startswith("["):
+        return value
+    try:
+        parsed = json.loads(trimmed)
+    except (ValueError, TypeError):
+        return value
+    return parsed if isinstance(parsed, (dict, list)) else value
+
+
+def resolve_variable_path(path, data):
+    """Walk a dotted/indexed path through nested dicts and lists.
+
+    Returns (found, value). `a.b.c`, `a.0.b` and the legacy `a[b][c]` all resolve.
+
+    A stringified JSON payload is parsed ONLY when a path actually walks into it. Doing it
+    here rather than at ingress is what keeps existing prompts byte-identical: a bare {var}
+    or {{var}} never triggers parsing, so a string-valued variable still renders as the exact
+    string it always did.
+    """
+    current = data
+    for part in path.replace("[", ".").replace("]", "").split("."):
+        if not part:
+            continue
+        current = parse_json_container(current)
+        if isinstance(current, dict):
+            if part not in current:
+                return False, None
+            current = current[part]
+        elif isinstance(current, (list, tuple)):
+            if not part.lstrip("-").isdigit():
+                return False, None
+            index = int(part)
+            if not -len(current) <= index < len(current):
+                return False, None
+            current = current[index]
+        else:
+            return False, None
+    return True, current
+
+
+def render_variable_value(value, as_json=False):
+    """Stringify a resolved value.
+
+    as_json is set only for the {{path}} syntax, where dicts and lists become real JSON
+    (a Python repr emits single quotes and True/None, which the model cannot parse).
+    The legacy {path} syntax keeps str(), because prod recipient_data already carries
+    object-valued variables — product_details, items, cart_data_json, nearest_store —
+    and switching those to JSON would change output on live calls.
+    """
+    if isinstance(value, str):
+        return value
+    if as_json and isinstance(value, (dict, list, tuple)):
+        try:
+            return json.dumps(value, ensure_ascii=False, default=str)
+        except (TypeError, ValueError):
+            return str(value)
+    return str(value)
+
+
+def log_unresolved_nested_path(path, data):
+    """INFO-log why a nested {{a.b}} did not resolve. Values are NEVER logged.
+
+    A nested path that fails leaves the token literal in the prompt, which is invisible until
+    someone hears the agent read "{prior.score}" aloud. The overwhelmingly common cause is a
+    container passed as a Python repr — "['apple', 'bananna']" with single quotes — which is not
+    valid JSON, so parse_json_container cannot accept it and there is nothing to index into.
+
+    Only nested paths are logged: a bare {name} miss is normal (it renders `missing`) and would
+    be pure noise. Types and shape only, so prompt variable VALUES never reach the logs.
+    """
+    root = path.split(".")[0].split("[")[0]
+    if root not in data:
+        logger.info(f"prompt variable unresolved: path={path!r} root={root!r} was not passed")
+        return
+    value = data[root]
+    if isinstance(value, str):
+        if value.strip()[:1] in ("{", "["):
+            reason = "a string that is not valid JSON (single quotes? JSON requires double)"
+        else:
+            reason = "a plain string, not a container"
+        logger.info(f"prompt variable unresolved: path={path!r} root={root!r} is {reason}")
+    else:
+        logger.info(
+            f"prompt variable unresolved: path={path!r} root={root!r} is {type(value).__name__}; "
+            "a key or index along the path is missing"
+        )
+
+
+def render_prompt(template, data, missing=""):
+    """Substitute {{path}} and {path} variables into a prompt.
+
+    Replaces str.format_map, which parsed every brace and therefore raised on any
+    JSON literal in the prompt — and because callers swallowed that exception, one
+    JSON snippet silently left EVERY variable in the prompt unsubstituted.
+
+    An unresolved {{path}} unescapes to {path}, preserving the legacy meaning of a
+    double-braced identifier. An unresolved {path} renders `missing`, matching the
+    previous DictWithMissing.
+
+    missing=None is partial-fill mode: substitute only what resolves and leave every
+    other token byte-identical. Agent template seeding needs this, because its leftover
+    placeholders are the runtime variables and must survive to the live call.
+    """
+    if not template or not isinstance(template, str):
+        return template
+    if not isinstance(data, dict):
+        data = {}
+
+    def substitute(match):
+        double = match.group("double")
+        path = double if double is not None else match.group("single")
+        spec = match.group("spec")
+        found, value = resolve_variable_path(path, data)
+        if not found:
+            # Nested-only: these fail silently and only surface when the agent reads the literal token aloud.
+            if ("." in path or "[" in path) and missing is not None:
+                log_unresolved_nested_path(path, data)
+            # Unresolved spec tokens stay literal — more likely pseudo-JSON like "{name: string}" than a variable.
+            if missing is None or spec:
+                return match.group(0)
+            return "{" + path + "}" if double is not None else missing
+        if spec:
+            # Partial fill leaves specs alone; applying one here would bake a seed-time value into the template.
+            if missing is None:
+                return match.group(0)
+            try:
+                return format(value, spec[1:])
+            except Exception:
+                # Broad on purpose: an escaping error upstream would lose every variable, as format_map did.
+                return match.group(0)
+        return render_variable_value(value, as_json=double is not None)
+
+    try:
+        return PROMPT_TOKEN_PATTERN.sub(substitute, template)
+    except Exception as e:
+        logger.error(f"render_prompt failed, returning template unchanged: {e}")
+        return template
+
 
 def load_file(file_path, is_json=False):
     data = None
@@ -329,16 +487,11 @@ def enrich_context_with_time_variables(context_data, timezone):
 
 
 def update_prompt_with_context(prompt, context_data):
-    try:
-        if not context_data or not isinstance(context_data.get("recipient_data"), dict):
-            return prompt.format_map(DictWithMissing({}))
-        # A {call_sid}/{stream_sid} template renders empty instead of leaking the real id.
-        recipient_data = {
-            k: v for k, v in context_data["recipient_data"].items() if k not in SERVER_OWNED_CALL_IDENTIFIERS
-        }
-        return prompt.format_map(DictWithMissing(recipient_data))
-    except Exception as e:
-        return prompt
+    if not context_data or not isinstance(context_data.get("recipient_data"), dict):
+        return render_prompt(prompt, {})
+    # A {call_sid}/{stream_sid} template renders empty instead of leaking the real id.
+    recipient_data = {k: v for k, v in context_data["recipient_data"].items() if k not in SERVER_OWNED_CALL_IDENTIFIERS}
+    return render_prompt(prompt, recipient_data)
 
 
 async def get_prompt_responses(assistant_id, local=False):
