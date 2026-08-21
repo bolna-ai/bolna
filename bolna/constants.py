@@ -50,6 +50,9 @@ LANGUAGE_SWITCH_SPEAKING_STALE_CAP_S = 2.5
 
 # Debounce for overlapped finals: one regenerate after this quiet window instead of per fragment.
 LLM_REGEN_SETTLE_S = 0.7
+# Transcribers (class-name prefix, lowercase) whose endpointing means a follow-up final can't
+# land inside the window — their overlapped finals skip the debounce and kick off immediately.
+REGEN_SETTLE_EXCLUDED_TRANSCRIBERS = ("deepgram",)
 
 # Past this much caller silence, callee_speaking is stale and held audio ships. Deepgram closes a
 # healthy turn within utterance_end_ms (1s floor), so a real speaker stays well inside this.

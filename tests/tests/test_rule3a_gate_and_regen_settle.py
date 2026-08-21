@@ -140,3 +140,42 @@ def test_safe_log_text_preserves_speech_and_truncates():
     assert safe_log_text(None) == ""
     assert len(safe_log_text("x" * 500)) == 120
     assert len(safe_log_text("x" * 500, 80)) == 80
+
+
+# ── exclusion list: providers whose finals can't land inside the window ──────────
+
+
+class DeepgramStub:
+    pass
+
+
+class SonioxStub:
+    pass
+
+
+class PoolStub:
+    def __init__(self, active_label, transcribers):
+        self.active_label = active_label
+        self.transcribers = transcribers
+
+
+def make_can_fire_tm(transcriber):
+    tm = MagicMock()
+    tm.tools = {"transcriber": transcriber}
+    tm.regen_settle_can_fire = TaskManager.regen_settle_can_fire.__get__(tm, TaskManager)
+    return tm
+
+
+def test_excluded_transcriber_skips_the_window():
+    assert make_can_fire_tm(DeepgramStub()).regen_settle_can_fire() is False
+
+
+def test_non_excluded_transcriber_arms():
+    assert make_can_fire_tm(SonioxStub()).regen_settle_can_fire() is True
+
+
+def test_can_fire_follows_the_active_pool_member():
+    pool = PoolStub("hi", {"hi": DeepgramStub(), "en": SonioxStub()})
+    assert make_can_fire_tm(pool).regen_settle_can_fire() is False
+    pool.active_label = "en"
+    assert make_can_fire_tm(pool).regen_settle_can_fire() is True

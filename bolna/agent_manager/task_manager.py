@@ -36,6 +36,7 @@ from bolna.constants import (
     LANGUAGE_SWITCH_SETTLE_MS,
     LLM_DEFAULT_CONFIGS,
     LLM_REGEN_SETTLE_S,
+    REGEN_SETTLE_EXCLUDED_TRANSCRIBERS,
     NON_EVIDENCE_MARK_TYPES,
     SWITCH_LANGUAGE_TOOL_DEFINITION,
     END_CALL_FUNCTION_PREFIX,
@@ -4532,6 +4533,17 @@ class TaskManager(BaseManager):
         """True while the settle-window timer is pending — a generation is owed for this turn."""
         return self.regen_settle_task is not None and not self.regen_settle_task.done()
 
+    def regen_settle_can_fire(self):
+        """False when the active transcriber is on the exclusion list — its endpointing means no
+        follow-up final can land inside the window, so waiting only adds latency."""
+        transcriber = self.tools.get("transcriber")
+        active = (
+            transcriber.transcribers.get(transcriber.active_label, transcriber)
+            if hasattr(transcriber, "transcribers")
+            else transcriber
+        )
+        return not type(active).__name__.lower().startswith(REGEN_SETTLE_EXCLUDED_TRANSCRIBERS)
+
     def arm_regen_settle(self, transcriber_message, meta_info):
         """(Re)arm the regeneration debounce with the latest merged turn."""
         if self.regen_settle_armed():
@@ -4653,8 +4665,9 @@ class TaskManager(BaseManager):
         )
         if next_task == "llm":
             meta_info["origin"] = "transcriber"
-            if overlapped:
+            if overlapped and (self.regen_settle_armed() or self.regen_settle_can_fire()):
                 # More finals are likely coming — regenerate once after they settle.
+                # An already-armed window always absorbs the final so no payload strands.
                 self.arm_regen_settle(transcriber_message, meta_info)
             else:
                 self.kickoff_llm_generation(transcriber_message, meta_info)
@@ -4989,6 +5002,7 @@ class TaskManager(BaseManager):
                             meta_info = self.__get_updated_meta_info(meta_info)
                             meta_info["eager_eot"] = True
                             meta_info["eot_confidence"] = eot_confidence
+                            meta_info["eager_transcript"] = eager_transcript
 
                             self.eager_history_snapshot = len(self.history)
                             self.eager_meta_info = meta_info
@@ -5088,11 +5102,18 @@ class TaskManager(BaseManager):
                             logger.info("EagerEOT reply dropped: settle window armed — merging final into regen")
                             self.eager_llm_task.cancel()
                             self.eager_llm_task = None
+                            eager_stub_text = (self.eager_meta_info or {}).get("eager_transcript")
                             self.eager_meta_info = None
-                            snapshot = getattr(self, "eager_history_snapshot", None)
                             self.eager_history_snapshot = None
-                            if snapshot is not None and len(self.history) > snapshot:
-                                self.history = self.history[:snapshot]
+                            # Pop only the eager stub; a merged turn (stub + later final) reads
+                            # differently and must survive — it's what the pending regen answers.
+                            last_row = self.history[-1] if self.history else None
+                            if (
+                                last_row
+                                and last_row.get("role") == "user"
+                                and last_row.get("content") == eager_stub_text
+                            ):
+                                self.history = self.history[:-1]
                             was_eager = False
 
                         if was_eager and self.eager_llm_task is not None:
