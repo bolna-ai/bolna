@@ -60,6 +60,7 @@ def make_tm(*, activity_values=None):
         tm.kickoff_calls.append((text, dict(meta)))
 
     tm.kickoff_llm_generation = kickoff
+    tm.regen_settle_armed = TaskManager.regen_settle_armed.__get__(tm, TaskManager)
     tm.arm_regen_settle = TaskManager.arm_regen_settle.__get__(tm, TaskManager)
     tm._TaskManager__regen_after_settle = TaskManager._TaskManager__regen_after_settle.__get__(tm, TaskManager)
     return tm
@@ -109,6 +110,20 @@ async def test_fire_with_cleared_payload_is_noop():
     tm.regen_settle_payload = None  # cleared by a race with cleanup
     await asyncio.sleep(LLM_REGEN_SETTLE_S + 0.15)
     assert tm.kickoff_calls == []
+
+
+@pytest.mark.asyncio
+async def test_regen_settle_armed_tracks_timer_lifecycle():
+    tm = make_tm()
+    assert tm.regen_settle_armed() is False  # nothing armed
+    tm.arm_regen_settle("hello", {"sequence_id": 2, "turn_id": 2})
+    assert tm.regen_settle_armed() is True  # window open: eager EOT and late duplicates must gate on this
+    await asyncio.sleep(LLM_REGEN_SETTLE_S + 0.15)
+    assert tm.regen_settle_armed() is False  # fired
+    tm.arm_regen_settle("again", {"sequence_id": 3, "turn_id": 3})
+    tm.regen_settle_task.cancel()
+    await asyncio.sleep(0)
+    assert tm.regen_settle_armed() is False  # cancelled
 
 
 # ── log sanitization (CodeQL log-injection) ──────────────────────────────────────

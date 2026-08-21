@@ -48,8 +48,7 @@ LANGUAGE_SWITCH_MIN_SEGMENT_AUDIO_S = 0.7
 # treated as stale — the detector hears the same audio and has produced nothing that long.
 LANGUAGE_SWITCH_SPEAKING_STALE_CAP_S = 2.5
 
-# Overlapped finals (multi-part utterances) regenerate once after this quiet window instead of
-# per fragment; sized under Deepgram's 1s utterance_end floor so a continuing speaker re-arms it.
+# Debounce for overlapped finals: one regenerate after this quiet window instead of per fragment.
 LLM_REGEN_SETTLE_S = 0.7
 
 # Past this much caller silence, callee_speaking is stale and held audio ships. Deepgram closes a

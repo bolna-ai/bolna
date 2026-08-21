@@ -2503,9 +2503,8 @@ class TaskManager(BaseManager):
         logger.info(f"Cleaning up downstream task")
         start_time = time.time()
         self._cancel_in_flight_llm_response()
-        # A pending regen belongs to the turn being torn down; the overlapped final
-        # path re-arms after this cleanup, so the newest turn always wins.
-        if self.regen_settle_task is not None and not self.regen_settle_task.done():
+        # The overlapped-final path re-arms after this cleanup, so the newest turn wins.
+        if self.regen_settle_armed():
             self.regen_settle_task.cancel()
         self.regen_settle_payload = None
         await self.tools["output"].handle_interruption()
@@ -4529,9 +4528,13 @@ class TaskManager(BaseManager):
         self._spawn_language_switch_decision(transcriber_message, meta_info)
         self.llm_task = asyncio.create_task(self._run_llm_task(transcriber_package))
 
+    def regen_settle_armed(self) -> bool:
+        """True while the settle-window timer is pending — a generation is owed for this turn."""
+        return self.regen_settle_task is not None and not self.regen_settle_task.done()
+
     def arm_regen_settle(self, transcriber_message, meta_info):
         """(Re)arm the regeneration debounce with the latest merged turn."""
-        if self.regen_settle_task is not None and not self.regen_settle_task.done():
+        if self.regen_settle_armed():
             self.regen_settle_task.cancel()
         self.regen_settle_payload = (transcriber_message, meta_info)
         self.regen_settle_task = asyncio.create_task(self.__regen_after_settle())
@@ -4603,8 +4606,7 @@ class TaskManager(BaseManager):
         current_sequence_id = meta_info.get("sequence_id")
         activity = self._inflight_response_activity(exclude_sequence_id=current_sequence_id)
         # A live settle timer counts as overlap — this final merges into the pending regen.
-        settle_pending = self.regen_settle_task is not None and not self.regen_settle_task.done()
-        overlapped = next_task == "llm" and (any(activity.values()) or settle_pending)
+        overlapped = next_task == "llm" and (any(activity.values()) or self.regen_settle_armed())
         if overlapped:
             logger.info(
                 "BOLNA_TRACE_TM cleanup_before_user_append seq=%s turn=%s response_uid=%s response_in_pipeline=%s audio_playing=%s pending_marks=%s pending_sequences=%s pending_generation=%s",
@@ -4652,8 +4654,7 @@ class TaskManager(BaseManager):
         if next_task == "llm":
             meta_info["origin"] = "transcriber"
             if overlapped:
-                # Overlapped speech means more finals are likely coming — regenerate once
-                # after they settle instead of a cut/regenerate cycle per fragment.
+                # More finals are likely coming — regenerate once after they settle.
                 self.arm_regen_settle(transcriber_message, meta_info)
             else:
                 self.kickoff_llm_generation(transcriber_message, meta_info)
@@ -4862,13 +4863,11 @@ class TaskManager(BaseManager):
                         interim_transcript_len += len(message["data"].get("content").strip().split(" "))
                         transcript_content = message["data"].get("content", "")
 
-                        # Deepgram sometimes delivers the real speech_final for an utterance
-                        # *after* our utterance timeout already force-finalized the same text
-                        # and started the LLM. Don't treat this late delivery as new user speech
-                        # — the LLM is already processing this exact transcript.
-                        if self.response_in_pipeline and self.conversation_history.is_duplicate_user(
-                            transcript_content
-                        ):
+                        # Late re-delivery of a transcript already being processed (or owed a
+                        # regen by the armed settle window) is not new user speech.
+                        if (
+                            self.response_in_pipeline or self.regen_settle_armed()
+                        ) and self.conversation_history.is_duplicate_user(transcript_content):
                             logger.info(
                                 "Skipping interruption: Deepgram late delivery of already-processing transcript: %s",
                                 transcript_content,
@@ -4980,6 +4979,7 @@ class TaskManager(BaseManager):
                             and self.tools["input"].welcome_message_played()
                             and not self.tools["input"].is_audio_being_played_to_user()
                             and not self.response_in_pipeline
+                            and not self.regen_settle_armed()
                         ):
                             logger.info(f"Starting speculative LLM task")
 
@@ -5081,6 +5081,19 @@ class TaskManager(BaseManager):
                             None,
                             "_cb_transcriber_connect_reported",
                         )
+
+                        if was_eager and self.eager_llm_task is not None and self.regen_settle_armed():
+                            # A regen is owed for the merged turn — drop the eager reply (generated
+                            # without it) and let this final merge into the pending window instead.
+                            logger.info("EagerEOT reply dropped: settle window armed — merging final into regen")
+                            self.eager_llm_task.cancel()
+                            self.eager_llm_task = None
+                            self.eager_meta_info = None
+                            snapshot = getattr(self, "eager_history_snapshot", None)
+                            self.eager_history_snapshot = None
+                            if snapshot is not None and len(self.history) > snapshot:
+                                self.history = self.history[:snapshot]
+                            was_eager = False
 
                         if was_eager and self.eager_llm_task is not None:
                             logger.info(f"EndOfTurn follows EagerEndOfTurn - using speculative LLM")
