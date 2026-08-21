@@ -37,8 +37,7 @@ class TestHandoffMessageVariables:
         assert out == "Asha, switching to Hindi."
 
     def test_runtime_placeholders_win_over_a_same_named_variable(self):
-        # Ordering matters: {agent_name} is the switch TARGET voice, not a prompt variable.
-        # Rendering first would let recipient_data hijack it.
+        # Ordering matters: {agent_name} is the switch target, so rendering first lets recipient_data hijack it.
         ctx = {"recipient_data": {"agent_name": "WRONG", "customer_name": "Asha"}}
         assert self.handoff("Hi {customer_name}, meet {agent_name}.", context=ctx) == "Hi Asha, meet Meera."
 

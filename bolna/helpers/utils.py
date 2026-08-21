@@ -47,26 +47,10 @@ class DictWithMissing(dict):
 # Server-owned telephony ids; never exposed to the model (prompt var, {placeholder}, or tool param).
 SERVER_OWNED_CALL_IDENTIFIERS = frozenset({"call_sid", "stream_sid"})
 
-# A variable path: an identifier, optionally followed by .key / .0 / [key] segments.
-# Kept public so dashboard-backend and the frontend can mirror it without drifting.
-# Hyphens are allowed in dot segments (never in the leading identifier) so keys like a date
-# "31-03-2024" are reachable as {{a.b.31-03-2024}}. Restricting hyphens to segments AFTER a
-# dot keeps {price-list} a non-match, exactly as before — measured 0/76,907 prod agents use a
-# dotted-then-hyphen token, so nothing existing changes.
+# Public so dashboard/frontend mirror it; hyphens in dot segments only, keeping {price-list} a non-match.
 VARIABLE_PATH = r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z0-9_-]+|\[[^\[\]{}]+\])*"
 
-# One pass over a prompt: {{path}} is tried before {path} so the new syntax wins.
-# Anything that is not a variable path — a JSON literal, an empty {} — matches nothing and
-# is copied through untouched. That is what makes JSON in prompts safe.
-#
-# `spec` keeps legacy {price:.2f} format specs working; it is single-brace only, since the
-# double-brace syntax is new and has no legacy specs to honour.
-#
-# Deliberately NO blanket {{ -> { unescaping. Nested JSON ends in }} ({"a": {"b": 1}}),
-# so unescaping would silently eat a closing brace from every nested payload — the exact
-# case this change exists to support. The cost is that a prompt which used {{...}} purely
-# to escape a literal brace now keeps both braces; that is visible, not data loss, and
-# only affects non-identifier content (an identifier still unescapes, see render_prompt).
+# {{path}} before {path}; non-paths match nothing so JSON survives, and there is no {{ -> { unescaping.
 PROMPT_TOKEN_PATTERN = re.compile(
     r"\{\{\s*(?P<double>" + VARIABLE_PATH + r")\s*\}\}|\{(?P<single>" + VARIABLE_PATH + r")(?P<spec>:[^{}]*)?\}"
 )
@@ -197,29 +181,21 @@ def render_prompt(template, data, missing=""):
         spec = match.group("spec")
         found, value = resolve_variable_path(path, data)
         if not found:
-            # Nested paths are the ones worth reporting: they fail silently and leave a literal
-            # token that only surfaces when the agent reads it aloud. Guarded to nested-only so
-            # ordinary {name} misses stay quiet.
+            # Nested-only: these fail silently and only surface when the agent reads the literal token aloud.
             if ("." in path or "[" in path) and missing is not None:
                 log_unresolved_nested_path(path, data)
-            # A spec-bearing token that does not resolve stays literal rather than
-            # rendering `missing`: it is far more likely pseudo-JSON a prompt is
-            # describing ("{name: string}") than a variable, and deleting that
-            # would be silent content loss.
+            # Unresolved spec tokens stay literal — more likely pseudo-JSON like "{name: string}" than a variable.
             if missing is None or spec:
                 return match.group(0)
             return "{" + path + "}" if double is not None else missing
         if spec:
-            # Partial fill leaves specs for the live render — applying one here would bake a
-            # seed-time value into the stored template and drop the runtime placeholder.
+            # Partial fill leaves specs alone; applying one here would bake a seed-time value into the template.
             if missing is None:
                 return match.group(0)
             try:
                 return format(value, spec[1:])
             except Exception:
-                # Any failure keeps the token literal. Deliberately broad: an escaping
-                # exception would hit the outer handler and lose EVERY variable in the
-                # prompt — the exact format_map behaviour this function replaces.
+                # Broad on purpose: an escaping error upstream would lose every variable, as format_map did.
                 return match.group(0)
         return render_variable_value(value, as_json=double is not None)
 
