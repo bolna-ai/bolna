@@ -1,8 +1,8 @@
 """The barge-in gate: which user speech cuts the agent off and which is ignored as chatter.
 
-should_trigger_interruption and is_false_interruption are complements while the agent is audible.
-A short utterance is chatter unless it is one of the deliberate stop phrases, which must cut the
-agent off on a single word — and neither verdict applies before the welcome message has played,
+should_trigger_interruption and is_false_interruption answer opposite halves of the same
+question and must never both hold. A short utterance is chatter unless it is one of the
+deliberate stop phrases, which must cut the agent off on a single word — and neither verdict applies before the welcome message has played,
 so the agent's opening line can never be barged by the caller's first noise.
 """
 

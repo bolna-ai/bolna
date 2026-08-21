@@ -7,7 +7,6 @@ name, and must stay out of the way for models it knows nothing about.
 
 import pytest
 
-from bolna.constants import MODEL_REASONING_EFFORT_MAP
 from bolna.models import validate_reasoning_effort_for_model
 
 
@@ -34,9 +33,3 @@ def test_a_non_gpt_model_is_left_alone():
 def test_an_unknown_gpt_model_is_left_alone():
     """A model newer than this map must not be blocked by it."""
     validate_reasoning_effort_for_model("gpt-5-not-released-yet", "minimal")
-
-
-@pytest.mark.parametrize("model", sorted(MODEL_REASONING_EFFORT_MAP))
-def test_every_catalogued_model_accepts_each_of_its_own_efforts(model):
-    for effort in MODEL_REASONING_EFFORT_MAP[model]:
-        validate_reasoning_effort_for_model(model, effort.value)

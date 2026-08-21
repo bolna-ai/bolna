@@ -41,16 +41,28 @@ def test_trim_by_response_uid_keeps_only_the_heard_prefix():
 
 
 def test_trim_without_a_turn_id_leaves_history_alone():
-    """Refusing to trim beats trimming whichever assistant turn happens to be last."""
+    """An unaddressed turn is exactly what a None lookup would match, so the guard must refuse.
+
+    The staged assistant placeholder carries no turn_id, so without the guard a None address
+    trims that placeholder instead of declining.
+    """
     history = _history()
+    history.append_assistant("staged, not yet addressed")
+    before = _contents(history)
+
     history.sync_turn_after_interruption(None, "We are open", _heard_prefix)
-    assert _contents(history) == ["sys", "what are your hours", FULL]
+
+    assert _contents(history) == before
 
 
 def test_trim_without_a_response_uid_leaves_history_alone():
     history = _history()
+    history.append_assistant("staged, not yet addressed")
+    before = _contents(history)
+
     history.sync_response_after_interruption(None, "We are open", _heard_prefix)
-    assert _contents(history) == ["sys", "what are your hours", FULL]
+
+    assert _contents(history) == before
 
 
 def test_trim_for_an_unmatched_turn_leaves_history_alone():

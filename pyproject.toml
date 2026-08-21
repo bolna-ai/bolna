@@ -30,9 +30,6 @@ asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
 pythonpath = ["."]
 addopts = "--strict-markers"
-markers = [
-    "integration: needs a live provider credential; skipped when the key is unset",
-]
 
 [tool.setuptools]
 package-dir = {"bolna" = "bolna"}

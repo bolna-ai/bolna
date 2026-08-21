@@ -21,8 +21,8 @@ Test doubles stay local to the module that uses them. A helper only earns a plac
 `conftest.py` once a second module needs it; importing across test modules is not the way.
 
 A test that needs a live provider credential belongs in `tests/manual/`, whose scripts pytest
-does not collect. Mark a collected test `@pytest.mark.integration` if it dials out, so it can
-be deselected with `-m 'not integration'`.
+does not collect.
 
-The collected suite runs with no network. Stub the routing call rather than letting a graph
-agent reach a provider — a live call makes the test slow, flaky, and dependent on a key.
+The collected suite runs with no network and no real credentials. Stub the routing call rather
+than letting a graph agent reach a provider, and pass a placeholder key into whatever you build
+— a live call makes the test slow, flaky, and dependent on someone's `.env`.

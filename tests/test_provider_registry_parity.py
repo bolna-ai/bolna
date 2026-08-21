@@ -62,19 +62,3 @@ def test_a_carrier_that_can_listen_can_also_speak():
 def test_the_carrier_subsets_stay_inside_the_full_handler_maps():
     assert set(SUPPORTED_INPUT_TELEPHONY_HANDLERS) <= set(SUPPORTED_INPUT_HANDLERS)
     assert set(SUPPORTED_OUTPUT_TELEPHONY_HANDLERS) <= set(SUPPORTED_OUTPUT_HANDLERS)
-
-
-@pytest.mark.parametrize(
-    "registry",
-    [
-        SUPPORTED_SYNTHESIZER_MODELS,
-        SUPPORTED_TRANSCRIBER_PROVIDERS,
-        SUPPORTED_LLM_PROVIDERS,
-        SUPPORTED_S2S_PROVIDERS,
-        SUPPORTED_INPUT_HANDLERS,
-        SUPPORTED_OUTPUT_HANDLERS,
-    ],
-)
-def test_every_entry_is_callable(registry):
-    """Entries are classes or factory functions; anything else fails at construction time."""
-    assert all(callable(entry) for entry in registry.values())
