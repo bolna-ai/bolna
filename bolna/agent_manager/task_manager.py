@@ -158,8 +158,7 @@ def _inject_end_call_tool(api_tools, *, scope, nodes, description=None):
 
 
 def is_alphanumeric_readout(text: str) -> bool:
-    """Code/number readout, not language evidence (judge rule 3a): ≥1 digit-bearing token and
-    ≤2 others. Bare letters never count, so "I want English" must not trip this."""
+    """Code readout, not language evidence (rule 3a): ≥1 digit-bearing token, ≤2 others."""
     tokens = re.findall(r"\w+", text or "", flags=re.UNICODE)
     if not tokens:
         return False
@@ -601,8 +600,7 @@ class TaskManager(BaseManager):
         # Records every language switch — manual tool call (legacy) or LLM-driven
         # (triggered_by="lid_llm") — used post-call for precision / latency analysis.
         self.language_switch_events: list[dict] = []
-        # Regeneration debounce for finals that overlap an in-flight response — one
-        # regen per merged utterance instead of a cut/regenerate cycle per fragment.
+        # Debounce for overlapped finals: one regen per merged utterance, not per fragment.
         self.regen_settle_task = None
         self.regen_settle_payload = None
         # Legacy-flow handoff state (populated by __inject_switch_language_tool
@@ -4521,8 +4519,7 @@ class TaskManager(BaseManager):
             # Re-register the seq_id allocated by __get_updated_meta_info, else the audio blocks.
             self.interruption_manager.revalidate_sequence_id(meta_info["sequence_id"])
 
-        # Unconditional: if the old task completed and the interruption path invalidated
-        # responses, the new seq_id would never be re-added and all audio would stay BLOCKed.
+        # Unconditional: an un-re-added seq_id leaves every chunk of this turn BLOCKed.
         self.interruption_manager.revalidate_sequence_id(meta_info["sequence_id"])
         self.response_in_pipeline = True
         # Background once-per-turn switch decision; gates this turn's AUDIO, not its generation.
@@ -4534,8 +4531,7 @@ class TaskManager(BaseManager):
         return self.regen_settle_task is not None and not self.regen_settle_task.done()
 
     def regen_settle_can_fire(self):
-        """False when the active transcriber is on the exclusion list — its endpointing means no
-        follow-up final can land inside the window, so waiting only adds latency."""
+        """False for excluded transcribers: no final can land inside the window, so waiting only costs."""
         transcriber = self.tools.get("transcriber")
         active = (
             transcriber.transcribers.get(transcriber.active_label, transcriber)
@@ -4637,8 +4633,7 @@ class TaskManager(BaseManager):
                 logger.info(f"Merged transcript with unheard response: {transcriber_message}")
             if any(activity.values()):
                 await self.__cleanup_downstream_tasks()
-            # Cleanup invalidates every pending seq id; re-register this turn's or _synthesize
-            # later drops the fresh response as an invalid sequence.
+            # Cleanup invalidated every pending seq id; without this _synthesize drops this turn.
             self.interruption_manager.revalidate_sequence_id(current_sequence_id)
             logger.info(
                 "BOLNA_TRACE_TM revalidated_current_seq_after_cleanup seq=%s turn=%s response_uid=%s",
@@ -4666,8 +4661,7 @@ class TaskManager(BaseManager):
         if next_task == "llm":
             meta_info["origin"] = "transcriber"
             if overlapped and (self.regen_settle_armed() or self.regen_settle_can_fire()):
-                # More finals are likely coming — regenerate once after they settle.
-                # An already-armed window always absorbs the final so no payload strands.
+                # More finals likely coming; an armed window always absorbs one, so none strands.
                 self.arm_regen_settle(transcriber_message, meta_info)
             else:
                 self.kickoff_llm_generation(transcriber_message, meta_info)
@@ -4876,8 +4870,7 @@ class TaskManager(BaseManager):
                         interim_transcript_len += len(message["data"].get("content").strip().split(" "))
                         transcript_content = message["data"].get("content", "")
 
-                        # Late re-delivery of a transcript already being processed (or owed a
-                        # regen by the armed settle window) is not new user speech.
+                        # Re-delivery of a transcript already processed or owed a regen isn't new speech.
                         if (
                             self.response_in_pipeline or self.regen_settle_armed()
                         ) and self.conversation_history.is_duplicate_user(transcript_content):
@@ -5097,16 +5090,14 @@ class TaskManager(BaseManager):
                         )
 
                         if was_eager and self.eager_llm_task is not None and self.regen_settle_armed():
-                            # A regen is owed for the merged turn — drop the eager reply (generated
-                            # without it) and let this final merge into the pending window instead.
+                            # A regen is owed the merged turn, so drop the eager reply built without it.
                             logger.info("EagerEOT reply dropped: settle window armed — merging final into regen")
                             self.eager_llm_task.cancel()
                             self.eager_llm_task = None
                             eager_stub_text = (self.eager_meta_info or {}).get("eager_transcript")
                             self.eager_meta_info = None
                             self.eager_history_snapshot = None
-                            # Pop only the eager stub; a merged turn (stub + later final) reads
-                            # differently and must survive — it's what the pending regen answers.
+                            # Pop only the stub: a merged turn reads differently and the regen answers it.
                             last_row = self.history[-1] if self.history else None
                             if (
                                 last_row
@@ -5771,8 +5762,7 @@ class TaskManager(BaseManager):
             return
         # One selection, used by BOTH the speculative copy and the real history append —
         idle_flush_user_text = trailing_utterance_text(detector_segments) or detector_transcript
-        # Snapshot before the multi-second decide: if a user turn lands meanwhile, the
-        # idle-flush append below would duplicate it (prod 43571cba / 8e98dbc2).
+        # Pre-decide snapshot: a turn landing meanwhile would be duplicated below.
         history_signature_at_decide = self.conversation_history.user_turn_signature()
         active = self.language
 
@@ -5996,8 +5986,7 @@ class TaskManager(BaseManager):
             emit_lid_decision("gated:short_audio")
             return
 
-        # Rule-3a backstop: the judge can still read "This B1" as English (prod b381ba0a);
-        # explicit by-name requests keep rule-1 precedence via the substance gate's bypass.
+        # Rule-3a backstop: the judge still reads "This B1" as English.
         if not explicit_bypass and is_alphanumeric_readout(detector_transcript):
             logger.info(
                 f"LanguageSwitcher: target '{target}' vetoed — rule-3a alphanumeric readout "
@@ -6086,8 +6075,7 @@ class TaskManager(BaseManager):
                     f"LanguageSwitcher: corrected user turn to detector transcript {detector_transcript[:80]!r}"
                 )
         elif self.conversation_history.user_turn_signature() != history_signature_at_decide:
-            # A main turn for this audio landed during the decide — appending would duplicate
-            # it and re-route the graph on phantom input; answer the real turn instead.
+            # A main turn landed during the decide; appending would re-route on phantom input.
             transcript_corrected = False
             logger.info(
                 "LanguageSwitcher: idle-flush skipped — user turn arrived during decide; "

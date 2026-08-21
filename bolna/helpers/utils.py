@@ -65,8 +65,7 @@ def write_json_file(file_path, data):
 
 
 def safe_log_text(text, limit=120):
-    """Strip control chars from caller-supplied text before logging, then truncate.
-    Blocks forged log entries (CodeQL log-injection) independently of the format spec."""
+    """Strip control chars from caller text and truncate — blocks forged log entries."""
     return re.sub(r"[\x00-\x1f\x7f]+", " ", str(text or ""))[:limit]
 
 

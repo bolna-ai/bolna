@@ -1,5 +1,4 @@
-"""Rule-3a alphanumeric veto + settle-window regeneration (prod b381ba0a: judge switched
-hi→en on "This B1", and each fragment final shattered one answer across synth turns)."""
+"""Rule-3a alphanumeric veto + settle-window regeneration."""
 
 import asyncio
 from unittest.mock import AsyncMock, MagicMock
