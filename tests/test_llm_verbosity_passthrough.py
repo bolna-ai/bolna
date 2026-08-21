@@ -35,7 +35,12 @@ def _task_config(llm_config):
             },
             "synthesizer": {
                 "provider": "elevenlabs",
-                "provider_config": {"voice": "Nila", "voice_id": "test", "model": "eleven_turbo_v2_5"},
+                "provider_config": {
+                    "voice": "Nila",
+                    "voice_id": "test",
+                    "model": "eleven_turbo_v2_5",
+                    "synthesizer_key": "test-key",
+                },
                 "stream": True,
                 "buffer_size": 100,
             },

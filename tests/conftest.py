@@ -6,6 +6,11 @@ import os
 # the network at import time, so the suite would not run offline.
 os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "True")
 
+# The OpenAI SDK refuses to build a client without a key, and the simple_llm_agent path has no
+# kwarg to pass one. Overwritten rather than defaulted, so a developer's .env can never point a
+# test at a live account. Tests needing any other provider credential supply it themselves.
+os.environ["OPENAI_API_KEY"] = "test-key"
+
 import pytest  # noqa: E402
 from unittest.mock import AsyncMock, MagicMock
 
