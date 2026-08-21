@@ -41,8 +41,7 @@ class TestLegacySingleBrace:
         assert render_prompt("{prior[loans][0][amount]}", DATA) == "5000"
 
     def test_double_braced_json_keeps_both_braces(self):
-        # Accepted regression: no blanket unescape, because nested JSON ends in }} and
-        # unescaping would eat a brace off every nested payload. Visible, not data loss.
+        # Accepted regression: no blanket unescape, since nested JSON ends in }} and would lose a brace.
         assert render_prompt('{{"status": "ok"}}', DATA) == '{{"status": "ok"}}'
 
     def test_double_braced_identifier_still_unescapes(self):

@@ -46,8 +46,7 @@ logger = configure_logger(__name__)
 
 _DETERMINISTIC_REASONING_PREFIX = "deterministic:"
 _ROUTER_REASONING_PREFIX = f"{_DETERMINISTIC_REASONING_PREFIX}router:"
-# Captures the ROOT identifier of a referenced variable in either syntax, so that a
-# nested reference like {{prior.loans}} still validates against recipient_data["prior"].
+# Root identifier in either syntax, so {{prior.loans}} still validates against recipient_data["prior"].
 _PROMPT_VAR_PATTERN = re.compile(r"\{\{?\s*([a-zA-Z_][a-zA-Z0-9_]*)(?:\.[a-zA-Z0-9_]+|\[[^\[\]{}]+\])*\s*\}\}?")
 
 # Time variables frozen per call for the conversation prompt; see _prompt_context.
