@@ -6174,17 +6174,6 @@ class TaskManager(BaseManager):
             if cached:
                 self.handoff_audio_cache[label] = cached
                 return
-            # A synth that disagrees with the call's wire format would be cached at one
-            # encoding and streamed at the other, so skip it rather than mislabel the clip.
-            synth_mulaw = getattr(synth, "use_mulaw", None)
-            if synth_mulaw is not None and bool(synth_mulaw) != mulaw_wire:
-                logger.error(
-                    f"LanguageSwitcher: skipping handoff prewarm for '{label}' — "
-                    f"{synth.__class__.__name__} use_mulaw={synth_mulaw} but call wire is "
-                    f"{'mulaw' if mulaw_wire else 'pcm'}"
-                )
-                return
-
             # Anything under ~50ms can't be a handoff line: some one-shots return a truthy
             # error sentinel (e.g. deepgram's b"\x00" on non-200) rather than None.
             min_clip_bytes = 400 if mulaw_wire else 2400

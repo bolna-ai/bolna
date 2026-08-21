@@ -1,4 +1,5 @@
-"""Handoff clips pre-rendered per language as mu-law; switch plays the clip, cold cache falls back to live synth."""
+"""Handoff clips pre-rendered per language in the call's wire format (mu-law@8k on telephony,
+raw PCM@24k on web/freeswitch); switch plays the clip, cold cache falls back to live synth."""
 
 import base64
 import io
@@ -343,16 +344,17 @@ async def test_short_fallback_clip_still_discarded():
 
 
 @pytest.mark.asyncio
-async def test_synth_wire_mismatch_skips_prewarm():
-    """A synth whose own use_mulaw disagrees with the call's wire would be cached at one
-    encoding and streamed at the other — skip it rather than mislabel the clip."""
+async def test_mulaw_stream_synth_still_prewarms_on_pcm_wire():
+    """use_mulaw describes the streaming wire, not the HTTP one-shot: pixa/rime hardcode it
+    True but their synthesize() returns WAV, which converts cleanly to the PCM wire."""
     tm = _tm()
     tm.tools["output"].get_provider = MagicMock(return_value="freeswitch")  # pcm wire
     tm.switch_handoff_messages = {"te": "Telugu {language}."}
 
     synth = MagicMock(spec=["synthesize", "use_mulaw"])
-    synth.use_mulaw = True  # disagrees with the pcm wire
-    synth.synthesize = AsyncMock(return_value=_wav_bytes())
+    synth.use_mulaw = True  # hardcoded by the provider, ignores the kwarg
+    synth.synthesize = AsyncMock(return_value=_wav_bytes(duration_ms=200, rate=32000))
+    tm._TaskManager__handoff_clip_convert = TaskManager._TaskManager__handoff_clip_convert.__get__(tm, TaskManager)
 
     pool = MagicMock(spec=SynthesizerPool)
     pool.active_label = "hi"
@@ -361,8 +363,8 @@ async def test_synth_wire_mismatch_skips_prewarm():
 
     await TaskManager._TaskManager__prewarm_handoff_clips.__get__(tm, TaskManager)()
 
-    synth.synthesize.assert_not_awaited()
-    assert "te" not in tm.handoff_audio_cache
+    # 0.2s PCM@24k = 9600 bytes (resampler may round a sample)
+    assert abs(len(tm.handoff_audio_cache["te"]) - 9600) <= 8
 
 
 def test_handoff_mulaw_wire_tracks_output_handler_registry():
