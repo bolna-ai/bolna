@@ -40,8 +40,7 @@ _DETERMINISTIC_REASONING_PREFIX = "deterministic:"
 _ROUTER_REASONING_PREFIX = f"{_DETERMINISTIC_REASONING_PREFIX}router:"
 # Root identifier in either syntax, so {{prior.loans}} still validates against recipient_data["prior"].
 _PROMPT_VAR_PATTERN = re.compile(r"\{\{?\s*([a-zA-Z_][a-zA-Z0-9_]*)(?:\.[a-zA-Z0-9_]+|\[[^\[\]{}]+\])*\s*\}\}?")
-# The router's rationale is explanatory only, and its tokens sit on a live turn's critical path.
-_ROUTING_REASONING_ENABLED = os.getenv("GRAPH_ROUTING_REASONING", "").strip().lower() in ("1", "true", "yes")
+_ROUTER_RATIONALE_ENABLED = os.getenv("GRAPH_ROUTER_RATIONALE", "").strip().lower() in ("1", "true", "yes")
 
 # Time variables frozen per call for the conversation prompt; see _prompt_context.
 _TIME_VAR_KEYS = (
@@ -360,7 +359,7 @@ class GraphAgent(BaseAgent):
                     }
                     parameters["required"].append(param_name)
 
-            if _ROUTING_REASONING_ENABLED:
+            if _ROUTER_RATIONALE_ENABLED:
                 parameters["properties"]["reasoning"] = {
                     "type": "string",
                     "description": "Brief explanation of why this routing decision was made",
@@ -381,7 +380,7 @@ class GraphAgent(BaseAgent):
 
         if allow_stay:
             stay_properties = {}
-            if _ROUTING_REASONING_ENABLED:
+            if _ROUTER_RATIONALE_ENABLED:
                 stay_properties["reasoning"] = {
                     "type": "string",
                     "description": "Brief explanation of why this routing decision was made",
@@ -787,8 +786,7 @@ class GraphAgent(BaseAgent):
             option_edges.append(default_edge)
         tools = self._build_transition_tools_for_edges(option_edges, allow_stay=default_edge is None)
 
-        # Internal bookkeeping keys change every turn and would break the cacheable prefix;
-        # expression edges read them straight off context_data.
+        # Skip internal _-prefixed keys so the routing prompt prefix stays cacheable.
         context_section = ""
         if self.context_data:
             context_items = [
