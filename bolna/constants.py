@@ -11,7 +11,13 @@ WEB_BASED_CALL_PROVIDER = "web_based_call"
 WEBCALL_TTS_SAMPLE_RATE = 24000
 
 OPENAI_TRANSCRIBER_HEARTBEAT_INTERVAL_S = 5
-OPENAI_TRANSCRIBER_UTTERANCE_TIMEOUT_S = 0.5
+# Wait this long after commit for transcription.completed before force-finalizing
+# from accumulated interim deltas (avoids 20–35s silent waits on Twilio).
+OPENAI_TRANSCRIBER_UTTERANCE_TIMEOUT_S = 2.0
+# Default client-side speech gate (RMS of 24 kHz PCM16). Telephony often needs a
+# higher floor so line noise does not keep a turn open indefinitely.
+OPENAI_TRANSCRIBER_SPEECH_RMS_THRESHOLD = 400
+OPENAI_TRANSCRIBER_TELEPHONY_SPEECH_RMS_THRESHOLD = 500
 
 # ElevenLabs realtime (scribe_v2_realtime) accepts up to 50 keyterms for biasing.
 ELEVENLABS_REALTIME_MAX_KEYTERMS = 50
