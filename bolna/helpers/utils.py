@@ -953,8 +953,8 @@ def ulaw_to_pcm(ulaw_bytes):
     return audioop.ulaw2lin(ulaw_bytes, 2)  # 2 = sample width in bytes (16-bit)
 
 
-def audio_to_mulaw8k(audio, rate_hint=8000, format_hint=""):
-    """One-shot synth output (base64 str / WAV / raw PCM) → mono 16-bit 8kHz mu-law.
+def decode_audio_segment(audio, rate_hint=8000, format_hint=""):
+    """One-shot synth output (base64 str / WAV / raw PCM) → AudioSegment.
     Undecodable compressed containers (MP3/Ogg/FLAC) return None — never raw noise."""
     import base64
 
@@ -985,12 +985,16 @@ def audio_to_mulaw8k(audio, rate_hint=8000, format_hint=""):
     return pcm_to_ulaw(segment.raw_data)
 
 
-def audio_to_pcm(audio, sample_rate, rate_hint=8000, format_hint=""):
-    """One-shot synth output → mono 16-bit raw PCM at sample_rate, or None if undecodable."""
+def audio_to_pcm(audio, *, target_sample_rate, rate_hint=8000, format_hint=""):
+    """One-shot synth output → mono 16-bit raw PCM at target_sample_rate, or None if undecodable.
+
+    target_sample_rate is keyword-only on purpose: the second positional of the sibling
+    audio_to_mulaw8k is the *source* hint, so a positional here would silently mean the
+    opposite of what it reads like."""
     segment = decode_audio_segment(audio, rate_hint, format_hint)
     if segment is None:
         return None
-    return segment.set_frame_rate(int(sample_rate)).set_channels(1).set_sample_width(2).raw_data
+    return segment.set_frame_rate(int(target_sample_rate)).set_channels(1).set_sample_width(2).raw_data
 
 
 def soniox_ws_url(host):

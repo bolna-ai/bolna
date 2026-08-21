@@ -25,7 +25,7 @@ def _wav_bytes(duration_ms=100, rate=16000):
 
 
 def _to_mulaw(synth, audio):
-    return TaskManager._TaskManager__handoff_clip_to_mulaw.__get__(MagicMock(), TaskManager)(synth, audio)
+    return TaskManager._TaskManager__handoff_clip_convert.__get__(MagicMock(), TaskManager)(synth, audio, True)
 
 
 def test_clip_from_wav_bytes():
@@ -125,7 +125,7 @@ async def test_prewarm_renders_all_labels_and_survives_failure():
     pool.active_label = "hi"
     pool.synthesizers = {"hi": synth_for("hi", fail=True), "te": synth_for("te")}
     tm.tools["synthesizer"] = pool
-    tm._TaskManager__handoff_clip_to_mulaw = TaskManager._TaskManager__handoff_clip_to_mulaw.__get__(tm, TaskManager)
+    tm._TaskManager__handoff_clip_convert = TaskManager._TaskManager__handoff_clip_convert.__get__(tm, TaskManager)
 
     await TaskManager._TaskManager__prewarm_handoff_clips.__get__(tm, TaskManager)()
 
@@ -224,7 +224,7 @@ async def test_prewarm_renders_pcm_for_non_mulaw_wire():
 
     fallback = MagicMock(spec=["synthesize"])  # no pcm one-shot → synthesize() + audio_to_pcm
     fallback.synthesize = AsyncMock(return_value=_wav_bytes(rate=16000))
-    tm._TaskManager__handoff_clip_to_pcm = TaskManager._TaskManager__handoff_clip_to_pcm.__get__(tm, TaskManager)
+    tm._TaskManager__handoff_clip_convert = TaskManager._TaskManager__handoff_clip_convert.__get__(tm, TaskManager)
 
     pool = MagicMock(spec=SynthesizerPool)
     pool.active_label = "hi"
@@ -295,3 +295,108 @@ async def test_elevenlabs_pcm_clip_uses_native_pcm_format():
     s._generate_http.assert_awaited_once_with("hello", format="pcm_24000")
 
     assert await clip_fn("hello", 8000) is None  # unsupported rate → converter fallback
+
+
+@pytest.mark.asyncio
+async def test_one_shot_sentinel_falls_back_to_synthesize():
+    """A truthy-but-tiny one-shot result is a failed render, not a clip: synthesize() must
+    still get its turn instead of the label being abandoned unwarmed."""
+    tm = _tm()
+    tm.tools["output"].get_provider = MagicMock(return_value="plivo")
+    tm.switch_handoff_messages = {"te": "Telugu {language}."}
+
+    synth = MagicMock(spec=["synthesize", "synthesize_telephony_clip"])
+    synth.synthesize_telephony_clip = AsyncMock(return_value=b"\x00")  # deepgram-style sentinel
+    synth.synthesize = AsyncMock(return_value=_wav_bytes(duration_ms=200))
+    tm._TaskManager__handoff_clip_convert = TaskManager._TaskManager__handoff_clip_convert.__get__(tm, TaskManager)
+
+    pool = MagicMock(spec=SynthesizerPool)
+    pool.active_label = "hi"
+    pool.synthesizers = {"te": synth}
+    tm.tools["synthesizer"] = pool
+
+    await TaskManager._TaskManager__prewarm_handoff_clips.__get__(tm, TaskManager)()
+
+    synth.synthesize.assert_awaited_once()
+    assert len(tm.handoff_audio_cache["te"]) == 1600  # 0.2s @ 8kHz mu-law
+
+
+@pytest.mark.asyncio
+async def test_short_fallback_clip_still_discarded():
+    """The size floor still applies to the converter result — a too-short clip is dropped."""
+    tm = _tm()
+    tm.tools["output"].get_provider = MagicMock(return_value="plivo")
+    tm.switch_handoff_messages = {"te": "Telugu {language}."}
+
+    synth = MagicMock(spec=["synthesize"])
+    synth.synthesize = AsyncMock(return_value=_wav_bytes(duration_ms=10))  # 80 bytes mu-law
+    tm._TaskManager__handoff_clip_convert = TaskManager._TaskManager__handoff_clip_convert.__get__(tm, TaskManager)
+
+    pool = MagicMock(spec=SynthesizerPool)
+    pool.active_label = "hi"
+    pool.synthesizers = {"te": synth}
+    tm.tools["synthesizer"] = pool
+
+    await TaskManager._TaskManager__prewarm_handoff_clips.__get__(tm, TaskManager)()
+
+    assert "te" not in tm.handoff_audio_cache
+
+
+@pytest.mark.asyncio
+async def test_synth_wire_mismatch_skips_prewarm():
+    """A synth whose own use_mulaw disagrees with the call's wire would be cached at one
+    encoding and streamed at the other — skip it rather than mislabel the clip."""
+    tm = _tm()
+    tm.tools["output"].get_provider = MagicMock(return_value="freeswitch")  # pcm wire
+    tm.switch_handoff_messages = {"te": "Telugu {language}."}
+
+    synth = MagicMock(spec=["synthesize", "use_mulaw"])
+    synth.use_mulaw = True  # disagrees with the pcm wire
+    synth.synthesize = AsyncMock(return_value=_wav_bytes())
+
+    pool = MagicMock(spec=SynthesizerPool)
+    pool.active_label = "hi"
+    pool.synthesizers = {"te": synth}
+    tm.tools["synthesizer"] = pool
+
+    await TaskManager._TaskManager__prewarm_handoff_clips.__get__(tm, TaskManager)()
+
+    synth.synthesize.assert_not_awaited()
+    assert "te" not in tm.handoff_audio_cache
+
+
+def test_handoff_mulaw_wire_tracks_output_handler_registry():
+    """The wire decision and the telephony handler registry must not drift apart."""
+    from bolna.providers import SUPPORTED_OUTPUT_TELEPHONY_HANDLERS
+
+    tm = _tm()
+    wire = TaskManager._TaskManager__handoff_mulaw_wire.__get__(tm, TaskManager)
+    for provider in SUPPORTED_OUTPUT_TELEPHONY_HANDLERS:
+        tm.tools["output"].get_provider = MagicMock(return_value=provider)
+        assert wire() is True, provider
+    for provider in ("freeswitch", "default"):
+        tm.tools["output"].get_provider = MagicMock(return_value=provider)
+        assert wire() is False, provider
+
+
+@pytest.mark.asyncio
+async def test_cartesia_pcm_clip_uses_raw_pcm_output_format():
+    from bolna.synthesizer.cartesia_synthesizer import CartesiaSynthesizer
+
+    s = MagicMock(spec=["_generate_http"])
+    s._generate_http = AsyncMock(return_value=b"\x00\x01" * 100)
+    clip_fn = CartesiaSynthesizer.synthesize_pcm_clip.__get__(s, CartesiaSynthesizer)
+
+    assert await clip_fn("hello", 24000) == b"\x00\x01" * 100
+    s._generate_http.assert_awaited_once_with(
+        "hello", output_format={"container": "raw", "encoding": "pcm_s16le", "sample_rate": 24000}
+    )
+
+
+def test_audio_to_pcm_target_rate_is_keyword_only():
+    """Positional-by-analogy with audio_to_mulaw8k would silently mean the source hint."""
+    from bolna.helpers.utils import audio_to_pcm
+
+    with pytest.raises(TypeError):
+        audio_to_pcm(_wav_bytes(), 24000)
+    assert audio_to_pcm(_wav_bytes(), target_sample_rate=24000) is not None
