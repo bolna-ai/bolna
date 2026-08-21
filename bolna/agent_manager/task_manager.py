@@ -1737,10 +1737,7 @@ class TaskManager(BaseManager):
 
                 # Pre-render every language's handoff clip on its own voice (background;
                 if self.language_switcher is not None and not self.turn_based_conversation:
-                    # On "default" the call only has one wire format when it is a browser call
-                    # (use_mulaw forced False). Off the web path each synth keeps its own
-                    # use_mulaw default — elevenlabs/cartesia mu-law, maya/deepgram PCM — so
-                    # there is nothing for a per-call render format to agree with.
+                    # "default" has one wire format only on the web path.
                     if self.task_config["tools_config"]["output"]["provider"] != "default" or self.is_web_based_call:
                         self.handoff_prewarm_task = asyncio.create_task(self.__prewarm_handoff_clips())
 
@@ -6098,7 +6095,6 @@ class TaskManager(BaseManager):
             "text": handoff_text,
             "type": "audio",
         }
-        # The prewarm rendered the clip in this call's wire format, so it is always usable.
         clip = self.handoff_audio_cache.get(target)
         if clip:
             # Pre-warmed wire-format clip pushed straight to the transport. Both end-flags required
@@ -6144,10 +6140,7 @@ class TaskManager(BaseManager):
         )
 
     def __handoff_mulaw_wire(self) -> bool:
-        """Telephony transports take the mu-law@8k clip; web/freeswitch play raw PCM@24k.
-
-        Keyed off the output-handler registry so a sixth carrier cannot be added without a
-        handler and silently fall through to the PCM branch."""
+        """True on telephony (mu-law@8k clip), False on web/freeswitch (raw PCM@24k)."""
         return self.tools["output"].get_provider() in SUPPORTED_OUTPUT_TELEPHONY_HANDLERS
 
     async def __prewarm_handoff_clips(self):
@@ -6174,8 +6167,7 @@ class TaskManager(BaseManager):
             if cached:
                 self.handoff_audio_cache[label] = cached
                 return
-            # Anything under ~50ms can't be a handoff line: some one-shots return a truthy
-            # error sentinel (e.g. deepgram's b"\x00" on non-200) rather than None.
+            # Under ~50ms is a failed one-shot returning a sentinel, not a clip.
             min_clip_bytes = 400 if mulaw_wire else 2400
             try:
                 clip = None
@@ -6188,8 +6180,7 @@ class TaskManager(BaseManager):
                     pcm_one_shot = getattr(synth, "synthesize_pcm_clip", None)
                     if pcm_one_shot is not None:
                         clip = await pcm_one_shot(text, WEBCALL_TTS_SAMPLE_RATE)
-                # Checked before the fallback: a sentinel is a failed one-shot, not a clip,
-                # so synthesize() still gets its turn instead of the label going unwarmed.
+                # Before the fallback, so synthesize() still gets its turn.
                 if clip and len(clip) < min_clip_bytes:
                     logger.warning(
                         f"LanguageSwitcher: one-shot for '{label}' returned {len(clip)}B — falling back to synthesize()"
@@ -6217,8 +6208,7 @@ class TaskManager(BaseManager):
         await asyncio.gather(*(render(label, synth) for label, synth in pool.synthesizers.items()))
 
     def __handoff_clip_convert(self, synth, audio, mulaw_wire):
-        """Decode a one-shot synth render into the call's wire format. Blocking (pydub) —
-        callers run it off the event loop."""
+        """Decode a one-shot render into the wire format. Blocking — run off-loop."""
         kwargs = {
             "rate_hint": getattr(synth, "sampling_rate", 0) or getattr(synth, "sample_rate", 0) or 8000,
             "format_hint": getattr(synth, "format", "") or "",

@@ -1,5 +1,4 @@
-"""Handoff clips pre-rendered per language in the call's wire format (mu-law@8k on telephony,
-raw PCM@24k on web/freeswitch); switch plays the clip, cold cache falls back to live synth."""
+"""Handoff clips pre-rendered per language in the call's wire format."""
 
 import base64
 import io
@@ -200,8 +199,7 @@ async def test_clips_cached_across_calls_per_voice_and_text():
 
 @pytest.mark.asyncio
 async def test_freeswitch_pushes_clip_as_pcm():
-    """42b5f89b: prewarm renders the clip in the call's wire format, so on FS the cached clip
-    is raw PCM@24k and is pushed directly with format=pcm (never mislabeled mulaw)."""
+    """42b5f89b: on FS the clip is PCM@24k, pushed as format=pcm, never mislabeled."""
     tm = _tm(cache={"te": b"\x00\x01" * 2400})
     tm.tools["output"].get_provider = MagicMock(return_value="freeswitch")
     await _play(tm)
@@ -300,8 +298,7 @@ async def test_elevenlabs_pcm_clip_uses_native_pcm_format():
 
 @pytest.mark.asyncio
 async def test_one_shot_sentinel_falls_back_to_synthesize():
-    """A truthy-but-tiny one-shot result is a failed render, not a clip: synthesize() must
-    still get its turn instead of the label being abandoned unwarmed."""
+    """A truthy-but-tiny one-shot is a failed render — synthesize() must still run."""
     tm = _tm()
     tm.tools["output"].get_provider = MagicMock(return_value="plivo")
     tm.switch_handoff_messages = {"te": "Telugu {language}."}
@@ -345,8 +342,7 @@ async def test_short_fallback_clip_still_discarded():
 
 @pytest.mark.asyncio
 async def test_mulaw_stream_synth_still_prewarms_on_pcm_wire():
-    """use_mulaw describes the streaming wire, not the HTTP one-shot: pixa/rime hardcode it
-    True but their synthesize() returns WAV, which converts cleanly to the PCM wire."""
+    """use_mulaw is the streaming wire, not the one-shot: pixa/rime return WAV anyway."""
     tm = _tm()
     tm.tools["output"].get_provider = MagicMock(return_value="freeswitch")  # pcm wire
     tm.switch_handoff_messages = {"te": "Telugu {language}."}

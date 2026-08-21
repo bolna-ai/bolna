@@ -97,7 +97,7 @@ class ElevenlabsBase(StreamSynthesizer):
         return await self._generate_http(text, format="mp3_44100_128")
 
     async def synthesize_pcm_clip(self, text, sample_rate):
-        # ElevenLabs renders pcm_16000/22050/24000/44100 natively — no MP3 decode needed.
+        # Natively rendered rates only.
         if int(sample_rate) not in (16000, 22050, 24000, 44100):
             return None
         return await self._generate_http(text, format=f"pcm_{int(sample_rate)}")

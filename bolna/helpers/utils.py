@@ -954,8 +954,7 @@ def ulaw_to_pcm(ulaw_bytes):
 
 
 def decode_audio_segment(audio, rate_hint=8000, format_hint=""):
-    """One-shot synth output (base64 str / WAV / raw PCM) → AudioSegment.
-    Undecodable compressed containers (MP3/Ogg/FLAC) return None — never raw noise."""
+    """base64/WAV/raw PCM → AudioSegment; undecodable containers → None."""
     import base64
 
     if isinstance(audio, str):
@@ -986,11 +985,7 @@ def audio_to_mulaw8k(audio, rate_hint=8000, format_hint=""):
 
 
 def audio_to_pcm(audio, *, target_sample_rate, rate_hint=8000, format_hint=""):
-    """One-shot synth output → mono 16-bit raw PCM at target_sample_rate, or None if undecodable.
-
-    target_sample_rate is keyword-only on purpose: the second positional of the sibling
-    audio_to_mulaw8k is the *source* hint, so a positional here would silently mean the
-    opposite of what it reads like."""
+    """→ mono 16-bit PCM, or None. Keyword-only: the sibling's 2nd arg is the SOURCE rate."""
     segment = decode_audio_segment(audio, rate_hint, format_hint)
     if segment is None:
         return None

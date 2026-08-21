@@ -271,8 +271,7 @@ class CartesiaSynthesizer(StreamSynthesizer):
         return await self._generate_http(text)
 
     async def synthesize_pcm_clip(self, text, sample_rate):
-        """One-shot render as raw PCM — the same output_format the WS path uses on the
-        web/freeswitch leg, so the clip needs no mp3 decode (and no ffmpeg) to play."""
+        """Raw PCM, matching the WS web leg — no mp3 decode."""
         return await self._generate_http(
             text,
             output_format={"container": "raw", "encoding": "pcm_s16le", "sample_rate": int(sample_rate)},
