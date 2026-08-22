@@ -7,6 +7,7 @@ Ref: https://docs.asterisk.org/Configuration/Channel-Drivers/WebSocket/
 import asyncio
 import json
 import os
+import time
 import traceback
 from bolna.input_handlers.telephony import TelephonyInputHandler
 from bolna.helpers.utils import create_ws_data_packet
@@ -27,6 +28,19 @@ AUDIO_BATCH_MS = 80
 # How long to wait after sending HANGUP before closing the WebSocket, giving Asterisk
 # time to act on it. Overridable via env.
 HANGUP_SETTLE_S = float(os.environ.get("SIP_HANGUP_SETTLE_S", "0.5"))
+
+# Grace on top of the unplayed-audio estimate when waiting for Asterisk to confirm
+# (QUEUE_DRAINED) that it has played out everything we sent, before HANGUP cuts the
+# tail off the goodbye. Overridable via env.
+HANGUP_DRAIN_TIMEOUT_S = float(os.environ.get("SIP_HANGUP_DRAIN_TIMEOUT_S", "2.0"))
+
+# Hard ceiling on the whole teardown drain (finish writing + play out). Asterisk's own
+# frame queue caps at ~24s of audio, so anything beyond this is a stuck signal, not a
+# long goodbye. Overridable via env.
+HANGUP_DRAIN_MAX_WAIT_S = float(os.environ.get("SIP_HANGUP_DRAIN_MAX_WAIT_S", "30.0"))
+
+# Extra wait after QUEUE_DRAINED for the far-end jitter buffer. Overridable via env.
+HANGUP_DRAIN_SETTLE_S = float(os.environ.get("SIP_HANGUP_DRAIN_SETTLE_S", "0.5"))
 
 # Submit accumulated DTMF digits after this much inter-digit silence (reset on each
 # keypress), or immediately when '#' is pressed. Overridable via env.
@@ -56,6 +70,10 @@ def _parse_asterisk_control_message(text: str) -> dict:
         # "QUEUE_DRAINED" have no space — guarding on `" " in text` dropped them entirely.
         if tokens and ":" not in tokens[0] and "event" not in result:
             result["event"] = tokens[0]
+            # Events carrying a bare correlation id ("MEDIA_MARK_PROCESSED <uuid>") put it
+            # in the second token, with no "key:value" shape to pick it up.
+            if len(tokens) > 1 and ":" not in tokens[1] and "correlation_id" not in result:
+                result["correlation_id"] = tokens[1]
 
     event = (result.get("event") or result.get("command") or "").upper().replace(" ", "_")
     if event:
@@ -98,6 +116,7 @@ class SipTrunkInputHandler(TelephonyInputHandler):
         self.ptime = 20
         self._pending_stream_sid = None  # promoted to stream_sid on first audio frame
         self._dtmf_timer_task = None  # inter-digit timeout for DTMF accumulation
+        self._queue_drained = asyncio.Event()  # set by Asterisk's QUEUE_DRAINED event
 
         input_config = self._get_input_config()
         self._expected_format = (input_config.get("audio_format") or input_config.get("format") or "ulaw").lower()
@@ -143,12 +162,66 @@ class SipTrunkInputHandler(TelephonyInputHandler):
         except Exception as e:
             logger.error(f"Error sending HANGUP: {e}")
 
+    def _unplayed_audio_estimate(self) -> float:
+        """Seconds of audio registered but not yet confirmed played, from pending marks."""
+        meta = getattr(self, "mark_event_meta_data", None)
+        if not meta:
+            return 0.0
+        events = meta.mark_event_meta_data
+        return sum(v.get("duration") or 0.0 for v in events.values() if v.get("type") != "pre_mark_message")
+
+    async def _await_playback_drained(self):
+        """Hold HANGUP until Asterisk reports its frame queue empty.
+
+        Audio is handed over faster than real time, so at teardown part of the goodbye is
+        usually still buffered in Asterisk — and, because sends are rate-limited, part of
+        it may not even have been written yet. Wait for the output handler to finish
+        writing, then wait for QUEUE_DRAINED for as long as the pending-mark durations
+        say is left to play. Bounded, and a no-op once the queue is already empty.
+        """
+        listen_task = self.websocket_listen_task
+        if listen_task is None or listen_task.done():
+            return  # receive loop is gone (caller hung up first) — nothing can answer
+
+        deadline = time.monotonic() + HANGUP_DRAIN_MAX_WAIT_S
+
+        output = getattr(self, "output_handler_ref", None)
+        if output is not None and hasattr(output, "has_unsent_audio"):
+            while output.has_unsent_audio() and time.monotonic() < deadline:
+                await asyncio.sleep(0.1)
+
+        self._queue_drained.clear()
+        try:
+            await self.websocket.send_text("REPORT_QUEUE_DRAINED")
+        except Exception as e:
+            logger.info(f"REPORT_QUEUE_DRAINED not sent for channel {self.channel_id}: {e}")
+            return
+
+        timeout = max(
+            HANGUP_DRAIN_TIMEOUT_S,
+            min(self._unplayed_audio_estimate() + HANGUP_DRAIN_TIMEOUT_S, deadline - time.monotonic()),
+        )
+        try:
+            await asyncio.wait_for(self._queue_drained.wait(), timeout=timeout)
+        except asyncio.TimeoutError:
+            logger.warning(
+                f"QUEUE_DRAINED not received within {timeout:.1f}s for channel {self.channel_id}; hanging up anyway"
+            )
+            return
+        await asyncio.sleep(HANGUP_DRAIN_SETTLE_S)
+
     async def stop_handler(self):
         """Stop and disconnect; Asterisk closes quickly after HANGUP."""
         logger.info(f"Stopping sip-trunk handler for channel {self.channel_id}")
-        self.running = False
-        self._cancel_dtmf_timer()
-        await self.disconnect_stream()
+        try:
+            await self._await_playback_drained()
+        finally:
+            # The drain wait is the only suspension point between entering teardown and the
+            # hangup, so sending HANGUP from finally is what keeps a cancelled teardown from
+            # leaving the caller on a live channel.
+            self.running = False
+            self._cancel_dtmf_timer()
+            await self.disconnect_stream()
         await asyncio.sleep(HANGUP_SETTLE_S)
         try:
             await self.websocket.close()
@@ -326,13 +399,29 @@ class SipTrunkInputHandler(TelephonyInputHandler):
                 task.add_done_callback(_on_drain_done)
             logger.info(f"MEDIA_XON for channel {self.channel_id}")
             return
+        if event == "MEDIA_MARK_PROCESSED":
+            # Asterisk queues the mark in-band behind the audio it follows, so this lands
+            # when that audio has been dequeued for RTP — the same contract as a Twilio or
+            # Plivo mark echo. Routed through the shared path so latency and heard-text
+            # tracking work identically across providers.
+            mark_id = parsed.get("correlation_id")
+            if mark_id:
+                self.process_mark_message({"name": mark_id})
+            else:
+                logger.warning(f"MEDIA_MARK_PROCESSED without a mark id for channel {self.channel_id}: {text}")
+            return
         if event == "STATUS" or "MEDIA_BUFFERING_COMPLETED" in event:
             logger.debug(f"Asterisk control: {event}")
             return
+        if event == "ERROR":
+            # Asterisk rejects a command (e.g. anything media-related in passthrough mode)
+            # with this. Silently swallowing it once hid a dead REPORT_QUEUE_DRAINED gate.
+            logger.warning(f"Asterisk rejected a command for channel {self.channel_id}: {text}")
+            return
         if event == "QUEUE_DRAINED" or "QUEUE_DRAINED" in event:
-            # At 1x pacing, playback completion is tracked by the output handler's
-            # send-loop drain detection — QUEUE_DRAINED is informational only.
-            logger.debug(f"QUEUE_DRAINED for channel {self.channel_id} (informational)")
+            # Only requested at teardown, to gate HANGUP on real playout completion.
+            self._queue_drained.set()
+            logger.info(f"QUEUE_DRAINED for channel {self.channel_id}")
             return
         if event or parsed:
             logger.debug(f"Asterisk control: {text} -> event={event}")

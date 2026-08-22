@@ -8,6 +8,7 @@ from dotenv import load_dotenv
 from .base_transcriber import BaseTranscriber
 import azure.cognitiveservices.speech as speechsdk
 from bolna.helpers.utils import create_ws_data_packet, timestamp_ms
+from bolna.enums import TelephonyProvider
 from bolna.helpers.logger_config import configure_logger
 
 logger = configure_logger(__name__)
@@ -50,8 +51,8 @@ class AzureTranscriber(BaseTranscriber):
         self._turn_start_epoch_ms = None
         self.turn_counter = 0
 
-        if self.audio_provider in ("twilio", "exotel", "plivo"):
-            self.encoding = "mulaw" if self.audio_provider in ("twilio",) else "linear16"
+        if self.audio_provider in TelephonyProvider.telephony_values():
+            self.encoding = "mulaw" if self.audio_provider in TelephonyProvider.mulaw_values() else "linear16"
             if self.encoding == "mulaw":
                 self.bits_per_sample = 8
             self.audio_frame_duration = 0.2
@@ -136,13 +137,57 @@ class AzureTranscriber(BaseTranscriber):
                     self.audio_frame_timestamps.append((frame_start, frame_end, send_timestamp))
                     self.num_frames += 1
 
-                    self.push_stream.write(ws_data_packet.get("data"))
+                    # None while a reconnect swaps the connection. That audio has nowhere to
+                    # go, but the pump has to survive the gap to serve the new stream.
+                    push_stream = self.push_stream
+                    if push_stream is not None:
+                        push_stream.write(ws_data_packet.get("data"))
         except Exception as e:
             exc_type, exc_obj, exc_tb = sys.exc_info()
             logger.error(f"Error occurred in send_audio_to_transcriber - {e} at {exc_tb.tb_lineno}")
 
+    def _release_previous_connection(self):
+        """Stop the superseded recognizer and drop it here, off the event loop."""
+        recognizer, self.recognizer = self.recognizer, None
+        push_stream, self.push_stream = self.push_stream, None
+
+        if recognizer is not None:
+            # Detach first: stopping raises session_stopped, whose handler asks for a reconnect,
+            # and a late recognizing event would land a stale transcript in the new turn.
+            for signal in (
+                recognizer.recognizing,
+                recognizer.recognized,
+                recognizer.canceled,
+                recognizer.session_started,
+                recognizer.session_stopped,
+            ):
+                try:
+                    signal.disconnect_all()
+                except Exception as e:
+                    logger.error(f"Error detaching previous recognizer signal: {e}")
+
+        if push_stream is not None:
+            try:
+                push_stream.close()
+            except Exception as e:
+                logger.error(f"Error closing previous push stream: {e}")
+
+        if recognizer is not None:
+            try:
+                recognizer.stop_continuous_recognition_async().get()
+            except Exception as e:
+                logger.error(f"Error stopping previous recognition: {e}")
+
     async def initialize_connection(self):
         try:
+            # The SDK's native teardown blocks for tens of seconds against an unresponsive
+            # endpoint, so a reconnect releases the previous recognizer off the loop.
+            if self.recognizer is not None or self.push_stream is not None:
+                await asyncio.get_event_loop().run_in_executor(None, self._release_previous_connection)
+
+            # run() reads this as "connection dead", so it must describe only this attempt.
+            self.connection_error = None
+
             speech_config = speechsdk.SpeechConfig(subscription=self.subscription_key, region=self.service_region)
             speech_config.speech_recognition_language = self.recognition_language
 

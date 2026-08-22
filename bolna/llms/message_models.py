@@ -22,6 +22,23 @@ class ChatMessage(BaseModel):
     tool_call_id: Optional[str] = None
 
 
+# Bookkeeping bolna attaches to history messages for correlation and audio gating. Removed
+# before the request is built: OpenAI-compatible providers forward unknown message keys
+# verbatim, and nothing should depend on the server ignoring them. Denylist rather than an
+# allowlist so a legitimate provider key (name, cache_control, multimodal parts) is never
+# silently dropped.
+INTERNAL_MESSAGE_KEYS = frozenset(
+    {"turn_id", "response_uid", "asr_turn_id", "sequence_id", "message_category", "exclude_from_llm"}
+)
+
+
+def strip_internal_keys(messages: list[dict]) -> list[dict]:
+    """Drop bolna's own bookkeeping keys, leaving every other key untouched."""
+    return [
+        {k: v for k, v in m.items() if k not in INTERNAL_MESSAGE_KEYS} if isinstance(m, dict) else m for m in messages
+    ]
+
+
 class ChatToolFunction(BaseModel):
     name: str = ""
     description: str = ""

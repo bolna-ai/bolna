@@ -27,6 +27,7 @@ class LanguageDetector:
         self._task = None
         self._llm = None
         self._latency_ms = None
+        self.detected_at_epoch_ms = None
 
         if self.turns_threshold > 0:
             self._llm = OpenAiLLM(model=os.getenv("LANGUAGE_DETECTION_LLM", "gpt-4.1-mini"))
@@ -44,6 +45,7 @@ class LanguageDetector:
             return {
                 "type": "language_detection",
                 "latency_ms": self._latency_ms,
+                "detected_at_epoch_ms": self.detected_at_epoch_ms,
                 "model": self._llm.model if self._llm else None,
                 "provider": "openai",
             }
@@ -84,6 +86,7 @@ class LanguageDetector:
             start_time = time.time()
             response = await self._llm.generate([{"role": "system", "content": prompt}], request_json=True)
             self._latency_ms = (time.time() - start_time) * 1000
+            self.detected_at_epoch_ms = time.time() * 1000
             self._result = json.loads(response)
             self._complete = True
             logger.info(f"Language detection complete: {self._result}")

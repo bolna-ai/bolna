@@ -18,6 +18,7 @@ class TelephonyProvider(str, Enum):
     PLIVO = "plivo"
     VOBIZ = "vobiz"
     SIP_TRUNK = "sip-trunk"
+    FREESWITCH = "freeswitch"  # linear16 16k in / 24k out (not ulaw/8k) — deliberately not a telephony_provider
     DEFAULT = "default"
     DATABASE = "database"
 
@@ -36,6 +37,16 @@ class TelephonyProvider(str, Enum):
         """Return telephony provider values as a list of strings."""
         return [provider.value for provider in cls.telephony_providers()]
 
+    @classmethod
+    def mulaw_providers(cls):
+        """Telephony providers that stream mulaw; every other telephony provider streams linear16."""
+        return [cls.TWILIO, cls.SIP_TRUNK]
+
+    @classmethod
+    def mulaw_values(cls):
+        """Return mulaw telephony provider values as a list of strings."""
+        return [provider.value for provider in cls.mulaw_providers()]
+
 
 class SynthesizerProvider(str, Enum):
     """Enum for synthesizer (TTS) providers."""
@@ -50,6 +61,7 @@ class SynthesizerProvider(str, Enum):
     SARVAM = "sarvam"
     RIME = "rime"
     PIXA = "pixa"
+    MAYA = "maya"
 
     @classmethod
     def all_values(cls):
@@ -187,6 +199,7 @@ class HangupReason(str, Enum):
     SYNTHESIZER_ERROR = "synthesizer_error"
     LLM_ERROR = "llm_error"
     END_CALL_TOOL = "end_call_tool"
+    S2S_ERROR = "s2s_error"
 
     @classmethod
     def all_values(cls):
@@ -204,6 +217,7 @@ class LogComponent(str, Enum):
     LLM_LANGUAGE_DETECTION = "llm_language_detection"
     LLM_LANGUAGE_SWITCH = "llm_language_switch"
     LLM_VOICEMAIL = "llm_voicemail"
+    S2S = "s2s"
     SYNTHESIZER = "synthesizer"
     TRANSCRIBER = "transcriber"
     WARNING = "warning"
@@ -279,6 +293,17 @@ class NodeType(str, Enum):
     LLM = "llm"
     STATIC = "static"
     ROUTER = "router"
+
+
+class S2SProvider(str, Enum):
+    """Enum for speech-to-speech providers."""
+
+    OPENAI_REALTIME = "openai_realtime"
+    GEMINI_LIVE = "gemini_live"
+
+    @classmethod
+    def all_values(cls):
+        return [p.value for p in cls]
 
 
 class ToolScope(str, Enum):

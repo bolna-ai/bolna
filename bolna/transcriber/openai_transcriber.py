@@ -89,6 +89,8 @@ class OpenAITranscriber(BaseTranscriber):
         # Saved at commit time so the receiver can still identify the turn after
         # _reset_turn_state() clears current_turn_id (e.g. utterance timeout race).
         self._last_committed_turn_id: Optional[str] = None
+        # turn_id of the last entry written to turn_latencies, to keep those keys unique
+        self._last_latency_turn_id = None
 
         self._speech_active = False
         self._silence_start_time: Optional[float] = None
@@ -410,6 +412,13 @@ class OpenAITranscriber(BaseTranscriber):
                             # most reliable identifier — current_turn_id may already point
                             # to the next turn if the sender started speaking immediately.
                             turn_id = self._last_committed_turn_id or self.current_turn_id or item_id
+                            # OpenAI emits several items per committed turn; reusing one id made
+                            # turn_latencies upserts clobber each other, so extras get a fresh id.
+                            if turn_id is not None and turn_id == self._last_latency_turn_id:
+                                self.turn_counter += 1
+                                turn_id = f"turn_{self.turn_counter}"
+                            self._last_latency_turn_id = turn_id
+                            self.meta_info["asr_turn_id"] = turn_id  # appends, so no base-class stamp
                             logger.info(f"Transcript completed for turn {turn_id}: {transcript[:80]}")
                             if self.current_turn_start_time:
                                 total_ms = round((time.perf_counter() - self.current_turn_start_time) * 1000)

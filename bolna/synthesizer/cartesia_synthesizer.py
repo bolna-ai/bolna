@@ -45,7 +45,7 @@ class CartesiaSynthesizer(StreamSynthesizer):
         self.language = language
         self.sampling_rate = sampling_rate
         self.speed = speed
-        self.use_mulaw = True
+        self.use_mulaw = kwargs.get("use_mulaw", True)  # web/freeswitch pass False → raw PCM @sampling_rate
         self.stream = True
 
         self.cartesia_host = os.getenv("CARTESIA_API_HOST", "api.cartesia.ai")
@@ -122,7 +122,11 @@ class CartesiaSynthesizer(StreamSynthesizer):
             "transcript": text,
             "language": self.language,
             "voice": {"mode": "id", "id": self.voice_id},
-            "output_format": {"container": "raw", "encoding": "pcm_mulaw", "sample_rate": 8000},
+            "output_format": (
+                {"container": "raw", "encoding": "pcm_mulaw", "sample_rate": 8000}
+                if self.use_mulaw
+                else {"container": "raw", "encoding": "pcm_s16le", "sample_rate": int(self.sampling_rate)}
+            ),
             "generation_config": {"speed": self.speed},
         }
         if text:
@@ -266,12 +270,19 @@ class CartesiaSynthesizer(StreamSynthesizer):
     async def synthesize(self, text):
         return await self._generate_http(text)
 
-    async def _generate_http(self, text):
+    async def synthesize_pcm_clip(self, text, sample_rate):
+        """Raw PCM, matching the WS web leg — no mp3 decode."""
+        return await self._generate_http(
+            text,
+            output_format={"container": "raw", "encoding": "pcm_s16le", "sample_rate": int(sample_rate)},
+        )
+
+    async def _generate_http(self, text, output_format=None):
         payload = {
             "model_id": self.model,
             "transcript": text,
             "voice": {"mode": "id", "id": self.voice_id},
-            "output_format": {"container": "mp3", "encoding": "mp3", "sample_rate": 44100},
+            "output_format": output_format or {"container": "mp3", "encoding": "mp3", "sample_rate": 44100},
             "language": self.language,
             "generation_config": {"speed": self.speed},
         }

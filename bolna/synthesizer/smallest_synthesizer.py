@@ -15,10 +15,13 @@ logger = configure_logger(__name__)
 
 
 class SmallestSynthesizer(StreamSynthesizer):
+    # Attribution tag sent to Smallest AI so requests are tracked as bolna traffic.
+    SOURCE = "bolna"
+
     def __init__(
         self,
         voice_id,
-        model="lightning",
+        model="lightning_v3.1",
         language="en",
         audio_format="mp3",
         sampling_rate="8000",
@@ -39,8 +42,10 @@ class SmallestSynthesizer(StreamSynthesizer):
         self.sampling_rate = int(sampling_rate)
         self.language = language
 
-        self.api_url = f"https://waves-api.smallest.ai/api/v1/{self.model}/get_speech"
-        self.ws_url = "wss://waves-api.smallest.ai/api/v1/lightning-v2/get_speech/stream?timeout=60"
+        # Unified Waves endpoints (docs.smallest.ai -> /text-to-speech).
+        # HTTP: POST /waves/v1/tts, streaming: WSS /waves/v1/tts/live
+        self.api_url = "https://api.smallest.ai/waves/v1/tts"
+        self.ws_url = "wss://api.smallest.ai/waves/v1/tts/live"
 
     # ------------------------------------------------------------------
     # StreamSynthesizer hooks
@@ -53,6 +58,7 @@ class SmallestSynthesizer(StreamSynthesizer):
         return {
             "voice_id": self.voice_id,
             "text": text,
+            "model": self.model,
             "language": self.language,
             "sample_rate": self.sampling_rate,
         }
@@ -134,7 +140,10 @@ class SmallestSynthesizer(StreamSynthesizer):
             websocket = await asyncio.wait_for(
                 websockets.connect(
                     self.ws_url,
-                    additional_headers={"Authorization": f"Token {self.api_key}"},
+                    additional_headers={
+                        "Authorization": f"Bearer {self.api_key}",
+                        "X-Source": self.SOURCE,
+                    },
                     ssl=get_ssl_context(self.ws_url),
                 ),
                 timeout=10.0,
@@ -163,10 +172,16 @@ class SmallestSynthesizer(StreamSynthesizer):
         payload = {
             "text": text,
             "voice_id": self.voice_id,
+            "model": self.model,
             "sample_rate": self.sampling_rate,
-            "add_wav_header": False,
+            "output_format": self._get_audio_format(),
         }
-        headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+            "Accept": "audio/wav",
+            "X-Source": self.SOURCE,
+        }
         async with aiohttp.ClientSession() as session:
             async with session.post(self.api_url, headers=headers, json=payload) as response:
                 if response.status == 200:

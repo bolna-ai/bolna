@@ -6,6 +6,10 @@ from bolna.helpers.logger_config import configure_logger
 
 logger = configure_logger(__name__)
 
+# Undrained buffer age bound: segments older than this are evicted at accumulate time so a
+# skipped/retained generation cannot lend its duration or text to a later turn.
+BUFFER_SEGMENT_MAX_AGE_S = 30.0
+
 # async def on_language(lang: str, confidence: Optional[float]) -> None
 # confidence is None when the provider does not return a score
 OnLanguageCallback = Callable[[str, Optional[float]], Awaitable[None]]
@@ -40,6 +44,13 @@ class LIDBackend:
         self._last_reconnect_at = 0.0
         self._dead_drop_logged = False
         self._reconnect_task = None
+        # Health counters — a silent detector writes no decides, so these are the only
+        # evidence distinguishing "nothing to switch" from "the tap was dead".
+        self.chunks_fed = 0
+        self.chunks_dropped = 0
+        self.segments_received = 0
+        self.unknown_frames = 0
+        self.unknown_frame_types_logged = set()
         # Per-turn buffer: providers _accumulate() one segment per utterance, drained per turn.
         self._buffer_text = ""
         self._buffer_lang = None
@@ -63,7 +74,9 @@ class LIDBackend:
             return
         try:
             self._queue.put_nowait(audio_bytes)
+            self.chunks_fed += 1
         except asyncio.QueueFull:
+            self.chunks_dropped += 1
             logger.debug(f"{self.__class__.__name__}: audio queue full — chunk dropped (backpressure)")
 
     async def stop(self):
@@ -173,15 +186,19 @@ class LIDBackend:
         bar, so sub-utterance fragments would never clear it.
         """
         if transcript:
-            self._buffer_text = " ".join(filter(None, [self._buffer_text, transcript]))
             self._buffer_last_segment_ts = time.monotonic()
             self._buffer_event.set()
             # ts is epoch (matches persisted telemetry); segments arrive in speech order.
             self._buffer_segments.append(
                 {"lang": lang, "prob": prob, "text": transcript, "audio_s": round(audio_s or 0.0, 3), "ts": time.time()}
             )
-            # Substance gate keys on the longest segment (short audio mis-tags languages).
-            self._buffer_max_segment_s = max(self._buffer_max_segment_s, audio_s or 0.0)
+            # Age bound: skipped/retained decides leave the buffer undrained, so without
+            # eviction one old utterance keeps lending its duration to later turns.
+            cutoff = time.time() - BUFFER_SEGMENT_MAX_AGE_S
+            self._buffer_segments = [s for s in self._buffer_segments if s["ts"] >= cutoff]
+            self._buffer_text = " ".join(s["text"] for s in self._buffer_segments if s.get("text"))
+            # Substance gate keys on the longest RETAINED segment (short audio mis-tags languages).
+            self._buffer_max_segment_s = max((s["audio_s"] for s in self._buffer_segments), default=0.0)
             if lang:
                 self._buffer_lang_streak = self._buffer_lang_streak + 1 if lang == self._buffer_lang else 1
                 self._buffer_lang = lang
@@ -211,13 +228,22 @@ class LIDBackend:
         return self._buffer_lang
 
     def buffer_language_streak(self):
-        """How many consecutive buffered segments carried the current buffer_language."""
+        """How many consecutive buffered segments carried the current buffer_language.
+
+        No production consumer: the pool wrapper and the mid-turn fast path that read this
+        were removed when switch decisions moved to full-turn transcripts only. Kept
+        deliberately — it is the highest-precision signal the detector produces (N same-language
+        confirmations), so it stays available if the fast path is ever re-enabled.
+        """
         return self._buffer_lang_streak
 
     def buffer_language_confidence(self):
         """Language probability of the current buffer_language (peek, no drain).
 
-        None when the provider does not return a language score (e.g. Soniox).
+        Sarvam reports a per-utterance score. Soniox reports none and deliberately leaves
+        prob None (its token-share proxy read exactly 1.0 on essentially every segment, so
+        it carried no information — see soniox.py) — detector corroboration is therefore
+        Sarvam-only. Callers must treat None as "no evidence", never as low confidence.
         """
         return self._buffer_lang_prob
 

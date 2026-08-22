@@ -21,11 +21,12 @@ from openai import (
 import websockets
 from websockets.protocol import State as WSState
 
-from bolna.constants import DEFAULT_LANGUAGE_CODE, GPT5_MODEL_PREFIX
-from bolna.enums import ReasoningEffort, ResponseStreamEvent, ResponseItemType, Verbosity
+from bolna.constants import DEFAULT_LANGUAGE_CODE, GPT5_MODEL_PREFIX, default_reasoning_effort
+from bolna.enums import ResponseStreamEvent, ResponseItemType, Verbosity
 from bolna.helpers.ssl_context import get_ssl_context
 from bolna.helpers.utils import compute_function_pre_call_message, now_ms
 from .openai_base import OpenAICompatibleLLM
+from .message_models import strip_internal_keys
 from .tool_call_accumulator import ToolCallAccumulator
 from .types import APIParams, LLMStreamChunk, LatencyData
 from bolna.helpers.logger_config import configure_logger
@@ -163,8 +164,9 @@ class OpenAiLLM(OpenAICompatibleLLM):
         self.model_args = {}
         if model.startswith(GPT5_MODEL_PREFIX):
             max_tokens_key = "max_completion_tokens"
-            self.model_args["reasoning_effort"] = kwargs.get("reasoning_effort", None) or ReasoningEffort.MINIMAL.value
+            self.model_args["reasoning_effort"] = kwargs.get("reasoning_effort") or default_reasoning_effort(model)
             self.model_args["verbosity"] = kwargs.get("verbosity", None) or Verbosity.LOW.value
+            self.reasoning_summary = kwargs.get("reasoning_summary")
 
         self.model_args.update({max_tokens_key: self.max_tokens, "temperature": self.temperature, "model": self.model})
 
@@ -237,7 +239,7 @@ class OpenAiLLM(OpenAICompatibleLLM):
         model_args = {
             **self.model_args,
             "response_format": response_format,
-            "messages": messages,
+            "messages": strip_internal_keys(messages),
             "stream": True,
             "stream_options": {"include_usage": True},
         }
@@ -448,7 +450,12 @@ class OpenAiLLM(OpenAICompatibleLLM):
 
         try:
             completion = await self.async_client.chat.completions.create(
-                model=self.model, temperature=0.0, messages=messages, stream=False, response_format=response_format
+                model=self.model,
+                temperature=0.0,
+                # Same guarantee as the streaming path: bookkeeping keys never reach the wire.
+                messages=strip_internal_keys(messages),
+                stream=False,
+                response_format=response_format,
             )
             res = completion.choices[0].message.content
             if ret_metadata:
@@ -528,6 +535,8 @@ class OpenAiLLM(OpenAICompatibleLLM):
         ws_service_tier = None
         llm_host = self.llm_host
         response_usage = None
+        incomplete = False
+        incomplete_reason = None
 
         try:
             async for evt in self._ws_transport.stream_response(create_params):
@@ -569,7 +578,9 @@ class OpenAiLLM(OpenAICompatibleLLM):
                     raise APIError(message=f"Response failed: {error_info}", request=None, body=None)
 
                 if evt_type == ResponseStreamEvent.INCOMPLETE:
-                    logger.warning("WS Responses API stream incomplete")
+                    incomplete = True
+                    incomplete_reason = ((evt.get("response") or {}).get("incomplete_details") or {}).get("reason")
+                    logger.warning(f"WS Responses API stream incomplete, reason={incomplete_reason}")
                     self.invalidate_response_chain()
                     break
 
@@ -652,7 +663,20 @@ class OpenAiLLM(OpenAICompatibleLLM):
             logger.error(f"WS streaming error: {e}, falling back to HTTP SSE")
             self.invalidate_response_chain()
             async for chunk in self._generate_stream_responses(
-                messages, synthesize, request_json, meta_info, tool_choice
+                messages, synthesize, request_json, meta_info, tool_choice, tools
+            ):
+                yield chunk
+            return
+
+        # Nothing was yielded yet, so a retry cannot duplicate speech.
+        if incomplete and not answer and not func_call_args:
+            logger.warning(f"WS Responses API returned no output (reason={incomplete_reason}), retrying once over HTTP")
+            if isinstance(meta_info, dict):
+                meta_info.setdefault("_non_fatal_errors", []).append(
+                    {"error_type": "incomplete_empty_response", "error": incomplete_reason, "model": self.model}
+                )
+            async for chunk in self._generate_stream_responses(
+                messages, synthesize, request_json, meta_info, tool_choice, tools, retry_on_empty=False
             ):
                 yield chunk
             return

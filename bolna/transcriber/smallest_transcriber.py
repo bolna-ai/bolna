@@ -12,6 +12,7 @@ from websockets.exceptions import ConnectionClosedError, InvalidHandshake, Conne
 from dotenv import load_dotenv
 
 from .base_transcriber import BaseTranscriber
+from bolna.enums import TelephonyProvider
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.ssl_context import get_ssl_context
 from bolna.helpers.utils import create_ws_data_packet, timestamp_ms
@@ -22,15 +23,18 @@ logger = configure_logger(__name__)
 
 class SmallestTranscriber(BaseTranscriber):
     """
-    Streaming transcriber using Smallest AI Lightning ASR WebSocket API.
+    Streaming transcriber using Smallest AI Pulse STT WebSocket API.
 
-    Smallest AI Lightning ASR is optimized for:
-    - Sub-300ms time-to-first-transcript latency
-    - High accuracy across 24+ languages
+    Smallest AI Pulse is optimized for:
+    - 64ms time-to-first-transcript latency
+    - High accuracy across 38 languages with auto-detect
     - Real-time streaming without waiting for complete audio
 
-    API Documentation: https://waves-docs.smallest.ai/v4.0.0/content/api-references/lightning-asr-ws
+    API Documentation: https://docs.smallest.ai/waves/documentation/speech-to-text-pulse/realtime-web-socket/quickstart
     """
+
+    # Attribution tag sent to Smallest AI so requests are tracked as bolna traffic.
+    SOURCE = "bolna"
 
     def __init__(
         self,
@@ -42,7 +46,7 @@ class SmallestTranscriber(BaseTranscriber):
         endpointing: str = "400",
         encoding: str = "linear16",
         sampling_rate: str = "16000",
-        model: str = None,
+        model: str = "pulse",
         keywords: str = None,
         word_timestamps: bool = True,
         process_interim_results: str = "true",
@@ -62,7 +66,7 @@ class SmallestTranscriber(BaseTranscriber):
 
         # API configuration
         self.api_key = kwargs.get("transcriber_key", os.getenv("SMALLEST_API_KEY"))
-        self.smallest_host = os.getenv("SMALLEST_HOST", "waves-api.smallest.ai")
+        self.smallest_host = os.getenv("SMALLEST_HOST", "api.smallest.ai")
 
         # Queues
         self.transcriber_output_queue = output_queue
@@ -119,8 +123,8 @@ class SmallestTranscriber(BaseTranscriber):
 
     def _configure_audio_params(self):
         """Configure audio parameters based on telephony provider."""
-        if self.provider == "twilio":
-            # Twilio sends mulaw at 8kHz
+        if self.provider in TelephonyProvider.mulaw_values():
+            # Twilio and SIP-trunk send mulaw at 8kHz
             self.encoding = "mulaw"
             self.sampling_rate = 8000
             self.audio_frame_duration = 0.2
@@ -150,7 +154,7 @@ class SmallestTranscriber(BaseTranscriber):
 
     def get_smallest_ws_url(self) -> str:
         """
-        Build the WebSocket URL for Smallest AI Lightning ASR.
+        Build the WebSocket URL for Smallest AI Pulse STT.
 
         Query params:
         - language: Language code (en, hi, multi, etc.)
@@ -159,6 +163,7 @@ class SmallestTranscriber(BaseTranscriber):
         - word_timestamps: Enable word-level timing
         """
         params = {
+            "model": self.model or "pulse",  # required by the Pulse live endpoint
             "language": self.language,
             "sample_rate": str(self.sampling_rate),
         }
@@ -171,7 +176,8 @@ class SmallestTranscriber(BaseTranscriber):
         if self.word_timestamps:
             params["word_timestamps"] = "true"
 
-        websocket_url = f"wss://{self.smallest_host}/api/v1/lightning/get_text?{urlencode(params)}"
+        # Unified Waves endpoint (docs.smallest.ai -> /speech-to-text): WSS /waves/v1/stt/live
+        websocket_url = f"wss://{self.smallest_host}/waves/v1/stt/live?{urlencode(params)}"
         logger.info(
             f"Smallest WebSocket URL params - language: {self.language}, sample_rate: {self.sampling_rate}, encoding: {self.encoding}, word_timestamps: {self.word_timestamps}"
         )
@@ -187,7 +193,10 @@ class SmallestTranscriber(BaseTranscriber):
         while attempt < retries:
             try:
                 websocket_url = self.get_smallest_ws_url()
-                additional_headers = {"Authorization": f"Bearer {self.api_key}"}
+                additional_headers = {
+                    "Authorization": f"Bearer {self.api_key}",
+                    "X-Source": self.SOURCE,
+                }
 
                 logger.info(f"Attempting to connect to Smallest AI WebSocket: {websocket_url}")
 
@@ -390,8 +399,8 @@ class SmallestTranscriber(BaseTranscriber):
     async def _close_smallest(self, ws: ClientConnection):
         """Send end signal and close WebSocket."""
         try:
-            # Send Smallest AI end signal
-            end_msg = {"type": "end"}
+            # Send Smallest AI end signal (Pulse live expects "close_stream")
+            end_msg = {"type": "close_stream"}
             await ws.send(json.dumps(end_msg))
             await ws.close()
         except Exception as e:

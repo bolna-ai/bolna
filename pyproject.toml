@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "bolna"
-version = "0.10.131"
+version = "0.10.204"
 readme = "README.md"
 authors = [
     { name = "Prateek Sachan", email = "ps@prateeksachan.com" }
@@ -22,6 +22,14 @@ requires-python = ">=3.10"
 
 [project.optional-dependencies]
 dev = ["pip-tools", "pre-commit", "pytest", "pytest-asyncio", "ruff"]
+
+[tool.pytest.ini_options]
+# Coroutine tests need no @pytest.mark.asyncio decorator.
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "--strict-markers"
 
 [tool.setuptools]
 package-dir = {"bolna" = "bolna"}

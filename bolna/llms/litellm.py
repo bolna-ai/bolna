@@ -12,6 +12,7 @@ from bolna.helpers.utils import convert_to_request_log, compute_function_pre_cal
 from .llm import BaseLLM
 from .tool_call_accumulator import ToolCallAccumulator
 from .types import LLMStreamChunk, LatencyData
+from .message_models import strip_internal_keys
 from bolna.helpers.logger_config import configure_logger
 
 logger = configure_logger(__name__)
@@ -47,6 +48,9 @@ class LiteLLM(BaseLLM):
                 self.model_args["api_key"] = kwargs["llm_key"]
             if kwargs.get("api_version", None):
                 self.model_args["api_version"] = kwargs["api_version"]
+            if kwargs.get("aws_region_name", None):
+                # Bedrock models: region for boto3 under litellm (no per-box aws config needed).
+                self.model_args["aws_region_name"] = kwargs["aws_region_name"]
 
         self.custom_tools = kwargs.get("api_tools", None)
         logger.info(f"API Tools {self.custom_tools}")
@@ -67,7 +71,7 @@ class LiteLLM(BaseLLM):
         first_token_time = None
 
         model_args = self.model_args.copy()
-        model_args["messages"] = messages
+        model_args["messages"] = strip_internal_keys(messages)
         model_args["stream"] = True
         model_args["stop"] = ["User:"]
 
@@ -188,7 +192,7 @@ class LiteLLM(BaseLLM):
         text = ""
         model_args = self.model_args.copy()
         model_args["model"] = self.model
-        model_args["messages"] = messages
+        model_args["messages"] = strip_internal_keys(messages)
         model_args["stream"] = stream
 
         if request_json:

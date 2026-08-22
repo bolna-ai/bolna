@@ -27,8 +27,10 @@ class ConversationHistory:
 
         self._interim = copy.deepcopy(self._messages)
 
-    def append_user(self, content: str):
-        self._messages.append({"role": ChatRole.USER, "content": content})
+    def append_user(self, content: str, **kwargs):
+        """kwargs (asr_turn_id) correlate a user turn to its ASR turn by id rather than by text.
+        LLM adapters call strip_internal_keys() before sending, so extras never reach a provider."""
+        self._messages.append({"role": ChatRole.USER, "content": content, **kwargs})
 
     def replace_last_user(self, expected_content: str, new_content: str) -> bool:
         """Replace the most recent user message's content, but only if it still matches
@@ -84,6 +86,19 @@ class ConversationHistory:
                     msgs[i]["content"] = content
                     if turn_id is not None and msgs[i].get("turn_id") is None:
                         msgs[i]["turn_id"] = turn_id
+                    return
+        # Not found by response_uid: adopt a uid-less placeholder for the same turn_id (e.g. the
+        # tool_calls one attach_tool_calls_to_turn leaves) instead of appending a duplicate, which
+        # would split the tool-call turn from its result and get the tool_calls stripped (BLT-018).
+        if turn_id is not None:
+            for i in range(len(msgs) - 1, -1, -1):
+                if (
+                    msgs[i].get("role") == ChatRole.ASSISTANT
+                    and msgs[i].get("turn_id") == turn_id
+                    and msgs[i].get("response_uid") is None
+                ):
+                    msgs[i]["content"] = content
+                    msgs[i]["response_uid"] = response_uid
                     return
         msgs.append({"role": ChatRole.ASSISTANT, "content": content, "turn_id": turn_id, "response_uid": response_uid})
 
@@ -310,6 +325,11 @@ class ConversationHistory:
             i += 1
 
         msgs[:] = sanitized
+
+    def user_turn_signature(self) -> tuple:
+        """(user count, last user content) — changes iff a user turn arrives, never on assistant commits."""
+        users = [m for m in self._messages if m.get("role") == ChatRole.USER]
+        return (len(users), users[-1].get("content") if users else None)
 
     def is_duplicate_user(self, content: str) -> bool:
         if not self._messages:

@@ -7,6 +7,7 @@ from .enums import (
     TelephonyProvider,
     SynthesizerProvider,
     TranscriberProvider,
+    S2SProvider,
     ReasoningEffort,
     Verbosity,
     ExpressionOperator,
@@ -18,6 +19,9 @@ from .enums import (
 from .constants import MODEL_REASONING_EFFORT_MAP
 
 AGENT_WELCOME_MESSAGE = "This call is being recorded for quality assurance and training. Please speak now."
+
+# A message that is either a single string or a per-language {lang_code: text} map.
+LocalizedText = Union[str, Dict[str, str]]
 
 
 def validate_attribute(value, allowed_values, value_type="provider"):
@@ -106,6 +110,17 @@ class PixaConfig(BaseModel):
     repetition_penalty: Optional[float] = 1.3
 
 
+class MayaConfig(BaseModel):
+    # "Ananya" (female) or "Arjun" (male) — the only two voices, both speak every language.
+    # Case-sensitive: Maya rejects "ananya" with a 400.
+    voice_id: str
+    voice: str
+    model: str
+    # One of hi/bn/gu/kn/ml/mr/or/pa/ta/te/en/auto. "en" is Indian English, "auto" lets Maya
+    # detect per utterance. Region-qualified codes ("en-IN") reduce to the primary subtag.
+    language: Optional[str] = "en"
+
+
 class AzureConfig(BaseModel):
     voice: str
     model: str
@@ -153,6 +168,7 @@ class Synthesizer(BaseModel):
         CartesiaConfig,
         DeepgramConfig,
         OpenAIConfig,
+        MayaConfig,
     ] = Field(union_mode="smart")
     stream: bool = False
     buffer_size: Optional[int] = 40  # 40 characters in a buffer
@@ -196,6 +212,9 @@ class Synthesizer(BaseModel):
         elif provider == "rime":
             if isinstance(config, dict):
                 values["provider_config"] = RimeConfig(**config)
+        elif provider == "maya":
+            if isinstance(config, dict):
+                values["provider_config"] = MayaConfig(**config)
 
         return values
 
@@ -383,7 +402,9 @@ class GraphEdge(BaseModel):
     function_description: Optional[str] = None  # Detailed description for LLM
     # Optional parameters to collect during transition
     parameters: Optional[Dict[str, str]] = None  # e.g., {"city": "string"}
-    priority: Optional[int] = None  # lower = evaluated first. Defaults: expression/unconditional=0, llm=100
+    # lower = evaluated first within a tier (expression/intent/unconditional); does not rank across tiers.
+    # Defaults: expression/unconditional=0, llm=100
+    priority: Optional[int] = None
 
 
 class GraphNode(BaseModel):
@@ -391,7 +412,7 @@ class GraphNode(BaseModel):
     description: Optional[str] = None
     node_type: NodeType = NodeType.LLM
     prompt: str = ""
-    static_message: Optional[str] = None
+    static_message: Optional[LocalizedText] = None
     repeat_after_silence_seconds: Optional[float] = None
     examples: Optional[Dict[str, str]] = None
     edges: List[GraphEdge] = Field(default_factory=list)
@@ -454,8 +475,9 @@ class GraphAgentConfig(Llm):
 
     @model_validator(mode="after")
     def validate_router_graph(self):
-        """Router edges must target existing nodes, and routers must not cycle among
-        themselves (either would leave the chain unable to reach a speaking node)."""
+        """Router edges must target existing nodes and routers must not cycle; either would
+        leave the chain unable to reach a speaking node. Chained intent routers are allowed
+        (each makes its own routing call, a latency tradeoff, not a correctness one)."""
         router_nodes = [n for n in self.nodes if n.node_type == NodeType.ROUTER]
         if not router_nodes:
             return self
@@ -573,6 +595,74 @@ class ToolModel(BaseModel):
     tools_params: Dict[str, APIParams]
 
 
+class OpenAIRealtimeConfig(BaseModel):
+    model: str = "gpt-realtime-2.1"
+    voice: str = "marin"
+    # semantic_vad scores whether the caller has actually finished from what they said, so
+    # it waits longer on a trailing "ummm" than on a finished sentence. That is the job the
+    # llm pipeline does with a word count and a phrase list, done by a model instead.
+    turn_detection_type: str = "semantic_vad"
+    # auto | low | medium | high. Lower gives the caller longer before the model takes over.
+    eagerness: Optional[str] = "auto"
+    # server_vad only; ignored under semantic_vad.
+    vad_threshold: Optional[float] = 0.5
+    vad_silence_duration_ms: Optional[int] = 500
+    vad_prefix_padding_ms: Optional[int] = 300
+    reasoning_effort: Optional[ReasoningEffort] = None
+    max_output_tokens: Optional[int] = None
+    transcription_model: Optional[str] = "gpt-4o-mini-transcribe"
+    language: Optional[str] = None
+
+    @model_validator(mode="after")
+    def validate_reasoning(self):
+        if self.reasoning_effort:
+            if self.model not in MODEL_REASONING_EFFORT_MAP:
+                raise ValueError(f"reasoning_effort is not supported for realtime model '{self.model}'.")
+            validate_reasoning_effort_for_model(self.model, self.reasoning_effort.value)
+        return self
+
+
+class GeminiLiveConfig(BaseModel):
+    model: str = "gemini-3.1-flash-live-preview"
+    voice: str = "Kore"
+    language: Optional[str] = None
+    temperature: Optional[float] = None
+    start_sensitivity: Optional[str] = None
+    end_sensitivity: Optional[str] = None
+    # Gemini's guide puts the usable band at 500-800ms: below it utterances fragment and
+    # transcription quality drops, above it the caller waits on every reply.
+    vad_silence_duration_ms: Optional[int] = 600
+    vad_prefix_padding_ms: Optional[int] = None
+    # Gemini closes an audio session at ~15 minutes, so both stay on unless explicitly disabled.
+    enable_session_resumption: bool = True
+    enable_context_compression: bool = True
+
+
+S2S_PROVIDER_CONFIGS = {
+    S2SProvider.OPENAI_REALTIME.value: OpenAIRealtimeConfig,
+    S2SProvider.GEMINI_LIVE.value: GeminiLiveConfig,
+}
+
+
+class S2SConfig(BaseModel):
+    provider: str
+    provider_config: Union[OpenAIRealtimeConfig, GeminiLiveConfig]
+    # Suppresses inbound audio while the agent opens, so its own greeting cannot trip provider VAD.
+    welcome_audio_gate_ms: int = 1500
+
+    @model_validator(mode="before")
+    def preprocess(cls, values):
+        if not isinstance(values, dict):
+            return values
+        provider = values.get("provider")
+        validate_attribute(provider, S2SProvider.all_values())
+        config = values.get("provider_config") or {}
+        if isinstance(config, BaseModel):
+            config = config.model_dump()
+        values["provider_config"] = S2S_PROVIDER_CONFIGS[provider](**config)
+        return values
+
+
 class ToolsConfig(BaseModel):
     llm_agent: Optional[Union[LlmAgent, SimpleLlmAgent]] = None
     synthesizer: Optional[Synthesizer] = None
@@ -580,6 +670,7 @@ class ToolsConfig(BaseModel):
     input: Optional[IOModel] = None
     output: Optional[IOModel] = None
     api_tools: Optional[ToolModel] = None
+    s2s: Optional[S2SConfig] = None
     switch_tool_description: Optional[str] = None
     switch_handoff_messages: Optional[Dict[str, str]] = None
     agent_names: Optional[Dict[str, str]] = None

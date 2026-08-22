@@ -8,6 +8,7 @@ import wave
 
 from dotenv import load_dotenv
 
+from bolna.enums import TelephonyProvider
 from bolna.helpers.logger_config import configure_logger
 
 from .base import LIDBackend
@@ -36,17 +37,16 @@ class SarvamLID(LIDBackend):
         super().__init__(on_language, config)
         self._api_key = config.get("sarvam_api_key") or os.getenv("SARVAM_API_KEY", "")
         self._host = config.get("sarvam_host") or os.getenv("SARVAM_HOST", "api.sarvam.ai")
+        # Per-agent override via the language_switch_saaras_v4_lid feature flag.
+        self._model = config.get("sarvam_model") or "saaras:v3"
         self._telephony = config.get("telephony_provider", "")
         # Target rate Saaras receives (it wants 16k). Per-provider INPUT rate/encoding
         # must mirror sarvam_transcriber._configure_audio_params — telephony providers
         # stream 8kHz, so we resample 8k→16k. Getting this wrong (e.g. treating vobiz's
         # 8kHz as 16kHz) feeds garbled audio to Saaras → no transcripts → no detection.
         self._sr = int(config.get("sampling_rate", 16000))
-        if self._telephony in ("plivo", "vobiz", "exotel"):
-            self._encoding = "linear16"
-            self._input_sr = 8000
-        elif self._telephony == "twilio":
-            self._encoding = "mulaw"
+        if self._telephony in TelephonyProvider.telephony_values():
+            self._encoding = "mulaw" if self._telephony in TelephonyProvider.mulaw_values() else "linear16"
             self._input_sr = 8000
         else:
             self._encoding = "linear16"
@@ -58,7 +58,7 @@ class SarvamLID(LIDBackend):
 
     def _build_url(self) -> str:
         params = {
-            "model": "saaras:v3",
+            "model": self._model,
             "mode": "transcribe",
             "language-code": "unknown",
             "high_vad_sensitivity": "true",
@@ -118,7 +118,17 @@ class SarvamLID(LIDBackend):
             async for raw in self._ws:
                 try:
                     data = json.loads(raw) if isinstance(raw, str) else {}
+                    if data.get("type") not in ("data", "events"):
+                        # "events" = requested VAD signals (per-utterance, benign — 174 spurious
+                        # warns before this exclusion). Anything else is counted and logged once
+                        # per type; detector_health emits the total at cleanup.
+                        self.unknown_frames += 1
+                        frame_type = str(data.get("type"))
+                        if frame_type not in self.unknown_frame_types_logged:
+                            self.unknown_frame_types_logged.add(frame_type)
+                            logger.warning(f"SarvamLID: non-data frame type={frame_type!r} {str(raw)[:200]}")
                     if data.get("type") == "data":
+                        self.segments_received += 1
                         payload = data.get("data", {})
                         transcript = (payload.get("transcript") or "").strip()
                         lang = payload.get("language_code", "")

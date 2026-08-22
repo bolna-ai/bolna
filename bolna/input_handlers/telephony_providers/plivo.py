@@ -18,6 +18,7 @@ class PlivoInputHandler(TelephonyInputHandler):
         turn_based_conversation=False,
         is_welcome_message_played=False,
         observable_variables=None,
+        auth_credentials=None,
     ):
         super().__init__(
             queues,
@@ -29,7 +30,10 @@ class PlivoInputHandler(TelephonyInputHandler):
             observable_variables=observable_variables,
         )
         self.io_provider = "plivo"
-        self.client = plivosdk.RestClient(os.getenv("PLIVO_AUTH_ID"), os.getenv("PLIVO_AUTH_TOKEN"))
+        auth_credentials = auth_credentials or {}
+        auth_id = auth_credentials.get("auth_id") or os.getenv("PLIVO_AUTH_ID")
+        auth_token = auth_credentials.get("auth_token") or os.getenv("PLIVO_AUTH_TOKEN")
+        self.client = plivosdk.RestClient(auth_id, auth_token)
 
     async def call_start(self, packet):
         start = packet["start"]

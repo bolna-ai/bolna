@@ -12,6 +12,7 @@ from websockets.exceptions import ConnectionClosedError, InvalidHandshake, Conne
 
 from .base_transcriber import BaseTranscriber
 from bolna.constants import ELEVENLABS_REALTIME_MAX_KEYTERMS
+from bolna.enums import TelephonyProvider
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.ssl_context import get_ssl_context
 from bolna.helpers.utils import create_ws_data_packet, timestamp_ms
@@ -107,9 +108,11 @@ class ElevenLabsTranscriber(BaseTranscriber):
         # Latency tracking
         self.last_audio_send_time = None
 
-        # Timeout tracking for stuck utterances
+        # Timeout tracking for stuck utterances. 2.0s ≈ 2× scribe's partial cadence
+        # (~1s between partials in prod), so a slightly late partial doesn't trigger a
+        # mid-utterance force-finalize, while a genuinely stuck commit is cut at ~2s not 5s.
         self.last_interim_time = None
-        self.interim_timeout = kwargs.get("interim_timeout", 5.0)
+        self.interim_timeout = kwargs.get("interim_timeout", 2.0)
         self.utterance_timeout_task = None
 
     def get_elevenlabs_ws_url(self):
@@ -117,12 +120,13 @@ class ElevenLabsTranscriber(BaseTranscriber):
         self.audio_frame_duration = 0.5  # Default for 8k samples at 16kHz
         audio_format = "pcm_16000"  # Default
 
-        if self.provider in ("twilio", "exotel", "plivo", "vobiz"):
-            # Twilio uses mulaw at 8kHz, exotel/plivo use linear16 at 8kHz
-            self.encoding = "mulaw" if self.provider == "twilio" else "linear16"
+        if self.provider in TelephonyProvider.telephony_values():
+            # Twilio/sip-trunk use mulaw at 8kHz, exotel/plivo/vobiz use linear16 at 8kHz
+            is_mulaw = self.provider in TelephonyProvider.mulaw_values()
+            self.encoding = "mulaw" if is_mulaw else "linear16"
             self.sampling_rate = 8000
             self.audio_frame_duration = 0.2  # 200ms chunks for telephony
-            audio_format = "ulaw_8000" if self.provider == "twilio" else "pcm_8000"
+            audio_format = "ulaw_8000" if is_mulaw else "pcm_8000"
 
         elif self.provider == "web_based_call":
             self.encoding = "linear16"
@@ -241,6 +245,11 @@ class ElevenLabsTranscriber(BaseTranscriber):
         logger.info(f"Force-finalized transcript after timeout: {transcript_to_send}")
         await self.push_to_transcriber_queue(create_ws_data_packet(data, self.meta_info))
         self._reset_turn_state()
+        # This utterance was already pushed — suppress ElevenLabs' own (late) commit for it,
+        # or the same turn gets processed twice (fragment now + full text seconds later).
+        # The next utterance's first partial flips this back to False, so only the stale
+        # commit is swallowed. Mirrors deepgram_transcriber's post-force-finalize state.
+        self.is_transcript_sent_for_processing = True
 
     async def monitor_utterance_timeout(self):
         """Monitor for stuck utterances that never receive committed transcript"""

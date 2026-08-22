@@ -1,4 +1,5 @@
 from datetime import datetime
+from functools import lru_cache
 from typing import Union, Optional
 import json
 import asyncio
@@ -62,6 +63,11 @@ def load_file(file_path, is_json=False):
 def write_json_file(file_path, data):
     with open(file_path, "w") as file:
         json.dump(data, file, indent=4, ensure_ascii=False)
+
+
+def safe_log_text(text, limit=120):
+    """Strip control chars from caller text and truncate — blocks forged log entries."""
+    return re.sub(r"[\x00-\x1f\x7f]+", " ", str(text or ""))[:limit]
 
 
 def create_ws_data_packet(data, meta_info=None, is_md5_hash=False, llm_generated=False):
@@ -236,6 +242,12 @@ def get_md5_hash(text):
     return hashlib.md5(text.encode(), usedforsecurity=False).hexdigest()
 
 
+def static_node_audio_key(text, provider=None, voice=None, voice_id=None, model=None):
+    """S3 filename stem for a static-node clip, bound to the voice it was rendered with."""
+    identity = "|".join(str(part or "") for part in (provider, voice, voice_id, model))
+    return get_md5_hash(f"{identity}|{text}")
+
+
 def is_valid_md5(hash_string):
     return bool(re.fullmatch(r"[0-9a-f]{32}", hash_string))
 
@@ -250,11 +262,19 @@ def get_required_input_types(task):
     input_types = dict()
     for i, chain in enumerate(task["toolchain"]["pipelines"]):
         first_model = chain[0]
-        if chain[0] == "transcriber":
+        # An s2s pipeline takes caller audio directly, with no transcriber in front of it.
+        if chain[0] in ("transcriber", "s2s"):
             input_types["audio"] = i
         elif chain[0] == "synthesizer" or chain[0] == "llm":
             input_types["text"] = i
     return input_types
+
+
+def is_s2s_agent(task):
+    """True when a task runs speech-to-speech instead of the transcriber/LLM/synthesizer chain."""
+    if not isinstance(task, dict):
+        return False
+    return bool((task.get("tools_config") or {}).get("s2s"))
 
 
 def format_messages(messages, use_system_prompt=False, include_tools=False):
@@ -426,6 +446,26 @@ def convert_audio_to_wav(audio_bytes, source_format="flac"):
     return buffer.getvalue()
 
 
+def wav_bytes_to_mp3(wav_bytes):
+    audio = AudioSegment.from_file(io.BytesIO(wav_bytes), format="wav")
+    buffer = io.BytesIO()
+    audio.export(buffer, format="mp3")
+    return buffer.getvalue()
+
+
+def mp3_bytes_to_pcm(mp3_bytes, target_sample_rate=8000):
+    audio = AudioSegment.from_file(io.BytesIO(mp3_bytes), format="mp3")
+    audio = audio.set_frame_rate(target_sample_rate).set_channels(1).set_sample_width(2)
+    return audio.raw_data
+
+
+@lru_cache(maxsize=32)
+def _resample_fir(up, down):
+    """resample_poly's default kaiser design, cached per ratio; it applies its own up scaling."""
+    max_rate = max(up, down)
+    return scipy.signal.firwin(20 * max_rate + 1, 1.0 / max_rate, window=("kaiser", 5.0)).astype(np.float32)
+
+
 def resample(audio_bytes, target_sample_rate, format="mp3", pcm_channels=1, original_sample_rate=None):
     """
     Resample audio bytes
@@ -447,7 +487,8 @@ def resample(audio_bytes, target_sample_rate, format="mp3", pcm_channels=1, orig
         if pcm_channels > 1:
             audio_array = audio_array.reshape(-1, pcm_channels)
         g = math.gcd(original_sample_rate, target_sample_rate)
-        resampled = scipy.signal.resample_poly(audio_array, target_sample_rate // g, original_sample_rate // g, axis=0)
+        up, down = target_sample_rate // g, original_sample_rate // g
+        resampled = scipy.signal.resample_poly(audio_array, up, down, axis=0, window=_resample_fir(up, down))
         return np.clip(resampled, -32768, 32767).astype(np.int16).tobytes()
 
     # Handle other formats (wav, mp3, etc.) via pydub
@@ -485,7 +526,8 @@ def merge_wav_bytes(wav_files_bytes):
 
 
 def calculate_audio_duration(size_bytes, sampling_rate, bit_depth=16, channels=1, format="wav"):
-    bytes_per_sample = (bit_depth / 8) * channels if format != "mulaw" else 1
+    # "ulaw" is the same 1-byte-per-sample encoding as "mulaw"; both spellings are in use.
+    bytes_per_sample = 1 if format in ("mulaw", "ulaw") else (bit_depth / 8) * channels
     total_samples = size_bytes / bytes_per_sample
     duration_seconds = total_samples / sampling_rate
     return duration_seconds
@@ -594,6 +636,18 @@ async def write_request_logs(message, run_id):
             None,
         ]
         metadata = message.get("graph_routing_metadata", {})
+    elif message["component"] == LogComponent.S2S:
+        component_details = [
+            message_data,
+            message.get("input_tokens", 0),
+            message.get("output_tokens", 0),
+            None,
+            message.get("latency", None),
+            False,
+            None,
+            None,
+        ]
+        metadata = message.get("s2s_metadata", {})
     elif message["component"] == LogComponent.ERROR:
         component_details = [message_data, None, None, None, message.get("latency", None), False, None, None]
         metadata = message.get("error_metadata", {})
@@ -786,6 +840,21 @@ def convert_to_request_log(
                     else UsageSource.ESTIMATED.value
                 )
                 log["llm_metadata"] = llm_metadata
+        case LogComponent.S2S:
+            log["latency"] = meta_info.get("s2s_latency", None) if direction == LogDirection.RESPONSE else None
+            if direction == LogDirection.RESPONSE:
+                log["input_tokens"] = input_tokens or 0
+                log["output_tokens"] = output_tokens or 0
+                # Audio and text are priced apart, so the split has to survive to billing.
+                s2s_metadata = dict(meta_info.get("s2s_usage") or {})
+                if cached_tokens:
+                    s2s_metadata["cached_tokens"] = cached_tokens
+                s2s_metadata["usage_source"] = (
+                    UsageSource.API_REPORTED.value
+                    if (input_tokens is not None or output_tokens is not None)
+                    else UsageSource.ESTIMATED.value
+                )
+                log["s2s_metadata"] = s2s_metadata
         case LogComponent.SYNTHESIZER:
             log["latency"] = meta_info.get("synthesizer_latency", None) if direction == LogDirection.RESPONSE else None
         case LogComponent.TRANSCRIBER:
@@ -812,7 +881,12 @@ def convert_to_request_log(
                 log["graph_routing_metadata"] = graph_routing_metadata
             else:
                 log["graph_routing_metadata"] = meta_info.get("llm_metadata", {})
-        case LogComponent.LLM_HANGUP | LogComponent.LLM_VOICEMAIL | LogComponent.LLM_LANGUAGE_DETECTION:
+        case (
+            LogComponent.LLM_HANGUP
+            | LogComponent.LLM_VOICEMAIL
+            | LogComponent.LLM_LANGUAGE_DETECTION
+            | LogComponent.LLM_LANGUAGE_SWITCH
+        ):
             log["latency"] = meta_info.get("llm_latency", None) if direction == LogDirection.RESPONSE else None
             if direction == LogDirection.RESPONSE:
                 log["input_tokens"] = input_tokens or 0
@@ -888,16 +962,20 @@ def pcm_to_ulaw(pcm_bytes):
     return ulaw_bytes
 
 
-def audio_to_mulaw8k(audio, rate_hint=8000, format_hint=""):
-    """One-shot synth output (base64 str / WAV / raw PCM) → mono 16-bit 8kHz mu-law.
-    Undecodable compressed containers (MP3/Ogg/FLAC) return None — never raw noise."""
+def ulaw_to_pcm(ulaw_bytes):
+    """Convert 8-bit ulaw audio to 16-bit signed linear PCM."""
+    return audioop.ulaw2lin(ulaw_bytes, 2)  # 2 = sample width in bytes (16-bit)
+
+
+def decode_audio_segment(audio, rate_hint=8000, format_hint=""):
+    """base64/WAV/raw PCM → AudioSegment; undecodable containers → None."""
     import base64
 
     if isinstance(audio, str):
         audio = base64.b64decode(audio)
     try:
         # Explicit format for WAV takes pydub's native reader — no ffprobe/ffmpeg.
-        segment = AudioSegment.from_file(io.BytesIO(audio), format="wav" if audio[:4] == b"RIFF" else None)
+        return AudioSegment.from_file(io.BytesIO(audio), format="wav" if audio[:4] == b"RIFF" else None)
     except Exception:
         if (
             audio[:3] == b"ID3"
@@ -908,9 +986,24 @@ def audio_to_mulaw8k(audio, rate_hint=8000, format_hint=""):
         # Headerless audio: trust the caller's declared rate/format.
         if "law" in str(format_hint or ""):
             audio = audioop.ulaw2lin(audio, 2)
-        segment = AudioSegment(data=audio, sample_width=2, frame_rate=int(rate_hint or 8000), channels=1)
+        return AudioSegment(data=audio, sample_width=2, frame_rate=int(rate_hint or 8000), channels=1)
+
+
+def audio_to_mulaw8k(audio, rate_hint=8000, format_hint=""):
+    """One-shot synth output → mono 16-bit 8kHz mu-law, or None if undecodable."""
+    segment = decode_audio_segment(audio, rate_hint, format_hint)
+    if segment is None:
+        return None
     segment = segment.set_frame_rate(8000).set_channels(1).set_sample_width(2)
     return pcm_to_ulaw(segment.raw_data)
+
+
+def audio_to_pcm(audio, *, target_sample_rate, rate_hint=8000, format_hint=""):
+    """→ mono 16-bit PCM, or None. Keyword-only: the sibling's 2nd arg is the SOURCE rate."""
+    segment = decode_audio_segment(audio, rate_hint, format_hint)
+    if segment is None:
+        return None
+    return segment.set_frame_rate(int(target_sample_rate)).set_channels(1).set_sample_width(2).raw_data
 
 
 def soniox_ws_url(host):
@@ -960,6 +1053,23 @@ def now_ms() -> float:
 
 def timestamp_ms() -> float:
     return time.time() * 1000
+
+
+def clean_gemini_schema(schema):
+    """Strip JSON Schema keys Gemini's proto-based Schema rejects.
+
+    Both the Gemini LLM and the Live API refuse a function declaration carrying
+    additionalProperties, and the Live API rejects the whole setup frame for it.
+    """
+    if not isinstance(schema, dict):
+        return schema
+    cleaned = {k: v for k, v in schema.items() if k != "additionalProperties"}
+    for k, v in cleaned.items():
+        if isinstance(v, dict):
+            cleaned[k] = clean_gemini_schema(v)
+        elif isinstance(v, list):
+            cleaned[k] = [clean_gemini_schema(i) if isinstance(i, dict) else i for i in v]
+    return cleaned
 
 
 def structure_system_prompt(

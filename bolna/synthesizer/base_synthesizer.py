@@ -23,12 +23,21 @@ class BaseSynthesizer:
         self.model = "default"
 
     def _upsert_turn_latency(self, entry: dict) -> None:
-        """Replace existing turn_latencies entry with matching sequence_id, or append if new."""
+        """Replace existing turn_latencies entry with matching sequence_id, or append if new.
+
+        Canned speech all shares sequence_id -1, so category joins the key — otherwise the
+        goodbye's entry overwrites the follow-up's and every earlier canned synthesis."""
         for i, t in enumerate(self.turn_latencies):
-            if t.get("sequence_id") == entry.get("sequence_id"):
+            if t.get("sequence_id") == entry.get("sequence_id") and t.get("message_category") == entry.get(
+                "message_category"
+            ):
                 self.turn_latencies[i] = entry
                 return
         self.turn_latencies.append(entry)
+
+    async def synthesize_pcm_clip(self, text, sample_rate):
+        """Override where the provider renders PCM natively; None → caller converts."""
+        return None
 
     async def synthesize_telephony_clip(self, text):
         """One-shot render of `text` as raw mu-law 8000 bytes, or None when the provider
