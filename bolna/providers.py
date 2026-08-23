@@ -11,6 +11,7 @@ from .synthesizer import (
     RimeSynthesizer,
     PixaSynthesizer,
     MayaSynthesizer,
+    SonioxSynthesizer,
 )
 from .transcriber import (
     DeepgramTranscriber,
@@ -68,6 +69,7 @@ SUPPORTED_SYNTHESIZER_MODELS = {
     SynthesizerProvider.RIME.value: RimeSynthesizer,
     SynthesizerProvider.PIXA.value: PixaSynthesizer,
     SynthesizerProvider.MAYA.value: MayaSynthesizer,
+    SynthesizerProvider.SONIOX.value: SonioxSynthesizer,
 }
 
 SUPPORTED_TRANSCRIBER_PROVIDERS = {
