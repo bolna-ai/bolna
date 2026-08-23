@@ -44,6 +44,15 @@ class _InputStub:
         self.stopped = True
 
 
+class _MarksStub:
+    """Holds one goodbye chunk the provider has been sent but has not acked."""
+
+    def __init__(self, duration):
+        self.mark_event_meta_data = {
+            "aud1": {"type": "agent_hangup", "duration": duration, "sent_ts": time.time()}
+        }
+
+
 class _VoicemailStub:
     def cancel_task(self):
         pass
@@ -64,15 +73,7 @@ def _make_tm(output, *, pending_duration=0.0, grace=0.4):
     tm.llm_task = None
     tm.turn_based_conversation = False
     tm.voicemail_handler = _VoicemailStub()
-    tm.mark_event_meta_data = type(
-        "_Marks",
-        (),
-        {
-            "mark_event_meta_data": {
-                "aud1": {"type": "agent_hangup", "duration": pending_duration, "sent_ts": time.time()}
-            }
-        },
-    )()
+    tm.mark_event_meta_data = _MarksStub(pending_duration)
 
     async def _already_flushed():
         return

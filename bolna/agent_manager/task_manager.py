@@ -2745,6 +2745,14 @@ class TaskManager(BaseManager):
             self.tools["output"].set_hangup_sent()
             await self.__process_end_of_conversation()
 
+    def _queued_playout_seconds(self) -> float:
+        """Seconds of already-sent audio the provider has not acked playing yet."""
+        return sum(
+            mark.get("duration", 0)
+            for mark in self.mark_event_meta_data.mark_event_meta_data.values()
+            if mark.get("type") != "pre_mark_message" and mark.get("sent_ts")
+        )
+
     async def wait_for_current_message(self):
         try:
             await asyncio.wait_for(self._turn_audio_flushed.wait(), timeout=3.0)
@@ -2781,12 +2789,7 @@ class TaskManager(BaseManager):
             # future rather than one that recedes with each iteration. Without this,
             # `remaining = sum(durations) + hangup_mark_event_timeout` never reaches 0
             # when Plivo stops ACKing marks, causing an indefinite spin.
-            remaining_durations = [
-                v.get("duration", 0)
-                for v in mark_events.values()
-                if v.get("type") != "pre_mark_message" and v.get("sent_ts")
-            ]
-            expected_play_end = (entry_time + sum(remaining_durations)) if remaining_durations else entry_time
+            expected_play_end = entry_time + self._queued_playout_seconds()
             deadline = expected_play_end + self.hangup_mark_event_timeout
 
             remaining = deadline - time.time()
@@ -2954,33 +2957,15 @@ class TaskManager(BaseManager):
 
         await self.wait_for_current_message()
 
-        # Wait for the queued goodbye to finish playing, but no longer than the audio still
-        # queued plus the mark grace. A dead media socket never acks, so an unbounded wait here
-        # holds the whole TaskManager until the pod dies and the final save never runs. The
-        # deadline is stamped once, up front, so it cannot recede with each iteration.
+        # A dead media socket never acks the goodbye, so bound the wait by the audio still
+        # queued plus the mark grace. Unbounded, teardown never reached the final save.
         if self.hangup_triggered and self.hangup_message_queued:
-            pending_playout = sum(
-                mark.get("duration", 0)
-                for mark in self.mark_event_meta_data.mark_event_meta_data.values()
-                if mark.get("type") != "pre_mark_message" and mark.get("sent_ts")
-            )
-            drain_budget = pending_playout + self.hangup_mark_event_timeout
-            drain_deadline = time.time() + drain_budget
-            while True:
-                try:
-                    if self.tools["output"].hangup_sent():
-                        logger.info("final hangup chunk is now sent. Breaking now")
-                        break
-                    if self.tools["output"].is_closed():
-                        logger.warning("output socket closed before the hangup chunk was acked, tearing down")
-                        break
-                    if time.time() >= drain_deadline:
-                        logger.warning(f"hangup drain timed out after {drain_budget:.1f}s, tearing down")
-                        break
-                    await asyncio.sleep(0.5)
-                except Exception as e:
-                    logger.error(f"Error while checking queue: {e}", exc_info=True)
-                    break
+            output = self.tools["output"]
+            deadline = time.time() + self._queued_playout_seconds() + self.hangup_mark_event_timeout
+            while not output.hangup_sent() and not output.is_closed() and time.time() < deadline:
+                await asyncio.sleep(0.5)
+            if not output.hangup_sent():
+                logger.warning(f"hangup chunk never acked (socket closed={output.is_closed()}), tearing down")
 
         if self.hangup_message_queued and not web_call_timeout:
             self.history.append(
