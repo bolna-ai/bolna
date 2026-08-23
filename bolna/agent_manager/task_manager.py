@@ -2954,19 +2954,33 @@ class TaskManager(BaseManager):
 
         await self.wait_for_current_message()
 
-        # Check completion of agent_hangup_message sent from output
-        # Only wait for hangup chunk if a hangup message was actually queued
-        while self.hangup_triggered and self.hangup_message_queued:
-            try:
-                if self.tools["output"].hangup_sent():
-                    logger.info("final hangup chunk is now sent. Breaking now")
-                    break
-                else:
-                    logger.info("final hangup chunk has not been sent yet")
+        # Wait for the queued goodbye to finish playing, but no longer than the audio still
+        # queued plus the mark grace. A dead media socket never acks, so an unbounded wait here
+        # holds the whole TaskManager until the pod dies and the final save never runs. The
+        # deadline is stamped once, up front, so it cannot recede with each iteration.
+        if self.hangup_triggered and self.hangup_message_queued:
+            pending_playout = sum(
+                mark.get("duration", 0)
+                for mark in self.mark_event_meta_data.mark_event_meta_data.values()
+                if mark.get("type") != "pre_mark_message" and mark.get("sent_ts")
+            )
+            drain_budget = pending_playout + self.hangup_mark_event_timeout
+            drain_deadline = time.time() + drain_budget
+            while True:
+                try:
+                    if self.tools["output"].hangup_sent():
+                        logger.info("final hangup chunk is now sent. Breaking now")
+                        break
+                    if self.tools["output"].is_closed():
+                        logger.warning("output socket closed before the hangup chunk was acked, tearing down")
+                        break
+                    if time.time() >= drain_deadline:
+                        logger.warning(f"hangup drain timed out after {drain_budget:.1f}s, tearing down")
+                        break
                     await asyncio.sleep(0.5)
-            except Exception as e:
-                logger.error(f"Error while checking queue: {e}", exc_info=True)
-                break
+                except Exception as e:
+                    logger.error(f"Error while checking queue: {e}", exc_info=True)
+                    break
 
         if self.hangup_message_queued and not web_call_timeout:
             self.history.append(
@@ -7203,7 +7217,9 @@ class TaskManager(BaseManager):
                 self.hangup_detail = HangupReason.WEB_CALL_MAX_DURATION_REACHED
                 break
 
-            if self.last_transmitted_timestamp == 0:
+            # A hangup still needs its timeout enforced even on a call where no mark was
+            # ever acked, so this idle guard must not swallow the branch below.
+            if self.last_transmitted_timestamp == 0 and not self.hangup_triggered:
                 logger.info(f"Last transmitted timestamp is simply 0 and hence continuing")
                 continue
 
@@ -7212,8 +7228,11 @@ class TaskManager(BaseManager):
                     logger.info(f"Call hangup completed successfully")
                     break
 
-                if self.hangup_triggered_at:
-                    time_since_hangup = time.time() - self.hangup_triggered_at
+                # hangup_triggered_at is only stamped once the goodbye is queued; fall back to
+                # the decision timestamp so a hangup that stalls before that still times out.
+                hangup_started_at = self.hangup_triggered_at or self.hangup_decision_at
+                if hangup_started_at:
+                    time_since_hangup = time.time() - hangup_started_at
                     if time_since_hangup > self.hangup_mark_event_timeout:
                         logger.warning(
                             f"Hangup mark event not received within {self.hangup_mark_event_timeout}s (waited {time_since_hangup:.1f}s), forcing conversation end"
