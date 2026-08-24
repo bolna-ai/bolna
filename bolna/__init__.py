@@ -1,8 +1,4 @@
-<<<<<<< HEAD
-__version__ = "0.10.204"
-=======
-__version__ = "0.10.201"
->>>>>>> cb7c23bf (bump: version 0.10.201)
+__version__ = "0.10.205"
 
 import os
 from bolna.helpers.logger_config import configure_logger
