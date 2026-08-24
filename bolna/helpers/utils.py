@@ -127,35 +127,6 @@ def render_variable_value(value, as_json=False):
     return str(value)
 
 
-def log_unresolved_nested_path(path, data):
-    """INFO-log why a nested {{a.b}} did not resolve. Values are NEVER logged.
-
-    A nested path that fails leaves the token literal in the prompt, which is invisible until
-    someone hears the agent read "{prior.score}" aloud. The overwhelmingly common cause is a
-    container passed as a Python repr — "['apple', 'bananna']" with single quotes — which is not
-    valid JSON, so parse_json_container cannot accept it and there is nothing to index into.
-
-    Only nested paths are logged: a bare {name} miss is normal (it renders `missing`) and would
-    be pure noise. Types and shape only, so prompt variable VALUES never reach the logs.
-    """
-    root = path.split(".")[0].split("[")[0]
-    if root not in data:
-        logger.info(f"prompt variable unresolved: path={path!r} root={root!r} was not passed")
-        return
-    value = data[root]
-    if isinstance(value, str):
-        if value.strip()[:1] in ("{", "["):
-            reason = "a string that is not valid JSON (single quotes? JSON requires double)"
-        else:
-            reason = "a plain string, not a container"
-        logger.info(f"prompt variable unresolved: path={path!r} root={root!r} is {reason}")
-    else:
-        logger.info(
-            f"prompt variable unresolved: path={path!r} root={root!r} is {type(value).__name__}; "
-            "a key or index along the path is missing"
-        )
-
-
 def render_prompt(template, data, missing=""):
     """Substitute {{path}} and {path} variables into a prompt.
 
@@ -182,9 +153,6 @@ def render_prompt(template, data, missing=""):
         spec = match.group("spec")
         found, value = resolve_variable_path(path, data)
         if not found:
-            # Nested-only: these fail silently and only surface when the agent reads the literal token aloud.
-            if ("." in path or "[" in path) and missing is not None:
-                log_unresolved_nested_path(path, data)
             # Unresolved spec tokens stay literal — more likely pseudo-JSON like "{name: string}" than a variable.
             if missing is None or spec:
                 return match.group(0)
