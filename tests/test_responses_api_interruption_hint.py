@@ -69,16 +69,18 @@ class TestInterruptionHintInjection:
         assert items_second[0]["role"] == "user"
         assert llm._interruption_hint is None
 
-    def test_hint_not_injected_without_chain(self):
+    def test_hint_injected_without_chain(self):
+        # chainless full history is the normal post-barge-in request — the hint must ride it
         llm = _make_llm(previous_response_id=None)
-        llm.set_interruption_hint("ignored")
+        llm.set_interruption_hint("hello th")
 
         _, items = llm._build_responses_input(SYSTEM_USER_ASSISTANT_USER)
 
-        assert all(item.get("role") != "developer" for item in items)
+        assert items[0]["role"] == "developer"
+        assert "hello th" in items[0]["content"]
         assert llm._interruption_hint is None
 
-    def test_hint_consumed_on_pending_tool_fallback(self):
+    def test_hint_injected_on_pending_tool_fallback(self):
         messages = [
             {"role": "system", "content": "sys"},
             {"role": "user", "content": "check order"},
@@ -98,7 +100,7 @@ class TestInterruptionHintInjection:
 
         assert llm.previous_response_id is None
         assert llm._interruption_hint is None
-        assert all(item.get("role") != "developer" for item in items)
+        assert items[0]["role"] == "developer"  # hint rides every path, this fallback included
 
     def test_hint_injected_when_tool_outputs_present(self):
         messages = [
@@ -160,10 +162,12 @@ class TestCancelInFlightResponse:
         llm.cancel_in_flight_response()
         llm._ws_transport.cancel_response.assert_not_called()
 
-    def test_cancel_in_flight_does_not_invalidate_chain(self):
+    def test_cancel_in_flight_drops_chain_but_keeps_hint(self):
+        # a lost cancel race can leave a server-committed fc — drop the chain, keep the hint
         import asyncio
 
-        llm = _make_llm(previous_response_id="resp_1")
+        llm = _make_llm(previous_response_id="resp_1", _pending_call_ids={"call_ghost"})
+        llm.set_interruption_hint("hello th")
         llm._ws_transport = MagicMock()
         llm._ws_transport.cancel_response = AsyncMock()
 
@@ -177,6 +181,9 @@ class TestCancelInFlightResponse:
             loop.close()
             asyncio.set_event_loop(None)
 
-        assert llm.previous_response_id == "resp_1"
+        llm._ws_transport.cancel_response.assert_awaited_once_with("resp_1")
+        assert llm.previous_response_id is None
+        assert llm._pending_call_ids == set()
+        assert llm._interruption_hint == "hello th"
         assert llm._pending_call_ids == set()
         llm._ws_transport.cancel_response.assert_called_once_with("resp_1")
