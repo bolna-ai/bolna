@@ -10,7 +10,13 @@ class TelnyxInputHandler(TelephonyInputHandler):
     """Telnyx Media Streaming (https://developers.telnyx.com/docs/voice/programmable-voice/media-streaming)
     uses the same start/media/mark/stop event shape as Twilio, but nests the call id
     under "start" as call_control_id and carries the stream id at the top level of every
-    frame as stream_id rather than inside "start"."""
+    frame as stream_id rather than inside "start".
+
+    Telnyx's docs also note that event order isn't guaranteed and expose a "chunk" number
+    for reordering. The base handler's _listen buffers media in arrival order without
+    reading "chunk" - safe here because there is exactly one TCP connection per call, and
+    TCP already guarantees in-order delivery on a single connection, so arrival order at
+    this socket is send order. No reordering logic is needed on top of that."""
 
     def __init__(
         self,

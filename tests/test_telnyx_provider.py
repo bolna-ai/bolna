@@ -14,7 +14,11 @@ import pytest
 from bolna.enums import TelephonyProvider
 from bolna.helpers.mark_event_meta_data import MarkEventMetaData
 from bolna.input_handlers.telephony_providers.telnyx import TelnyxInputHandler
-from bolna.output_handlers.telephony_providers.telnyx import TelnyxOutputHandler
+from bolna.output_handlers.telephony_providers.telnyx import (
+    MULAW_SILENCE_BYTE,
+    TELNYX_MIN_CHUNK_BYTES,
+    TelnyxOutputHandler,
+)
 from bolna.providers import (
     SUPPORTED_INPUT_HANDLERS,
     SUPPORTED_INPUT_TELEPHONY_HANDLERS,
@@ -70,7 +74,9 @@ class TestTelnyxOutputHandler:
     @pytest.mark.asyncio
     async def test_media_message_has_no_session_id_and_converts_to_mulaw(self):
         handler = self._make_handler()
-        pcm_audio = b"\x10\x00\x20\x00"
+        # Padded to TELNYX_MIN_CHUNK_BYTES worth of PCM samples (2 bytes each) so the
+        # resulting mulaw payload already clears Telnyx's chunk-size floor untouched.
+        pcm_audio = b"\x10\x00\x20\x00" * (TELNYX_MIN_CHUNK_BYTES // 2)
 
         message = await handler.form_media_message(pcm_audio, audio_format="pcm")
 
@@ -82,11 +88,34 @@ class TestTelnyxOutputHandler:
     @pytest.mark.asyncio
     async def test_media_message_skips_conversion_when_already_mulaw(self):
         handler = self._make_handler()
-        mulaw_audio = b"\xff\x7e\x81"
+        mulaw_audio = (b"\xff\x7e\x81" * TELNYX_MIN_CHUNK_BYTES)[:TELNYX_MIN_CHUNK_BYTES]
 
         message = await handler.form_media_message(mulaw_audio, audio_format="mulaw")
 
         assert message["media"]["payload"] == base64.b64encode(mulaw_audio).decode("utf-8")
+
+    @pytest.mark.asyncio
+    async def test_media_message_pads_undersized_tail_chunk_to_telnyx_floor(self):
+        # Telnyx requires >=20ms (160 bytes of mulaw@8kHz) per chunk; the shared chunking
+        # in task_manager.py can hand us a tail slice as small as 1-2 bytes.
+        handler = self._make_handler()
+        mulaw_audio = b"\xab"
+
+        message = await handler.form_media_message(mulaw_audio, audio_format="mulaw")
+
+        payload = base64.b64decode(message["media"]["payload"])
+        assert len(payload) == TELNYX_MIN_CHUNK_BYTES
+        assert payload[:1] == mulaw_audio
+        assert payload[1:] == MULAW_SILENCE_BYTE * (TELNYX_MIN_CHUNK_BYTES - 1)
+
+    @pytest.mark.asyncio
+    async def test_media_message_does_not_pad_chunk_already_at_floor(self):
+        handler = self._make_handler()
+        mulaw_audio = b"\xab" * TELNYX_MIN_CHUNK_BYTES
+
+        message = await handler.form_media_message(mulaw_audio, audio_format="mulaw")
+
+        assert base64.b64decode(message["media"]["payload"]) == mulaw_audio
 
     @pytest.mark.asyncio
     async def test_mark_message_has_no_session_id(self):
