@@ -5,6 +5,7 @@ Ref: https://docs.asterisk.org/Configuration/Channel-Drivers/WebSocket/
 """
 
 import asyncio
+import audioop
 import json
 import os
 import time
@@ -46,6 +47,9 @@ HANGUP_DRAIN_SETTLE_S = float(os.environ.get("SIP_HANGUP_DRAIN_SETTLE_S", "0.5")
 # keypress), or immediately when '#' is pressed. Overridable via env.
 DTMF_INTERDIGIT_TIMEOUT_S = float(os.environ.get("SIP_DTMF_INTERDIGIT_TIMEOUT_S", "3"))
 
+# How often to report inbound audio counters. Overridable via env; 0 disables.
+AUDIO_STATS_INTERVAL_S = float(os.environ.get("SIP_AUDIO_STATS_INTERVAL_S", "10"))
+
 
 def _parse_asterisk_control_message(text: str) -> dict:
     """Parse Asterisk control: JSON or plain 'KEY value' / 'KEY:value'.
@@ -79,6 +83,44 @@ def _parse_asterisk_control_message(text: str) -> dict:
     if event:
         result["event"] = event
     return result
+
+
+class InboundAudioStats:
+    """Counters for the audio Asterisk writes to us.
+
+    An empty transcript looks the same whether Asterisk never sent the caller's audio or
+    the ASR made nothing of it. No batches means a dead leg; batches with peak 0 mean
+    Asterisk sent us digital silence.
+    """
+
+    __slots__ = ("total_batches", "total_bytes", "_batches", "_bytes", "_peak", "_since")
+
+    def __init__(self) -> None:
+        self.total_batches = 0
+        self.total_bytes = 0
+        self._batches = 0
+        self._bytes = 0
+        self._peak = 0
+        self._since = time.monotonic()
+
+    def record(self, ulaw_audio: bytes) -> None:
+        """Accumulate one batch of inbound ulaw."""
+        self.total_batches += 1
+        self.total_bytes += len(ulaw_audio)
+        self._batches += 1
+        self._bytes += len(ulaw_audio)
+        self._peak = max(self._peak, audioop.max(audioop.ulaw2lin(ulaw_audio, 2), 2))
+
+    def take_window(self) -> str:
+        """Describe the batches seen since the last call, then start a fresh window."""
+        now = time.monotonic()
+        window = f"batches={self._batches} bytes={self._bytes} peak={self._peak} over={now - self._since:.1f}s"
+        self._batches = self._bytes = self._peak = 0
+        self._since = now
+        return window
+
+    def totals(self) -> str:
+        return f"batches={self.total_batches} bytes={self.total_bytes}"
 
 
 class SipTrunkInputHandler(TelephonyInputHandler):
@@ -267,12 +309,27 @@ class SipTrunkInputHandler(TelephonyInputHandler):
         """Handle MEDIA_START."""
         self._initialize_from_media_start(packet)
 
+    async def _report_inbound_audio(self, stats: InboundAudioStats):
+        """Report inbound counters on a timer.
+
+        Timer-driven rather than receive-driven because the case worth catching is
+        Asterisk sending nothing, when the receive loop is parked and reports nothing.
+        """
+        try:
+            while self.running:
+                await asyncio.sleep(AUDIO_STATS_INTERVAL_S)
+                logger.info(f"sip-trunk rx {stats.take_window()} channel={self.channel_id}")
+        except asyncio.CancelledError:
+            return
+
     async def _listen(self):
         """Receive TEXT (control) and BINARY (ulaw). Forward audio in ~AUDIO_BATCH_MS batches
         for a balance of latency and transcript accuracy."""
         buffer = []
         chunks_per_batch = max(2, AUDIO_BATCH_MS // self.ptime) if self.ptime else 4
         message_count = 0
+        stats = InboundAudioStats()
+        stats_task = asyncio.create_task(self._report_inbound_audio(stats)) if AUDIO_STATS_INTERVAL_S > 0 else None
 
         while self.running:
             try:
@@ -297,6 +354,7 @@ class SipTrunkInputHandler(TelephonyInputHandler):
                         merged = b"".join(buffer)
                         buffer = []
                         message_count = 0
+                        stats.record(merged)
                         await self.ingest_audio(merged, self._audio_meta())
 
                 elif "text" in message:
@@ -320,9 +378,13 @@ class SipTrunkInputHandler(TelephonyInputHandler):
                 traceback.print_exc()
                 break
 
+        if stats_task is not None:
+            stats_task.cancel()
+
         if buffer:
             merged = b"".join(buffer)
             if merged:
+                stats.record(merged)
                 await self.ingest_audio(merged, self._audio_meta())
 
         ws_data_packet = create_ws_data_packet(
@@ -330,7 +392,7 @@ class SipTrunkInputHandler(TelephonyInputHandler):
             meta_info={"io": self.io_provider, "eos": True, "sequence": (self.input_types or {}).get("audio", 0)},
         )
         self.queues["transcriber"].put_nowait(ws_data_packet)
-        logger.info(f"sip-trunk WebSocket closed for channel {self.channel_id}")
+        logger.info(f"sip-trunk WebSocket closed for channel {self.channel_id}, rx {stats.totals()}")
 
     def _flush_dtmf(self):
         """Enqueue the accumulated DTMF digits as one entry and clear the buffer."""
