@@ -1318,10 +1318,7 @@ class TestOpenAIWSConnection:
 
 
 class TestChainedRequestRejectionRetry:
-    """A cancelled response can leave a function_call committed server-side that this client
-    never saw; every later chained request then 400s with "No tool output found for function
-    call ..." and, before the retry existed, the APIError tore down the whole live call.
-    The WS path must recover by resending the FULL history unchained."""
+    """A rejected chained request must retry unchained with full history, not kill the call."""
 
     TOOL_HISTORY = [
         {"role": "system", "content": "sys"},
@@ -1375,20 +1372,17 @@ class TestChainedRequestRejectionRetry:
             chunks.append(chunk)
 
         assert len(seen_params) == 2
-        # first attempt was chained (delta after the last assistant = just the tool output)
         assert seen_params[0].get("previous_response_id") == "resp_fc"
-        # retry is unchained and self-consistent: full history with the call/output PAIR inline
+        # retry is unchained, full history with the call/output pair inline
         assert "previous_response_id" not in seen_params[1]
         types = [getattr(item.get("type"), "value", item.get("type")) for item in seen_params[1]["input"]]
         assert "function_call_output" in types
         assert "function_call" in types
         # the call survives and the answer streams from the retry
         assert any("785" in c.data for c in chunks if isinstance(c.data, str))
-        # the retry's response re-establishes a clean chain
-        assert llm.previous_response_id == "resp_retry"
+        assert llm.previous_response_id == "resp_retry"  # clean chain re-established
 
     async def test_unchained_invalid_request_still_raises(self):
-        # with no chain there is nothing to heal by retrying — the error must surface
         error_event = {
             "type": "error",
             "error": {"type": "invalid_request_error", "code": None, "message": "bad input", "param": "input"},
@@ -1401,8 +1395,7 @@ class TestChainedRequestRejectionRetry:
         assert len(seen_params) == 1
 
     async def test_prev_response_not_found_retry_keeps_tools(self):
-        # the pre-existing retry dropped `tools` on recursion — a retried turn silently lost
-        # its function-calling ability; pin the passthrough
+        # the pre-existing retry dropped `tools` on recursion
         error_event = {
             "type": "error",
             "error": {"type": "invalid_request_error", "code": "previous_response_not_found", "message": "gone"},

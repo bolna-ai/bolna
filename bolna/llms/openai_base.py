@@ -289,8 +289,7 @@ class OpenAICompatibleLLM(BaseLLM):
         With previous_response_id set, only sends items after the last
         assistant. Falls back to full history when pending tool outputs are
         missing. Any pending interruption hint is consumed exactly once and
-        prepended on both the chained path and the chainless full-history path
-        (the latter is the normal post-barge-in path — cancel drops the chain).
+        prepended on both the chained and chainless paths.
         """
         hint = self._interruption_hint
         self._interruption_hint = None
@@ -306,8 +305,7 @@ class OpenAICompatibleLLM(BaseLLM):
             if hint is not None:
                 input_items = [self._build_interruption_hint_item(hint), *input_items]
             return instructions, input_items
-        # No chain — the post-barge-in path since cancel_in_flight_response drops it. The hint
-        # matters most exactly here, so it rides the full-history request too.
+        # no chain = the post-barge-in path (cancel drops it) — the hint rides it too
         instructions, input_items = MessageFormatAdapter.chat_to_responses_input(messages)
         if hint is not None:
             input_items = [self._build_interruption_hint_item(hint), *input_items]
