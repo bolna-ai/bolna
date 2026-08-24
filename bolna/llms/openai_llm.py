@@ -550,7 +550,29 @@ class OpenAiLLM(OpenAICompatibleLLM):
                         logger.warning(f"WS previous_response_id not found, retrying with full history")
                         self.previous_response_id = None
                         async for chunk in self._generate_stream_ws_responses(
-                            messages, synthesize, request_json, meta_info, tool_choice
+                            messages, synthesize, request_json, meta_info, tool_choice, tools
+                        ):
+                            yield chunk
+                        return
+                    # Any other rejection of a CHAINED request gets one full-history retry: the
+                    # server-side lineage can be unsatisfiable in ways the client can't see (e.g.
+                    # a cancelled response that committed a function_call nobody will ever answer
+                    # -> "No tool output found for function call ..."). Full history carries every
+                    # function_call/output pair inline, so it is always self-consistent. Gated on
+                    # nothing-yielded so a retry can never duplicate speech.
+                    if (
+                        self.previous_response_id
+                        and error_info.get("type") == "invalid_request_error"
+                        and not answer
+                        and not func_call_args
+                        and not gave_pre_call_msg
+                    ):
+                        logger.warning(
+                            f"WS chained request rejected ({error_info.get('message')}), retrying with full history"
+                        )
+                        self.previous_response_id = None
+                        async for chunk in self._generate_stream_ws_responses(
+                            messages, synthesize, request_json, meta_info, tool_choice, tools
                         ):
                             yield chunk
                         return
@@ -732,9 +754,18 @@ class OpenAiLLM(OpenAICompatibleLLM):
         self.started_streaming = False
 
     def cancel_in_flight_response(self):
-        """Cancel the in-flight WS response; keeps previous_response_id alive."""
+        """Cancel the in-flight WS response and drop the response chain. The cancel can lose the
+        race with generation: the server may commit output items — including a function_call this
+        client never consumed — before acting on it, and chaining onto such a response makes every
+        later request owe a tool output the client doesn't know exists (the server 400s with
+        "No tool output found for function call ...", which killed live calls mid-tool-call).
+        Cost: one full-history request after each barge-in; the chain re-establishes on that
+        response. Only the chain state is dropped — NOT invalidate_response_chain(), which would
+        also clear the interruption hint that sync_history set moments before this runs."""
         if self._ws_transport and self.previous_response_id:
             asyncio.ensure_future(self._ws_transport.cancel_response(self.previous_response_id))
+            self.previous_response_id = None
+            self._pending_call_ids = set()
 
     async def close(self):
         # httpx client is shared via pool, don't close it here

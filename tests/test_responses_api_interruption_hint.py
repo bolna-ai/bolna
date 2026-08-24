@@ -69,13 +69,16 @@ class TestInterruptionHintInjection:
         assert items_second[0]["role"] == "user"
         assert llm._interruption_hint is None
 
-    def test_hint_not_injected_without_chain(self):
+    def test_hint_injected_without_chain(self):
+        # the chainless full-history request IS the normal post-barge-in request now that
+        # cancel_in_flight_response drops the chain — the hint must ride it
         llm = _make_llm(previous_response_id=None)
-        llm.set_interruption_hint("ignored")
+        llm.set_interruption_hint("hello th")
 
         _, items = llm._build_responses_input(SYSTEM_USER_ASSISTANT_USER)
 
-        assert all(item.get("role") != "developer" for item in items)
+        assert items[0]["role"] == "developer"
+        assert "hello th" in items[0]["content"]
         assert llm._interruption_hint is None
 
     def test_hint_consumed_on_pending_tool_fallback(self):
@@ -160,10 +163,15 @@ class TestCancelInFlightResponse:
         llm.cancel_in_flight_response()
         llm._ws_transport.cancel_response.assert_not_called()
 
-    def test_cancel_in_flight_does_not_invalidate_chain(self):
+    def test_cancel_in_flight_drops_chain_but_keeps_hint(self):
+        # A cancel can lose the race with generation: the server may commit a function_call
+        # this client never saw, and chaining onto that response 400s every later request
+        # ("No tool output found for function call ..."). So cancel drops the chain — but NOT
+        # the interruption hint, which sync_history sets immediately before cancelling.
         import asyncio
 
-        llm = _make_llm(previous_response_id="resp_1")
+        llm = _make_llm(previous_response_id="resp_1", _pending_call_ids={"call_ghost"})
+        llm.set_interruption_hint("hello th")
         llm._ws_transport = MagicMock()
         llm._ws_transport.cancel_response = AsyncMock()
 
@@ -177,6 +185,10 @@ class TestCancelInFlightResponse:
             loop.close()
             asyncio.set_event_loop(None)
 
-        assert llm.previous_response_id == "resp_1"
+        # the cancel frame still targeted the old id
+        llm._ws_transport.cancel_response.assert_awaited_once_with("resp_1")
+        assert llm.previous_response_id is None
+        assert llm._pending_call_ids == set()
+        assert llm._interruption_hint == "hello th"
         assert llm._pending_call_ids == set()
         llm._ws_transport.cancel_response.assert_called_once_with("resp_1")

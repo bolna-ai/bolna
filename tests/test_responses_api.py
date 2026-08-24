@@ -1310,3 +1310,122 @@ class TestOpenAIWSConnection:
         assert "response.failed" in OpenAIWSConnection.TERMINAL_EVENTS
         assert "response.incomplete" in OpenAIWSConnection.TERMINAL_EVENTS
         assert "error" in OpenAIWSConnection.TERMINAL_EVENTS
+
+
+# ===================================================================
+# Chained-request rejection recovery (the mid-tool-call hangup bug)
+# ===================================================================
+
+
+class TestChainedRequestRejectionRetry:
+    """A cancelled response can leave a function_call committed server-side that this client
+    never saw; every later chained request then 400s with "No tool output found for function
+    call ..." and, before the retry existed, the APIError tore down the whole live call.
+    The WS path must recover by resending the FULL history unchained."""
+
+    TOOL_HISTORY = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "mera loan remove karo"},
+        {
+            "role": "assistant",
+            "content": "ek moment",
+            "tool_calls": [
+                {
+                    "id": "call_7aYe",
+                    "type": "function",
+                    "function": {"name": "get_ctx", "arguments": '{"uid":"x"}'},
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call_7aYe", "content": '{"score": 785}'},
+    ]
+
+    def _llm_with_flaky_ws(self, error_event, previous_response_id="resp_fc"):
+        llm = _make_llm(use_responses_api=True, previous_response_id=previous_response_id)
+        seen_params = []
+
+        async def fake_stream(params):
+            seen_params.append(params)
+            if len(seen_params) == 1:
+                yield error_event
+                return
+            yield {"type": "response.created", "response": {"id": "resp_retry", "service_tier": None}}
+            yield {"type": "response.output_text.delta", "delta": "aapka score 785 hai", "item_id": "m1"}
+            yield {"type": "response.completed", "response": {"id": "resp_retry", "usage": None}}
+
+        mock_ws = MagicMock()
+        mock_ws.stream_response = fake_stream
+        llm._ws_transport = mock_ws
+        return llm, seen_params
+
+    async def test_no_tool_output_rejection_retries_full_history(self):
+        error_event = {
+            "type": "error",
+            "error": {
+                "type": "invalid_request_error",
+                "code": None,
+                "message": "No tool output found for function call call_7aYe.",
+                "param": "input",
+            },
+        }
+        llm, seen_params = self._llm_with_flaky_ws(error_event)
+
+        chunks = []
+        async for chunk in llm.generate_stream(self.TOOL_HISTORY, synthesize=False, meta_info=_make_meta_info()):
+            chunks.append(chunk)
+
+        assert len(seen_params) == 2
+        # first attempt was chained (delta after the last assistant = just the tool output)
+        assert seen_params[0].get("previous_response_id") == "resp_fc"
+        # retry is unchained and self-consistent: full history with the call/output PAIR inline
+        assert "previous_response_id" not in seen_params[1]
+        types = [getattr(item.get("type"), "value", item.get("type")) for item in seen_params[1]["input"]]
+        assert "function_call_output" in types
+        assert "function_call" in types
+        # the call survives and the answer streams from the retry
+        assert any("785" in c.data for c in chunks if isinstance(c.data, str))
+        # the retry's response re-establishes a clean chain
+        assert llm.previous_response_id == "resp_retry"
+
+    async def test_unchained_invalid_request_still_raises(self):
+        # with no chain there is nothing to heal by retrying — the error must surface
+        error_event = {
+            "type": "error",
+            "error": {"type": "invalid_request_error", "code": None, "message": "bad input", "param": "input"},
+        }
+        llm, seen_params = self._llm_with_flaky_ws(error_event, previous_response_id=None)
+
+        with pytest.raises(APIError):
+            async for _ in llm.generate_stream(self.TOOL_HISTORY, synthesize=False, meta_info=_make_meta_info()):
+                pass
+        assert len(seen_params) == 1
+
+    async def test_prev_response_not_found_retry_keeps_tools(self):
+        # the pre-existing retry dropped `tools` on recursion — a retried turn silently lost
+        # its function-calling ability; pin the passthrough
+        error_event = {
+            "type": "error",
+            "error": {"type": "invalid_request_error", "code": "previous_response_not_found", "message": "gone"},
+        }
+        llm, seen_params = self._llm_with_flaky_ws(error_event)
+        llm.trigger_function_call = True  # _parse_tools drops tools otherwise
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_ctx",
+                    "description": "d",
+                    "parameters": {"type": "object", "properties": {}, "required": []},
+                },
+            }
+        ]
+
+        chunks = []
+        async for chunk in llm.generate_stream(
+            self.TOOL_HISTORY, synthesize=False, meta_info=_make_meta_info(), tools=tools
+        ):
+            chunks.append(chunk)
+
+        assert len(seen_params) == 2
+        assert "tools" in seen_params[0]
+        assert "tools" in seen_params[1], "retry must carry the turn's tools"
