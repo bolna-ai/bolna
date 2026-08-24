@@ -497,6 +497,7 @@ class TaskManager(BaseManager):
         self.consider_next_transcript_after = time.time()
         self.llm_response_generated = False
         self.response_in_pipeline = False
+        self._synthesis_awaiting_first_audio = False
         self._response_turn_id = 0
         self._turn_msg_map = {}  # turn_id → assistant message dict ref in _messages
         self._pending_assistant_history = {}  # sequence_id -> {content, turn_id, response_uid}
@@ -2520,6 +2521,7 @@ class TaskManager(BaseManager):
         self.interruption_manager.invalidate_pending_responses()
         self._drop_all_staged_assistant_history("cleanup_downstream_tasks")
         self.response_in_pipeline = False
+        self._synthesis_awaiting_first_audio = False
         await self.tools["synthesizer"].flush_synthesizer_stream()
 
         # Stop the output loop first so that we do not transmit anything else
@@ -3947,6 +3949,7 @@ class TaskManager(BaseManager):
         if empty_turn_detail:
             logger.info(f"{empty_turn_detail}; clearing response_in_pipeline")
             self.response_in_pipeline = False
+            self._synthesis_awaiting_first_audio = False
 
         # Collect RAG latency if present (from KnowledgeBaseAgent)
         if meta_info.get("rag_latency"):
@@ -4390,10 +4393,12 @@ class TaskManager(BaseManager):
             self.llm_task = None
         except BolnaComponentError as e:
             self.response_in_pipeline = False
+            self._synthesis_awaiting_first_audio = False
             await self._end_call_on_component_error(e, HangupReason.LLM_ERROR)
             raise
         except Exception as e:
             self.response_in_pipeline = False
+            self._synthesis_awaiting_first_audio = False
             await self._end_call_on_component_error(
                 LLMError(
                     str(e), provider=self.llm_config.get("provider", "unknown"), model=self.llm_config.get("model")
@@ -6896,6 +6901,8 @@ class TaskManager(BaseManager):
                 and meta_info["is_first_message"]
                 or self.interruption_manager.is_valid_sequence(message["meta_info"]["sequence_id"])
             ):
+                if meta_info.get("sequence_id") not in (None, -1):
+                    self._synthesis_awaiting_first_audio = True
                 if meta_info["is_md5_hash"]:
                     logger.info(
                         "sending preprocessed audio response to {}".format(
@@ -7021,6 +7028,7 @@ class TaskManager(BaseManager):
                         self._commit_staged_assistant_history(sequence_id)
                         self.tools["input"].update_is_audio_being_played(True)
                         self.response_in_pipeline = False
+                        self._synthesis_awaiting_first_audio = False
                         await self.tools["output"].handle(message)
                         # Track when agent audio first starts flowing for this sequence.
                         # Only fire on real audio bytes — BOS/EOS control packets are strings
@@ -7068,6 +7076,7 @@ class TaskManager(BaseManager):
                             # the SEND path that normally resets this flag. Clear it here so
                             # subsequent user speech is not permanently treated as an interruption.
                             self.response_in_pipeline = False
+                            self._synthesis_awaiting_first_audio = False
                         should_continue_outer_loop = True
                         break  # Exit inner loop, skip to next message
 
@@ -7187,6 +7196,10 @@ class TaskManager(BaseManager):
             and time_since_user_last_spoke > stall_timeout
         )
 
+    def _pipeline_busy(self, audio_playing):
+        """True while the agent is speaking or about to: response_in_pipeline can read False in the gap between a response's synth push and its first audio chunk, so _synthesis_awaiting_first_audio covers it."""
+        return audio_playing or self.response_in_pipeline or self._synthesis_awaiting_first_audio
+
     def compute_last_ai_audio_timestamp(self):
         """Most recent moment agent audio was still reaching the user.
 
@@ -7276,7 +7289,7 @@ class TaskManager(BaseManager):
 
             # Draining audio needs no term here: every branch below is gated on
             # time_since_last_spoken_ai_word, which stays at 0 while the caller can still hear.
-            if self.tools["input"].is_audio_being_played_to_user() or self.response_in_pipeline:
+            if self._pipeline_busy(self.tools["input"].is_audio_being_played_to_user()):
                 continue
 
             if (
