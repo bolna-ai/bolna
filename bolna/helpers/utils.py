@@ -1,4 +1,5 @@
 from datetime import datetime
+from functools import lru_cache
 from typing import Union, Optional
 import json
 import asyncio
@@ -62,6 +63,11 @@ def load_file(file_path, is_json=False):
 def write_json_file(file_path, data):
     with open(file_path, "w") as file:
         json.dump(data, file, indent=4, ensure_ascii=False)
+
+
+def safe_log_text(text, limit=120):
+    """Strip control chars from caller text and truncate — blocks forged log entries."""
+    return re.sub(r"[\x00-\x1f\x7f]+", " ", str(text or ""))[:limit]
 
 
 def create_ws_data_packet(data, meta_info=None, is_md5_hash=False, llm_generated=False):
@@ -453,6 +459,13 @@ def mp3_bytes_to_pcm(mp3_bytes, target_sample_rate=8000):
     return audio.raw_data
 
 
+@lru_cache(maxsize=32)
+def _resample_fir(up, down):
+    """resample_poly's default kaiser design, cached per ratio; it applies its own up scaling."""
+    max_rate = max(up, down)
+    return scipy.signal.firwin(20 * max_rate + 1, 1.0 / max_rate, window=("kaiser", 5.0)).astype(np.float32)
+
+
 def resample(audio_bytes, target_sample_rate, format="mp3", pcm_channels=1, original_sample_rate=None):
     """
     Resample audio bytes
@@ -474,7 +487,8 @@ def resample(audio_bytes, target_sample_rate, format="mp3", pcm_channels=1, orig
         if pcm_channels > 1:
             audio_array = audio_array.reshape(-1, pcm_channels)
         g = math.gcd(original_sample_rate, target_sample_rate)
-        resampled = scipy.signal.resample_poly(audio_array, target_sample_rate // g, original_sample_rate // g, axis=0)
+        up, down = target_sample_rate // g, original_sample_rate // g
+        resampled = scipy.signal.resample_poly(audio_array, up, down, axis=0, window=_resample_fir(up, down))
         return np.clip(resampled, -32768, 32767).astype(np.int16).tobytes()
 
     # Handle other formats (wav, mp3, etc.) via pydub
@@ -953,16 +967,15 @@ def ulaw_to_pcm(ulaw_bytes):
     return audioop.ulaw2lin(ulaw_bytes, 2)  # 2 = sample width in bytes (16-bit)
 
 
-def audio_to_mulaw8k(audio, rate_hint=8000, format_hint=""):
-    """One-shot synth output (base64 str / WAV / raw PCM) → mono 16-bit 8kHz mu-law.
-    Undecodable compressed containers (MP3/Ogg/FLAC) return None — never raw noise."""
+def decode_audio_segment(audio, rate_hint=8000, format_hint=""):
+    """base64/WAV/raw PCM → AudioSegment; undecodable containers → None."""
     import base64
 
     if isinstance(audio, str):
         audio = base64.b64decode(audio)
     try:
         # Explicit format for WAV takes pydub's native reader — no ffprobe/ffmpeg.
-        segment = AudioSegment.from_file(io.BytesIO(audio), format="wav" if audio[:4] == b"RIFF" else None)
+        return AudioSegment.from_file(io.BytesIO(audio), format="wav" if audio[:4] == b"RIFF" else None)
     except Exception:
         if (
             audio[:3] == b"ID3"
@@ -973,9 +986,24 @@ def audio_to_mulaw8k(audio, rate_hint=8000, format_hint=""):
         # Headerless audio: trust the caller's declared rate/format.
         if "law" in str(format_hint or ""):
             audio = audioop.ulaw2lin(audio, 2)
-        segment = AudioSegment(data=audio, sample_width=2, frame_rate=int(rate_hint or 8000), channels=1)
+        return AudioSegment(data=audio, sample_width=2, frame_rate=int(rate_hint or 8000), channels=1)
+
+
+def audio_to_mulaw8k(audio, rate_hint=8000, format_hint=""):
+    """One-shot synth output → mono 16-bit 8kHz mu-law, or None if undecodable."""
+    segment = decode_audio_segment(audio, rate_hint, format_hint)
+    if segment is None:
+        return None
     segment = segment.set_frame_rate(8000).set_channels(1).set_sample_width(2)
     return pcm_to_ulaw(segment.raw_data)
+
+
+def audio_to_pcm(audio, *, target_sample_rate, rate_hint=8000, format_hint=""):
+    """→ mono 16-bit PCM, or None. Keyword-only: the sibling's 2nd arg is the SOURCE rate."""
+    segment = decode_audio_segment(audio, rate_hint, format_hint)
+    if segment is None:
+        return None
+    return segment.set_frame_rate(int(target_sample_rate)).set_channels(1).set_sample_width(2).raw_data
 
 
 def soniox_ws_url(host):

@@ -35,6 +35,8 @@ from bolna.constants import (
     LANGUAGE_SWITCH_SPEAKING_STALE_CAP_S,
     LANGUAGE_SWITCH_SETTLE_MS,
     LLM_DEFAULT_CONFIGS,
+    LLM_REGEN_SETTLE_S,
+    REGEN_SETTLE_EXCLUDED_TRANSCRIBERS,
     NON_EVIDENCE_MARK_TYPES,
     SWITCH_LANGUAGE_TOOL_DEFINITION,
     END_CALL_FUNCTION_PREFIX,
@@ -86,6 +88,7 @@ from bolna.helpers.utils import (
     is_valid_md5,
     get_required_input_types,
     format_messages,
+    safe_log_text,
     get_prompt_responses,
     resample,
     save_audio_file_to_s3,
@@ -99,6 +102,7 @@ from bolna.helpers.utils import (
     yield_chunks_from_memory,
     process_task_cancellation,
     audio_to_mulaw8k,
+    audio_to_pcm,
     pcm_to_ulaw,
     ulaw_to_pcm,
     format_error_message,
@@ -151,6 +155,15 @@ def _inject_end_call_tool(api_tools, *, scope, nodes, description=None):
         "nodes": list(nodes or []),
     }
     return api_tools
+
+
+def is_alphanumeric_readout(text: str) -> bool:
+    """Code readout, not language evidence (rule 3a): ≥1 digit-bearing token, ≤2 others."""
+    tokens = re.findall(r"\w+", text or "", flags=re.UNICODE)
+    if not tokens:
+        return False
+    code_tokens = [t for t in tokens if any(ch.isdigit() for ch in t)]
+    return len(code_tokens) >= 1 and (len(tokens) - len(code_tokens)) <= 2
 
 
 def build_lid_decision_record(
@@ -587,6 +600,9 @@ class TaskManager(BaseManager):
         # Records every language switch — manual tool call (legacy) or LLM-driven
         # (triggered_by="lid_llm") — used post-call for precision / latency analysis.
         self.language_switch_events: list[dict] = []
+        # Debounce for overlapped finals: one regen per merged utterance, not per fragment.
+        self.regen_settle_task = None
+        self.regen_settle_payload = None
         # Legacy-flow handoff state (populated by __inject_switch_language_tool
         # when the LLM-driven switch flow is NOT enabled for this call).
         self.switch_handoff_messages = {}
@@ -1687,14 +1703,7 @@ class TaskManager(BaseManager):
 
                 # Telephony providers expect mulaw@8000Hz — force use_mulaw for all synths in the pool
                 output_provider = self.task_config["tools_config"]["output"]["provider"]
-                is_telephony = output_provider in (
-                    TelephonyProvider.PLIVO.value,
-                    TelephonyProvider.TWILIO.value,
-                    TelephonyProvider.EXOTEL.value,
-                    TelephonyProvider.VOBIZ.value,
-                    TelephonyProvider.TELNYX.value,
-                    TelephonyProvider.SIP_TRUNK.value,
-                )
+                is_telephony = output_provider in SUPPORTED_OUTPUT_TELEPHONY_HANDLERS
                 synthesizer_kwargs = self.kwargs.copy()
                 if is_telephony:
                     synthesizer_kwargs["use_mulaw"] = True
@@ -1743,7 +1752,8 @@ class TaskManager(BaseManager):
 
                 # Pre-render every language's handoff clip on its own voice (background;
                 if self.language_switcher is not None and not self.turn_based_conversation:
-                    if self.task_config["tools_config"]["output"]["provider"] != "default":
+                    # "default" has one wire format only on the web path.
+                    if self.task_config["tools_config"]["output"]["provider"] != "default" or self.is_web_based_call:
                         self.handoff_prewarm_task = asyncio.create_task(self.__prewarm_handoff_clips())
 
                 if self.task_config["tools_config"]["llm_agent"] is not None and llm_config is not None:
@@ -1773,14 +1783,7 @@ class TaskManager(BaseManager):
             # the multilingual-pool path above. Synths that honor the kwarg (e.g. cartesia)
             # would otherwise stream raw PCM that telephony plays as mulaw → loud static.
             output_provider = self.task_config["tools_config"]["output"]["provider"]
-            is_telephony = output_provider in (
-                TelephonyProvider.PLIVO.value,
-                TelephonyProvider.TWILIO.value,
-                TelephonyProvider.EXOTEL.value,
-                TelephonyProvider.VOBIZ.value,
-                TelephonyProvider.TELNYX.value,
-                TelephonyProvider.SIP_TRUNK.value,
-            )
+            is_telephony = output_provider in SUPPORTED_OUTPUT_TELEPHONY_HANDLERS
             synthesizer_kwargs = self.kwargs.copy()
             if is_telephony:
                 synthesizer_kwargs["use_mulaw"] = True
@@ -2499,6 +2502,10 @@ class TaskManager(BaseManager):
         logger.info(f"Cleaning up downstream task")
         start_time = time.time()
         self._cancel_in_flight_llm_response()
+        # The overlapped-final path re-arms after this cleanup, so the newest turn wins.
+        if self.regen_settle_armed():
+            self.regen_settle_task.cancel()
+        self.regen_settle_payload = None
         await self.tools["output"].handle_interruption()
         await self.tools["synthesizer"].handle_interruption()
 
@@ -4497,6 +4504,71 @@ class TaskManager(BaseManager):
             reason,
         )
 
+    def kickoff_llm_generation(self, transcriber_message, meta_info):
+        """Start the LLM turn for a final transcript (immediate path and settle-window path)."""
+        logger.info(f"Running llm Tasks")
+        transcriber_package = create_ws_data_packet(transcriber_message, meta_info)
+
+        # Cancel any existing LLM task to prevent orphaned concurrent responses
+        if self.llm_task is not None and not self.llm_task.done():
+            logger.info("Cancelling existing LLM task for new speech_final")
+            self.llm_task.cancel()
+            self.llm_task = None
+            self.interruption_manager.invalidate_pending_responses()
+            self._drop_all_staged_assistant_history("llm_task_cancelled_for_new_speech_final")
+            # Re-register the seq_id allocated by __get_updated_meta_info, else the audio blocks.
+            self.interruption_manager.revalidate_sequence_id(meta_info["sequence_id"])
+
+        # Unconditional: an un-re-added seq_id leaves every chunk of this turn BLOCKed.
+        self.interruption_manager.revalidate_sequence_id(meta_info["sequence_id"])
+        self.response_in_pipeline = True
+        # Background once-per-turn switch decision; gates this turn's AUDIO, not its generation.
+        self._spawn_language_switch_decision(transcriber_message, meta_info)
+        self.llm_task = asyncio.create_task(self._run_llm_task(transcriber_package))
+
+    def regen_settle_armed(self) -> bool:
+        """True while the settle-window timer is pending — a generation is owed for this turn."""
+        return self.regen_settle_task is not None and not self.regen_settle_task.done()
+
+    def regen_settle_can_fire(self):
+        """False for excluded transcribers: no final can land inside the window, so waiting only costs."""
+        transcriber = self.tools.get("transcriber")
+        active = (
+            transcriber.transcribers.get(transcriber.active_label, transcriber)
+            if hasattr(transcriber, "transcribers")
+            else transcriber
+        )
+        return not type(active).__name__.lower().startswith(REGEN_SETTLE_EXCLUDED_TRANSCRIBERS)
+
+    def arm_regen_settle(self, transcriber_message, meta_info):
+        """(Re)arm the regeneration debounce with the latest merged turn."""
+        if self.regen_settle_armed():
+            self.regen_settle_task.cancel()
+        self.regen_settle_payload = (transcriber_message, meta_info)
+        self.regen_settle_task = asyncio.create_task(self.__regen_after_settle())
+        logger.info(
+            "BOLNA_TRACE_TM regen_settle armed seq=%s turn=%s window=%ss text=%r",
+            meta_info.get("sequence_id"),
+            meta_info.get("turn_id"),
+            LLM_REGEN_SETTLE_S,
+            safe_log_text(transcriber_message, 80),
+        )
+
+    async def __regen_after_settle(self):
+        await asyncio.sleep(LLM_REGEN_SETTLE_S)
+        payload = self.regen_settle_payload
+        self.regen_settle_payload = None
+        if payload is None:
+            return
+        transcriber_message, meta_info = payload
+        logger.info(
+            "BOLNA_TRACE_TM regen_settle fired seq=%s turn=%s text=%r",
+            meta_info.get("sequence_id"),
+            meta_info.get("turn_id"),
+            safe_log_text(transcriber_message, 80),
+        )
+        self.kickoff_llm_generation(transcriber_message, meta_info)
+
     async def _handle_transcriber_output(self, next_task, transcriber_message, meta_info):
         logger.info(
             "BOLNA_TRACE_TM handle_transcript next=%s seq=%s turn=%s response_uid=%s group_uid=%s request_id=%s text_len=%s text=%r",
@@ -4507,7 +4579,7 @@ class TaskManager(BaseManager):
             meta_info.get("response_group_uid"),
             meta_info.get("request_id"),
             len((transcriber_message or "").strip()),
-            (transcriber_message or "")[:120],
+            safe_log_text(transcriber_message),
         )
         if not self.tools["input"].welcome_message_played():
             logger.info(f"Welcome message is playing while spoken: {transcriber_message}")
@@ -4541,7 +4613,9 @@ class TaskManager(BaseManager):
 
         current_sequence_id = meta_info.get("sequence_id")
         activity = self._inflight_response_activity(exclude_sequence_id=current_sequence_id)
-        if next_task == "llm" and any(activity.values()):
+        # A live settle timer counts as overlap — this final merges into the pending regen.
+        overlapped = next_task == "llm" and (any(activity.values()) or self.regen_settle_armed())
+        if overlapped:
             logger.info(
                 "BOLNA_TRACE_TM cleanup_before_user_append seq=%s turn=%s response_uid=%s response_in_pipeline=%s audio_playing=%s pending_marks=%s pending_sequences=%s pending_generation=%s",
                 meta_info.get("sequence_id"),
@@ -4557,11 +4631,9 @@ class TaskManager(BaseManager):
             transcriber_message = self.conversation_history.pop_and_merge_user(transcriber_message)
             if transcriber_message != original_message:
                 logger.info(f"Merged transcript with unheard response: {transcriber_message}")
-            await self.__cleanup_downstream_tasks()
-            # cleanup invalidates all pending sequence ids. The current turn's
-            # sequence_id was already allocated by __get_updated_meta_info, so
-            # we must re-register it or the fresh LLM response will later be
-            # dropped in _synthesize as an invalid sequence.
+            if any(activity.values()):
+                await self.__cleanup_downstream_tasks()
+            # Cleanup invalidated every pending seq id; without this _synthesize drops this turn.
             self.interruption_manager.revalidate_sequence_id(current_sequence_id)
             logger.info(
                 "BOLNA_TRACE_TM revalidated_current_seq_after_cleanup seq=%s turn=%s response_uid=%s",
@@ -4580,41 +4652,19 @@ class TaskManager(BaseManager):
             meta_info.get("turn_id"),
             meta_info.get("response_uid"),
             len(self.conversation_history.messages),
-            (transcriber_message or "")[:120],
+            safe_log_text(transcriber_message),
         )
 
         convert_to_request_log(
             message=transcriber_message, meta_info=meta_info, model=self.transcriber_provider, run_id=self.run_id
         )
         if next_task == "llm":
-            logger.info(f"Running llm Tasks")
             meta_info["origin"] = "transcriber"
-            transcriber_package = create_ws_data_packet(transcriber_message, meta_info)
-
-            # Cancel any existing LLM task to prevent orphaned concurrent responses
-            if self.llm_task is not None and not self.llm_task.done():
-                logger.info("Cancelling existing LLM task for new speech_final")
-                self.llm_task.cancel()
-                self.llm_task = None
-                self.interruption_manager.invalidate_pending_responses()
-                self._drop_all_staged_assistant_history("llm_task_cancelled_for_new_speech_final")
-                # Re-register the current sequence_id (already allocated by
-                # __get_updated_meta_info) so the new response's audio is not blocked
-                self.interruption_manager.revalidate_sequence_id(meta_info["sequence_id"])
-
-            # Always revalidate the new sequence_id — if the old task already
-            # completed and invalidate_pending_responses was called from the
-            # interruption path, the new seq_id would otherwise never be added
-            # back to sequence_ids, causing all audio to be BLOCKed permanently.
-            self.interruption_manager.revalidate_sequence_id(meta_info["sequence_id"])
-            self.response_in_pipeline = True
-            # Once-per-turn language-switch decision (no-op unless gated on); background
-            # task so it never delays the main LLM. When the detector already tagged this
-            # Gates this turn's AUDIO (not its generation) when the detector disagrees with the
-            # active language — see _spawn_language_switch_decision, which arms it for both this
-            # path and the eager one.
-            self._spawn_language_switch_decision(transcriber_message, meta_info)
-            self.llm_task = asyncio.create_task(self._run_llm_task(transcriber_package))
+            if overlapped and (self.regen_settle_armed() or self.regen_settle_can_fire()):
+                # More finals likely coming; an armed window always absorbs one, so none strands.
+                self.arm_regen_settle(transcriber_message, meta_info)
+            else:
+                self.kickoff_llm_generation(transcriber_message, meta_info)
 
         elif next_task == "synthesizer":
             self.synthesizer_tasks.append(
@@ -4820,13 +4870,10 @@ class TaskManager(BaseManager):
                         interim_transcript_len += len(message["data"].get("content").strip().split(" "))
                         transcript_content = message["data"].get("content", "")
 
-                        # Deepgram sometimes delivers the real speech_final for an utterance
-                        # *after* our utterance timeout already force-finalized the same text
-                        # and started the LLM. Don't treat this late delivery as new user speech
-                        # — the LLM is already processing this exact transcript.
-                        if self.response_in_pipeline and self.conversation_history.is_duplicate_user(
-                            transcript_content
-                        ):
+                        # Re-delivery of a transcript already processed or owed a regen isn't new speech.
+                        if (
+                            self.response_in_pipeline or self.regen_settle_armed()
+                        ) and self.conversation_history.is_duplicate_user(transcript_content):
                             logger.info(
                                 "Skipping interruption: Deepgram late delivery of already-processing transcript: %s",
                                 transcript_content,
@@ -4938,6 +4985,7 @@ class TaskManager(BaseManager):
                             and self.tools["input"].welcome_message_played()
                             and not self.tools["input"].is_audio_being_played_to_user()
                             and not self.response_in_pipeline
+                            and not self.regen_settle_armed()
                         ):
                             logger.info(f"Starting speculative LLM task")
 
@@ -4947,6 +4995,7 @@ class TaskManager(BaseManager):
                             meta_info = self.__get_updated_meta_info(meta_info)
                             meta_info["eager_eot"] = True
                             meta_info["eot_confidence"] = eot_confidence
+                            meta_info["eager_transcript"] = eager_transcript
 
                             self.eager_history_snapshot = len(self.history)
                             self.eager_meta_info = meta_info
@@ -4989,7 +5038,7 @@ class TaskManager(BaseManager):
                             word_count,
                             self.tools["input"].is_audio_being_played_to_user(),
                             self.response_in_pipeline,
-                            transcript_content[:120],
+                            safe_log_text(transcript_content),
                         )
 
                         # response_in_pipeline deliberately not counted: with no audio playing yet, a short
@@ -5039,6 +5088,24 @@ class TaskManager(BaseManager):
                             None,
                             "_cb_transcriber_connect_reported",
                         )
+
+                        if was_eager and self.eager_llm_task is not None and self.regen_settle_armed():
+                            # A regen is owed the merged turn, so drop the eager reply built without it.
+                            logger.info("EagerEOT reply dropped: settle window armed — merging final into regen")
+                            self.eager_llm_task.cancel()
+                            self.eager_llm_task = None
+                            eager_stub_text = (self.eager_meta_info or {}).get("eager_transcript")
+                            self.eager_meta_info = None
+                            self.eager_history_snapshot = None
+                            # Pop only the stub: a merged turn reads differently and the regen answers it.
+                            last_row = self.history[-1] if self.history else None
+                            if (
+                                last_row
+                                and last_row.get("role") == "user"
+                                and last_row.get("content") == eager_stub_text
+                            ):
+                                self.history = self.history[:-1]
+                            was_eager = False
 
                         if was_eager and self.eager_llm_task is not None:
                             logger.info(f"EndOfTurn follows EagerEndOfTurn - using speculative LLM")
@@ -5695,6 +5762,8 @@ class TaskManager(BaseManager):
             return
         # One selection, used by BOTH the speculative copy and the real history append —
         idle_flush_user_text = trailing_utterance_text(detector_segments) or detector_transcript
+        # Pre-decide snapshot: a turn landing meanwhile would be duplicated below.
+        history_signature_at_decide = self.conversation_history.user_turn_signature()
         active = self.language
 
         # Foreign-segment max, not the buffer-lifetime max: the idle-flush skip leaves the buffer
@@ -5917,6 +5986,15 @@ class TaskManager(BaseManager):
             emit_lid_decision("gated:short_audio")
             return
 
+        # Rule-3a backstop: the judge still reads "This B1" as English.
+        if not explicit_bypass and is_alphanumeric_readout(detector_transcript):
+            logger.info(
+                f"LanguageSwitcher: target '{target}' vetoed — rule-3a alphanumeric readout "
+                f"({detector_transcript[:60]!r}); no switch (reason={reasoning})"
+            )
+            emit_lid_decision("gated:alphanumeric_readout")
+            return
+
         # Truncate the in-flight old-language reply (barge-in cleanup) before switching.
         activity = self._inflight_response_activity()  # captured pre-truncation for telemetry
         # Release the gate before cleanup: cleanup invalidates this sequence, so the output
@@ -5996,6 +6074,13 @@ class TaskManager(BaseManager):
                 logger.info(
                     f"LanguageSwitcher: corrected user turn to detector transcript {detector_transcript[:80]!r}"
                 )
+        elif self.conversation_history.user_turn_signature() != history_signature_at_decide:
+            # A main turn landed during the decide; appending would re-route on phantom input.
+            transcript_corrected = False
+            logger.info(
+                "LanguageSwitcher: idle-flush skipped — user turn arrived during decide; "
+                "generating follow-up for the latest turn"
+            )
         else:
             # Reply to the caller's LAST utterance, not the whole buffer — with the
             self.conversation_history.append_user(idle_flush_user_text)
@@ -6105,13 +6190,14 @@ class TaskManager(BaseManager):
             "sequence_id": -1,
             "message_category": "handoff",
             "text": handoff_text,
+            "type": "audio",
         }
         clip = self.handoff_audio_cache.get(target)
         if clip:
-            # Pre-warmed mu-law clip pushed straight to telephony. Both end-flags required
+            # Pre-warmed wire-format clip pushed straight to the transport. Both end-flags required
             handoff_meta.update(
                 {
-                    "format": "mulaw",
+                    "format": "mulaw" if self.__handoff_mulaw_wire() else "pcm",
                     "end_of_llm_stream": True,
                     "end_of_synthesizer_stream": True,
                     "is_first_chunk": True,
@@ -6150,12 +6236,19 @@ class TaskManager(BaseManager):
             "{language}", LANGUAGE_NAMES.get(label, label)
         )
 
+    def __handoff_mulaw_wire(self) -> bool:
+        """True on telephony (mu-law@8k clip), False on web/freeswitch (raw PCM@24k)."""
+        return self.tools["output"].get_provider() in SUPPORTED_OUTPUT_TELEPHONY_HANDLERS
+
     async def __prewarm_handoff_clips(self):
         """Pre-render each language's handoff on its own voice via one-shot synthesize().
         Clips are static for the call; non-active labels first (likely first targets)."""
         pool = self.tools.get("synthesizer")
         if not isinstance(pool, SynthesizerPool):
             return
+
+        # A call has exactly one transport, so render in its wire format only.
+        mulaw_wire = self.__handoff_mulaw_wire()
 
         async def render(label, synth):
             text = self.__handoff_text_for(label)
@@ -6165,23 +6258,40 @@ class TaskManager(BaseManager):
                 synth.__class__.__name__,
                 getattr(synth, "voice_id", None) or getattr(synth, "voice", None),
                 text,
+                "mulaw" if mulaw_wire else f"pcm{WEBCALL_TTS_SAMPLE_RATE}",
             )
             cached = HANDOFF_CLIP_CACHE.get(cache_key)
             if cached:
                 self.handoff_audio_cache[label] = cached
                 return
+            # Under ~50ms is a failed one-shot returning a sentinel, not a clip.
+            min_clip_bytes = 400 if mulaw_wire else 2400
             try:
                 clip = None
-                # Prefer a native mu-law 8000 one-shot when the provider offers it.
-                telephony_one_shot = getattr(synth, "synthesize_telephony_clip", None)
-                if telephony_one_shot is not None:
-                    clip = await telephony_one_shot(text)
+                # Prefer a native one-shot in the wire format when the provider offers it.
+                if mulaw_wire:
+                    telephony_one_shot = getattr(synth, "synthesize_telephony_clip", None)
+                    if telephony_one_shot is not None:
+                        clip = await telephony_one_shot(text)
+                else:
+                    pcm_one_shot = getattr(synth, "synthesize_pcm_clip", None)
+                    if pcm_one_shot is not None:
+                        clip = await pcm_one_shot(text, WEBCALL_TTS_SAMPLE_RATE)
+                # Before the fallback, so synthesize() still gets its turn.
+                if clip and len(clip) < min_clip_bytes:
+                    logger.warning(
+                        f"LanguageSwitcher: one-shot for '{label}' returned {len(clip)}B — falling back to synthesize()"
+                    )
+                    clip = None
                 if not clip:
                     audio = await synth.synthesize(text)
                     if not audio:
                         return
                     # pydub decode shells out to ffprobe/ffmpeg — keep it off the event loop.
-                    clip = await asyncio.to_thread(self.__handoff_clip_to_mulaw, synth, audio)
+                    clip = await asyncio.to_thread(self.__handoff_clip_convert, synth, audio, mulaw_wire)
+                if clip and len(clip) < min_clip_bytes:
+                    logger.error(f"LanguageSwitcher: handoff clip for '{label}' is {len(clip)}B — discarding")
+                    return
                 if clip:
                     self.handoff_audio_cache[label] = clip
                     if len(HANDOFF_CLIP_CACHE) >= HANDOFF_CLIP_CACHE_MAX:
@@ -6194,14 +6304,21 @@ class TaskManager(BaseManager):
 
         await asyncio.gather(*(render(label, synth) for label, synth in pool.synthesizers.items()))
 
-    def __handoff_clip_to_mulaw(self, synth, audio):
-        clip = audio_to_mulaw8k(
-            audio,
-            rate_hint=getattr(synth, "sampling_rate", 0) or getattr(synth, "sample_rate", 0) or 8000,
-            format_hint=getattr(synth, "format", "") or "",
-        )
+    def __handoff_clip_convert(self, synth, audio, mulaw_wire):
+        """Decode a one-shot render into the wire format. Blocking — run off-loop."""
+        kwargs = {
+            "rate_hint": getattr(synth, "sampling_rate", 0) or getattr(synth, "sample_rate", 0) or 8000,
+            "format_hint": getattr(synth, "format", "") or "",
+        }
+        if mulaw_wire:
+            clip = audio_to_mulaw8k(audio, **kwargs)
+        else:
+            clip = audio_to_pcm(audio, target_sample_rate=WEBCALL_TTS_SAMPLE_RATE, **kwargs)
         if clip is None:
-            logger.error("LanguageSwitcher: handoff clip is a compressed container pydub can't decode — skipping")
+            logger.error(
+                f"LanguageSwitcher: handoff clip for {synth.__class__.__name__} is a compressed container "
+                f"pydub can't decode into {'mulaw' if mulaw_wire else 'pcm'} — skipping"
+            )
         return clip
 
     def __language_directive(self, label: str) -> str:
@@ -8195,6 +8312,7 @@ class TaskManager(BaseManager):
                 process_task_cancellation(self.execute_function_call_task, "execute_function_call_task")
             )
             tasks_to_cancel.append(process_task_cancellation(self._lid_idle_watcher_task, "lid_idle_watcher_task"))
+            tasks_to_cancel.append(process_task_cancellation(self.regen_settle_task, "regen_settle_task"))
             # Sync cancel BEFORE clearing, so an in-flight render can't repopulate the
             if self.handoff_prewarm_task is not None:
                 self.handoff_prewarm_task.cancel()

@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import json
 import os
@@ -14,6 +15,12 @@ from bolna.helpers.utils import calculate_audio_duration
 logger = configure_logger(__name__)
 load_dotenv()
 
+# A carrier media socket can go half-dead (TCP stops delivering ACKs, no close
+# frame ever arrives) without raising — a bare `websocket.send_text()` then
+# never returns. Bound every send so a dead socket fails fast instead of
+# freezing the caller (e.g. __cleanup_downstream_tasks) forever.
+OUTPUT_SEND_TIMEOUT_S = float(os.getenv("OUTPUT_SEND_TIMEOUT_S", "5"))
+
 
 class TelephonyOutputHandler(DefaultOutputHandler):
     def __init__(self, io_provider, websocket=None, mark_event_meta_data=None, log_dir_name=None):
@@ -23,6 +30,10 @@ class TelephonyOutputHandler(DefaultOutputHandler):
         self.stream_sid = None
         self.current_request_id = None
         self.rejected_request_ids = set()
+
+    async def _send_text(self, message):
+        """Guarded send_text: raises asyncio.TimeoutError instead of hanging on a dead socket."""
+        await asyncio.wait_for(self.websocket.send_text(message), timeout=OUTPUT_SEND_TIMEOUT_S)
 
     async def handle_interruption(self):
         pass
@@ -82,7 +93,7 @@ class TelephonyOutputHandler(DefaultOutputHandler):
                             meta_info.get("message_category", ""),
                         )
                         mark_message = await self.form_mark_message(mark_id)
-                        await self.websocket.send_text(json.dumps(mark_message))
+                        await self._send_text(json.dumps(mark_message))
 
                         # sending of audio chunk
                         if (
@@ -93,7 +104,7 @@ class TelephonyOutputHandler(DefaultOutputHandler):
                         ):
                             audio_format = "wav"
                         media_message = await self.form_media_message(audio_chunk, audio_format)
-                        await self.websocket.send_text(json.dumps(media_message))
+                        await self._send_text(json.dumps(media_message))
                         if (
                             meta_info.get("message_category", "") == "agent_welcome_message"
                             and not self.welcome_message_sent_ts
@@ -142,7 +153,7 @@ class TelephonyOutputHandler(DefaultOutputHandler):
                         len(mark_event_meta_data.get("text_synthesized", "") or ""),
                     )
                     mark_message = await self.form_mark_message(mark_id)
-                    await self.websocket.send_text(json.dumps(mark_message))
+                    await self._send_text(json.dumps(mark_message))
                 else:
                     logger.info("Not sending")
             except Exception as e:
