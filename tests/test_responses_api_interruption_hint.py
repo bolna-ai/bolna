@@ -80,7 +80,7 @@ class TestInterruptionHintInjection:
         assert "hello th" in items[0]["content"]
         assert llm._interruption_hint is None
 
-    def test_hint_consumed_on_pending_tool_fallback(self):
+    def test_hint_injected_on_pending_tool_fallback(self):
         messages = [
             {"role": "system", "content": "sys"},
             {"role": "user", "content": "check order"},
@@ -100,7 +100,7 @@ class TestInterruptionHintInjection:
 
         assert llm.previous_response_id is None
         assert llm._interruption_hint is None
-        assert all(item.get("role") != "developer" for item in items)
+        assert items[0]["role"] == "developer"  # hint rides every path, this fallback included
 
     def test_hint_injected_when_tool_outputs_present(self):
         messages = [

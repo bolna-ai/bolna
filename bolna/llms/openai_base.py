@@ -289,24 +289,22 @@ class OpenAICompatibleLLM(BaseLLM):
         With previous_response_id set, only sends items after the last
         assistant. Falls back to full history when pending tool outputs are
         missing. Any pending interruption hint is consumed exactly once and
-        prepended on both the chained and chainless paths.
+        prepended on every path.
         """
         hint = self._interruption_hint
         self._interruption_hint = None
 
-        if self.previous_response_id:
-            if self._pending_call_ids:
-                completed = {m.get("tool_call_id") for m in messages if m.get("role") == ChatRole.TOOL}
-                if not self._pending_call_ids.issubset(completed):
-                    logger.info("Pending tool call outputs missing, sending full context")
-                    self.previous_response_id = None
-                    return MessageFormatAdapter.chat_to_responses_input(messages)
+        chained = bool(self.previous_response_id)
+        if chained and self._pending_call_ids:
+            completed = {m.get("tool_call_id") for m in messages if m.get("role") == ChatRole.TOOL}
+            if not self._pending_call_ids.issubset(completed):
+                logger.info("Pending tool call outputs missing, sending full context")
+                self.previous_response_id = None
+                chained = False
+        if chained:
             instructions, input_items = self._extract_new_input(messages)
-            if hint is not None:
-                input_items = [self._build_interruption_hint_item(hint), *input_items]
-            return instructions, input_items
-        # no chain = the post-barge-in path (cancel drops it) — the hint rides it too
-        instructions, input_items = MessageFormatAdapter.chat_to_responses_input(messages)
+        else:
+            instructions, input_items = MessageFormatAdapter.chat_to_responses_input(messages)
         if hint is not None:
             input_items = [self._build_interruption_hint_item(hint), *input_items]
         return instructions, input_items

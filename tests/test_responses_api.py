@@ -1368,11 +1368,13 @@ class TestChainedRequestRejectionRetry:
         llm, seen_params = self._llm_with_flaky_ws(error_event)
 
         chunks = []
-        async for chunk in llm.generate_stream(self.TOOL_HISTORY, synthesize=False, meta_info=_make_meta_info()):
+        meta_info = _make_meta_info()
+        async for chunk in llm.generate_stream(self.TOOL_HISTORY, synthesize=False, meta_info=meta_info):
             chunks.append(chunk)
 
         assert len(seen_params) == 2
         assert seen_params[0].get("previous_response_id") == "resp_fc"
+        assert meta_info["_non_fatal_errors"][0]["error_type"] == "chained_request_rejected"
         # retry is unchained, full history with the call/output pair inline
         assert "previous_response_id" not in seen_params[1]
         types = [getattr(item.get("type"), "value", item.get("type")) for item in seen_params[1]["input"]]
@@ -1388,6 +1390,24 @@ class TestChainedRequestRejectionRetry:
             "error": {"type": "invalid_request_error", "code": None, "message": "bad input", "param": "input"},
         }
         llm, seen_params = self._llm_with_flaky_ws(error_event, previous_response_id=None)
+
+        with pytest.raises(APIError):
+            async for _ in llm.generate_stream(self.TOOL_HISTORY, synthesize=False, meta_info=_make_meta_info()):
+                pass
+        assert len(seen_params) == 1
+
+    async def test_coded_invalid_request_does_not_retry(self):
+        # context_length_exceeded etc. are invalid_request_error too; a retry can't fix them
+        error_event = {
+            "type": "error",
+            "error": {
+                "type": "invalid_request_error",
+                "code": "context_length_exceeded",
+                "message": "too long",
+                "param": "input",
+            },
+        }
+        llm, seen_params = self._llm_with_flaky_ws(error_event)
 
         with pytest.raises(APIError):
             async for _ in llm.generate_stream(self.TOOL_HISTORY, synthesize=False, meta_info=_make_meta_info()):
