@@ -28,7 +28,7 @@ def _make_tm(history, generate):
     tm.conversation_history = history
     tm.multilingual_prompts = {"en": "You are a helpful agent.", "hi": "Hindi prompt"}
     # Bind the real note builder so the speculative system prompt mirrors production.
-    tm._TaskManager__switch_context_note = TaskManager._TaskManager__switch_context_note.__get__(tm, TaskManager)
+    tm._TaskManager__language_directive = TaskManager._TaskManager__language_directive.__get__(tm, TaskManager)
     tm.tools = {"llm_agent": MagicMock()}
     tm.tools["llm_agent"].generate = generate
     return tm
