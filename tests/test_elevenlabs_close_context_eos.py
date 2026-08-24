@@ -137,12 +137,11 @@ def test_sender_does_not_close_when_not_end_of_stream():
 
 
 def test_stale_context_text_match_suppressed():
-    """A draining previous-turn chunk whose tail matches the new turn's text must not
-    emit end-of-stream (call 8909c48c: two turns ending in the same phrase)."""
+    """When consecutive turns end in the same phrase, only the live context may end the stream."""
     synth = _make_synth()
     synth.ws_send_time = 1.0
     synth.last_text_sent = True
-    synth.current_text = "क्या आपके पास एक और hold है जिसके बारे में आप बात करना चाहेंगे?"
+    synth.current_text = "बात करना चाहेंगे?"
     synth.current_turn_context_id = "ctx-new"
     synth.websocket = FakeWS(
         [

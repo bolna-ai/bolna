@@ -326,6 +326,11 @@ class ConversationHistory:
 
         msgs[:] = sanitized
 
+    def user_turn_signature(self) -> tuple:
+        """(user count, last user content) — changes iff a user turn arrives, never on assistant commits."""
+        users = [m for m in self._messages if m.get("role") == ChatRole.USER]
+        return (len(users), users[-1].get("content") if users else None)
+
     def is_duplicate_user(self, content: str) -> bool:
         if not self._messages:
             return False

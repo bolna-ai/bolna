@@ -1,29 +1,16 @@
-"""
-Regression test for the end_call goodbye being dropped from recording + transcript.
+"""The end_call goodbye reaching the caller and the transcript.
 
-When the LLM calls the end_call tool and speaks the goodbye in the same completion,
-__execute_function_call enters hangup (_enter_hangup_state) before the goodbye audio
-flushes. From that point _should_ignore_transcriber_input() is True, so
-_listen_transcriber swallows the user's UtteranceEnd and never resets
-InterruptionManager.callee_speaking. get_audio_send_status() then keeps returning WAIT
-for the goodbye, wait_for_current_message() times out, and the call is torn down before
-the goodbye reaches the caller (absent from recording) or the SEND branch that commits
-it to history (absent from transcript).
-
-Fix: _enter_hangup_state() releases the audio gate via on_user_speech_ended(), so the
-buffered goodbye flushes on the next transmit pass.
+Entering hangup makes _should_ignore_transcriber_input() true, so _listen_transcriber stops
+resetting InterruptionManager.callee_speaking. _enter_hangup_state() therefore releases the audio
+gate itself, otherwise get_audio_send_status() holds the buffered goodbye at WAIT until teardown.
 """
 
 import asyncio
-import os
-import sys
 import time
 from unittest.mock import AsyncMock, MagicMock
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-
-from bolna.agent_manager.task_manager import TaskManager  # noqa: E402
-from bolna.agent_manager.interruption_manager import InterruptionManager  # noqa: E402
+from bolna.agent_manager.task_manager import TaskManager
+from bolna.agent_manager.interruption_manager import InterruptionManager
 
 GOODBYE_SEQ = 9
 SPEECH_ENDED = {"data": {"type": "speech_ended"}, "meta_info": {}}
@@ -124,19 +111,9 @@ def test_gate_still_holds_outside_hangup():
 
 
 def test_transcript_still_ignored_during_hangup():
-    """Precondition the fix relies on: while hangup drains the goodbye, transcriber input
-    is still dropped, so a late interim cannot start a new turn or clear the mark queue."""
+    """While hangup drains the goodbye, transcriber input stays dropped, so a late interim
+    cannot start a new turn or clear the mark queue."""
     im = _im_with_speaking_user()
     tm = _ignore_tm(im, end_call_in_progress=True)
     asyncio.run(_drive_listen_transcriber(tm, [INTERIM]))
     assert tm.process_transcriber_request.await_count == 0
-
-
-if __name__ == "__main__":
-    test_speech_ended_swallowed_during_hangup()
-    test_enter_hangup_releases_audio_gate()
-    test_release_on_production_history_length()
-    test_grace_period_holds_briefly_then_clears()
-    test_gate_still_holds_outside_hangup()
-    test_transcript_still_ignored_during_hangup()
-    print("all tests passed")
