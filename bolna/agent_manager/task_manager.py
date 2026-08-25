@@ -6021,7 +6021,7 @@ class TaskManager(BaseManager):
             self.lid_playback_gate = None
             logger.info("LanguageSwitcher: in-flight function call — switching in parallel, not truncating the action")
             if target != self.language:
-                context_note = self.__switch_context_note(target, detector_transcript, reasoning)
+                context_note = self.__language_directive(target)
                 await self.switch_language(target, triggered_by="lid_llm", context_note=context_note)
                 emit_lid_decision("switched", switched_to=target, context_note=context_note, inflight_activity=activity)
             else:
@@ -6060,7 +6060,7 @@ class TaskManager(BaseManager):
             emit_lid_decision("gated:concurrent_switch", inflight_activity=activity)
             return
 
-        context_note = self.__switch_context_note(target, detector_transcript, reasoning)
+        context_note = self.__language_directive(target)
         logger.info(
             f"LanguageSwitcher: switching '{current}' → '{target}' (confidence={target_conf}, langs={languages}, reason={reasoning})"
         )
@@ -6335,13 +6335,7 @@ class TaskManager(BaseManager):
         return clip
 
     def __language_directive(self, label: str) -> str:
-        """Generic standing order pinned to the system prompt: reply ONLY in the active language.
-
-        Used whenever a richer switch-time note isn't available — tool-driven switches
-        (which pass no context_note) and the call's starting language. Starts with the
-        same "## Language note:" header as __switch_context_note so replacement logic
-        can find and strip whichever variant is currently installed.
-        """
+        """The one standing language order, installed at setup and on every switch."""
         name = LANGUAGE_NAMES.get(label, label)
         return (
             f"## Language note:\nThe user is now speaking {name} ('{label}'). From this point onward, "
@@ -6374,30 +6368,6 @@ class TaskManager(BaseManager):
         new_prompt = f"{base}\n\n{context_note or self.__language_directive(label)}"
         self.conversation_history.update_system_prompt(new_prompt)
         self.system_prompt["content"] = new_prompt
-
-    def __switch_context_note(self, target: str, detector_transcript: str, reasoning: str = None) -> str:
-        """Build the language note installed in the system prompt on a switch.
-
-        Must be a DIRECTIVE, not a description: with history dominated by the old
-        language (and customer prompts often written in one language), the main LLM
-        follows conversation momentum and keeps replying in the OLD language unless
-        explicitly ordered (QA 16db0968: pipeline switched hi→en but every reply
-        stayed Hindi). Shared by the real switch path and the speculative follow-up
-        so the committed speculation obeys the same directive. The reasoning line is
-        omitted on the speculative path — the decision hasn't returned yet there.
-        """
-        target_name = LANGUAGE_NAMES.get(target, target)
-        note = (
-            f"## Language note:\nThe caller is now speaking {target_name} ('{target}'). "
-            f"From this point, respond ONLY in {target_name} — every reply must be in {target_name}, "
-            f"regardless of the language of earlier conversation turns or the language these "
-            f"instructions are written in. In your NEXT reply only, first briefly restate your "
-            f"previous line in {target_name} so the caller can follow, then continue from there. "
-            f'Their latest message: "{detector_transcript}".'
-        )
-        if reasoning:
-            note += f" Reason: {reasoning}"
-        return note
 
     def __log_committed_speculation(self, spec_text: str, capture):
         """Log a committed speculative follow-up exactly like a normal turn:
@@ -6504,7 +6474,7 @@ class TaskManager(BaseManager):
         """
         messages = self.conversation_history.get_copy()
         target_prompt = self.multilingual_prompts.get(target_label)
-        note = self.__switch_context_note(target_label, detector_transcript)
+        note = self.__language_directive(target_label)
         target_prompt = f"{target_prompt}\n\n{note}" if target_prompt else note
         if messages and messages[0].get("role") == "system":
             messages[0]["content"] = target_prompt
