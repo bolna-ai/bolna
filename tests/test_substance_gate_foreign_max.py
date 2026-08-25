@@ -40,6 +40,7 @@ def _tm(monkeypatch, segments, buffer_max):
     synth.labels = ["hi", "mr"]
     tm.tools = {"transcriber": pool, "synthesizer": synth, "input": MagicMock()}
     tm.language_switcher = MagicMock()
+    tm.lid_explicit_only = False
     tm.language_switcher.decide = AsyncMock(
         return_value={"target_language": "mr", "target_confidence": 0.95, "reasoning": "r"}
     )

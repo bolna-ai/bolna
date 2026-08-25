@@ -210,6 +210,9 @@ def build_lid_decision_record(
         "target_language": dec.get("target_language"),
         "target_confidence": dec.get("target_confidence"),
         "explicit_request": dec.get("explicit_request"),
+        # Explicit-only judge fields; None on the ambient prompt.
+        "request_status": dec.get("request_status"),
+        "request_source": dec.get("request_source"),
         "reasoning": (dec.get("reasoning") or "").strip(),
         "buffered_max_segment_s": round(buffered_max_segment_s, 3),
         "speculation_started": speculation_started,
@@ -615,6 +618,7 @@ class TaskManager(BaseManager):
         # Dedicated LLM that decides language switches from the unbiased detector
         # transcript. Set up in __setup_transcriber only for gated multilingual agents.
         self.language_switcher = None
+        self.lid_explicit_only = False
         # Serializes switch decisions so overlapping turns can't interleave two
         # switch+follow-up sequences. Background-only: the caller-facing pipeline
         # (ASR -> main LLM -> TTS) never waits on this lock.
@@ -1618,11 +1622,16 @@ class TaskManager(BaseManager):
                         lid_config["sarvam_model"] = lid_model
                     switch_enabled = self.__language_switch_enabled()
                     if switch_enabled:
+                        # Per-agent toggle: judge switches only on an explicit request/selection.
+                        self.lid_explicit_only = bool(
+                            self.task_config.get("tools_config", {}).get("language_switch_explicit_only")
+                        )
                         # language_switch_llm (from the azure flag) overrides the model; absent → default.
                         self.language_switcher = LanguageSwitcher(
                             available_labels=list(transcribers.keys()),
                             run_id=self.run_id,
                             model=self.task_config.get("tools_config", {}).get("language_switch_llm"),
+                            explicit_only=self.lid_explicit_only,
                         )
                         self.language_switcher.prewarm()  # pay the TLS handshake now
 
@@ -5895,7 +5904,11 @@ class TaskManager(BaseManager):
         try:
             decision = await asyncio.wait_for(
                 self.language_switcher.decide(
-                    detector_transcript, active_transcript, active, recent_turns=self.__recent_detected_turns(pool)
+                    detector_transcript,
+                    active_transcript,
+                    active,
+                    recent_turns=self.__recent_detected_turns(pool),
+                    last_agent_turn=self.conversation_history.last_assistant_content(),
                 ),
                 timeout=decide_timeout_s,
             )
@@ -5972,53 +5985,63 @@ class TaskManager(BaseManager):
                     None,
                 )
             )
-        # Corroboration: when the detector independently agrees on the target, accept a lower LLM
-        # self-report. Both signals are noisy alone (the LLM's float is self-assessed; the detector
-        # tag can be wrong) but they fail independently, so agreement is real evidence.
-        # Only ever LOWERS the bar, never raises it.
-        #
-        # Read the evidence from a SUBSTANTIVE segment tagged as the target, not from the buffer's
-        # last-segment aggregates: those describe different segments of the turn (buffer_language /
-        # its prob come from the FINAL fragment, buffer_max_segment_seconds is a max over ALL of
-        # them), so a one-token "okay" could lend its 1.0 token-share purity to a whole Hindi turn.
-        corroborated = self.__detector_corroborates(detector_segments, target)
-        effective_min_conf = min_conf
-        if corroborated:
-            effective_min_conf = float(os.getenv("LANGUAGE_SWITCH_CORROBORATED_MIN_CONFIDENCE", "0.55"))
-        if target_conf is None or target_conf < effective_min_conf:
+        # Explicit-only mode: the judge's own authorization IS the gate — its prompt only
+        # ever targets an explicit request, so the ambient detection gates below would veto
+        # legitimate requests (a one-word "Telugu." answer fails every one of them).
+        if self.lid_explicit_only:
             logger.info(
-                f"LanguageSwitcher: target '{target}' confidence {target_conf} below {effective_min_conf} "
-                f"(corroborated={corroborated}, detector_prob={detector_lang_confidence}) (or missing) — "
-                f"no switch (reason={reasoning})"
+                f"LanguageSwitcher: explicit-only mode — switch to '{target}' authorized "
+                f"(status={decision.get('request_status')}, source={decision.get('request_source')}, "
+                f"conf={target_conf}); detection gates bypassed"
             )
-            emit_lid_decision("gated:low_confidence")
-            return
+        else:
+            # Corroboration: when the detector independently agrees on the target, accept a lower LLM
+            # self-report. Both signals are noisy alone (the LLM's float is self-assessed; the detector
+            # tag can be wrong) but they fail independently, so agreement is real evidence.
+            # Only ever LOWERS the bar, never raises it.
+            #
+            # Read the evidence from a SUBSTANTIVE segment tagged as the target, not from the buffer's
+            # last-segment aggregates: those describe different segments of the turn (buffer_language /
+            # its prob come from the FINAL fragment, buffer_max_segment_seconds is a max over ALL of
+            # them), so a one-token "okay" could lend its 1.0 token-share purity to a whole Hindi turn.
+            corroborated = self.__detector_corroborates(detector_segments, target)
+            effective_min_conf = min_conf
+            if corroborated:
+                effective_min_conf = float(os.getenv("LANGUAGE_SWITCH_CORROBORATED_MIN_CONFIDENCE", "0.55"))
+            if target_conf is None or target_conf < effective_min_conf:
+                logger.info(
+                    f"LanguageSwitcher: target '{target}' confidence {target_conf} below {effective_min_conf} "
+                    f"(corroborated={corroborated}, detector_prob={detector_lang_confidence}) (or missing) — "
+                    f"no switch (reason={reasoning})"
+                )
+                emit_lid_decision("gated:low_confidence")
+                return
 
-        # Substance gate: acknowledgment-length audio mis-tags languages. Short turns need at
-        # least one substantive segment — an explicit by-name request is legitimately short and
-        # bypasses instead. Its bar defaults to min_conf, never above it: a stricter explicit
-        # bar would reject the caller-asked case while admitting the incidental one.
-        explicit_min_conf = float(os.getenv("LANGUAGE_SWITCH_EXPLICIT_MIN_CONFIDENCE", str(min_conf)))
-        explicit_bypass = bool(decision.get("explicit_request")) and (target_conf or 0.0) >= explicit_min_conf
-        if not explicit_bypass and foreign_max_segment_s < min_segment_s:
-            logger.info(
-                f"LanguageSwitcher: target '{target}' but longest foreign segment "
-                f"{foreign_max_segment_s:.2f}s < {min_segment_s}s (buffer max {buffered_max_segment_s:.2f}s) "
-                f"and no confident explicit request "
-                f"(explicit={decision.get('explicit_request')}, conf={target_conf}) — "
-                f"no switch (short audio is unreliable LID evidence; reason={reasoning})"
-            )
-            emit_lid_decision("gated:short_audio")
-            return
+            # Substance gate: acknowledgment-length audio mis-tags languages. Short turns need at
+            # least one substantive segment — an explicit by-name request is legitimately short and
+            # bypasses instead. Its bar defaults to min_conf, never above it: a stricter explicit
+            # bar would reject the caller-asked case while admitting the incidental one.
+            explicit_min_conf = float(os.getenv("LANGUAGE_SWITCH_EXPLICIT_MIN_CONFIDENCE", str(min_conf)))
+            explicit_bypass = bool(decision.get("explicit_request")) and (target_conf or 0.0) >= explicit_min_conf
+            if not explicit_bypass and foreign_max_segment_s < min_segment_s:
+                logger.info(
+                    f"LanguageSwitcher: target '{target}' but longest foreign segment "
+                    f"{foreign_max_segment_s:.2f}s < {min_segment_s}s (buffer max {buffered_max_segment_s:.2f}s) "
+                    f"and no confident explicit request "
+                    f"(explicit={decision.get('explicit_request')}, conf={target_conf}) — "
+                    f"no switch (short audio is unreliable LID evidence; reason={reasoning})"
+                )
+                emit_lid_decision("gated:short_audio")
+                return
 
-        # Rule-3a backstop: the judge still reads "This B1" as English.
-        if not explicit_bypass and is_alphanumeric_readout(detector_transcript):
-            logger.info(
-                f"LanguageSwitcher: target '{target}' vetoed — rule-3a alphanumeric readout "
-                f"({detector_transcript[:60]!r}); no switch (reason={reasoning})"
-            )
-            emit_lid_decision("gated:alphanumeric_readout")
-            return
+            # Rule-3a backstop: the judge still reads "This B1" as English.
+            if not explicit_bypass and is_alphanumeric_readout(detector_transcript):
+                logger.info(
+                    f"LanguageSwitcher: target '{target}' vetoed — rule-3a alphanumeric readout "
+                    f"({detector_transcript[:60]!r}); no switch (reason={reasoning})"
+                )
+                emit_lid_decision("gated:alphanumeric_readout")
+                return
 
         # Truncate the in-flight old-language reply (barge-in cleanup) before switching.
         activity = self._inflight_response_activity()  # captured pre-truncation for telemetry
