@@ -190,6 +190,7 @@ class LiteLLM(BaseLLM):
 
     async def generate(self, messages, stream=False, request_json=False, meta_info=None, ret_metadata=False):
         text = ""
+        completion = None
         model_args = self.model_args.copy()
         model_args["model"] = self.model
         model_args["messages"] = strip_internal_keys(messages)
@@ -238,6 +239,17 @@ class LiteLLM(BaseLLM):
             logger.error(f"LiteLLM unexpected error generating response: {error_message}")
             raise
         if ret_metadata:
-            return text, {}
+            metadata = {}
+            usage = getattr(completion, "usage", None)
+            if usage is not None:
+                metadata = {
+                    "input_tokens": getattr(usage, "prompt_tokens", 0) or 0,
+                    "output_tokens": getattr(usage, "completion_tokens", 0) or 0,
+                }
+                details = getattr(usage, "prompt_tokens_details", None)
+                cached = getattr(details, "cached_tokens", 0) if details is not None else 0
+                if cached:
+                    metadata["cached_tokens"] = cached
+            return text, metadata
         else:
             return text

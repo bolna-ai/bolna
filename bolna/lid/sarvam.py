@@ -52,6 +52,7 @@ class SarvamLID(LIDBackend):
             self._encoding = "linear16"
             self._input_sr = self._sr
         self._resample_state = None
+        self.input_bytes_per_second = 8000 if self._encoding == "mulaw" else 2 * self._input_sr
 
     def _on_reconnect_reset(self):
         self._resample_state = None

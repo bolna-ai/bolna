@@ -5559,7 +5559,30 @@ class TaskManager(BaseManager):
                 record()
             except Exception as e:
                 logger.warning(f"detector_health record failed: {e}")
+        self.__record_lid_usage(pool)
         return list(getattr(pool, "lid_detection_events", []))
+
+    def __record_lid_usage(self, pool) -> None:
+        """One per-call spend record in lid_detection_events: judge tokens + detector audio seconds."""
+        events = getattr(pool, "lid_detection_events", None)
+        if events is None or any(e.get("type") == "lid_usage" for e in events):
+            return
+        switcher = self.language_switcher
+        detector_seconds = pool.lid_audio_seconds() if hasattr(pool, "lid_audio_seconds") else None
+        if switcher is None and not detector_seconds:
+            return
+        record = {"type": "lid_usage", "ts": time.time(), "detector_audio_seconds": detector_seconds}
+        if switcher is not None:
+            record.update(
+                {
+                    "judge_model": switcher.model,
+                    "judge_requests": switcher.usage_totals.get("requests", 0),
+                    "judge_input_tokens": switcher.usage_totals.get("input_tokens", 0),
+                    "judge_output_tokens": switcher.usage_totals.get("output_tokens", 0),
+                    "judge_cached_tokens": switcher.usage_totals.get("cached_tokens", 0),
+                }
+            )
+        events.append(record)
 
     def __record_lid_event(self, record: dict) -> None:
         """Append a metrics record to the pool's lid_detection_events (persisted to

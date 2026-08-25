@@ -16,7 +16,7 @@ def make_switcher(generate_return, labels=("en", "hi", "te"), explicit_only=True
     from bolna.helpers.language_switcher import LanguageSwitcher
 
     fake_llm = MagicMock()
-    fake_llm.generate = AsyncMock(return_value=generate_return)
+    fake_llm.generate = AsyncMock(return_value=(generate_return, {}))
     with patch(f"{MOD}.LiteLLM", return_value=fake_llm):
         switcher = LanguageSwitcher(available_labels=list(labels), explicit_only=explicit_only)
     return switcher, fake_llm
@@ -37,7 +37,9 @@ async def test_explicit_mode_uses_explicit_prompts_and_last_agent_turn():
     payload = json.dumps({"target_language": None, "request_status": "no_request"})
     switcher, fake_llm = make_switcher(payload)
     await switcher.decide(
-        "मेरा order कहाँ है?", "mera order kahan", active_label="en",
+        "मेरा order कहाँ है?",
+        "mera order kahan",
+        active_label="en",
         last_agent_turn="How can I help you today?",
     )
     assert system_text(fake_llm) == EXPLICIT_LANGUAGE_SWITCH_SYSTEM_PROMPT
@@ -51,8 +53,11 @@ async def test_ambient_mode_prompts_unchanged_and_ignores_last_agent_turn():
     payload = json.dumps({"languages": [], "target_language": None, "reasoning": "stay"})
     switcher, fake_llm = make_switcher(payload, explicit_only=False)
     await switcher.decide(
-        "hello", "hello", active_label="en",
-        recent_turns=[("hi", 2.1)], last_agent_turn="Would you like Hindi?",
+        "hello",
+        "hello",
+        active_label="en",
+        recent_turns=[("hi", 2.1)],
+        last_agent_turn="Would you like Hindi?",
     )
     assert system_text(fake_llm) == LANGUAGE_SWITCH_SYSTEM_PROMPT
     turn = turn_text(fake_llm)
@@ -83,10 +88,14 @@ async def test_explicit_mode_empty_live_stays_empty_not_marker():
 async def test_canonical_no_request_stays():
     payload = json.dumps(
         {
-            "detected_language": "hi", "detection_confidence": 0.98,
-            "explicit_request": False, "requested_language": None,
-            "target_language": None, "target_confidence": 0,
-            "request_status": "no_request", "request_source": "none",
+            "detected_language": "hi",
+            "detection_confidence": 0.98,
+            "explicit_request": False,
+            "requested_language": None,
+            "target_language": None,
+            "target_confidence": 0,
+            "request_status": "no_request",
+            "request_source": "none",
             "reasoning": "Caller spoke Hindi but made no language request",
         }
     )
@@ -99,16 +108,22 @@ async def test_canonical_no_request_stays():
 async def test_canonical_one_word_answer_switches():
     payload = json.dumps(
         {
-            "detected_language": "en", "detection_confidence": 0.85,
-            "explicit_request": True, "requested_language": "te",
-            "target_language": "te", "target_confidence": 0.99,
-            "request_status": "switch", "request_source": "agent_prompted_selection",
+            "detected_language": "en",
+            "detection_confidence": 0.85,
+            "explicit_request": True,
+            "requested_language": "te",
+            "target_language": "te",
+            "target_confidence": 0.99,
+            "request_status": "switch",
+            "request_source": "agent_prompted_selection",
             "reasoning": "Caller selected Telugu from the offered languages",
         }
     )
     switcher, fake_llm = make_switcher(payload)
     result = await switcher.decide(
-        "Telugu.", "Telugu.", active_label="en",
+        "Telugu.",
+        "Telugu.",
+        active_label="en",
         last_agent_turn="Would you prefer Hindi or Telugu?",
     )
     assert result["target_language"] == "te"
@@ -119,10 +134,14 @@ async def test_canonical_one_word_answer_switches():
 async def test_canonical_yes_to_two_options_is_ambiguous_stay():
     payload = json.dumps(
         {
-            "detected_language": "en", "detection_confidence": 0.95,
-            "explicit_request": False, "requested_language": None,
-            "target_language": None, "target_confidence": 0,
-            "request_status": "ambiguous", "request_source": "none",
+            "detected_language": "en",
+            "detection_confidence": 0.95,
+            "explicit_request": False,
+            "requested_language": None,
+            "target_language": None,
+            "target_confidence": 0,
+            "request_status": "ambiguous",
+            "request_source": "none",
             "reasoning": "Affirmation does not choose between two offered languages",
         }
     )
@@ -245,9 +264,14 @@ async def test_explicit_mode_missing_synth_voice_still_blocked(monkeypatch):
 
 async def test_explicit_mode_null_target_stays(monkeypatch):
     decision = {
-        "detected_language": "hi", "explicit_request": False, "requested_language": None,
-        "target_language": None, "target_confidence": 0, "request_status": "no_request",
-        "request_source": "none", "reasoning": "no request",
+        "detected_language": "hi",
+        "explicit_request": False,
+        "requested_language": None,
+        "target_language": None,
+        "target_confidence": 0,
+        "request_status": "no_request",
+        "request_source": "none",
+        "reasoning": "no request",
     }
     tm = make_tm(monkeypatch, decision)
     await run_switch(tm)

@@ -77,6 +77,9 @@ class LanguageSwitcher:
             self.model = f"anthropic/{self.model}"
         self.latency_ms = None
         self.hedge_won = False  # last decide was answered by the hedged request, not the first
+        # Judge spend for the whole call (decides + prewarm); persisted via the lid_usage record.
+        self.usage_totals = {"input_tokens": 0, "output_tokens": 0, "cached_tokens": 0, "requests": 0}
+        self.last_usage = None
         # Dedicated creds, NOT the agent's — an Azure/OpenAI agent would 404 the switch model.
         switch_llm_key, switch_llm_base, switch_llm_version = resolve_switch_llm_credentials(self.model)
         # A configured (e.g. azure) judge with no resolvable key would fail EVERY decide,
@@ -128,6 +131,14 @@ class LanguageSwitcher:
             block["cache_control"] = {"type": "ephemeral"}
         return {"role": "system", "content": [block]}
 
+    def _tally_usage(self, usage):
+        if not usage:
+            return
+        for key in ("input_tokens", "output_tokens", "cached_tokens"):
+            self.usage_totals[key] += int(usage.get(key) or 0)
+        self.usage_totals["requests"] += 1
+        self.last_usage = usage
+
     def prewarm(self):
         """Fire-and-forget request that pays the TLS handshake AND seeds the prompt cache
         with the real system block, so the first decide of the call is a cache read.
@@ -135,10 +146,14 @@ class LanguageSwitcher:
 
         async def _warm():
             try:
-                await asyncio.wait_for(
-                    self._llm.generate([self._system_message(), {"role": "user", "content": "Reply with exactly: ok"}]),
+                _, usage = await asyncio.wait_for(
+                    self._llm.generate(
+                        [self._system_message(), {"role": "user", "content": "Reply with exactly: ok"}],
+                        ret_metadata=True,
+                    ),
                     timeout=5,
                 )
+                self._tally_usage(usage)
                 logger.info("LanguageSwitcher: connection prewarmed")
             except Exception as e:
                 logger.debug(f"LanguageSwitcher: prewarm skipped: {e}")
@@ -169,6 +184,7 @@ class LanguageSwitcher:
         """
         if not detector_transcript or not detector_transcript.strip():
             return None
+        self.last_usage = None
 
         # On idle-flush firings there IS no main-ASR turn — LIVE is empty because nobody
         # produced one, not because the locked recognizer failed to decode foreign speech.
@@ -255,7 +271,9 @@ class LanguageSwitcher:
         self.last_generate_errored = False
 
         async def attempt():
-            return self._parse_json(await self._llm.generate(messages))
+            text, usage = await self._llm.generate(messages, ret_metadata=True)
+            self._tally_usage(usage)
+            return self._parse_json(text)
 
         # Tasks created inside the try: cancellation of decide() itself must not strand a
         # running attempt unowned (finally covers every await window).
@@ -336,6 +354,7 @@ class LanguageSwitcher:
             model=self.model,
             run_id=self.run_id,
         )
+        usage = self.last_usage or {}
         convert_to_request_log(
             message=result,
             meta_info=meta_info,
@@ -343,4 +362,7 @@ class LanguageSwitcher:
             direction=LogDirection.RESPONSE,
             model=self.model,
             run_id=self.run_id,
+            input_tokens=usage.get("input_tokens"),
+            output_tokens=usage.get("output_tokens"),
+            cached_tokens=usage.get("cached_tokens"),
         )
