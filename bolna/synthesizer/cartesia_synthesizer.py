@@ -270,12 +270,19 @@ class CartesiaSynthesizer(StreamSynthesizer):
     async def synthesize(self, text):
         return await self._generate_http(text)
 
-    async def _generate_http(self, text):
+    async def synthesize_pcm_clip(self, text, sample_rate):
+        """Raw PCM, matching the WS web leg — no mp3 decode."""
+        return await self._generate_http(
+            text,
+            output_format={"container": "raw", "encoding": "pcm_s16le", "sample_rate": int(sample_rate)},
+        )
+
+    async def _generate_http(self, text, output_format=None):
         payload = {
             "model_id": self.model,
             "transcript": text,
             "voice": {"mode": "id", "id": self.voice_id},
-            "output_format": {"container": "mp3", "encoding": "mp3", "sample_rate": 44100},
+            "output_format": output_format or {"container": "mp3", "encoding": "mp3", "sample_rate": 44100},
             "language": self.language,
             "generation_config": {"speed": self.speed},
         }
