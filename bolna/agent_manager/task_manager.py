@@ -515,6 +515,10 @@ class TaskManager(BaseManager):
         self.transcriber_duration = 0
         self.synthesizer_characters = 0
         self.ended_by_assistant = False
+        # False until the caller's own words land in conversation history as a user turn.
+        # Synthetic user turns (silence nudges, injected prompts) deliberately do not set it,
+        # so a call where only the agent ever spoke stays False.
+        self.user_spoke = False
         self.start_time = time.time()
 
         # Tasks
@@ -4371,6 +4375,7 @@ class TaskManager(BaseManager):
                 await self.tools["output"].handle(bos_packet)
                 # self.interim_history = self.history.copy()
                 # self.history.append({'role': 'user', 'content': ws_data_packet['data']})
+                self.user_spoke = True
                 await self._run_llm_task(create_ws_data_packet(ws_data_packet["data"], meta_info))
                 eos_packet = create_ws_data_packet("<end_of_stream>", meta_info)
                 await self.tools["output"].handle(eos_packet)
@@ -4647,6 +4652,7 @@ class TaskManager(BaseManager):
                 meta_info.get("response_uid"),
             )
 
+        self.user_spoke = True
         # asr_turn_id (int-coerced), not meta_info["turn_id"] — that one counts responses, not ASR turns.
         self.conversation_history.append_user(
             transcriber_message, asr_turn_id=asr_id_to_int(meta_info.get("asr_turn_id"))
@@ -5009,6 +5015,7 @@ class TaskManager(BaseManager):
                             )
                             # Committed user row when EndOfTurn(was_eager) skips _handle_transcriber_output.
                             # meta_info["asr_turn_id"] is stale until EndOfTurn, so read the live id.
+                            self.user_spoke = True
                             eager_user_row = {"role": "user", "content": eager_transcript}
                             eager_asr_turn_id = asr_id_to_int(getattr(active_transcriber, "current_turn_id", None))
                             if eager_asr_turn_id is not None:
@@ -6087,6 +6094,7 @@ class TaskManager(BaseManager):
                 "generating follow-up for the latest turn"
             )
         else:
+            self.user_spoke = True
             # Reply to the caller's LAST utterance, not the whole buffer — with the
             self.conversation_history.append_user(idle_flush_user_text)
             logger.info(
@@ -7792,6 +7800,7 @@ class TaskManager(BaseManager):
             elif isinstance(event, s2s_events.InputTranscript):
                 if event.is_final and event.content:
                     logger.info(f"S2S caller: {event.content[:200]}")
+                    self.user_spoke = True
                     self.conversation_history.append_user(event.content)
                     self.time_since_last_spoken_human_word = time.time()
                     # Cleared here rather than in the output loop: the prompt's audio is not
@@ -8403,6 +8412,7 @@ class TaskManager(BaseManager):
                         self.tools["synthesizer"].get_synthesized_characters() if _has_asr_tts else 0
                     ),
                     "ended_by_assistant": self.ended_by_assistant,
+                    "user_spoke": self.user_spoke,
                     "latency_dict": {
                         "llm_latencies": self.llm_latencies.model_dump(),
                         "transcriber_latencies": self.transcriber_latencies.model_dump(),
