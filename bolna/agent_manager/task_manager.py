@@ -497,6 +497,7 @@ class TaskManager(BaseManager):
         self.consider_next_transcript_after = time.time()
         self.llm_response_generated = False
         self.response_in_pipeline = False
+        self._synthesis_awaiting_first_audio = False
         self._response_turn_id = 0
         self._turn_msg_map = {}  # turn_id → assistant message dict ref in _messages
         self._pending_assistant_history = {}  # sequence_id -> {content, turn_id, response_uid}
@@ -2520,6 +2521,7 @@ class TaskManager(BaseManager):
         self.interruption_manager.invalidate_pending_responses()
         self._drop_all_staged_assistant_history("cleanup_downstream_tasks")
         self.response_in_pipeline = False
+        self._synthesis_awaiting_first_audio = False
         await self.tools["synthesizer"].flush_synthesizer_stream()
 
         # Stop the output loop first so that we do not transmit anything else
@@ -3947,6 +3949,7 @@ class TaskManager(BaseManager):
         if empty_turn_detail:
             logger.info(f"{empty_turn_detail}; clearing response_in_pipeline")
             self.response_in_pipeline = False
+            self._synthesis_awaiting_first_audio = False
 
         # Collect RAG latency if present (from KnowledgeBaseAgent)
         if meta_info.get("rag_latency"):
@@ -4390,10 +4393,12 @@ class TaskManager(BaseManager):
             self.llm_task = None
         except BolnaComponentError as e:
             self.response_in_pipeline = False
+            self._synthesis_awaiting_first_audio = False
             await self._end_call_on_component_error(e, HangupReason.LLM_ERROR)
             raise
         except Exception as e:
             self.response_in_pipeline = False
+            self._synthesis_awaiting_first_audio = False
             await self._end_call_on_component_error(
                 LLMError(
                     str(e), provider=self.llm_config.get("provider", "unknown"), model=self.llm_config.get("model")
@@ -6009,7 +6014,7 @@ class TaskManager(BaseManager):
             self.lid_playback_gate = None
             logger.info("LanguageSwitcher: in-flight function call — switching in parallel, not truncating the action")
             if target != self.language:
-                context_note = self.__switch_context_note(target, detector_transcript, reasoning)
+                context_note = self.__language_directive(target)
                 await self.switch_language(target, triggered_by="lid_llm", context_note=context_note)
                 emit_lid_decision("switched", switched_to=target, context_note=context_note, inflight_activity=activity)
             else:
@@ -6048,7 +6053,7 @@ class TaskManager(BaseManager):
             emit_lid_decision("gated:concurrent_switch", inflight_activity=activity)
             return
 
-        context_note = self.__switch_context_note(target, detector_transcript, reasoning)
+        context_note = self.__language_directive(target)
         logger.info(
             f"LanguageSwitcher: switching '{current}' → '{target}' (confidence={target_conf}, langs={languages}, reason={reasoning})"
         )
@@ -6322,13 +6327,7 @@ class TaskManager(BaseManager):
         return clip
 
     def __language_directive(self, label: str) -> str:
-        """Generic standing order pinned to the system prompt: reply ONLY in the active language.
-
-        Used whenever a richer switch-time note isn't available — tool-driven switches
-        (which pass no context_note) and the call's starting language. Starts with the
-        same "## Language note:" header as __switch_context_note so replacement logic
-        can find and strip whichever variant is currently installed.
-        """
+        """The one standing language order, installed at setup and on every switch."""
         name = LANGUAGE_NAMES.get(label, label)
         return (
             f"## Language note:\nThe user is now speaking {name} ('{label}'). From this point onward, "
@@ -6361,30 +6360,6 @@ class TaskManager(BaseManager):
         new_prompt = f"{base}\n\n{context_note or self.__language_directive(label)}"
         self.conversation_history.update_system_prompt(new_prompt)
         self.system_prompt["content"] = new_prompt
-
-    def __switch_context_note(self, target: str, detector_transcript: str, reasoning: str = None) -> str:
-        """Build the language note installed in the system prompt on a switch.
-
-        Must be a DIRECTIVE, not a description: with history dominated by the old
-        language (and customer prompts often written in one language), the main LLM
-        follows conversation momentum and keeps replying in the OLD language unless
-        explicitly ordered (QA 16db0968: pipeline switched hi→en but every reply
-        stayed Hindi). Shared by the real switch path and the speculative follow-up
-        so the committed speculation obeys the same directive. The reasoning line is
-        omitted on the speculative path — the decision hasn't returned yet there.
-        """
-        target_name = LANGUAGE_NAMES.get(target, target)
-        note = (
-            f"## Language note:\nThe caller is now speaking {target_name} ('{target}'). "
-            f"From this point, respond ONLY in {target_name} — every reply must be in {target_name}, "
-            f"regardless of the language of earlier conversation turns or the language these "
-            f"instructions are written in. In your NEXT reply only, first briefly restate your "
-            f"previous line in {target_name} so the caller can follow, then continue from there. "
-            f'Their latest message: "{detector_transcript}".'
-        )
-        if reasoning:
-            note += f" Reason: {reasoning}"
-        return note
 
     def __log_committed_speculation(self, spec_text: str, capture):
         """Log a committed speculative follow-up exactly like a normal turn:
@@ -6491,7 +6466,7 @@ class TaskManager(BaseManager):
         """
         messages = self.conversation_history.get_copy()
         target_prompt = self.multilingual_prompts.get(target_label)
-        note = self.__switch_context_note(target_label, detector_transcript)
+        note = self.__language_directive(target_label)
         target_prompt = f"{target_prompt}\n\n{note}" if target_prompt else note
         if messages and messages[0].get("role") == "system":
             messages[0]["content"] = target_prompt
@@ -6896,6 +6871,8 @@ class TaskManager(BaseManager):
                 and meta_info["is_first_message"]
                 or self.interruption_manager.is_valid_sequence(message["meta_info"]["sequence_id"])
             ):
+                if meta_info.get("sequence_id") not in (None, -1):
+                    self._synthesis_awaiting_first_audio = True
                 if meta_info["is_md5_hash"]:
                     logger.info(
                         "sending preprocessed audio response to {}".format(
@@ -7021,6 +6998,7 @@ class TaskManager(BaseManager):
                         self._commit_staged_assistant_history(sequence_id)
                         self.tools["input"].update_is_audio_being_played(True)
                         self.response_in_pipeline = False
+                        self._synthesis_awaiting_first_audio = False
                         await self.tools["output"].handle(message)
                         # Track when agent audio first starts flowing for this sequence.
                         # Only fire on real audio bytes — BOS/EOS control packets are strings
@@ -7068,6 +7046,7 @@ class TaskManager(BaseManager):
                             # the SEND path that normally resets this flag. Clear it here so
                             # subsequent user speech is not permanently treated as an interruption.
                             self.response_in_pipeline = False
+                            self._synthesis_awaiting_first_audio = False
                         should_continue_outer_loop = True
                         break  # Exit inner loop, skip to next message
 
@@ -7187,6 +7166,10 @@ class TaskManager(BaseManager):
             and time_since_user_last_spoke > stall_timeout
         )
 
+    def _pipeline_busy(self, audio_playing):
+        """True while the agent is speaking or about to: response_in_pipeline can read False in the gap between a response's synth push and its first audio chunk, so _synthesis_awaiting_first_audio covers it."""
+        return audio_playing or self.response_in_pipeline or self._synthesis_awaiting_first_audio
+
     def compute_last_ai_audio_timestamp(self):
         """Most recent moment agent audio was still reaching the user.
 
@@ -7276,7 +7259,7 @@ class TaskManager(BaseManager):
 
             # Draining audio needs no term here: every branch below is gated on
             # time_since_last_spoken_ai_word, which stays at 0 while the caller can still hear.
-            if self.tools["input"].is_audio_being_played_to_user() or self.response_in_pipeline:
+            if self._pipeline_busy(self.tools["input"].is_audio_being_played_to_user()):
                 continue
 
             if (

@@ -1318,10 +1318,7 @@ class TestOpenAIWSConnection:
 
 
 class TestChainedRequestRejectionRetry:
-    """A cancelled response can leave a function_call committed server-side that this client
-    never saw; every later chained request then 400s with "No tool output found for function
-    call ..." and, before the retry existed, the APIError tore down the whole live call.
-    The WS path must recover by resending the FULL history unchained."""
+    """A rejected chained request must retry unchained with full history, not kill the call."""
 
     TOOL_HISTORY = [
         {"role": "system", "content": "sys"},
@@ -1371,24 +1368,23 @@ class TestChainedRequestRejectionRetry:
         llm, seen_params = self._llm_with_flaky_ws(error_event)
 
         chunks = []
-        async for chunk in llm.generate_stream(self.TOOL_HISTORY, synthesize=False, meta_info=_make_meta_info()):
+        meta_info = _make_meta_info()
+        async for chunk in llm.generate_stream(self.TOOL_HISTORY, synthesize=False, meta_info=meta_info):
             chunks.append(chunk)
 
         assert len(seen_params) == 2
-        # first attempt was chained (delta after the last assistant = just the tool output)
         assert seen_params[0].get("previous_response_id") == "resp_fc"
-        # retry is unchained and self-consistent: full history with the call/output PAIR inline
+        assert meta_info["_non_fatal_errors"][0]["error_type"] == "chained_request_rejected"
+        # retry is unchained, full history with the call/output pair inline
         assert "previous_response_id" not in seen_params[1]
         types = [getattr(item.get("type"), "value", item.get("type")) for item in seen_params[1]["input"]]
         assert "function_call_output" in types
         assert "function_call" in types
         # the call survives and the answer streams from the retry
         assert any("785" in c.data for c in chunks if isinstance(c.data, str))
-        # the retry's response re-establishes a clean chain
-        assert llm.previous_response_id == "resp_retry"
+        assert llm.previous_response_id == "resp_retry"  # clean chain re-established
 
     async def test_unchained_invalid_request_still_raises(self):
-        # with no chain there is nothing to heal by retrying — the error must surface
         error_event = {
             "type": "error",
             "error": {"type": "invalid_request_error", "code": None, "message": "bad input", "param": "input"},
@@ -1400,9 +1396,26 @@ class TestChainedRequestRejectionRetry:
                 pass
         assert len(seen_params) == 1
 
+    async def test_coded_invalid_request_does_not_retry(self):
+        # context_length_exceeded etc. are invalid_request_error too; a retry can't fix them
+        error_event = {
+            "type": "error",
+            "error": {
+                "type": "invalid_request_error",
+                "code": "context_length_exceeded",
+                "message": "too long",
+                "param": "input",
+            },
+        }
+        llm, seen_params = self._llm_with_flaky_ws(error_event)
+
+        with pytest.raises(APIError):
+            async for _ in llm.generate_stream(self.TOOL_HISTORY, synthesize=False, meta_info=_make_meta_info()):
+                pass
+        assert len(seen_params) == 1
+
     async def test_prev_response_not_found_retry_keeps_tools(self):
-        # the pre-existing retry dropped `tools` on recursion — a retried turn silently lost
-        # its function-calling ability; pin the passthrough
+        # the pre-existing retry dropped `tools` on recursion
         error_event = {
             "type": "error",
             "error": {"type": "invalid_request_error", "code": "previous_response_not_found", "message": "gone"},

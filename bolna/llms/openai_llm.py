@@ -503,6 +503,14 @@ class OpenAiLLM(OpenAICompatibleLLM):
         else:
             return {"type": "text"}
 
+    async def _retry_full_history(self, messages, synthesize, request_json, meta_info, tool_choice, tools):
+        """Drop the chain and re-run the turn on full history (single home for both WS retries)."""
+        self.previous_response_id = None
+        async for chunk in self._generate_stream_ws_responses(
+            messages, synthesize, request_json, meta_info, tool_choice, tools
+        ):
+            yield chunk
+
     async def _generate_stream_ws_responses(
         self, messages, synthesize=True, request_json=False, meta_info=None, tool_choice=None, tools=None
     ):
@@ -548,21 +556,19 @@ class OpenAiLLM(OpenAICompatibleLLM):
                     error_code = error_info.get("code", "")
                     if error_code == "previous_response_not_found" and self.previous_response_id:
                         logger.warning(f"WS previous_response_id not found, retrying with full history")
-                        self.previous_response_id = None
-                        async for chunk in self._generate_stream_ws_responses(
+                        async for chunk in self._retry_full_history(
                             messages, synthesize, request_json, meta_info, tool_choice, tools
                         ):
                             yield chunk
                         return
-                    # Any other rejection of a CHAINED request gets one full-history retry: the
-                    # server-side lineage can be unsatisfiable in ways the client can't see (e.g.
-                    # a cancelled response that committed a function_call nobody will ever answer
-                    # -> "No tool output found for function call ..."). Full history carries every
-                    # function_call/output pair inline, so it is always self-consistent. Gated on
-                    # nothing-yielded so a retry can never duplicate speech.
+                    # lineage/pairing rejection of a CHAINED request (code None, param input — e.g.
+                    # "No tool output found ...") gets one full-history retry; nothing yielded yet.
+                    # Coded errors like context_length_exceeded raise — a retry can't fix those.
                     if (
                         self.previous_response_id
                         and error_info.get("type") == "invalid_request_error"
+                        and not error_code
+                        and error_info.get("param") == "input"
                         and not answer
                         and not func_call_args
                         and not gave_pre_call_msg
@@ -570,8 +576,15 @@ class OpenAiLLM(OpenAICompatibleLLM):
                         logger.warning(
                             f"WS chained request rejected ({error_info.get('message')}), retrying with full history"
                         )
-                        self.previous_response_id = None
-                        async for chunk in self._generate_stream_ws_responses(
+                        if isinstance(meta_info, dict):
+                            meta_info.setdefault("_non_fatal_errors", []).append(
+                                {
+                                    "error_type": "chained_request_rejected",
+                                    "error": error_info.get("message"),
+                                    "model": self.model,
+                                }
+                            )
+                        async for chunk in self._retry_full_history(
                             messages, synthesize, request_json, meta_info, tool_choice, tools
                         ):
                             yield chunk
@@ -754,14 +767,9 @@ class OpenAiLLM(OpenAICompatibleLLM):
         self.started_streaming = False
 
     def cancel_in_flight_response(self):
-        """Cancel the in-flight WS response and drop the response chain. The cancel can lose the
-        race with generation: the server may commit output items — including a function_call this
-        client never consumed — before acting on it, and chaining onto such a response makes every
-        later request owe a tool output the client doesn't know exists (the server 400s with
-        "No tool output found for function call ...", which killed live calls mid-tool-call).
-        Cost: one full-history request after each barge-in; the chain re-establishes on that
-        response. Only the chain state is dropped — NOT invalidate_response_chain(), which would
-        also clear the interruption hint that sync_history set moments before this runs."""
+        """Cancel the in-flight WS response and drop the chain — a lost cancel race can leave a
+        server-committed function_call this client never saw, poisoning every later chained
+        request. Chain state only: the hint sync_history sets right after this must survive."""
         if self._ws_transport and self.previous_response_id:
             asyncio.ensure_future(self._ws_transport.cancel_response(self.previous_response_id))
             self.previous_response_id = None
