@@ -3977,7 +3977,6 @@ class TaskManager(BaseManager):
         self._append_eager_llm_stub(meta_info)
 
         if self.turn_based_conversation:
-            self.user_spoke = True
             self.history.append({"role": "user", "content": message["data"]})
         messages = self.conversation_history.get_copy()
 
@@ -4364,6 +4363,7 @@ class TaskManager(BaseManager):
                 await self.tools["output"].handle(bos_packet)
                 # self.interim_history = self.history.copy()
                 # self.history.append({'role': 'user', 'content': ws_data_packet['data']})
+                self.user_spoke = True
                 await self._run_llm_task(create_ws_data_packet(ws_data_packet["data"], meta_info))
                 eos_packet = create_ws_data_packet("<end_of_stream>", meta_info)
                 await self.tools["output"].handle(eos_packet)
@@ -4959,6 +4959,7 @@ class TaskManager(BaseManager):
                             )
                             # Committed user row when EndOfTurn(was_eager) skips _handle_transcriber_output.
                             # meta_info["asr_turn_id"] is stale until EndOfTurn, so read the live id.
+                            self.user_spoke = True
                             eager_user_row = {"role": "user", "content": eager_transcript}
                             eager_asr_turn_id = asr_id_to_int(getattr(active_transcriber, "current_turn_id", None))
                             if eager_asr_turn_id is not None:
