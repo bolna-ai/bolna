@@ -60,7 +60,7 @@ def language_switch_tm(monkeypatch):
         )
         tm._TaskManager__cleanup_downstream_tasks = AsyncMock()
         tm.switch_language = AsyncMock()
-        tm._TaskManager__switch_context_note = MagicMock(return_value="note")
+        tm._TaskManager__language_directive = MagicMock(return_value="note")
         tm._TaskManager__play_switch_handoff = AsyncMock()
         tm._TaskManager__prepare_followup_generation = MagicMock(return_value=None)
         tm.conversation_history = MagicMock()
