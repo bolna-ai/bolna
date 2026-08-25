@@ -75,7 +75,14 @@ async def _drain(synth, limit=8, timeout=2.0):
 
 
 def _make(model="eleven_v3_conversational", **kwargs):
-    opts = dict(voice="George", voice_id=VOICE_ID, sampling_rate="8000", use_mulaw=True, caching=False)
+    opts = dict(
+        voice="George",
+        voice_id=VOICE_ID,
+        sampling_rate="8000",
+        use_mulaw=True,
+        caching=False,
+        synthesizer_key="test-key",
+    )
     opts.update(kwargs)
     return SUPPORTED_SYNTHESIZER_MODELS["elevenlabs"](model=model, task_manager_instance=StubTaskManager(), **opts)
 

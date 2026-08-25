@@ -35,6 +35,10 @@ class BaseSynthesizer:
                 return
         self.turn_latencies.append(entry)
 
+    async def synthesize_pcm_clip(self, text, sample_rate):
+        """Override where the provider renders PCM natively; None → caller converts."""
+        return None
+
     async def synthesize_telephony_clip(self, text):
         """One-shot render of `text` as raw mu-law 8000 bytes, or None when the provider
         can't produce that natively — the caller then falls back to synthesize() +
