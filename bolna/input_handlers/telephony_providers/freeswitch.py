@@ -28,8 +28,22 @@ class FreeSwitchInputHandler(DefaultInputHandler):
         # set by FreeSwitchOutputHandler: called when mod_audio_stream reports its playout
         # buffer ACTUALLY drained (real playback-complete, vs the byte-count estimate)
         self.on_playout_done = None
+        # set by FreeSwitchOutputHandler: per-mark playback echoes from the patched module
+        self.on_mark_played = None
 
     async def process_message(self, message):
+        if message.get("type") == "markPlayed":
+            # the module's playhead crossed this in-band mark — a REAL per-chunk playback ack.
+            # Registry ack here (sync_history/latency read these), turn-end in the output
+            # handler. A mark cleared by killAudio arrives after handle_interruption already
+            # emptied the registry, so it no-ops — exactly like telephony's cleared marks.
+            name = message.get("name")
+            self.process_mark_message({"type": "mark", "name": name})
+            # cleared = the module dropped it unplayed (killAudio flush / ring overflow) — ack
+            # the registry but never drive turn-end off audio that was not actually heard
+            if not message.get("cleared") and self.on_mark_played:
+                self.on_mark_played(name)
+            return
         if message.get("type") == "playoutDone":
             # mod_audio_stream: all queued TTS has really been played to the caller — hand the
             # signal to the output handler so turn-taking state matches what was heard
