@@ -2,31 +2,19 @@
 Kalpa Labs TTS: streaming WSS /v1/tts/{voice_id}/stream, one-shot POST /v1/tts/{voice_id}.
 
 Kalpa's conversational speech models render named voices from GET /v1/voices
-(kalpa-tts-multilingual-beta-v0.1 speaks English and Hindi — including code-switched
-Hinglish — with no language parameter; kalpa-tts-beta-v0.1 is English-only). Everything on
-the socket is JSON text frames: the client authenticates with an initializeConnection
-frame (the handshake itself is unauthenticated), the server confirms with sessionCreated,
-then each sendText frame appends text and flush=true renders the buffered utterance.
-Audio arrives as responseAudio frames carrying base64 raw 24 kHz mono s16le PCM, and every
-flushed utterance terminates with exactly one responseDone (status "completed", or
-"cancelled" after a cancelResponse).
 
-Two transport behaviors shape this integration:
+Models:
+1. kalpa-tts-multilingual-beta-v0.1 speaks English and Hindi, including code-switched
+Hinglish with no language parameter
+2. kalpa-tts-beta-v0.1 is English-only.
 
-  * One response generates at a time per connection. Current gateways queue one flush that
-    arrives mid-generation (older deployments rejected it outright), and this integration
-    leans on neither: the sender waits for the previous turn's responseDone (a cancelled
-    turn still gets one) before flushing, which serializes turns without ever risking the
-    one-slot queue's rejection and stays correct on older gateways.
-  * On current gateways a bare cancelResponse abandons everything undelivered server-side
-    — the in-flight generation, the queued flush, and buffered text; older deployments
-    only stopped the generation and kept the text buffer. Aggregating a whole assistant
-    turn client-side and sending it as a single text+flush frame keeps every turn atomic
-    on the wire — exactly one responseDone per turn — and never leaves an abandoned
-    turn's fragments in a server buffer on any gateway version.
-
-Kalpa output is a fixed 24 kHz, so like the Maya/Sarvam synthesizers we resample every
-chunk down to the target rate and, for telephony, mu-law encode it.
+Flow
+1. The client authenticates with an initializeConnection frame (the handshake itself is unauthenticated),
+2. The server confirms with sessionCreated
+3. Each sendText frame appends text and flush=true renders the buffered utterance.
+4. Audio arrives as responseAudio frames carrying base64 raw 24 kHz mono s16le PCM.
+5. Every flushed utterance terminates with exactly one responseDone (status "completed", or "cancelled" after a cancelResponse).
+6. For telephony, mu-law encodes audio from 24KHz to 8KHz
 """
 
 import asyncio
@@ -276,11 +264,19 @@ class KalpaSynthesizer(StreamSynthesizer):
 
             await self._wait_for_ws()
 
+            # The wait suspends for real while the socket is reconnecting, and a barge-in can
+            # retire this sequence (and clear the shared buffer) in that gap — appending after
+            # it would leak this turn's fragment into the next turn's utterance.
+            if not self.should_synthesize_response(sequence_id):
+                logger.info(f"Not synthesizing (post-wait): sequence_id {sequence_id} not current")
+                return
+
             if text:
                 self._text_buffer.append(text)
 
-            # Keep buffering until the LLM turn ends: one atomic text+flush frame per turn
-            # (see the module docstring for why fragments are never streamed server-side).
+            # Keep buffering until the LLM turn ends: one atomic text+flush frame per turn, so
+            # an abandoned turn's fragments never sit in a server-side buffer and every turn
+            # settles with exactly one responseDone.
             if not end_of_llm_stream:
                 return
 
@@ -390,6 +386,12 @@ class KalpaSynthesizer(StreamSynthesizer):
 
             except websockets.exceptions.ConnectionClosed:
                 logger.info("Kalpa WebSocket connection closed")
+                # A response that dies with the socket will never get its responseDone: free
+                # the single-flight slot and terminate the turn so playback doesn't hang on
+                # it (monitor_connection re-establishes the socket for the next turn).
+                if not self._response_idle.is_set():
+                    self._response_idle.set()
+                    yield b"\x00"
                 break
             except Exception as e:
                 logger.error(f"Error occurred in Kalpa receiver - {e}")
