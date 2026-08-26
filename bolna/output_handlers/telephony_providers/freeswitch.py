@@ -36,11 +36,7 @@ class FreeSwitchOutputHandler(DefaultOutputHandler):
         self._finish_task = None
         self._finish_marks = []
         self.stream_sid = None
-        # In-band playback marks (Twilio semantics): each chunk's frames are followed by a
-        # {"type":"mark"} the patched module echoes as markPlayed when its playhead crosses that
-        # offset. The FINAL mark's echo ends the turn after a short settle for the browser's
-        # jitter buffer; the duration estimator below stays armed as the fallback (old module /
-        # lost echo), and registry acks are idempotent so whichever fires second is a no-op.
+        # in-band marks (Twilio semantics): final mark's echo ends the turn (+settle); estimator stays as fallback
         self.playback_settle_s = float(os.getenv("WEBCALL_PLAYBACK_SETTLE_S", "0.15"))
         self._final_mark_id = None
         self.marks_echoed = False  # first echo = module supports marks (observability)
@@ -53,8 +49,7 @@ class FreeSwitchOutputHandler(DefaultOutputHandler):
         # and interruption does not depend on this. Re-enable by wiring on_playout_done here.
 
     def on_mark_played(self, name):
-        """Echo from the patched module: the playhead crossed this mark (registry ack already
-        recorded by the input handler). The final mark's echo is real playback-complete."""
+        """Playhead crossed this mark (registry ack already done); the final mark's echo is real playback-complete."""
         if self._closed:
             return
         self.marks_echoed = True
@@ -65,7 +60,7 @@ class FreeSwitchOutputHandler(DefaultOutputHandler):
         if self._final_mark_id is not None and name == self._final_mark_id:
             self._final_mark_id = None
             if self._finish_task and not self._finish_task.done():
-                self._finish_task.cancel()  # estimator superseded by the real playback clock
+                self._finish_task.cancel()  # real playback clock supersedes the estimator
             self._finish_task = asyncio.create_task(
                 self._complete_after_playout(self.playback_settle_s, list(self._finish_marks))
             )
@@ -142,9 +137,7 @@ class FreeSwitchOutputHandler(DefaultOutputHandler):
             if remaining > 0:
                 await asyncio.sleep(remaining)
             self._finish_marks = []  # estimator finishing — a later playoutDone must not re-ack
-            # a late final-mark echo (estimator ran early, module still draining) must not match
-            # into the NEXT response and clear is_audio_being_played mid-speech
-            self._final_mark_id = None
+            self._final_mark_id = None  # a late final echo must not match into the next response
             for mark_id in marks:
                 if self.input_handler:
                     self.input_handler.process_mark_message({"type": "mark", "name": mark_id})
@@ -221,13 +214,10 @@ class FreeSwitchOutputHandler(DefaultOutputHandler):
                     },
                 )
             self._pending_marks.append(mark_id)
-            # in-band mark AFTER the chunk's frames: the WS is ordered, so the module records
-            # the marker at exactly this chunk's tail. An unpatched module ignores the type.
+            # in-band mark after the chunk's frames (ordered WS); an unpatched module ignores the type
             await self.websocket.send_text(json.dumps({"type": "mark", "name": mark_id}))
 
-            # on the final chunk, arm completion: the final mark's echo finishes the response at
-            # the REAL playhead (+settle); the estimated timer is the fallback if echoes never
-            # arrive (old module / WS blip) — whichever fires first wins, both are idempotent.
+            # on the final chunk, arm completion: final-mark echo wins, estimated timer is the fallback
             if is_final:
                 self._final_mark_id = mark_id
                 total_dur = self._response_bytes / self.bytes_per_second

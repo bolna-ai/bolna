@@ -1,10 +1,4 @@
-"""In-band playback marks on the FreeSWITCH webcall path.
-
-Each TTS chunk's streamAudio frames are followed by a {"type":"mark"} the patched
-mod_audio_stream echoes as markPlayed when its playhead crosses that offset. The final
-mark's echo ends the turn (+settle); the duration estimator stays as the fallback for an
-unpatched module, so every test here pins one side of that dual path.
-"""
+"""In-band playback marks on the FreeSWITCH webcall path: echoes end the turn, estimator is the fallback."""
 
 import asyncio
 import json
@@ -116,8 +110,7 @@ def test_output_handler_wires_callback_onto_input_handler():
 
 @pytest.mark.asyncio
 async def test_stale_final_echo_after_estimator_completion_is_ignored():
-    # estimator finishes the turn early while the module is still draining; the late final
-    # echo must not match into the next response and clear is_audio_being_played mid-speech
+    # a late final echo must not match into the next response and clear is_audio_being_played
     handler, ws, input_handler = _make_output()
     await handler.handle(_packet(final=True, mark_id="m-old-final"))
     await asyncio.wait_for(handler._finish_task, timeout=2)  # estimator completes the turn
@@ -133,8 +126,7 @@ async def test_stale_final_echo_after_estimator_completion_is_ignored():
 
 @pytest.mark.asyncio
 async def test_cleared_echo_acks_registry_but_never_ends_turn():
-    # "cleared":true = dropped unplayed (killAudio / ring overflow); a cleared FINAL echo must
-    # not complete the turn while real audio is still queued
+    # cleared = dropped unplayed; a cleared FINAL echo must not complete the turn
     handler = FreeSwitchInputHandler.__new__(FreeSwitchInputHandler)
     handler.on_mark_played = MagicMock()
     handler.on_playout_done = None
