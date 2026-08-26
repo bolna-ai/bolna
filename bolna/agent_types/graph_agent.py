@@ -11,6 +11,7 @@ from bolna.models import *
 from bolna.agent_types.base_agent import BaseAgent
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.rag_service_client import RAGServiceClientSingleton
+from bolna.helpers.function_calling_helpers import guard_llm_base_url
 from bolna.helpers.utils import (
     now_ms,
     format_messages,
@@ -77,6 +78,7 @@ class GraphAgent(BaseAgent):
         # Get credentials from config (injected by task_manager) or fall back to env vars
         self.llm_key = self.config.get("llm_key") or os.getenv("OPENAI_API_KEY")
         self.base_url = self.config.get("base_url")
+        self._base_url_validated = False
 
         # Initialize OpenAI client with credentials (supports EU routing)
         if self.base_url:
@@ -1317,6 +1319,12 @@ class GraphAgent(BaseAgent):
         detected_language = meta_info.get("detected_language")  # None if not yet detected
         if detected_language:
             self.context_data["detected_language"] = detected_language
+
+        # Before the first outbound hop (routing runs before the node LLM), so a blocked
+        # endpoint ends the call cleanly here rather than being swallowed and spoken below.
+        if self.base_url and not self._base_url_validated:
+            await guard_llm_base_url(self.base_url)
+            self._base_url_validated = True
 
         try:
             # Event-triggered generation: process_event() already handled routing
