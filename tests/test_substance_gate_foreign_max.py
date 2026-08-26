@@ -46,7 +46,7 @@ def _tm(monkeypatch, segments, buffer_max):
     tm._inflight_response_activity = MagicMock(return_value={"audio_playing": False})
     tm._TaskManager__cleanup_downstream_tasks = AsyncMock()
     tm.switch_language = AsyncMock()
-    tm._TaskManager__switch_context_note = MagicMock(return_value="note")
+    tm._TaskManager__language_directive = MagicMock(return_value="note")
     tm._TaskManager__play_switch_handoff = AsyncMock()
     tm._TaskManager__prepare_followup_generation = MagicMock(return_value=None)
     tm.conversation_history = MagicMock()
