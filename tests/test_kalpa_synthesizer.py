@@ -296,9 +296,10 @@ def test_stale_sequence_sends_nothing():
 
 
 def test_the_flush_waits_for_the_previous_responses_done():
-    """One response in flight per connection: flushing while the previous turn is still
-    generating is rejected by the server (and the turn lost), so the sender must park on
-    the idle event until responseDone frees the slot."""
+    """One response generates at a time per connection: older gateways rejected a flush
+    sent mid-generation (losing the turn) and current ones queue exactly one, so the
+    sender parks on the idle event until responseDone frees the slot — serializing turns
+    without relying on either behavior."""
     s = _synth()
     s._response_idle.clear()  # a previous flush is still generating
     order = []
