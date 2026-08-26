@@ -167,7 +167,7 @@ class SipTrunkInputHandler(TelephonyInputHandler):
         meta = getattr(self, "mark_event_meta_data", None)
         if not meta:
             return 0.0
-        events = meta.mark_event_meta_data
+        events = meta.pending_marks
         return sum(v.get("duration") or 0.0 for v in events.values() if v.get("type") != "pre_mark_message")
 
     async def _await_playback_drained(self):

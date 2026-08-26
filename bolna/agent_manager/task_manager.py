@@ -2218,7 +2218,7 @@ class TaskManager(BaseManager):
         return None
 
     def _has_interruptible_mark_activity(self):
-        for mark_data in self.mark_event_meta_data.mark_event_meta_data.values():
+        for mark_data in self.mark_event_meta_data.pending_marks.values():
             if mark_data.get("type") == "pre_mark_message":
                 continue
             if mark_data.get("turn_id") is not None:
@@ -2749,7 +2749,7 @@ class TaskManager(BaseManager):
         """Seconds of already-sent audio the provider has not acked playing yet."""
         return sum(
             mark.get("duration", 0)
-            for mark in self.mark_event_meta_data.mark_event_meta_data.values()
+            for mark in self.mark_event_meta_data.pending_marks.values()
             if mark.get("type") != "pre_mark_message" and mark.get("sent_ts")
         )
 
@@ -2761,7 +2761,7 @@ class TaskManager(BaseManager):
 
         entry_time = time.time()
         while not self.conversation_ended:
-            mark_events = self.mark_event_meta_data.mark_event_meta_data
+            mark_events = self.mark_event_meta_data.pending_marks
             mark_items_list = [{"mark_id": k, "mark_data": v} for k, v in mark_events.items()]
             logger.info(f"current_list: {mark_items_list}")
 
@@ -8236,11 +8236,11 @@ class TaskManager(BaseManager):
                 if self.hangup_triggered and not self.conversation_ended:
                     await self.wait_for_current_message()
 
-                has_pending_marks = len(self.mark_event_meta_data.mark_event_meta_data) > 0
+                has_pending_marks = len(self.mark_event_meta_data.pending_marks) > 0
                 has_response_heard = bool(self.tools["input"].response_heard_by_user)
                 if has_pending_marks or has_response_heard:
                     await self.sync_history(
-                        self.mark_event_meta_data.mark_event_meta_data.items(),
+                        self.mark_event_meta_data.pending_marks.items(),
                         time.time(),
                         extend_with_playback_estimate=True,
                     )

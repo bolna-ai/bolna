@@ -48,9 +48,7 @@ class _MarksStub:
     """Holds one goodbye chunk the provider has been sent but has not acked."""
 
     def __init__(self, duration):
-        self.mark_event_meta_data = {
-            "aud1": {"type": "agent_hangup", "duration": duration, "sent_ts": time.time()}
-        }
+        self.pending_marks = {"aud1": {"type": "agent_hangup", "duration": duration, "sent_ts": time.time()}}
 
 
 class _VoicemailStub:

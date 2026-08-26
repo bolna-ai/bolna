@@ -60,7 +60,7 @@ class TestGetChunkMarks:
 
         assert popped["acked"] is True
         assert before <= popped["ack_ts"] <= after
-        assert "audio-1" not in m.mark_event_meta_data
+        assert "audio-1" not in m.pending_marks
 
         marks = m.get_chunk_marks()
         assert len(marks) == 1

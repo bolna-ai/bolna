@@ -59,8 +59,8 @@ class MarkStats(BaseModel):
 
 class MarkEventMetaData:
     def __init__(self):
-        self.mark_event_meta_data = {}
-        self.previous_mark_event_meta_data = {}
+        self.pending_marks = {}
+        self.previous_pending_marks = {}
         self._mark_history: Dict[str, Dict] = {}
         self.counter = 0
         self.mark_changed = asyncio.Event()
@@ -93,7 +93,7 @@ class MarkEventMetaData:
         value.setdefault("acked", False)
         value.setdefault("ack_ts", None)
         self.counter += 1
-        self.mark_event_meta_data[mark_id] = value
+        self.pending_marks[mark_id] = value
         duration = value.get("duration") or 0
         if value.get("type") != "pre_mark_message":
             self._mark_history[mark_id] = value
@@ -171,17 +171,17 @@ class MarkEventMetaData:
     def drop_data(self, mark_id):
         """Remove a mark that was never played (cleared echo): no ack stamp, so last-ack
         playback crediting and chunk-mark analytics can't count it as heard."""
-        entry = self.mark_event_meta_data.pop(mark_id, {})
+        entry = self.pending_marks.pop(mark_id, {})
         if entry:
             entry["cleared"] = True
         return entry
 
     def fetch_data(self, mark_id):
-        entry = self.mark_event_meta_data.get(mark_id)
+        entry = self.pending_marks.get(mark_id)
         if entry is not None and entry.get("type") != "pre_mark_message":
             entry["acked"] = True
             entry["ack_ts"] = time.time()
-        result = self.mark_event_meta_data.pop(mark_id, {})
+        result = self.pending_marks.pop(mark_id, {})
         if result:
             logger.info(
                 "BOLNA_TRACE_MARK fetch mark_id=%s type=%s seq=%s turn=%s response_uid=%s group_uid=%s counter=%s",
@@ -200,21 +200,21 @@ class MarkEventMetaData:
         logger.info(f"Clearing mark meta data dict")
         logger.info(
             "BOLNA_TRACE_MARK clear pending=%s mark_ids=%s",
-            len(self.mark_event_meta_data),
-            list(self.mark_event_meta_data.keys()),
+            len(self.pending_marks),
+            list(self.pending_marks.keys()),
         )
         self.counter = 0
         self.drop_playout_estimate()
 
-        for mark_id, value in self.mark_event_meta_data.items():
+        for mark_id, value in self.pending_marks.items():
             if value.get("type") != "pre_mark_message":
                 value["cleared_on_interrupt"] = True
                 seq = value.get("sequence_id")
                 if seq is not None and seq in self._mark_stats.per_sequence:
                     self._mark_stats.per_sequence[seq].interrupted = True
 
-        self.previous_mark_event_meta_data = copy.deepcopy(self.mark_event_meta_data)
-        self.mark_event_meta_data = {}
+        self.previous_pending_marks = copy.deepcopy(self.pending_marks)
+        self.pending_marks = {}
         self.mark_changed.set()
 
     def get_mark_tracking_summary(self) -> dict:
@@ -255,7 +255,7 @@ class MarkEventMetaData:
         return summary.model_dump()
 
     def fetch_cleared_mark_event_data(self):
-        return self.previous_mark_event_meta_data
+        return self.previous_pending_marks
 
     def get_last_ack_ts_for_turn(self, turn_id) -> Optional[float]:
         """Wall-clock of the turn's last ACKed chunk — the playback clock's last confirmed point.
@@ -301,4 +301,4 @@ class MarkEventMetaData:
         return out
 
     def __str__(self):
-        return f"{self.mark_event_meta_data}"
+        return f"{self.pending_marks}"

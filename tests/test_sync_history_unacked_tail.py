@@ -79,7 +79,7 @@ def _assistant_content(history):
 async def test_end_of_call_credits_unacked_tail_played_after_last_ack():
     tm, history, marks = _make_tm()
     teardown_ts = marks.get_last_ack_ts_for_turn(8) + 20  # well past the 9.6s tail
-    await tm.sync_history(marks.mark_event_meta_data.items(), teardown_ts, extend_with_playback_estimate=True)
+    await tm.sync_history(marks.pending_marks.items(), teardown_ts, extend_with_playback_estimate=True)
     assert _assistant_content(history) == FULL_TEXT
 
 
@@ -87,7 +87,7 @@ async def test_end_of_call_mid_chunk_hangup_credits_proportional_word_trimmed():
     # PR review replay: last ACK 6.97s before teardown vs 9.61s tail → ~72% heard, word-aligned.
     tm, history, marks = _make_tm()
     teardown_ts = marks.get_last_ack_ts_for_turn(8) + 6.97
-    await tm.sync_history(marks.mark_event_meta_data.items(), teardown_ts, extend_with_playback_estimate=True)
+    await tm.sync_history(marks.pending_marks.items(), teardown_ts, extend_with_playback_estimate=True)
     content = _assistant_content(history)
     assert content.startswith(PREFIX + "rupees")  # tail partially credited
     assert len(content) < len(FULL_TEXT)
@@ -97,11 +97,11 @@ async def test_end_of_call_mid_chunk_hangup_credits_proportional_word_trimmed():
 async def test_end_of_call_zero_elapsed_keeps_strict_ack_trim():
     tm, history, marks = _make_tm()
     teardown_ts = marks.get_last_ack_ts_for_turn(8)  # hangup at the last confirmed instant
-    await tm.sync_history(marks.mark_event_meta_data.items(), teardown_ts, extend_with_playback_estimate=True)
+    await tm.sync_history(marks.pending_marks.items(), teardown_ts, extend_with_playback_estimate=True)
     assert _assistant_content(history) == PREFIX.strip()
 
 
 async def test_interruption_path_still_trims_to_acked_text():
     tm, history, marks = _make_tm()
-    await tm.sync_history(marks.mark_event_meta_data.items(), time.time())
+    await tm.sync_history(marks.pending_marks.items(), time.time())
     assert _assistant_content(history) == PREFIX.strip()

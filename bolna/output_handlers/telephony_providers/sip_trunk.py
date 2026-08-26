@@ -189,7 +189,7 @@ class SipTrunkOutputHandler(TelephonyOutputHandler):
         """
         if not self.input_handler or not self.input_handler.mark_event_meta_data:
             return
-        remaining = list(self.input_handler.mark_event_meta_data.mark_event_meta_data.keys())
+        remaining = list(self.input_handler.mark_event_meta_data.pending_marks.keys())
         if not remaining and not self.input_handler.is_audio_being_played_to_user():
             logger.info(f"sip-trunk: playback completed by mark echo before the {reason} timer")
             return

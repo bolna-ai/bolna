@@ -186,7 +186,7 @@ async def test_drain_timeout_scales_with_pending_mark_durations():
     handler = _make_handler(ws, listen_task)
 
     class _Meta:
-        mark_event_meta_data = {
+        pending_marks = {
             "m1": {"type": "agent_response", "duration": 0.5},
             "m2": {"type": "agent_response", "duration": 0.3},
         }
