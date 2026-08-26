@@ -9,11 +9,18 @@ Hinglish with no language parameter
 2. kalpa-tts-beta-v0.1 is English-only.
 
 Flow
-1. The client authenticates with an initializeConnection frame (the handshake itself is unauthenticated),
-2. The server confirms with sessionCreated
-3. Each sendText frame appends text and flush=true renders the buffered utterance.
-4. Audio arrives as responseAudio frames carrying base64 raw 24 kHz mono s16le PCM.
-5. Every flushed utterance terminates with exactly one responseDone (status "completed", or "cancelled" after a cancelResponse).
+1. The client authenticates with an initializeConnection frame (the handshake itself is
+   unauthenticated). Its generation_config.chunk_length_schedule opts the connection into
+   server-side segmentation: once buffered text crosses the schedule's next threshold and ends
+   at a complete sentence, that part starts rendering while the rest is still arriving.
+2. The server confirms with sessionCreated.
+3. LLM chunks are streamed as sendText frames the moment they arrive; flush=true (sent at
+   end_of_llm_stream) ends the utterance and renders whatever remains.
+4. Audio arrives as responseAudio frames carrying base64 raw 24 kHz mono s16le PCM. The whole
+   utterance stays one response on the wire — one responseCreated, one responseDone — but its
+   first audio can arrive long before the flush.
+5. Every utterance terminates with exactly one responseDone (status "completed", or
+   "cancelled" after a cancelResponse).
 6. For telephony, mu-law encodes audio from 24KHz to 8KHz
 """
 
@@ -44,10 +51,16 @@ KALPA_DEFAULT_MODEL = "kalpa-tts-multilingual-beta-v0.1"
 # Kalpa rejects utterances longer than this; we truncate rather than fail a live turn.
 MAX_TEXT_CHARS = 8000
 
-# How long a flush waits for the previous response's responseDone. Cancels settle in
-# milliseconds, so hitting this means something is wrong — flush anyway and let the
-# server arbitrate rather than silently dropping the turn (current gateways queue the
-# flush in that case, so nothing is lost even then).
+# Buffered-character thresholds before each successive part of an utterance may start
+# rendering (the last value repeats). The same schedule ElevenLabs runs in this codebase, and
+# also Kalpa's server-side default — sent explicitly, because omitting generation_config
+# altogether falls back to generate-only-on-flush and loses the early first audio.
+DEFAULT_CHUNK_LENGTH_SCHEDULE = [50, 80, 120, 150]
+
+# How long a new utterance waits for the previous response's responseDone. Cancels settle in
+# milliseconds, so hitting this means the connection's state is wedged or unknowable; the
+# socket is closed to reset it (the receiver settles the lost turn, monitor_connection
+# redials) rather than flushing into a session we no longer understand.
 RESPONSE_IDLE_TIMEOUT = 10.0
 
 AUDIO_QUALITIES = {"low", "medium", "high"}
@@ -60,10 +73,10 @@ class KalpaSynthesizer(StreamSynthesizer):
         voice_id=None,
         model=KALPA_DEFAULT_MODEL,
         temperature=None,
-        top_k=None,
         acoustic_temperature=None,
         max_new_tokens=None,
         audio_quality=None,
+        chunk_length_schedule=None,
         sampling_rate="24000",
         stream=False,
         buffer_size=400,
@@ -95,13 +108,13 @@ class KalpaSynthesizer(StreamSynthesizer):
             key: value
             for key, value in (
                 ("temperature", temperature),
-                ("top_k", top_k),
                 ("acoustic_temperature", acoustic_temperature),
                 ("max_new_tokens", max_new_tokens),
                 ("audio_quality", audio_quality),
             )
             if value is not None
         }
+        self.chunk_length_schedule = list(chunk_length_schedule or DEFAULT_CHUNK_LENGTH_SCHEDULE)
 
         self.use_mulaw = kwargs.get("use_mulaw", False)
         # Telephony always renders at 8 kHz mu-law; web keeps the configured PCM rate.
@@ -118,18 +131,27 @@ class KalpaSynthesizer(StreamSynthesizer):
         # Fail fast on a misconfigured agent rather than mid-call.
         self._validate_options()
 
-        # Aggregation state: buffer a whole turn's chunks, flush once on end_of_llm_stream.
-        # _buffer_seq tracks which turn owns the buffer so a superseded turn (new
-        # sequence_id before its end_of_llm_stream) can't leak its half-buffered text.
-        self._text_buffer = []
-        self._buffer_seq = None
-        # Set while no response is generating on the socket (one in flight per connection).
-        # The counter tracks outstanding flushes: normally 0/1, briefly 2 when the idle
-        # timeout lets a newer turn flush past a wedged response — responses settle in
-        # flush order, so only the done that drains it back to 0 owns the slot.
+        # Text is streamed to the server as the LLM produces it (segmentation renders it
+        # early), so the client tracks the open utterance rather than a local buffer. One
+        # utterance occupies the connection from its first sendText to its responseDone.
+        # The lock releases senders in acquisition order, so frames leave in push order even
+        # when an earlier sender suspends mid-await (slot wait, reconnect).
+        self._send_lock = asyncio.Lock()
+        self._turn_seq = None  # sequence that owns the open (un-flushed) utterance
+        self._turn_chunks = []  # wire fragments already sent for it (reconnect replay)
+        self._turn_chars = 0
+        self._turn_truncated = False
+        self._turn_dead = False  # utterance abandoned mid-stream; drop its stragglers
+        # A connection generation stamps which socket the turn's text went to; a mismatch at
+        # send time means the server lost its buffer and the whole turn must be resent.
+        self._conn_gen = 0
+        self._turn_conn_gen = 0
+        # A superseded turn can leave un-flushed text in the server buffer (no interruption
+        # ran); the generation it happened on gates a defensive wipe before the next turn.
+        self._dirty_conn_gen = None
+        # Set while no utterance occupies the connection.
         self._response_idle = asyncio.Event()
         self._response_idle.set()
-        self._inflight_flushes = 0
         # After a cancel, audio frames already on the wire keep arriving until the
         # response's own responseDone; ids in this set are dropped instead of played.
         self._ignored_response_ids = set()
@@ -146,24 +168,24 @@ class KalpaSynthesizer(StreamSynthesizer):
     # ------------------------------------------------------------------
 
     def _validate_options(self):
-        """Mirror the server's GenParams ranges so a typo fails at agent setup, not on the
-        first turn of a live call. The model id is deliberately not validated against a
-        fixed list — the catalog (GET /v1/models) evolves server-side."""
+        """Mirror the server's ranges so a typo fails at agent setup, not on the first turn
+        of a live call. The model id is deliberately not validated against a fixed list —
+        the catalog (GET /v1/models) evolves server-side."""
         temperature = self.params.get("temperature")
         if temperature is not None and not 0.0 <= float(temperature) <= 1.5:
             raise ValueError("Kalpa temperature must be between 0.0 and 1.5")
         acoustic = self.params.get("acoustic_temperature")
         if acoustic is not None and not 0.0 <= float(acoustic) <= 1.5:
             raise ValueError("Kalpa acoustic_temperature must be between 0.0 and 1.5")
-        top_k = self.params.get("top_k")
-        if top_k is not None and int(top_k) < 1:
-            raise ValueError("Kalpa top_k must be >= 1")
         max_new_tokens = self.params.get("max_new_tokens")
         if max_new_tokens is not None and not 16 <= int(max_new_tokens) <= 2048:
             raise ValueError("Kalpa max_new_tokens must be between 16 and 2048")
         audio_quality = self.params.get("audio_quality")
         if audio_quality is not None and audio_quality not in AUDIO_QUALITIES:
             raise ValueError(f"Kalpa audio_quality must be one of {sorted(AUDIO_QUALITIES)}")
+        schedule = self.chunk_length_schedule
+        if not 1 <= len(schedule) <= 10 or any(not 50 <= int(t) <= 2000 for t in schedule):
+            raise ValueError("Kalpa chunk_length_schedule must be 1-10 thresholds between 50 and 2000")
 
     # ------------------------------------------------------------------
     # StreamSynthesizer hooks
@@ -189,16 +211,16 @@ class KalpaSynthesizer(StreamSynthesizer):
         return pcm_to_ulaw(audio) if self.use_mulaw else audio
 
     def _on_push(self, meta_info, text):
-        """Runs synchronously in push order (before the sender task): if a new turn starts
-        while the previous one is still buffered, drop the stale buffer so it can't prepend
-        onto this turn's text."""
+        """Runs synchronously in push order (before the sender task): a new turn starting
+        while an older utterance is still open means that turn was retired without an
+        interruption. Mark it dead so its stragglers drop instead of appending to this
+        turn's utterance, and remember that its text may still sit in the server buffer."""
         seq = meta_info.get("sequence_id")
-        if self._buffer_seq is not None and self._buffer_seq != seq and self._text_buffer:
-            logger.info(
-                f"Dropping {len(self._text_buffer)} unflushed Kalpa chunk(s) from superseded seq={self._buffer_seq}"
-            )
-            self._text_buffer = []
-        self._buffer_seq = seq
+        if self._turn_seq is not None and self._turn_seq != seq and not self._turn_dead:
+            logger.info(f"Marking un-flushed Kalpa utterance from superseded seq={self._turn_seq} dead")
+            self._turn_dead = True
+            if self._turn_chunks and self._turn_conn_gen == self._conn_gen:
+                self._dirty_conn_gen = self._conn_gen
 
     # ------------------------------------------------------------------
     # Voice resolution
@@ -241,23 +263,36 @@ class KalpaSynthesizer(StreamSynthesizer):
     # ------------------------------------------------------------------
 
     async def handle_interruption(self):
-        """Drop the buffered turn and cancel the in-flight response. Cancel is idempotent
-        server-side, so it is unconditionally safe to fire; the cancelled response still
-        terminates with its own responseDone (status "cancelled"), which frees the
-        in-flight slot without emitting an end-of-stream sentinel. On current gateways a
-        bare cancel also wipes undelivered server-side state (queued flush, buffered
-        text) — moot here, since this integration never leaves either behind."""
-        self._text_buffer = []
-        self._buffer_seq = None
-        if not self._response_idle.is_set():
-            self._abandoned_in_flight = True
-            if self._current_response_id is not None:
-                self._ignored_response_ids.add(self._current_response_id)
+        """Abandon the open utterance and whatever the server holds for it. Three states
+        need three moves:
+
+        - A response is known (responseCreated arrived): bare cancelResponse. It aborts the
+          generation and wipes buffered text, and the response still settles with its own
+          responseDone (status "cancelled"), which frees the connection slot.
+        - The utterance was flushed but its responseCreated hasn't arrived yet: same cancel.
+          The flush committed the utterance server-side, so a responseDone is guaranteed;
+          the abandonment flag keeps that late settle from finishing the next turn.
+        - Text was streamed but never flushed and no response has been seen: the server may
+          or may not have started rendering it (segmentation decides), and a cancel that
+          lands before any response exists settles with no responseDone at all — the slot
+          would hang until the idle timeout. Close the socket instead: the server treats
+          disconnect as barge-in, and the fresh connection's state is deterministic.
+        """
+        turn_open = self._turn_seq is not None and not self._turn_dead
+        self._reset_turn()
+        self._dirty_conn_gen = None
         # The cancelled turn's end-of-stream is never forwarded, so the next turn must be
         # re-detected as new for stale text_queue entries to be pruned — even when the
         # cancel send below fails with the socket.
         self.current_turn_start_time = None
         try:
+            if not self._response_idle.is_set():
+                self._abandoned_in_flight = True
+                if self._current_response_id is not None:
+                    self._ignored_response_ids.add(self._current_response_id)
+                elif turn_open:
+                    await self._close_ws("barge-in on an un-flushed utterance with no response yet")
+                    return
             ws = self.websocket
             if ws is not None and ws.state is websockets.protocol.State.OPEN:
                 await ws.send(json.dumps({"type": "cancelResponse"}))
@@ -269,6 +304,109 @@ class KalpaSynthesizer(StreamSynthesizer):
     # sender / receiver
     # ------------------------------------------------------------------
 
+    def _reset_turn(self):
+        self._turn_seq = None
+        self._turn_chunks = []
+        self._turn_chars = 0
+        self._turn_truncated = False
+        self._turn_dead = False
+
+    async def _close_ws(self, reason):
+        """Deterministic reset: the receiver notices the closure and settles the lost turn,
+        monitor_connection redials, and establish_connection reinitializes the state."""
+        ws = self.websocket
+        if ws is None:
+            return
+        logger.warning(f"Closing Kalpa TTS socket: {reason}")
+        try:
+            await ws.close()
+        except Exception as e:
+            logger.error(f"Error closing Kalpa TTS socket: {e}")
+
+    async def _wait_for_idle_slot(self, sequence_id):
+        """Wait for the previous utterance's responseDone to free the connection; returns
+        "free", "retired", or "reset". Cancels settle in milliseconds, so hitting the
+        timeout means a done that is wedged or can never arrive; the socket is closed to
+        reset the session ("reset" — the caller parks on the reconnect, after which this
+        turn's text is replayed on the fresh connection)."""
+        deadline = time.perf_counter() + RESPONSE_IDLE_TIMEOUT
+        while not self._response_idle.is_set():
+            if self.conversation_ended or not self.should_synthesize_response(sequence_id):
+                return "retired"
+            remaining = deadline - time.perf_counter()
+            if remaining <= 0:
+                await self._close_ws("previous response still unsettled after 10s")
+                return "reset"
+            try:
+                await asyncio.wait_for(self._response_idle.wait(), timeout=remaining)
+            except asyncio.TimeoutError:
+                pass
+        return "free"
+
+    async def _open_utterance(self, sequence_id):
+        """Ensure `sequence_id` owns an open utterance on a live connection; returns
+        (opened, replay). replay=True means this turn's earlier chunks were sent on a
+        connection that died — the server lost them, so the caller resends the whole turn."""
+        while True:
+            if self.conversation_ended or not self.should_synthesize_response(sequence_id):
+                return False, False
+            if self._turn_dead and self._turn_seq == sequence_id:
+                return False, False
+            if self._turn_seq == sequence_id and self._turn_conn_gen == self._conn_gen and self._is_ws_connected():
+                return True, False
+            await self._wait_for_ws()
+            if self.conversation_ended or self.connection_error:
+                return False, False
+            if not self.should_synthesize_response(sequence_id):
+                return False, False
+            # A new utterance (or a replay after a reconnect) claims the connection's slot.
+            slot = await self._wait_for_idle_slot(sequence_id)
+            if slot == "retired" or not self.should_synthesize_response(sequence_id):
+                # the wait can span a barge-in that retires this sequence; the wake-up on
+                # the freed slot must not claim it for a turn the pipeline dropped
+                return False, False
+            if slot == "reset" or not self._is_ws_connected():
+                continue  # the socket died (or was reset) while parked; redial and retry
+            if self._turn_seq != sequence_id:
+                self._reset_turn()
+                self._turn_seq = sequence_id
+            if self._dirty_conn_gen == self._conn_gen:
+                # A superseded turn left un-flushed text in the server buffer; wipe it
+                # before this turn's first chunk or the utterances merge.
+                self._dirty_conn_gen = None
+                await self._send_json({"type": "cancelResponse"})
+            replay = bool(self._turn_chunks)
+            self._turn_conn_gen = self._conn_gen
+            self._response_idle.clear()
+            # Generation may start at any segment boundary from here on, so synth latency
+            # is measured from the turn's first text frame.
+            if self.ws_send_time is None:
+                self.ws_send_time = time.perf_counter()
+            return True, replay
+
+    def _wire_text(self, text, replay):
+        """Account `text` against the open utterance and return what should go on the wire.
+
+        The streaming LLM wrappers split chunks with rsplit(" ", 1) and drop the boundary
+        space, so every chunk after the turn's first gets it restored. The utterance cap is
+        enforced across the whole turn: the chunk that crosses it is cut at a word boundary
+        and everything after is dropped (the flush still lands). A replay returns the whole
+        turn so far — the reconnect handed us a server with an empty buffer."""
+        if not self._turn_truncated:
+            piece = (" " if self._turn_chars else "") + text
+            budget = MAX_TEXT_CHARS - self._turn_chars
+            if len(piece) > budget:
+                logger.warning(f"Kalpa utterance exceeds {MAX_TEXT_CHARS} chars; truncating")
+                cut = piece.rfind(" ", 0, budget + 1)
+                piece = piece[:cut] if cut > 0 else piece[:budget]
+                self._turn_truncated = True
+            if piece:
+                self._turn_chunks.append(piece)
+                self._turn_chars += len(piece)
+        else:
+            piece = ""
+        return "".join(self._turn_chunks) if replay else piece
+
     async def sender(self, text, sequence_id, end_of_llm_stream=False):
         try:
             if self.conversation_ended:
@@ -277,102 +415,82 @@ class KalpaSynthesizer(StreamSynthesizer):
                 logger.info(f"Not synthesizing: sequence_id {sequence_id} not current")
                 return
 
-            # Appends happen before any await: sender tasks start in push order and a
-            # non-EOS sender never suspends, so chunks cannot aggregate out of order even
-            # while the socket is reconnecting. Only the EOS task below ever waits.
-            if text:
-                # Guard the ownership invariant: a chunk whose turn's buffer was already
-                # dropped (barge-in between task creation and start) must not append.
-                if self._buffer_seq != sequence_id:
-                    logger.info(f"Dropping Kalpa chunk for superseded seq={sequence_id} (buffer seq={self._buffer_seq})")
+            async with self._send_lock:
+                # The lock wait can span a barge-in that retires this sequence without
+                # cancelling the task; nothing may reach the socket after that.
+                if self.conversation_ended or not self.should_synthesize_response(sequence_id):
+                    logger.info(f"Not synthesizing (post-lock): sequence_id {sequence_id} not current")
                     return
-                self._text_buffer.append(text)
 
-            # Keep buffering until the LLM turn ends: one atomic text+flush frame per turn, so
-            # an abandoned turn's fragments never sit in a server-side buffer and every turn
-            # settles with exactly one responseDone.
-            if not end_of_llm_stream:
-                return
+                if text and not (self._turn_dead and self._turn_seq == sequence_id):
+                    opened, replay = await self._open_utterance(sequence_id)
+                    if not opened:
+                        return
+                    wire_text = self._wire_text(text, replay)
+                    if wire_text:
+                        try:
+                            await self._send_json({"type": "sendText", "text": wire_text})
+                        except Exception:
+                            # The socket died mid-send; the chunk stays in _turn_chunks, so
+                            # the next send (or this call's flush below) replays the turn
+                            # on the fresh connection.
+                            pass
 
-            # The streaming LLM wrappers split chunks with rsplit(" ", 1) and drop the
-            # boundary space, so it has to be restored here.
-            full_text = " ".join(self._text_buffer).strip()
-            self._text_buffer = []
-            self._buffer_seq = None
-            self.last_text_sent = True
-
-            if not full_text:
-                return
-            if len(full_text) > MAX_TEXT_CHARS:
-                logger.warning(f"Kalpa utterance exceeds {MAX_TEXT_CHARS} chars; truncating")
-                # Cut at a word boundary so the caller doesn't hear a clipped syllable.
-                cut = full_text.rfind(" ", 0, MAX_TEXT_CHARS + 1)
-                full_text = full_text[:cut] if cut > 0 else full_text[:MAX_TEXT_CHARS]
-
-            await self._wait_for_ws()
-
-            # The wait suspends for real while the socket reconnects, and a barge-in can
-            # retire this sequence in that gap — the captured turn must not flush then.
-            if not self.should_synthesize_response(sequence_id):
-                logger.info(f"Not synthesizing (post-wait): sequence_id {sequence_id} not current")
-                return
-
-            # One response in flight per connection: wait for the previous turn's
-            # responseDone (a cancelled turn still gets one) before flushing. Event.set()
-            # wakes every parked sender, so re-check and re-park until the slot is truly
-            # free — otherwise two turns could ride one done into overlapping flushes.
-            deadline = time.perf_counter() + RESPONSE_IDLE_TIMEOUT
-            while not self._response_idle.is_set():
-                remaining = deadline - time.perf_counter()
-                if remaining <= 0:
-                    logger.warning("Kalpa: previous response still in flight after 10s; flushing anyway")
-                    # Giving up on the wedged response retires its abandonment too —
-                    # otherwise this turn's response would inherit it at responseCreated
-                    # and lose its audio and completion sentinel. Its id (when known)
-                    # stays ignored.
-                    self._abandoned_in_flight = False
-                    break
-                try:
-                    await asyncio.wait_for(self._response_idle.wait(), timeout=remaining)
-                except asyncio.TimeoutError:
-                    pass
-
-            # The waits above can span a barge-in that retires this sequence without
-            # cancelling the task; re-check before anything reaches the socket.
-            if not self.should_synthesize_response(sequence_id):
-                logger.info(f"Not synthesizing (inner): sequence_id {sequence_id} not current")
-                return
-
-            self._inflight_flushes += 1
-            self._response_idle.clear()
-            if self.ws_send_time is None:
-                self.ws_send_time = time.perf_counter()
-            try:
-                await self._send_json({"type": "sendText", "text": full_text, "flush": True})
-            except Exception:
-                # _send_json already logged and set connection_error. Nothing was flushed,
-                # so no responseDone will free the slot — release it here.
-                self._inflight_flushes -= 1
-                if self._inflight_flushes == 0:
-                    self._response_idle.set()
+                if end_of_llm_stream:
+                    await self._finish_utterance(sequence_id)
 
         except asyncio.CancelledError:
             logger.info("Kalpa sender task was cancelled.")
         except Exception as e:
             logger.error(f"Unexpected error in Kalpa sender: {e}")
 
-    def _settle_lost_flushes(self):
-        """The socket died with responses outstanding: free the slot, reset the flush
-        bookkeeping, and return how many end-of-stream sentinels settle the lost turns
-        (oldest first; an abandoned turn is skipped — its pipeline already dropped it)."""
+    async def _finish_utterance(self, sequence_id):
+        """The LLM turn ended: flush the utterance. A turn that never opened (the LLM's last
+        buffer is often empty) has nothing to flush; a dead one is finally forgotten."""
+        if self._turn_seq != sequence_id:
+            return
+        if self._turn_dead:
+            self._reset_turn()
+            return
+        opened, replay = await self._open_utterance(sequence_id)
+        if not opened:
+            return
+        frame = {"type": "sendText", "flush": True}
+        if replay:
+            frame["text"] = "".join(self._turn_chunks)
+        self.last_text_sent = True
+        try:
+            await self._send_json(frame)
+        except Exception:
+            # Died at the flush: the receiver's settle path terminates the turn (the slot
+            # stays claimed until then, so nothing else flushes into the gap).
+            pass
+        self._reset_turn()
+
+    def _settle_lost_utterance(self):
+        """The socket died. Free the connection slot and return how many end-of-stream
+        sentinels settle the lost turn (0 or 1):
+
+        - a flushed utterance awaiting its responseDone settles now (unless a barge-in had
+          already abandoned it — its pipeline dropped the turn, so it settles silently);
+        - an open utterance whose response had started already played audio; replaying its
+          text would repeat what the caller heard, so the turn ends here instead — it is
+          marked dead and settled;
+        - an open utterance with no response yet lost nothing audible: keep its text for
+          replay and stay silent — the turn is still live."""
         lost = 0
         if not self._response_idle.is_set():
             self._response_idle.set()
-            lost = max(1, self._inflight_flushes)
-            if self._abandoned_in_flight:
-                lost -= 1
-        self._inflight_flushes = 0
+            if self._abandoned_in_flight or self._turn_dead:
+                lost = 0
+            elif self._turn_seq is None:
+                lost = 1
+            elif self._current_response_id is not None:
+                self._turn_dead = True
+                lost = 1
         self._abandoned_in_flight = False
+        self._current_response_id = None
+        self._ignored_response_ids.clear()
         return lost
 
     async def receiver(self):
@@ -383,8 +501,8 @@ class KalpaSynthesizer(StreamSynthesizer):
                     return
                 if not self._is_ws_connected():
                     # A socket that dies between recvs is seen here, not by the
-                    # ConnectionClosed handler below — settle its turns here too.
-                    for _ in range(self._settle_lost_flushes()):
+                    # ConnectionClosed handler below — settle its turn here too.
+                    for _ in range(self._settle_lost_utterance()):
                         yield b"\x00"
                     if self.connection_error:
                         return
@@ -414,19 +532,11 @@ class KalpaSynthesizer(StreamSynthesizer):
                     if chunk:
                         yield chunk
                 elif event == "responseDone":
-                    if self._inflight_flushes:
-                        self._inflight_flushes -= 1
                     rid = data.get("response_id")
                     if rid == self._current_response_id:
                         self._current_response_id = None
                     status = data.get("status")
                     logger.info(f"Kalpa responseDone status={status} response_id={rid}")
-                    if self._inflight_flushes:
-                        # A late done for a retired response (the idle-timeout overlap):
-                        # the newer flush still owns the slot — releasing it or emitting
-                        # a sentinel would finish the newer turn before its audio.
-                        self._ignored_response_ids.discard(rid)
-                        continue
                     self._response_idle.set()
                     was_abandoned = self._abandoned_in_flight
                     self._abandoned_in_flight = False
@@ -449,24 +559,25 @@ class KalpaSynthesizer(StreamSynthesizer):
                         if err.get("type") == "authentication_error":
                             self.connection_error = err.get("message") or "authentication error"
                     else:
-                        # A non-fatal error with a flush in flight means that turn will
-                        # never produce audio — terminate it and free the slot. When idle
-                        # (e.g. a rejected cancelResponse) a sentinel would pop the next
-                        # turn's meta_info, so just log.
+                        # A non-fatal error with an utterance on the connection means that
+                        # turn will never finish normally — terminate it and free the slot.
+                        # When idle (e.g. a rejected cancelResponse) a sentinel would pop
+                        # the next turn's meta_info, so just log.
                         logger.error(f"Kalpa TTS error: {err}")
                         if not self._response_idle.is_set():
-                            if self._inflight_flushes:
-                                self._inflight_flushes -= 1
-                            if self._inflight_flushes == 0:
-                                self._response_idle.set()
-                                if not self._abandoned_in_flight:
-                                    yield b"\x00"
-                                self._abandoned_in_flight = False
+                            self._response_idle.set()
+                            if self._turn_seq is not None:
+                                self._turn_dead = True  # drop the broken turn's stragglers
+                            if not self._abandoned_in_flight:
+                                yield b"\x00"
+                            self._abandoned_in_flight = False
                 elif event == "sessionCreated":
                     # Normally consumed inside establish_connection; tolerated here in case
                     # a future server pushes an unsolicited session update.
                     self.native_sample_rate = int(data.get("sample_rate") or self.native_sample_rate)
                 elif event == "responseCreated":
+                    # With segmentation this can arrive well before the flush — the server
+                    # started rendering the open utterance's first complete sentences.
                     self._current_response_id = data.get("response_id")
                     if self._abandoned_in_flight:
                         # The barge-in landed before this frame delivered the id; the
@@ -478,9 +589,9 @@ class KalpaSynthesizer(StreamSynthesizer):
 
             except websockets.exceptions.ConnectionClosed:
                 logger.info("Kalpa WebSocket connection closed")
-                # Responses that die with the socket never get their responseDone;
-                # monitor_connection re-establishes the socket for the next turn.
-                for _ in range(self._settle_lost_flushes()):
+                # A turn that dies with the socket never gets its responseDone;
+                # monitor_connection re-establishes the socket for what remains.
+                for _ in range(self._settle_lost_utterance()):
                     yield b"\x00"
                 break
             except Exception as e:
@@ -509,7 +620,11 @@ class KalpaSynthesizer(StreamSynthesizer):
     # ------------------------------------------------------------------
 
     def _initialize_message(self):
-        message = {"type": "initializeConnection", "api_key": self.api_key}
+        message = {
+            "type": "initializeConnection",
+            "api_key": self.api_key,
+            "generation_config": {"chunk_length_schedule": self.chunk_length_schedule},
+        }
         if self.model:
             message["model"] = self.model
         if self.params:
@@ -548,9 +663,10 @@ class KalpaSynthesizer(StreamSynthesizer):
                 return None
 
             self.native_sample_rate = int(reply.get("sample_rate") or self.native_sample_rate)
-            # A fresh connection has nothing in flight.
+            # A fresh connection has nothing in flight; an open turn's text is NOT reset —
+            # its sender sees the new generation and replays it here.
+            self._conn_gen += 1
             self._response_idle.set()
-            self._inflight_flushes = 0
             self._ignored_response_ids.clear()
             self._current_response_id = None
             self._abandoned_in_flight = False

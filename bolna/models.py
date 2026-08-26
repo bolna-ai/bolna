@@ -126,7 +126,6 @@ class KalpaConfig(BaseModel):
     voice_id: Optional[str] = None
     model: str = "kalpa-tts-multilingual-beta-v0.1"
     temperature: Optional[float] = None
-    top_k: Optional[int] = None
     acoustic_temperature: Optional[float] = None
     max_new_tokens: Optional[int] = None
     audio_quality: Optional[str] = None
