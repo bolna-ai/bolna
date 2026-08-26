@@ -38,6 +38,8 @@ class FreeSwitchOutputHandler(DefaultOutputHandler):
         self.stream_sid = None
         # in-band marks (Twilio semantics): final mark's echo ends the turn (+settle); estimator stays as fallback
         self.playback_settle_s = float(os.getenv("WEBCALL_PLAYBACK_SETTLE_S", "0.15"))
+        # once echoes are confirmed, the estimator gets this grace so the real echo wins the race
+        self.estimator_grace_s = float(os.getenv("WEBCALL_ESTIMATOR_GRACE_S", "1.5"))
         self._final_mark_id = None
         self.marks_echoed = False  # first echo = module supports marks (observability)
         if input_handler is not None:
@@ -136,6 +138,8 @@ class FreeSwitchOutputHandler(DefaultOutputHandler):
         try:
             if remaining > 0:
                 await asyncio.sleep(remaining)
+            if self.marks_echoed:
+                logger.warning("freeswitch: estimator watchdog fired despite mark echoes (echo lost?)")
             self._finish_marks = []  # estimator finishing — a later playoutDone must not re-ack
             self._final_mark_id = None  # a late final echo must not match into the next response
             for mark_id in marks:
@@ -208,7 +212,11 @@ class FreeSwitchOutputHandler(DefaultOutputHandler):
                         "is_first_chunk": meta_info.get("is_first_chunk", False),
                         "is_final_chunk": is_final,
                         "sequence_id": meta_info.get("sequence_id"),
-                        # record_ack / latency tracking require these (same contract as sip_trunk)
+                        # turn mapping fields (same contract as telephony.py) — without turn_id,
+                        # sync_history can't map acked marks to a turn and skips barge-in trims
+                        "turn_id": meta_info.get("turn_id"),
+                        "response_uid": meta_info.get("response_uid"),
+                        "response_group_uid": meta_info.get("response_group_uid"),
                         "duration": (len(audio) / self.bytes_per_second) if has_audio else 0.0,
                         "sent_ts": time.time(),
                     },
@@ -224,6 +232,11 @@ class FreeSwitchOutputHandler(DefaultOutputHandler):
                 # a no-audio final (e.g. language-switch handoff) has no first-send ts
                 first_send = self._response_first_send if self._response_first_send is not None else time.time()
                 remaining = (first_send + total_dur) - time.time()
+                # bare `remaining` is a LOWER bound on real playback end (startup + jitter land
+                # later), so an ungraced estimator always beats the echo and the settle never
+                # applies. With echoes confirmed, demote the estimator to a watchdog.
+                if self.marks_echoed:
+                    remaining = max(remaining, 0) + self.estimator_grace_s
                 marks, self._pending_marks = self._pending_marks, []
                 self._response_bytes = 0
                 self._response_first_send = None

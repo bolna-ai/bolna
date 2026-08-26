@@ -46,18 +46,34 @@ async def test_mark_sent_in_band_after_audio_frames():
 
 
 @pytest.mark.asyncio
-async def test_final_mark_echo_completes_turn_and_supersedes_estimator():
+async def test_final_mark_echo_wins_the_real_race_once_echoes_confirmed():
+    # prod ordering: real playback ends AFTER the bare estimate, so the echo arrives late;
+    # with echoes confirmed the estimator is a graced watchdog and the echo must win
     handler, ws, input_handler = _make_output()
+    handler.estimator_grace_s = 0.5
+    handler.marks_echoed = True  # module confirmed patched (first echo already seen)
     await handler.handle(_packet(final=True, mark_id="m-final"))
     estimator = handler._finish_task
-    assert estimator is not None and not estimator.done()
-    assert handler._final_mark_id == "m-final"
 
-    handler.on_mark_played("m-final")
-    assert handler.marks_echoed is True
+    await asyncio.sleep(0.1)  # past the bare ~66ms estimate — watchdog grace must be holding
+    assert not estimator.done()
+    input_handler.update_is_audio_being_played.assert_not_called()
+
+    handler.on_mark_played("m-final")  # the late real echo
     assert handler._final_mark_id is None
+    assert handler._finish_task is not estimator  # settle task replaced the watchdog
     await asyncio.sleep(0.05)  # settle (0.01) elapses
-    assert estimator.cancelled()
+    assert estimator.done()  # cancelled mid-sleep (the coro swallows CancelledError by design)
+    input_handler.update_is_audio_being_played.assert_called_once_with(False)
+
+
+@pytest.mark.asyncio
+async def test_watchdog_completes_turn_when_echo_is_lost():
+    handler, ws, input_handler = _make_output()
+    handler.estimator_grace_s = 0.05
+    handler.marks_echoed = True
+    await handler.handle(_packet(final=True, mark_id="m-final"))
+    await asyncio.wait_for(handler._finish_task, timeout=2)  # ~66ms estimate + 50ms grace
     input_handler.update_is_audio_being_played.assert_called_with(False)
 
 
@@ -125,12 +141,38 @@ async def test_stale_final_echo_after_estimator_completion_is_ignored():
 
 
 @pytest.mark.asyncio
-async def test_cleared_echo_acks_registry_but_never_ends_turn():
-    # cleared = dropped unplayed; a cleared FINAL echo must not complete the turn
+async def test_cleared_echo_pops_registry_without_heard_text_or_turn_end():
+    # cleared = dropped unplayed; must not record heard text nor complete the turn
     handler = FreeSwitchInputHandler.__new__(FreeSwitchInputHandler)
     handler.on_mark_played = MagicMock()
     handler.on_playout_done = None
     handler.process_mark_message = MagicMock()
+    handler.mark_event_meta_data = MagicMock()
     await handler.process_message({"type": "markPlayed", "name": "m-final", "cleared": True})
-    handler.process_mark_message.assert_called_once()
+    handler.mark_event_meta_data.fetch_data.assert_called_once_with("m-final")
+    handler.process_mark_message.assert_not_called()
     handler.on_mark_played.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_mark_registration_carries_turn_mapping_fields():
+    # sync_history maps acked marks -> turn via these; without them barge-in trims are skipped
+    ws = MagicMock()
+    ws.send_text = AsyncMock()
+    registry = MagicMock()
+    handler = FreeSwitchOutputHandler(websocket=ws, mark_event_meta_data=registry, input_handler=None)
+    meta = {
+        "type": "audio",
+        "sequence_id": 2,
+        "mark_id": "m-1",
+        "turn_id": 7,
+        "response_uid": "r-uid",
+        "response_group_uid": "g-uid",
+        "text_synthesized": "hello",
+    }
+    await handler.handle({"data": PCM, "meta_info": meta})
+    entry = registry.update_data.call_args[0][1]
+    assert entry["turn_id"] == 7
+    assert entry["response_uid"] == "r-uid"
+    assert entry["response_group_uid"] == "g-uid"
+    assert entry["text_synthesized"] == "hello"
