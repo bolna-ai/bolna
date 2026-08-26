@@ -122,15 +122,9 @@ class MayaConfig(BaseModel):
 
 
 class KalpaConfig(BaseModel):
-    # Display name from GET /v1/voices (e.g. "Kiara (hindi)"; the base name "Kiara" also
-    # resolves). voice_id is the catalog's opaque id and wins when both are set.
     voice: Optional[str] = None
     voice_id: Optional[str] = None
-    # "kalpa-tts-multilingual-beta-v0.1" (English + Hindi, the default here) or
-    # "kalpa-tts-beta-v0.1" (English). No language parameter — the model detects it,
-    # code-switched Hinglish included.
     model: str = "kalpa-tts-multilingual-beta-v0.1"
-    # Optional sampling controls (Kalpa applies its tuned production defaults when omitted)
     temperature: Optional[float] = None
     top_k: Optional[int] = None
     acoustic_temperature: Optional[float] = None

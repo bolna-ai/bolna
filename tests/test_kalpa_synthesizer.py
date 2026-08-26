@@ -343,6 +343,64 @@ def test_a_barge_in_during_the_idle_wait_stops_the_sender():
     assert s.sent == []
 
 
+def test_a_barge_in_during_the_ws_wait_never_buffers_stale_text():
+    """_wait_for_ws() suspends for real while the socket reconnects; a barge-in in that gap
+    retires the sequence and clears the shared buffer. The resumed sender must not append
+    its stale fragment into the next turn's buffer (it would flush as OLD-NEW text)."""
+    s = _synth()
+    retired = {"yet": False}
+    s.task_manager_instance.is_sequence_id_in_current_ids.side_effect = lambda _: not retired["yet"]
+
+    async def wait_then_barge_in():
+        retired["yet"] = True  # the barge-in lands while the sender is parked here
+
+    s._wait_for_ws = AsyncMock(side_effect=wait_then_barge_in)
+    asyncio.run(s.sender("stale fragment", sequence_id=1, end_of_llm_stream=False))
+    assert s._text_buffer == []
+    assert s.sent == []
+
+
+def test_a_dead_socket_settles_the_in_flight_turn():
+    """A response that dies with the socket never gets its responseDone. The receiver must
+    free the single-flight slot and emit the end-of-stream sentinel so playback terminates
+    instead of waiting on a frame that will never arrive."""
+    import websockets as _ws
+
+    s = _synth()
+    s._response_idle.clear()  # a flush is in flight when the socket drops
+
+    async def recv():
+        raise _ws.exceptions.ConnectionClosedOK(None, None)
+
+    s.websocket.recv = recv
+    s.conversation_ended = False
+
+    async def go():
+        return [item async for item in s.receiver()]
+
+    out = asyncio.run(asyncio.wait_for(go(), timeout=5))
+    assert out == [b"\x00"]
+    assert s._response_idle.is_set()
+
+
+def test_a_dead_socket_with_nothing_in_flight_stays_silent():
+    # No sentinel when idle: a spurious one would pop the next turn's meta_info.
+    import websockets as _ws
+
+    s = _synth()
+
+    async def recv():
+        raise _ws.exceptions.ConnectionClosedOK(None, None)
+
+    s.websocket.recv = recv
+    s.conversation_ended = False
+
+    async def go():
+        return [item async for item in s.receiver()]
+
+    assert asyncio.run(asyncio.wait_for(go(), timeout=5)) == []
+
+
 def test_sender_stamps_ws_send_time_at_the_flush():
     # Generation only starts at the flush, so TTFB measured from here is true synth latency.
     s = _synth()
