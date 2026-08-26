@@ -133,6 +133,9 @@ class OpenAIWSConnection:
 
 
 class OpenAiLLM(OpenAICompatibleLLM):
+    _base_url = None
+    _base_url_validated = False
+
     def __init__(
         self,
         max_tokens=100,
