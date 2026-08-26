@@ -314,8 +314,7 @@ Use this information naturally when it helps answer the user's questions. Don't 
         meta_info["llm_metadata"]["rag_info"] = {}
         meta_info["llm_metadata"]["rag_info"]["all_sources"] = self.rag_config.get("used_sources", [])
 
-        # Before the first outbound hop, so a blocked custom endpoint ends the call cleanly
-        # here rather than being swallowed and spoken by the except below.
+        # Ahead of the try so a blocked endpoint ends the call instead of being spoken.
         base_url = self.config.get("base_url")
         if base_url and not self._base_url_validated:
             await guard_llm_base_url(base_url)

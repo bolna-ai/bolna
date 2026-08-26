@@ -1320,8 +1320,7 @@ class GraphAgent(BaseAgent):
         if detected_language:
             self.context_data["detected_language"] = detected_language
 
-        # Before the first outbound hop (routing runs before the node LLM), so a blocked
-        # endpoint ends the call cleanly here rather than being swallowed and spoken below.
+        # Ahead of the try so a blocked endpoint ends the call instead of being spoken.
         if self.base_url and not self._base_url_validated:
             await guard_llm_base_url(self.base_url)
             self._base_url_validated = True

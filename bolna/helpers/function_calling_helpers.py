@@ -97,11 +97,7 @@ async def validate_outbound_url(url):
 
 
 async def guard_llm_base_url(base_url):
-    """Validate a customer-supplied LLM base_url before any outbound call.
-
-    Raises SSRFError with the resolved address scrubbed, so a swallowed error never voices
-    or logs an internal IP to the caller. The detailed reason is logged here instead.
-    """
+    """Validate a customer-supplied LLM base_url, raising with the resolved address scrubbed."""
     if not base_url:
         return
     try:

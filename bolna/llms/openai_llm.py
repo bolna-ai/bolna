@@ -203,9 +203,9 @@ class OpenAiLLM(OpenAICompatibleLLM):
             # logger.info(f'thread id : {self.thread_id}')
         self.run_id = kwargs.get("run_id", None)
 
-        self._init_responses_api(
-            kwargs.get("use_responses_api", False), compact_threshold=kwargs.get("compact_threshold")
-        )
+        # Self-hosted endpoints speak chat completions only; Responses-API chaining is OpenAI-specific.
+        use_responses_api = kwargs.get("use_responses_api", False) and kwargs.get("provider", "openai") != "custom"
+        self._init_responses_api(use_responses_api, compact_threshold=kwargs.get("compact_threshold"))
 
         self._ws_transport = None
         if self.use_responses_api and kwargs.get("provider", "openai") != "custom" and not base_url:
