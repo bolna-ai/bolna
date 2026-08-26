@@ -11,15 +11,19 @@ Audio arrives as responseAudio frames carrying base64 raw 24 kHz mono s16le PCM,
 flushed utterance terminates with exactly one responseDone (status "completed", or
 "cancelled" after a cancelResponse).
 
-Two server-side properties shape this integration:
+Two transport behaviors shape this integration:
 
-  * One response in flight per connection — a flush while a previous response is still
-    generating is rejected with a non-fatal error, not queued. The sender therefore waits
-    for the previous turn's responseDone (tracked client-side) before flushing.
-  * cancelResponse stops generation but does not clear the server-side text buffer, so
-    fragments streamed before a barge-in would silently prepend onto the next turn's
-    utterance. The sender aggregates a whole assistant turn client-side and sends it as a
-    single text+flush frame, keeping every turn atomic on the wire.
+  * One response generates at a time per connection. Current gateways queue one flush that
+    arrives mid-generation (older deployments rejected it outright), and this integration
+    leans on neither: the sender waits for the previous turn's responseDone (a cancelled
+    turn still gets one) before flushing, which serializes turns without ever risking the
+    one-slot queue's rejection and stays correct on older gateways.
+  * On current gateways a bare cancelResponse abandons everything undelivered server-side
+    — the in-flight generation, the queued flush, and buffered text; older deployments
+    only stopped the generation and kept the text buffer. Aggregating a whole assistant
+    turn client-side and sending it as a single text+flush frame keeps every turn atomic
+    on the wire — exactly one responseDone per turn — and never leaves an abandoned
+    turn's fragments in a server buffer on any gateway version.
 
 Kalpa output is a fixed 24 kHz, so like the Maya/Sarvam synthesizers we resample every
 chunk down to the target rate and, for telephony, mu-law encode it.
@@ -54,7 +58,8 @@ MAX_TEXT_CHARS = 8000
 
 # How long a flush waits for the previous response's responseDone. Cancels settle in
 # milliseconds, so hitting this means something is wrong — flush anyway and let the
-# server arbitrate rather than silently dropping the turn.
+# server arbitrate rather than silently dropping the turn (current gateways queue the
+# flush in that case, so nothing is lost even then).
 RESPONSE_IDLE_TIMEOUT = 10.0
 
 AUDIO_QUALITIES = {"low", "medium", "high"}
@@ -241,7 +246,9 @@ class KalpaSynthesizer(StreamSynthesizer):
         """Drop the buffered turn and cancel the in-flight response. Cancel is idempotent
         server-side, so it is unconditionally safe to fire; the cancelled response still
         terminates with its own responseDone (status "cancelled"), which frees the
-        in-flight slot without emitting an end-of-stream sentinel."""
+        in-flight slot without emitting an end-of-stream sentinel. On current gateways a
+        bare cancel also wipes undelivered server-side state (queued flush, buffered
+        text) — moot here, since this integration never leaves either behind."""
         self._text_buffer = []
         self._buffer_seq = None
         try:
