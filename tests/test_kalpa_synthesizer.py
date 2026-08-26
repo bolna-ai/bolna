@@ -9,6 +9,7 @@ import json
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+import websockets as _ws
 
 from bolna.helpers.utils import audio_to_mulaw8k
 from bolna.models import KalpaConfig, Synthesizer
@@ -48,6 +49,12 @@ def _synth(**kwargs):
     s.sent = []
     s._send_json = AsyncMock(side_effect=lambda p: s.sent.append(p))
     return s
+
+
+def _push(s, text, seq, eos=False):
+    """Mimic _push_stream's ordering: _on_push stamps buffer ownership, then the sender runs."""
+    s._on_push({"sequence_id": seq}, text)
+    asyncio.run(s.sender(text, sequence_id=seq, end_of_llm_stream=eos))
 
 
 def _pcm(seconds, rate=KALPA_NATIVE_SAMPLE_RATE):
@@ -106,20 +113,6 @@ def _patch_http(monkeypatch, body, status=200):
 # ----------------------------------------------------------------------
 
 
-def test_provider_is_registered():
-    assert SUPPORTED_SYNTHESIZER_MODELS["kalpa"] is KalpaSynthesizer
-
-
-def test_synthesizer_model_builds_kalpa_config():
-    synth = Synthesizer(
-        provider="kalpa",
-        provider_config={"voice": "Kiara", "voice_id": VOICE_ID},
-        stream=True,
-    )
-    assert isinstance(synth.provider_config, KalpaConfig)
-    assert synth.provider_config.model == KALPA_DEFAULT_MODEL
-
-
 def test_config_survives_the_model_and_reaches_the_synthesizer():
     """The dashboard round-trips provider_config through the pydantic model; a field the
     model drops silently would leave the synthesizer on defaults."""
@@ -132,6 +125,7 @@ def test_config_survives_the_model_and_reaches_the_synthesizer():
     cfg.pop("provider")
     provider_config = cfg.pop("provider_config")
 
+    assert SUPPORTED_SYNTHESIZER_MODELS["kalpa"] is KalpaSynthesizer
     s = SUPPORTED_SYNTHESIZER_MODELS["kalpa"](
         **cfg, **provider_config, caching=True, synthesizer_key=KEY, task_manager_instance=MagicMock()
     )
@@ -148,6 +142,16 @@ def test_config_survives_the_model_and_reaches_the_synthesizer():
 def test_a_voice_or_voice_id_is_required():
     with pytest.raises(ValueError):
         KalpaSynthesizer(synthesizer_key=KEY, task_manager_instance=MagicMock())
+
+
+def test_the_config_always_carries_a_voice_name():
+    """task_manager reads provider_config["voice"] unconditionally and calls .lower() on it
+    when backchanneling is on; a None voice crashes call setup before any audio."""
+    cfg = Synthesizer(provider="kalpa", provider_config={"voice_id": VOICE_ID}, stream=True)
+    assert isinstance(cfg.provider_config, KalpaConfig)
+    assert cfg.provider_config.voice == "Kiara"
+    assert cfg.provider_config.voice_id == VOICE_ID  # the id still wins at resolution time
+    assert cfg.provider_config.model == KALPA_DEFAULT_MODEL
 
 
 @pytest.mark.parametrize(
@@ -167,18 +171,17 @@ def test_out_of_range_params_raise_at_construction_not_mid_call(bad):
         _synth(**bad)
 
 
-def test_mulaw_is_off_unless_task_manager_asks_for_it():
-    s = KalpaSynthesizer(voice_id=VOICE_ID, stream=True, synthesizer_key=KEY, task_manager_instance=MagicMock())
-    assert s.use_mulaw is False
-    assert s._get_audio_format() == "pcm"
-
-
 def test_telephony_pins_8k_mulaw_and_web_keeps_the_configured_rate():
     tel = _synth(use_mulaw=True)
     assert (tel.target_sample_rate, tel._get_audio_format()) == (8000, "mulaw")
 
     web = _synth(use_mulaw=False, sampling_rate="24000")
     assert (web.target_sample_rate, web._get_audio_format()) == (24000, "pcm")
+
+    # Without the task_manager kwargs (dashboard/turn-based constructs with defaults),
+    # mulaw stays off and the rate is Kalpa's 24 kHz native — not telephone quality.
+    plain = KalpaSynthesizer(voice_id=VOICE_ID, stream=True, synthesizer_key=KEY, task_manager_instance=MagicMock())
+    assert (plain.use_mulaw, plain.target_sample_rate, plain._get_audio_format()) == (False, 24000, "pcm")
 
 
 # ----------------------------------------------------------------------
@@ -194,11 +197,8 @@ def test_initialize_message_carries_auth_model_and_only_set_params():
         "model": KALPA_DEFAULT_MODEL,
         "params": {"temperature": 0.8, "top_k": 50},
     }
-
-
-def test_initialize_message_omits_params_when_none_are_configured():
-    # Kalpa's server defaults are the tuned production sampling; sending an empty params
-    # object is harmless but sending none keeps the contract explicit.
+    # Kalpa's server defaults are the tuned production sampling; sending none keeps
+    # the contract explicit.
     assert "params" not in _synth()._initialize_message()
 
 
@@ -247,12 +247,14 @@ def test_a_catalog_error_raises_rather_than_guessing(monkeypatch):
 
 
 def test_sender_aggregates_the_turn_and_flushes_once_on_eos():
+    """Chunks join with a single space: the streaming LLM wrappers split at buffer_size
+    with rsplit(" ", 1) and drop the boundary space — joining verbatim would glue words."""
     s = _synth()
-    asyncio.run(s.sender("Namaste! ", sequence_id=1, end_of_llm_stream=False))
-    asyncio.run(s.sender("Kaise hain aap?", sequence_id=1, end_of_llm_stream=False))
+    _push(s, "Namaste!", 1)
+    _push(s, "Kaise hain aap?", 1)
     assert s.sent == []  # nothing reaches the socket while the turn is still streaming
 
-    asyncio.run(s.sender("", sequence_id=1, end_of_llm_stream=True))
+    _push(s, "", 1, eos=True)
     assert s.sent == [{"type": "sendText", "text": "Namaste! Kaise hain aap?", "flush": True}]
     assert s.last_text_sent is True
     assert s._text_buffer == []
@@ -266,17 +268,30 @@ def test_an_empty_turn_sends_nothing():
     assert s.sent == []
 
 
-def test_an_overlong_turn_is_truncated_to_the_server_cap():
+def test_an_overlong_turn_truncates_to_the_cap_at_a_word_boundary():
     s = _synth()
-    asyncio.run(s.sender("a" * (MAX_TEXT_CHARS + 500), sequence_id=1, end_of_llm_stream=True))
+    _push(s, "hello " * (MAX_TEXT_CHARS // 6 + 50), 1, eos=True)
+    sent = s.sent[0]["text"]
+    assert len(sent) <= MAX_TEXT_CHARS
+    assert sent.endswith("hello")  # never a clipped syllable
+
+    s = _synth()
+    _push(s, "a" * (MAX_TEXT_CHARS + 500), 1, eos=True)  # no whitespace: hard cap
     assert len(s.sent[0]["text"]) == MAX_TEXT_CHARS
 
 
-def test_chunks_concatenate_verbatim_because_the_llm_owns_spacing():
+def test_a_late_chunk_after_its_turns_flush_is_dropped():
+    """Ownership invariant: a stray chunk whose turn's buffer was already flushed or
+    dropped must not append and ride into the next turn's utterance."""
     s = _synth()
-    asyncio.run(s.sender("Sure, I can", sequence_id=1))
-    asyncio.run(s.sender(" help with that.", sequence_id=1, end_of_llm_stream=True))
-    assert s.sent[0]["text"] == "Sure, I can help with that."
+    _push(s, "chunk two", 1)
+    _push(s, "chunk three", 1, eos=True)  # the turn flushes without the straggler
+    asyncio.run(s.sender("chunk one", sequence_id=1, end_of_llm_stream=False))  # wakes late
+    assert s._text_buffer == []
+
+    s._response_idle.set()  # the flushed response completes
+    _push(s, "next turn", 2, eos=True)
+    assert s.sent[-1]["text"] == "next turn"
 
 
 def test_on_push_drops_a_superseded_turns_buffer():
@@ -302,6 +317,7 @@ def test_the_flush_waits_for_the_previous_responses_done():
     without relying on either behavior."""
     s = _synth()
     s._response_idle.clear()  # a previous flush is still generating
+    s._on_push({"sequence_id": 2}, "next turn")
     order = []
 
     async def go():
@@ -326,6 +342,7 @@ def test_a_barge_in_during_the_idle_wait_stops_the_sender():
     task; without the re-check the sender would flush a turn the pipeline already dropped."""
     s = _synth()
     s._response_idle.clear()
+    s._on_push({"sequence_id": 1}, "text for an interrupted turn")
     retired = {"yet": False}
     s.task_manager_instance.is_sequence_id_in_current_ids.side_effect = lambda _: not retired["yet"]
 
@@ -343,29 +360,51 @@ def test_a_barge_in_during_the_idle_wait_stops_the_sender():
     assert s.sent == []
 
 
-def test_a_barge_in_during_the_ws_wait_never_buffers_stale_text():
+def test_a_barge_in_during_the_ws_wait_stops_the_flush():
     """_wait_for_ws() suspends for real while the socket reconnects; a barge-in in that gap
-    retires the sequence and clears the shared buffer. The resumed sender must not append
-    its stale fragment into the next turn's buffer (it would flush as OLD-NEW text)."""
+    retires the sequence, and the captured turn must not flush when the wait resumes."""
     s = _synth()
     retired = {"yet": False}
     s.task_manager_instance.is_sequence_id_in_current_ids.side_effect = lambda _: not retired["yet"]
 
     async def wait_then_barge_in():
-        retired["yet"] = True  # the barge-in lands while the sender is parked here
+        retired["yet"] = True  # the barge-in lands while the flush is parked here
 
     s._wait_for_ws = AsyncMock(side_effect=wait_then_barge_in)
-    asyncio.run(s.sender("stale fragment", sequence_id=1, end_of_llm_stream=False))
-    assert s._text_buffer == []
+    _push(s, "an interrupted turn", 1, eos=True)
     assert s.sent == []
+    assert s._text_buffer == []
+
+
+def test_a_reconnect_gap_flushes_the_whole_turn_in_order():
+    """Chunks append before any await, in push order; only the EOS task waits on the
+    socket. A reconnect mid-turn must never reorder or drop earlier fragments."""
+    s = _synth()
+    gate = asyncio.Event()
+
+    async def parked_until_reconnect():
+        await gate.wait()
+
+    s._wait_for_ws = parked_until_reconnect
+
+    async def go():
+        tasks = []
+        for text, eos in (("first", False), ("middle", False), ("final", True)):
+            s._on_push({"sequence_id": 1}, text)
+            tasks.append(asyncio.create_task(s.sender(text, 1, end_of_llm_stream=eos)))
+        await asyncio.sleep(0.05)  # the EOS task is parked on the dead socket
+        assert s.sent == []
+        gate.set()  # reconnect completes
+        await asyncio.wait_for(asyncio.gather(*tasks), timeout=2)
+
+    asyncio.run(go())
+    assert s.sent == [{"type": "sendText", "text": "first middle final", "flush": True}]
 
 
 def test_a_dead_socket_settles_the_in_flight_turn():
     """A response that dies with the socket never gets its responseDone. The receiver must
     free the single-flight slot and emit the end-of-stream sentinel so playback terminates
     instead of waiting on a frame that will never arrive."""
-    import websockets as _ws
-
     s = _synth()
     s._response_idle.clear()  # a flush is in flight when the socket drops
 
@@ -385,8 +424,6 @@ def test_a_dead_socket_settles_the_in_flight_turn():
 
 def test_a_dead_socket_with_nothing_in_flight_stays_silent():
     # No sentinel when idle: a spurious one would pop the next turn's meta_info.
-    import websockets as _ws
-
     s = _synth()
 
     async def recv():
@@ -404,9 +441,9 @@ def test_a_dead_socket_with_nothing_in_flight_stays_silent():
 def test_sender_stamps_ws_send_time_at_the_flush():
     # Generation only starts at the flush, so TTFB measured from here is true synth latency.
     s = _synth()
-    asyncio.run(s.sender("first chunk", sequence_id=1))
+    _push(s, "first chunk", 1)
     assert s.ws_send_time is None
-    asyncio.run(s.sender(" last chunk", sequence_id=1, end_of_llm_stream=True))
+    _push(s, "last chunk", 1, eos=True)
     assert s.ws_send_time is not None
 
 
@@ -499,6 +536,230 @@ def test_a_non_fatal_error_terminates_the_turn_and_frees_the_slot():
     assert s.connection_error is None  # the socket stays usable
 
 
+def test_an_idle_error_frame_logs_without_terminating_the_next_turn():
+    """A sentinel with nothing in flight would pop the next turn's meta_info from the
+    text_queue and stamp end-of-stream onto a turn that never played."""
+    s = _synth()  # _response_idle starts set
+    out = _drain(
+        s,
+        [json.dumps({"type": "error", "fatal": False, "error": {"type": "invalid_request", "message": "bad frame"}})],
+    )
+    assert out == []
+    assert s._response_idle.is_set()
+
+
+def test_audio_from_a_cancelled_response_is_dropped_until_its_done():
+    """After cancelResponse, frames already on the wire keep arriving until the response's
+    own responseDone; played as-is they would open the next turn's reply."""
+    s = _synth()
+    s._response_idle.clear()
+    s._current_response_id = "r1"  # responseCreated arrived before the barge-in
+    ws = MagicMock()
+    ws.state = _ws.protocol.State.OPEN
+    ws.send = AsyncMock()
+    s.websocket = ws
+    asyncio.run(s.handle_interruption())
+    assert s._ignored_response_ids == {"r1"}
+
+    out = _drain(
+        s,
+        [
+            json.dumps({"type": "responseAudio", "response_id": "r1", "pcm_b64": base64.b64encode(b"stale").decode()}),
+            # "completed", not "cancelled": even when the cancel loses the race, the
+            # abandoned response must not stamp end-of-stream onto the next turn.
+            json.dumps({"type": "responseDone", "response_id": "r1", "status": "completed", "text": "", "usage": {}}),
+            json.dumps({"type": "responseCreated", "response_id": "r2", "sample_rate": 24000}),
+            json.dumps({"type": "responseAudio", "response_id": "r2", "pcm_b64": base64.b64encode(b"fresh").decode()}),
+            json.dumps({"type": "responseDone", "response_id": "r2", "status": "completed", "text": "hi", "usage": {}}),
+        ],
+    )
+    assert out == [b"fresh", b"\x00"]
+    assert s._ignored_response_ids == set()
+
+
+def test_a_barge_in_before_response_created_still_drops_that_responses_audio():
+    """The barge-in can land after the flush but before responseCreated delivers the id;
+    the late-arriving id must inherit the abandonment so its audio never plays."""
+    s = _synth()
+    s._response_idle.clear()  # a flush went out; responseCreated has not arrived yet
+    ws = MagicMock()
+    ws.state = _ws.protocol.State.OPEN
+    ws.send = AsyncMock()
+    s.websocket = ws
+    asyncio.run(s.handle_interruption())
+
+    out = _drain(
+        s,
+        [
+            json.dumps({"type": "responseCreated", "response_id": "r1", "sample_rate": 24000}),
+            json.dumps({"type": "responseAudio", "response_id": "r1", "pcm_b64": base64.b64encode(b"stale").decode()}),
+            json.dumps({"type": "responseDone", "response_id": "r1", "status": "cancelled", "text": "", "usage": {}}),
+        ],
+    )
+    assert out == []
+    assert s._response_idle.is_set()
+    assert s._ignored_response_ids == set()
+
+
+def test_a_socket_death_after_an_early_barge_in_stays_silent():
+    """Same window, but the socket dies before the abandoned response settles: the close
+    handler must not emit a sentinel that would finalize the next turn's queued meta."""
+    s = _synth()
+    s._response_idle.clear()  # a flush went out; responseCreated has not arrived yet
+    ws = MagicMock()
+    ws.state = _ws.protocol.State.OPEN
+    ws.send = AsyncMock()
+    s.websocket = ws
+    asyncio.run(s.handle_interruption())
+
+    async def recv():
+        raise _ws.exceptions.ConnectionClosedOK(None, None)
+
+    s.websocket.recv = recv
+    s.conversation_ended = False
+
+    async def go():
+        return [item async for item in s.receiver()]
+
+    assert asyncio.run(asyncio.wait_for(go(), timeout=5)) == []
+    assert s._response_idle.is_set()  # the slot is still freed for the next connection
+
+
+def test_a_timed_out_abandonment_does_not_poison_the_next_turn(monkeypatch):
+    """If the abandoned response's responseDone never arrives, the idle timeout lets the
+    next turn flush anyway; giving up must also retire the abandonment, or the next
+    turn's response is marked ignored at responseCreated and loses audio and sentinel."""
+    monkeypatch.setattr("bolna.synthesizer.kalpa_synthesizer.RESPONSE_IDLE_TIMEOUT", 0.05)
+    s = _synth()
+    s._response_idle.clear()  # a flush is in flight; its responseDone will never come
+    ws = MagicMock()
+    ws.state = _ws.protocol.State.OPEN
+    ws.send = AsyncMock()
+    s.websocket = ws
+    asyncio.run(s.handle_interruption())  # abandoned before responseCreated named it
+
+    _push(s, "next turn", 2, eos=True)  # parks on the idle wait, then flushes anyway
+    assert s.sent[-1] == {"type": "sendText", "text": "next turn", "flush": True}
+
+    out = _drain(
+        s,
+        [
+            json.dumps({"type": "responseCreated", "response_id": "r2", "sample_rate": 24000}),
+            json.dumps({"type": "responseAudio", "response_id": "r2", "pcm_b64": base64.b64encode(b"live").decode()}),
+            json.dumps({"type": "responseDone", "response_id": "r2", "status": "completed", "text": "hi", "usage": {}}),
+        ],
+    )
+    assert out == [b"live", b"\x00"]
+
+
+def test_a_late_done_for_a_retired_response_does_not_finish_the_active_turn(monkeypatch):
+    """After the idle timeout lets a newer turn flush past a wedged response, the old
+    response's late responseDone must neither free the newer flush's single-flight slot
+    nor emit a sentinel that finishes the newer turn's metadata before its audio."""
+    monkeypatch.setattr("bolna.synthesizer.kalpa_synthesizer.RESPONSE_IDLE_TIMEOUT", 0.05)
+    s = _synth()
+    _push(s, "turn one", 1, eos=True)  # in flight; its responseDone is delayed
+    _push(s, "turn two", 2, eos=True)  # parks on the idle wait, then flushes anyway
+    assert [p["text"] for p in s.sent] == ["turn one", "turn two"]
+
+    out = _drain(
+        s,
+        [json.dumps({"type": "responseDone", "response_id": "r1", "status": "completed", "text": "", "usage": {}})],
+    )
+    assert out == []  # a late completion of a retired response is not the active turn's
+    assert not s._response_idle.is_set()  # turn two still owns the slot
+
+    out = _drain(
+        s,
+        [json.dumps({"type": "responseDone", "response_id": "r2", "status": "completed", "text": "", "usage": {}})],
+    )
+    assert out == [b"\x00"]
+    assert s._response_idle.is_set()
+
+
+def test_a_socket_death_seen_by_the_poll_path_still_settles_the_turn():
+    """The receiver usually notices a dead socket at its connection poll, not inside
+    recv(); the in-flight turn must settle there too or its completion is lost and the
+    reconnect erases the evidence."""
+    s = _synth()
+    s._response_idle.clear()
+    s._inflight_flushes = 1
+    s._is_ws_connected = MagicMock(return_value=False)
+    s.conversation_ended = False
+    out = []
+
+    async def go():
+        async for item in s.receiver():
+            out.append(item)
+            s.connection_error = "socket died"  # ends the poll loop after the settle
+
+    asyncio.run(asyncio.wait_for(go(), timeout=5))
+    assert out == [b"\x00"]
+    assert s._response_idle.is_set()
+
+
+def test_parked_senders_serialize_when_the_slot_frees():
+    """Event.set() wakes every parked sender; each must re-check the slot so two turns
+    cannot ride one responseDone into overlapping flushes (which would swallow the
+    older turn's completion sentinel)."""
+    s = _synth()
+    s._response_idle.clear()  # a response is generating
+
+    async def go():
+        s._on_push({"sequence_id": 2}, "turn two")
+        t2 = asyncio.create_task(s.sender("turn two", 2, end_of_llm_stream=True))
+        await asyncio.sleep(0.01)  # t2 captures its text and parks on the idle wait
+        s._on_push({"sequence_id": 3}, "turn three")
+        t3 = asyncio.create_task(s.sender("turn three", 3, end_of_llm_stream=True))
+        await asyncio.sleep(0.01)  # t3 parks behind it
+
+        s._response_idle.set()  # the in-flight response's done frees the slot once
+        await asyncio.sleep(0.05)
+        assert [p["text"] for p in s.sent] == ["turn two"]  # only one flush rode it
+
+        s._response_idle.set()  # turn two's done
+        await asyncio.wait_for(asyncio.gather(t2, t3), timeout=2)
+
+    asyncio.run(go())
+    assert [p["text"] for p in s.sent] == ["turn two", "turn three"]
+
+
+def test_interruption_bookkeeping_survives_a_failing_cancel_send():
+    """current_turn_start_time must reset even when the cancel send dies with the socket;
+    otherwise the next turn skips the stale-meta prune and its leading audio pops the
+    old turn's metas, which the pipeline then filters as a retired sequence."""
+    s = _synth()
+    s.current_turn_start_time = 123.0
+    ws = MagicMock()
+    ws.state = _ws.protocol.State.OPEN
+    ws.send = AsyncMock(side_effect=RuntimeError("socket died mid-send"))
+    s.websocket = ws
+    asyncio.run(s.handle_interruption())  # must not raise
+    assert s.current_turn_start_time is None
+
+
+def test_a_socket_death_with_overlapping_flushes_settles_each_turn(monkeypatch):
+    """When the idle timeout let a second turn flush past a wedged response, a close must
+    settle both outstanding turns in order — one positional sentinel would finish only
+    the older turn and leave the newer one queued without a completion signal."""
+    monkeypatch.setattr("bolna.synthesizer.kalpa_synthesizer.RESPONSE_IDLE_TIMEOUT", 0.05)
+    s = _synth()
+    _push(s, "turn one", 1, eos=True)  # in flight; its responseDone never comes
+    _push(s, "turn two", 2, eos=True)  # parks on the idle wait, then flushes anyway
+
+    async def recv():
+        raise _ws.exceptions.ConnectionClosedOK(None, None)
+
+    s.websocket.recv = recv
+    s.conversation_ended = False
+
+    async def go():
+        return [item async for item in s.receiver()]
+
+    assert asyncio.run(asyncio.wait_for(go(), timeout=5)) == [b"\x00", b"\x00"]
+    assert s._response_idle.is_set()
+
+
 def test_a_fatal_auth_error_kills_the_synthesizer_instead_of_reconnecting():
     # The server closes the socket after a fatal error; a bad key would just fail again,
     # so connection_error stops monitor_connection from burning its retries.
@@ -508,12 +769,6 @@ def test_a_fatal_auth_error_kills_the_synthesizer_instead_of_reconnecting():
         [json.dumps({"type": "error", "fatal": True, "error": {"type": "authentication_error", "message": "bad key"}})],
     )
     assert s.connection_error == "bad key"
-
-
-def test_an_unsolicited_session_created_updates_the_native_rate():
-    s = _synth()
-    _drain(s, [json.dumps({"type": "sessionCreated", "sample_rate": 48000})])
-    assert s.native_sample_rate == 48000
 
 
 def test_receiver_survives_malformed_and_unknown_frames():
@@ -572,8 +827,6 @@ def test_empty_and_undecodable_chunks_are_dropped_rather_than_yielded():
 
 
 def test_interruption_cancels_and_clears_the_buffered_turn():
-    import websockets as _ws
-
     s = _synth()
     s._text_buffer = ["partial turn"]
     s.current_turn_start_time = 123.0
@@ -713,12 +966,17 @@ def test_synthesize_returns_the_apis_wav_which_is_self_describing(monkeypatch):
     clip = audio_to_mulaw8k(out, rate_hint=8000, format_hint="")
     assert len(clip) == 8000
 
+    web = _synth(use_mulaw=False, sampling_rate="24000")
+    assert web._get_http_audio_format() == "wav"
+    assert web._process_http_audio(wav) == wav  # already at the target rate
+
 
 def test_telephony_one_shot_returns_mulaw_and_skips_the_transcode(monkeypatch):
     _patch_http(monkeypatch, _tts_response(_wav(1.0)))
     s = _synth(use_mulaw=True)
     clip = asyncio.run(s.synthesize_telephony_clip("hi"))
     assert len(clip) == 8000  # 1s of mu-law @8k, no pydub/ffmpeg involved downstream
+    assert s._get_http_audio_format() == "mulaw"
 
 
 def test_telephony_one_shot_defers_to_synthesize_on_non_telephony_configs():
@@ -735,12 +993,10 @@ def test_http_error_and_empty_body_return_none(monkeypatch):
     assert asyncio.run(s.synthesize("hi")) is None
 
 
-def test_http_conversion_matches_the_declared_http_format():
-    s = _synth(use_mulaw=True)
-    assert s._get_http_audio_format() == "mulaw"
-    assert len(s._process_http_audio(_wav(1.0))) == 8000
+def test_a_failed_one_shot_render_degrades_to_the_eos_sentinel():
+    """The non-streaming loop has no None guard: a None packet crashes the output
+    handler's b64encode, which then marks itself closed and mutes the whole session."""
+    s = _synth()
+    assert s._process_http_audio(None) == b"\x00"
 
-    web = _synth(use_mulaw=False, sampling_rate="24000")
-    assert web._get_http_audio_format() == "wav"
-    wav = _wav(0.5)
-    assert web._process_http_audio(wav) == wav  # already at the target rate
+

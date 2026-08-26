@@ -64,8 +64,7 @@ class KalpaSynthesizer(StreamSynthesizer):
         acoustic_temperature=None,
         max_new_tokens=None,
         audio_quality=None,
-        audio_format="pcm",
-        sampling_rate="8000",
+        sampling_rate="24000",
         stream=False,
         buffer_size=400,
         caching=True,
@@ -125,8 +124,19 @@ class KalpaSynthesizer(StreamSynthesizer):
         self._text_buffer = []
         self._buffer_seq = None
         # Set while no response is generating on the socket (one in flight per connection).
+        # The counter tracks outstanding flushes: normally 0/1, briefly 2 when the idle
+        # timeout lets a newer turn flush past a wedged response — responses settle in
+        # flush order, so only the done that drains it back to 0 owns the slot.
         self._response_idle = asyncio.Event()
         self._response_idle.set()
+        self._inflight_flushes = 0
+        # After a cancel, audio frames already on the wire keep arriving until the
+        # response's own responseDone; ids in this set are dropped instead of played.
+        self._ignored_response_ids = set()
+        self._current_response_id = None
+        # A barge-in can land before responseCreated delivers the in-flight response's id;
+        # this flag marks the abandonment id-independently until that response settles.
+        self._abandoned_in_flight = False
 
     def get_sleep_time(self):
         return 0.01
@@ -239,14 +249,19 @@ class KalpaSynthesizer(StreamSynthesizer):
         text) — moot here, since this integration never leaves either behind."""
         self._text_buffer = []
         self._buffer_seq = None
+        if not self._response_idle.is_set():
+            self._abandoned_in_flight = True
+            if self._current_response_id is not None:
+                self._ignored_response_ids.add(self._current_response_id)
+        # The cancelled turn's end-of-stream is never forwarded, so the next turn must be
+        # re-detected as new for stale text_queue entries to be pruned — even when the
+        # cancel send below fails with the socket.
+        self.current_turn_start_time = None
         try:
             ws = self.websocket
             if ws is not None and ws.state is websockets.protocol.State.OPEN:
                 await ws.send(json.dumps({"type": "cancelResponse"}))
                 logger.info("Sent cancelResponse to Kalpa TTS WebSocket")
-            # The cancelled turn's end-of-stream is never forwarded, so the next turn must
-            # be re-detected as new for stale text_queue entries to be pruned.
-            self.current_turn_start_time = None
         except Exception as e:
             logger.error(f"Error handling Kalpa interruption: {e}")
 
@@ -262,16 +277,15 @@ class KalpaSynthesizer(StreamSynthesizer):
                 logger.info(f"Not synthesizing: sequence_id {sequence_id} not current")
                 return
 
-            await self._wait_for_ws()
-
-            # The wait suspends for real while the socket is reconnecting, and a barge-in can
-            # retire this sequence (and clear the shared buffer) in that gap — appending after
-            # it would leak this turn's fragment into the next turn's utterance.
-            if not self.should_synthesize_response(sequence_id):
-                logger.info(f"Not synthesizing (post-wait): sequence_id {sequence_id} not current")
-                return
-
+            # Appends happen before any await: sender tasks start in push order and a
+            # non-EOS sender never suspends, so chunks cannot aggregate out of order even
+            # while the socket is reconnecting. Only the EOS task below ever waits.
             if text:
+                # Guard the ownership invariant: a chunk whose turn's buffer was already
+                # dropped (barge-in between task creation and start) must not append.
+                if self._buffer_seq != sequence_id:
+                    logger.info(f"Dropping Kalpa chunk for superseded seq={sequence_id} (buffer seq={self._buffer_seq})")
+                    return
                 self._text_buffer.append(text)
 
             # Keep buffering until the LLM turn ends: one atomic text+flush frame per turn, so
@@ -280,8 +294,9 @@ class KalpaSynthesizer(StreamSynthesizer):
             if not end_of_llm_stream:
                 return
 
-            # LLM chunks carry their own spacing, so they concatenate verbatim.
-            full_text = "".join(self._text_buffer).strip()
+            # The streaming LLM wrappers split chunks with rsplit(" ", 1) and drop the
+            # boundary space, so it has to be restored here.
+            full_text = " ".join(self._text_buffer).strip()
             self._text_buffer = []
             self._buffer_seq = None
             self.last_text_sent = True
@@ -290,14 +305,37 @@ class KalpaSynthesizer(StreamSynthesizer):
                 return
             if len(full_text) > MAX_TEXT_CHARS:
                 logger.warning(f"Kalpa utterance exceeds {MAX_TEXT_CHARS} chars; truncating")
-                full_text = full_text[:MAX_TEXT_CHARS]
+                # Cut at a word boundary so the caller doesn't hear a clipped syllable.
+                cut = full_text.rfind(" ", 0, MAX_TEXT_CHARS + 1)
+                full_text = full_text[:cut] if cut > 0 else full_text[:MAX_TEXT_CHARS]
+
+            await self._wait_for_ws()
+
+            # The wait suspends for real while the socket reconnects, and a barge-in can
+            # retire this sequence in that gap — the captured turn must not flush then.
+            if not self.should_synthesize_response(sequence_id):
+                logger.info(f"Not synthesizing (post-wait): sequence_id {sequence_id} not current")
+                return
 
             # One response in flight per connection: wait for the previous turn's
-            # responseDone (a cancelled turn still gets one) before flushing.
-            try:
-                await asyncio.wait_for(self._response_idle.wait(), timeout=RESPONSE_IDLE_TIMEOUT)
-            except asyncio.TimeoutError:
-                logger.warning("Kalpa: previous response still in flight after 10s; flushing anyway")
+            # responseDone (a cancelled turn still gets one) before flushing. Event.set()
+            # wakes every parked sender, so re-check and re-park until the slot is truly
+            # free — otherwise two turns could ride one done into overlapping flushes.
+            deadline = time.perf_counter() + RESPONSE_IDLE_TIMEOUT
+            while not self._response_idle.is_set():
+                remaining = deadline - time.perf_counter()
+                if remaining <= 0:
+                    logger.warning("Kalpa: previous response still in flight after 10s; flushing anyway")
+                    # Giving up on the wedged response retires its abandonment too —
+                    # otherwise this turn's response would inherit it at responseCreated
+                    # and lose its audio and completion sentinel. Its id (when known)
+                    # stays ignored.
+                    self._abandoned_in_flight = False
+                    break
+                try:
+                    await asyncio.wait_for(self._response_idle.wait(), timeout=remaining)
+                except asyncio.TimeoutError:
+                    pass
 
             # The waits above can span a barge-in that retires this sequence without
             # cancelling the task; re-check before anything reaches the socket.
@@ -305,19 +343,37 @@ class KalpaSynthesizer(StreamSynthesizer):
                 logger.info(f"Not synthesizing (inner): sequence_id {sequence_id} not current")
                 return
 
+            self._inflight_flushes += 1
+            self._response_idle.clear()
+            if self.ws_send_time is None:
+                self.ws_send_time = time.perf_counter()
             try:
-                self._response_idle.clear()
-                if self.ws_send_time is None:
-                    self.ws_send_time = time.perf_counter()
                 await self._send_json({"type": "sendText", "text": full_text, "flush": True})
-            except Exception as e:
-                logger.error(f"Error sending text to Kalpa: {e}")
-                self.connection_error = str(e)
+            except Exception:
+                # _send_json already logged and set connection_error. Nothing was flushed,
+                # so no responseDone will free the slot — release it here.
+                self._inflight_flushes -= 1
+                if self._inflight_flushes == 0:
+                    self._response_idle.set()
 
         except asyncio.CancelledError:
             logger.info("Kalpa sender task was cancelled.")
         except Exception as e:
             logger.error(f"Unexpected error in Kalpa sender: {e}")
+
+    def _settle_lost_flushes(self):
+        """The socket died with responses outstanding: free the slot, reset the flush
+        bookkeeping, and return how many end-of-stream sentinels settle the lost turns
+        (oldest first; an abandoned turn is skipped — its pipeline already dropped it)."""
+        lost = 0
+        if not self._response_idle.is_set():
+            self._response_idle.set()
+            lost = max(1, self._inflight_flushes)
+            if self._abandoned_in_flight:
+                lost -= 1
+        self._inflight_flushes = 0
+        self._abandoned_in_flight = False
+        return lost
 
     async def receiver(self):
         not_connected_since = None
@@ -326,6 +382,10 @@ class KalpaSynthesizer(StreamSynthesizer):
                 if self.conversation_ended:
                     return
                 if not self._is_ws_connected():
+                    # A socket that dies between recvs is seen here, not by the
+                    # ConnectionClosed handler below — settle its turns here too.
+                    for _ in range(self._settle_lost_flushes()):
+                        yield b"\x00"
                     if self.connection_error:
                         return
                     now = time.perf_counter()
@@ -348,14 +408,34 @@ class KalpaSynthesizer(StreamSynthesizer):
 
                 event = data.get("type")
                 if event == "responseAudio":
+                    if data.get("response_id") in self._ignored_response_ids:
+                        continue
                     chunk = self._decode_audio(data.get("pcm_b64"))
                     if chunk:
                         yield chunk
                 elif event == "responseDone":
-                    self._response_idle.set()
+                    if self._inflight_flushes:
+                        self._inflight_flushes -= 1
+                    rid = data.get("response_id")
+                    if rid == self._current_response_id:
+                        self._current_response_id = None
                     status = data.get("status")
-                    logger.info(f"Kalpa responseDone status={status} response_id={data.get('response_id')}")
-                    if status == "completed":
+                    logger.info(f"Kalpa responseDone status={status} response_id={rid}")
+                    if self._inflight_flushes:
+                        # A late done for a retired response (the idle-timeout overlap):
+                        # the newer flush still owns the slot — releasing it or emitting
+                        # a sentinel would finish the newer turn before its audio.
+                        self._ignored_response_ids.discard(rid)
+                        continue
+                    self._response_idle.set()
+                    was_abandoned = self._abandoned_in_flight
+                    self._abandoned_in_flight = False
+                    if rid in self._ignored_response_ids or was_abandoned:
+                        # This response's turn was abandoned at the barge-in; even a
+                        # "completed" done (the cancel lost the race) must not stamp
+                        # end-of-stream onto the next turn.
+                        self._ignored_response_ids.discard(rid)
+                    elif status == "completed":
                         yield b"\x00"
                     # "cancelled" terminates a turn we interrupted; handle_interruption()
                     # already abandoned it, so forwarding a sentinel would stamp
@@ -369,28 +449,38 @@ class KalpaSynthesizer(StreamSynthesizer):
                         if err.get("type") == "authentication_error":
                             self.connection_error = err.get("message") or "authentication error"
                     else:
-                        # A non-fatal error is a rejected client frame. This integration only
-                        # sends whole-turn flushes, so the rejected turn will never produce
-                        # audio or a responseDone — terminate it and free the in-flight slot.
+                        # A non-fatal error with a flush in flight means that turn will
+                        # never produce audio — terminate it and free the slot. When idle
+                        # (e.g. a rejected cancelResponse) a sentinel would pop the next
+                        # turn's meta_info, so just log.
                         logger.error(f"Kalpa TTS error: {err}")
-                        self._response_idle.set()
-                        yield b"\x00"
+                        if not self._response_idle.is_set():
+                            if self._inflight_flushes:
+                                self._inflight_flushes -= 1
+                            if self._inflight_flushes == 0:
+                                self._response_idle.set()
+                                if not self._abandoned_in_flight:
+                                    yield b"\x00"
+                                self._abandoned_in_flight = False
                 elif event == "sessionCreated":
                     # Normally consumed inside establish_connection; tolerated here in case
                     # a future server pushes an unsolicited session update.
                     self.native_sample_rate = int(data.get("sample_rate") or self.native_sample_rate)
                 elif event == "responseCreated":
-                    logger.info(f"Kalpa responseCreated response_id={data.get('response_id')}")
+                    self._current_response_id = data.get("response_id")
+                    if self._abandoned_in_flight:
+                        # The barge-in landed before this frame delivered the id; the
+                        # response is already abandoned, so its audio must not play.
+                        self._ignored_response_ids.add(self._current_response_id)
+                    logger.info(f"Kalpa responseCreated response_id={self._current_response_id}")
                 else:
                     logger.info(f"Ignoring Kalpa event: {data}")
 
             except websockets.exceptions.ConnectionClosed:
                 logger.info("Kalpa WebSocket connection closed")
-                # A response that dies with the socket will never get its responseDone: free
-                # the single-flight slot and terminate the turn so playback doesn't hang on
-                # it (monitor_connection re-establishes the socket for the next turn).
-                if not self._response_idle.is_set():
-                    self._response_idle.set()
+                # Responses that die with the socket never get their responseDone;
+                # monitor_connection re-establishes the socket for the next turn.
+                for _ in range(self._settle_lost_flushes()):
                     yield b"\x00"
                 break
             except Exception as e:
@@ -460,6 +550,10 @@ class KalpaSynthesizer(StreamSynthesizer):
             self.native_sample_rate = int(reply.get("sample_rate") or self.native_sample_rate)
             # A fresh connection has nothing in flight.
             self._response_idle.set()
+            self._inflight_flushes = 0
+            self._ignored_response_ids.clear()
+            self._current_response_id = None
+            self._abandoned_in_flight = False
             if not self.connection_time:
                 self.connection_time = round((time.perf_counter() - start_time) * 1000)
             logger.info(
@@ -537,7 +631,9 @@ class KalpaSynthesizer(StreamSynthesizer):
     def _process_http_audio(self, audio):
         """Convert the one-shot WAV to the format the non-streaming loop should emit."""
         if not audio:
-            return audio
+            # The non-streaming loop has no None guard: a None packet crashes the output
+            # handler's b64encode and mutes the session. b"\x00" just ends the turn.
+            return b"\x00"
         if self.use_mulaw:
             return audio_to_mulaw8k(audio, rate_hint=self.native_sample_rate, format_hint="wav")
         if self.target_sample_rate != self.native_sample_rate:
