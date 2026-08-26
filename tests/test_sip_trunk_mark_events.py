@@ -50,7 +50,7 @@ class _FakeInputHandler:
     def process_mark_message(self, packet):
         mark_id = packet.get("name")
         self.acked.append(mark_id)
-        self.mark_event_meta_data.mark_event_meta_data.pop(mark_id, None)
+        self.mark_event_meta_data.pending_marks.pop(mark_id, None)
 
     def is_audio_being_played_to_user(self):
         return self.audio_playing
@@ -119,7 +119,7 @@ async def test_mark_media_is_sent_after_the_audio_it_marks():
     assert ws.frames[2][1].startswith("MARK_MEDIA ")
 
     mark_id = ws.frames[2][1].split(" ", 1)[1]
-    assert mark_id in out.mark_event_meta_data.mark_event_meta_data
+    assert mark_id in out.mark_event_meta_data.pending_marks
 
 
 async def test_mark_is_registered_before_the_first_frame_is_written():
@@ -134,7 +134,7 @@ async def test_mark_is_registered_before_the_first_frame_is_written():
 
         async def send_bytes(self, data):
             if self.marks_at_first_frame is None:
-                self.marks_at_first_frame = dict(meta.mark_event_meta_data)
+                self.marks_at_first_frame = dict(meta.pending_marks)
             await super().send_bytes(data)
 
     ws = _SnoopWS()

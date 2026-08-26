@@ -221,7 +221,7 @@ class DefaultInputHandler:
                 self.is_welcome_message_played = True
                 self.welcome_message_played_ts = time.time() * 1000
                 pre_mark_id = self.mark_event_meta_data.welcome_pre_mark_id
-                if pre_mark_id and pre_mark_id in self.mark_event_meta_data.mark_event_meta_data:
+                if pre_mark_id and pre_mark_id in self.mark_event_meta_data.pending_marks:
                     self.mark_event_meta_data.fetch_data(pre_mark_id)
                     logger.info("Cleared stale welcome pre_mark %s (never acked by Plivo)", pre_mark_id)
 

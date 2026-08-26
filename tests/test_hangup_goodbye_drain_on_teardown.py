@@ -56,7 +56,7 @@ class _InputStub:
 
 class _MarkMetaStub:
     def __init__(self, marks=None):
-        self.mark_event_meta_data = dict(marks or {})
+        self.pending_marks = dict(marks or {})
         self.mark_changed = asyncio.Event()
 
     def get_heard_text_for_response(self, _uid):
@@ -66,7 +66,7 @@ class _MarkMetaStub:
         return ""
 
     def drain(self):
-        self.mark_event_meta_data.clear()
+        self.pending_marks.clear()
         self.mark_changed.set()
 
 
@@ -127,9 +127,9 @@ async def test_draining_before_teardown_keeps_full_goodbye():
 
     assert 0.04 < elapsed < 3.0  # waited for the drain, not zero and not the full grace
 
-    has_pending = len(tm.mark_event_meta_data.mark_event_meta_data) > 0
+    has_pending = len(tm.mark_event_meta_data.pending_marks) > 0
     if has_pending:
-        await tm.sync_history(tm.mark_event_meta_data.mark_event_meta_data.items(), time.time())
+        await tm.sync_history(tm.mark_event_meta_data.pending_marks.items(), time.time())
     assert _turn7(history)["content"] == FULL_GOODBYE.strip()
 
 
@@ -149,14 +149,14 @@ async def test_wait_is_bounded_when_marks_never_ack():
     elapsed = time.monotonic() - start
 
     assert elapsed < 2.0  # bounded by duration + grace, not endless
-    assert len(tm.mark_event_meta_data.mark_event_meta_data) > 0  # returned without the mark ever acking
+    assert len(tm.mark_event_meta_data.pending_marks) > 0  # returned without the mark ever acking
 
 
 def test_run_gates_terminal_sync_on_in_flight_hangup():
     src = inspect.getsource(TaskManager.run)
     gate_idx = src.find("if self.hangup_triggered and not self.conversation_ended:")
     sync_idx = src.find(
-        "await self.sync_history(\n                        self.mark_event_meta_data.mark_event_meta_data.items(),"
+        "await self.sync_history(\n                        self.mark_event_meta_data.pending_marks.items(),"
     )
     assert gate_idx != -1 and sync_idx != -1
     assert gate_idx < sync_idx

@@ -2218,7 +2218,7 @@ class TaskManager(BaseManager):
         return None
 
     def _has_interruptible_mark_activity(self):
-        for mark_data in self.mark_event_meta_data.mark_event_meta_data.values():
+        for mark_data in self.mark_event_meta_data.pending_marks.values():
             if mark_data.get("type") == "pre_mark_message":
                 continue
             if mark_data.get("turn_id") is not None:
@@ -2745,6 +2745,14 @@ class TaskManager(BaseManager):
             self.tools["output"].set_hangup_sent()
             await self.__process_end_of_conversation()
 
+    def _queued_playout_seconds(self) -> float:
+        """Seconds of already-sent audio the provider has not acked playing yet."""
+        return sum(
+            mark.get("duration", 0)
+            for mark in self.mark_event_meta_data.pending_marks.values()
+            if mark.get("type") != "pre_mark_message" and mark.get("sent_ts")
+        )
+
     async def wait_for_current_message(self):
         try:
             await asyncio.wait_for(self._turn_audio_flushed.wait(), timeout=3.0)
@@ -2753,7 +2761,7 @@ class TaskManager(BaseManager):
 
         entry_time = time.time()
         while not self.conversation_ended:
-            mark_events = self.mark_event_meta_data.mark_event_meta_data
+            mark_events = self.mark_event_meta_data.pending_marks
             mark_items_list = [{"mark_id": k, "mark_data": v} for k, v in mark_events.items()]
             logger.info(f"current_list: {mark_items_list}")
 
@@ -2781,12 +2789,7 @@ class TaskManager(BaseManager):
             # future rather than one that recedes with each iteration. Without this,
             # `remaining = sum(durations) + hangup_mark_event_timeout` never reaches 0
             # when Plivo stops ACKing marks, causing an indefinite spin.
-            remaining_durations = [
-                v.get("duration", 0)
-                for v in mark_events.values()
-                if v.get("type") != "pre_mark_message" and v.get("sent_ts")
-            ]
-            expected_play_end = (entry_time + sum(remaining_durations)) if remaining_durations else entry_time
+            expected_play_end = entry_time + self._queued_playout_seconds()
             deadline = expected_play_end + self.hangup_mark_event_timeout
 
             remaining = deadline - time.time()
@@ -2954,19 +2957,15 @@ class TaskManager(BaseManager):
 
         await self.wait_for_current_message()
 
-        # Check completion of agent_hangup_message sent from output
-        # Only wait for hangup chunk if a hangup message was actually queued
-        while self.hangup_triggered and self.hangup_message_queued:
-            try:
-                if self.tools["output"].hangup_sent():
-                    logger.info("final hangup chunk is now sent. Breaking now")
-                    break
-                else:
-                    logger.info("final hangup chunk has not been sent yet")
-                    await asyncio.sleep(0.5)
-            except Exception as e:
-                logger.error(f"Error while checking queue: {e}", exc_info=True)
-                break
+        # A dead media socket never acks the goodbye, so bound the wait by the audio still
+        # queued plus the mark grace. Unbounded, teardown never reached the final save.
+        if self.hangup_triggered and self.hangup_message_queued:
+            output = self.tools["output"]
+            deadline = time.time() + self._queued_playout_seconds() + self.hangup_mark_event_timeout
+            while not output.hangup_sent() and not output.is_closed() and time.time() < deadline:
+                await asyncio.sleep(0.5)
+            if not output.hangup_sent():
+                logger.warning(f"hangup chunk never acked (socket closed={output.is_closed()}), tearing down")
 
         if self.hangup_message_queued and not web_call_timeout:
             self.history.append(
@@ -7203,7 +7202,9 @@ class TaskManager(BaseManager):
                 self.hangup_detail = HangupReason.WEB_CALL_MAX_DURATION_REACHED
                 break
 
-            if self.last_transmitted_timestamp == 0:
+            # A hangup still needs its timeout enforced even on a call where no mark was
+            # ever acked, so this idle guard must not swallow the branch below.
+            if self.last_transmitted_timestamp == 0 and not self.hangup_triggered:
                 logger.info(f"Last transmitted timestamp is simply 0 and hence continuing")
                 continue
 
@@ -7212,8 +7213,11 @@ class TaskManager(BaseManager):
                     logger.info(f"Call hangup completed successfully")
                     break
 
-                if self.hangup_triggered_at:
-                    time_since_hangup = time.time() - self.hangup_triggered_at
+                # hangup_triggered_at is only stamped once the goodbye is queued; fall back to
+                # the decision timestamp so a hangup that stalls before that still times out.
+                hangup_started_at = self.hangup_triggered_at or self.hangup_decision_at
+                if hangup_started_at:
+                    time_since_hangup = time.time() - hangup_started_at
                     if time_since_hangup > self.hangup_mark_event_timeout:
                         logger.warning(
                             f"Hangup mark event not received within {self.hangup_mark_event_timeout}s (waited {time_since_hangup:.1f}s), forcing conversation end"
@@ -8232,11 +8236,11 @@ class TaskManager(BaseManager):
                 if self.hangup_triggered and not self.conversation_ended:
                     await self.wait_for_current_message()
 
-                has_pending_marks = len(self.mark_event_meta_data.mark_event_meta_data) > 0
+                has_pending_marks = len(self.mark_event_meta_data.pending_marks) > 0
                 has_response_heard = bool(self.tools["input"].response_heard_by_user)
                 if has_pending_marks or has_response_heard:
                     await self.sync_history(
-                        self.mark_event_meta_data.mark_event_meta_data.items(),
+                        self.mark_event_meta_data.pending_marks.items(),
                         time.time(),
                         extend_with_playback_estimate=True,
                     )
