@@ -168,6 +168,14 @@ class MarkEventMetaData:
             return ""
         return (self.heard_text_by_response.get(response_uid) or "").strip()
 
+    def drop_data(self, mark_id):
+        """Remove a mark that was never played (cleared echo): no ack stamp, so last-ack
+        playback crediting and chunk-mark analytics can't count it as heard."""
+        entry = self.mark_event_meta_data.pop(mark_id, {})
+        if entry:
+            entry["cleared"] = True
+        return entry
+
     def fetch_data(self, mark_id):
         entry = self.mark_event_meta_data.get(mark_id)
         if entry is not None and entry.get("type") != "pre_mark_message":
