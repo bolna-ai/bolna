@@ -34,11 +34,11 @@ class FreeSwitchInputHandler(DefaultInputHandler):
     async def process_message(self, message):
         if message.get("type") == "markPlayed":
             name = message.get("name")
-            # cleared = dropped unplayed (killAudio/ring overflow): pop the registry WITHOUT
-            # recording heard text or driving turn-end — the caller never heard this audio
+            # cleared = dropped unplayed (killAudio/ring overflow): drop from the registry with
+            # no ack stamp — heard text, tail-credit and turn-end must never count it
             if message.get("cleared"):
                 if self.mark_event_meta_data:
-                    self.mark_event_meta_data.fetch_data(name)
+                    self.mark_event_meta_data.drop_data(name)
                 return
             # real per-chunk playback ack: registry ack here, turn-end in the output handler
             self.process_mark_message({"type": "mark", "name": name})

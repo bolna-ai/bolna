@@ -141,17 +141,24 @@ async def test_stale_final_echo_after_estimator_completion_is_ignored():
 
 
 @pytest.mark.asyncio
-async def test_cleared_echo_pops_registry_without_heard_text_or_turn_end():
-    # cleared = dropped unplayed; must not record heard text nor complete the turn
+async def test_cleared_echo_drops_mark_without_ack_heard_text_or_turn_end():
+    # cleared = dropped unplayed; no heard text, no turn-end, and NO ack stamp (an acked
+    # cleared mark would advance last-ack tail crediting for audio never played)
+    from bolna.helpers.mark_event_meta_data import MarkEventMetaData
+
+    registry = MarkEventMetaData()
+    registry.update_data("m-x", {"type": "", "sequence_id": 2, "turn_id": 2, "text_synthesized": "never played"})
     handler = FreeSwitchInputHandler.__new__(FreeSwitchInputHandler)
     handler.on_mark_played = MagicMock()
     handler.on_playout_done = None
     handler.process_mark_message = MagicMock()
-    handler.mark_event_meta_data = MagicMock()
-    await handler.process_message({"type": "markPlayed", "name": "m-final", "cleared": True})
-    handler.mark_event_meta_data.fetch_data.assert_called_once_with("m-final")
+    handler.mark_event_meta_data = registry
+    await handler.process_message({"type": "markPlayed", "name": "m-x", "cleared": True})
     handler.process_mark_message.assert_not_called()
     handler.on_mark_played.assert_not_called()
+    assert registry.fetch_data("m-x") == {}  # popped
+    assert registry.get_last_ack_ts_for_turn(2) is None  # never stamped as acked
+    assert registry.get_heard_text_for_turn(2) == ""
 
 
 @pytest.mark.asyncio
