@@ -192,8 +192,7 @@ class OpenAiLLM(OpenAICompatibleLLM):
                 self.async_client = AsyncOpenAI(api_key=llm_key, http_client=http_client)
             api_key = llm_key
         self.llm_host = urlparse(base_url).netloc if base_url else None
-        # Only a customer endpoint is guarded; platform ones (Azure, EU OpenAI, OpenRouter) are
-        # ours and must keep the SDK's connection retries in front of a transient DNS failure.
+        # Only a customer endpoint is guarded; platform ones keep the SDK's connection retries.
         self._base_url = base_url if kwargs.get("provider", "openai") == "custom" else None
         self._base_url_validated = False
         self.assistant_id = kwargs.get("assistant_id", None)

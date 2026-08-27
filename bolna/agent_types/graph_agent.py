@@ -82,8 +82,7 @@ class GraphAgent(BaseAgent):
 
         # Initialize OpenAI client with credentials (supports EU routing)
         if self.base_url:
-            # A supplied client keeps httpx's follow_redirects=False, so a customer endpoint
-            # cannot redirect the routing hop to an internal address.
+            # Supplying the client keeps follow_redirects off, so the endpoint cannot redirect us inward.
             self.openai = OpenAI(
                 api_key=self.llm_key,
                 base_url=self.base_url,
