@@ -82,7 +82,13 @@ class GraphAgent(BaseAgent):
 
         # Initialize OpenAI client with credentials (supports EU routing)
         if self.base_url:
-            self.openai = OpenAI(api_key=self.llm_key, base_url=self.base_url)
+            # A supplied client keeps httpx's follow_redirects=False, so a customer endpoint
+            # cannot redirect the routing hop to an internal address.
+            self.openai = OpenAI(
+                api_key=self.llm_key,
+                base_url=self.base_url,
+                http_client=get_shared_sync_http_client(base_url=self.base_url, http2=False),
+            )
             logger.info(f"OpenAI client initialized with custom base_url: {self.base_url}")
         else:
             self.openai = OpenAI(api_key=self.llm_key)
@@ -1321,7 +1327,8 @@ class GraphAgent(BaseAgent):
             self.context_data["detected_language"] = detected_language
 
         # Ahead of the try so a blocked endpoint ends the call instead of being spoken.
-        if self.base_url and not self._base_url_validated:
+        is_custom = (self.config.get("provider") or self.config.get("llm_provider")) == "custom"
+        if is_custom and self.base_url and not self._base_url_validated:
             await guard_llm_base_url(self.base_url)
             self._base_url_validated = True
 
