@@ -82,12 +82,12 @@ class GraphAgent(BaseAgent):
 
         # Initialize OpenAI client with credentials (supports EU routing)
         if self.base_url:
-            # Supplying the client keeps follow_redirects off, so the endpoint cannot redirect us inward.
-            self.openai = OpenAI(
-                api_key=self.llm_key,
-                base_url=self.base_url,
-                http_client=get_shared_sync_http_client(base_url=self.base_url, http2=False),
-            )
+            client_kwargs = {"api_key": self.llm_key, "base_url": self.base_url}
+            if (self.config.get("provider") or self.config.get("llm_provider")) == "custom":
+                # Supplying the client keeps follow_redirects off, so a customer endpoint
+                # cannot redirect this hop inward.
+                client_kwargs["http_client"] = get_shared_sync_http_client(base_url=self.base_url, http2=False)
+            self.openai = OpenAI(**client_kwargs)
             logger.info(f"OpenAI client initialized with custom base_url: {self.base_url}")
         else:
             self.openai = OpenAI(api_key=self.llm_key)
