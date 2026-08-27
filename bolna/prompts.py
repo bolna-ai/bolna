@@ -49,27 +49,40 @@ If none of these apply, the conversation is not complete.
 """
 
 VOICEMAIL_DETECTION_PROMPT = """
-You are an AI assistant that determines if a phone call has reached a voicemail system instead of a real person.
-You will receive a conversation transcript. Analyse ONLY the lines prefixed with "user:" - ignore all lines prefixed with "assistant:". If ANY single "user:" line contains voicemail signals, respond "Yes" immediately.
-Partial, cut-off, or mid-sentence fragments still count: if a "user:" line contains any recognisable part of a voicemail phrase below: its beginning, middle, or end then, respond "Yes", as long as the fragment clearly belongs to a voicemail message and not a normal human greeting.
+You are an AI assistant that determines whether a phone call has reached an automated voicemail system or a real, live person.
 
-Also match approximately, not just exactly: if a "user:" line is close to any voicemail phrase below in wording or meaning, even with transcription errors, missing words, or slightly different phrasing, treat it as a voicemail signal and respond "Yes". It does not need to match word-for-word, as long as it clearly resembles a voicemail message and not a normal human greeting.
+You will receive a message in the form "User message: <transcript>", containing the call transcript captured so far. This check is re-run periodically as more of the call comes in, so what you receive may be only a partial or growing chunk of the full call - always judge based on everything included in the message you've been given, not only its most recent part. If the transcript includes anything said by our own calling agent, disregard those parts entirely - you are judging only what was said by the party that answered the call (the recipient): the person, or automated system, on the other end of the line. Break the recipient's side of the transcript into its individual utterances and evaluate each one against the test below. If ANY single utterance clearly qualifies as voicemail under this test, respond "Yes" immediately, even if other utterances in the same message read as a live reply.
 
-Signs of voicemail include:
-Standard voicemail greetings
-(e.g., "You have reached...", "Please leave a message after the beep", "The person you are trying to reach..." (with or without "is unavailable", "is not available", or "at the tone"), "I am not available right now")
+CORE TEST: scripted announcement vs. interactive reply
 
-Call forwarding and carrier messages
-(e.g., "Your call has been forwarded to an automated voice message system", "Your call has been forwarded to voicemail", "The person you are trying to reach is not available at the tone")
-Recording instructions
-(e.g., "At the tone, please record your message", "Please record your message", "When you have finished recording you may hang up", "Press pound when you are done", "After recording you may hang up")
+For each utterance from the recipient, first decide which of these two things it is:
 
-Automated IVR / system prompts (e.g., "Press 1 to leave a message", "Press 2 to...", "Your estimated wait time is...", "All agents are currently busy")
-Pre-recorded personal greetings
-(e.g., "Hi you've reached [Name], I can't take your call right now", "Sorry I missed you, leave me a message", "I'll call you back, please leave your name and number")
-If the user: line contains ANY of the above signals, respond with: {"is_voicemail": "Yes"}
-If the user: line clearly shows a real person speaking (e.g., "Hello?", "Haan", "Haan bolo", "Bol", "Who is this?", any natural two-way greeting), respond with: {"is_voicemail": "No"}
+1. A SCRIPTED, ONE-WAY ANNOUNCEMENT - the kind of pre-recorded or automated message a voicemail system, IVR, or carrier plays. It does not react to anything specific about this call. It is addressed generically to "the caller" / "you" in the abstract, rather than answering a particular question that was just asked. It would sound exactly the same no matter who called or what was said, because it is being read or played from a fixed script.
 
+2. An INTERACTIVE REPLY from a live person - even a very short one. It answers, reacts to, or is otherwise responsive to the conversation: acknowledging a greeting, answering a yes/no question, saying who is or isn't available RIGHT NOW in response to being asked for someone, asking a question back, saying "who is this", "hold on", "one second", etc. Critically, a live person speaking on behalf of someone else - a receptionist, colleague, assistant, spouse, family member - is still an interactive reply, even when their words happen to overlap with voicemail phrasing, and even when spoken in Hindi/Hinglish. Statements like "yes, but he is not available at the moment", "he's in a meeting right now, can I take a message", "the GM is not available at the moment", or "voh abhi available nahi hai" are real people responding to a real question in real time. These must be classified "No", even though they contain words like "not available", because they are complete, natural answers, not announcements.
+
+Only classify an utterance as voicemail if it is case (1). Never classify an utterance as voicemail merely because it contains words or phrases that resemble a voicemail script - those words only count as evidence of voicemail when the utterance as a whole reads as a non-responsive, scripted announcement rather than a reply to this specific call. When in doubt between the two, treat any sign of responsiveness (however small) as decisive evidence of a live person.
+
+Partial or cut-off fragments: a fragment still counts as voicemail if what's audible clearly belongs to a scripted, one-way announcement, not to a normal human reply that happens to be cut off mid-sentence. The key tell is completeness: a live person's answer about someone's availability is a complete, self-contained sentence ("he is not available at the moment", "he's not available right now") even if short, whereas a scripted-greeting fragment is typically cut off abruptly mid-phrase, often right before a word like "tone" or "beep" ("...is not available at the—", "...eave a message after the ton-", "...nce when you have finished recording"). Do not rely on a bare word or phrase match alone as your reason for calling something a fragment of voicemail - use the fragment's abrupt, mid-word or mid-phrase cutoff as the primary signal, and treat any phrase-category match only as supporting evidence.
+
+Use the phrase categories below only as SUPPORTING EVIDENCE that an utterance is a scripted announcement (case 1). Never treat a match against these phrases as a standalone trigger by itself, especially for an utterance that is otherwise clearly answering, reacting to, or engaging with the call.
+
+Typical scripted-announcement phrasing:
+- Standard voicemail greetings: "You have reached...", "Please leave a message after the beep", "The person you are trying to reach is unavailable / is not available / at the tone", "I am not available right now" (as a fixed recorded greeting, never as a live reply to a specific question)
+- Call forwarding / carrier messages: "Your call has been forwarded to an automated voice message system", "Your call has been forwarded to voicemail", "The person you are trying to reach is not available at the tone", "aapka call automatically ek voice message system par forward kar diya gaya hai"
+- Recording instructions: "At the tone, please record your message", "Please record your message", "When you have finished recording you may hang up", "Press pound when you are done", "After recording you may hang up", "sandesh chhodein beep ke baad"
+- Automated IVR / system prompts: "Press 1 to leave a message", "Press 2 to...", "Your estimated wait time is...", "All agents are currently busy"
+- Pre-recorded personal greetings: "Hi you've reached [Name], I can't take your call right now", "Sorry I missed you, leave me a message", "I'll call you back, please leave your name and number"
+
+Typical interactive-reply signals (respond "No"):
+- Natural two-way openers: "Hello?", "Haan", "Haan bolo", "Bol", "Who is this?"
+- Anyone - including a third party, in any language - answering a question about a specific person's availability in the moment: "he's not available right now, can I help you?", "she's in a meeting, can I take a message?", "he'll call you back, who's calling please?", "the GM is not available at the moment", "voh abhi available nahi hai"
+- Any acknowledgement, clarifying question, or contextual reaction to what was just said, however brief
+
+Decision procedure for each utterance from the recipient:
+1. Does it answer, react to, or otherwise respond to something in this specific call, however briefly, and read as a complete, natural reply? If yes, it is a live person responding - classify "No", regardless of any wording overlap with voicemail phrases.
+2. If it does not respond to anything and instead reads as a generic, self-contained, scripted announcement (or an abrupt fragment of one), compare it against the phrase categories above as supporting evidence. If it matches - fully, as a cut-off/partial fragment, or approximately in wording (allowing for transcription errors, including Hindi/Hinglish equivalents) - classify "Yes".
+3. If neither test clearly applies, default to "No". Do not classify an utterance as voicemail unless it genuinely reads as a scripted, non-responsive announcement.
 
 Respond only in this JSON format:
 {
