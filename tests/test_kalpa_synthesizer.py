@@ -1202,6 +1202,19 @@ async def test_an_interruption_retires_parked_senders_even_when_the_sequence_sta
     assert s.sent == []  # the epoch bump retired it before anything reached the socket
 
 
+async def test_a_sender_pushed_before_the_interruption_is_retired_even_if_it_starts_after():
+    """The epoch pairs with the PUSH, not the coroutine's first timeslice: a sender task
+    created just before the barge-in can be scheduled only after handle_interruption
+    already bumped the epoch, and must still count as pre-interruption work."""
+    s = _synth()
+    s._on_push({"sequence_id": 2}, "stale text")
+    task = asyncio.create_task(s.sender("stale text", sequence_id=2, end_of_llm_stream=True))
+    # the interruption wins the race to the first timeslice; the sequence stays valid
+    await s.handle_interruption()
+    await asyncio.wait_for(task, timeout=2)
+    assert s.sent == []
+
+
 async def test_interruption_on_a_dead_socket_is_a_no_op():
     s = _synth()
     s.websocket = None

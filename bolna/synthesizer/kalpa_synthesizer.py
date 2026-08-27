@@ -29,6 +29,7 @@ import base64
 import json
 import os
 import time
+from collections import deque
 
 import aiohttp
 import websockets
@@ -150,10 +151,15 @@ class KalpaSynthesizer(StreamSynthesizer):
         # A superseded turn can leave un-flushed text in the server buffer (no interruption
         # ran); the generation it happened on gates a defensive wipe before the next turn.
         self._dirty_conn_gen = None
-        # Bumped by handle_interruption() before anything else. Senders capture it at entry
-        # and retire at their next await boundary on a mismatch — including on task-manager
-        # paths that cancel first and only invalidate the sequence later.
+        # Bumped by handle_interruption() before anything else; senders retire at their
+        # next await boundary on a mismatch — including on task-manager paths that cancel
+        # first and only invalidate the sequence later. Each sender's epoch is captured at
+        # PUSH time (_on_push runs synchronously when its task is created, and pushes and
+        # senders are strictly FIFO, so the deque pairs them): a sender task created just
+        # before the barge-in but first scheduled after it must still count as
+        # pre-interruption work.
         self._interrupt_gen = 0
+        self._sender_epochs = deque()
         # THE SLOT: one utterance occupies the connection from its first sendText until its
         # settle. _slot_seq names the owning sequence; _slot_abandoned marks a barge-in on
         # it (its completion then settles silently). Freed ONLY by _settle_slot() (and the
@@ -221,10 +227,12 @@ class KalpaSynthesizer(StreamSynthesizer):
         return pcm_to_ulaw(audio) if self.use_mulaw else audio
 
     def _on_push(self, meta_info, text):
-        """Runs synchronously in push order (before the sender task): a new turn starting
-        while an older utterance is still open means that turn was retired without an
-        interruption. Mark it dead so its stragglers drop instead of appending to this
-        turn's utterance, and remember that its text may still sit in the server buffer."""
+        """Runs synchronously in push order (before the sender task): stamp the interrupt
+        epoch this push belongs to, and detect supersession — a new turn starting while an
+        older utterance is still open means that turn was retired without an interruption.
+        Mark it dead so its stragglers drop instead of appending to this turn's utterance,
+        and remember that its text may still sit in the server buffer."""
+        self._sender_epochs.append(self._interrupt_gen)
         seq = meta_info.get("sequence_id")
         if self._turn_seq is not None and self._turn_seq != seq and not self._turn_dead:
             logger.info(f"Marking un-flushed Kalpa utterance from superseded seq={self._turn_seq} dead")
@@ -479,10 +487,11 @@ class KalpaSynthesizer(StreamSynthesizer):
 
     async def sender(self, text, sequence_id, end_of_llm_stream=False):
         try:
-            # Captured before any await: an interruption bumps the epoch first, so a
-            # sender that started before the barge-in retires at its next await boundary
-            # even when the sequence is only invalidated later.
-            interrupt_gen = self._interrupt_gen
+            # The epoch was stamped at push time (see _on_push): an interruption bumps it
+            # first, so a sender pushed before the barge-in retires even when its task is
+            # first scheduled after the bump and the sequence is only invalidated later.
+            # (Direct calls without a push fall back to the live epoch.)
+            interrupt_gen = self._sender_epochs.popleft() if self._sender_epochs else self._interrupt_gen
             if self._retired(sequence_id, interrupt_gen):
                 logger.info(f"Not synthesizing: sequence_id {sequence_id} not current")
                 return
