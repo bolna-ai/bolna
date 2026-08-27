@@ -246,6 +246,13 @@ class ConversationHistory:
     def last_content(self) -> str | None:
         return self._messages[-1].get("content") if self._messages else None
 
+    def last_assistant_content(self) -> str | None:
+        """The agent's most recent spoken line (skips tool rows and tool-call-only stubs)."""
+        for message in reversed(self._messages):
+            if message.get("role") == ChatRole.ASSISTANT and message.get("content"):
+                return message["content"]
+        return None
+
     def get_copy(self) -> list[dict]:
         self._sanitize_tool_messages(self._messages)
         return copy.deepcopy([m for m in self._messages if not m.get("exclude_from_llm")])

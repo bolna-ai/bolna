@@ -120,9 +120,9 @@ async def test_decide_passes_recent_turns_into_the_prompt(monkeypatch):
     sw = LanguageSwitcher(available_labels=["en", "hi"], run_id="r")
     sent = {}
 
-    async def generate(messages):
+    async def generate(messages, **kwargs):
         sent["user"] = messages[-1]["content"]
-        return '{"target_language": null, "target_confidence": 0.0}'
+        return '{"target_language": null, "target_confidence": 0.0}', {}
 
     sw._llm = MagicMock()
     sw._llm.generate = generate

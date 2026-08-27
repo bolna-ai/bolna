@@ -54,6 +54,7 @@ def language_switch_tm(monkeypatch):
         tm.tools = {"transcriber": pool, "synthesizer": synth, "input": MagicMock()}
 
         tm.language_switcher = MagicMock()
+        tm.language_switcher.explicit_only = False
         tm.language_switcher.decide = AsyncMock(return_value=_SWITCH_DECISION)
         tm._inflight_response_activity = MagicMock(
             return_value={"audio_playing": audio_playing, "response_in_pipeline": True}
