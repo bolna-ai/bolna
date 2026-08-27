@@ -653,6 +653,13 @@ class KalpaSynthesizer(StreamSynthesizer):
                             self._response_idle.set()
                             owns_head = self._sentinel_owns_queue_head()
                             self._slot_seq = None
+                            if self._current_response_id is not None:
+                                # The failed response may still have frames on the wire:
+                                # ignore its late audio, and retire its id so a delayed
+                                # done cannot match as current after a newer turn claims
+                                # the slot — that would finish the newer turn early.
+                                self._ignored_response_ids.add(self._current_response_id)
+                                self._current_response_id = None
                             if self._turn_seq is not None:
                                 self._turn_dead = True  # drop the broken turn's stragglers
                             if not self._abandoned_in_flight and owns_head:

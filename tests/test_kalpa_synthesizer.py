@@ -710,6 +710,37 @@ async def test_a_non_fatal_error_terminates_the_turn_and_frees_the_slot():
     assert s.connection_error is None  # the socket stays usable
 
 
+async def test_a_failed_responses_late_done_cannot_finish_the_next_turn():
+    """The non-fatal error settles the failed response's turn; its id must not linger as
+    'current', or its delayed done would match after a newer turn claims the slot and
+    finish that turn before its audio — and its late audio frames would play into it."""
+    s = _synth()
+    await _push(s, "turn one.", 1)
+    out = await _drain(
+        s,
+        [
+            json.dumps({"type": "responseCreated", "response_id": "r1", "sample_rate": 24000}),
+            json.dumps({"type": "error", "fatal": False, "error": {"type": "invalid_request", "message": "boom"}}),
+        ],
+    )
+    assert out == [b"\x00"]  # the failed turn settles
+    assert s._current_response_id is None
+
+    # the next turn claims the slot; r1's delayed frames arrive before its own created
+    s._on_push({"sequence_id": 2}, "turn two.")
+    await s.sender("turn two.", sequence_id=2, end_of_llm_stream=True)
+    assert not s._response_idle.is_set()
+    out = await _drain(
+        s,
+        [
+            json.dumps({"type": "responseAudio", "response_id": "r1", "pcm_b64": base64.b64encode(b"stale").decode()}),
+            json.dumps({"type": "responseDone", "response_id": "r1", "status": "completed", "text": "", "usage": {}}),
+        ],
+    )
+    assert out == []  # neither plays nor completes anything
+    assert not s._response_idle.is_set()  # turn two still owns the slot
+
+
 async def test_an_idle_error_frame_logs_without_terminating_the_next_turn():
     """A sentinel with nothing in flight would pop the next turn's meta_info from the
     text_queue and stamp end-of-stream onto a turn that never played."""
