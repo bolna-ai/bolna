@@ -25,6 +25,7 @@ from bolna.constants import DEFAULT_LANGUAGE_CODE, GPT5_MODEL_PREFIX, default_re
 from bolna.enums import ResponseStreamEvent, ResponseItemType, Verbosity
 from bolna.helpers.ssl_context import get_ssl_context
 from bolna.helpers.utils import compute_function_pre_call_message, now_ms
+from bolna.helpers.function_calling_helpers import guard_llm_base_url
 from .openai_base import OpenAICompatibleLLM
 from .message_models import strip_internal_keys
 from .tool_call_accumulator import ToolCallAccumulator
@@ -132,6 +133,9 @@ class OpenAIWSConnection:
 
 
 class OpenAiLLM(OpenAICompatibleLLM):
+    _base_url = None
+    _base_url_validated = False
+
     def __init__(
         self,
         max_tokens=100,
@@ -188,6 +192,9 @@ class OpenAiLLM(OpenAICompatibleLLM):
                 self.async_client = AsyncOpenAI(api_key=llm_key, http_client=http_client)
             api_key = llm_key
         self.llm_host = urlparse(base_url).netloc if base_url else None
+        # Only a customer endpoint is guarded; platform ones keep the SDK's connection retries.
+        self._base_url = base_url if kwargs.get("provider", "openai") == "custom" else None
+        self._base_url_validated = False
         self.assistant_id = kwargs.get("assistant_id", None)
         if self.assistant_id:
             logger.info(f"Initializing OpenAI assistant with assistant id {self.assistant_id}")
@@ -200,18 +207,26 @@ class OpenAiLLM(OpenAICompatibleLLM):
             # logger.info(f'thread id : {self.thread_id}')
         self.run_id = kwargs.get("run_id", None)
 
-        self._init_responses_api(
-            kwargs.get("use_responses_api", False), compact_threshold=kwargs.get("compact_threshold")
-        )
+        # Self-hosted endpoints speak chat completions only; Responses-API chaining is OpenAI-specific.
+        use_responses_api = kwargs.get("use_responses_api", False) and kwargs.get("provider", "openai") != "custom"
+        self._init_responses_api(use_responses_api, compact_threshold=kwargs.get("compact_threshold"))
 
         self._ws_transport = None
         if self.use_responses_api and kwargs.get("provider", "openai") != "custom" and not base_url:
             self._ws_transport = OpenAIWSConnection(api_key=api_key)
             self._ws_transport.start_connect()
 
+    async def _ensure_base_url_allowed(self):
+        """SSRF-guard a customer-supplied base_url once before the first outbound request."""
+        if self._base_url_validated:
+            return
+        await guard_llm_base_url(self._base_url)
+        self._base_url_validated = True
+
     async def generate_stream(
         self, messages, synthesize=True, request_json=False, meta_info=None, tool_choice=None, tools=None
     ):
+        await self._ensure_base_url_allowed()
         if self.use_responses_api:
             if self._ws_transport:
                 async for chunk in self._generate_stream_ws_responses(
@@ -441,6 +456,7 @@ class OpenAiLLM(OpenAICompatibleLLM):
         self.started_streaming = False
 
     async def generate(self, messages, request_json=False, ret_metadata=False, meta_info=None):
+        await self._ensure_base_url_allowed()
         if self.use_responses_api:
             return await self._generate_responses(messages, request_json, ret_metadata, meta_info)
         return await self._generate_chat(messages, request_json, ret_metadata)

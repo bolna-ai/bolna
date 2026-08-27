@@ -8,6 +8,7 @@ from bolna.models import *
 from bolna.agent_types.base_agent import BaseAgent
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.rag_service_client import RAGServiceClientSingleton
+from bolna.helpers.function_calling_helpers import guard_llm_base_url
 from bolna.helpers.utils import now_ms, format_messages
 from bolna.llms.types import LLMStreamChunk, LatencyData
 from bolna.providers import SUPPORTED_LLM_PROVIDERS
@@ -33,6 +34,7 @@ class KnowledgeBaseAgent(BaseAgent):
         self.agent_information = self.config.get("agent_information", "Knowledge-based AI assistant")
         self.context_data = self.config.get("context_data", {})
         self.llm_model = self.config.get("model", "gpt-4o")
+        self._base_url_validated = False
 
         # Main LLM for conversation
         self.llm = self._initialize_llm()
@@ -311,6 +313,14 @@ Use this information naturally when it helps answer the user's questions. Don't 
         meta_info["llm_metadata"] = meta_info.get("llm_metadata", {})
         meta_info["llm_metadata"]["rag_info"] = {}
         meta_info["llm_metadata"]["rag_info"]["all_sources"] = self.rag_config.get("used_sources", [])
+
+        # Ahead of the try so a blocked endpoint ends the call instead of being spoken.
+        provider = self.config.get("provider") or self.config.get("llm_provider")
+        base_url = self.config.get("base_url") if provider == "custom" else None
+        if base_url and not self._base_url_validated:
+            await guard_llm_base_url(base_url)
+            self._base_url_validated = True
+
         try:
             messages_with_context, metadata = await self._add_rag_context(message)
 
