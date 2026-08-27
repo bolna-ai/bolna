@@ -3046,9 +3046,17 @@ class TaskManager(BaseManager):
             meta_info["message_category"] = "filler"
 
         if next_step == "synthesizer" and not should_bypass_synth:
-            if not text_chunk or not text_chunk.strip():
+            if text_chunk and text_chunk.strip():
+                self._turn_audio_flushed.clear()
+            elif self.stream and meta_info.get("end_of_llm_stream") and not self._turn_audio_flushed.is_set():
+                # The turn's last LLM buffer is often empty (the wrapper's rsplit leaves no
+                # remainder for the final flush); dropping it would swallow end_of_llm_stream
+                # and a streaming synthesizer would never flush the turn. Forward the bare
+                # marker — but only for a turn that actually sent text (_turn_audio_flushed
+                # cleared above), so a fully empty turn stays silent as before.
+                text_chunk = ""
+            else:
                 return
-            self._turn_audio_flushed.clear()
             task = asyncio.create_task(self._synthesize(create_ws_data_packet(text_chunk, meta_info)))
             self.synthesizer_tasks.append(asyncio.ensure_future(task))
         elif self.tools["output"] is not None:
