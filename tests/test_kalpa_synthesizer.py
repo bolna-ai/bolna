@@ -281,8 +281,8 @@ async def test_chunks_stream_as_they_arrive_and_the_flush_ends_the_turn():
     """Text reaches the server the moment the LLM produces it — segmentation renders it
     early — and chunks rejoin with the boundary space the LLM wrappers' rsplit consumed."""
     s = _synth()
-    await _push(s, "Namaste!", 1)
-    assert s.sent == [{"type": "sendText", "text": "Namaste!"}]
+    await _push(s, "Namaste ji!", 1)
+    assert s.sent == [{"type": "sendText", "text": "Namaste ji!"}]
     assert not s._response_idle.is_set()  # the utterance claims the slot at its first chunk
 
     await _push(s, "Kaise hain aap?", 1)
@@ -293,6 +293,47 @@ async def test_chunks_stream_as_they_arrive_and_the_flush_ends_the_turn():
     assert s.last_text_sent is True
     assert s._turn_seq is None  # the turn is closed; the slot frees at its responseDone
     assert not s._response_idle.is_set()
+
+
+async def test_an_unbroken_token_is_not_split_by_a_phantom_space():
+    """The wrappers' rsplit(" ", 1) consumed a boundary space only when the emitted chunk
+    still contains one; a space-less chunk was an unbreakable token (long URL, number) cut
+    mid-way at the buffer size, and the next chunk continues it directly — gluing a space
+    in would mispronounce it."""
+    s = _synth()
+    await _push(s, "Your code is", 1)
+    await _push(s, "123456789012345678", 1)  # space-less: cut mid-token by the buffer size
+    await _push(s, "9012 got it?", 1, eos=True)  # continues the token directly
+    assert s.sent == [
+        {"type": "sendText", "text": "Your code is"},
+        {"type": "sendText", "text": " 123456789012345678"},
+        {"type": "sendText", "text": "9012 got it?"},
+        {"type": "sendText", "flush": True},
+    ]
+
+
+async def test_a_failed_supersession_cancel_retries_instead_of_losing_the_chunk():
+    """The triage cancel can die with the socket; bailing out of the sender there would
+    lose the new turn's first chunk before anything retained it — a one-chunk turn would
+    go completely silent. The claim path parks on the redial and retries instead."""
+    s = _synth()
+    await _push(s, "half a turn", 1)
+    s._current_response_id = "r1"  # the dead turn's response is known
+    s._on_push({"sequence_id": 2}, "next")  # superseded, no handle_interruption ran
+    calls = {"n": 0}
+
+    async def flaky_send(payload):
+        calls["n"] += 1
+        if calls["n"] == 2:  # the triage cancelResponse dies with the socket
+            # what the receiver's settle and monitor's redial do once the death lands:
+            s._settle_lost_utterance()
+            s._conn_gen += 1
+            raise RuntimeError("socket died mid-send")
+        s.sent.append(payload)
+
+    s._send_frame = flaky_send
+    await s.sender("next", sequence_id=2, end_of_llm_stream=True)
+    assert s.sent[-2:] == [{"type": "sendText", "text": "next"}, {"type": "sendText", "flush": True}]
 
 
 async def test_an_empty_turn_sends_nothing():
@@ -403,7 +444,7 @@ async def test_senders_serialize_in_push_order_through_a_reconnect():
     s._wait_for_ws = parked_until_reconnect
 
     tasks = []
-    for text, eos in (("first", False), ("middle", False), ("final", True)):
+    for text, eos in (("first words", False), ("middle words", False), ("final words", True)):
         s._on_push({"sequence_id": 1}, text)
         tasks.append(asyncio.create_task(s.sender(text, 1, end_of_llm_stream=eos)))
     await asyncio.sleep(0.05)  # the first sender is parked on the dead socket
@@ -411,9 +452,9 @@ async def test_senders_serialize_in_push_order_through_a_reconnect():
     gate.set()  # reconnect completes
     await asyncio.wait_for(asyncio.gather(*tasks), timeout=2)
     assert s.sent == [
-        {"type": "sendText", "text": "first"},
-        {"type": "sendText", "text": " middle"},
-        {"type": "sendText", "text": " final"},
+        {"type": "sendText", "text": "first words"},
+        {"type": "sendText", "text": " middle words"},
+        {"type": "sendText", "text": " final words"},
         {"type": "sendText", "flush": True},
     ]
 

@@ -142,6 +142,7 @@ class KalpaSynthesizer(StreamSynthesizer):
         self._turn_chars = 0
         self._turn_truncated = False
         self._turn_dead = False  # utterance abandoned mid-stream; drop its stragglers
+        self._turn_glue = " "  # what the wrappers' split consumed before the next chunk
         # A connection generation stamps which socket the turn's text went to; a mismatch at
         # send time means the server lost its buffer and the whole turn must be resent.
         self._conn_gen = 0
@@ -312,6 +313,7 @@ class KalpaSynthesizer(StreamSynthesizer):
         self._turn_chars = 0
         self._turn_truncated = False
         self._turn_dead = False
+        self._turn_glue = " "
 
     async def _send_frame(self, payload):
         """Send one frame. Unlike the shared _send_json, a failure here is not recorded as
@@ -390,7 +392,13 @@ class KalpaSynthesizer(StreamSynthesizer):
                 if self._current_response_id is not None:
                     self._ignored_response_ids.add(self._current_response_id)
                     self._dirty_conn_gen = None  # the cancel wipes the buffered text too
-                    await self._send_frame({"type": "cancelResponse"})
+                    try:
+                        await self._send_frame({"type": "cancelResponse"})
+                    except Exception:
+                        # the cancel died with the socket, and with it the dead turn's
+                        # residue; park on the redial and retry — bailing out here would
+                        # lose the new turn's chunk before anything retained it
+                        continue
                 else:
                     await self._close_ws("superseded utterance holds the slot with no response")
                     continue
@@ -409,7 +417,10 @@ class KalpaSynthesizer(StreamSynthesizer):
                 # A superseded turn left un-flushed text in the server buffer; wipe it
                 # before this turn's first chunk or the utterances merge.
                 self._dirty_conn_gen = None
-                await self._send_frame({"type": "cancelResponse"})
+                try:
+                    await self._send_frame({"type": "cancelResponse"})
+                except Exception:
+                    continue  # died with the socket (which wiped the buffer); redial and retry
             replay = bool(self._turn_chunks)
             self._turn_conn_gen = self._conn_gen
             self._response_idle.clear()
@@ -423,13 +434,17 @@ class KalpaSynthesizer(StreamSynthesizer):
     def _wire_text(self, text, replay):
         """Account `text` against the open utterance and return what should go on the wire.
 
-        The streaming LLM wrappers split chunks with rsplit(" ", 1) and drop the boundary
-        space, so every chunk after the turn's first gets it restored. The utterance cap is
-        enforced across the whole turn: the chunk that crosses it is cut at a word boundary
-        and everything after is dropped (the flush still lands). A replay returns the whole
-        turn so far — the reconnect handed us a server with an empty buffer."""
+        The streaming LLM wrappers split chunks with rsplit(" ", 1): when the buffer had a
+        space, the boundary space is consumed and must be restored before the next chunk —
+        but a chunk with no space at all was an unbreakable token (long URL, number) cut
+        mid-way, and the next chunk continues it directly, so gluing a space in would
+        mispronounce it. The utterance cap is enforced across the whole turn: the chunk
+        that crosses it is cut at a word boundary and everything after is dropped (the
+        flush still lands). A replay returns the whole turn so far — the reconnect handed
+        us a server with an empty buffer."""
         if not self._turn_truncated:
-            piece = (" " if self._turn_chars else "") + text
+            piece = (self._turn_glue if self._turn_chars else "") + text
+            self._turn_glue = " " if " " in text else ""
             budget = MAX_TEXT_CHARS - self._turn_chars
             if len(piece) > budget:
                 piece = self._truncate_at_word(piece, budget)
