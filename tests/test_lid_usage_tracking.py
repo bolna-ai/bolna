@@ -56,7 +56,21 @@ async def test_missing_usage_logs_none_not_crash():
         result = await switcher.decide("hello", "hello", "en")
     assert result is not None
     assert log.call_args_list[-1].kwargs["input_tokens"] is None
-    assert switcher.usage_totals["requests"] == 0
+    # requests counts completed responses, even when the provider omitted usage.
+    assert switcher.usage_totals["requests"] == 1
+    assert switcher.usage_totals["input_tokens"] == 0
+
+
+async def test_models_used_tracks_the_answering_model():
+    payload = json.dumps({"target_language": None})
+    usage = {"input_tokens": 10, "output_tokens": 1}
+    switcher, _ = make_switcher(payload, usage)
+    await switcher.decide("hello", "hello", "en")
+    assert switcher.models_used == [switcher.model]
+    # a runtime fallback swap mid-call must show BOTH models
+    switcher.model = "anthropic/other-judge"
+    await switcher.decide("namaste", "namaste", "en")
+    assert len(switcher.models_used) == 2
 
 
 # ── detector audio seconds ────────────────────────────────────────────────────────
@@ -100,6 +114,7 @@ def make_tm(events=None, seconds=63.0, switcher=True):
     if switcher:
         tm.language_switcher = MagicMock()
         tm.language_switcher.model = "bedrock/haiku"
+        tm.language_switcher.models_used = ["bedrock/haiku"]
         tm.language_switcher.usage_totals = {
             "input_tokens": 11000,
             "output_tokens": 120,
@@ -122,6 +137,7 @@ def test_snapshot_appends_one_usage_record():
     assert usage[0]["judge_requests"] == 2
     assert usage[0]["detector_audio_seconds"] == 63.0
     assert usage[0]["judge_model"] == "bedrock/haiku"
+    assert usage[0]["judge_models"] == ["bedrock/haiku"]
 
 
 def test_snapshot_is_idempotent():

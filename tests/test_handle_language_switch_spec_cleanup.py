@@ -15,7 +15,7 @@ from bolna.agent_manager.task_manager import TaskManager
 
 def _make_tm():
     tm = MagicMock()
-    tm.lid_explicit_only = False
+    tm.language_switcher.explicit_only = False
     tm.language_switch_lock = asyncio.Lock()
     tm._spec_followup_task = None
     return tm

@@ -618,7 +618,6 @@ class TaskManager(BaseManager):
         # Dedicated LLM that decides language switches from the unbiased detector
         # transcript. Set up in __setup_transcriber only for gated multilingual agents.
         self.language_switcher = None
-        self.lid_explicit_only = False
         # Serializes switch decisions so overlapping turns can't interleave two
         # switch+follow-up sequences. Background-only: the caller-facing pipeline
         # (ASR -> main LLM -> TTS) never waits on this lock.
@@ -1622,16 +1621,15 @@ class TaskManager(BaseManager):
                         lid_config["sarvam_model"] = lid_model
                     switch_enabled = self.__language_switch_enabled()
                     if switch_enabled:
-                        # Per-agent toggle: judge switches only on an explicit request/selection.
-                        self.lid_explicit_only = bool(
-                            self.task_config.get("tools_config", {}).get("language_switch_explicit_only")
-                        )
                         # language_switch_llm (from the azure flag) overrides the model; absent → default.
                         self.language_switcher = LanguageSwitcher(
                             available_labels=list(transcribers.keys()),
                             run_id=self.run_id,
                             model=self.task_config.get("tools_config", {}).get("language_switch_llm"),
-                            explicit_only=self.lid_explicit_only,
+                            # Per-agent toggle: judge switches only on an explicit request/selection.
+                            explicit_only=bool(
+                                self.task_config.get("tools_config", {}).get("language_switch_explicit_only")
+                            ),
                         )
                         self.language_switcher.prewarm()  # pay the TLS handshake now
 
@@ -5568,13 +5566,15 @@ class TaskManager(BaseManager):
         if events is None or any(e.get("type") == "lid_usage" for e in events):
             return
         switcher = self.language_switcher
-        detector_seconds = pool.lid_audio_seconds() if hasattr(pool, "lid_audio_seconds") else None
+        detector_seconds = pool.lid_audio_seconds()
         if switcher is None and not detector_seconds:
             return
         record = {"type": "lid_usage", "ts": time.time(), "detector_audio_seconds": detector_seconds}
         if switcher is not None:
             record.update(
                 {
+                    # Every model that answered this call — the runtime fallback can swap mid-call.
+                    "judge_models": switcher.models_used or [switcher.model],
                     "judge_model": switcher.model,
                     "judge_requests": switcher.usage_totals.get("requests", 0),
                     "judge_input_tokens": switcher.usage_totals.get("input_tokens", 0),
@@ -5867,6 +5867,7 @@ class TaskManager(BaseManager):
         spec_agent_type = self.task_config["tools_config"]["llm_agent"].get("agent_type", "simple_llm_agent")
         if (
             spec_agent_type == "simple_llm_agent"
+            and not self.language_switcher.explicit_only
             and detected_lang
             and detected_lang != active
             and detected_lang in labels
@@ -5930,7 +5931,7 @@ class TaskManager(BaseManager):
                     detector_transcript,
                     active_transcript,
                     active,
-                    recent_turns=self.__recent_detected_turns(pool),
+                    recent_turns=None if self.language_switcher.explicit_only else self.__recent_detected_turns(pool),
                     last_agent_turn=self.conversation_history.last_assistant_content(),
                 ),
                 timeout=decide_timeout_s,
@@ -6008,14 +6009,20 @@ class TaskManager(BaseManager):
                     None,
                 )
             )
-        # Explicit-only mode: the judge's own authorization IS the gate — its prompt only
-        # ever targets an explicit request, so the ambient detection gates below would veto
-        # legitimate requests (a one-word "Telugu." answer fails every one of them).
-        if self.lid_explicit_only:
+        # Explicit-only mode: a switch is authorized iff the judge returned a consistent
+        # explicit verdict (request_status="switch" AND explicit_request) — the ambient
+        # detection gates below grade evidence the explicit contract does not produce.
+        if self.language_switcher.explicit_only:
+            if decision.get("request_status") != "switch" or not decision.get("explicit_request"):
+                logger.info(
+                    f"LanguageSwitcher: explicit-only mode — target '{target}' without an explicit verdict "
+                    f"(status={decision.get('request_status')}, explicit={decision.get('explicit_request')}) — no switch"
+                )
+                emit_lid_decision("gated:not_explicit")
+                return
             logger.info(
                 f"LanguageSwitcher: explicit-only mode — switch to '{target}' authorized "
-                f"(status={decision.get('request_status')}, source={decision.get('request_source')}, "
-                f"conf={target_conf}); detection gates bypassed"
+                f"(status=switch, source={decision.get('request_source')}, conf={target_conf})"
             )
         else:
             # Corroboration: when the detector independently agrees on the target, accept a lower LLM

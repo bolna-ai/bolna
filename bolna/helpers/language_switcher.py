@@ -80,6 +80,7 @@ class LanguageSwitcher:
         # Judge spend for the whole call (decides + prewarm); persisted via the lid_usage record.
         self.usage_totals = {"input_tokens": 0, "output_tokens": 0, "cached_tokens": 0, "requests": 0}
         self.last_usage = None
+        self.models_used: list = []
         # Dedicated creds, NOT the agent's — an Azure/OpenAI agent would 404 the switch model.
         switch_llm_key, switch_llm_base, switch_llm_version = resolve_switch_llm_credentials(self.model)
         # A configured (e.g. azure) judge with no resolvable key would fail EVERY decide,
@@ -132,11 +133,15 @@ class LanguageSwitcher:
         return {"role": "system", "content": [block]}
 
     def _tally_usage(self, usage):
+        """Count every completed response; a hedge loser cancelled mid-request never reaches
+        here, so tokens the provider billed for it are not client-visible and go uncounted."""
+        self.usage_totals["requests"] += 1
+        if self.model not in self.models_used:
+            self.models_used.append(self.model)
         if not usage:
             return
         for key in ("input_tokens", "output_tokens", "cached_tokens"):
             self.usage_totals[key] += int(usage.get(key) or 0)
-        self.usage_totals["requests"] += 1
         self.last_usage = usage
 
     def prewarm(self):

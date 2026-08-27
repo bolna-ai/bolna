@@ -163,7 +163,7 @@ from bolna.transcriber.transcriber_pool import TranscriberPool
 def make_tm(monkeypatch, decision, explicit_only=True, synth_labels=("en", "hi")):
     monkeypatch.setenv("LANGUAGE_SWITCH_SETTLE_MS", "0")
     tm = MagicMock()
-    tm.lid_explicit_only = explicit_only
+
     tm.task_config = {"tools_config": {"llm_agent": {"agent_type": "graph_agent"}}}
     tm.language = "en"
     tm.conversation_ended = False
@@ -183,6 +183,7 @@ def make_tm(monkeypatch, decision, explicit_only=True, synth_labels=("en", "hi")
     synth.labels = list(synth_labels)
     tm.tools = {"transcriber": pool, "synthesizer": synth, "input": MagicMock()}
     tm.language_switcher = MagicMock()
+    tm.language_switcher.explicit_only = explicit_only
     tm.language_switcher.decide = AsyncMock(return_value=decision)
     tm._inflight_response_activity = MagicMock(return_value={"audio_playing": False})
     tm._TaskManager__cleanup_downstream_tasks = AsyncMock()
@@ -285,3 +286,30 @@ async def test_telemetry_record_carries_request_fields(monkeypatch):
     record = tm.tools["transcriber"].lid_detection_events[-1]
     assert record["request_status"] == "switch"
     assert record["request_source"] == "agent_prompted_selection"
+
+
+async def test_explicit_mode_target_without_verdict_is_gated(monkeypatch):
+    # The exact shape from review: a target with status=ambiguous / explicit_request=false
+    # must not switch — rule 18 of the prompt is not the only guard anymore.
+    decision = {
+        "detected_language": "hi",
+        "explicit_request": False,
+        "requested_language": None,
+        "target_language": "hi",
+        "target_confidence": 0.0,
+        "request_status": "ambiguous",
+        "request_source": "none",
+        "reasoning": "drift",
+    }
+    tm = make_tm(monkeypatch, decision)
+    await run_switch(tm)
+    tm.switch_language.assert_not_awaited()
+    assert "gated:not_explicit" in outcomes(tm)
+
+
+async def test_explicit_mode_status_switch_but_no_explicit_flag_is_gated(monkeypatch):
+    decision = dict(EXPLICIT_SWITCH, explicit_request=False)
+    tm = make_tm(monkeypatch, decision)
+    await run_switch(tm)
+    tm.switch_language.assert_not_awaited()
+    assert "gated:not_explicit" in outcomes(tm)
