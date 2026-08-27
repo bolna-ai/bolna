@@ -20,8 +20,16 @@ from bolna.synthesizer.kalpa_synthesizer import (
     KALPA_DEFAULT_MODEL,
     KALPA_NATIVE_SAMPLE_RATE,
     MAX_TEXT_CHARS,
+    _VOICE_IDS,
     KalpaSynthesizer,
 )
+
+
+@pytest.fixture(autouse=True)
+def _fresh_voice_cache():
+    """The name->id cache is process-wide by design; tests must not see each other's."""
+    _VOICE_IDS.clear()
+    yield
 
 KEY = "kalpa_sk_test_dummy"
 VOICE_ID = "5e0c5704-590f-483b-b291-00a2415cb67e"
@@ -286,6 +294,19 @@ def test_a_catalog_error_raises_rather_than_guessing(monkeypatch):
     s = _synth(voice_id=None, voice="Kiara")
     with pytest.raises(RuntimeError):
         asyncio.run(s._resolve_voice_id())
+
+
+def test_voice_resolution_is_cached_across_instances(monkeypatch):
+    """The task manager builds a fresh synthesizer per call; without a process-wide cache
+    every call pays the GET /v1/voices round trip on its connect path."""
+    _patch_http(monkeypatch, CATALOG)
+    assert asyncio.run(_synth(voice_id=None, voice="Kiara")._resolve_voice_id()) == VOICE_ID
+
+    def boom(*a, **k):
+        raise AssertionError("a later call must not fetch /v1/voices again")
+
+    monkeypatch.setattr("bolna.synthesizer.kalpa_synthesizer.aiohttp.ClientSession", boom)
+    assert asyncio.run(_synth(voice_id=None, voice=" KIARA ")._resolve_voice_id()) == VOICE_ID
 
 
 # ----------------------------------------------------------------------
@@ -579,23 +600,23 @@ async def test_a_superseded_turn_with_a_live_response_is_cancelled_not_timed_out
     assert s.sent[-1] == {"type": "sendText", "text": "next"}
 
 
-async def test_a_superseded_turn_with_no_response_resets_the_socket_immediately():
-    """Same supersession, but no response is known: a cancel could settle nothing, so the
-    claim path closes the socket right away rather than waiting out the idle timeout."""
+async def test_a_superseded_turn_with_no_response_flushes_then_cancels():
+    """Same supersession, but no response is known: a bare cancel could settle nothing, so
+    the claim path flushes first — committing the utterance so the cancel's done is
+    guaranteed — instead of resetting the socket and paying the reconnect."""
     s = _synth()
     await _push(s, "half a turn", 1)
     s._on_push({"sequence_id": 2}, "next")
-    closed = {"yet": False}
+    task = asyncio.create_task(s.sender("next", sequence_id=2, end_of_llm_stream=False))
+    await asyncio.sleep(0.05)
+    s.websocket.close.assert_not_awaited()
+    assert s.sent[-2:] == [{"type": "sendText", "flush": True}, {"type": "cancelResponse"}]
+    assert s._slot_abandoned is True
 
-    async def close():
-        closed["yet"] = True
-        # what the receiver's settle and monitor's redial do once the closure lands:
-        s._settle_lost_utterance()
-        s._conn_gen += 1
-
-    s.websocket.close = close
-    await s.sender("next", sequence_id=2, end_of_llm_stream=False)
-    assert closed["yet"] is True
+    # the cancelled done arrives and frees the slot; the new turn proceeds on the same
+    # connection:
+    s._settle_slot(emit=False)
+    await asyncio.wait_for(task, timeout=2)
     assert s.sent[-1] == {"type": "sendText", "text": "next"}
 
 
@@ -1169,19 +1190,31 @@ async def test_interruption_cancels_the_rendering_utterance_and_clears_the_turn(
     assert s.current_turn_start_time is None
 
 
-async def test_a_barge_in_on_an_unflushed_utterance_resets_the_socket():
-    """Text was streamed but never flushed and no response has been seen: the server may or
-    may not have started rendering, and a cancel that lands before any response exists
-    settles with no responseDone — the slot would hang. The close is the barge-in."""
+async def test_a_barge_in_on_an_unflushed_utterance_flushes_then_cancels():
+    """Text was streamed but never flushed and no response has been seen: a bare cancel
+    could settle with no responseDone (the server may not have started rendering), and a
+    socket reset would cost the next turn the full reconnect. The flush commits the
+    utterance — a response and its done are then guaranteed — so the cancel settles the
+    slot in milliseconds on the same connection."""
     s = _synth()
     await _push(s, "streamed but never flushed", 1)
     ws = _open_ws(s)
     await s.handle_interruption()
-    ws.close.assert_awaited()
-    ws.send.assert_not_awaited()  # no cancel frame: the disconnect carries the barge-in
+    ws.close.assert_not_awaited()  # the reconnect cost was the bug
+    frames = [json.loads(c.args[0]) for c in ws.send.await_args_list]
+    assert frames == [{"type": "sendText", "flush": True}, {"type": "cancelResponse"}]
     assert s._turn_seq is None
-    # the closure settles silently — the pipeline already dropped the turn:
-    assert s._settle_lost_utterance() == 0
+    assert s._slot_abandoned is True  # the committed response's audio must never play
+
+    # the guaranteed done settles the slot silently, without a socket reset:
+    out = await _drain(
+        s,
+        [
+            json.dumps({"type": "responseCreated", "response_id": "r1", "sample_rate": 24000}),
+            json.dumps({"type": "responseDone", "response_id": "r1", "status": "cancelled", "text": "", "usage": {}}),
+        ],
+    )
+    assert out == []
     assert s._response_idle.is_set()
 
 

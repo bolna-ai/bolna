@@ -66,6 +66,13 @@ RESPONSE_IDLE_TIMEOUT = 10.0
 
 AUDIO_QUALITIES = {"low", "medium", "high"}
 
+# Voice display names resolve to catalog ids once per process, not once per call: the task
+# manager builds a fresh synthesizer for every call, and the GET /v1/voices round trip sits
+# on the connect path. The catalog is global (never key-scoped), so (host, name) is the
+# whole key; failures are never cached, so a typo keeps failing loudly and a voice added to
+# the catalog later is picked up without a restart.
+_VOICE_IDS = {}  # (host, lowercased display name) -> voice id
+
 
 class KalpaSynthesizer(StreamSynthesizer):
     def __init__(
@@ -245,13 +252,20 @@ class KalpaSynthesizer(StreamSynthesizer):
     # ------------------------------------------------------------------
 
     async def _resolve_voice_id(self):
-        """Return the opaque voice id, resolving a display name via GET /v1/voices once.
+        """Return the opaque voice id, resolving a display name via GET /v1/voices once
+        per process (see _VOICE_IDS).
 
         Names match case-insensitively, on the full name ("Kiara (hindi)") or its base
         before the qualifier ("Kiara") — so agent configs don't have to carry UUIDs.
         """
         if self.voice_id:
             return self.voice_id
+
+        wanted = self.voice.strip().lower()
+        cached = _VOICE_IDS.get((self.kalpa_host, wanted))
+        if cached:
+            self.voice_id = cached
+            return cached
 
         headers = {"Authorization": f"Bearer {self.api_key}"}
         url = f"https://{self.kalpa_host}/v1/voices"
@@ -262,12 +276,12 @@ class KalpaSynthesizer(StreamSynthesizer):
                 body = await resp.json()
         voices = body.get("data", []) if isinstance(body, dict) else body
 
-        wanted = self.voice.strip().lower()
         matches = [v for v in voices if v.get("name", "").lower() == wanted]
         if not matches:
             matches = [v for v in voices if v.get("name", "").split(" (")[0].lower() == wanted]
         if len(matches) == 1:
             self.voice_id = matches[0]["id"]
+            _VOICE_IDS[(self.kalpa_host, wanted)] = self.voice_id
             logger.info(f"Resolved Kalpa voice {self.voice!r} -> {matches[0]['name']!r} ({self.voice_id})")
             return self.voice_id
 
@@ -288,7 +302,7 @@ class KalpaSynthesizer(StreamSynthesizer):
         task-manager paths that interrupt before invalidating the sequence (it is why this
         method is safe without taking the send lock, which a parked sender may hold).
 
-        Then three states need three moves:
+        Then three states, two moves:
         - A response is open on the wire: bare cancelResponse. It aborts the generation
           and wipes buffered text; the response still settles with its own responseDone,
           and _slot_abandoned keeps that settle silent (even a "completed" done when the
@@ -296,11 +310,12 @@ class KalpaSynthesizer(StreamSynthesizer):
         - The utterance was flushed but its responseCreated hasn't arrived yet: same
           cancel. The flush committed the utterance server-side, so a response (and its
           done) is guaranteed.
-        - Text was streamed but never flushed and no response has been seen: the server
-          may or may not have started rendering it (segmentation decides), and a cancel
-          that lands before any response exists settles with no responseDone at all — the
-          slot would hang until the idle timeout. Close the socket instead: the server
-          treats disconnect as barge-in, and the fresh connection's state is deterministic.
+        - Text was streamed but never flushed and no response has been seen: a cancel
+          alone could settle with no responseDone at all (segmentation decides whether
+          the server started rendering), wedging the slot until the idle timeout. Flush
+          first: that commits the utterance and reduces this to the previous case — the
+          cancel's done frees the slot in milliseconds on the same connection, where a
+          socket reset here cost the next turn the full reconnect.
         """
         self._interrupt_gen += 1
         turn_open = self._turn_seq is not None and not self._turn_dead
@@ -311,16 +326,18 @@ class KalpaSynthesizer(StreamSynthesizer):
         # cancel send below fails with the socket.
         self.current_turn_start_time = None
         try:
+            flush_first = False
             if not self._response_idle.is_set():
                 self._slot_abandoned = True
-                if self._wire_rid is None and turn_open:
-                    await self._close_ws("barge-in on an un-flushed utterance with no response yet")
-                    return
+                flush_first = self._wire_rid is None and turn_open
             ws = self.websocket
             if ws is not None and ws.state is websockets.protocol.State.OPEN:
+                if flush_first:
+                    await ws.send(json.dumps({"type": "sendText", "flush": True}))
                 await ws.send(json.dumps({"type": "cancelResponse"}))
                 logger.info("Sent cancelResponse to Kalpa TTS WebSocket")
         except Exception as e:
+            # The send died with the socket; the receiver's closure path settles the turn.
             logger.error(f"Error handling Kalpa interruption: {e}")
 
     # ------------------------------------------------------------------
@@ -415,20 +432,18 @@ class KalpaSynthesizer(StreamSynthesizer):
             if self._turn_dead and not self._response_idle.is_set():
                 # A superseded turn holds the slot but can never settle it (it will never
                 # flush); run the barge-in triage handle_interruption never got to run:
-                # cancel when its response is on the wire — the done frees the slot in
-                # milliseconds — and reset the socket when none may ever exist.
+                # flush first when no response is known (a bare cancel there could settle
+                # nothing) — either way the cancel's done frees the slot in milliseconds.
                 self._slot_abandoned = True
-                if self._wire_rid is not None:
-                    self._dirty_conn_gen = None  # the cancel wipes the buffered text too
-                    try:
-                        await self._send_frame({"type": "cancelResponse"})
-                    except Exception:
-                        # the cancel died with the socket, and with it the dead turn's
-                        # residue; park on the redial and retry — bailing out here would
-                        # lose the new turn's chunk before anything retained it
-                        continue
-                else:
-                    await self._close_ws("superseded utterance holds the slot with no response")
+                self._dirty_conn_gen = None  # the cancel wipes the buffered text too
+                try:
+                    if self._wire_rid is None:
+                        await self._send_frame({"type": "sendText", "flush": True})
+                    await self._send_frame({"type": "cancelResponse"})
+                except Exception:
+                    # the send died with the socket, and with it the dead turn's
+                    # residue; park on the redial and retry — bailing out here would
+                    # lose the new turn's chunk before anything retained it
                     continue
             # A new utterance (or a replay after a reconnect) claims the connection's slot.
             slot = await self._wait_for_idle_slot(sequence_id, interrupt_gen)
