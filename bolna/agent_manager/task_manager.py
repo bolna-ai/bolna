@@ -2081,6 +2081,9 @@ class TaskManager(BaseManager):
                 extraction_json = (
                     task.get("tools_config").get("llm_agent", {}).get("llm_config", {}).get("extraction_json")
                 )
+                # Schema goes in as a .format() argument, so variables inside it reached the model as literal braces.
+                if isinstance(extraction_json, str):
+                    extraction_json = update_prompt_with_context(extraction_json, self.context_data)
                 prompt = EXTRACTION_PROMPT.format(current_date, current_time, self.timezone, extraction_json)
                 return {"system_prompt": prompt}
             elif task_type == "summarization":
@@ -3332,6 +3335,8 @@ class TaskManager(BaseManager):
                     handoff_text = handoff_template.replace("{agent_name}", target_agent_name).replace(
                         "{language}", language_display
                     )
+                    # Rendered after the two runtime replaces, so agent/language values win over a same-named variable.
+                    handoff_text = update_prompt_with_context(handoff_text, self.context_data)
                     meta_info_handoff = {
                         "io": self.tools["output"].get_provider(),
                         "request_id": str(uuid.uuid4()),
@@ -6253,9 +6258,11 @@ class TaskManager(BaseManager):
         template = self.switch_handoff_messages.get(label, "")
         if not template:
             return ""
-        return template.replace("{agent_name}", self._get_voice_name_for_label(label)).replace(
+        text = template.replace("{agent_name}", self._get_voice_name_for_label(label)).replace(
             "{language}", LANGUAGE_NAMES.get(label, label)
         )
+        # As in the legacy handoff: render after the runtime placeholders so {customer_name} resolves.
+        return update_prompt_with_context(text, self.context_data)
 
     def __handoff_mulaw_wire(self) -> bool:
         """True on telephony (mu-law@8k clip), False on web/freeswitch (raw PCM@24k)."""
