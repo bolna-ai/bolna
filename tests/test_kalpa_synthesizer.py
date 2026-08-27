@@ -694,6 +694,24 @@ async def test_a_dead_socket_settles_the_flushed_turn():
     assert s._response_idle.is_set()
 
 
+async def test_a_lost_turns_sentinel_is_suppressed_when_a_newer_turn_is_queued():
+    """The settle sentinel is positional: the stream generator stamps it onto the next
+    queued meta_info. With the newer turn's metadata already queued (pushes enqueue while
+    the sender parks on the slot), emitting it would mark that turn complete before it
+    produces any audio — the lost turn drops its completion instead, and the slot still
+    frees so the newer turn proceeds."""
+    s = _synth()
+    await _push(s, "turn one", 1, eos=True)  # flushed; its responseDone never arrives
+    s.text_queue.append({"sequence_id": 2})  # turn two pushed, parked on the slot
+    assert s._settle_lost_utterance() == 0
+    assert s._response_idle.is_set()
+
+    s = _synth()
+    await _push(s, "turn one", 1, eos=True)
+    s.text_queue.append({"sequence_id": 1})  # its own unconsumed meta: attribution is right
+    assert s._settle_lost_utterance() == 1
+
+
 async def test_a_dead_socket_with_nothing_in_flight_stays_silent():
     # No sentinel when idle: a spurious one would pop the next turn's meta_info.
     s = _synth()

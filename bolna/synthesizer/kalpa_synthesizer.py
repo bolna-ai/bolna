@@ -149,9 +149,11 @@ class KalpaSynthesizer(StreamSynthesizer):
         # A superseded turn can leave un-flushed text in the server buffer (no interruption
         # ran); the generation it happened on gates a defensive wipe before the next turn.
         self._dirty_conn_gen = None
-        # Set while no utterance occupies the connection.
+        # Set while no utterance occupies the connection; _slot_seq names the sequence that
+        # claimed it (it outlives the turn state, which resets at the flush).
         self._response_idle = asyncio.Event()
         self._response_idle.set()
+        self._slot_seq = None
         # After a cancel, audio frames already on the wire keep arriving until the
         # response's own responseDone; ids in this set are dropped instead of played.
         self._ignored_response_ids = set()
@@ -378,6 +380,7 @@ class KalpaSynthesizer(StreamSynthesizer):
             replay = bool(self._turn_chunks)
             self._turn_conn_gen = self._conn_gen
             self._response_idle.clear()
+            self._slot_seq = sequence_id
             # Generation may start at any segment boundary from here on, so synth latency
             # is measured from the turn's first text frame.
             if self.ws_send_time is None:
@@ -467,6 +470,22 @@ class KalpaSynthesizer(StreamSynthesizer):
             pass
         self._reset_turn()
 
+    def _sentinel_owns_queue_head(self):
+        """A completion sentinel is positional: the shared stream generator stamps it onto
+        the next queued meta_info. If a newer turn's metadata is already queued (its pushes
+        enqueue synchronously while its sender parks on the slot), the settling turn's own
+        metas were consumed by its audio — emitting would mark the newer turn complete
+        before it renders, so the settling turn is dropped without a completion instead."""
+        if not self.text_queue:
+            return True
+        head_seq = self.text_queue[0].get("sequence_id")
+        if head_seq == self._slot_seq:
+            return True
+        logger.warning(
+            f"Suppressing Kalpa end-of-stream for lost seq={self._slot_seq}: queue head belongs to seq={head_seq}"
+        )
+        return False
+
     def _settle_lost_utterance(self):
         """The socket died. Free the connection slot and return how many end-of-stream
         sentinels settle the lost turn (0 or 1):
@@ -483,11 +502,11 @@ class KalpaSynthesizer(StreamSynthesizer):
             self._response_idle.set()
             if self._abandoned_in_flight or self._turn_dead:
                 lost = 0
-            elif self._turn_seq is None:
-                lost = 1
-            elif self._current_response_id is not None:
-                self._turn_dead = True
-                lost = 1
+            elif self._turn_seq is None or self._current_response_id is not None:
+                if self._turn_seq is not None:
+                    self._turn_dead = True
+                lost = 1 if self._sentinel_owns_queue_head() else 0
+        self._slot_seq = None
         self._abandoned_in_flight = False
         self._current_response_id = None
         self._ignored_response_ids.clear()
@@ -538,6 +557,8 @@ class KalpaSynthesizer(StreamSynthesizer):
                     status = data.get("status")
                     logger.info(f"Kalpa responseDone status={status} response_id={rid}")
                     self._response_idle.set()
+                    owns_head = self._sentinel_owns_queue_head()
+                    self._slot_seq = None
                     was_abandoned = self._abandoned_in_flight
                     self._abandoned_in_flight = False
                     if rid in self._ignored_response_ids or was_abandoned:
@@ -545,7 +566,7 @@ class KalpaSynthesizer(StreamSynthesizer):
                         # "completed" done (the cancel lost the race) must not stamp
                         # end-of-stream onto the next turn.
                         self._ignored_response_ids.discard(rid)
-                    elif status == "completed":
+                    elif status == "completed" and owns_head:
                         yield b"\x00"
                     # "cancelled" terminates a turn we interrupted; handle_interruption()
                     # already abandoned it, so forwarding a sentinel would stamp
@@ -566,9 +587,11 @@ class KalpaSynthesizer(StreamSynthesizer):
                         logger.error(f"Kalpa TTS error: {err}")
                         if not self._response_idle.is_set():
                             self._response_idle.set()
+                            owns_head = self._sentinel_owns_queue_head()
+                            self._slot_seq = None
                             if self._turn_seq is not None:
                                 self._turn_dead = True  # drop the broken turn's stragglers
-                            if not self._abandoned_in_flight:
+                            if not self._abandoned_in_flight and owns_head:
                                 yield b"\x00"
                             self._abandoned_in_flight = False
                 elif event == "sessionCreated":
