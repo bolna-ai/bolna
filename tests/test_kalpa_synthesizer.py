@@ -31,6 +31,7 @@ def _fresh_voice_cache():
     _VOICE_IDS.clear()
     yield
 
+
 KEY = "kalpa_sk_test_dummy"
 VOICE_ID = "5e0c5704-590f-483b-b291-00a2415cb67e"
 
@@ -995,7 +996,9 @@ async def test_frames_from_a_replaced_socket_are_ignored():
     s = _synth()
     old_ws = s.websocket
     new_ws = _cancelling_ws()
-    frames = [json.dumps({"type": "responseDone", "response_id": "r-old", "status": "completed", "text": "", "usage": {}})]
+    frames = [
+        json.dumps({"type": "responseDone", "response_id": "r-old", "status": "completed", "text": "", "usage": {}})
+    ]
 
     async def old_recv():
         # monitor_connection replaced the socket while this recv was parked; the newer
@@ -1059,9 +1062,13 @@ async def test_the_receiver_survives_a_reconnect_within_one_generate_call():
         if ev == "r2-created":
             return json.dumps({"type": "responseCreated", "response_id": "r2", "sample_rate": 24000})
         if ev == "r2-audio":
-            return json.dumps({"type": "responseAudio", "response_id": "r2", "pcm_b64": base64.b64encode(b"two").decode()})
+            return json.dumps(
+                {"type": "responseAudio", "response_id": "r2", "pcm_b64": base64.b64encode(b"two").decode()}
+            )
         if ev == "r2-done":
-            return json.dumps({"type": "responseDone", "response_id": "r2", "status": "completed", "text": "", "usage": {}})
+            return json.dumps(
+                {"type": "responseDone", "response_id": "r2", "status": "completed", "text": "", "usage": {}}
+            )
         raise asyncio.CancelledError
 
     s.websocket.recv = recv
