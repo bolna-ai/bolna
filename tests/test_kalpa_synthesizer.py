@@ -50,7 +50,7 @@ def _synth(**kwargs):
     s._wait_for_ws = AsyncMock()
     s._is_ws_connected = MagicMock(return_value=True)
     s.sent = []
-    s._send_json = AsyncMock(side_effect=lambda p: s.sent.append(p))
+    s._send_frame = AsyncMock(side_effect=lambda p: s.sent.append(p))
     return s
 
 
@@ -131,7 +131,12 @@ def test_config_survives_the_model_and_reaches_the_synthesizer():
     model drops silently would leave the synthesizer on defaults."""
     cfg = Synthesizer(
         provider="kalpa",
-        provider_config={"voice_id": VOICE_ID, "model": "kalpa-tts-beta-v0.1", "temperature": 0.7},
+        provider_config={
+            "voice_id": VOICE_ID,
+            "model": "kalpa-tts-beta-v0.1",
+            "temperature": 0.7,
+            "chunk_length_schedule": [100, 200],
+        },
         stream=True,
     ).model_dump()
     cfg.pop("caching", None)
@@ -145,6 +150,7 @@ def test_config_survives_the_model_and_reaches_the_synthesizer():
     assert s.voice_id == VOICE_ID
     assert s.model == "kalpa-tts-beta-v0.1"
     assert s.params == {"temperature": 0.7}
+    assert s.chunk_length_schedule == [100, 200]
 
 
 # ----------------------------------------------------------------------
@@ -490,6 +496,73 @@ async def test_a_socket_death_after_audio_started_ends_the_turn_instead_of_repla
     await _push(s, "", 1, eos=True)
     assert len(s.sent) == 1  # nothing after the death reached the wire
     assert s._turn_seq is None  # the eos finally forgets the dead turn
+
+
+async def test_a_superseded_turn_with_a_live_response_is_cancelled_not_timed_out():
+    """A superseded open turn holds the slot but can never settle it (it will never flush).
+    With its response known, the claim path cancels it — the done frees the slot in
+    milliseconds — instead of eating the 10s idle timeout."""
+    s = _synth()
+    await _push(s, "half a turn", 1)
+    s._current_response_id = "r1"  # segmentation already started rendering it
+    s._on_push({"sequence_id": 2}, "next")  # superseded, no handle_interruption ran
+    task = asyncio.create_task(s.sender("next", sequence_id=2, end_of_llm_stream=False))
+    await asyncio.sleep(0.05)
+    assert {"type": "cancelResponse"} in s.sent
+    assert "r1" in s._ignored_response_ids  # its still-arriving audio must not play
+
+    # the cancelled done arrives and frees the slot:
+    s._response_idle.set()
+    s._abandoned_in_flight = False
+    s._current_response_id = None
+    await asyncio.wait_for(task, timeout=2)
+    assert s.sent[-1] == {"type": "sendText", "text": "next"}
+
+
+async def test_a_superseded_turn_with_no_response_resets_the_socket_immediately():
+    """Same supersession, but no response is known: a cancel could settle nothing, so the
+    claim path closes the socket right away rather than waiting out the idle timeout."""
+    s = _synth()
+    await _push(s, "half a turn", 1)
+    s._on_push({"sequence_id": 2}, "next")
+    closed = {"yet": False}
+
+    async def close():
+        closed["yet"] = True
+        # what the receiver's settle and monitor's redial do once the closure lands:
+        s._settle_lost_utterance()
+        s._conn_gen += 1
+
+    s.websocket.close = close
+    await s.sender("next", sequence_id=2, end_of_llm_stream=False)
+    assert closed["yet"] is True
+    assert s.sent[-1] == {"type": "sendText", "text": "next"}
+
+
+async def test_a_failed_send_stays_transient_and_the_turn_replays():
+    """The shared _send_json marks any failure as connection_error, which is fatal to the
+    generate loop; Kalpa sends its own frames, so a socket dying mid-send stays transient
+    and the turn replays on the next connection instead of ending the call."""
+    s = _synth()
+    s._send_frame = KalpaSynthesizer._send_frame.__get__(s)  # the real send path
+    sent = []
+    fail = {"next": True}
+
+    async def ws_send(raw):
+        if fail["next"]:
+            fail["next"] = False
+            raise RuntimeError("socket died mid-send")
+        sent.append(json.loads(raw))
+
+    s.websocket.send = ws_send
+    await _push(s, "first words.", 1)  # this send fails with the socket
+    assert s.connection_error is None  # transient: the shared loop must keep running
+    assert sent == []
+
+    assert s._settle_lost_utterance() == 0  # the receiver sees the death; nothing rendered
+    s._conn_gen += 1  # monitor_connection redials
+    await _push(s, "", 1, eos=True)
+    assert sent == [{"type": "sendText", "flush": True, "text": "first words."}]
 
 
 async def test_a_superseded_turns_server_residue_is_wiped_before_the_next_turn():
@@ -1081,6 +1154,27 @@ def test_http_error_and_empty_body_return_none(monkeypatch):
 
     _patch_http(monkeypatch, {"request_id": "r", "model": "m", "text": "hi", "usage": {}})
     assert asyncio.run(s.synthesize("hi")) is None
+
+
+def test_the_one_shot_render_truncates_at_the_cap_too(monkeypatch):
+    """The non-streaming loop sends the whole LLM response through this path; without the
+    same cap as streaming, an overlong turn is rejected by the API and silently muted."""
+    wav = _wav(0.1)
+    seen = {}
+
+    class _CapturingSession(_FakeSession):
+        def post(self, *a, **k):
+            seen["payload"] = k.get("json")
+            return _FakeResp(self._body, self._status)
+
+    monkeypatch.setattr(
+        "bolna.synthesizer.kalpa_synthesizer.aiohttp.ClientSession",
+        lambda *a, **k: _CapturingSession(_tts_response(wav)),
+    )
+    s = _synth()
+    asyncio.run(s.synthesize("hello " * (MAX_TEXT_CHARS // 6 + 50)))
+    assert len(seen["payload"]["text"]) <= MAX_TEXT_CHARS
+    assert seen["payload"]["text"].endswith("hello")  # cut at a word boundary
 
 
 def test_a_failed_one_shot_render_degrades_to_the_eos_sentinel():

@@ -129,6 +129,7 @@ class KalpaConfig(BaseModel):
     acoustic_temperature: Optional[float] = None
     max_new_tokens: Optional[int] = None
     audio_quality: Optional[str] = None
+    chunk_length_schedule: Optional[List[int]] = None
 
 
 class AzureConfig(BaseModel):

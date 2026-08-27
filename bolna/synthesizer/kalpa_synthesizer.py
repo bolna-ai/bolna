@@ -313,6 +313,26 @@ class KalpaSynthesizer(StreamSynthesizer):
         self._turn_truncated = False
         self._turn_dead = False
 
+    async def _send_frame(self, payload):
+        """Send one frame. Unlike the shared _send_json, a failure here is not recorded as
+        connection_error: a socket dying mid-send is transient — the receiver settles or
+        replays the turn and monitor_connection redials — while connection_error is
+        reserved for fatal conditions that must stop the whole synthesizer."""
+        try:
+            await self.websocket.send(json.dumps(payload))
+        except Exception as e:
+            logger.error(f"Kalpa send failed ({payload.get('type')}): {e}")
+            raise
+
+    @staticmethod
+    def _truncate_at_word(text, limit):
+        """Cut at a word boundary so the caller doesn't hear a clipped syllable."""
+        if len(text) <= limit:
+            return text
+        logger.warning(f"Kalpa text exceeds {limit} chars; truncating at a word boundary")
+        cut = text.rfind(" ", 0, limit + 1)
+        return text[:cut] if cut > 0 else text[:limit]
+
     async def _close_ws(self, reason):
         """Deterministic reset: the receiver notices the closure and settles the lost turn,
         monitor_connection redials, and establish_connection reinitializes the state."""
@@ -361,6 +381,19 @@ class KalpaSynthesizer(StreamSynthesizer):
                 return False, False
             if not self.should_synthesize_response(sequence_id):
                 return False, False
+            if self._turn_dead and not self._response_idle.is_set():
+                # A superseded turn holds the slot but can never settle it (it will never
+                # flush); run the barge-in triage handle_interruption never got to run:
+                # cancel when its response is known — the done frees the slot in
+                # milliseconds — and reset the socket when none may ever exist.
+                self._abandoned_in_flight = True
+                if self._current_response_id is not None:
+                    self._ignored_response_ids.add(self._current_response_id)
+                    self._dirty_conn_gen = None  # the cancel wipes the buffered text too
+                    await self._send_frame({"type": "cancelResponse"})
+                else:
+                    await self._close_ws("superseded utterance holds the slot with no response")
+                    continue
             # A new utterance (or a replay after a reconnect) claims the connection's slot.
             slot = await self._wait_for_idle_slot(sequence_id)
             if slot == "retired" or not self.should_synthesize_response(sequence_id):
@@ -376,7 +409,7 @@ class KalpaSynthesizer(StreamSynthesizer):
                 # A superseded turn left un-flushed text in the server buffer; wipe it
                 # before this turn's first chunk or the utterances merge.
                 self._dirty_conn_gen = None
-                await self._send_json({"type": "cancelResponse"})
+                await self._send_frame({"type": "cancelResponse"})
             replay = bool(self._turn_chunks)
             self._turn_conn_gen = self._conn_gen
             self._response_idle.clear()
@@ -399,9 +432,7 @@ class KalpaSynthesizer(StreamSynthesizer):
             piece = (" " if self._turn_chars else "") + text
             budget = MAX_TEXT_CHARS - self._turn_chars
             if len(piece) > budget:
-                logger.warning(f"Kalpa utterance exceeds {MAX_TEXT_CHARS} chars; truncating")
-                cut = piece.rfind(" ", 0, budget + 1)
-                piece = piece[:cut] if cut > 0 else piece[:budget]
+                piece = self._truncate_at_word(piece, budget)
                 self._turn_truncated = True
             if piece:
                 self._turn_chunks.append(piece)
@@ -432,7 +463,7 @@ class KalpaSynthesizer(StreamSynthesizer):
                     wire_text = self._wire_text(text, replay)
                     if wire_text:
                         try:
-                            await self._send_json({"type": "sendText", "text": wire_text})
+                            await self._send_frame({"type": "sendText", "text": wire_text})
                         except Exception:
                             # The socket died mid-send; the chunk stays in _turn_chunks, so
                             # the next send (or this call's flush below) replays the turn
@@ -463,7 +494,7 @@ class KalpaSynthesizer(StreamSynthesizer):
             frame["text"] = "".join(self._turn_chunks)
         self.last_text_sent = True
         try:
-            await self._send_json(frame)
+            await self._send_frame(frame)
         except Exception:
             # Died at the flush: the receiver's settle path terminates the turn (the slot
             # stays claimed until then, so nothing else flushes into the gap).
@@ -742,7 +773,9 @@ class KalpaSynthesizer(StreamSynthesizer):
             logger.error(f"Kalpa voice resolution failed: {e}")
             return None
 
-        payload = {"text": text}
+        # Same cap as the streaming path: the API rejects longer utterances outright, and
+        # in the non-streaming loop that rejection would silently mute the whole turn.
+        payload = {"text": self._truncate_at_word(text, MAX_TEXT_CHARS)}
         if self.model:
             payload["model"] = self.model
         if self.params:
