@@ -726,6 +726,81 @@ async def test_a_dead_socket_with_nothing_in_flight_stays_silent():
     assert out == []
 
 
+async def _consume_all(s):
+    out = []
+    try:
+
+        async def go():
+            async for item in s.receiver():
+                out.append(item)
+
+        await asyncio.wait_for(go(), timeout=5)
+    except (asyncio.CancelledError, asyncio.TimeoutError):
+        pass
+    return out
+
+
+def _cancelling_ws():
+    ws = MagicMock()
+
+    async def recv():
+        raise asyncio.CancelledError
+
+    ws.recv = recv
+    return ws
+
+
+async def test_frames_from_a_replaced_socket_are_ignored():
+    """A closed socket drains its buffered frames before raising ConnectionClosed, so after
+    a reset the receiver can still be reading the replaced socket while the new connection
+    already serves the next turn. The old response's late done must not free — let alone
+    complete — the newer turn's slot."""
+    s = _synth()
+    old_ws = s.websocket
+    new_ws = _cancelling_ws()
+    frames = [json.dumps({"type": "responseDone", "response_id": "r-old", "status": "completed", "text": "", "usage": {}})]
+
+    async def old_recv():
+        # monitor_connection replaced the socket while this recv was parked; the newer
+        # turn has already claimed the slot on the fresh connection
+        s.websocket = new_ws
+        s._response_idle.clear()
+        s._slot_seq = 2
+        if frames:
+            return frames.pop(0)
+        raise _ws.exceptions.ConnectionClosedOK(None, None)
+
+    old_ws.recv = old_recv
+    s.conversation_ended = False
+
+    out = await _consume_all(s)
+    assert out == []  # the stale done neither played nor completed anything
+    assert not s._response_idle.is_set()  # the newer turn still owns the slot
+    assert s._slot_seq == 2
+
+
+async def test_a_replaced_sockets_death_does_not_settle_the_new_connection():
+    """The replaced socket's ConnectionClosed must not settle the live connection's state:
+    establish_connection already reset it, and the newer turn owns the slot."""
+    s = _synth()
+    old_ws = s.websocket
+    new_ws = _cancelling_ws()
+
+    async def old_recv():
+        s.websocket = new_ws
+        s._response_idle.clear()
+        s._slot_seq = 2
+        raise _ws.exceptions.ConnectionClosedOK(None, None)
+
+    old_ws.recv = old_recv
+    s.conversation_ended = False
+
+    out = await _consume_all(s)
+    assert out == []
+    assert not s._response_idle.is_set()
+    assert s._slot_seq == 2
+
+
 async def test_a_socket_death_seen_by_the_poll_path_still_settles_the_turn():
     """The receiver usually notices a dead socket at its connection poll, not inside
     recv(); the flushed turn must settle there too or its completion is lost and the

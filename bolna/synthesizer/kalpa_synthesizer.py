@@ -514,6 +514,7 @@ class KalpaSynthesizer(StreamSynthesizer):
 
     async def receiver(self):
         not_connected_since = None
+        ws = None
         while True:
             try:
                 if self.conversation_ended:
@@ -538,7 +539,16 @@ class KalpaSynthesizer(StreamSynthesizer):
                 else:
                     not_connected_since = None
 
-                response = await self.websocket.recv()
+                # Pin the iteration to the socket it reads from: a closed socket drains its
+                # buffered frames before raising ConnectionClosed, so after a reset this
+                # loop can still be reading the replaced socket while the new connection
+                # already serves the next turn. A stale done freeing (and "completing") the
+                # newer turn's slot is exactly the corruption this guard prevents.
+                ws = self.websocket
+                response = await ws.recv()
+                if ws is not self.websocket:
+                    logger.info("Dropping frame from a replaced Kalpa socket")
+                    continue
                 data = self._loads_event(response)
                 if data is None:
                     continue
@@ -611,6 +621,11 @@ class KalpaSynthesizer(StreamSynthesizer):
                     logger.info(f"Ignoring Kalpa event: {data}")
 
             except websockets.exceptions.ConnectionClosed:
+                if ws is not None and ws is not self.websocket:
+                    # A socket we already replaced finished dying; the live connection's
+                    # state was reset at establish, so there is nothing to settle here.
+                    logger.info("Kalpa: replaced socket finished closing")
+                    continue
                 logger.info("Kalpa WebSocket connection closed")
                 # A turn that dies with the socket never gets its responseDone;
                 # monitor_connection re-establishes the socket for what remains.
