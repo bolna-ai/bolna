@@ -150,18 +150,25 @@ class KalpaSynthesizer(StreamSynthesizer):
         # A superseded turn can leave un-flushed text in the server buffer (no interruption
         # ran); the generation it happened on gates a defensive wipe before the next turn.
         self._dirty_conn_gen = None
-        # Set while no utterance occupies the connection; _slot_seq names the sequence that
-        # claimed it (it outlives the turn state, which resets at the flush).
+        # Bumped by handle_interruption() before anything else. Senders capture it at entry
+        # and retire at their next await boundary on a mismatch — including on task-manager
+        # paths that cancel first and only invalidate the sequence later.
+        self._interrupt_gen = 0
+        # THE SLOT: one utterance occupies the connection from its first sendText until its
+        # settle. _slot_seq names the owning sequence; _slot_abandoned marks a barge-in on
+        # it (its completion then settles silently). Freed ONLY by _settle_slot() (and the
+        # establish_connection reset) so the state cannot half-change.
         self._response_idle = asyncio.Event()
         self._response_idle.set()
         self._slot_seq = None
-        # After a cancel, audio frames already on the wire keep arriving until the
-        # response's own responseDone; ids in this set are dropped instead of played.
-        self._ignored_response_ids = set()
-        self._current_response_id = None
-        # A barge-in can land before responseCreated delivers the in-flight response's id;
-        # this flag marks the abandonment id-independently until that response settles.
-        self._abandoned_in_flight = False
+        self._slot_abandoned = False
+        # THE WIRE RESPONSE: the server serializes responses on a connection, so at most
+        # one is open (responseCreated..responseDone). Whether it serves the slot-owning
+        # utterance is decided ONCE, at its responseCreated; audio, done, and error frames
+        # all correlate against this single record, so a stale or foreign frame can never
+        # touch the active slot.
+        self._wire_rid = None
+        self._wire_serves_slot = False
 
     def get_sleep_time(self):
         return 0.01
@@ -266,21 +273,28 @@ class KalpaSynthesizer(StreamSynthesizer):
     # ------------------------------------------------------------------
 
     async def handle_interruption(self):
-        """Abandon the open utterance and whatever the server holds for it. Three states
-        need three moves:
+        """Abandon the open utterance and whatever the server holds for it.
 
-        - A response is known (responseCreated arrived): bare cancelResponse. It aborts the
-          generation and wipes buffered text, and the response still settles with its own
-          responseDone (status "cancelled"), which frees the connection slot.
-        - The utterance was flushed but its responseCreated hasn't arrived yet: same cancel.
-          The flush committed the utterance server-side, so a responseDone is guaranteed;
-          the abandonment flag keeps that late settle from finishing the next turn.
-        - Text was streamed but never flushed and no response has been seen: the server may
-          or may not have started rendering it (segmentation decides), and a cancel that
-          lands before any response exists settles with no responseDone at all — the slot
-          would hang until the idle timeout. Close the socket instead: the server treats
-          disconnect as barge-in, and the fresh connection's state is deterministic.
+        The epoch bump comes first: it retires every pending sender at its next await
+        boundary, so this cancel cannot race a parked sender into the socket even on
+        task-manager paths that interrupt before invalidating the sequence (it is why this
+        method is safe without taking the send lock, which a parked sender may hold).
+
+        Then three states need three moves:
+        - A response is open on the wire: bare cancelResponse. It aborts the generation
+          and wipes buffered text; the response still settles with its own responseDone,
+          and _slot_abandoned keeps that settle silent (even a "completed" done when the
+          cancel lost the race) and drops its still-arriving audio.
+        - The utterance was flushed but its responseCreated hasn't arrived yet: same
+          cancel. The flush committed the utterance server-side, so a response (and its
+          done) is guaranteed.
+        - Text was streamed but never flushed and no response has been seen: the server
+          may or may not have started rendering it (segmentation decides), and a cancel
+          that lands before any response exists settles with no responseDone at all — the
+          slot would hang until the idle timeout. Close the socket instead: the server
+          treats disconnect as barge-in, and the fresh connection's state is deterministic.
         """
+        self._interrupt_gen += 1
         turn_open = self._turn_seq is not None and not self._turn_dead
         self._reset_turn()
         self._dirty_conn_gen = None
@@ -290,10 +304,8 @@ class KalpaSynthesizer(StreamSynthesizer):
         self.current_turn_start_time = None
         try:
             if not self._response_idle.is_set():
-                self._abandoned_in_flight = True
-                if self._current_response_id is not None:
-                    self._ignored_response_ids.add(self._current_response_id)
-                elif turn_open:
+                self._slot_abandoned = True
+                if self._wire_rid is None and turn_open:
                     await self._close_ws("barge-in on an un-flushed utterance with no response yet")
                     return
             ws = self.websocket
@@ -347,15 +359,26 @@ class KalpaSynthesizer(StreamSynthesizer):
         except Exception as e:
             logger.error(f"Error closing Kalpa TTS socket: {e}")
 
-    async def _wait_for_idle_slot(self, sequence_id):
-        """Wait for the previous utterance's responseDone to free the connection; returns
-        "free", "retired", or "reset". Cancels settle in milliseconds, so hitting the
-        timeout means a done that is wedged or can never arrive; the socket is closed to
+    def _retired(self, sequence_id, interrupt_gen):
+        """True once a sender's work must not reach the socket: the conversation ended, an
+        interruption ran after the sender started (the epoch moved), or the pipeline
+        retired the sequence. Re-checked after every await — a parked sender can resume
+        long after the world changed."""
+        return (
+            self.conversation_ended
+            or interrupt_gen != self._interrupt_gen
+            or not self.should_synthesize_response(sequence_id)
+        )
+
+    async def _wait_for_idle_slot(self, sequence_id, interrupt_gen):
+        """Wait for the previous utterance's settle to free the connection; returns
+        "free", "retired", or "reset". Settles arrive in milliseconds, so hitting the
+        timeout means one that is wedged or can never arrive; the socket is closed to
         reset the session ("reset" — the caller parks on the reconnect, after which this
         turn's text is replayed on the fresh connection)."""
         deadline = time.perf_counter() + RESPONSE_IDLE_TIMEOUT
         while not self._response_idle.is_set():
-            if self.conversation_ended or not self.should_synthesize_response(sequence_id):
+            if self._retired(sequence_id, interrupt_gen):
                 return "retired"
             remaining = deadline - time.perf_counter()
             if remaining <= 0:
@@ -367,30 +390,27 @@ class KalpaSynthesizer(StreamSynthesizer):
                 pass
         return "free"
 
-    async def _open_utterance(self, sequence_id):
+    async def _open_utterance(self, sequence_id, interrupt_gen):
         """Ensure `sequence_id` owns an open utterance on a live connection; returns
         (opened, replay). replay=True means this turn's earlier chunks were sent on a
         connection that died — the server lost them, so the caller resends the whole turn."""
         while True:
-            if self.conversation_ended or not self.should_synthesize_response(sequence_id):
+            if self._retired(sequence_id, interrupt_gen):
                 return False, False
             if self._turn_dead and self._turn_seq == sequence_id:
                 return False, False
             if self._turn_seq == sequence_id and self._turn_conn_gen == self._conn_gen and self._is_ws_connected():
                 return True, False
             await self._wait_for_ws()
-            if self.conversation_ended or self.connection_error:
-                return False, False
-            if not self.should_synthesize_response(sequence_id):
+            if self.connection_error or self._retired(sequence_id, interrupt_gen):
                 return False, False
             if self._turn_dead and not self._response_idle.is_set():
                 # A superseded turn holds the slot but can never settle it (it will never
                 # flush); run the barge-in triage handle_interruption never got to run:
-                # cancel when its response is known — the done frees the slot in
+                # cancel when its response is on the wire — the done frees the slot in
                 # milliseconds — and reset the socket when none may ever exist.
-                self._abandoned_in_flight = True
-                if self._current_response_id is not None:
-                    self._ignored_response_ids.add(self._current_response_id)
+                self._slot_abandoned = True
+                if self._wire_rid is not None:
                     self._dirty_conn_gen = None  # the cancel wipes the buffered text too
                     try:
                         await self._send_frame({"type": "cancelResponse"})
@@ -403,8 +423,8 @@ class KalpaSynthesizer(StreamSynthesizer):
                     await self._close_ws("superseded utterance holds the slot with no response")
                     continue
             # A new utterance (or a replay after a reconnect) claims the connection's slot.
-            slot = await self._wait_for_idle_slot(sequence_id)
-            if slot == "retired" or not self.should_synthesize_response(sequence_id):
+            slot = await self._wait_for_idle_slot(sequence_id, interrupt_gen)
+            if slot == "retired" or self._retired(sequence_id, interrupt_gen):
                 # the wait can span a barge-in that retires this sequence; the wake-up on
                 # the freed slot must not claim it for a turn the pipeline dropped
                 return False, False
@@ -425,6 +445,7 @@ class KalpaSynthesizer(StreamSynthesizer):
             self._turn_conn_gen = self._conn_gen
             self._response_idle.clear()
             self._slot_seq = sequence_id
+            self._slot_abandoned = False
             # Generation may start at any segment boundary from here on, so synth latency
             # is measured from the turn's first text frame.
             if self.ws_send_time is None:
@@ -458,21 +479,22 @@ class KalpaSynthesizer(StreamSynthesizer):
 
     async def sender(self, text, sequence_id, end_of_llm_stream=False):
         try:
-            if self.conversation_ended:
-                return
-            if not self.should_synthesize_response(sequence_id):
+            # Captured before any await: an interruption bumps the epoch first, so a
+            # sender that started before the barge-in retires at its next await boundary
+            # even when the sequence is only invalidated later.
+            interrupt_gen = self._interrupt_gen
+            if self._retired(sequence_id, interrupt_gen):
                 logger.info(f"Not synthesizing: sequence_id {sequence_id} not current")
                 return
 
             async with self._send_lock:
-                # The lock wait can span a barge-in that retires this sequence without
-                # cancelling the task; nothing may reach the socket after that.
-                if self.conversation_ended or not self.should_synthesize_response(sequence_id):
+                # The lock wait can span a barge-in; nothing may reach the socket after it.
+                if self._retired(sequence_id, interrupt_gen):
                     logger.info(f"Not synthesizing (post-lock): sequence_id {sequence_id} not current")
                     return
 
                 if text and not (self._turn_dead and self._turn_seq == sequence_id):
-                    opened, replay = await self._open_utterance(sequence_id)
+                    opened, replay = await self._open_utterance(sequence_id, interrupt_gen)
                     if not opened:
                         return
                     wire_text = self._wire_text(text, replay)
@@ -486,14 +508,14 @@ class KalpaSynthesizer(StreamSynthesizer):
                             pass
 
                 if end_of_llm_stream:
-                    await self._finish_utterance(sequence_id)
+                    await self._finish_utterance(sequence_id, interrupt_gen)
 
         except asyncio.CancelledError:
             logger.info("Kalpa sender task was cancelled.")
         except Exception as e:
             logger.error(f"Unexpected error in Kalpa sender: {e}")
 
-    async def _finish_utterance(self, sequence_id):
+    async def _finish_utterance(self, sequence_id, interrupt_gen):
         """The LLM turn ended: flush the utterance. A turn that never opened (the LLM's last
         buffer is often empty) has nothing to flush; a dead one is finally forgotten."""
         if self._turn_seq != sequence_id:
@@ -501,7 +523,7 @@ class KalpaSynthesizer(StreamSynthesizer):
         if self._turn_dead:
             self._reset_turn()
             return
-        opened, replay = await self._open_utterance(sequence_id)
+        opened, replay = await self._open_utterance(sequence_id, interrupt_gen)
         if not opened:
             return
         frame = {"type": "sendText", "flush": True}
@@ -532,30 +554,41 @@ class KalpaSynthesizer(StreamSynthesizer):
         )
         return False
 
-    def _settle_lost_utterance(self):
-        """The socket died. Free the connection slot and return how many end-of-stream
-        sentinels settle the lost turn (0 or 1):
+    def _settle_slot(self, emit):
+        """THE transition that frees the connection slot — every settle path (done, error,
+        socket death) funnels through here so the state cannot half-change. Returns 1 when
+        the settling turn's end-of-stream sentinel should be emitted: never for an
+        abandoned (barged-in) turn — its pipeline already dropped it — and never when the
+        queue head already belongs to a newer turn (the sentinel is positional)."""
+        if self._response_idle.is_set():
+            return 0
+        emit = emit and not self._slot_abandoned and self._sentinel_owns_queue_head()
+        self._response_idle.set()
+        self._slot_seq = None
+        self._slot_abandoned = False
+        return 1 if emit else 0
 
-        - a flushed utterance awaiting its responseDone settles now (unless a barge-in had
-          already abandoned it — its pipeline dropped the turn, so it settles silently);
+    def _settle_lost_utterance(self):
+        """The socket died. Settle whatever it was carrying and return how many
+        end-of-stream sentinels to emit (0 or 1):
+
+        - a flushed utterance awaiting its responseDone settles now (an abandoned one
+          settles silently via _settle_slot);
         - an open utterance whose response had started already played audio; replaying its
           text would repeat what the caller heard, so the turn ends here instead — it is
           marked dead and settled;
         - an open utterance with no response yet lost nothing audible: keep its text for
-          replay and stay silent — the turn is still live."""
-        lost = 0
+          replay and settle silently — the turn is still live."""
+        emit = False
         if not self._response_idle.is_set():
-            self._response_idle.set()
-            if self._abandoned_in_flight or self._turn_dead:
-                lost = 0
-            elif self._turn_seq is None or self._current_response_id is not None:
-                if self._turn_seq is not None:
-                    self._turn_dead = True
-                lost = 1 if self._sentinel_owns_queue_head() else 0
-        self._slot_seq = None
-        self._abandoned_in_flight = False
-        self._current_response_id = None
-        self._ignored_response_ids.clear()
+            if self._turn_seq is None:
+                emit = True
+            elif not self._turn_dead and self._wire_rid is not None and self._wire_serves_slot:
+                self._turn_dead = True
+                emit = True
+        lost = self._settle_slot(emit)
+        self._wire_rid = None
+        self._wire_serves_slot = False
         return lost
 
     async def receiver(self):
@@ -601,7 +634,10 @@ class KalpaSynthesizer(StreamSynthesizer):
 
                 event = data.get("type")
                 if event == "responseAudio":
-                    if data.get("response_id") in self._ignored_response_ids:
+                    # Only the open wire response, and only while it serves a live
+                    # (un-abandoned) slot: stale, foreign, orphaned, or barged-in audio
+                    # never plays.
+                    if data.get("response_id") != self._wire_rid or not self._wire_serves_slot or self._slot_abandoned:
                         continue
                     chunk = self._decode_audio(data.get("pcm_b64"))
                     if chunk:
@@ -610,31 +646,20 @@ class KalpaSynthesizer(StreamSynthesizer):
                     rid = data.get("response_id")
                     status = data.get("status")
                     logger.info(f"Kalpa responseDone status={status} response_id={rid}")
-                    if rid is None or rid != self._current_response_id:
+                    if rid is None or rid != self._wire_rid:
                         # created always precedes done on this ordered socket, so a done
-                        # that does not name the response being served is stale or foreign
-                        # (e.g. a late settle after an error already freed its turn) — it
-                        # must not free, or positionally complete, a slot a newer turn may
-                        # own. If it strands the connection, the idle timeout resets it.
+                        # that does not name the open wire response is stale or foreign —
+                        # it must not free, or positionally complete, a slot a newer turn
+                        # may own. If it strands the connection, the idle timeout resets it.
                         logger.warning(f"Ignoring Kalpa responseDone for unmatched response_id={rid}")
-                        self._ignored_response_ids.discard(rid)
                         continue
-                    self._current_response_id = None
-                    self._response_idle.set()
-                    owns_head = self._sentinel_owns_queue_head()
-                    self._slot_seq = None
-                    was_abandoned = self._abandoned_in_flight
-                    self._abandoned_in_flight = False
-                    if rid in self._ignored_response_ids or was_abandoned:
-                        # This response's turn was abandoned at the barge-in; even a
-                        # "completed" done (the cancel lost the race) must not stamp
-                        # end-of-stream onto the next turn.
-                        self._ignored_response_ids.discard(rid)
-                    elif status == "completed" and owns_head:
+                    serves = self._wire_serves_slot
+                    self._wire_rid = None
+                    self._wire_serves_slot = False
+                    # A "cancelled" done (or any done of an abandoned turn, even
+                    # "completed" when the cancel lost the race) settles silently.
+                    if serves and self._settle_slot(emit=status == "completed"):
                         yield b"\x00"
-                    # "cancelled" terminates a turn we interrupted; handle_interruption()
-                    # already abandoned it, so forwarding a sentinel would stamp
-                    # end-of-stream on a turn the pipeline dropped.
                 elif event == "error":
                     err = data.get("error") or {}
                     if data.get("fatal"):
@@ -644,40 +669,46 @@ class KalpaSynthesizer(StreamSynthesizer):
                         if err.get("type") == "authentication_error":
                             self.connection_error = err.get("message") or "authentication error"
                     else:
-                        # A non-fatal error with an utterance on the connection means that
-                        # turn will never finish normally — terminate it and free the slot.
-                        # When idle (e.g. a rejected cancelResponse) a sentinel would pop
-                        # the next turn's meta_info, so just log.
                         logger.error(f"Kalpa TTS error: {err}")
-                        if not self._response_idle.is_set():
-                            self._response_idle.set()
-                            owns_head = self._sentinel_owns_queue_head()
-                            self._slot_seq = None
-                            if self._current_response_id is not None:
-                                # The failed response may still have frames on the wire:
-                                # ignore its late audio, and retire its id so a delayed
-                                # done cannot match as current after a newer turn claims
-                                # the slot — that would finish the newer turn early.
-                                self._ignored_response_ids.add(self._current_response_id)
-                                self._current_response_id = None
+                        rid = data.get("response_id")
+                        if rid is not None:
+                            # Response-scoped: only the open wire response can be killed —
+                            # a delayed error for an already-settled response touches
+                            # nothing.
+                            if rid == self._wire_rid:
+                                serves = self._wire_serves_slot
+                                self._wire_rid = None
+                                self._wire_serves_slot = False
+                                if self._turn_seq is not None:
+                                    self._turn_dead = True  # drop the broken turn's stragglers
+                                if serves and self._settle_slot(emit=True):
+                                    yield b"\x00"
+                        elif not self._response_idle.is_set() and self._wire_rid is None:
+                            # Connection-scoped rejection (e.g. a rejected flush) with no
+                            # response to carry the settle: the slot-owning utterance can
+                            # never finish — end it. With a response open its own done
+                            # still arrives, and when idle a sentinel would pop the next
+                            # turn's meta_info, so both just log.
                             if self._turn_seq is not None:
-                                self._turn_dead = True  # drop the broken turn's stragglers
-                            if not self._abandoned_in_flight and owns_head:
+                                self._turn_dead = True
+                            if self._settle_slot(emit=True):
                                 yield b"\x00"
-                            self._abandoned_in_flight = False
                 elif event == "sessionCreated":
                     # Normally consumed inside establish_connection; tolerated here in case
                     # a future server pushes an unsolicited session update.
                     self.native_sample_rate = int(data.get("sample_rate") or self.native_sample_rate)
                 elif event == "responseCreated":
-                    # With segmentation this can arrive well before the flush — the server
-                    # started rendering the open utterance's first complete sentences.
-                    self._current_response_id = data.get("response_id")
-                    if self._abandoned_in_flight:
-                        # The barge-in landed before this frame delivered the id; the
-                        # response is already abandoned, so its audio must not play.
-                        self._ignored_response_ids.add(self._current_response_id)
-                    logger.info(f"Kalpa responseCreated response_id={self._current_response_id}")
+                    # With segmentation this can arrive well before the flush. Whether the
+                    # response serves the slot-owning utterance is decided HERE, once: the
+                    # server serializes responses, so a response created while our slot is
+                    # claimed can only be ours (and one created while the slot is idle is
+                    # an orphan whose frames must not play). A barge-in after this point
+                    # flips _slot_abandoned rather than rewriting this record.
+                    self._wire_rid = data.get("response_id")
+                    self._wire_serves_slot = not self._response_idle.is_set()
+                    logger.info(
+                        f"Kalpa responseCreated response_id={self._wire_rid} serves_slot={self._wire_serves_slot}"
+                    )
                 else:
                     logger.info(f"Ignoring Kalpa event: {data}")
 
@@ -689,10 +720,12 @@ class KalpaSynthesizer(StreamSynthesizer):
                     continue
                 logger.info("Kalpa WebSocket connection closed")
                 # A turn that dies with the socket never gets its responseDone;
-                # monitor_connection re-establishes the socket for what remains.
+                # monitor_connection re-establishes the socket. Keep looping rather than
+                # returning: SynthesizerPool iterates generate() exactly once, so a
+                # receiver that ends on a transient closure would leave that language
+                # silent for the rest of the call.
                 for _ in range(self._settle_lost_utterance()):
                     yield b"\x00"
-                break
             except Exception as e:
                 logger.error(f"Error occurred in Kalpa receiver - {e}")
 
@@ -766,9 +799,10 @@ class KalpaSynthesizer(StreamSynthesizer):
             # its sender sees the new generation and replays it here.
             self._conn_gen += 1
             self._response_idle.set()
-            self._ignored_response_ids.clear()
-            self._current_response_id = None
-            self._abandoned_in_flight = False
+            self._slot_seq = None
+            self._slot_abandoned = False
+            self._wire_rid = None
+            self._wire_serves_slot = False
             if not self.connection_time:
                 self.connection_time = round((time.perf_counter() - start_time) * 1000)
             logger.info(

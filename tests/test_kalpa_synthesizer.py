@@ -75,6 +75,22 @@ def _open_ws(s):
     return ws
 
 
+def _die_once(s):
+    """recv that raises ConnectionClosed once. The receiver keeps looping across the
+    closure (SynthesizerPool iterates generate() only once), so the script must end it
+    explicitly with CancelledError on the next read."""
+    calls = {"n": 0}
+
+    async def recv():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise _ws.exceptions.ConnectionClosedOK(None, None)
+        raise asyncio.CancelledError
+
+    s.websocket.recv = recv
+    s.conversation_ended = False
+
+
 class _FakeResp:
     def __init__(self, body, status=200):
         self._body = body
@@ -318,7 +334,8 @@ async def test_a_failed_supersession_cancel_retries_instead_of_losing_the_chunk(
     go completely silent. The claim path parks on the redial and retries instead."""
     s = _synth()
     await _push(s, "half a turn", 1)
-    s._current_response_id = "r1"  # the dead turn's response is known
+    s._wire_rid = "r1"  # the dead turn's response is on the wire
+    s._wire_serves_slot = True
     s._on_push({"sequence_id": 2}, "next")  # superseded, no handle_interruption ran
     calls = {"n": 0}
 
@@ -529,7 +546,8 @@ async def test_a_socket_death_after_audio_started_ends_the_turn_instead_of_repla
     stragglers are dropped."""
     s = _synth()
     await _push(s, "some words that already rendered.", 1)
-    s._current_response_id = "r1"  # the server had started this utterance's response
+    s._wire_rid = "r1"  # the server had started this utterance's response
+    s._wire_serves_slot = True
     assert s._settle_lost_utterance() == 1
     s._conn_gen += 1
 
@@ -545,17 +563,18 @@ async def test_a_superseded_turn_with_a_live_response_is_cancelled_not_timed_out
     milliseconds — instead of eating the 10s idle timeout."""
     s = _synth()
     await _push(s, "half a turn", 1)
-    s._current_response_id = "r1"  # segmentation already started rendering it
+    s._wire_rid = "r1"  # segmentation already started rendering it
+    s._wire_serves_slot = True
     s._on_push({"sequence_id": 2}, "next")  # superseded, no handle_interruption ran
     task = asyncio.create_task(s.sender("next", sequence_id=2, end_of_llm_stream=False))
     await asyncio.sleep(0.05)
     assert {"type": "cancelResponse"} in s.sent
-    assert "r1" in s._ignored_response_ids  # its still-arriving audio must not play
+    assert s._slot_abandoned is True  # its still-arriving audio must not play
 
     # the cancelled done arrives and frees the slot:
-    s._response_idle.set()
-    s._abandoned_in_flight = False
-    s._current_response_id = None
+    s._settle_slot(emit=False)
+    s._wire_rid = None
+    s._wire_serves_slot = False
     await asyncio.wait_for(task, timeout=2)
     assert s.sent[-1] == {"type": "sendText", "text": "next"}
 
@@ -680,10 +699,9 @@ async def test_a_cancelled_done_frees_the_slot_without_a_sentinel():
         [
             json.dumps({"type": "responseCreated", "response_id": "r1", "sample_rate": 24000}),
             json.dumps({"type": "responseDone", "response_id": "r1", "status": "cancelled", "text": "", "usage": {}}),
-            json.dumps({"type": "responseAudio", "response_id": "r2", "pcm_b64": base64.b64encode(b"go").decode()}),
         ],
     )
-    assert out == [b"go"]
+    assert out == []
     assert s._response_idle.is_set()
 
 
@@ -710,21 +728,28 @@ async def test_a_non_fatal_error_terminates_the_turn_and_frees_the_slot():
     assert s.connection_error is None  # the socket stays usable
 
 
-async def test_a_failed_responses_late_done_cannot_finish_the_next_turn():
-    """The non-fatal error settles the failed response's turn; its id must not linger as
-    'current', or its delayed done would match after a newer turn claims the slot and
-    finish that turn before its audio — and its late audio frames would play into it."""
+async def test_a_response_scoped_error_kills_only_that_response():
+    """An error naming the open wire response terminates its turn (sentinel, slot freed,
+    stragglers dropped); its delayed done and audio afterwards touch nothing."""
     s = _synth()
     await _push(s, "turn one.", 1)
     out = await _drain(
         s,
         [
             json.dumps({"type": "responseCreated", "response_id": "r1", "sample_rate": 24000}),
-            json.dumps({"type": "error", "fatal": False, "error": {"type": "invalid_request", "message": "boom"}}),
+            json.dumps(
+                {
+                    "type": "error",
+                    "fatal": False,
+                    "response_id": "r1",
+                    "error": {"type": "inference_error", "message": "boom"},
+                }
+            ),
         ],
     )
     assert out == [b"\x00"]  # the failed turn settles
-    assert s._current_response_id is None
+    assert s._response_idle.is_set()
+    assert s._turn_dead is True
 
     # the next turn claims the slot; r1's delayed frames arrive before its own created
     s._on_push({"sequence_id": 2}, "turn two.")
@@ -739,6 +764,57 @@ async def test_a_failed_responses_late_done_cannot_finish_the_next_turn():
     )
     assert out == []  # neither plays nor completes anything
     assert not s._response_idle.is_set()  # turn two still owns the slot
+
+
+async def test_a_delayed_error_for_a_settled_response_touches_nothing():
+    """A response-scoped error arriving after that response already settled must not free
+    — or positionally complete — a slot a newer turn owns."""
+    s = _synth()
+    await _push(s, "turn one.", 1, eos=True)
+    out = await _drain(
+        s,
+        [
+            json.dumps({"type": "responseCreated", "response_id": "r1", "sample_rate": 24000}),
+            json.dumps({"type": "responseDone", "response_id": "r1", "status": "completed", "text": "", "usage": {}}),
+        ],
+    )
+    assert out == [b"\x00"]  # turn one settled normally
+
+    s._on_push({"sequence_id": 2}, "turn two.")
+    await s.sender("turn two.", sequence_id=2, end_of_llm_stream=True)
+    assert not s._response_idle.is_set()
+    out = await _drain(
+        s,
+        [
+            json.dumps(
+                {
+                    "type": "error",
+                    "fatal": False,
+                    "response_id": "r1",
+                    "error": {"type": "inference_error", "message": "late boom"},
+                }
+            )
+        ],
+    )
+    assert out == []
+    assert not s._response_idle.is_set()  # turn two still owns the slot
+    assert s._slot_seq == 2
+
+
+async def test_a_connection_scoped_error_while_a_response_renders_just_logs():
+    """An error with no response_id while a response is open on the wire (e.g. a rejected
+    cancelResponse) must not settle anything: the response's own done still arrives."""
+    s = _synth()
+    await _push(s, "turn one.", 1, eos=True)
+    out = await _drain(
+        s,
+        [
+            json.dumps({"type": "responseCreated", "response_id": "r1", "sample_rate": 24000}),
+            json.dumps({"type": "error", "fatal": False, "error": {"type": "invalid_request", "message": "bad frame"}}),
+            json.dumps({"type": "responseDone", "response_id": "r1", "status": "completed", "text": "", "usage": {}}),
+        ],
+    )
+    assert out == [b"\x00"]  # exactly one completion, from the done — not the error
 
 
 async def test_an_idle_error_frame_logs_without_terminating_the_next_turn():
@@ -757,11 +833,12 @@ async def test_audio_from_a_cancelled_response_is_dropped_until_its_done():
     """After cancelResponse, frames already on the wire keep arriving until the response's
     own responseDone; played as-is they would open the next turn's reply."""
     s = _synth()
-    s._response_idle.clear()
-    s._current_response_id = "r1"  # responseCreated arrived before the barge-in
+    await _push(s, "the interrupted turn", 1, eos=True)
+    out = await _drain(s, [json.dumps({"type": "responseCreated", "response_id": "r1", "sample_rate": 24000})])
+    assert out == []
     _open_ws(s)
     await s.handle_interruption()
-    assert s._ignored_response_ids == {"r1"}
+    assert s._slot_abandoned is True
 
     out = await _drain(
         s,
@@ -770,13 +847,23 @@ async def test_audio_from_a_cancelled_response_is_dropped_until_its_done():
             # "completed", not "cancelled": even when the cancel loses the race, the
             # abandoned response must not stamp end-of-stream onto the next turn.
             json.dumps({"type": "responseDone", "response_id": "r1", "status": "completed", "text": "", "usage": {}}),
+        ],
+    )
+    assert out == []  # nothing of the abandoned turn plays or completes
+    assert s._response_idle.is_set()
+
+    # the next turn claims the slot and renders normally
+    s._on_push({"sequence_id": 2}, "next turn")
+    await s.sender("next turn", sequence_id=2, end_of_llm_stream=True)
+    out = await _drain(
+        s,
+        [
             json.dumps({"type": "responseCreated", "response_id": "r2", "sample_rate": 24000}),
             json.dumps({"type": "responseAudio", "response_id": "r2", "pcm_b64": base64.b64encode(b"fresh").decode()}),
             json.dumps({"type": "responseDone", "response_id": "r2", "status": "completed", "text": "hi", "usage": {}}),
         ],
     )
     assert out == [b"fresh", b"\x00"]
-    assert s._ignored_response_ids == set()
 
 
 async def test_a_barge_in_after_the_flush_but_before_response_created_still_drops_the_audio():
@@ -800,7 +887,7 @@ async def test_a_barge_in_after_the_flush_but_before_response_created_still_drop
     )
     assert out == []
     assert s._response_idle.is_set()
-    assert s._ignored_response_ids == set()
+    assert s._slot_abandoned is False  # the settle retired the abandonment
 
 
 async def test_a_socket_death_after_an_early_barge_in_stays_silent():
@@ -811,13 +898,8 @@ async def test_a_socket_death_after_an_early_barge_in_stays_silent():
     _open_ws(s)
     await s.handle_interruption()
 
-    async def recv():
-        raise _ws.exceptions.ConnectionClosedOK(None, None)
-
-    s.websocket.recv = recv
-    s.conversation_ended = False
-
-    out = [item async for item in s.receiver()]
+    _die_once(s)
+    out = await _consume_all(s)
     assert out == []
     assert s._response_idle.is_set()  # the slot is still freed for the next connection
 
@@ -829,13 +911,8 @@ async def test_a_dead_socket_settles_the_flushed_turn():
     s = _synth()
     await _push(s, "a flushed turn", 1, eos=True)
 
-    async def recv():
-        raise _ws.exceptions.ConnectionClosedOK(None, None)
-
-    s.websocket.recv = recv
-    s.conversation_ended = False
-
-    out = [item async for item in s.receiver()]
+    _die_once(s)
+    out = await _consume_all(s)
     assert out == [b"\x00"]
     assert s._response_idle.is_set()
 
@@ -861,15 +938,8 @@ async def test_a_lost_turns_sentinel_is_suppressed_when_a_newer_turn_is_queued()
 async def test_a_dead_socket_with_nothing_in_flight_stays_silent():
     # No sentinel when idle: a spurious one would pop the next turn's meta_info.
     s = _synth()
-
-    async def recv():
-        raise _ws.exceptions.ConnectionClosedOK(None, None)
-
-    s.websocket.recv = recv
-    s.conversation_ended = False
-
-    out = [item async for item in s.receiver()]
-    assert out == []
+    _die_once(s)
+    assert await _consume_all(s) == []
 
 
 async def _consume_all(s):
@@ -947,6 +1017,38 @@ async def test_a_replaced_sockets_death_does_not_settle_the_new_connection():
     assert s._slot_seq == 2
 
 
+async def test_the_receiver_survives_a_reconnect_within_one_generate_call():
+    """SynthesizerPool iterates generate() exactly once, so the receiver must keep looping
+    across a transient closure: settle the lost turn, then serve the next turn on the
+    reconnected socket — all inside the same generator run."""
+    s = _synth()
+    await _push(s, "turn one", 1, eos=True)  # flushed; the socket dies before its done
+    events = ["CLOSE", "RECLAIM", "r2-created", "r2-audio", "r2-done", "END"]
+
+    async def recv():
+        ev = events.pop(0)
+        if ev == "CLOSE":
+            raise _ws.exceptions.ConnectionClosedOK(None, None)
+        if ev == "RECLAIM":
+            # monitor_connection redialed and the next turn claimed the fresh connection
+            s._conn_gen += 1
+            s._response_idle.clear()
+            s._slot_seq = 2
+            return json.dumps({"type": "sessionCreated", "sample_rate": 24000})
+        if ev == "r2-created":
+            return json.dumps({"type": "responseCreated", "response_id": "r2", "sample_rate": 24000})
+        if ev == "r2-audio":
+            return json.dumps({"type": "responseAudio", "response_id": "r2", "pcm_b64": base64.b64encode(b"two").decode()})
+        if ev == "r2-done":
+            return json.dumps({"type": "responseDone", "response_id": "r2", "status": "completed", "text": "", "usage": {}})
+        raise asyncio.CancelledError
+
+    s.websocket.recv = recv
+    s.conversation_ended = False
+    out = await _consume_all(s)
+    assert out == [b"\x00", b"two", b"\x00"]  # turn one settles, turn two renders — one generate()
+
+
 async def test_a_socket_death_seen_by_the_poll_path_still_settles_the_turn():
     """The receiver usually notices a dead socket at its connection poll, not inside
     recv(); the flushed turn must settle there too or its completion is lost and the
@@ -980,6 +1082,7 @@ async def test_a_fatal_auth_error_kills_the_synthesizer_instead_of_reconnecting(
 
 async def test_receiver_survives_malformed_and_unknown_frames():
     s = _synth()
+    await _push(s, "a real turn", 1, eos=True)  # the garbage arrives around a live turn
     out = await _drain(
         s,
         [
@@ -1053,13 +1156,14 @@ def test_empty_and_undecodable_chunks_are_dropped_rather_than_yielded():
 async def test_interruption_cancels_the_rendering_utterance_and_clears_the_turn():
     s = _synth()
     await _push(s, "partial turn.", 1)
-    s._current_response_id = "r1"  # segmentation already started rendering it
+    s._wire_rid = "r1"  # segmentation already started rendering it
+    s._wire_serves_slot = True
     s.current_turn_start_time = 123.0
     ws = _open_ws(s)
     await s.handle_interruption()
     assert s._turn_seq is None  # nothing of the abandoned turn can reach the next one
     assert json.loads(ws.send.call_args[0][0]) == {"type": "cancelResponse"}
-    assert s._ignored_response_ids == {"r1"}
+    assert s._slot_abandoned is True  # its still-arriving audio is dropped until the done
     # The cancelled turn's end-of-stream is never forwarded, so the next turn must be
     # re-detected as new for stale text_queue entries to be pruned.
     assert s.current_turn_start_time is None
@@ -1079,6 +1183,23 @@ async def test_a_barge_in_on_an_unflushed_utterance_resets_the_socket():
     # the closure settles silently — the pipeline already dropped the turn:
     assert s._settle_lost_utterance() == 0
     assert s._response_idle.is_set()
+
+
+async def test_an_interruption_retires_parked_senders_even_when_the_sequence_stays_valid():
+    """Some task-manager paths (hangup, overlap, language switch) interrupt first and only
+    invalidate the sequence later. The epoch bump in handle_interruption must retire a
+    parked sender on its own — otherwise it wakes when the cancelled response settles and
+    sends the interrupted text after the cancel, contaminating the next utterance."""
+    s = _synth()
+    s._response_idle.clear()  # a response is rendering; the sender parks on the slot
+    s._on_push({"sequence_id": 2}, "old turn text")
+    task = asyncio.create_task(s.sender("old turn text", sequence_id=2, end_of_llm_stream=True))
+    await asyncio.sleep(0.05)
+
+    await s.handle_interruption()  # note: the sequence is NOT invalidated
+    s._response_idle.set()  # the cancelled response settles; the parked sender wakes
+    await asyncio.wait_for(task, timeout=2)
+    assert s.sent == []  # the epoch bump retired it before anything reached the socket
 
 
 async def test_interruption_on_a_dead_socket_is_a_no_op():
