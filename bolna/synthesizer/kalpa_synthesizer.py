@@ -593,10 +593,18 @@ class KalpaSynthesizer(StreamSynthesizer):
                         yield chunk
                 elif event == "responseDone":
                     rid = data.get("response_id")
-                    if rid == self._current_response_id:
-                        self._current_response_id = None
                     status = data.get("status")
                     logger.info(f"Kalpa responseDone status={status} response_id={rid}")
+                    if rid is None or rid != self._current_response_id:
+                        # created always precedes done on this ordered socket, so a done
+                        # that does not name the response being served is stale or foreign
+                        # (e.g. a late settle after an error already freed its turn) — it
+                        # must not free, or positionally complete, a slot a newer turn may
+                        # own. If it strands the connection, the idle timeout resets it.
+                        logger.warning(f"Ignoring Kalpa responseDone for unmatched response_id={rid}")
+                        self._ignored_response_ids.discard(rid)
+                        continue
+                    self._current_response_id = None
                     self._response_idle.set()
                     owns_head = self._sentinel_owns_queue_head()
                     self._slot_seq = None

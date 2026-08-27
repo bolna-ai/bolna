@@ -637,6 +637,7 @@ async def test_a_cancelled_done_frees_the_slot_without_a_sentinel():
     out = await _drain(
         s,
         [
+            json.dumps({"type": "responseCreated", "response_id": "r1", "sample_rate": 24000}),
             json.dumps({"type": "responseDone", "response_id": "r1", "status": "cancelled", "text": "", "usage": {}}),
             json.dumps({"type": "responseAudio", "response_id": "r2", "pcm_b64": base64.b64encode(b"go").decode()}),
         ],
@@ -913,12 +914,29 @@ async def test_receiver_survives_malformed_and_unknown_frames():
             "not json at all",
             json.dumps(["a", "list"]),
             json.dumps({"type": "something_new"}),
+            json.dumps({"type": "responseCreated", "response_id": "r1", "sample_rate": 24000}),
             json.dumps({"type": "responseAudio", "response_id": "r1", "pcm_b64": "@@not-base64@@"}),
             json.dumps({"type": "responseDone", "response_id": "r1", "status": "completed", "text": "", "usage": {}}),
         ],
     )
     assert out == [b"\x00"]
     assert s.connection_error is None
+
+
+async def test_an_unmatched_done_does_not_free_the_active_slot():
+    """created always precedes done on the ordered socket, so a done that does not name
+    the response being served is stale or foreign (e.g. a late settle after an error
+    already freed its turn); freeing — and positionally completing — the slot on it would
+    finish a newer turn before its audio."""
+    s = _synth()
+    await _push(s, "streaming turn", 2)  # slot claimed; its responseCreated hasn't arrived
+    out = await _drain(
+        s,
+        [json.dumps({"type": "responseDone", "response_id": "r-old", "status": "completed", "text": "", "usage": {}})],
+    )
+    assert out == []
+    assert not s._response_idle.is_set()  # the active turn still owns the slot
+    assert s._slot_seq == 2
 
 
 # ----------------------------------------------------------------------
