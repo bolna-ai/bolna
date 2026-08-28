@@ -84,6 +84,7 @@ class TranscriberProvider(str, Enum):
     SMALLEST = "smallest"
     OPENAI = "openai"
     SONIOX = "soniox"
+    GEMINI = "gemini"
 
     @classmethod
     def all_values(cls):
