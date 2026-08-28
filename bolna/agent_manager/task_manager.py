@@ -7887,6 +7887,9 @@ class TaskManager(BaseManager):
                 # the provider's VAD has already stopped generating, so nothing decided here
                 # can give the agent the floor back. Barge-in sensitivity is tuned provider-side.
                 self.interruption_manager.on_user_speech_started()
+                # A speech start is proof the caller is talking, so it must refresh liveness
+                # even when this turn is not a barge-in.
+                self.time_since_last_spoken_human_word = time.time()
                 if self._s2s_agent_has_floor():
                     logger.info("S2S: caller barged in, dropping queued audio")
                     self.interruption_manager.on_interruption_triggered()
