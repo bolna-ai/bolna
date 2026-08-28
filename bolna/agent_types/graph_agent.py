@@ -1,5 +1,4 @@
 import asyncio
-from collections import defaultdict
 import os
 import re
 import time
@@ -11,12 +10,13 @@ from bolna.models import *
 from bolna.agent_types.base_agent import BaseAgent
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.rag_service_client import RAGServiceClientSingleton
+from bolna.helpers.function_calling_helpers import guard_llm_base_url
 from bolna.helpers.utils import (
     now_ms,
     format_messages,
     update_prompt_with_context,
+    render_prompt,
     enrich_context_with_time_variables,
-    DictWithMissing,
     get_md5_hash,
     select_message_by_language,
 )
@@ -46,7 +46,8 @@ logger = configure_logger(__name__)
 
 _DETERMINISTIC_REASONING_PREFIX = "deterministic:"
 _ROUTER_REASONING_PREFIX = f"{_DETERMINISTIC_REASONING_PREFIX}router:"
-_PROMPT_VAR_PATTERN = re.compile(r"\{([a-zA-Z_][a-zA-Z0-9_]*)\}")
+# Root identifier in either syntax, so {{prior.loans}} still validates against recipient_data["prior"].
+_PROMPT_VAR_PATTERN = re.compile(r"\{\{?\s*([a-zA-Z_][a-zA-Z0-9_]*)(?:\.[a-zA-Z0-9_]+|\[[^\[\]{}]+\])*\s*\}\}?")
 
 # Time variables frozen per call for the conversation prompt; see _prompt_context.
 _TIME_VAR_KEYS = (
@@ -77,10 +78,16 @@ class GraphAgent(BaseAgent):
         # Get credentials from config (injected by task_manager) or fall back to env vars
         self.llm_key = self.config.get("llm_key") or os.getenv("OPENAI_API_KEY")
         self.base_url = self.config.get("base_url")
+        self._base_url_validated = False
 
         # Initialize OpenAI client with credentials (supports EU routing)
         if self.base_url:
-            self.openai = OpenAI(api_key=self.llm_key, base_url=self.base_url)
+            client_kwargs = {"api_key": self.llm_key, "base_url": self.base_url}
+            if (self.config.get("provider") or self.config.get("llm_provider")) == "custom":
+                # Supplying the client keeps follow_redirects off, so a customer endpoint
+                # cannot redirect this hop inward.
+                client_kwargs["http_client"] = get_shared_sync_http_client(base_url=self.base_url, http2=False)
+            self.openai = OpenAI(**client_kwargs)
             logger.info(f"OpenAI client initialized with custom base_url: {self.base_url}")
         else:
             self.openai = OpenAI(api_key=self.llm_key)
@@ -847,7 +854,7 @@ class GraphAgent(BaseAgent):
                 substitution_data = dict(self.context_data)
                 if "recipient_data" in self.context_data and isinstance(self.context_data["recipient_data"], dict):
                     substitution_data.update(self.context_data["recipient_data"])
-                instructions = instructions.format_map(defaultdict(lambda: "NULL", substitution_data))
+                instructions = render_prompt(instructions, substitution_data, missing="NULL")
             except Exception as e:
                 logger.debug(f"Variable substitution in routing_instructions failed: {e}")
 
@@ -1317,6 +1324,12 @@ class GraphAgent(BaseAgent):
         detected_language = meta_info.get("detected_language")  # None if not yet detected
         if detected_language:
             self.context_data["detected_language"] = detected_language
+
+        # Ahead of the try so a blocked endpoint ends the call instead of being spoken.
+        is_custom = (self.config.get("provider") or self.config.get("llm_provider")) == "custom"
+        if is_custom and self.base_url and not self._base_url_validated:
+            await guard_llm_base_url(self.base_url)
+            self._base_url_validated = True
 
         try:
             # Event-triggered generation: process_event() already handled routing

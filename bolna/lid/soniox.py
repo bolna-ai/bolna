@@ -41,6 +41,7 @@ class SonioxLID(LIDBackend):
         else:
             self._audio_format = "pcm_s16le"
             self._input_sr = int(config.get("sampling_rate", 16000))
+        self.set_input_audio_format(self._audio_format, self._input_sr)
         self._pending = self._empty_pending()
 
     @staticmethod

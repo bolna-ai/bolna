@@ -121,6 +121,17 @@ class MayaConfig(BaseModel):
     language: Optional[str] = "en"
 
 
+class KalpaConfig(BaseModel):
+    voice: str = "Kiara"
+    voice_id: Optional[str] = None
+    model: str = "kalpa-tts-multilingual-beta-v0.1"
+    temperature: Optional[float] = None
+    acoustic_temperature: Optional[float] = None
+    max_new_tokens: Optional[int] = None
+    audio_quality: Optional[str] = None
+    chunk_length_schedule: Optional[List[int]] = None
+
+
 class AzureConfig(BaseModel):
     voice: str
     model: str
@@ -169,6 +180,7 @@ class Synthesizer(BaseModel):
         DeepgramConfig,
         OpenAIConfig,
         MayaConfig,
+        KalpaConfig,
     ] = Field(union_mode="smart")
     stream: bool = False
     buffer_size: Optional[int] = 40  # 40 characters in a buffer
@@ -215,6 +227,9 @@ class Synthesizer(BaseModel):
         elif provider == "maya":
             if isinstance(config, dict):
                 values["provider_config"] = MayaConfig(**config)
+        elif provider == "kalpa":
+            if isinstance(config, dict):
+                values["provider_config"] = KalpaConfig(**config)
 
         return values
 

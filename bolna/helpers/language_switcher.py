@@ -5,7 +5,12 @@ import time
 import uuid
 
 from bolna.llms import LiteLLM
-from bolna.prompts import LANGUAGE_SWITCH_SYSTEM_PROMPT, LANGUAGE_SWITCH_TURN_PROMPT
+from bolna.prompts import (
+    EXPLICIT_LANGUAGE_SWITCH_SYSTEM_PROMPT,
+    EXPLICIT_LANGUAGE_SWITCH_TURN_PROMPT,
+    LANGUAGE_SWITCH_SYSTEM_PROMPT,
+    LANGUAGE_SWITCH_TURN_PROMPT,
+)
 from bolna.enums import LogComponent, LogDirection
 from bolna.helpers.utils import convert_to_request_log
 from bolna.helpers.logger_config import configure_logger
@@ -61,15 +66,21 @@ class LanguageSwitcher:
     and returns a target language (or None to stay).
     """
 
-    def __init__(self, available_labels, run_id=None, model=None):
+    def __init__(self, available_labels, run_id=None, model=None, explicit_only=False):
         self.available_labels = list(available_labels or [])
         self.run_id = run_id
+        # Explicit-only judge: switches only on an explicit request/selection/confirmation.
+        self.explicit_only = bool(explicit_only)
         self.model = model or os.getenv("LANGUAGE_SWITCH_LLM", DEFAULT_LANGUAGE_SWITCH_LLM)
         # Explicit anthropic/ prefix: bare claude names fail on litellm versions whose
         if self.model.startswith("claude") and "/" not in self.model:
             self.model = f"anthropic/{self.model}"
         self.latency_ms = None
         self.hedge_won = False  # last decide was answered by the hedged request, not the first
+        # Judge spend for the whole call (decides + prewarm); persisted via the lid_usage record.
+        self.usage_totals = {"input_tokens": 0, "output_tokens": 0, "cached_tokens": 0, "requests": 0}
+        self.last_usage = None
+        self.models_used: list = []
         # Dedicated creds, NOT the agent's — an Azure/OpenAI agent would 404 the switch model.
         switch_llm_key, switch_llm_base, switch_llm_version = resolve_switch_llm_credentials(self.model)
         # A configured (e.g. azure) judge with no resolvable key would fail EVERY decide,
@@ -112,13 +123,26 @@ class LanguageSwitcher:
         # Static rules as a cacheable prefix (Anthropic cache_control; Azure caches automatically).
         # Bedrock-hosted Claude also caches (litellm translates cache_control → cachePoint);
         # scoped to claude ids so a non-Anthropic bedrock model never gets an unsupported block.
-        block = {"type": "text", "text": LANGUAGE_SWITCH_SYSTEM_PROMPT}
+        system_text = EXPLICIT_LANGUAGE_SWITCH_SYSTEM_PROMPT if self.explicit_only else LANGUAGE_SWITCH_SYSTEM_PROMPT
+        block = {"type": "text", "text": system_text}
         cacheable = self.model.startswith(("anthropic/", "claude")) or (
             self.model.startswith("bedrock/") and "claude" in self.model
         )
         if cacheable:
             block["cache_control"] = {"type": "ephemeral"}
         return {"role": "system", "content": [block]}
+
+    def _tally_usage(self, usage):
+        """Count every completed response; a hedge loser cancelled mid-request never reaches
+        here, so tokens the provider billed for it are not client-visible and go uncounted."""
+        self.usage_totals["requests"] += 1
+        if self.model not in self.models_used:
+            self.models_used.append(self.model)
+        if not usage:
+            return
+        for key in ("input_tokens", "output_tokens", "cached_tokens"):
+            self.usage_totals[key] += int(usage.get(key) or 0)
+        self.last_usage = usage
 
     def prewarm(self):
         """Fire-and-forget request that pays the TLS handshake AND seeds the prompt cache
@@ -127,10 +151,14 @@ class LanguageSwitcher:
 
         async def _warm():
             try:
-                await asyncio.wait_for(
-                    self._llm.generate([self._system_message(), {"role": "user", "content": "Reply with exactly: ok"}]),
+                _, usage = await asyncio.wait_for(
+                    self._llm.generate(
+                        [self._system_message(), {"role": "user", "content": "Reply with exactly: ok"}],
+                        ret_metadata=True,
+                    ),
                     timeout=5,
                 )
+                self._tally_usage(usage)
                 logger.info("LanguageSwitcher: connection prewarmed")
             except Exception as e:
                 logger.debug(f"LanguageSwitcher: prewarm skipped: {e}")
@@ -143,6 +171,7 @@ class LanguageSwitcher:
         active_transcript: str,
         active_label: str,
         recent_turns: list | None = None,
+        last_agent_turn: str | None = None,
     ) -> dict | None:
         """Decide the language from both transcripts.
 
@@ -160,6 +189,7 @@ class LanguageSwitcher:
         """
         if not detector_transcript or not detector_transcript.strip():
             return None
+        self.last_usage = None
 
         # On idle-flush firings there IS no main-ASR turn — LIVE is empty because nobody
         # produced one, not because the locked recognizer failed to decode foreign speech.
@@ -167,21 +197,27 @@ class LanguageSwitcher:
         # a detector transliteration becomes "confirmed" by an absence we manufactured
         # (QA 7c7d4b00: English "Hi, hi—what's up?" → Soniox Telugu-script → false switch).
         # Telemetry keeps the raw empty string — only the prompt gets the marker.
-        live = (active_transcript or "").strip() or LIVE_UNAVAILABLE_MARKER
+        live = (active_transcript or "").strip()
+        if self.explicit_only:
+            # The explicit prompt handles an empty LIVE itself and reads last_agent_turn
+            # instead of the drift history (recent_turns).
+            turn_content = EXPLICIT_LANGUAGE_SWITCH_TURN_PROMPT.format(
+                active_language=active_label,
+                available_languages=", ".join(self.available_labels),
+                last_agent_turn=(last_agent_turn or "").strip() or "(none)",
+                detector_transcript=detector_transcript.strip(),
+                active_transcript=live,
+            )
+        else:
+            turn_content = LANGUAGE_SWITCH_TURN_PROMPT.format(
+                active_language=active_label,
+                available_languages=", ".join(self.available_labels),
+                recent_turns=self._format_recent_turns(recent_turns),
+                detector_transcript=detector_transcript.strip(),
+                active_transcript=live or LIVE_UNAVAILABLE_MARKER,
+            )
 
-        messages = [
-            self._system_message(),
-            {
-                "role": "user",
-                "content": LANGUAGE_SWITCH_TURN_PROMPT.format(
-                    active_language=active_label,
-                    available_languages=", ".join(self.available_labels),
-                    recent_turns=self._format_recent_turns(recent_turns),
-                    detector_transcript=detector_transcript.strip(),
-                    active_transcript=live,
-                ),
-            },
-        ]
+        messages = [self._system_message(), {"role": "user", "content": turn_content}]
         start_time = time.time()
         try:
             result = await self._hedged_generate(messages)
@@ -240,7 +276,9 @@ class LanguageSwitcher:
         self.last_generate_errored = False
 
         async def attempt():
-            return self._parse_json(await self._llm.generate(messages))
+            text, usage = await self._llm.generate(messages, ret_metadata=True)
+            self._tally_usage(usage)
+            return self._parse_json(text)
 
         # Tasks created inside the try: cancellation of decide() itself must not strand a
         # running attempt unowned (finally covers every await window).
@@ -321,6 +359,7 @@ class LanguageSwitcher:
             model=self.model,
             run_id=self.run_id,
         )
+        usage = self.last_usage or {}
         convert_to_request_log(
             message=result,
             meta_info=meta_info,
@@ -328,4 +367,7 @@ class LanguageSwitcher:
             direction=LogDirection.RESPONSE,
             model=self.model,
             run_id=self.run_id,
+            input_tokens=usage.get("input_tokens"),
+            output_tokens=usage.get("output_tokens"),
+            cached_tokens=usage.get("cached_tokens"),
         )
