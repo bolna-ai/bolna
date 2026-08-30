@@ -13,6 +13,7 @@ from .synthesizer import (
     MayaSynthesizer,
     KalpaSynthesizer,
     GeminiSynthesizer,
+    GandrSynthesizer,
 )
 from .transcriber import (
     DeepgramTranscriber,
@@ -73,6 +74,7 @@ SUPPORTED_SYNTHESIZER_MODELS = {
     SynthesizerProvider.MAYA.value: MayaSynthesizer,
     SynthesizerProvider.KALPA.value: KalpaSynthesizer,
     SynthesizerProvider.GEMINI.value: GeminiSynthesizer,
+    SynthesizerProvider.GANDR.value: GandrSynthesizer,
 }
 
 SUPPORTED_TRANSCRIBER_PROVIDERS = {
