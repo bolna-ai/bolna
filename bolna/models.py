@@ -132,6 +132,11 @@ class KalpaConfig(BaseModel):
     chunk_length_schedule: Optional[List[int]] = None
 
 
+class GandrConfig(BaseModel):
+    voice: str
+    model: Optional[str] = "tts-1"
+
+
 class AzureConfig(BaseModel):
     voice: str
     model: str
@@ -181,6 +186,7 @@ class Synthesizer(BaseModel):
         OpenAIConfig,
         MayaConfig,
         KalpaConfig,
+        GandrConfig,
     ] = Field(union_mode="smart")
     stream: bool = False
     buffer_size: Optional[int] = 40  # 40 characters in a buffer
@@ -230,6 +236,9 @@ class Synthesizer(BaseModel):
         elif provider == "kalpa":
             if isinstance(config, dict):
                 values["provider_config"] = KalpaConfig(**config)
+        elif provider == "gandr":
+            if isinstance(config, dict):
+                values["provider_config"] = GandrConfig(**config)
 
         return values
 

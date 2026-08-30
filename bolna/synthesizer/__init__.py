@@ -12,4 +12,5 @@ from .sarvam_synthesizer import SarvamSynthesizer
 from .pixa_synthesizer import PixaSynthesizer
 from .maya_synthesizer import MayaSynthesizer
 from .kalpa_synthesizer import KalpaSynthesizer
+from .gandr_synthesizer import GandrSynthesizer
 from .synthesizer_pool import SynthesizerPool
