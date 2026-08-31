@@ -614,6 +614,8 @@ class ToolModel(BaseModel):
 class OpenAIRealtimeConfig(BaseModel):
     model: str = "gpt-realtime-2.1"
     voice: str = "marin"
+    # Playback rate (0.25 to 1.5), not how the reply is worded.
+    speed: Optional[float] = 1.0
     # semantic_vad scores whether the caller has actually finished from what they said, so
     # it waits longer on a trailing "ummm" than on a finished sentence. That is the job the
     # llm pipeline does with a word count and a phrase list, done by a model instead.

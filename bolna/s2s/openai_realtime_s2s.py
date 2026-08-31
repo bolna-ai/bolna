@@ -63,6 +63,7 @@ class OpenAIRealtimeS2S(BaseS2SProvider):
         max_output_tokens: Optional[int] = None,
         transcription_model: str = "gpt-4o-mini-transcribe",
         language: Optional[str] = None,
+        speed: float = 1.0,
         **kwargs,
     ):
         super().__init__(
@@ -82,6 +83,7 @@ class OpenAIRealtimeS2S(BaseS2SProvider):
         self.max_output_tokens = max_output_tokens
         self.transcription_model = transcription_model
         self.language = language
+        self.speed = speed
 
         self._ws = None
         self._closed = False
@@ -177,6 +179,7 @@ class OpenAIRealtimeS2S(BaseS2SProvider):
                 "output": {
                     "format": {"type": "audio/pcm", "rate": self.output_sample_rate},
                     "voice": self.voice,
+                    "speed": self.speed,
                 },
             },
         }
