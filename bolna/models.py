@@ -409,6 +409,7 @@ class GraphEdge(BaseModel):
 
     to_node_id: str
     condition: str = ""  # Human-readable description of when to transition
+    label: Optional[str] = None
     condition_type: Optional[EdgeConditionType] = None  # None → "llm" (backward compat)
     expression: Optional[ExpressionGroup] = None  # required when condition_type == "expression"
     event_name: Optional[str] = None  # Matches CallEvent.event when condition_type="event"
