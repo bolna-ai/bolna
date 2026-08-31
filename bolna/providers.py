@@ -25,6 +25,7 @@ from .transcriber import (
     SmallestTranscriber,
     OpenAITranscriber,
     SonioxTranscriber,
+    GeminiTranscriber,
 )
 from .input_handlers import (
     DefaultInputHandler,
@@ -84,6 +85,7 @@ SUPPORTED_TRANSCRIBER_PROVIDERS = {
     TranscriberProvider.SMALLEST.value: SmallestTranscriber,
     TranscriberProvider.OPENAI.value: OpenAITranscriber,
     TranscriberProvider.SONIOX.value: SonioxTranscriber,
+    TranscriberProvider.GEMINI.value: GeminiTranscriber,
 }
 
 # Backwards compatibility
