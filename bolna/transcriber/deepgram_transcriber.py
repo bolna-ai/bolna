@@ -60,8 +60,10 @@ class DeepgramTranscriber(BaseTranscriber):
         self.sampling_rate = int(sampling_rate) if isinstance(sampling_rate, (str, int)) else 16000
         self.encoding = encoding
         self.api_key = kwargs.get("transcriber_key", os.getenv("DEEPGRAM_AUTH_TOKEN"))
-        self.deepgram_host = os.getenv("DEEPGRAM_HOST", "api.deepgram.com")
-        self.deepgram_flux_host = os.getenv("DEEPGRAM_FLUX_HOST", "api.deepgram.com")
+        # Per-call host override (multi-cloud router) takes precedence over the fleet-wide env default.
+        self.deepgram_host = kwargs.get("deepgram_host") or os.getenv("DEEPGRAM_HOST", "api.deepgram.com")
+        self.deepgram_flux_host = kwargs.get("deepgram_flux_host") or os.getenv("DEEPGRAM_FLUX_HOST", "api.deepgram.com")
+        self.deepgram_host_protocol = kwargs.get("deepgram_host_protocol") or os.getenv("DEEPGRAM_HOST_PROTOCOL", "wss")
         self.transcriber_output_queue = output_queue
         self.transcription_task = None
         self.keywords = keywords
@@ -191,7 +193,7 @@ class DeepgramTranscriber(BaseTranscriber):
             dg_params["tag"] = self.run_id
             dg_params["extra"] = f"run_id:{self.run_id}"
 
-        websocket_api = "{}://{}/v1/listen?".format(os.getenv("DEEPGRAM_HOST_PROTOCOL", "wss"), self.deepgram_host)
+        websocket_api = "{}://{}/v1/listen?".format(self.deepgram_host_protocol, self.deepgram_host)
         websocket_url = websocket_api + urlencode(dg_params)
 
         if self.keywords:
@@ -250,7 +252,7 @@ class DeepgramTranscriber(BaseTranscriber):
         if self.run_id:
             dg_params["tag"] = self.run_id
 
-        websocket_api = "{}://{}/v2/listen?".format(os.getenv("DEEPGRAM_HOST_PROTOCOL", "wss"), self.deepgram_flux_host)
+        websocket_api = "{}://{}/v2/listen?".format(self.deepgram_host_protocol, self.deepgram_flux_host)
         websocket_url = websocket_api + urlencode(dg_params, doseq=True)
         return websocket_url
 
@@ -1314,6 +1316,12 @@ class DeepgramTranscriber(BaseTranscriber):
             # Use Deepgram's actual audio duration for billing
             if self.meta_info is not None and "deepgram_duration" in self.meta_info:
                 self.meta_info["transcriber_duration"] = self.meta_info["deepgram_duration"]
+
+            # Record the endpoint that actually served the call (multi-cloud attribution).
+            if self.meta_info is not None:
+                self.meta_info["deepgram_host"] = (
+                    self.deepgram_flux_host if self.is_flux_model else self.deepgram_host
+                )
 
             meta = dict(getattr(self, "meta_info", None) or {})
             if self.connection_error:
