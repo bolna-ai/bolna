@@ -125,9 +125,11 @@ ACCIDENTAL_INTERRUPTION_PHRASES = [
     "stop speaking",
 ]
 
+# Keys must be ISO 639-1 codes present in LANGUAGE_NAMES — a code that never reaches
+# select_message_by_language is dead weight and silently falls back to "en".
 PRE_FUNCTION_CALL_MESSAGE = {
     "en": "Just give me a moment, I'll be back with you.",
-    "ge": "Geben Sie mir einen Moment Zeit, ich bin gleich wieder bei Ihnen.",
+    "de": "Geben Sie mir einen Moment Zeit, ich bin gleich wieder bei Ihnen.",
 }
 
 FILLER_PHRASES = [
