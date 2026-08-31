@@ -1925,7 +1925,7 @@ class TaskManager(BaseManager):
             llm_agent = KnowledgeBaseAgent(injected_cfg)
             logger.info("Knowledge agent created with rag-proxy-server support")
         else:
-            raise f"{agent_type} Agent type is not created yet"
+            raise ValueError(f"Unsupported runtime agent_type: {agent_type}")
         return llm_agent
 
     def __setup_s2s(self):

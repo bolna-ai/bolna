@@ -377,6 +377,13 @@ class Edge(BaseModel):
 
 
 class LlmAgentGraph(BaseModel):
+    """Legacy graph schema retained for direct-import compatibility.
+
+    ``LlmAgent`` no longer accepts this schema because it has no runtime
+    implementation. New and persisted configurations should migrate to
+    ``agent_type="graph_agent"`` with ``GraphAgentConfig``.
+    """
+
     nodes: List[Node]
     edges: List[Edge]
 
@@ -555,9 +562,7 @@ class KnowledgebaseAgent(Llm):
 class LlmAgent(BaseModel):
     agent_flow_type: str
     agent_type: str
-    llm_config: Union[
-        KnowledgebaseAgent, LlmAgentGraph, MultiAgent, SimpleLlmAgent, GraphAgentConfig, KnowledgeAgentConfig
-    ]
+    llm_config: Union[KnowledgebaseAgent, MultiAgent, SimpleLlmAgent, GraphAgentConfig, KnowledgeAgentConfig]
 
     @field_validator("llm_config", mode="before")
     def validate_llm_config(cls, value, info):
@@ -566,10 +571,15 @@ class LlmAgent(BaseModel):
         valid_config_types = {
             "knowledgebase_agent": KnowledgeAgentConfig,
             "graph_agent": GraphAgentConfig,
-            "llm_agent_graph": LlmAgentGraph,
             "multiagent": MultiAgent,
             "simple_llm_agent": SimpleLlmAgent,
         }
+
+        if agent_type == "llm_agent_graph":
+            raise ValueError(
+                "agent_type 'llm_agent_graph' is not supported at runtime; "
+                "migrate this configuration to agent_type 'graph_agent'"
+            )
 
         if agent_type not in valid_config_types:
             raise ValueError(f"Unsupported agent_type: {agent_type}")
