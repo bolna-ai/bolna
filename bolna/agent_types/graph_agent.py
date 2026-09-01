@@ -23,7 +23,7 @@ from bolna.helpers.utils import (
 from bolna.helpers.expression_evaluator import evaluate_edge_expression, describe_edge_expression
 from bolna.enums import EdgeConditionType, NodeType, ToolScope
 from bolna.llms.types import LLMStreamChunk, LatencyData
-from bolna.llms import OpenAiLLM
+from bolna.llms import OpenAiLLM, AzureLLM
 from bolna.llms.azure_llm import should_overflow
 from bolna.llms.http_client_pool import get_shared_sync_http_client
 from bolna.providers import SUPPORTED_LLM_PROVIDERS
@@ -40,6 +40,11 @@ try:
 except ImportError:
     GROQ_AVAILABLE = False
     Groq = None
+
+# Conversation providers whose own key authenticates the OpenAI- or Azure-keyed routing and aux
+# hops; any other provider (Gemini, the LiteLLM backends) needs the platform key instead.
+OPENAI_KEYED_PROVIDERS = frozenset(p for p, cls in SUPPORTED_LLM_PROVIDERS.items() if cls is OpenAiLLM)
+AZURE_KEYED_PROVIDERS = frozenset(p for p, cls in SUPPORTED_LLM_PROVIDERS.items() if cls is AzureLLM)
 
 load_dotenv()
 logger = configure_logger(__name__)
@@ -123,15 +128,15 @@ class GraphAgent(BaseAgent):
         # Initialize main LLM for response generation (supports api_tools/function calling + real streaming)
         self.llm = self._initialize_llm()
 
-        # Hangup/voicemail run on OpenAiLLM, which has no Azure support, so an Azure conversation LLM
-        # cannot serve them and they fall back to the platform OpenAI key.
+        # Hangup/voicemail run on OpenAiLLM, so a conversation on a non-OpenAI provider lends no
+        # usable key and these fall back to the platform OpenAI key.
         aux_provider = self.config.get("aux_provider") or self.config.get("provider") or "openai"
         aux_model = (self.config.get("aux_model") or self.llm_model or "").split("/", 1)[-1]
         llm_kwargs = {}
-        if aux_provider == "azure" and os.getenv("OPENAI_API_KEY"):
+        if aux_provider not in OPENAI_KEYED_PROVIDERS and os.getenv("OPENAI_API_KEY"):
             llm_kwargs["llm_key"] = os.getenv("OPENAI_API_KEY")
         else:
-            # No platform key to fall back to, so keep the agent's own creds rather than fail construction.
+            # Otherwise the conversation's own creds serve the hop.
             if self.llm_key:
                 llm_kwargs["llm_key"] = self.llm_key
             if self.base_url:
@@ -275,6 +280,21 @@ class GraphAgent(BaseAgent):
             }
             return self._routing_overflow_client.chat.completions.create(**overflow_kwargs), True
 
+    def _conversation_serves_routing(self, routing_provider):
+        """True when the conversation credentials authenticate this routing provider."""
+        conv_provider = self.config.get("provider") or self.config.get("llm_provider") or "openai"
+        if routing_provider == "openai":
+            return conv_provider in OPENAI_KEYED_PROVIDERS
+        if routing_provider == "azure":
+            return conv_provider in AZURE_KEYED_PROVIDERS
+        return False
+
+    def _openai_routing_client(self):
+        """Reuse the conversation client when routing follows it or it is OpenAI-keyed, else the platform key."""
+        if self.config.get("route_routing_to_conversation") or self._conversation_serves_routing("openai"):
+            return self.openai
+        return OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
     def _init_routing_client(self):
         """Initialize routing client. Uses Groq if available, else OpenAI."""
         groq_available = GROQ_AVAILABLE and os.getenv("GROQ_API_KEY")
@@ -304,11 +324,23 @@ class GraphAgent(BaseAgent):
                 logger.warning(
                     "Groq requested but GROQ_API_KEY not set or groq package not installed, falling back to OpenAI"
                 )
-                self.routing_client = self.openai
+                self.routing_client = self._openai_routing_client()
                 self.routing_provider = "openai"
                 self.routing_model = os.getenv("DEFAULT_ROUTING_MODEL_OPENAI", "gpt-4.1-mini")
-        elif self.routing_provider == "azure":
-            azure_endpoint = self.base_url or os.getenv("AZURE_OPENAI_ENDPOINT")
+        elif self.routing_provider in AZURE_KEYED_PROVIDERS:
+            if self._conversation_serves_routing("azure"):
+                azure_endpoint = self.base_url or os.getenv("AZURE_OPENAI_ENDPOINT")
+                azure_key = self.llm_key
+            else:
+                azure_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
+                azure_key = os.getenv("AZURE_OPENAI_API_KEY")
+            if not (azure_endpoint and azure_key):
+                logger.warning("Azure routing requested without usable Azure credentials, falling back to OpenAI")
+                self.routing_client = self._openai_routing_client()
+                self.routing_provider = "openai"
+                self.routing_model = os.getenv("DEFAULT_ROUTING_MODEL_OPENAI", "gpt-4.1-mini")
+                logger.info(f"Routing initialized with OpenAI ({self.routing_model})")
+                return
             api_version = self.config.get("api_version") or os.getenv("AZURE_OPENAI_API_VERSION", "2024-12-01-preview")
             overflow = self.config.get("overflow_llm") or {}
             # Built on first use: overflowing is rare, and an unused client still holds a pool.
@@ -319,7 +351,7 @@ class GraphAgent(BaseAgent):
             # Same trade as the conversation client, on a hop the caller is already waiting through.
             self.routing_client = AzureOpenAI(
                 azure_endpoint=azure_endpoint,
-                api_key=self.llm_key,
+                api_key=azure_key,
                 api_version=api_version,
                 **({"max_retries": 0} if self._routing_overflow_cfg else {}),
             )
@@ -329,7 +361,7 @@ class GraphAgent(BaseAgent):
                 self.routing_model = os.getenv("DEFAULT_ROUTING_MODEL_AZURE", "gpt-4.1-mini")
             logger.info(f"Routing initialized with Azure ({self.routing_model})")
         else:
-            self.routing_client = self.openai
+            self.routing_client = self._openai_routing_client()
             if not self.routing_model:
                 self.routing_model = os.getenv("DEFAULT_ROUTING_MODEL_OPENAI", "gpt-4.1-mini")
             logger.info(f"Routing initialized with OpenAI ({self.routing_model})")
@@ -926,7 +958,9 @@ class GraphAgent(BaseAgent):
                 routing_kwargs["max_tokens"] = self.routing_max_tokens or 250
                 routing_kwargs["temperature"] = 0.0
 
-            if self.routing_provider in ("openai", "azure") and self.service_tier:
+            if (
+                self.routing_provider == "openai" or self.routing_provider in AZURE_KEYED_PROVIDERS
+            ) and self.service_tier:
                 routing_kwargs["service_tier"] = self.service_tier
 
             self._routing_reasoning_effort_used = routing_kwargs.get("reasoning_effort")
