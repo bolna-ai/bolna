@@ -260,6 +260,8 @@ These are the current supported ASRs Providers:
 | Provider     | Environment variable to be added in `.env` file |
 |--------------|-------------------------------------------------|
 | Deepgram     | `DEEPGRAM_AUTH_TOKEN`                           |
+| Qwen3-ASR (realtime) | `QWEN_API_KEY` (or `DASHSCOPE_API_KEY`) |
+| Qwen3-ASR (open weights, `stream: false`) | key of whichever OpenAI-compatible host you point `base_url` at |
 
 </details>
 &nbsp;<br>

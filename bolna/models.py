@@ -160,6 +160,14 @@ class Transcriber(BaseModel):
     noise_reduction: Optional[bool] = False
     vad_threshold: Optional[float] = 0.5
     vad_prefix_padding_ms: Optional[int] = 300
+    # Qwen3-ASR realtime: how long to wait for a final after the server VAD reports speech_stopped
+    completion_timeout: Optional[float] = None
+    # Qwen3-ASR open weights (stream=false): OpenAI-compatible base, e.g. an OpenRouter,
+    # DeepInfra, Azure AI Foundry or self-hosted `vllm serve` host.
+    base_url: Optional[str] = None
+    speech_rms_threshold: Optional[int] = None
+    http_timeout_s: Optional[float] = None
+    max_utterance_s: Optional[float] = None
 
     @field_validator("provider")
     def validate_model(cls, value):
