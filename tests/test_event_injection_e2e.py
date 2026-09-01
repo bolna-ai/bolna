@@ -119,7 +119,6 @@ def _make_graph_agent(config_overrides=None):
     mock_llm.trigger_function_call = False
 
     with (
-        patch("bolna.agent_types.graph_agent.OpenAI", return_value=MagicMock()),
         patch("bolna.agent_types.graph_agent.SUPPORTED_LLM_PROVIDERS", {"openai": MagicMock(return_value=mock_llm)}),
         patch("bolna.agent_types.graph_agent.OpenAiLLM", return_value=MagicMock()),
     ):
@@ -925,25 +924,26 @@ class TestEventEdgesDoNotInterfereWithNormalRouting:
         """LLM-based routing should not see event edges."""
         agent = _make_graph_agent()
 
-        mock_response = MagicMock()
-        mock_response.choices = [MagicMock()]
-        mock_response.choices[0].message.tool_calls = [MagicMock()]
-        mock_response.choices[0].message.tool_calls[0].function.name = "stay_on_current_node"
-        mock_response.choices[0].message.tool_calls[
-            0
-        ].function.arguments = '{"reasoning": "no match", "confidence": 0.9}'
+        captured = {}
 
-        agent.routing_client = MagicMock()
-        agent.routing_client.chat.completions.create = MagicMock(return_value=mock_response)
+        async def fake_route(messages, tools, tool_choice="required", meta_info=None):
+            captured["tools"] = tools
+            return {
+                "function_name": "stay_on_current_node",
+                "arguments": {"reasoning": "no match", "confidence": 0.9},
+                "usage": {},
+                "service_tier": None,
+                "overflowed": False,
+            }
+
+        agent.routing_llm = MagicMock()
+        agent.routing_llm.route = fake_route
 
         history = [{"role": "user", "content": "hello"}]
-        result = await agent.decide_next_node_with_functions(history)
+        await agent.decide_next_node_with_functions(history)
 
-        create_call = agent.routing_client.chat.completions.create
-        if create_call.called:
-            call_kwargs = create_call.call_args
-            tools = call_kwargs.kwargs.get("tools") or call_kwargs[1].get("tools", [])
-            tool_names = [t["function"]["name"] for t in tools]
+        if "tools" in captured:
+            tool_names = [t["function"]["name"] for t in captured["tools"]]
             # Event edge (transition_to_verify_details) should NOT be in tools
             assert "transition_to_verify_details" not in tool_names
             # LLM edge should be present
