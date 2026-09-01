@@ -798,69 +798,62 @@ async def write_request_logs(message, run_id):
 
 
 async def save_audio_file_to_s3(conversation_recording, sampling_rate=24000, assistant_id=None, run_id=None):
-    last_frame_end_time = conversation_recording["output"][0]["start_time"]
     logger.info(f"LENGTH OF OUTPUT AUDIO {len(conversation_recording['output'])}")
-    initial_gap = (last_frame_end_time - conversation_recording["metadata"]["started"]) * 1000
-    logger.info(f"Initial gap {initial_gap}")
-    combined_audio = AudioSegment.silent(duration=initial_gap, frame_rate=sampling_rate)
-    for i, frame in enumerate(conversation_recording["output"]):
-        frame_start_time = frame["start_time"]
-        logger.info(
-            f"Processing frame {i}, fram start time = {last_frame_end_time}, frame start time= {frame_start_time}"
-        )
-        if last_frame_end_time < frame_start_time:
-            gap_duration_samples = frame_start_time - last_frame_end_time
-            silence = AudioSegment.silent(duration=gap_duration_samples * 1000, frame_rate=sampling_rate)
-            combined_audio += silence
-        last_frame_end_time = frame_start_time + frame["duration"]
-        frame_as = AudioSegment.from_file(io.BytesIO(frame["data"]), format="wav")
-        combined_audio += frame_as
 
-    webm_segment = AudioSegment.from_file(io.BytesIO(conversation_recording["input"]["data"]))
-    wav_bytes = io.BytesIO()
-    webm_segment.export(wav_bytes, format="wav")
-    wav_bytes.seek(0)  # Reset the pointer to the start
-    waveform, sample_rate = torchaudio.load(wav_bytes)
-    resampler = torchaudio.transforms.Resample(orig_freq=sample_rate, new_freq=sampling_rate)
-    downsampled_waveform = resampler(waveform)
-    torchaudio_wavio = io.BytesIO()
-    torchaudio.save(torchaudio_wavio, downsampled_waveform, sampling_rate, format="wav")
-    audio_segment_bytes = io.BytesIO()
-    combined_audio.export(audio_segment_bytes, format="wav")
-    audio_segment_bytes.seek(0)
-    waveform_audio_segment, sample_rate = torchaudio.load(audio_segment_bytes)
+    # Bot (agent) channel: stitch the recorded output frames back together, restoring the
+    # silence between them so the timeline matches the real call.
+    output_frames = conversation_recording["output"]
+    if output_frames:
+        last_frame_end_time = output_frames[0]["start_time"]
+        initial_gap = max((last_frame_end_time - conversation_recording["metadata"]["started"]) * 1000, 0)
+        logger.info(f"Initial gap {initial_gap}")
+        combined_audio = AudioSegment.silent(duration=initial_gap, frame_rate=sampling_rate)
+        for i, frame in enumerate(output_frames):
+            frame_start_time = frame["start_time"]
+            logger.info(
+                f"Processing frame {i}, fram start time = {last_frame_end_time}, frame start time= {frame_start_time}"
+            )
+            if last_frame_end_time < frame_start_time:
+                gap_duration_samples = frame_start_time - last_frame_end_time
+                silence = AudioSegment.silent(duration=gap_duration_samples * 1000, frame_rate=sampling_rate)
+                combined_audio += silence
+            last_frame_end_time = frame_start_time + frame["duration"]
+            frame_as = AudioSegment.from_file(io.BytesIO(frame["data"]), format="wav")
+            combined_audio += frame_as
+    else:
+        # No agent audio was recorded; keep an empty bot channel so the mix still succeeds.
+        combined_audio = AudioSegment.silent(duration=0, frame_rate=sampling_rate)
 
-    if waveform_audio_segment.shape[0] > 1:
-        waveform_audio_segment = waveform_audio_segment[:1, :]
+    # User (caller) channel: decode whatever container the input arrived in and normalise it
+    # to the recording's mono 16-bit sampling_rate. pydub + scipy already ship as dependencies,
+    # so the mix is done here instead of pulling in torch/torchaudio (which were never declared
+    # and made this function raise NameError on every recorded call).
+    input_bytes = conversation_recording["input"]["data"]
+    user_channel = decode_audio_segment(input_bytes)
+    if user_channel is None:
+        # A compressed container (e.g. a browser's webm/opus) needs ffmpeg, which the
+        # deployment image ships; WAV/PCM are decoded natively above without it.
+        user_channel = AudioSegment.from_file(io.BytesIO(input_bytes))
+    user_channel = user_channel.set_frame_rate(sampling_rate).set_channels(1).set_sample_width(2)
+    bot_channel = combined_audio.set_frame_rate(sampling_rate).set_channels(1).set_sample_width(2)
 
-    # Adjust shapes to be [1, N] if not already
-    downsampled_waveform = (
-        downsampled_waveform.unsqueeze(0) if downsampled_waveform.dim() == 1 else downsampled_waveform
-    )
-    waveform_audio_segment = (
-        waveform_audio_segment.unsqueeze(0) if waveform_audio_segment.dim() == 1 else waveform_audio_segment
-    )
+    # Pad the shorter channel with trailing silence so both span the full call length before
+    # they are interleaved into a stereo file (left = caller, right = agent).
+    max_duration_ms = max(len(user_channel), len(bot_channel))
+    if len(user_channel) < max_duration_ms:
+        user_channel += AudioSegment.silent(duration=max_duration_ms - len(user_channel), frame_rate=sampling_rate)
+    if len(bot_channel) < max_duration_ms:
+        bot_channel += AudioSegment.silent(duration=max_duration_ms - len(bot_channel), frame_rate=sampling_rate)
 
-    # Ensure both waveforms have the same length
-    max_length = max(downsampled_waveform.size(1), waveform_audio_segment.size(1))
-    downsampled_waveform_padded = torch.nn.functional.pad(
-        downsampled_waveform, (0, max_length - downsampled_waveform.size(1))
-    )
-    waveform_audio_segment_padded = torch.nn.functional.pad(
-        waveform_audio_segment, (0, max_length - waveform_audio_segment.size(1))
-    )
-    stereo_waveform = torch.cat((downsampled_waveform_padded, waveform_audio_segment_padded), 0)
-
-    # Verify the stereo waveform shape is [2, M]
-    assert stereo_waveform.shape[0] == 2, "Stereo waveform should have 2 channels."
-    key = f"{assistant_id + run_id}.wav"
+    stereo_audio = AudioSegment.from_mono_audiosegments(user_channel, bot_channel)
 
     audio_buffer = io.BytesIO()
-    torchaudio.save(audio_buffer, stereo_waveform, 24000, format="wav")
-    audio_buffer.seek(0)
+    stereo_audio.export(audio_buffer, format="wav")
+    audio_data = audio_buffer.getvalue()
 
+    key = f"{assistant_id + run_id}.wav"
     logger.info(f"Storing in {RECORDING_BUCKET_URL}{key}")
-    await store_file(bucket_name=RECORDING_BUCKET_NAME, file_key=key, file_data=audio_buffer, content_type="wav")
+    await store_file(bucket_name=RECORDING_BUCKET_NAME, file_key=key, file_data=audio_data, content_type="wav")
 
     return f"{RECORDING_BUCKET_URL}{key}"
 
