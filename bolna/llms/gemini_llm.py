@@ -225,6 +225,51 @@ class GeminiLLM(BaseLLM):
             config.automatic_function_calling = types.AutomaticFunctionCallingConfig(disable=True)
         return config
 
+    async def route(self, messages, tools, tool_choice="required", meta_info=None):
+        parsed_tools = json.loads(tools) if isinstance(tools, str) else tools
+        declarations = []
+        for tool in parsed_tools:
+            func = tool["function"] if tool.get("type") == "function" else tool
+            declarations.append(
+                types.FunctionDeclaration(
+                    name=func["name"],
+                    description=func.get("description", ""),
+                    parameters=clean_gemini_schema(func["parameters"]),
+                )
+            )
+        system_instruction, history = self._prepare_history(messages)
+        config = types.GenerateContentConfig(
+            system_instruction=system_instruction or None,
+            max_output_tokens=self.max_tokens,
+            temperature=self.temperature,
+            tools=[types.Tool(function_declarations=declarations)],
+            automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
+            tool_config=types.ToolConfig(function_calling_config=types.FunctionCallingConfig(mode="ANY")),
+        )
+        thinking_config = self._get_thinking_config()
+        if thinking_config is not None:
+            config.thinking_config = thinking_config
+
+        response = await self.client.aio.models.generate_content(model=self.model, contents=history, config=config)
+        fn = None
+        for candidate in response.candidates or []:
+            if candidate.content and candidate.content.parts:
+                for part in candidate.content.parts:
+                    if getattr(part, "function_call", None):
+                        fn = part.function_call
+                        break
+            if fn:
+                break
+        if fn is None:
+            return None
+        return {
+            "function_name": fn.name,
+            "arguments": dict(fn.args) if fn.args else {},
+            "usage": _usage_kwargs(getattr(response, "usage_metadata", None)),
+            "service_tier": None,
+            "overflowed": False,
+        }
+
     async def generate_stream(
         self, messages, synthesize=True, meta_info=None, tool_choice=None, tools=None
     ) -> AsyncIterable[LLMStreamChunk]:

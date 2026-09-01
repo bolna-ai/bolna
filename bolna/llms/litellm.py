@@ -12,7 +12,7 @@ from bolna.helpers.utils import convert_to_request_log, compute_function_pre_cal
 from .llm import BaseLLM
 from .tool_call_accumulator import ToolCallAccumulator
 from .types import LLMStreamChunk, LatencyData
-from .message_models import strip_internal_keys
+from .message_models import strip_internal_keys, first_tool_call_result
 from bolna.helpers.logger_config import configure_logger
 
 logger = configure_logger(__name__)
@@ -187,6 +187,23 @@ class LiteLLM(BaseLLM):
             yield LLMStreamChunk(data=answer, end_of_stream=True, latency=latency_data)
 
         self.started_streaming = False
+
+    async def route(self, messages, tools, tool_choice="required", meta_info=None):
+        parsed_tools = json.loads(tools) if isinstance(tools, str) else tools
+        model_args = self.model_args.copy()
+        model_args.update(
+            {
+                "model": self.model,
+                "messages": strip_internal_keys(messages),
+                "tools": parsed_tools,
+                "tool_choice": tool_choice,
+                "parallel_tool_calls": False,
+                "stream": False,
+                "temperature": 0.0,
+            }
+        )
+        completion = await acompletion(**model_args)
+        return first_tool_call_result(completion)
 
     async def generate(self, messages, stream=False, request_json=False, meta_info=None, ret_metadata=False):
         text = ""

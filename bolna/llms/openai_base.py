@@ -14,7 +14,7 @@ from bolna.helpers.utils import (
     SERVER_OWNED_CALL_IDENTIFIERS,
 )
 from .llm import BaseLLM
-from .message_models import MessageFormatAdapter
+from .message_models import MessageFormatAdapter, strip_internal_keys, first_tool_call_result
 from .types import APIParams, LLMStreamChunk, LatencyData, FunctionCallPayload
 from bolna.helpers.logger_config import configure_logger
 
@@ -359,6 +359,27 @@ class OpenAICompatibleLLM(BaseLLM):
         src = tools if tools is not None else self.tools
         parsed = json.loads(src) if isinstance(src, str) else src
         return _strip_server_injected_params(parsed)
+
+    async def _route_completion(self, model_args):
+        """Issue the routing completion. Returns (completion, overflowed). Azure overrides for PTU overflow."""
+        return await self.async_client.chat.completions.create(**model_args), False
+
+    async def route(self, messages, tools, tool_choice="required", meta_info=None):
+        parsed_tools = json.loads(tools) if isinstance(tools, str) else tools
+        model_args = {
+            **self.model_args,
+            "messages": strip_internal_keys(messages),
+            "tools": parsed_tools,
+            "tool_choice": tool_choice,
+            "parallel_tool_calls": False,
+            "stream": False,
+        }
+        if "reasoning_effort" in model_args:  # gpt-5 family fixes temperature, so leave it unset
+            model_args.pop("temperature", None)
+        else:
+            model_args["temperature"] = 0.0
+        completion, overflowed = await self._route_completion(model_args)
+        return first_tool_call_result(completion, overflowed)
 
     def invalidate_response_chain(self):
         self.previous_response_id = None
