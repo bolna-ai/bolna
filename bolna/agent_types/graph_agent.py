@@ -295,6 +295,13 @@ class GraphAgent(BaseAgent):
             return self.openai
         return OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
+    def _fallback_to_openai_routing(self, reason):
+        """Drop to OpenAI routing when the requested backend is unusable, discarding its model name."""
+        logger.warning(f"{reason}, falling back to OpenAI")
+        self.routing_provider = "openai"
+        self.routing_client = self._openai_routing_client()
+        self.routing_model = os.getenv("DEFAULT_ROUTING_MODEL_OPENAI", "gpt-4.1-mini")
+
     def _init_routing_client(self):
         """Initialize routing client. Uses Groq if available, else OpenAI."""
         groq_available = GROQ_AVAILABLE and os.getenv("GROQ_API_KEY")
@@ -314,19 +321,15 @@ class GraphAgent(BaseAgent):
                 self.routing_model = conv_model.split("/", 1)[-1]
 
         if self.routing_provider == "groq":
-            if groq_available:
-                self.routing_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
-                # Default to llama-3.3-70b-versatile (best for multilingual routing)
-                if not self.routing_model:
-                    self.routing_model = os.getenv("DEFAULT_ROUTING_MODEL_GROQ", "llama-3.3-70b-versatile")
-                logger.info(f"Routing initialized with Groq ({self.routing_model}) - fast mode ~200ms")
-            else:
-                logger.warning(
-                    "Groq requested but GROQ_API_KEY not set or groq package not installed, falling back to OpenAI"
+            if not groq_available:
+                return self._fallback_to_openai_routing(
+                    "Groq requested but GROQ_API_KEY not set or groq package not installed"
                 )
-                self.routing_client = self._openai_routing_client()
-                self.routing_provider = "openai"
-                self.routing_model = os.getenv("DEFAULT_ROUTING_MODEL_OPENAI", "gpt-4.1-mini")
+            self.routing_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+            # Default to llama-3.3-70b-versatile (best for multilingual routing)
+            if not self.routing_model:
+                self.routing_model = os.getenv("DEFAULT_ROUTING_MODEL_GROQ", "llama-3.3-70b-versatile")
+            logger.info(f"Routing initialized with Groq ({self.routing_model}) - fast mode ~200ms")
         elif self.routing_provider in AZURE_KEYED_PROVIDERS:
             if self._conversation_serves_routing("azure"):
                 azure_endpoint = self.base_url or os.getenv("AZURE_OPENAI_ENDPOINT")
@@ -335,12 +338,7 @@ class GraphAgent(BaseAgent):
                 azure_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
                 azure_key = os.getenv("AZURE_OPENAI_API_KEY")
             if not (azure_endpoint and azure_key):
-                logger.warning("Azure routing requested without usable Azure credentials, falling back to OpenAI")
-                self.routing_client = self._openai_routing_client()
-                self.routing_provider = "openai"
-                self.routing_model = os.getenv("DEFAULT_ROUTING_MODEL_OPENAI", "gpt-4.1-mini")
-                logger.info(f"Routing initialized with OpenAI ({self.routing_model})")
-                return
+                return self._fallback_to_openai_routing("Azure routing requested without usable Azure credentials")
             api_version = self.config.get("api_version") or os.getenv("AZURE_OPENAI_API_VERSION", "2024-12-01-preview")
             overflow = self.config.get("overflow_llm") or {}
             # Built on first use: overflowing is rare, and an unused client still holds a pool.
