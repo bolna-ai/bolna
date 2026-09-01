@@ -12,7 +12,8 @@ def _make_switcher(generate_return, labels=("en", "hi")):
     from bolna.helpers.language_switcher import LanguageSwitcher
 
     fake_llm = MagicMock()
-    fake_llm.generate = AsyncMock(return_value=generate_return)
+    # Real generate(ret_metadata=True) returns (text, usage) — mirror the contract.
+    fake_llm.generate = AsyncMock(return_value=(generate_return, {}))
     with patch(f"{MOD}.LiteLLM", return_value=fake_llm):
         switcher = LanguageSwitcher(available_labels=list(labels))
     return switcher, fake_llm

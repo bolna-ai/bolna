@@ -47,6 +47,9 @@ class LIDBackend:
         # Health counters — a silent detector writes no decides, so these are the only
         # evidence distinguishing "nothing to switch" from "the tap was dead".
         self.chunks_fed = 0
+        self.bytes_fed = 0
+        # Raw INPUT byte rate (pre-resample); providers set it so bytes_fed converts to seconds.
+        self.input_bytes_per_second = 0
         self.chunks_dropped = 0
         self.segments_received = 0
         self.unknown_frames = 0
@@ -75,9 +78,20 @@ class LIDBackend:
         try:
             self._queue.put_nowait(audio_bytes)
             self.chunks_fed += 1
+            self.bytes_fed += len(audio_bytes)
         except asyncio.QueueFull:
             self.chunks_dropped += 1
             logger.debug(f"{self.__class__.__name__}: audio queue full — chunk dropped (backpressure)")
+
+    def set_input_audio_format(self, encoding: str, sample_rate: int) -> None:
+        """Derive bytes/sec from the raw INPUT format: mulaw is 1 byte/sample, linear16 is 2."""
+        self.input_bytes_per_second = int(sample_rate) if "law" in (encoding or "") else 2 * int(sample_rate)
+
+    def audio_seconds_fed(self) -> float:
+        """Seconds of caller audio streamed to this detector (its usage, billed per second)."""
+        if not self.input_bytes_per_second:
+            return 0.0
+        return round(self.bytes_fed / self.input_bytes_per_second, 2)
 
     async def stop(self):
         raise NotImplementedError

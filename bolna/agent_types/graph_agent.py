@@ -1,5 +1,4 @@
 import asyncio
-from collections import defaultdict
 import os
 import re
 import time
@@ -16,8 +15,8 @@ from bolna.helpers.utils import (
     now_ms,
     format_messages,
     update_prompt_with_context,
+    render_prompt,
     enrich_context_with_time_variables,
-    DictWithMissing,
     get_md5_hash,
     select_message_by_language,
 )
@@ -47,7 +46,8 @@ logger = configure_logger(__name__)
 
 _DETERMINISTIC_REASONING_PREFIX = "deterministic:"
 _ROUTER_REASONING_PREFIX = f"{_DETERMINISTIC_REASONING_PREFIX}router:"
-_PROMPT_VAR_PATTERN = re.compile(r"\{([a-zA-Z_][a-zA-Z0-9_]*)\}")
+# Root identifier in either syntax, so {{prior.loans}} still validates against recipient_data["prior"].
+_PROMPT_VAR_PATTERN = re.compile(r"\{\{?\s*([a-zA-Z_][a-zA-Z0-9_]*)(?:\.[a-zA-Z0-9_]+|\[[^\[\]{}]+\])*\s*\}\}?")
 
 # Time variables frozen per call for the conversation prompt; see _prompt_context.
 _TIME_VAR_KEYS = (
@@ -861,7 +861,7 @@ class GraphAgent(BaseAgent):
                 substitution_data = dict(self.context_data)
                 if "recipient_data" in self.context_data and isinstance(self.context_data["recipient_data"], dict):
                     substitution_data.update(self.context_data["recipient_data"])
-                instructions = instructions.format_map(defaultdict(lambda: "NULL", substitution_data))
+                instructions = render_prompt(instructions, substitution_data, missing="NULL")
             except Exception as e:
                 logger.debug(f"Variable substitution in routing_instructions failed: {e}")
 

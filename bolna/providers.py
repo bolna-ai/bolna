@@ -11,6 +11,7 @@ from .synthesizer import (
     RimeSynthesizer,
     PixaSynthesizer,
     MayaSynthesizer,
+    KalpaSynthesizer,
 )
 from .transcriber import (
     DeepgramTranscriber,
@@ -24,6 +25,7 @@ from .transcriber import (
     SmallestTranscriber,
     OpenAITranscriber,
     SonioxTranscriber,
+    GeminiTranscriber,
 )
 from .input_handlers import (
     DefaultInputHandler,
@@ -68,6 +70,7 @@ SUPPORTED_SYNTHESIZER_MODELS = {
     SynthesizerProvider.RIME.value: RimeSynthesizer,
     SynthesizerProvider.PIXA.value: PixaSynthesizer,
     SynthesizerProvider.MAYA.value: MayaSynthesizer,
+    SynthesizerProvider.KALPA.value: KalpaSynthesizer,
 }
 
 SUPPORTED_TRANSCRIBER_PROVIDERS = {
@@ -82,6 +85,7 @@ SUPPORTED_TRANSCRIBER_PROVIDERS = {
     TranscriberProvider.SMALLEST.value: SmallestTranscriber,
     TranscriberProvider.OPENAI.value: OpenAITranscriber,
     TranscriberProvider.SONIOX.value: SonioxTranscriber,
+    TranscriberProvider.GEMINI.value: GeminiTranscriber,
 }
 
 # Backwards compatibility

@@ -62,6 +62,7 @@ class SynthesizerProvider(str, Enum):
     RIME = "rime"
     PIXA = "pixa"
     MAYA = "maya"
+    KALPA = "kalpa"
 
     @classmethod
     def all_values(cls):
@@ -83,6 +84,7 @@ class TranscriberProvider(str, Enum):
     SMALLEST = "smallest"
     OPENAI = "openai"
     SONIOX = "soniox"
+    GEMINI = "gemini"
 
     @classmethod
     def all_values(cls):

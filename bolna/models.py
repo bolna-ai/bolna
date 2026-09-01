@@ -121,6 +121,17 @@ class MayaConfig(BaseModel):
     language: Optional[str] = "en"
 
 
+class KalpaConfig(BaseModel):
+    voice: str = "Kiara"
+    voice_id: Optional[str] = None
+    model: str = "kalpa-tts-multilingual-beta-v0.1"
+    temperature: Optional[float] = None
+    acoustic_temperature: Optional[float] = None
+    max_new_tokens: Optional[int] = None
+    audio_quality: Optional[str] = None
+    chunk_length_schedule: Optional[List[int]] = None
+
+
 class AzureConfig(BaseModel):
     voice: str
     model: str
@@ -169,6 +180,7 @@ class Synthesizer(BaseModel):
         DeepgramConfig,
         OpenAIConfig,
         MayaConfig,
+        KalpaConfig,
     ] = Field(union_mode="smart")
     stream: bool = False
     buffer_size: Optional[int] = 40  # 40 characters in a buffer
@@ -215,6 +227,9 @@ class Synthesizer(BaseModel):
         elif provider == "maya":
             if isinstance(config, dict):
                 values["provider_config"] = MayaConfig(**config)
+        elif provider == "kalpa":
+            if isinstance(config, dict):
+                values["provider_config"] = KalpaConfig(**config)
 
         return values
 
@@ -394,6 +409,7 @@ class GraphEdge(BaseModel):
 
     to_node_id: str
     condition: str = ""  # Human-readable description of when to transition
+    label: Optional[str] = None
     condition_type: Optional[EdgeConditionType] = None  # None → "llm" (backward compat)
     expression: Optional[ExpressionGroup] = None  # required when condition_type == "expression"
     event_name: Optional[str] = None  # Matches CallEvent.event when condition_type="event"
@@ -598,6 +614,8 @@ class ToolModel(BaseModel):
 class OpenAIRealtimeConfig(BaseModel):
     model: str = "gpt-realtime-2.1"
     voice: str = "marin"
+    # Playback rate (0.25 to 1.5), not how the reply is worded.
+    speed: Optional[float] = 1.0
     # semantic_vad scores whether the caller has actually finished from what they said, so
     # it waits longer on a trailing "ummm" than on a finished sentence. That is the job the
     # llm pipeline does with a word count and a phrase list, done by a model instead.
