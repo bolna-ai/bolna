@@ -614,6 +614,7 @@ class GraphAgent(BaseAgent):
         *,
         routing_type: str,
         latency_ms: float,
+        started_at: float,
         reasoning: Optional[str],
         confidence: Optional[float],
         is_silence_trigger: bool = False,
@@ -634,6 +635,8 @@ class GraphAgent(BaseAgent):
             "routing_model": self.routing_model if made_llm_call else None,
             "routing_provider": self.routing_provider if made_llm_call else None,
             "routing_latency_ms": round(latency_ms, 1),
+            # Wall clock at hop start — the trace row is written after the hop finished.
+            "routing_started_at": started_at,
             "extracted_params": extracted_params or {},
             "node_history": list(self.node_history),
             "routing_messages": routing_messages,
@@ -664,6 +667,7 @@ class GraphAgent(BaseAgent):
             visited.add(self.current_node_id)
 
             hop_start = time.perf_counter()
+            hop_started_at = time.time()
             self._enrich_routing_context(history)
             router_node = self.get_node_by_id(self.current_node_id)
             previous_node = self.current_node_id
@@ -702,6 +706,7 @@ class GraphAgent(BaseAgent):
                             previous_node,
                             routing_type="llm",
                             latency_ms=latency_ms,
+                            started_at=hop_started_at,
                             reasoning=reasoning,
                             confidence=confidence,
                             is_silence_trigger=is_silence_trigger,
@@ -737,6 +742,7 @@ class GraphAgent(BaseAgent):
                     previous_node,
                     routing_type="deterministic",
                     latency_ms=latency_ms,
+                    started_at=hop_started_at,
                     reasoning=f"{_ROUTER_REASONING_PREFIX}{condition}",
                     confidence=1.0,
                     is_silence_trigger=is_silence_trigger,
@@ -778,6 +784,7 @@ class GraphAgent(BaseAgent):
             "routing_model": None,
             "routing_provider": None,
             "routing_latency_ms": None,
+            "routing_started_at": time.time(),
             "extracted_params": {},
             "node_history": list(self.node_history),
             "routing_messages": None,
@@ -1348,6 +1355,7 @@ class GraphAgent(BaseAgent):
                         "routing_model": None,
                         "routing_provider": None,
                         "routing_latency_ms": 0,
+                        "routing_started_at": time.time(),
                         "extracted_params": {},
                         "node_history": list(self.node_history),
                         "routing_messages": None,
@@ -1415,6 +1423,7 @@ class GraphAgent(BaseAgent):
                 yield {"routing_info": self._hold_routing_info(is_silence_trigger)}
             else:
                 previous_node = self.current_node_id
+                routing_started_at = time.time()
                 (
                     next_node_id,
                     extracted_params,
@@ -1446,6 +1455,7 @@ class GraphAgent(BaseAgent):
                         "routing_model": self.routing_model,
                         "routing_provider": getattr(self, "routing_provider", None),
                         "routing_latency_ms": round(routing_latency_ms, 1),
+                        "routing_started_at": routing_started_at,
                         "routing_reasoning_effort": getattr(self, "_routing_reasoning_effort_used", None),
                         "extracted_params": extracted_params or {},
                         "node_history": list(self.node_history),

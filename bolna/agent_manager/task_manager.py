@@ -3530,6 +3530,8 @@ class TaskManager(BaseManager):
         reasoning_content=None,
         log_message=None,
         overflowed=False,
+        ts=None,
+        llm_latency=None,
     ):
         self.llm_response_generated = True
         # task 0 only, so aux LLMs (hangup/voicemail) never tally, and never an overflowed turn,
@@ -3553,6 +3555,8 @@ class TaskManager(BaseManager):
             reasoning_tokens=reasoning_tokens,
             cached_tokens=cached_tokens,
             reasoning_content=reasoning_content,
+            ts=ts,
+            latency=llm_latency,
         )
         turn_id = meta_info.get("turn_id")
         response_uid = meta_info.get("response_uid")
@@ -3591,6 +3595,11 @@ class TaskManager(BaseManager):
         )
         actual_overflowed = False
         actual_reasoning_content = None
+        # Stamped per chunk: after the loop these hold when the LLM actually finished and how
+        # fast it started. __store_into_history runs much later (once every chunk has been
+        # pushed to TTS), so the response trace row must be stamped from here, not from there.
+        llm_stream_end_ts = None
+        llm_first_token_latency = None
         synthesize = True
         if should_bypass_synth:
             synthesize = False
@@ -3623,6 +3632,12 @@ class TaskManager(BaseManager):
                 if isinstance(llm_message, dict) and "routing_info" in llm_message:
                     routing_info = llm_message["routing_info"]
 
+                    # Both rows are written here, after the hop already finished — stamp the
+                    # request row at the hop's start so the trace stays chronological.
+                    routing_started_at = routing_info.get("routing_started_at")
+                    routing_latency_ms = routing_info.get("routing_latency_ms")
+                    routing_latency = round(routing_latency_ms / 1000, 6) if routing_latency_ms is not None else None
+
                     # Log routing request with tools
                     routing_messages = routing_info.get("routing_messages")
                     routing_tools = routing_info.get("routing_tools", [])
@@ -3646,6 +3661,7 @@ class TaskManager(BaseManager):
                             component=LogComponent.GRAPH_ROUTING,
                             direction=LogDirection.REQUEST,
                             run_id=self.run_id,
+                            ts=routing_started_at,
                         )
                     elif routing_info.get("routing_type") == "deterministic":
                         expression_trace = (
@@ -3658,6 +3674,7 @@ class TaskManager(BaseManager):
                             component=LogComponent.GRAPH_ROUTING,
                             direction=LogDirection.REQUEST,
                             run_id=self.run_id,
+                            ts=routing_started_at,
                         )
 
                     # Build routing response data
@@ -3735,6 +3752,7 @@ class TaskManager(BaseManager):
                         output_tokens=routing_usage.get("output_tokens"),
                         reasoning_tokens=routing_usage.get("reasoning_tokens"),
                         cached_tokens=routing_usage.get("cached_tokens"),
+                        latency=routing_latency,
                     )
 
                     is_silence_trigger = routing_info.get("is_silence_trigger", False)
@@ -3784,6 +3802,9 @@ class TaskManager(BaseManager):
                 data = llm_message.data
                 end_of_llm_stream = llm_message.end_of_stream
                 latency = llm_message.latency
+                llm_stream_end_ts = time.time()
+                if latency and latency.first_token_latency_ms is not None and llm_first_token_latency is None:
+                    llm_first_token_latency = round(latency.first_token_latency_ms / 1000, 6)
                 trigger_function_call = llm_message.is_function_call
                 function_tool = llm_message.function_name
                 function_tool_message = llm_message.function_message
@@ -3840,6 +3861,8 @@ class TaskManager(BaseManager):
                             cached_tokens=actual_cached_tokens,
                             reasoning_content=actual_reasoning_content,
                             overflowed=actual_overflowed,
+                            ts=llm_stream_end_ts,
+                            llm_latency=llm_first_token_latency,
                         )
                     try:
                         await self.__execute_function_call(next_step=next_step, **data.model_dump())
@@ -3942,6 +3965,8 @@ class TaskManager(BaseManager):
                 reasoning_content=actual_reasoning_content,
                 log_message=empty_turn_detail,
                 overflowed=actual_overflowed,
+                ts=llm_stream_end_ts,
+                llm_latency=llm_first_token_latency,
             )
         elif not self.stream:
             llm_response = llm_response.strip()
@@ -3962,6 +3987,8 @@ class TaskManager(BaseManager):
                 reasoning_tokens=actual_reasoning_tokens,
                 cached_tokens=actual_cached_tokens,
                 reasoning_content=actual_reasoning_content,
+                ts=llm_stream_end_ts,
+                latency=llm_first_token_latency,
             )
 
         # Stamp full response text on the last LLM turn entry (new field, no existing fields changed)

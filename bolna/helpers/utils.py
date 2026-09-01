@@ -928,12 +928,16 @@ def convert_to_request_log(
     reasoning_tokens=None,
     cached_tokens=None,
     reasoning_content=None,
+    ts=None,
+    latency=None,
 ):
     log = dict()
     log["direction"] = direction.value if isinstance(direction, Enum) else direction
     log["data"] = message
     log["leg_id"] = meta_info["request_id"] if "request_id" in meta_info else "-"
-    log["time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")
+    # ts (epoch seconds) stamps the row when the event happened rather than when it is logged —
+    # callers that log after the fact (LLM response, graph routing request) must pass it.
+    log["time"] = (datetime.fromtimestamp(ts) if ts else datetime.now()).strftime("%Y-%m-%d %H:%M:%S.%f")
     log["component"] = component.value if isinstance(component, Enum) else component
     log["sequence_id"] = meta_info.get("sequence_id", None)
     log["model"] = model
@@ -1023,6 +1027,9 @@ def convert_to_request_log(
                     else UsageSource.ESTIMATED.value
                 )
                 log["llm_metadata"] = llm_metadata
+    # Explicit latency (seconds) wins over the meta_info lookups above.
+    if latency is not None:
+        log["latency"] = latency
     log["engine"] = engine
     asyncio.create_task(write_request_logs(log, run_id))
 
