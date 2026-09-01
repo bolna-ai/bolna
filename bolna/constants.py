@@ -70,6 +70,76 @@ SONIOX_ENDPOINT_TOKEN = "<end>"  # sentinel token emitted when the speaker stops
 SONIOX_DEFAULT_MULTILINGUAL_HINTS = ["en", "hi", "ta", "te", "kn", "ml", "mr", "bn", "gu", "pa", "ur"]
 SONIOX_AUTO_LANGUAGE_VALUES = {"", "multi", "auto", "multilingual", "unknown"}
 
+# Qwen3-ASR realtime (Alibaba Cloud Model Studio / DashScope)
+# International (Singapore) gateway. Beijing is dashscope.aliyuncs.com — override via QWEN_ASR_HOST.
+QWEN_ASR_HOST = "dashscope-intl.aliyuncs.com"
+QWEN_ASR_REALTIME_PATH = "/api-ws/v1/realtime"
+QWEN_ASR_DEFAULT_MODEL = "qwen3-asr-flash-realtime"
+# Server-VAD silence before Qwen closes a turn. Bolna's `endpointing` maps onto this; the floor
+# keeps a fast agent config from cutting mid-sentence (Qwen's own default is 800ms).
+QWEN_ASR_MIN_SILENCE_DURATION_MS = 400
+# `.completed` normally lands within ~300ms of speech_stopped. Past this the turn is force-closed
+# with whatever interim text we have, so a dropped final can't hold the agent's reply forever.
+QWEN_ASR_COMPLETION_TIMEOUT_S = 2.0
+# Ceiling on the biasing corpus. The API caps `corpus.text` at 10k tokens; chars are the only
+# budget we can measure locally, and ~4 chars/token leaves headroom for CJK.
+QWEN_ASR_MAX_CORPUS_CHARS = 20000
+# Absent `language`, Qwen auto-detects. These config values mean "don't pin one".
+QWEN_ASR_AUTO_LANGUAGE_VALUES = {"", "multi", "auto", "multilingual", "unknown"}
+# Languages qwen3-asr-flash-realtime accepts as an explicit hint. Anything else is sent as
+# auto-detect rather than rejected at the handshake.
+QWEN_ASR_SUPPORTED_LANGUAGES = frozenset(
+    {
+        "zh",
+        "yue",
+        "en",
+        "ja",
+        "de",
+        "ko",
+        "ru",
+        "fr",
+        "pt",
+        "ar",
+        "it",
+        "es",
+        "hi",
+        "id",
+        "th",
+        "tr",
+        "uk",
+        "vi",
+        "cs",
+        "da",
+        "fil",
+        "fi",
+        "is",
+        "ms",
+        "no",
+        "pl",
+        "sv",
+    }
+)
+
+# ── Qwen3-ASR open-weights path (stream=false) ────────────────────────────────
+# The Apache-2.0 models (Qwen3-ASR-1.7B / 0.6B) are served by any host behind an
+# OpenAI-compatible /v1/audio/transcriptions endpoint. That is batch file transcription:
+# no interim results and no server VAD, so endpointing is done locally here.
+# vLLM also exposes /v1/realtime for these weights, but it transcribes each 5s segment in
+# isolation and duplicates speech across boundaries (vllm#35767, closed "not planned"),
+# so the batch endpoint is the only usable open-weights route.
+QWEN_ASR_DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
+QWEN_ASR_DEFAULT_BATCH_MODEL = "qwen/qwen3-asr-1.7b"
+# Frame RMS above which audio counts as speech, for the local endpointer.
+QWEN_ASR_SPEECH_RMS_THRESHOLD = 300
+# Cap on one buffered utterance. Past this it is flushed regardless of silence, so a caller
+# who never pauses cannot grow the buffer (and the request) without bound.
+QWEN_ASR_MAX_UTTERANCE_S = 25.0
+# HTTP timeout for one transcription request. Sized to not DROP a turn rather than to be
+# fast: measured round trips on the default host/model (OpenRouter -> DeepInfra, 4.5s clip)
+# ranged 1.4s to 52.9s across runs, so anything tighter silently loses the caller's utterance
+# on a slow day. Tune per-deployment with `http_timeout_s` on the transcriber config.
+QWEN_ASR_HTTP_TIMEOUT_S = 60.0
+
 # Model prefixes
 GPT5_MODEL_PREFIX = "gpt-5"
 GPT5_4_MODEL_PREFIX = "gpt-5.4"
