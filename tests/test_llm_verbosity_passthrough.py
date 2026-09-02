@@ -75,7 +75,6 @@ def _captured_llm_kwargs(agent_cls, config):
         return MagicMock()
 
     with (
-        patch("bolna.agent_types.graph_agent.OpenAI", return_value=MagicMock()),
         patch("bolna.agent_types.graph_agent.OpenAiLLM", return_value=MagicMock()),
         patch(f"{agent_cls.__module__}.SUPPORTED_LLM_PROVIDERS", {"openai": _capture}),
     ):

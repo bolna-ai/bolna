@@ -149,6 +149,9 @@ class AzureLLM(OpenAICompatibleLLM):
             ):
                 yield chunk
 
+    async def _route_completion(self, model_args):
+        return await self._create_completion(model_args)
+
     async def _create_completion(self, model_args):
         """Start a completion, overflowing when the pool cannot serve it. Returns (completion, overflowed)."""
         try:
