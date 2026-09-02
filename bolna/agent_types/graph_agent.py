@@ -41,6 +41,8 @@ _ROUTER_REASONING_PREFIX = f"{_DETERMINISTIC_REASONING_PREFIX}router:"
 # Root identifier in either syntax, so {{prior.loans}} still validates against recipient_data["prior"].
 _PROMPT_VAR_PATTERN = re.compile(r"\{\{?\s*([a-zA-Z_][a-zA-Z0-9_]*)(?:\.[a-zA-Z0-9_]+|\[[^\[\]{}]+\])*\s*\}\}?")
 _ROUTER_RATIONALE_ENABLED = os.getenv("GRAPH_ROUTER_RATIONALE", "").strip().lower() in ("1", "true", "yes")
+_ROUTER_REASONING_DESC = "Brief explanation of why this routing decision was made"
+_ROUTER_CONFIDENCE_DESC = "Confidence score from 0.0 to 1.0 for this routing decision"
 
 # Time variables frozen per call for the conversation prompt; see _prompt_context.
 _TIME_VAR_KEYS = (
@@ -362,12 +364,12 @@ class GraphAgent(BaseAgent):
             if _ROUTER_RATIONALE_ENABLED:
                 parameters["properties"]["reasoning"] = {
                     "type": "string",
-                    "description": "Brief explanation of why this routing decision was made",
+                    "description": _ROUTER_REASONING_DESC,
                 }
                 parameters["required"].append("reasoning")
             parameters["properties"]["confidence"] = {
                 "type": "number",
-                "description": "Confidence score from 0.0 to 1.0 for this routing decision",
+                "description": _ROUTER_CONFIDENCE_DESC,
             }
             parameters["required"].append("confidence")
 
@@ -383,11 +385,11 @@ class GraphAgent(BaseAgent):
             if _ROUTER_RATIONALE_ENABLED:
                 stay_properties["reasoning"] = {
                     "type": "string",
-                    "description": "Brief explanation of why this routing decision was made",
+                    "description": _ROUTER_REASONING_DESC,
                 }
             stay_properties["confidence"] = {
                 "type": "number",
-                "description": "Confidence score from 0.0 to 1.0 for this routing decision",
+                "description": _ROUTER_CONFIDENCE_DESC,
             }
             tools.append(
                 {
