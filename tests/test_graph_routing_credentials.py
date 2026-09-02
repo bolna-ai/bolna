@@ -110,7 +110,9 @@ def test_explicit_azure_routing_with_openai_conversation_uses_platform_creds():
 
 
 def test_routing_forwards_service_tier_and_reasoning_effort():
-    agent, _ = _build(provider="openai", service_tier="priority", routing_reasoning_effort="low")
+    agent, _ = _build(
+        provider="openai", routing_model="gpt-5.4-mini", service_tier="priority", routing_reasoning_effort="low"
+    )
     kw = _routing_kwargs(agent)
     assert kw["service_tier"] == "priority"
     assert kw["reasoning_effort"] == "low"

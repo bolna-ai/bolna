@@ -25,7 +25,7 @@ from bolna.llms.types import LLMStreamChunk, LatencyData
 from bolna.llms import OpenAiLLM, LiteLLM
 from bolna.providers import SUPPORTED_LLM_PROVIDERS
 from bolna.prompts import VOICEMAIL_DETECTION_PROMPT
-from bolna.constants import LANGUAGE_NAMES
+from bolna.constants import GPT5_MODEL_PREFIX, LANGUAGE_NAMES, canonical_model, default_reasoning_effort
 
 from typing import List, Tuple, AsyncGenerator, Optional, Dict, Any
 
@@ -274,14 +274,20 @@ class GraphAgent(BaseAgent):
             for key in ("llm_key", "base_url", "api_version"):
                 if self.config.get(key):
                     routing_kwargs[key] = self.config[key]
-        if self.routing_reasoning_effort:
-            routing_kwargs["reasoning_effort"] = self.routing_reasoning_effort
+        # Only gpt-5 models take an effort; resolve deployment names to the model family first.
+        routing_family = canonical_model(self.routing_model)
+        if routing_family.startswith(GPT5_MODEL_PREFIX):
+            routing_kwargs["reasoning_effort"] = (
+                self.routing_reasoning_effort
+                or os.getenv("GPT5_ROUTING_REASONING_EFFORT")
+                or default_reasoning_effort(routing_family)
+            )
         if self.service_tier:
             routing_kwargs["service_tier"] = self.service_tier
         if self.config.get("overflow_llm"):
             routing_kwargs["overflow_llm"] = self.config["overflow_llm"]
 
-        self._routing_reasoning_effort_used = self.routing_reasoning_effort
+        self._routing_reasoning_effort_used = routing_kwargs.get("reasoning_effort")
         self.routing_llm = llm_class(**routing_kwargs)
         logger.info(f"Routing initialized with {self.routing_provider} ({self.routing_model})")
 
