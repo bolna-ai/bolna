@@ -40,6 +40,9 @@ _DETERMINISTIC_REASONING_PREFIX = "deterministic:"
 _ROUTER_REASONING_PREFIX = f"{_DETERMINISTIC_REASONING_PREFIX}router:"
 # Root identifier in either syntax, so {{prior.loans}} still validates against recipient_data["prior"].
 _PROMPT_VAR_PATTERN = re.compile(r"\{\{?\s*([a-zA-Z_][a-zA-Z0-9_]*)(?:\.[a-zA-Z0-9_]+|\[[^\[\]{}]+\])*\s*\}\}?")
+_ROUTER_RATIONALE_ENABLED = os.getenv("GRAPH_ROUTER_RATIONALE", "").strip().lower() in ("1", "true", "yes")
+_ROUTER_REASONING_DESC = "Brief explanation of why this routing decision was made"
+_ROUTER_CONFIDENCE_DESC = "Confidence score from 0.0 to 1.0 for this routing decision"
 
 # Time variables frozen per call for the conversation prompt; see _prompt_context.
 _TIME_VAR_KEYS = (
@@ -358,15 +361,17 @@ class GraphAgent(BaseAgent):
                     }
                     parameters["required"].append(param_name)
 
-            parameters["properties"]["reasoning"] = {
-                "type": "string",
-                "description": "Brief explanation of why this routing decision was made",
-            }
+            if _ROUTER_RATIONALE_ENABLED:
+                parameters["properties"]["reasoning"] = {
+                    "type": "string",
+                    "description": _ROUTER_REASONING_DESC,
+                }
+                parameters["required"].append("reasoning")
             parameters["properties"]["confidence"] = {
                 "type": "number",
-                "description": "Confidence score from 0.0 to 1.0 for this routing decision",
+                "description": _ROUTER_CONFIDENCE_DESC,
             }
-            parameters["required"].extend(["reasoning", "confidence"])
+            parameters["required"].append("confidence")
 
             tools.append(
                 {
@@ -376,6 +381,16 @@ class GraphAgent(BaseAgent):
             )
 
         if allow_stay:
+            stay_properties = {}
+            if _ROUTER_RATIONALE_ENABLED:
+                stay_properties["reasoning"] = {
+                    "type": "string",
+                    "description": _ROUTER_REASONING_DESC,
+                }
+            stay_properties["confidence"] = {
+                "type": "number",
+                "description": _ROUTER_CONFIDENCE_DESC,
+            }
             tools.append(
                 {
                     "type": "function",
@@ -384,17 +399,8 @@ class GraphAgent(BaseAgent):
                         "description": "No transition matches. Need more info or clarification.",
                         "parameters": {
                             "type": "object",
-                            "properties": {
-                                "reasoning": {
-                                    "type": "string",
-                                    "description": "Brief explanation of why this routing decision was made",
-                                },
-                                "confidence": {
-                                    "type": "number",
-                                    "description": "Confidence score from 0.0 to 1.0 for this routing decision",
-                                },
-                            },
-                            "required": ["reasoning", "confidence"],
+                            "properties": stay_properties,
+                            "required": list(stay_properties),
                         },
                     },
                 }
@@ -782,13 +788,13 @@ class GraphAgent(BaseAgent):
             option_edges.append(default_edge)
         tools = self._build_transition_tools_for_edges(option_edges, allow_stay=default_edge is None)
 
-        # Build compact context for routing
+        # Skip internal _-prefixed keys so the routing prompt prefix stays cacheable.
         context_section = ""
         if self.context_data:
             context_items = [
                 f"{k}={v}"
                 for k, v in self.context_data.items()
-                if v is not None and not isinstance(v, dict) and k != "detected_language"
+                if v is not None and not isinstance(v, dict) and k != "detected_language" and not k.startswith("_")
             ]
             if context_items:
                 context_section = f"\nContext: {', '.join(context_items)}"
@@ -804,19 +810,21 @@ class GraphAgent(BaseAgent):
             )
         instructions = self.routing_instructions or default_instructions
 
-        if self.context_data and instructions:
+        # The same frozen context the spoken prompt uses: the router otherwise reads "{Name}" while
+        # the history shows the real value, and live time variables rewrite the prompt every turn.
+        prompt_context = self._prompt_context()
+
+        if prompt_context and instructions:
             try:
-                substitution_data = dict(self.context_data)
-                if "recipient_data" in self.context_data and isinstance(self.context_data["recipient_data"], dict):
-                    substitution_data.update(self.context_data["recipient_data"])
+                substitution_data = dict(prompt_context)
+                recipient_data = prompt_context.get("recipient_data")
+                if isinstance(recipient_data, dict):
+                    substitution_data.update(recipient_data)
                 instructions = render_prompt(instructions, substitution_data, missing="NULL")
             except Exception as e:
                 logger.debug(f"Variable substitution in routing_instructions failed: {e}")
 
-        # Substituted with the same frozen context the spoken prompt uses: the router
-        # otherwise reads "{Name}" while the conversation history shows the real value.
         node_objective = node.get("prompt") or node.get("description") or ""
-        prompt_context = self._prompt_context()
         if prompt_context:
             node_objective = update_prompt_with_context(node_objective, prompt_context)
         system_prompt = f"""Routing Guidelines: \n {instructions}\n Current Node: {node["id"]}{context_section} \n Node Objective: {node_objective}\n\n Node Conversation History:\n"""
