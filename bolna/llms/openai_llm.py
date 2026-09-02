@@ -51,6 +51,7 @@ class OpenAIWSConnection:
     def __init__(self, api_key: str):
         self._api_key = api_key
         self._ws = None
+        self._needs_reset = False
         self._connected_at: float = 0
         self._lock = asyncio.Lock()
         self._connect_task: Optional[asyncio.Task] = None
@@ -72,7 +73,12 @@ class OpenAIWSConnection:
             self._connect_task = None
 
         if self._ws is not None:
-            if self._ws.state is not WSState.OPEN:
+            if self._needs_reset:
+                # An abandoned stream left its events queued here; reading them as the next
+                # turn's would answer the previous utterance.
+                logger.info("WebSocket dirty after an abandoned stream, reconnecting")
+                await self._close_ws()
+            elif self._ws.state is not WSState.OPEN:
                 logger.info("WebSocket closed unexpectedly, reconnecting")
                 await self._close_ws()
             elif time.monotonic() - self._connected_at >= self.RECONNECT_BEFORE_SECS:
@@ -81,6 +87,7 @@ class OpenAIWSConnection:
             else:
                 return
 
+        self._needs_reset = False
         await self._connect()
 
     async def _connect(self):
@@ -99,13 +106,21 @@ class OpenAIWSConnection:
         async with self._lock:
             await self.ensure_connected()
             await self._ws.send(json.dumps({"type": ResponseStreamEvent.CREATE, **create_params}))
+            # Cleared only once a terminal event is actually consumed. Any other exit —
+            # cancellation, error, the consumer breaking early — leaves the response's
+            # remaining events on the socket, so it must not be reused.
+            self._needs_reset = True
 
             async for raw_msg in self._ws:
                 evt = json.loads(raw_msg)
                 evt_type = evt.get("type", "")
-                yield evt
                 if evt_type in self.TERMINAL_EVENTS:
+                    # Before the yield: consumers break on COMPLETED/INCOMPLETE and never
+                    # let this generator resume to run the line after.
+                    self._needs_reset = False
+                    yield evt
                     return
+                yield evt
 
     async def cancel_response(self, response_id: str):
         """Best-effort cancel: signal the server to terminate the in-flight
