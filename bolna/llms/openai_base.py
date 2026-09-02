@@ -21,6 +21,41 @@ from bolna.helpers.logger_config import configure_logger
 logger = configure_logger(__name__)
 
 
+CONTENT_FILTER_CODE = "content_filter"
+
+
+def is_content_filter_error(error) -> bool:
+    """A prompt the provider's moderation stack rejected: 400 carrying code 'content_filter'."""
+    if not isinstance(error, BadRequestError):
+        return False
+    if getattr(error, "code", None) == CONTENT_FILTER_CODE:
+        return True
+    body = getattr(error, "body", None)
+    inner = body.get("error") if isinstance(body, dict) else None
+    return isinstance(inner, dict) and inner.get("code") == CONTENT_FILTER_CODE
+
+
+def note_content_filter(error, meta_info, model, run_id):
+    """Record a filtered prompt as a non-fatal turn. The turn is dropped, the call goes on —
+    the same treatment litellm already gives ContentPolicyViolationError."""
+    message = str(error)
+    logger.error(f"Content policy violation, dropping turn: {message}")
+    if meta_info and run_id:
+        convert_to_request_log(
+            f"Content Policy Violation: {message}",
+            meta_info,
+            model,
+            component=LogComponent.WARNING,
+            direction=LogDirection.WARNING,
+            is_cached=False,
+            run_id=run_id,
+        )
+    if isinstance(meta_info, dict):
+        meta_info.setdefault("_non_fatal_errors", []).append(
+            {"error_type": "content_policy_violation", "error": message, "model": model}
+        )
+
+
 def _clean_rescue_answer(answer: str) -> str | None:
     """Strip leftover 'functions' / 'functions.xxx' tokens from a rescue textual_response."""
     cleaned = re.sub(r"\bfunctions(\.\w+)?\b", "", answer).strip()
@@ -556,6 +591,10 @@ class OpenAICompatibleLLM(BaseLLM):
         try:
             stream = await self._responses_client.responses.create(**create_kwargs)
         except Exception as e:
+            # Ahead of the stale-id check, which treats any 400 as stale and would burn a retry.
+            if is_content_filter_error(e):
+                note_content_filter(e, meta_info, self.request_log_model, getattr(self, "run_id", None))
+                return
             if self.previous_response_id and self._is_stale_response_error(e):
                 logger.warning(f"Stale previous_response_id, retrying with full history: {e}")
                 if isinstance(meta_info, dict):

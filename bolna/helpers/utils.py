@@ -886,7 +886,8 @@ def format_error_message(component, provider, error_str):
     provider_str = f" ({provider})" if provider and provider != "-" else ""
     err_lower = error_str.lower() if error_str else ""
 
-    if "content policy" in err_lower or "content_policy" in err_lower:
+    # Azure words it "content management policy" with code content_filter; OpenAI says "content policy".
+    if any(t in err_lower for t in ("content policy", "content_policy", "content_filter", "content management")):
         return "Content policy violation - response blocked by safety filter"
     if "timeout" in err_lower:
         return f"{display} service{provider_str} connection timed out"

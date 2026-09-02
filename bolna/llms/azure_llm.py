@@ -20,7 +20,7 @@ from openai import (
 from bolna.constants import DEFAULT_LANGUAGE_CODE, GPT5_MODEL_PREFIX, canonical_model, default_reasoning_effort
 from bolna.enums import Verbosity
 from bolna.helpers.utils import convert_to_request_log, compute_function_pre_call_message, now_ms
-from .openai_base import OpenAICompatibleLLM
+from .openai_base import OpenAICompatibleLLM, is_content_filter_error, note_content_filter
 from .tool_call_accumulator import ToolCallAccumulator
 from .types import LLMStreamChunk, LatencyData
 from .message_models import strip_internal_keys
@@ -211,6 +211,9 @@ class AzureLLM(OpenAICompatibleLLM):
         try:
             completion_stream, turn_overflowed = await self._create_completion(model_args)
         except BadRequestError as e:
+            if is_content_filter_error(e):
+                note_content_filter(e, meta_info, self.request_log_model, self.run_id)
+                return
             logger.error(f"Azure OpenAI bad request: {e}")
             raise
         except AuthenticationError as e:

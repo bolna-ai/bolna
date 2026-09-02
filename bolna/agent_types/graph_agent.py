@@ -1426,10 +1426,7 @@ class GraphAgent(BaseAgent):
                 yield chunk
 
         except Exception as e:
+            # Never yield the error as text: a chunk here is indistinguishable from model output
+            # and gets spoken. Propagate so the task manager ends the call with an LLMError.
             logger.error(f"Error in generate: {e}")
-            latency_data = LatencyData(
-                sequence_id=meta_info.get("sequence_id") if meta_info else None,
-                first_token_latency_ms=0,
-                total_stream_duration_ms=now_ms() - start_time,
-            )
-            yield LLMStreamChunk(data=f"An error occurred: {str(e)}", end_of_stream=True, latency=latency_data)
+            raise
