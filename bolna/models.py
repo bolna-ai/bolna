@@ -131,7 +131,7 @@ class AzureConfig(BaseModel):
 
 
 # The config class each provider's provider_config is validated against. Adding a provider means
-# one entry here, and downstream services read this map rather than keeping their own copy.
+# one entry here.
 SYNTHESIZER_CONFIG_MODELS = {
     SynthesizerProvider.POLLY.value: PollyConfig,
     SynthesizerProvider.ELEVENLABS.value: ElevenLabsConfig,
@@ -192,7 +192,7 @@ class Synthesizer(BaseModel):
         if not isinstance(config, dict):
             return values
 
-        if provider == "elevenlabs" and (not config.get("voice") or not config.get("voice_id")):
+        if provider == SynthesizerProvider.ELEVENLABS.value and (not config.get("voice") or not config.get("voice_id")):
             raise ValueError("ElevenLabs config requires both 'voice' and 'voice_id'.")
 
         config_model = SYNTHESIZER_CONFIG_MODELS.get(provider)
