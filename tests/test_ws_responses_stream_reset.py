@@ -1,15 +1,8 @@
 """A cancelled WS Responses turn must not leak its events into the next turn.
 
-One WebSocket serves every turn of a call, and `stream_response` yields whatever it reads
-with no response_id filter. When `llm_task.cancel()` abandons the generator mid-stream, the
-cancelled response's remaining events stay queued on the socket — the next turn then reads
-them and answers the PREVIOUS utterance, in ~0ms (run 23323c9e: seq4 cancelled, seq5 7.81ms,
-seq6 0.52ms, agent replied to 'ठीक है' instead of the question that followed).
-
-The guarantee: a stream that does not consume a terminal event marks the socket dirty, and
-the next use reconnects. Consumers `break` on COMPLETED/INCOMPLETE and never let the
-generator resume, so the flag must be cleared BEFORE the terminal event is yielded —
-otherwise every healthy turn would reconnect too.
+One socket serves every turn and `stream_response` reads it without a response_id filter, so
+an abandoned stream's leftovers get read as the next turn's (run 23323c9e). The guarantee: no
+terminal event consumed => socket dirty => reconnect before reuse. See INIT.md.
 """
 
 import asyncio
@@ -37,8 +30,7 @@ def created(rid="resp_x"):
 
 
 class FakeWS:
-    """Models the real socket: a response's events are queued when its create is sent, and
-    whatever nobody consumes stays queued on THIS socket. A reconnect yields a fresh one."""
+    """Events queue on send and stay queued until read; a reconnect yields a fresh socket."""
 
     def __init__(self, script, hang=False, gate=None):
         self.state = WSState.OPEN
@@ -46,8 +38,8 @@ class FakeWS:
         self.closed = False
         self._script = script  # shared across reconnects; each send pops one response
         self._queue = []
-        self._hang = hang  # block instead of ending, to model "server has not answered yet"
-        self._gate = gate  # when set, events are withheld until the gate opens
+        self._hang = hang  # block instead of ending, so a turn can be cancelled mid-stream
+        self._gate = gate  # withhold events until opened
 
     async def send(self, raw):
         self.sent.append(json.loads(raw))
@@ -118,8 +110,7 @@ async def test_two_healthy_turns_reuse_one_socket():
 
 
 async def test_a_consumer_that_breaks_on_completed_does_not_dirty_the_socket():
-    # The real consumer breaks on COMPLETED and never lets the generator resume, so the
-    # flag has to be cleared before the yield. Clearing it after would reconnect every turn.
+    # Clearing the flag after the yield instead would reconnect on every healthy turn.
     t = _transport([delta("hi"), completed()], [completed("r2")])
     async for evt in t.stream_response({"input": "a"}):
         if evt["type"] == ResponseStreamEvent.COMPLETED.value:
@@ -160,9 +151,7 @@ async def test_the_next_turn_after_an_abandoned_stream_reconnects():
 
 
 async def test_leftover_events_can_never_reach_the_next_turn():
-    """The regression itself. Turn 1 ('ठीक है') is cancelled with its answer still queued;
-    turn 2 (the loan question) must see only its own events. Unfixed, turn 2 reads turn 1's
-    answer and its terminal event, i.e. it replies to the previous utterance in ~0ms."""
+    """The regression: turn 1 is cancelled with its answer still queued, turn 2 must not read it."""
     t = _transport(
         [created("r1"), delta("कुछ और पूछना था?"), completed("r1")],
         [created("r2"), delta("loan answer"), completed("r2")],
@@ -179,7 +168,7 @@ async def test_leftover_events_can_never_reach_the_next_turn():
 
 
 async def test_a_generator_that_never_ran_sends_nothing_and_stays_clean():
-    # Nothing was sent, so nothing is queued — reconnecting here would be pure cost.
+    # Nothing sent means nothing queued; reconnecting here would be pure cost.
     t = _transport([completed("r1")])
     agen = t.stream_response({"input": "a"})
     await agen.aclose()  # never iterated, so the body never ran
@@ -188,8 +177,7 @@ async def test_a_generator_that_never_ran_sends_nothing_and_stays_clean():
 
 
 async def test_task_cancellation_while_awaiting_the_first_event_dirties_the_socket():
-    """The reported call exactly: llm_task.cancel() 6ms after the create was sent, while the
-    turn is still awaiting its first event. The response is already committed server-side."""
+    """The reported call: cancelled 6ms after the create, before any event arrived."""
     t = _transport([], hang=True)
 
     async def consume():
@@ -273,9 +261,7 @@ def _text(chunks):
 
 
 async def test_real_consumer_completes_a_turn_without_dirtying_the_socket():
-    """The ordering guarantee against the actual consumer, which breaks on COMPLETED and
-    never lets the generator resume. If the flag were cleared after the yield instead of
-    before, every healthy turn would reconnect."""
+    """The ordering guarantee against the actual consumer, which breaks on COMPLETED."""
     t = _transport(
         [created("r1"), delta("नमस्ते"), completed("r1")],
         [created("r2"), delta("दूसरा"), completed("r2")],
@@ -292,8 +278,7 @@ async def test_real_consumer_completes_a_turn_without_dirtying_the_socket():
 
 
 async def test_real_consumer_does_not_inherit_a_cancelled_turns_answer():
-    """End to end reproduction of run 23323c9e: turn 1 is cancelled mid-flight, turn 2 must
-    still generate its own answer rather than replay turn 1's."""
+    """End to end reproduction of run 23323c9e, through the real consumer."""
     gate = asyncio.Event()  # the server answers turn 1 only after it has been cancelled
     t = _transport(
         [created("r1"), delta("कुछ और पूछना था?"), completed("r1")],

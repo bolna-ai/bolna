@@ -74,8 +74,7 @@ class OpenAIWSConnection:
 
         if self._ws is not None:
             if self._needs_reset:
-                # An abandoned stream left its events queued here; reading them as the next
-                # turn's would answer the previous utterance.
+                # An abandoned stream's queued events would be read as the next turn's.
                 logger.info("WebSocket dirty after an abandoned stream, reconnecting")
                 await self._close_ws()
             elif self._ws.state is not WSState.OPEN:
@@ -106,17 +105,13 @@ class OpenAIWSConnection:
         async with self._lock:
             await self.ensure_connected()
             await self._ws.send(json.dumps({"type": ResponseStreamEvent.CREATE, **create_params}))
-            # Cleared only once a terminal event is actually consumed. Any other exit —
-            # cancellation, error, the consumer breaking early — leaves the response's
-            # remaining events on the socket, so it must not be reused.
-            self._needs_reset = True
+            self._needs_reset = True  # cleared only once a terminal event is consumed
 
             async for raw_msg in self._ws:
                 evt = json.loads(raw_msg)
                 evt_type = evt.get("type", "")
                 if evt_type in self.TERMINAL_EVENTS:
-                    # Before the yield: consumers break on COMPLETED/INCOMPLETE and never
-                    # let this generator resume to run the line after.
+                    # Before the yield: consumers break here and never let this resume.
                     self._needs_reset = False
                     yield evt
                     return
