@@ -71,41 +71,32 @@ class DeepgramConfig(BaseModel):
     model: str
 
 
-class CartesiaConfig(BaseModel):
-    voice_id: str
+class StandardVoiceConfig(BaseModel):
+    """The four fields every voice provider needs; extend it with provider-specific knobs."""
+
     voice: str
+    voice_id: str
     model: str
     language: str
+
+
+class CartesiaConfig(StandardVoiceConfig):
     speed: Optional[float] = 1.0
 
 
-class RimeConfig(BaseModel):
-    voice_id: str
-    language: str
-    voice: str
-    model: str
+class RimeConfig(StandardVoiceConfig):
+    pass
 
 
-class SmallestConfig(BaseModel):
-    voice_id: str
-    language: str
-    voice: str
-    model: str
+class SmallestConfig(StandardVoiceConfig):
+    pass
 
 
-class SarvamConfig(BaseModel):
-    voice_id: str
-    language: str
-    voice: str
-    model: str
+class SarvamConfig(StandardVoiceConfig):
     speed: Optional[float] = 1.0
 
 
-class PixaConfig(BaseModel):
-    voice_id: str
-    voice: str
-    model: str
-    language: str
+class PixaConfig(StandardVoiceConfig):
     top_p: Optional[float] = 0.95
     repetition_penalty: Optional[float] = 1.3
 
@@ -139,6 +130,24 @@ class AzureConfig(BaseModel):
     speed: Optional[float] = 1.0
 
 
+# The config class each provider's provider_config is validated against. Adding a provider means
+# one entry here.
+SYNTHESIZER_CONFIG_MODELS = {
+    SynthesizerProvider.POLLY.value: PollyConfig,
+    SynthesizerProvider.ELEVENLABS.value: ElevenLabsConfig,
+    SynthesizerProvider.OPENAI.value: OpenAIConfig,
+    SynthesizerProvider.DEEPGRAM.value: DeepgramConfig,
+    SynthesizerProvider.AZURETTS.value: AzureConfig,
+    SynthesizerProvider.CARTESIA.value: CartesiaConfig,
+    SynthesizerProvider.SMALLEST.value: SmallestConfig,
+    SynthesizerProvider.SARVAM.value: SarvamConfig,
+    SynthesizerProvider.RIME.value: RimeConfig,
+    SynthesizerProvider.PIXA.value: PixaConfig,
+    SynthesizerProvider.MAYA.value: MayaConfig,
+    SynthesizerProvider.KALPA.value: KalpaConfig,
+}
+
+
 class Transcriber(BaseModel):
     model: Optional[str] = "nova-2"
     language: Optional[str] = None
@@ -168,20 +177,8 @@ class Transcriber(BaseModel):
 
 class Synthesizer(BaseModel):
     provider: str
-    provider_config: Union[
-        PollyConfig,
-        ElevenLabsConfig,
-        AzureConfig,
-        RimeConfig,
-        SmallestConfig,
-        SarvamConfig,
-        PixaConfig,
-        CartesiaConfig,
-        DeepgramConfig,
-        OpenAIConfig,
-        MayaConfig,
-        KalpaConfig,
-    ] = Field(union_mode="smart")
+    # Derived from the registry so a provider registered there is always accepted here.
+    provider_config: Union[tuple(SYNTHESIZER_CONFIG_MODELS.values())] = Field(union_mode="smart")
     stream: bool = False
     buffer_size: Optional[int] = 40  # 40 characters in a buffer
     audio_format: Optional[str] = "pcm"
@@ -192,44 +189,15 @@ class Synthesizer(BaseModel):
         provider = values.get("provider")
         config = values.get("provider_config", {})
 
-        if provider == "elevenlabs":
-            if not config.get("voice") or not config.get("voice_id"):
-                raise ValueError("ElevenLabs config requires 'voice' or 'voice_id'.")
-            if isinstance(config, dict):
-                values["provider_config"] = ElevenLabsConfig(**config)
-        elif provider == "pixa":
-            if isinstance(config, dict):
-                values["provider_config"] = PixaConfig(**config)
-        elif provider == "cartesia":
-            if isinstance(config, dict):
-                values["provider_config"] = CartesiaConfig(**config)
-        elif provider == "polly":
-            if isinstance(config, dict):
-                values["provider_config"] = PollyConfig(**config)
-        elif provider == "azuretts":
-            if isinstance(config, dict):
-                values["provider_config"] = AzureConfig(**config)
-        elif provider == "deepgram":
-            if isinstance(config, dict):
-                values["provider_config"] = DeepgramConfig(**config)
-        elif provider == "openai":
-            if isinstance(config, dict):
-                values["provider_config"] = OpenAIConfig(**config)
-        elif provider == "smallest":
-            if isinstance(config, dict):
-                values["provider_config"] = SmallestConfig(**config)
-        elif provider == "sarvam":
-            if isinstance(config, dict):
-                values["provider_config"] = SarvamConfig(**config)
-        elif provider == "rime":
-            if isinstance(config, dict):
-                values["provider_config"] = RimeConfig(**config)
-        elif provider == "maya":
-            if isinstance(config, dict):
-                values["provider_config"] = MayaConfig(**config)
-        elif provider == "kalpa":
-            if isinstance(config, dict):
-                values["provider_config"] = KalpaConfig(**config)
+        if not isinstance(config, dict):
+            return values
+
+        if provider == SynthesizerProvider.ELEVENLABS.value and (not config.get("voice") or not config.get("voice_id")):
+            raise ValueError("ElevenLabs config requires both 'voice' and 'voice_id'.")
+
+        config_model = SYNTHESIZER_CONFIG_MODELS.get(provider)
+        if config_model:
+            values["provider_config"] = config_model(**config)
 
         return values
 
