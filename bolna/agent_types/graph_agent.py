@@ -22,7 +22,7 @@ from bolna.helpers.utils import (
 from bolna.helpers.expression_evaluator import evaluate_edge_expression, describe_edge_expression
 from bolna.enums import EdgeConditionType, NodeType, ToolScope
 from bolna.llms.types import LLMStreamChunk, LatencyData
-from bolna.llms import OpenAiLLM
+from bolna.llms import OpenAiLLM, LiteLLM
 from bolna.providers import SUPPORTED_LLM_PROVIDERS
 from bolna.prompts import VOICEMAIL_DETECTION_PROMPT
 from bolna.constants import LANGUAGE_NAMES
@@ -240,15 +240,26 @@ class GraphAgent(BaseAgent):
         otherwise each provider class resolves its own platform key.
         """
         conv_provider = self.config.get("provider") or self.config.get("llm_provider") or "openai"
-        # Default routing to the platform OpenAI model; follow the conversation only on request.
-        self.routing_provider = self.routing_provider or "openai"
-        if self.config.get("route_routing_to_conversation"):
+        # Self-hosted OpenAI-compatible endpoints (custom/ola) have no platform router, so they route on
+        # their own model and endpoint; everything else defaults to the platform OpenAI router. Either can
+        # be told to follow the conversation model explicitly.
+        follow_conversation = self.config.get("route_routing_to_conversation") or (
+            not self.routing_provider and conv_provider in ("custom", "ola")
+        )
+        if follow_conversation:
             self.routing_provider = conv_provider
             conv_model = self.config.get("model")
-            if conv_model:
+            if conv_model and not self.routing_model:
                 self.routing_model = conv_model.split("/", 1)[-1]
+        elif not self.routing_provider:
+            self.routing_provider = "openai"
         if not self.routing_model:
             self.routing_model = os.getenv("DEFAULT_ROUTING_MODEL_OPENAI", "gpt-4.1-mini")
+
+        llm_class = SUPPORTED_LLM_PROVIDERS.get(self.routing_provider, OpenAiLLM)
+        # LiteLLM addresses a backend by a "provider/model" string; a bare model name resolves to OpenAI.
+        if llm_class is LiteLLM and "/" not in self.routing_model:
+            self.routing_model = f"{self.routing_provider}/{self.routing_model}"
 
         routing_kwargs = {
             "model": self.routing_model,
@@ -268,7 +279,6 @@ class GraphAgent(BaseAgent):
             routing_kwargs["overflow_llm"] = self.config["overflow_llm"]
 
         self._routing_reasoning_effort_used = self.routing_reasoning_effort
-        llm_class = SUPPORTED_LLM_PROVIDERS.get(self.routing_provider, OpenAiLLM)
         self.routing_llm = llm_class(**routing_kwargs)
         logger.info(f"Routing initialized with {self.routing_provider} ({self.routing_model})")
 

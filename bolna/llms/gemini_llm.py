@@ -225,6 +225,25 @@ class GeminiLLM(BaseLLM):
             config.automatic_function_calling = types.AutomaticFunctionCallingConfig(disable=True)
         return config
 
+    @staticmethod
+    def _flatten_tool_history_for_routing(messages):
+        """Render tool calls and results as plain text for the routing hop, so no function-call Part
+        (and its thought_signature, which the routing model never produced) has to be reconstructed."""
+        flat = []
+        for msg in messages:
+            role = msg.get("role")
+            if role == "assistant" and msg.get("tool_calls"):
+                parts = [msg["content"]] if msg.get("content") else []
+                for tc in msg["tool_calls"]:
+                    fn = tc.get("function", {})
+                    parts.append(f"[called {fn.get('name')}({fn.get('arguments', '')})]")
+                flat.append({"role": "assistant", "content": " ".join(parts)})
+            elif role == "tool":
+                flat.append({"role": "user", "content": f"[tool result: {msg.get('content', '')}]"})
+            else:
+                flat.append(msg)
+        return flat
+
     async def route(self, messages, tools, tool_choice="required", meta_info=None):
         parsed_tools = json.loads(tools) if isinstance(tools, str) else tools
         declarations = []
@@ -237,7 +256,7 @@ class GeminiLLM(BaseLLM):
                     parameters=clean_gemini_schema(func["parameters"]),
                 )
             )
-        system_instruction, history = self._prepare_history(messages)
+        system_instruction, history = self._prepare_history(self._flatten_tool_history_for_routing(messages))
         config = types.GenerateContentConfig(
             system_instruction=system_instruction or None,
             max_output_tokens=self.max_tokens,

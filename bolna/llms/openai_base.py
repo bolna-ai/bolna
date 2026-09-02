@@ -365,6 +365,10 @@ class OpenAICompatibleLLM(BaseLLM):
         return await self.async_client.chat.completions.create(**model_args), False
 
     async def route(self, messages, tools, tool_choice="required", meta_info=None):
+        # Same SSRF guard the streaming path runs before reaching a customer base_url.
+        guard = getattr(self, "_ensure_base_url_allowed", None)
+        if guard:
+            await guard()
         parsed_tools = json.loads(tools) if isinstance(tools, str) else tools
         model_args = {
             **self.model_args,

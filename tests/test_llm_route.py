@@ -101,6 +101,31 @@ async def test_gemini_route_normalizes():
     assert res["usage"]["input_tokens"] == 50
 
 
+async def test_openai_route_runs_ssrf_guard():
+    llm = OpenAiLLM(model="gpt-4.1-mini", llm_key="k")
+    llm._ensure_base_url_allowed = AsyncMock()
+    llm.async_client = MagicMock()
+    llm.async_client.chat.completions.create = AsyncMock(return_value=_openai_completion())
+    await llm.route(MSGS, TOOLS)
+    llm._ensure_base_url_allowed.assert_awaited_once()
+
+
+def test_gemini_flattens_tool_history_for_routing():
+    msgs = [
+        {
+            "role": "assistant",
+            "content": "ok",
+            "tool_calls": [{"function": {"name": "verify", "arguments": '{"id":1}'}}],
+        },
+        {"role": "tool", "tool_call_id": "x", "content": "verified"},
+        {"role": "user", "content": "yes"},
+    ]
+    flat = GeminiLLM._flatten_tool_history_for_routing(msgs)
+    assert all("tool_calls" not in m for m in flat)  # no function-call Part -> no thought_signature needed
+    assert any("called verify" in m.get("content", "") for m in flat)
+    assert any("tool result: verified" in m.get("content", "") for m in flat)
+
+
 async def test_route_returns_none_without_tool_call():
     llm = OpenAiLLM(model="gpt-4.1-mini", llm_key="k")
     empty = SimpleNamespace(

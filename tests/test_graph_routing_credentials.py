@@ -125,3 +125,40 @@ def test_gemini_conversation_aux_llm_uses_platform_openai_key():
 def test_openai_conversation_aux_llm_reuses_its_own_key():
     _, aux_calls = _build(provider="openai")
     assert all(call["llm_key"] == "conv-key" for call in aux_calls)
+
+
+# Real construction (no registry mock) for the paths whose behavior depends on the concrete LLM class.
+def _real_agent(**overrides):
+    config = {
+        "agent_information": "Test agent",
+        "model": "gpt-4o-mini",
+        "provider": "openai",
+        "llm_key": "conv-key",
+        "current_node_id": "start",
+        "nodes": [{"id": "start", "prompt": "hi", "edges": []}],
+    }
+    config.update(overrides)
+    with patch.dict(os.environ, {"OPENAI_API_KEY": "plat", "GOOGLE_API_KEY": "gg"}, clear=True):
+        return GraphAgent(config)
+
+
+def test_custom_conversation_routes_on_its_own_endpoint():
+    from bolna.llms import OpenAiLLM
+
+    agent = _real_agent(provider="custom", base_url="https://box/v1", llm_key="ck", model="my-llama")
+    assert agent.routing_provider == "custom"
+    assert agent.routing_model == "my-llama"  # its endpoint has no gpt-4.1-mini
+    assert isinstance(agent.routing_llm, OpenAiLLM)
+
+
+def test_explicit_litellm_routing_prefixes_bare_model():
+    from bolna.llms import LiteLLM
+
+    agent = _real_agent(routing_provider="groq", routing_model="llama-3.3-70b-versatile")
+    assert agent.routing_model == "groq/llama-3.3-70b-versatile"
+    assert isinstance(agent.routing_llm, LiteLLM)
+
+
+def test_already_prefixed_litellm_model_not_doubled():
+    agent = _real_agent(routing_provider="anthropic", routing_model="anthropic/claude-3-5-sonnet")
+    assert agent.routing_model == "anthropic/claude-3-5-sonnet"
