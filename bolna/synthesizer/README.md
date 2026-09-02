@@ -5,8 +5,8 @@ Four registrations, one synthesizer class, one smoke run.
 ## Register
 
 1. `bolna/enums.py`: add the slug to `SynthesizerProvider`.
-2. `bolna/models.py`: add a config class, add it to `Synthesizer.provider_config`'s union, and add one
-   entry to `SYNTHESIZER_CONFIG_MODELS`. Extend `StandardVoiceConfig` unless the provider genuinely
+2. `bolna/models.py`: add a config class and one entry to `SYNTHESIZER_CONFIG_MODELS`; the
+   `provider_config` union derives from it. Extend `StandardVoiceConfig` unless the provider genuinely
    needs a different shape: a config of `voice`, `voice_id`, `model` and `language` needs no
    per-provider code downstream to build agent configs for it.
 3. `bolna/synthesizer/<name>_synthesizer.py`: the class. Subclass `StreamSynthesizer` for a websocket

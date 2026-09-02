@@ -177,20 +177,8 @@ class Transcriber(BaseModel):
 
 class Synthesizer(BaseModel):
     provider: str
-    provider_config: Union[
-        PollyConfig,
-        ElevenLabsConfig,
-        AzureConfig,
-        RimeConfig,
-        SmallestConfig,
-        SarvamConfig,
-        PixaConfig,
-        CartesiaConfig,
-        DeepgramConfig,
-        OpenAIConfig,
-        MayaConfig,
-        KalpaConfig,
-    ] = Field(union_mode="smart")
+    # Derived from the registry so a provider registered there is always accepted here.
+    provider_config: Union[tuple(SYNTHESIZER_CONFIG_MODELS.values())] = Field(union_mode="smart")
     stream: bool = False
     buffer_size: Optional[int] = 40  # 40 characters in a buffer
     audio_format: Optional[str] = "pcm"
@@ -205,7 +193,7 @@ class Synthesizer(BaseModel):
             return values
 
         if provider == "elevenlabs" and (not config.get("voice") or not config.get("voice_id")):
-            raise ValueError("ElevenLabs config requires 'voice' or 'voice_id'.")
+            raise ValueError("ElevenLabs config requires both 'voice' and 'voice_id'.")
 
         config_model = SYNTHESIZER_CONFIG_MODELS.get(provider)
         if config_model:
