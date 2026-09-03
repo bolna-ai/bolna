@@ -42,9 +42,10 @@ from bolna.constants import (
     END_CALL_FUNCTION_PREFIX,
     END_CALL_TOOL_DEFINITION,
     RESPONSES_API_MODEL_PREFIXES,
+    LLM_GENERATION_TIMEOUT_S,
     S2S_GOODBYE_TIMEOUT_S,
     S2S_STREAM_SID_TIMEOUT_S,
-    STALL_HANGUP_FLOOR_S,
+    STALL_HANGUP_HARD_CAP_S,
     STUCK_AUDIO_GATE_RELEASE_S,
     WEB_BASED_CALL_PROVIDER,
     WEBCALL_TTS_SAMPLE_RATE,
@@ -3209,7 +3210,17 @@ class TaskManager(BaseManager):
 
             self.hangup_detail = HangupReason.END_CALL_TOOL
             self.call_hangup_message_config = None
-            await self.process_call_hangup()
+            # Detached, not awaited: this call site runs inside __do_llm_generation's own
+            # LLM_GENERATION_TIMEOUT_S window (the end_call tool is handled here, mid-generation).
+            # process_call_hangup's teardown (goodbye playout wait, hangup-chunk wait,
+            # stop_handler) can legitimately take longer than that and must not be cancelled
+            # mid-way - same failure mode as BOLNA-2563, reached via the end_call tool instead
+            # of the hangup-decision check. Held on self, not _usage_tasks, so a reference
+            # survives (see _usage_tasks' own comment) without an unrelated cleanup sweep
+            # ever cancelling this specific task. Done callback so a raised exception doesn't
+            # just vanish with the task (mirrors _s2s_on_task_done, same reasoning).
+            self._end_call_hangup_task = asyncio.create_task(self.process_call_hangup())
+            self._end_call_hangup_task.add_done_callback(self.__log_detached_hangup_exception)
             return
 
         if called_fun.startswith("transfer_call"):
@@ -3571,6 +3582,20 @@ class TaskManager(BaseManager):
             self.conversation_history.sync_interim(messages)
 
     async def __do_llm_generation(
+        self, messages, meta_info, next_step, should_bypass_synth=False, should_trigger_function_call=False
+    ):
+        """Bounds one generation call to LLM_GENERATION_TIMEOUT_S. Scoped here (not around the
+        whole conversation task) so a hung LLM raises promptly without also racing the
+        hangup-decision call or the hangup teardown that can follow it - those can legitimately
+        take a while and must not be cut off mid-way. BOLNA-2563."""
+        await asyncio.wait_for(
+            self.__do_llm_generation_impl(
+                messages, meta_info, next_step, should_bypass_synth, should_trigger_function_call
+            ),
+            timeout=LLM_GENERATION_TIMEOUT_S,
+        )
+
+    async def __do_llm_generation_impl(
         self, messages, meta_info, next_step, should_bypass_synth=False, should_trigger_function_call=False
     ):
         if self.hangup_triggered or self.conversation_ended:
@@ -4156,6 +4181,15 @@ class TaskManager(BaseManager):
     def _should_ignore_transcriber_input(self) -> bool:
         return self.hangup_triggered or self._end_call_in_progress or self.has_transfer
 
+    def __log_detached_hangup_exception(self, task: asyncio.Task) -> None:
+        """A bare create_task with no done callback drops the exception along with the task, so
+        a failed hangup would look identical to a successful one. Mirrors _s2s_on_task_done."""
+        if task.cancelled():
+            return
+        exception = task.exception()
+        if exception is not None:
+            logger.error(f"Detached end_call hangup failed | error={type(exception).__name__}: {exception}")
+
     async def process_call_hangup(self):
         if self.hangup_decision_at is None:
             self.hangup_decision_at = time.time()
@@ -4437,8 +4471,15 @@ class TaskManager(BaseManager):
 
         try:
             if self._is_extraction_task() or self._is_summarization_task():
+                # No timeout: this is post-call extraction/summarization, not a live call - there
+                # is no caller to rescue. Capping it here only risks discarding a slow-but-working
+                # result and running live-call cleanup (_report_provider_health(False),
+                # __process_end_of_conversation) against a task manager with no telephony handler.
                 await self._process_followup_task(message)
             elif self._is_conversation_task():
+                # No outer timeout here: __do_llm_generation bounds each individual generation
+                # call on its own. The hangup-decision LLM call and any hangup teardown that
+                # follows it in _process_conversation_task must not share that same clock.
                 await self._process_conversation_task(message, sequence, meta_info)
             else:
                 logger.error("unsupported task type: {}".format(self.task_config["task_type"]))
@@ -4448,6 +4489,21 @@ class TaskManager(BaseManager):
             self._synthesis_awaiting_first_audio = False
             await self._end_call_on_component_error(e, HangupReason.LLM_ERROR)
             raise
+        except asyncio.TimeoutError:
+            # The LLM never came back within LLM_GENERATION_TIMEOUT_S seconds - treat it as
+            # stuck and hang up, same as any other LLM failure, instead of waiting forever.
+            # BOLNA-2563.
+            logger.error(f"LLM generation stuck for {LLM_GENERATION_TIMEOUT_S}s (run_id={self.run_id}) - hanging up")
+            self.response_in_pipeline = False
+            self._synthesis_awaiting_first_audio = False
+            await self._end_call_on_component_error(
+                LLMError(
+                    f"LLM generation timed out after {LLM_GENERATION_TIMEOUT_S}s",
+                    provider=self.llm_config.get("provider", "unknown"),
+                    model=self.llm_config.get("model"),
+                ),
+                HangupReason.LLM_ERROR,
+            )
         except Exception as e:
             self.response_in_pipeline = False
             self._synthesis_awaiting_first_audio = False
@@ -7254,22 +7310,26 @@ class TaskManager(BaseManager):
             logger.info("Silence repeat generation cancelled by interruption")
             return
 
-    def _should_stall_hangup(
-        self, audio_playing, has_pending_generation, time_since_last_spoken_ai_word, time_since_user_last_spoke
-    ):
-        """Hang up when the call has made no forward progress at all: no audio playing, nothing
-        in flight, and both sides silent past the floor. Runs above the audio/pipeline gate so it
-        still applies when a pipeline flag is stuck. Floor stays above hangup_after_silence so the
-        normal inactivity path takes precedence whenever it is reachable."""
+    def _should_stall_hangup(self, audio_playing, time_since_last_spoken_ai_word, time_since_user_last_spoke):
+        """Hang up when the call has made no forward progress at all: no audio playing and both
+        sides silent past the hard cap. Runs above the audio/pipeline gate so it still applies
+        when a pipeline flag is stuck (e.g. a hung LLM call). An agent's own hangup_after_silence
+        wins over the hard cap when configured higher - this is insurance on top of that
+        configured patience, not a replacement for it."""
         if self.hang_conversation_after <= 0:
             return False
-        stall_timeout = max(self.hang_conversation_after, STALL_HANGUP_FLOOR_S)
-        return (
+        stall_timeout = max(self.hang_conversation_after, STALL_HANGUP_HARD_CAP_S)
+        fires = (
             not audio_playing
-            and not has_pending_generation
             and time_since_last_spoken_ai_word > stall_timeout
             and time_since_user_last_spoke > stall_timeout
         )
+        if fires:
+            logger.debug(
+                f"_should_stall_hangup: firing (ai_silent={time_since_last_spoken_ai_word:.1f}s "
+                f"user_silent={time_since_user_last_spoke:.1f}s stall_timeout={stall_timeout}s)"
+            )
+        return fires
 
     def _pipeline_busy(self, audio_playing):
         """True while the agent is speaking or about to: response_in_pipeline can read False in the gap between a response's synth push and its first audio chunk, so _synthesis_awaiting_first_audio covers it."""
@@ -7330,13 +7390,15 @@ class TaskManager(BaseManager):
             # running inside it) means a response is still being produced even though
             # response_in_pipeline has flipped False after the filler audio. Treat that
             # window as busy so we don't synthesize "are you still there" over the
-            # upcoming follow-up response. hang_conversation_after intentionally remains
-            # ungated so a truly hung task still triggers the inactivity hangup.
+            # upcoming follow-up response, or repeat-after-silence over it either (both checks
+            # below are gated on this). hang_conversation_after intentionally remains ungated so
+            # a truly hung task still triggers the inactivity hangup - and so does the stall
+            # backstop's own hard cap (_should_stall_hangup, below, does not look at this flag
+            # at all): a tool call or s2s call that outlasts that cap with no audio playing can
+            # still be read as no forward progress and hung up mid-tool. BOLNA-2563.
             has_pending_generation = (
                 (self.llm_task is not None and not self.llm_task.done())
                 or (self.execute_function_call_task is not None and not self.execute_function_call_task.done())
-                # An s2s tool call lives here instead, and outlasting the floor would otherwise
-                # read as no forward progress and hang up mid-tool.
                 or any(not task.done() for task in getattr(self, "_s2s_tool_tasks", ()))
             )
 
@@ -7350,14 +7412,13 @@ class TaskManager(BaseManager):
             # Must run above the audio/pipeline gate below (see method docstring).
             if self._should_stall_hangup(
                 audio_playing=self.tools["input"].is_audio_being_played_to_user(),
-                has_pending_generation=has_pending_generation,
                 time_since_last_spoken_ai_word=time_since_last_spoken_ai_word,
                 time_since_user_last_spoke=time_since_user_last_spoke,
             ):
                 logger.warning(
                     f"Stall backstop: no forward progress for {time_since_last_spoken_ai_word:.1f}s "
-                    f"(audio_playing=False, no pending generation, response_in_pipeline={self.response_in_pipeline}) "
-                    f"- forcing hangup"
+                    f"(audio_playing=False, has_pending_generation={has_pending_generation}, "
+                    f"response_in_pipeline={self.response_in_pipeline}) - forcing hangup"
                 )
                 await self._hangup_after_goodbye(HangupReason.INACTIVITY_TIMEOUT)
                 break
