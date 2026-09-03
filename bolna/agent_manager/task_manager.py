@@ -6463,6 +6463,8 @@ class TaskManager(BaseManager):
         new_prompt = f"{base}\n\n{context_note or self.__language_directive(label)}"
         self.conversation_history.update_system_prompt(new_prompt)
         self.system_prompt["content"] = new_prompt
+        # Responses API keeps the system prompt server-side, so a rewrite only ships once the chain drops.
+        self._invalidate_response_chain()
 
     def __log_committed_speculation(self, spec_text: str, capture):
         """Log a committed speculative follow-up exactly like a normal turn:
