@@ -1,6 +1,7 @@
 import os
 import asyncio
 import json
+from contextlib import suppress
 import re
 import time
 from typing import Optional
@@ -139,6 +140,13 @@ class OpenAIWSConnection:
             pass
 
     async def disconnect(self):
+        # Settle any in-flight pre-warm first: it assigns _ws after the fact, so closing
+        # before it lands would leave a live socket nobody owns.
+        task, self._connect_task = self._connect_task, None
+        if task is not None and not task.done():
+            task.cancel()
+            with suppress(asyncio.CancelledError, Exception):
+                await task
         await self._close_ws()
 
     async def _close_ws(self):

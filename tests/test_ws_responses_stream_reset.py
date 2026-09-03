@@ -131,11 +131,14 @@ async def test_a_consumer_that_breaks_on_completed_does_not_dirty_the_socket():
     assert t.connects == 1
 
 
-@pytest.mark.parametrize("terminal", ["response.failed", "response.incomplete", "error"])
-async def test_every_terminal_event_clears_the_flag(terminal):
-    t = _transport([{"type": terminal}])
+@pytest.mark.parametrize("terminal", ["response.completed", "response.failed", "response.incomplete"])
+async def test_every_response_terminal_settles_the_socket(terminal):
+    # `error` is deliberately absent: test_an_error_event_does_not_mark_the_socket_clean owns it.
+    t = _transport([{"type": terminal}], [completed("r2")])
     await _drain(t.stream_response({"input": "a"}))
+    await _settle()
     assert t._needs_reset is False
+    assert t.connects == 1 and t.sockets[0].closed is False  # settled, so kept
 
 
 # ---------------------------------------------------------------- abandoned turns reconnect
@@ -413,3 +416,34 @@ async def test_the_old_socket_close_is_never_awaited_on_the_critical_path():
     assert t.sockets[0].closed is False
     await _settle()
     assert t.sockets[0].closed is True
+
+
+# ---------------------------------------------------------------- review: teardown vs pre-warm
+
+
+async def test_disconnect_does_not_leak_the_socket_a_prewarm_is_still_opening():
+    """discard_socket clears _ws and opens a replacement in the background. A teardown landing
+    inside that window would find nothing to close, then inherit a live socket nobody owns."""
+    t = _transport([completed("r1")], [completed("r2")])
+    await t.ensure_connected()
+    first = t._ws
+
+    opening = asyncio.Event()
+    release = asyncio.Event()
+    finish_connect = t._connect
+
+    async def slow_connect():
+        opening.set()
+        await release.wait()
+        await finish_connect()
+
+    t._connect = slow_connect
+    t.discard_socket()  # hands off the close, starts the replacement
+    await opening.wait()
+
+    await t.disconnect()  # call ends mid-handshake
+    release.set()
+    await _settle()
+
+    assert t._ws is None
+    assert all(ws.closed for ws in t.sockets)
