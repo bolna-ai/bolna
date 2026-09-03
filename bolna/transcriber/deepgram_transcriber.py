@@ -1317,12 +1317,6 @@ class DeepgramTranscriber(BaseTranscriber):
             if self.meta_info is not None and "deepgram_duration" in self.meta_info:
                 self.meta_info["transcriber_duration"] = self.meta_info["deepgram_duration"]
 
-            # Record the endpoint that actually served the call (multi-cloud attribution).
-            if self.meta_info is not None:
-                self.meta_info["deepgram_host"] = (
-                    self.deepgram_flux_host if self.is_flux_model else self.deepgram_host
-                )
-
             meta = dict(getattr(self, "meta_info", None) or {})
             if self.connection_error:
                 meta["connection_error"] = self.connection_error
