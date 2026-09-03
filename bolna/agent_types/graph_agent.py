@@ -237,15 +237,7 @@ class GraphAgent(BaseAgent):
         }
 
     def _init_routing_client(self):
-        """Build the routing LLM from the same registry as the conversation model.
-
-        Credentials come from one of three places, in order: routing_llm_key/base_url/api_version the
-        caller resolved for a routing provider that differs from the conversation (Azure needs an
-        endpoint the runtime does not carry); the conversation credentials when routing shares its
-        provider; otherwise the provider class resolves its own platform key from the env. A provider
-        left with no usable credentials falls back to the platform OpenAI router instead of failing the
-        call.
-        """
+        """Build the routing LLM from the same registry as the conversation model."""
         conv_provider = self.config.get("provider") or self.config.get("llm_provider") or "openai"
         # Self-hosted OpenAI-compatible endpoints (custom/ola) have no platform router, so they route on
         # their own model and endpoint; everything else defaults to the platform OpenAI router. Either can
@@ -280,9 +272,8 @@ class GraphAgent(BaseAgent):
             "api_version": self.config.get("routing_api_version"),
         }
         if not follow_conversation and any(explicit_routing_creds.values()):
-            # Credentials the caller resolved for a routing provider that differs from the conversation.
-            # follow_conversation (e.g. a PTU swap) overrides these: routing then rides the conversation's
-            # own credentials, which may point at a different deployment than these were resolved for.
+            # Creds the caller resolved for a routing provider that differs from the conversation.
+            # follow_conversation (a PTU swap) overrides them: routing then rides the conversation's own.
             routing_kwargs.update({k: v for k, v in explicit_routing_creds.items() if v})
         elif self.routing_provider == conv_provider:
             for key in ("llm_key", "base_url", "api_version"):
@@ -305,9 +296,7 @@ class GraphAgent(BaseAgent):
         try:
             self.routing_llm = llm_class(**routing_kwargs)
         except Exception as e:
-            # A provider the runtime holds no credentials for raises here, and routing is one call per
-            # turn: fall back to the platform router an unspecified routing provider resolves to rather
-            # than take the call down before it reaches the caller.
+            # Routing is one call per turn; degrade to the platform OpenAI router rather than fail the call.
             logger.error(f"Routing client for {self.routing_provider} failed to build: {e}. Routing on OpenAI")
             self.routing_provider = "openai"
             self.routing_model = os.getenv("DEFAULT_ROUTING_MODEL_OPENAI", "gpt-4.1-mini")
