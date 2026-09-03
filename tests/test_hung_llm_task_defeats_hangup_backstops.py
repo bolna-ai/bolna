@@ -2,31 +2,32 @@
 both hangup backstops in __check_for_completion, so a call with voicemail detection +
 hangup-after-silence enabled would sit in dead air until the carrier dropped it.
 
-response_in_pipeline is only ever cleared back to False inside _run_llm_task's exception
-handlers (task_manager.py ~4419-4432). A generation that never raises and never yields a token
-never reaches that cleanup, so both signals downstream stay "busy" indefinitely:
+response_in_pipeline is cleared in several places (the generation path, the audio-playback path,
+teardown, and _run_llm_task's own exception handlers) - but all of them require the in-flight
+work to actually finish or raise. A generation that never does either reaches none of them, so
+both signals downstream stay "busy" indefinitely:
 
-  - has_pending_generation (task_manager.py ~7352-7358) reads llm_task.done(), which is False
-    for the life of the hang.
-  - response_in_pipeline stays True, so _pipeline_busy() (task_manager.py ~7296-7298) stays True.
+  - has_pending_generation reads llm_task.done(), which is False for the life of the hang.
+  - response_in_pipeline stays True, so _pipeline_busy() stays True.
 
 _should_stall_hangup is the backstop for exactly "no forward progress at all": past
-STALL_HANGUP_HARD_CAP_S of mutual silence with no audio playing, it fires unconditionally -
-it no longer takes has_pending_generation into account at all, so a hung task (or any other
-in-flight work) can never wedge the call open past the hard cap. _run_llm_task's own
-LLM_GENERATION_TIMEOUT_S is what protects legitimate in-flight generation from being cut off
-before that point.
+STALL_HANGUP_HARD_CAP_S of mutual silence with no audio playing, it fires unconditionally - it
+does not take has_pending_generation into account at all, so a hung task (or any other in-flight
+work) can never wedge the call open past the hard cap. _run_llm_task's own LLM_GENERATION_TIMEOUT_S
+(scoped to __do_llm_generation) is what protects legitimate in-flight generation from being cut
+off before that point, and from being confused with unrelated work that runs after it.
 """
 
 import asyncio
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
+import bolna.agent_manager.task_manager as task_manager_module
 from bolna.agent_manager.task_manager import TaskManager
 from bolna.constants import STALL_HANGUP_HARD_CAP_S
 
-AGED = STALL_HANGUP_HARD_CAP_S - 5  # comfortably below the hard cap
 VERY_AGED = STALL_HANGUP_HARD_CAP_S + 300  # 5 minutes past the hard cap - "it's just stuck"
 
 
@@ -41,75 +42,55 @@ async def hung_llm_task():
         await task
 
 
-def _has_pending_generation(llm_task):
-    # Mirrors task_manager.py:7352-7358 for the llm_task clause (the other two clauses -
-    # execute_function_call_task and s2s tool tasks - are not part of this bug).
-    return llm_task is not None and not llm_task.done()
-
-
-async def test_hung_llm_task_keeps_has_pending_generation_true_forever(hung_llm_task):
-    assert _has_pending_generation(hung_llm_task) is True
-    # Simulate the watchdog's 2s-interval passing many times over; nothing about a hung task
-    # (no completion, no exception) ever flips this.
-    await asyncio.sleep(0)
-    assert _has_pending_generation(hung_llm_task) is True
-
-
-async def test_short_lived_pending_generation_is_still_protected_below_the_hard_cap(hung_llm_task):
-    """Below STALL_HANGUP_HARD_CAP_S, a task that's merely still running (not yet provably hung)
-    must not be force-hungup on - that's real in-flight work, protected by _run_llm_task's own
-    LLM_GENERATION_TIMEOUT_S rather than by _should_stall_hangup."""
-    fake = SimpleNamespace(hang_conversation_after=15)
-
-    fires = TaskManager._should_stall_hangup(
-        fake,
-        audio_playing=False,
-        time_since_last_spoken_ai_word=AGED,
-        time_since_user_last_spoke=AGED,
-    )
-    assert fires is False
-
-
-async def test_hung_llm_task_no_longer_defeats_the_stall_backstop_past_hard_cap(hung_llm_task):
-    """Past STALL_HANGUP_HARD_CAP_S the backstop fires regardless of any in-flight task, so a
-    hung task (this one included) can no longer wedge the call open forever."""
-    fake = SimpleNamespace(hang_conversation_after=15)
-
-    fires = TaskManager._should_stall_hangup(
-        fake,
-        audio_playing=False,
-        time_since_last_spoken_ai_word=VERY_AGED,
-        time_since_user_last_spoke=VERY_AGED,
-    )
-    assert fires is True
-
-
 async def test_hung_llm_task_leaves_response_in_pipeline_stuck_so_pipeline_stays_busy(hung_llm_task):
-    """response_in_pipeline is set True when the turn kicks off (task_manager.py:4554) and is
-    only cleared in _run_llm_task's except blocks (task_manager.py:4419-4432). A hang that never
-    raises never reaches that clear, so _pipeline_busy() reads busy indefinitely - and
-    __check_for_completion's `if self._pipeline_busy(...): continue` (task_manager.py:7338-7339)
+    """response_in_pipeline is set True when a turn kicks off and only clears once that turn
+    finishes or raises. A hang that never does either never reaches that clear, so
+    _pipeline_busy() reads busy indefinitely - and __check_for_completion's pipeline-busy gate
     means the normal hang_conversation_after check below it is never reached."""
-    assert _has_pending_generation(hung_llm_task) is True  # the hang is still "in flight"
+    has_pending_generation = hung_llm_task is not None and not hung_llm_task.done()
+    assert has_pending_generation is True  # the hang is still "in flight"
 
-    stuck_response_in_pipeline = True  # never cleared - the exception handler never ran
+    stuck_response_in_pipeline = True  # never cleared - the turn never finished or raised
     fake = SimpleNamespace(response_in_pipeline=stuck_response_in_pipeline, _synthesis_awaiting_first_audio=False)
 
     busy = TaskManager._pipeline_busy(fake, audio_playing=False)
     assert busy is True  # bug: __check_for_completion `continue`s here, forever
 
 
-async def test_stall_backstop_eventually_fires_no_matter_how_long_the_task_stays_hung(hung_llm_task):
-    """End-to-end: as the same hung task ages, the backstop stays protective early (does not
-    punish real in-flight work) but is guaranteed to fire by the hard cap - unlike before the
-    fix, where it would have stayed silent even at 20+ minutes."""
-    fake_stall = SimpleNamespace(hang_conversation_after=15)
+async def test_hung_generation_still_times_out_via_the_wrapper(monkeypatch):
+    """The timeout now lives on __do_llm_generation itself, not around the whole conversation
+    task - confirm a hung implementation still raises within LLM_GENERATION_TIMEOUT_S instead
+    of hanging forever."""
+    monkeypatch.setattr(task_manager_module, "LLM_GENERATION_TIMEOUT_S", 0.05)
+    tm = TaskManager.__new__(TaskManager)
 
-    for silence_s, expected in ((AGED, False), (VERY_AGED, True), (VERY_AGED * 4, True)):
-        stall_fires = TaskManager._should_stall_hangup(
-            fake_stall,
-            audio_playing=False,
-            time_since_last_spoken_ai_word=silence_s,
-            time_since_user_last_spoke=silence_s,
-        )
-        assert stall_fires is expected
+    async def _hang(*args, **kwargs):
+        await asyncio.Event().wait()
+
+    tm._TaskManager__do_llm_generation_impl = AsyncMock(side_effect=_hang)
+
+    # A 1.0s outer bound only guards the test itself against hanging; asserting elapsed time
+    # stays well under it proves LLM_GENERATION_TIMEOUT_S (0.05s) is what actually fired.
+    start = asyncio.get_event_loop().time()
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(TaskManager._TaskManager__do_llm_generation(tm, None, None, None), timeout=1.0)
+    assert asyncio.get_event_loop().time() - start < 0.5
+
+
+async def test_slow_work_after_generation_is_no_longer_capped(monkeypatch):
+    """_run_llm_task no longer wraps the whole conversation task - work that runs after
+    generation (the hangup-decision call, or hangup teardown) can legitimately outlast
+    LLM_GENERATION_TIMEOUT_S without being cut off mid-way. BOLNA-2563."""
+    monkeypatch.setattr(task_manager_module, "LLM_GENERATION_TIMEOUT_S", 0.05)
+    tm = TaskManager.__new__(TaskManager)
+    tm.task_config = {"task_type": "conversation"}
+
+    async def _slow(*args, **kwargs):
+        await asyncio.sleep(0.15)  # deliberately past the patched timeout above
+
+    tm._process_conversation_task = AsyncMock(side_effect=_slow)
+    tm._end_call_on_component_error = AsyncMock()
+
+    await asyncio.wait_for(tm._run_llm_task({}), timeout=1.0)
+
+    tm._end_call_on_component_error.assert_not_awaited()

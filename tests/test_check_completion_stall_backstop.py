@@ -54,3 +54,11 @@ def test_does_not_fire_below_the_hard_cap():
     below_cap = STALL_HANGUP_HARD_CAP_S - 5
     assert below_cap > 0
     assert _decide(15, audio_playing=False, ai_silent_s=below_cap, user_silent_s=below_cap) is False
+
+
+def test_configured_patience_above_the_hard_cap_wins():
+    # An agent that asked for more patience than the hard cap must get it - the cap is a
+    # floor/insurance policy, not a ceiling that overrides what the agent configured.
+    above_cap = STALL_HANGUP_HARD_CAP_S + 30
+    assert _decide(above_cap, audio_playing=False, ai_silent_s=STALL_HANGUP_HARD_CAP_S + 5, user_silent_s=STALL_HANGUP_HARD_CAP_S + 5) is False
+    assert _decide(above_cap, audio_playing=False, ai_silent_s=above_cap + 5, user_silent_s=above_cap + 5) is True
