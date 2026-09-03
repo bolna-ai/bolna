@@ -3210,7 +3210,15 @@ class TaskManager(BaseManager):
 
             self.hangup_detail = HangupReason.END_CALL_TOOL
             self.call_hangup_message_config = None
-            await self.process_call_hangup()
+            # Detached, not awaited: this call site runs inside __do_llm_generation's own
+            # LLM_GENERATION_TIMEOUT_S window (the end_call tool is handled here, mid-generation).
+            # process_call_hangup's teardown (goodbye playout wait, hangup-chunk wait,
+            # stop_handler) can legitimately take longer than that and must not be cancelled
+            # mid-way - same failure mode as BOLNA-2563, reached via the end_call tool instead
+            # of the hangup-decision check. Held on self, not _usage_tasks, so a reference
+            # survives (see _usage_tasks' own comment) without an unrelated cleanup sweep
+            # ever cancelling this specific task.
+            self._end_call_hangup_task = asyncio.create_task(self.process_call_hangup())
             return
 
         if called_fun.startswith("transfer_call"):

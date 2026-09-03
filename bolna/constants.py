@@ -30,9 +30,6 @@ STALL_HANGUP_HARD_CAP_S = 60.0
 # no error, it just hangs - force it to fail after this many seconds and hang up, instead of
 # leaving the call stuck forever. BOLNA-2563.
 LLM_GENERATION_TIMEOUT_S = 60.0
-# Same idea, applied to the voicemail-check LLM call (agent_manager/voicemail_handler.py),
-# which has its own unguarded await and is not covered by _run_llm_task's timeout. BOLNA-2563.
-VOICEMAIL_CHECK_TIMEOUT_S = 12.0
 
 # LLM-driven language-switch defaults, all overridable by the matching LANGUAGE_SWITCH_* env.
 # Read via os.getenv(..., CONSTANT) at call time, never frozen at import (load_dotenv runs later).
