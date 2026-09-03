@@ -62,7 +62,9 @@ class DeepgramTranscriber(BaseTranscriber):
         self.api_key = kwargs.get("transcriber_key", os.getenv("DEEPGRAM_AUTH_TOKEN"))
         # Per-call host override (multi-cloud router) takes precedence over the fleet-wide env default.
         self.deepgram_host = kwargs.get("deepgram_host") or os.getenv("DEEPGRAM_HOST", "api.deepgram.com")
-        self.deepgram_flux_host = kwargs.get("deepgram_flux_host") or os.getenv("DEEPGRAM_FLUX_HOST", "api.deepgram.com")
+        self.deepgram_flux_host = kwargs.get("deepgram_flux_host") or os.getenv(
+            "DEEPGRAM_FLUX_HOST", "api.deepgram.com"
+        )
         self.deepgram_host_protocol = kwargs.get("deepgram_host_protocol") or os.getenv("DEEPGRAM_HOST_PROTOCOL", "wss")
         self.transcriber_output_queue = output_queue
         self.transcription_task = None

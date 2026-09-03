@@ -29,9 +29,13 @@ def test_kwarg_host_overrides_env(monkeypatch):
     monkeypatch.setenv("DEEPGRAM_HOST", "env-host:8080")
     monkeypatch.setenv("DEEPGRAM_FLUX_HOST", "env-flux:8080")
     monkeypatch.setenv("DEEPGRAM_HOST_PROTOCOL", "wss")
-    nova = urlparse(_make(model="nova-2", deepgram_host="kwarg-host:8080", deepgram_host_protocol="ws")._get_nova_ws_url())
+    nova = urlparse(
+        _make(model="nova-2", deepgram_host="kwarg-host:8080", deepgram_host_protocol="ws")._get_nova_ws_url()
+    )
     flux = urlparse(
-        _make(model="flux-general-en", deepgram_flux_host="kwarg-flux:8080", deepgram_host_protocol="ws")._get_flux_ws_url()
+        _make(
+            model="flux-general-en", deepgram_flux_host="kwarg-flux:8080", deepgram_host_protocol="ws"
+        )._get_flux_ws_url()
     )
     assert (nova.scheme, nova.netloc) == ("ws", "kwarg-host:8080")
     assert (flux.scheme, flux.netloc) == ("ws", "kwarg-flux:8080")
