@@ -126,6 +126,24 @@ def test_injected_routing_credentials_reach_the_routing_client():
     assert kw["api_version"] == "2024-12-01-preview"
 
 
+def test_route_routing_to_conversation_overrides_injected_routing_credentials():
+    # A PTU swap resolves routing creds for the original provider, then flips the conversation onto its
+    # own deployment and sets route_routing_to_conversation. Routing must follow the conversation's
+    # (PTU) credentials, not the standalone ones resolved before the swap.
+    agent, _ = _build(
+        provider="azure",
+        llm_key="ptu-conv-key",
+        base_url="https://ptu.azure.example",
+        route_routing_to_conversation=True,
+        routing_provider="azure",
+        routing_llm_key="standalone-azure-key",
+        routing_base_url="https://standalone.azure.example",
+    )
+    kw = _routing_kwargs(agent)
+    assert kw["llm_key"] == "ptu-conv-key"
+    assert kw["base_url"] == "https://ptu.azure.example"
+
+
 def test_injected_routing_credentials_win_over_conversation_inheritance():
     # Same provider on both hops, but the caller supplied a distinct routing endpoint: use it, not the
     # conversation's, so a routing hop on a different deployment is not silently sent to the conv one.

@@ -279,7 +279,10 @@ class GraphAgent(BaseAgent):
             "base_url": self.config.get("routing_base_url"),
             "api_version": self.config.get("routing_api_version"),
         }
-        if any(explicit_routing_creds.values()):
+        if not follow_conversation and any(explicit_routing_creds.values()):
+            # Credentials the caller resolved for a routing provider that differs from the conversation.
+            # follow_conversation (e.g. a PTU swap) overrides these: routing then rides the conversation's
+            # own credentials, which may point at a different deployment than these were resolved for.
             routing_kwargs.update({k: v for k, v in explicit_routing_creds.items() if v})
         elif self.routing_provider == conv_provider:
             for key in ("llm_key", "base_url", "api_version"):
