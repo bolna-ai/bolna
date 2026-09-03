@@ -9,8 +9,7 @@ from bolna.agent_types.base_agent import BaseAgent
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.rag_service_client import RAGServiceClientSingleton
 from bolna.helpers.function_calling_helpers import guard_llm_base_url
-from bolna.helpers.utils import now_ms, format_messages
-from bolna.llms.types import LLMStreamChunk, LatencyData
+from bolna.helpers.utils import format_messages
 from bolna.providers import SUPPORTED_LLM_PROVIDERS
 from bolna.llms import OpenAiLLM
 from bolna.prompts import VOICEMAIL_DETECTION_PROMPT
@@ -308,7 +307,6 @@ Use this information naturally when it helps answer the user's questions. Don't 
         """
         meta_info = kwargs.get("meta_info")
         synthesize = kwargs.get("synthesize", True)
-        start_time = now_ms()
 
         meta_info["llm_metadata"] = meta_info.get("llm_metadata", {})
         meta_info["llm_metadata"]["rag_info"] = {}
@@ -338,10 +336,7 @@ Use this information naturally when it helps answer the user's questions. Don't 
                 yield chunk
 
         except Exception as e:
+            # Never yield the error as text: a chunk here is indistinguishable from model output
+            # and gets spoken. Propagate so the task manager ends the call with an LLMError.
             logger.error(f"generate() error: {e}")
-            latency_data = LatencyData(
-                sequence_id=meta_info.get("sequence_id") if meta_info else None,
-                first_token_latency_ms=0,
-                total_stream_duration_ms=now_ms() - start_time,
-            )
-            yield LLMStreamChunk(data=f"An error occurred: {str(e)}", end_of_stream=True, latency=latency_data)
+            raise
