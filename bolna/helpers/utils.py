@@ -23,7 +23,13 @@ from enum import Enum
 from dotenv import load_dotenv
 from pydantic import create_model
 from .logger_config import configure_logger
-from bolna.constants import PREPROCESS_DIR, PRE_FUNCTION_CALL_MESSAGE, TRANSFERING_CALL_FILLER, END_CALL_FUNCTION_PREFIX
+from bolna.constants import (
+    CONTENT_POLICY_ERROR_MARKERS,
+    PREPROCESS_DIR,
+    PRE_FUNCTION_CALL_MESSAGE,
+    TRANSFERING_CALL_FILLER,
+    END_CALL_FUNCTION_PREFIX,
+)
 from bolna.enums import LogComponent, LogDirection, UsageSource
 from bolna.prompts import DATE_PROMPT
 from pydub import AudioSegment
@@ -886,8 +892,7 @@ def format_error_message(component, provider, error_str):
     provider_str = f" ({provider})" if provider and provider != "-" else ""
     err_lower = error_str.lower() if error_str else ""
 
-    # Azure words it "content management policy" with code content_filter; OpenAI says "content policy".
-    if any(t in err_lower for t in ("content policy", "content_policy", "content_filter", "content management")):
+    if any(marker in err_lower for marker in CONTENT_POLICY_ERROR_MARKERS):
         return "Content policy violation - response blocked by safety filter"
     if "timeout" in err_lower:
         return f"{display} service{provider_str} connection timed out"

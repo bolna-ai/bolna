@@ -76,6 +76,10 @@ SONIOX_ENDPOINT_TOKEN = "<end>"  # sentinel token emitted when the speaker stops
 SONIOX_DEFAULT_MULTILINGUAL_HINTS = ["en", "hi", "ta", "te", "kn", "ml", "mr", "bn", "gu", "pa", "ur"]
 SONIOX_AUTO_LANGUAGE_VALUES = {"", "multi", "auto", "multilingual", "unknown"}
 
+# How each provider words a moderation rejection: OpenAI says "content policy", Azure says
+# "content management policy" and carries code content_filter.
+CONTENT_POLICY_ERROR_MARKERS = ("content policy", "content_policy", "content_filter", "content management")
+
 # Model prefixes
 GPT5_MODEL_PREFIX = "gpt-5"
 GPT5_4_MODEL_PREFIX = "gpt-5.4"

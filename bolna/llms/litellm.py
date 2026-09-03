@@ -2,7 +2,7 @@ import os
 import json
 import time
 import logging
-from litellm import acompletion
+from litellm import acompletion, ContentPolicyViolationError
 from litellm.exceptions import AuthenticationError, RateLimitError, APIError, APIConnectionError
 from dotenv import load_dotenv
 
@@ -95,6 +95,9 @@ class LiteLLM(BaseLLM):
 
         try:
             completion_stream = await acompletion(**model_args)
+        except ContentPolicyViolationError as e:
+            logger.error(f"LiteLLM content policy violation: {e}")
+            raise
         except AuthenticationError as e:
             logger.error(f"LiteLLM authentication failed: Invalid or expired API key - {e}")
             raise
@@ -199,6 +202,9 @@ class LiteLLM(BaseLLM):
         try:
             completion = await acompletion(**model_args)
             text = completion.choices[0].message.content
+        except ContentPolicyViolationError as e:
+            logger.error(f"LiteLLM content policy violation: {e}")
+            raise
         except AuthenticationError as e:
             logger.error(f"LiteLLM authentication failed: Invalid or expired API key - {e}")
             raise
