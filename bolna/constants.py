@@ -76,6 +76,10 @@ SONIOX_ENDPOINT_TOKEN = "<end>"  # sentinel token emitted when the speaker stops
 SONIOX_DEFAULT_MULTILINGUAL_HINTS = ["en", "hi", "ta", "te", "kn", "ml", "mr", "bn", "gu", "pa", "ur"]
 SONIOX_AUTO_LANGUAGE_VALUES = {"", "multi", "auto", "multilingual", "unknown"}
 
+# Pre-generated clips that bypass the synthesizer and go out as one mark covering the whole
+# message, unlike streamed speech which arrives as many marks.
+CACHED_SINGLE_MARK_CATEGORIES = ("static_node", "event_proactive")
+
 # Model prefixes
 GPT5_MODEL_PREFIX = "gpt-5"
 GPT5_4_MODEL_PREFIX = "gpt-5.4"
