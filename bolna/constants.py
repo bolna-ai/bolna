@@ -81,6 +81,10 @@ SONIOX_AUTO_LANGUAGE_VALUES = {"", "multi", "auto", "multilingual", "unknown"}
 # "content management policy" and carries code content_filter.
 CONTENT_POLICY_ERROR_MARKERS = ("content policy", "content_policy", "content_filter", "content management")
 
+# Pre-generated clips that bypass the synthesizer and go out as one mark covering the whole
+# message, unlike streamed speech which arrives as many marks.
+CACHED_SINGLE_MARK_CATEGORIES = ("static_node", "event_proactive")
+
 # Model prefixes
 GPT5_MODEL_PREFIX = "gpt-5"
 GPT5_4_MODEL_PREFIX = "gpt-5.4"
