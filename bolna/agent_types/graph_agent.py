@@ -237,11 +237,7 @@ class GraphAgent(BaseAgent):
         }
 
     def _init_routing_client(self):
-        """Build the routing LLM from the same registry as the conversation model.
-
-        Routing reuses the conversation credentials only when it runs on the same provider;
-        otherwise each provider class resolves its own platform key.
-        """
+        """Build the routing LLM from the same registry as the conversation model."""
         conv_provider = self.config.get("provider") or self.config.get("llm_provider") or "openai"
         # Self-hosted OpenAI-compatible endpoints (custom/ola) have no platform router, so they route on
         # their own model and endpoint; everything else defaults to the platform OpenAI router. Either can
@@ -270,7 +266,15 @@ class GraphAgent(BaseAgent):
             "temperature": 0,
             "max_tokens": self.routing_max_tokens or 250,
         }
-        if self.routing_provider == conv_provider:
+        explicit_routing_creds = {
+            "llm_key": self.config.get("routing_llm_key"),
+            "base_url": self.config.get("routing_base_url"),
+            "api_version": self.config.get("routing_api_version"),
+        }
+        if not follow_conversation and any(explicit_routing_creds.values()):
+            # follow_conversation (a PTU swap) overrides these: routing then rides the conversation's own.
+            routing_kwargs.update({k: v for k, v in explicit_routing_creds.items() if v})
+        elif self.routing_provider == conv_provider:
             for key in ("llm_key", "base_url", "api_version"):
                 if self.config.get(key):
                     routing_kwargs[key] = self.config[key]
