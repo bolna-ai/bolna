@@ -22,8 +22,14 @@ DEEPGRAM_FLUX_EAGER_EOT_THRESHOLD = 0.5  # confidence to trigger speculative LLM
 DEEPGRAM_FLUX_EOT_TIMEOUT_MS = 500  # max silence before forcing end-of-turn
 # Min time a Flux turn may stay open with no transcriber events before it is force-closed.
 DEEPGRAM_FLUX_TURN_STALL_FLOOR_S = 3.0
-# Min idle time before the inactivity backstop hangs up; kept above hangup_after_silence.
-STALL_HANGUP_FLOOR_S = 20.0
+# Past this much silence (no audio playing, both sides silent), force a hangup - the call has
+# made no forward progress at all, e.g. a hung LLM call or an s2s tool task that never
+# completes. BOLNA-2563.
+STALL_HANGUP_HARD_CAP_S = 60.0
+# Max time to wait for one LLM reply (_run_llm_task). If the LLM never comes back - no reply,
+# no error, it just hangs - force it to fail after this many seconds and hang up, instead of
+# leaving the call stuck forever. BOLNA-2563.
+LLM_GENERATION_TIMEOUT_S = 60.0
 
 # LLM-driven language-switch defaults, all overridable by the matching LANGUAGE_SWITCH_* env.
 # Read via os.getenv(..., CONSTANT) at call time, never frozen at import (load_dotenv runs later).
@@ -69,6 +75,10 @@ SONIOX_ENDPOINT_TOKEN = "<end>"  # sentinel token emitted when the speaker stops
 # stream; hinting the relevant set sharpens accuracy over fully-open auto. No real-time as/od.
 SONIOX_DEFAULT_MULTILINGUAL_HINTS = ["en", "hi", "ta", "te", "kn", "ml", "mr", "bn", "gu", "pa", "ur"]
 SONIOX_AUTO_LANGUAGE_VALUES = {"", "multi", "auto", "multilingual", "unknown"}
+
+# How each provider words a moderation rejection: OpenAI says "content policy", Azure says
+# "content management policy" and carries code content_filter.
+CONTENT_POLICY_ERROR_MARKERS = ("content policy", "content_policy", "content_filter", "content management")
 
 # Model prefixes
 GPT5_MODEL_PREFIX = "gpt-5"

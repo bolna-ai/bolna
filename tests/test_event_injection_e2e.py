@@ -886,7 +886,9 @@ class TestGraphAgentGenerateEventPath:
         """Normal (non-event) generate should work unchanged."""
         agent = _make_graph_agent()
 
-        agent.decide_next_node_with_functions = AsyncMock(return_value=(None, None, 0.0, None, None, None, None))
+        # 8-tuple: the last element is routing_usage. A short tuple used to be swallowed by
+        # generate()'s blanket except and spoken as "An error occurred", so this stayed green.
+        agent.decide_next_node_with_functions = AsyncMock(return_value=(None, None, 0.0, None, None, None, None, None))
 
         chunks = []
         async for chunk in agent.generate([{"role": "user", "content": "hi"}], meta_info={}):
