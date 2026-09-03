@@ -22,8 +22,17 @@ DEEPGRAM_FLUX_EAGER_EOT_THRESHOLD = 0.5  # confidence to trigger speculative LLM
 DEEPGRAM_FLUX_EOT_TIMEOUT_MS = 500  # max silence before forcing end-of-turn
 # Min time a Flux turn may stay open with no transcriber events before it is force-closed.
 DEEPGRAM_FLUX_TURN_STALL_FLOOR_S = 3.0
-# Min idle time before the inactivity backstop hangs up; kept above hangup_after_silence.
-STALL_HANGUP_FLOOR_S = 20.0
+# Past this much silence (no audio playing, both sides silent), force a hangup - the call has
+# made no forward progress at all, e.g. a hung LLM call or an s2s tool task that never
+# completes. BOLNA-2563.
+STALL_HANGUP_HARD_CAP_S = 60.0
+# Max time to wait for one LLM reply (_run_llm_task). If the LLM never comes back - no reply,
+# no error, it just hangs - force it to fail after this many seconds and hang up, instead of
+# leaving the call stuck forever. BOLNA-2563.
+LLM_GENERATION_TIMEOUT_S = 60.0
+# Same idea, applied to the voicemail-check LLM call (agent_manager/voicemail_handler.py),
+# which has its own unguarded await and is not covered by _run_llm_task's timeout. BOLNA-2563.
+VOICEMAIL_CHECK_TIMEOUT_S = 12.0
 
 # LLM-driven language-switch defaults, all overridable by the matching LANGUAGE_SWITCH_* env.
 # Read via os.getenv(..., CONSTANT) at call time, never frozen at import (load_dotenv runs later).
