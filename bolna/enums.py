@@ -172,6 +172,12 @@ class ResponseStreamEvent(str, Enum):
         return frozenset({cls.COMPLETED, cls.FAILED, cls.INCOMPLETE, cls.ERROR})
 
     @classmethod
+    def response_terminal_events(cls):
+        """Terminals that settle the response itself. `error` is excluded: it can be raised
+        against the session and still be followed by the response's own terminal event."""
+        return frozenset({cls.COMPLETED, cls.FAILED, cls.INCOMPLETE})
+
+    @classmethod
     def all_values(cls):
         return [e.value for e in cls]
 

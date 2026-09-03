@@ -1,8 +1,8 @@
 """A cancelled WS Responses turn must not leak its events into the next turn.
 
-One socket serves every turn and `stream_response` reads it without a response_id filter, so
-an abandoned stream's leftovers get read as the next turn's (run 23323c9e). The guarantee: no
-terminal event consumed => socket dirty => reconnect before reuse. See INIT.md.
+One socket serves every turn and `stream_response` reads it without a response_id filter, so an
+abandoned stream's leftovers would be read as the next turn's. The guarantee: no response
+terminal consumed => socket dirty => it is replaced before reuse.
 """
 
 import asyncio
@@ -90,6 +90,17 @@ async def _drain(agen):
     return [e async for e in agen]
 
 
+async def _settle():
+    """Let discard_socket's background close and pre-warm run."""
+    for _ in range(4):
+        await asyncio.sleep(0)
+
+
+def _discarded(t, ws):
+    """The socket was dropped and a replacement warmed, so no handshake lands on the next turn."""
+    return t._ws is not ws and ws.closed and t.connects == 2
+
+
 # ---------------------------------------------------------------- healthy turns unchanged
 
 
@@ -130,12 +141,13 @@ async def test_every_terminal_event_clears_the_flag(terminal):
 # ---------------------------------------------------------------- abandoned turns reconnect
 
 
-async def test_a_cancelled_stream_marks_the_socket_dirty():
-    t = _transport([delta("कुछ"), delta(" और"), completed()])
-    agen = t.stream_response({"input": "ठीक है"})
+async def test_an_abandoned_stream_discards_its_socket():
+    t = _transport([delta("one"), delta("two"), completed()], [completed("r2")])
+    agen = t.stream_response({"input": "a"})
     await agen.__anext__()  # consume one delta, then walk away
     await agen.aclose()
-    assert t._needs_reset is True
+    await _settle()
+    assert _discarded(t, t.sockets[0])
 
 
 async def test_the_next_turn_after_an_abandoned_stream_reconnects():
@@ -176,9 +188,9 @@ async def test_a_generator_that_never_ran_sends_nothing_and_stays_clean():
     assert t.connects == 0
 
 
-async def test_task_cancellation_while_awaiting_the_first_event_dirties_the_socket():
-    """The reported call: cancelled 6ms after the create, before any event arrived."""
-    t = _transport([], hang=True)
+async def test_task_cancellation_while_awaiting_the_first_event_discards_the_socket():
+    """Cancelled milliseconds after the create, before any event arrived."""
+    t = _transport([], [completed("r2")], hang=True)
 
     async def consume():
         async for _ in t.stream_response({"input": "ठीक है"}):
@@ -191,13 +203,14 @@ async def test_task_cancellation_while_awaiting_the_first_event_dirties_the_sock
     with pytest.raises(asyncio.CancelledError):
         await task
 
-    assert t._needs_reset is True
+    await _settle()
+    assert _discarded(t, t.sockets[0])
     assert t._lock.locked() is False  # cancellation lands inside the generator, freeing it
 
 
-async def test_a_turn_cancelled_mid_stream_dirties_the_socket():
+async def test_a_turn_cancelled_mid_stream_discards_the_socket():
     # Partial output delivered, terminal event still to come — the leak window.
-    t = _transport([delta("one"), delta("two")], hang=True)
+    t = _transport([delta("one"), delta("two")], [completed("r2")], hang=True)
     started = asyncio.Event()
 
     async def consume():
@@ -210,7 +223,8 @@ async def test_a_turn_cancelled_mid_stream_dirties_the_socket():
     with pytest.raises(asyncio.CancelledError):
         await task
 
-    assert t._needs_reset is True
+    await _settle()
+    assert _discarded(t, t.sockets[0])
 
 
 async def test_the_dirty_flag_is_cleared_by_the_reconnect():
@@ -278,7 +292,7 @@ async def test_real_consumer_completes_a_turn_without_dirtying_the_socket():
 
 
 async def test_real_consumer_does_not_inherit_a_cancelled_turns_answer():
-    """End to end reproduction of run 23323c9e, through the real consumer."""
+    """End to end, through the real consumer."""
     gate = asyncio.Event()  # the server answers turn 1 only after it has been cancelled
     t = _transport(
         [created("r1"), delta("कुछ और पूछना था?"), completed("r1")],
@@ -304,3 +318,98 @@ async def test_real_consumer_does_not_inherit_a_cancelled_turns_answer():
     assert "loan answer" in text
     assert "कुछ और पूछना था?" not in text
     assert t.connects == 2
+
+
+# ---------------------------------------------------------------- review: cancel during send
+
+
+async def test_a_send_cancelled_mid_frame_still_discards_the_socket():
+    """The frame may already be on the wire, and a cancelled send leaves the connection
+    inconsistent either way. Marking after the send would miss both."""
+    t = _transport([created("r1"), delta("leftover"), completed("r1")], [completed("r2")])
+    await t.ensure_connected()
+    ws = t._ws
+    delivered = asyncio.Event()
+    real_send = ws.send
+
+    async def slow_send(raw):
+        await real_send(raw)  # frame delivered...
+        delivered.set()
+        await asyncio.Event().wait()  # ...then the send suspends and never returns
+
+    ws.send = slow_send
+
+    async def consume():
+        async for _ in t.stream_response({"input": "a"}):
+            pass
+
+    task = asyncio.create_task(consume())
+    await delivered.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    await _settle()
+    assert _discarded(t, ws)
+
+
+# ---------------------------------------------------------------- review: error is not a settle
+
+
+async def test_an_error_event_does_not_mark_the_socket_clean():
+    """`error` can be raised against the session and still be followed by the response's own
+    terminal event. Treating it as a settle would leave that event on a socket called clean."""
+    t = _transport([{"type": "error", "error": {"code": "x"}}, completed("r1")], [completed("r2")])
+    events = await _drain(t.stream_response({"input": "a"}))
+    assert [e["type"] for e in events] == ["error"]
+    await _settle()
+    assert _discarded(t, t.sockets[0])
+
+
+async def test_a_terminal_trailing_an_error_cannot_reach_the_next_turn():
+    t = _transport(
+        [{"type": "error", "error": {"code": "x"}}, delta("stale"), completed("r1")],
+        [created("r2"), delta("fresh"), completed("r2")],
+    )
+    await _drain(t.stream_response({"input": "a"}))
+    await _settle()
+
+    events = await _drain(t.stream_response({"input": "b"}))
+    assert [e["delta"] for e in events if "delta" in e] == ["fresh"]
+
+
+# ---------------------------------------------------------------- review: no handshake on the turn
+
+
+async def test_the_replacement_socket_is_warm_before_the_next_turn():
+    """discard_socket pre-warms, so the next turn finds a connected socket instead of paying
+    a close handshake plus TLS inside the lock."""
+    t = _transport([delta("one")], [completed("r2")], hang=True)
+
+    async def consume():
+        async for _ in t.stream_response({"input": "a"}):
+            pass
+
+    task = asyncio.create_task(consume())
+    while t._ws is None or not t._ws.sent:
+        await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await _settle()
+
+    assert t.connects == 2  # already reconnected, before the next turn asked
+    connects_before = t.connects
+    await _drain(t.stream_response({"input": "b"}))
+    assert t.connects == connects_before  # the turn itself opened nothing
+
+
+async def test_the_old_socket_close_is_never_awaited_on_the_critical_path():
+    t = _transport([delta("one"), completed("r1")], [completed("r2")])
+    agen = t.stream_response({"input": "a"})
+    await agen.__anext__()
+    await agen.aclose()
+    # discard_socket hands the close to the loop; it has not run yet.
+    assert t.sockets[0].closed is False
+    await _settle()
+    assert t.sockets[0].closed is True
