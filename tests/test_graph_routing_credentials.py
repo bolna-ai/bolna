@@ -109,6 +109,40 @@ def test_explicit_azure_routing_with_openai_conversation_uses_platform_creds():
     assert "base_url" not in kw
 
 
+def test_injected_routing_credentials_reach_the_routing_client():
+    agent, _ = _build(
+        provider="google",
+        model="gemini-3.7-flash",
+        routing_provider="azure",
+        routing_model="azure/gpt-4.1-mini",
+        routing_llm_key="routing-azure-key",
+        routing_base_url="https://routing.azure.example",
+        routing_api_version="2024-12-01-preview",
+    )
+    kw = _routing_kwargs(agent)
+    assert kw["provider"] == "azure"
+    assert kw["llm_key"] == "routing-azure-key"
+    assert kw["base_url"] == "https://routing.azure.example"
+    assert kw["api_version"] == "2024-12-01-preview"
+
+
+def test_injected_routing_credentials_win_over_conversation_inheritance():
+    # Same provider on both hops, but the caller supplied a distinct routing endpoint: use it, not the
+    # conversation's, so a routing hop on a different deployment is not silently sent to the conv one.
+    agent, _ = _build(
+        provider="azure",
+        llm_key="conv-key",
+        base_url="https://conv.azure.example",
+        routing_provider="azure",
+        routing_model="azure/gpt-4.1-mini",
+        routing_llm_key="routing-azure-key",
+        routing_base_url="https://routing.azure.example",
+    )
+    kw = _routing_kwargs(agent)
+    assert kw["llm_key"] == "routing-azure-key"
+    assert kw["base_url"] == "https://routing.azure.example"
+
+
 def test_routing_forwards_service_tier_and_reasoning_effort():
     agent, _ = _build(
         provider="openai", routing_model="gpt-5.4-mini", service_tier="priority", routing_reasoning_effort="low"
@@ -224,3 +258,22 @@ def test_azure_routing_fallback_drops_the_unbuilt_models_reasoning_effort():
     fell_back = _real_agent(env=AZURE_KEY_ONLY_ENV, provider="google", model="gemini-3.7-flash", **gpt5_routing)
     assert fell_back.routing_provider == "openai"
     assert fell_back._routing_reasoning_effort_used is None
+
+
+def test_injected_azure_routing_creds_build_the_real_client_without_a_platform_endpoint():
+    """The proper fix: a Gemini conversation with caller-resolved Azure routing creds routes ON Azure,
+    even though the runtime env carries no AZURE_OPENAI_ENDPOINT (the production shape)."""
+    from bolna.llms import AzureLLM
+
+    agent = _real_agent(
+        env=AZURE_KEY_ONLY_ENV,
+        provider="google",
+        model="gemini-3.7-flash",
+        routing_llm_key="routing-azure-key",
+        routing_base_url="https://routing.azure.example",
+        routing_api_version="2024-12-01-preview",
+        **AZURE_ROUTING,
+    )
+    assert isinstance(agent.routing_llm, AzureLLM)
+    assert agent.routing_provider == "azure"
+    assert agent.routing_llm.llm_host == "routing.azure.example"

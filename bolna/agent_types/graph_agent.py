@@ -239,9 +239,12 @@ class GraphAgent(BaseAgent):
     def _init_routing_client(self):
         """Build the routing LLM from the same registry as the conversation model.
 
-        Routing reuses the conversation credentials only when it runs on the same provider;
-        otherwise each provider class resolves its own platform key. A provider with no usable
-        credentials falls back to the platform OpenAI router instead of failing the call.
+        Credentials come from one of three places, in order: routing_llm_key/base_url/api_version the
+        caller resolved for a routing provider that differs from the conversation (Azure needs an
+        endpoint the runtime does not carry); the conversation credentials when routing shares its
+        provider; otherwise the provider class resolves its own platform key from the env. A provider
+        left with no usable credentials falls back to the platform OpenAI router instead of failing the
+        call.
         """
         conv_provider = self.config.get("provider") or self.config.get("llm_provider") or "openai"
         # Self-hosted OpenAI-compatible endpoints (custom/ola) have no platform router, so they route on
@@ -271,7 +274,14 @@ class GraphAgent(BaseAgent):
             "temperature": 0,
             "max_tokens": self.routing_max_tokens or 250,
         }
-        if self.routing_provider == conv_provider:
+        explicit_routing_creds = {
+            "llm_key": self.config.get("routing_llm_key"),
+            "base_url": self.config.get("routing_base_url"),
+            "api_version": self.config.get("routing_api_version"),
+        }
+        if any(explicit_routing_creds.values()):
+            routing_kwargs.update({k: v for k, v in explicit_routing_creds.items() if v})
+        elif self.routing_provider == conv_provider:
             for key in ("llm_key", "base_url", "api_version"):
                 if self.config.get(key):
                     routing_kwargs[key] = self.config[key]
