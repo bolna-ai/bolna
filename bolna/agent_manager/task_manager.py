@@ -8762,7 +8762,7 @@ class TaskManager(BaseManager):
                 self.request_logs.clear()
                 self.function_tool_api_call_details.clear()
 
-            return output
+        return output
 
     async def handle_cancellation(self, message):
         try:
