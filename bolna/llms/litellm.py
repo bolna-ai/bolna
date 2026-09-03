@@ -2,7 +2,7 @@ import os
 import json
 import time
 import logging
-from litellm import acompletion, ContentPolicyViolationError
+from litellm import acompletion
 from litellm.exceptions import AuthenticationError, RateLimitError, APIError, APIConnectionError
 from dotenv import load_dotenv
 
@@ -95,26 +95,6 @@ class LiteLLM(BaseLLM):
 
         try:
             completion_stream = await acompletion(**model_args)
-        except ContentPolicyViolationError as e:
-            error_message = str(e)
-            logger.error(f"Content policy violation in stream: {error_message}")
-
-            # Log to CSV trace as warning (non-call-breaking)
-            if meta_info and self.run_id:
-                convert_to_request_log(
-                    f"Content Policy Violation: {error_message}",
-                    meta_info,
-                    self.model,
-                    component=LogComponent.WARNING,
-                    direction=LogDirection.WARNING,
-                    is_cached=False,
-                    run_id=self.run_id,
-                )
-            if isinstance(meta_info, dict):
-                meta_info.setdefault("_non_fatal_errors", []).append(
-                    {"error_type": "content_policy_violation", "error": error_message, "model": self.model}
-                )
-            return
         except AuthenticationError as e:
             logger.error(f"LiteLLM authentication failed: Invalid or expired API key - {e}")
             raise
@@ -219,26 +199,6 @@ class LiteLLM(BaseLLM):
         try:
             completion = await acompletion(**model_args)
             text = completion.choices[0].message.content
-        except ContentPolicyViolationError as e:
-            error_message = str(e)
-            logger.error(f"Content policy violation: {error_message}")
-
-            # Log to CSV trace as warning (non-call-breaking)
-            if meta_info and self.run_id:
-                convert_to_request_log(
-                    f"Content Policy Violation: {error_message}",
-                    meta_info,
-                    self.model,
-                    component=LogComponent.WARNING,
-                    direction=LogDirection.WARNING,
-                    is_cached=False,
-                    run_id=self.run_id,
-                )
-            if isinstance(meta_info, dict):
-                meta_info.setdefault("_non_fatal_errors", []).append(
-                    {"error_type": "content_policy_violation", "error": error_message, "model": self.model}
-                )
-            # Don't re-raise - allow graceful degradation for content policy violations
         except AuthenticationError as e:
             logger.error(f"LiteLLM authentication failed: Invalid or expired API key - {e}")
             raise

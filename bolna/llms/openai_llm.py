@@ -16,7 +16,6 @@ from openai import (
     RateLimitError,
     APIError,
     APIConnectionError,
-    BadRequestError,
 )
 
 import websockets
@@ -27,7 +26,7 @@ from bolna.enums import ResponseStreamEvent, ResponseItemType, Verbosity
 from bolna.helpers.ssl_context import get_ssl_context
 from bolna.helpers.utils import compute_function_pre_call_message, now_ms
 from bolna.helpers.function_calling_helpers import guard_llm_base_url
-from .openai_base import OpenAICompatibleLLM, is_content_filter_error, note_content_filter
+from .openai_base import OpenAICompatibleLLM
 from .message_models import strip_internal_keys
 from .tool_call_accumulator import ToolCallAccumulator
 from .types import APIParams, LLMStreamChunk, LatencyData
@@ -287,12 +286,6 @@ class OpenAiLLM(OpenAICompatibleLLM):
 
         try:
             completion_stream = await self.async_client.chat.completions.create(**model_args)
-        except BadRequestError as e:
-            if is_content_filter_error(e):
-                note_content_filter(e, meta_info, self.request_log_model, self.run_id)
-                return
-            logger.error(f"OpenAI bad request: {e}")
-            raise
         except AuthenticationError as e:
             logger.error(f"OpenAI authentication failed: Invalid or expired API key - {e}")
             raise
