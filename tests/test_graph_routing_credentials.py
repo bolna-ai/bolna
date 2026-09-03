@@ -8,6 +8,8 @@ is what stops a Gemini conversation from lending its key to an OpenAI router (BO
 import os
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from bolna.agent_types.graph_agent import GraphAgent
 
 PLATFORM_ENV = {
@@ -220,66 +222,13 @@ def test_already_prefixed_litellm_model_not_doubled():
     assert agent.routing_model == "anthropic/claude-3-5-sonnet"
 
 
-# The runtime holds no Azure endpoint of its own, so an Azure routing hop under a non-Azure
-# conversation model has no credentials to resolve and its client cannot be built.
 AZURE_ROUTING = {"routing_provider": "azure", "routing_model": "azure/gpt-4.1-mini"}
-AZURE_PLATFORM_ENV = {
-    "OPENAI_API_KEY": "plat",
-    "GOOGLE_API_KEY": "gg",
-    "AZURE_OPENAI_ENDPOINT": "https://platform.azure.example",
-    "AZURE_OPENAI_API_KEY": "platform-azure-key",
-}
-# What the runtime actually carries: an Azure key, and no endpoint to spend it against.
-AZURE_KEY_ONLY_ENV = {k: v for k, v in AZURE_PLATFORM_ENV.items() if k != "AZURE_OPENAI_ENDPOINT"}
-
-
-def test_azure_routing_falls_back_to_openai_without_a_platform_azure_endpoint():
-    """A Gemini conversation routing on Azure: the agent is built, and the call is not lost."""
-    from bolna.llms import OpenAiLLM
-
-    agent = _real_agent(env=AZURE_KEY_ONLY_ENV, provider="google", model="gemini-3.7-flash", **AZURE_ROUTING)
-    assert isinstance(agent.routing_llm, OpenAiLLM)
-    assert agent.routing_provider == "openai"
-    assert agent.routing_model == "gpt-4.1-mini"
-    assert agent.routing_llm.max_tokens == 250
-
-
-def test_azure_routing_fallback_honours_routing_max_tokens():
-    agent = _real_agent(
-        env=AZURE_KEY_ONLY_ENV, provider="google", model="gemini-3.7-flash", routing_max_tokens=64, **AZURE_ROUTING
-    )
-    assert agent.routing_llm.max_tokens == 64
-
-
-def test_azure_routing_falls_back_with_no_azure_credentials_at_all():
-    from bolna.llms import OpenAiLLM
-
-    agent = _real_agent(provider="google", model="gemini-3.7-flash", **AZURE_ROUTING)
-    assert isinstance(agent.routing_llm, OpenAiLLM)
-    assert agent.routing_provider == "openai"
-
-
-def test_azure_routing_stays_on_azure_when_the_platform_endpoint_is_set():
-    from bolna.llms import AzureLLM
-
-    agent = _real_agent(env=AZURE_PLATFORM_ENV, provider="google", model="gemini-3.7-flash", **AZURE_ROUTING)
-    assert isinstance(agent.routing_llm, AzureLLM)
-    assert agent.routing_provider == "azure"
-
-
-def test_azure_routing_fallback_drops_the_unbuilt_models_reasoning_effort():
-    gpt5_routing = {"routing_provider": "azure", "routing_model": "azure/gpt-5.4-mini"}
-
-    on_azure = _real_agent(env=AZURE_PLATFORM_ENV, provider="google", model="gemini-3.7-flash", **gpt5_routing)
-    assert on_azure._routing_reasoning_effort_used is not None
-
-    fell_back = _real_agent(env=AZURE_KEY_ONLY_ENV, provider="google", model="gemini-3.7-flash", **gpt5_routing)
-    assert fell_back.routing_provider == "openai"
-    assert fell_back._routing_reasoning_effort_used is None
+# What the runtime carries: an Azure key, and no endpoint to spend it against.
+AZURE_KEY_ONLY_ENV = {"OPENAI_API_KEY": "plat", "GOOGLE_API_KEY": "gg", "AZURE_OPENAI_API_KEY": "platform-azure-key"}
 
 
 def test_injected_azure_routing_creds_build_the_real_client_without_a_platform_endpoint():
-    """The proper fix: a Gemini conversation with caller-resolved Azure routing creds routes ON Azure,
+    """The fix: a Gemini conversation with caller-resolved Azure routing creds routes ON Azure,
     even though the runtime env carries no AZURE_OPENAI_ENDPOINT (the production shape)."""
     from bolna.llms import AzureLLM
 
@@ -295,3 +244,10 @@ def test_injected_azure_routing_creds_build_the_real_client_without_a_platform_e
     assert isinstance(agent.routing_llm, AzureLLM)
     assert agent.routing_provider == "azure"
     assert agent.routing_llm.llm_host == "routing.azure.example"
+
+
+def test_azure_routing_without_resolvable_creds_surfaces_the_error():
+    # No silent default: an Azure routing hop the caller could not resolve credentials for raises,
+    # rather than quietly routing on a different provider.
+    with pytest.raises(Exception):
+        _real_agent(env=AZURE_KEY_ONLY_ENV, provider="google", model="gemini-3.7-flash", **AZURE_ROUTING)

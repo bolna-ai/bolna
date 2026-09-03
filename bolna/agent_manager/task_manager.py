@@ -1872,7 +1872,6 @@ class TaskManager(BaseManager):
                 injected_cfg["routing_reasoning_effort"] = self.kwargs["routing_reasoning_effort"]
             if "routing_max_tokens" in self.kwargs:
                 injected_cfg["routing_max_tokens"] = self.kwargs["routing_max_tokens"]
-            # Credentials for a routing hop on a different provider than the conversation.
             for key in ("routing_llm_key", "routing_base_url", "routing_api_version"):
                 if self.kwargs.get(key) is not None:
                     injected_cfg[key] = self.kwargs[key]
