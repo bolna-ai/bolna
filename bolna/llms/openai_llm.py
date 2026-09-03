@@ -1,6 +1,7 @@
 import os
 import asyncio
 import json
+from contextlib import suppress
 import re
 import time
 from typing import Optional
@@ -47,10 +48,12 @@ class OpenAIWSConnection:
     WS_URL = "wss://api.openai.com/v1/responses"
     RECONNECT_BEFORE_SECS = 55 * 60
     TERMINAL_EVENTS = ResponseStreamEvent.terminal_events()
+    RESPONSE_TERMINAL_EVENTS = ResponseStreamEvent.response_terminal_events()
 
     def __init__(self, api_key: str):
         self._api_key = api_key
         self._ws = None
+        self._needs_reset = False
         self._connected_at: float = 0
         self._lock = asyncio.Lock()
         self._connect_task: Optional[asyncio.Task] = None
@@ -72,7 +75,11 @@ class OpenAIWSConnection:
             self._connect_task = None
 
         if self._ws is not None:
-            if self._ws.state is not WSState.OPEN:
+            if self._needs_reset:
+                # An abandoned stream's queued events would be read as the next turn's.
+                logger.info("WebSocket dirty after an abandoned stream, reconnecting")
+                self.discard_socket(prewarm=False)
+            elif self._ws.state is not WSState.OPEN:
                 logger.info("WebSocket closed unexpectedly, reconnecting")
                 await self._close_ws()
             elif time.monotonic() - self._connected_at >= self.RECONNECT_BEFORE_SECS:
@@ -81,6 +88,7 @@ class OpenAIWSConnection:
             else:
                 return
 
+        self._needs_reset = False
         await self._connect()
 
     async def _connect(self):
@@ -98,14 +106,25 @@ class OpenAIWSConnection:
         """Send response.create and yield raw event dicts until terminal event."""
         async with self._lock:
             await self.ensure_connected()
-            await self._ws.send(json.dumps({"type": ResponseStreamEvent.CREATE, **create_params}))
-
-            async for raw_msg in self._ws:
-                evt = json.loads(raw_msg)
-                evt_type = evt.get("type", "")
-                yield evt
-                if evt_type in self.TERMINAL_EVENTS:
-                    return
+            # Before the send: a cancelled send may still have put the frame on the wire,
+            # and leaves the connection inconsistent either way. The try covers it too.
+            self._needs_reset = True
+            try:
+                await self._ws.send(json.dumps({"type": ResponseStreamEvent.CREATE, **create_params}))
+                async for raw_msg in self._ws:
+                    evt = json.loads(raw_msg)
+                    evt_type = evt.get("type", "")
+                    if evt_type in self.RESPONSE_TERMINAL_EVENTS:
+                        # Before the yield: consumers break here and never let this resume.
+                        self._needs_reset = False
+                        yield evt
+                        return
+                    yield evt
+                    if evt_type in self.TERMINAL_EVENTS:
+                        return
+            finally:
+                if self._needs_reset:
+                    self.discard_socket()
 
     async def cancel_response(self, response_id: str):
         """Best-effort cancel: signal the server to terminate the in-flight
@@ -121,6 +140,13 @@ class OpenAIWSConnection:
             pass
 
     async def disconnect(self):
+        # Settle any in-flight pre-warm first: it assigns _ws after the fact, so closing
+        # before it lands would leave a live socket nobody owns.
+        task, self._connect_task = self._connect_task, None
+        if task is not None and not task.done():
+            task.cancel()
+            with suppress(asyncio.CancelledError, Exception):
+                await task
         await self._close_ws()
 
     async def _close_ws(self):
@@ -130,6 +156,23 @@ class OpenAIWSConnection:
             except Exception:
                 pass
             self._ws = None
+
+    def discard_socket(self, prewarm=True):
+        """Drop a socket carrying an abandoned response. The close is not awaited and the
+        replacement is warmed in the background, so no handshake lands on the next turn."""
+        ws, self._ws = self._ws, None
+        self._needs_reset = False
+        if ws is not None:
+            asyncio.ensure_future(self._close_quietly(ws))
+        if prewarm:
+            self.start_connect()
+
+    @staticmethod
+    async def _close_quietly(ws):
+        try:
+            await ws.close()
+        except Exception:
+            pass
 
 
 class OpenAiLLM(OpenAICompatibleLLM):
