@@ -109,3 +109,31 @@ async def test_end_call_hangup_teardown_is_not_awaited_inline():
 
     assert elapsed < 0.1  # returned well before the mocked 0.2s teardown finished
     await asyncio.wait_for(hangup_started.wait(), timeout=1.0)  # the detached task did start
+
+
+async def test_end_call_hangup_failure_is_logged_not_swallowed(caplog):
+    """A bare create_task with no done callback would drop the exception along with the task,
+    so a failed hangup would look identical to a successful one. The done callback must
+    surface it instead."""
+    tm = TaskManager.__new__(TaskManager)
+    tm.run_id = "test-run"
+    tm.conversation_history = MagicMock()
+    tm.hangup_decision_at = None
+    tm.interruption_manager = MagicMock()
+    tm.wait_for_current_message = AsyncMock()
+
+    async def _boom():
+        raise RuntimeError("teardown exploded")
+
+    tm.process_call_hangup = AsyncMock(side_effect=_boom)
+
+    meta_info = {"request_id": "r1", "turn_id": 1, "response_uid": "u1"}
+    resp = {"model_response": [], "tool_call_id": "tc1", "textual_response": "Goodbye!"}
+
+    with caplog.at_level("ERROR"):
+        await TaskManager._TaskManager__execute_function_call(
+            tm, None, None, None, None, None, None, meta_info, None, END_CALL_FUNCTION_PREFIX, **resp
+        )
+        await asyncio.gather(tm._end_call_hangup_task, return_exceptions=True)
+
+    assert any("teardown exploded" in r.message for r in caplog.records)

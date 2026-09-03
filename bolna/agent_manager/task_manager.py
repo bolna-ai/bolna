@@ -3217,8 +3217,10 @@ class TaskManager(BaseManager):
             # mid-way - same failure mode as BOLNA-2563, reached via the end_call tool instead
             # of the hangup-decision check. Held on self, not _usage_tasks, so a reference
             # survives (see _usage_tasks' own comment) without an unrelated cleanup sweep
-            # ever cancelling this specific task.
+            # ever cancelling this specific task. Done callback so a raised exception doesn't
+            # just vanish with the task (mirrors _s2s_on_task_done, same reasoning).
             self._end_call_hangup_task = asyncio.create_task(self.process_call_hangup())
+            self._end_call_hangup_task.add_done_callback(self.__log_detached_hangup_exception)
             return
 
         if called_fun.startswith("transfer_call"):
@@ -4178,6 +4180,15 @@ class TaskManager(BaseManager):
 
     def _should_ignore_transcriber_input(self) -> bool:
         return self.hangup_triggered or self._end_call_in_progress or self.has_transfer
+
+    def __log_detached_hangup_exception(self, task: asyncio.Task) -> None:
+        """A bare create_task with no done callback drops the exception along with the task, so
+        a failed hangup would look identical to a successful one. Mirrors _s2s_on_task_done."""
+        if task.cancelled():
+            return
+        exception = task.exception()
+        if exception is not None:
+            logger.error(f"Detached end_call hangup failed | error={type(exception).__name__}: {exception}")
 
     async def process_call_hangup(self):
         if self.hangup_decision_at is None:
