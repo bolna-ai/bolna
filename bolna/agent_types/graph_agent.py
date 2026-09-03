@@ -240,7 +240,8 @@ class GraphAgent(BaseAgent):
         """Build the routing LLM from the same registry as the conversation model.
 
         Routing reuses the conversation credentials only when it runs on the same provider;
-        otherwise each provider class resolves its own platform key.
+        otherwise each provider class resolves its own platform key. A provider with no usable
+        credentials falls back to the platform OpenAI router instead of failing the call.
         """
         conv_provider = self.config.get("provider") or self.config.get("llm_provider") or "openai"
         # Self-hosted OpenAI-compatible endpoints (custom/ola) have no platform router, so they route on
@@ -288,7 +289,22 @@ class GraphAgent(BaseAgent):
             routing_kwargs["overflow_llm"] = self.config["overflow_llm"]
 
         self._routing_reasoning_effort_used = routing_kwargs.get("reasoning_effort")
-        self.routing_llm = llm_class(**routing_kwargs)
+        try:
+            self.routing_llm = llm_class(**routing_kwargs)
+        except Exception as e:
+            # A provider the runtime holds no credentials for raises here, and routing is one call per
+            # turn: fall back to the platform router an unspecified routing provider resolves to rather
+            # than take the call down before it reaches the caller.
+            logger.error(f"Routing client for {self.routing_provider} failed to build: {e}. Routing on OpenAI")
+            self.routing_provider = "openai"
+            self.routing_model = os.getenv("DEFAULT_ROUTING_MODEL_OPENAI", "gpt-4.1-mini")
+            self._routing_reasoning_effort_used = None
+            self.routing_llm = OpenAiLLM(
+                model=self.routing_model,
+                provider=self.routing_provider,
+                temperature=0,
+                max_tokens=routing_kwargs["max_tokens"],
+            )
         logger.info(f"Routing initialized with {self.routing_provider} ({self.routing_model})")
 
     async def check_for_completion(self, messages, check_for_completion_prompt, meta_info=None):
