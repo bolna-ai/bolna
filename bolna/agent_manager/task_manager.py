@@ -22,6 +22,7 @@ from pydub import AudioSegment
 
 from bolna.constants import (
     ACCIDENTAL_INTERRUPTION_PHRASES,
+    CACHED_SINGLE_MARK_CATEGORIES,
     DEFAULT_USER_ONLINE_MESSAGE,
     DEFAULT_USER_ONLINE_MESSAGE_TRIGGER_DURATION,
     FILLER_DICT,
@@ -2785,7 +2786,13 @@ class TaskManager(BaseManager):
                 ):
                     break
 
-            if first_item.get("text_synthesized") and first_item.get("is_final_chunk") is True:
+            # Cached clips are a single mark that is always the final chunk, so this shortcut
+            # would skip waiting for the whole message rather than just its tail.
+            if (
+                first_item.get("text_synthesized")
+                and first_item.get("is_final_chunk") is True
+                and first_item.get("type") not in CACHED_SINGLE_MARK_CATEGORIES
+            ):
                 break
 
             # Use entry_time (not time.time()) so the deadline is a fixed point in the
@@ -3818,6 +3825,9 @@ class TaskManager(BaseManager):
 
                     meta_info["end_of_llm_stream"] = True
                     meta_info["text"] = static_text
+                    # The clip skips the synthesizer, which is what normally stamps this. Without
+                    # it the mark carries no text and an interrupted node cannot be trimmed.
+                    meta_info["text_synthesized"] = static_text
                     meta_info["cached"] = True
                     meta_info["message_category"] = "static_node"
                     ws_packet = create_ws_data_packet(static_hash, meta_info=meta_info, is_md5_hash=True)
