@@ -255,13 +255,10 @@ class GraphAgent(BaseAgent):
         if not self.routing_model:
             self.routing_model = os.getenv("DEFAULT_ROUTING_MODEL_OPENAI", "gpt-4.1-mini")
 
-        llm_class = SUPPORTED_LLM_PROVIDERS.get(self.routing_provider, OpenAiLLM)
-        # LiteLLM addresses a backend by a "provider/model" string; a bare model name resolves to OpenAI.
-        if llm_class is LiteLLM and "/" not in self.routing_model:
-            self.routing_model = f"{self.routing_provider}/{self.routing_model}"
+        self.routing_model = self._qualify_routing_model(self.routing_model)
 
-        routing_kwargs = {
-            "model": self.routing_model,
+        # Everything but the model: provider, credentials, tier. A per-node routing_model reuses this.
+        base_kwargs = {
             "provider": self.routing_provider,
             "temperature": 0,
             "max_tokens": self.routing_max_tokens or 250,
@@ -273,27 +270,69 @@ class GraphAgent(BaseAgent):
         }
         if not follow_conversation and any(explicit_routing_creds.values()):
             # follow_conversation (a PTU swap) overrides these: routing then rides the conversation's own.
-            routing_kwargs.update({k: v for k, v in explicit_routing_creds.items() if v})
+            base_kwargs.update({k: v for k, v in explicit_routing_creds.items() if v})
         elif self.routing_provider == conv_provider:
             for key in ("llm_key", "base_url", "api_version"):
                 if self.config.get(key):
-                    routing_kwargs[key] = self.config[key]
+                    base_kwargs[key] = self.config[key]
+        if self.service_tier:
+            base_kwargs["service_tier"] = self.service_tier
+        if self.config.get("overflow_llm"):
+            base_kwargs["overflow_llm"] = self.config["overflow_llm"]
+        self._routing_base_kwargs = base_kwargs
+        self._routing_llm_cache: Dict[str, Any] = {}
+        self._routing_llm_cache_max_size = 100
+
+        routing_kwargs = self._routing_kwargs_for_model(self.routing_model)
+        self._routing_reasoning_effort_used = routing_kwargs.get("reasoning_effort")
+        self.routing_llm = self._routing_llm_class()(**routing_kwargs)
+        # What the last routing call actually ran on; a node override moves these for one call.
+        self._last_routing_model = self.routing_model
+        self._last_routing_effort = self._routing_reasoning_effort_used
+        logger.info(f"Routing initialized with {self.routing_provider} ({self.routing_model})")
+
+    def _routing_llm_class(self):
+        return SUPPORTED_LLM_PROVIDERS.get(self.routing_provider, OpenAiLLM)
+
+    def _qualify_routing_model(self, model: str) -> str:
+        # LiteLLM addresses a backend by a "provider/model" string; a bare model name resolves to OpenAI.
+        if self._routing_llm_class() is LiteLLM and "/" not in model:
+            return f"{self.routing_provider}/{model}"
+        return model
+
+    def _routing_kwargs_for_model(self, model: str) -> dict:
+        kwargs = {**self._routing_base_kwargs, "model": model}
         # Only gpt-5 models take an effort; resolve deployment names to the model family first.
-        routing_family = canonical_model(self.routing_model)
-        if routing_family.startswith(GPT5_MODEL_PREFIX):
-            routing_kwargs["reasoning_effort"] = (
+        family = canonical_model(model)
+        if family.startswith(GPT5_MODEL_PREFIX):
+            kwargs["reasoning_effort"] = (
                 self.routing_reasoning_effort
                 or os.getenv("GPT5_ROUTING_REASONING_EFFORT")
-                or default_reasoning_effort(routing_family)
+                or default_reasoning_effort(family)
             )
-        if self.service_tier:
-            routing_kwargs["service_tier"] = self.service_tier
-        if self.config.get("overflow_llm"):
-            routing_kwargs["overflow_llm"] = self.config["overflow_llm"]
+        return kwargs
 
-        self._routing_reasoning_effort_used = routing_kwargs.get("reasoning_effort")
-        self.routing_llm = llm_class(**routing_kwargs)
-        logger.info(f"Routing initialized with {self.routing_provider} ({self.routing_model})")
+    def _reset_routing_identity(self) -> None:
+        """Back to the agent's routing model, so a turn that makes no LLM call reports it."""
+        self._last_routing_model = self.routing_model
+        self._last_routing_effort = self._routing_reasoning_effort_used
+
+    def _routing_llm_for(self, node: Optional[dict]):
+        """The node's own routing model on the agent's provider and credentials, else the agent's.
+        Returns (llm, model, reasoning_effort)."""
+        override = (node or {}).get("routing_model")
+        if not override:
+            return self.routing_llm, self.routing_model, self._routing_reasoning_effort_used
+        model = self._qualify_routing_model(override)
+        kwargs = self._routing_kwargs_for_model(model)
+        llm = self._routing_llm_cache.get(model)
+        if llm is None:
+            if len(self._routing_llm_cache) >= self._routing_llm_cache_max_size:
+                self._routing_llm_cache.pop(next(iter(self._routing_llm_cache)))
+            llm = self._routing_llm_class()(**kwargs)
+            self._routing_llm_cache[model] = llm
+            logger.info(f"Routing override ready: {model} for node {(node or {}).get('id')!r}")
+        return llm, model, kwargs.get("reasoning_effort")
 
     async def check_for_completion(self, messages, check_for_completion_prompt, meta_info=None):
         """Check if the conversation should end. Returns (hangup_dict, metadata)."""
@@ -596,7 +635,7 @@ class GraphAgent(BaseAgent):
             "current_node": self.current_node_id,
             "transitioned": True,
             "routing_type": routing_type,
-            "routing_model": self.routing_model if made_llm_call else None,
+            "routing_model": self._last_routing_model if made_llm_call else None,
             "routing_provider": self.routing_provider if made_llm_call else None,
             "routing_latency_ms": round(latency_ms, 1),
             # Wall clock at hop start — the trace row is written after the hop finished.
@@ -632,6 +671,7 @@ class GraphAgent(BaseAgent):
 
             hop_start = time.perf_counter()
             hop_started_at = time.time()
+            self._reset_routing_identity()
             self._enrich_routing_context(history)
             router_node = self.get_node_by_id(self.current_node_id)
             previous_node = self.current_node_id
@@ -872,7 +912,8 @@ class GraphAgent(BaseAgent):
                 messages.append({"role": "user", "content": user_message})
 
         try:
-            result = await self.routing_llm.route(messages, tools)
+            routing_llm, self._last_routing_model, self._last_routing_effort = self._routing_llm_for(node)
+            result = await routing_llm.route(messages, tools)
             latency_ms = (time.perf_counter() - start_time) * 1000
 
             if result is None:
@@ -937,6 +978,7 @@ class GraphAgent(BaseAgent):
         unconditional default. Without an unconditional edge the node may stay."""
         start_time = time.perf_counter()
         self._last_deterministic_eval = None
+        self._reset_routing_identity()
 
         current_node = self.get_node_by_id(self.current_node_id)
         if not current_node:
@@ -1380,11 +1422,13 @@ class GraphAgent(BaseAgent):
                         "current_node": self.current_node_id,
                         "transitioned": next_node_id is not None,
                         "routing_type": routing_type,
-                        "routing_model": self.routing_model,
+                        "routing_model": self._last_routing_model if routing_type == "llm" else self.routing_model,
                         "routing_provider": getattr(self, "routing_provider", None),
                         "routing_latency_ms": round(routing_latency_ms, 1),
                         "routing_started_at": routing_started_at,
-                        "routing_reasoning_effort": getattr(self, "_routing_reasoning_effort_used", None),
+                        "routing_reasoning_effort": self._last_routing_effort
+                        if routing_type == "llm"
+                        else getattr(self, "_routing_reasoning_effort_used", None),
                         "extracted_params": extracted_params or {},
                         "node_history": list(self.node_history),
                         "routing_messages": routing_messages,

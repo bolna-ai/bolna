@@ -398,6 +398,10 @@ class GraphNode(BaseModel):
     prompt: str = ""
     static_message: Optional[LocalizedText] = None
     repeat_after_silence_seconds: Optional[float] = None
+    # Per-node override of ConversationConfig.number_of_words_for_interruption; None inherits it.
+    number_of_words_for_interruption: Optional[int] = None
+    # Per-node routing model, served on the agent's routing provider and credentials; None inherits.
+    routing_model: Optional[str] = None
     examples: Optional[Dict[str, str]] = None
     edges: List[GraphEdge] = Field(default_factory=list)
     function_call: Optional[str] = None
