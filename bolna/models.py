@@ -166,6 +166,10 @@ class Transcriber(BaseModel):
     provider: Optional[str] = "deepgram"
     multilingual: Optional[Dict[str, Any]] = None
     active: Optional[str] = None
+    # Per-call self-hosted Deepgram endpoint override; unset falls back to DEEPGRAM_HOST* env.
+    deepgram_host: Optional[str] = None
+    deepgram_flux_host: Optional[str] = None
+    deepgram_host_protocol: Optional[str] = None
     # Flux model parameters
     eot_threshold: Optional[float] = None
     eager_eot_threshold: Optional[float] = None
