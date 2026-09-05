@@ -580,7 +580,15 @@ class TaskManager(BaseManager):
                     }
 
                     # This dict is rebuilt for simple agents, so copy opt-ins before transport auto-selection.
-                    for key in ("prompt_cache_key", "omit_request_parameters", "use_responses_api"):
+                    for key in (
+                        "prompt_cache_key",
+                        "omit_request_parameters",
+                        "use_responses_api",
+                        "responses_store",
+                        "responses_history",
+                        "responses_omit_parameters",
+                        "strict_websocket",
+                    ):
                         value = self.llm_agent_config.get(key)
                         if value is not None:
                             self.llm_config[key] = value
