@@ -17,7 +17,12 @@ from openai import (
     BadRequestError,
 )
 
-from bolna.constants import DEFAULT_LANGUAGE_CODE, GPT5_MODEL_PREFIX, canonical_model, default_reasoning_effort
+from bolna.constants import (
+    DEFAULT_LANGUAGE_CODE,
+    canonical_model,
+    default_reasoning_effort,
+    is_reasoning_model,
+)
 from bolna.enums import Verbosity
 from bolna.helpers.utils import convert_to_request_log, compute_function_pre_call_message, now_ms
 from .openai_base import OpenAICompatibleLLM
@@ -74,7 +79,7 @@ class AzureLLM(OpenAICompatibleLLM):
         self.temperature = temperature
         max_tokens_key = "max_tokens"
         self.model_args = {}
-        if self.model_family.startswith(GPT5_MODEL_PREFIX):
+        if is_reasoning_model(self.model_family):
             max_tokens_key = "max_completion_tokens"
             self.model_args["reasoning_effort"] = kwargs.get("reasoning_effort", None) or default_reasoning_effort(
                 self.model_family
@@ -182,7 +187,7 @@ class AzureLLM(OpenAICompatibleLLM):
             "stream_options": {"include_usage": True},
         }
 
-        if not self.model_family.startswith(GPT5_MODEL_PREFIX):
+        if not is_reasoning_model(self.model_family):
             model_args["stop"] = ["User:"]
 
         if self.trigger_function_call:

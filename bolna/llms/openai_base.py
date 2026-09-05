@@ -5,7 +5,7 @@ from typing import Optional
 
 from openai import BadRequestError, APIError
 
-from bolna.constants import GPT5_MODEL_PREFIX
+from bolna.constants import is_reasoning_model
 from bolna.enums import ChatRole, ResponseStreamEvent, ResponseItemType, LogComponent, LogDirection
 from bolna.helpers.utils import (
     convert_to_request_log,
@@ -491,7 +491,7 @@ class OpenAICompatibleLLM(BaseLLM):
         if service_tier:
             create_kwargs["service_tier"] = service_tier
 
-        if self.model_family.startswith(GPT5_MODEL_PREFIX):
+        if is_reasoning_model(self.model_family):
             create_kwargs["temperature"] = 1
             reasoning_effort = self.model_args.get("reasoning_effort")
             reasoning_config = {}
@@ -751,7 +751,7 @@ class OpenAICompatibleLLM(BaseLLM):
         if service_tier:
             create_kwargs["service_tier"] = service_tier
 
-        if self.model_family.startswith(GPT5_MODEL_PREFIX):
+        if is_reasoning_model(self.model_family):
             create_kwargs["temperature"] = 1
             reasoning_config = {}
             reasoning_effort = self.model_args.get("reasoning_effort")

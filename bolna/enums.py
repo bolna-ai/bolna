@@ -127,6 +127,7 @@ class ReasoningEffort(str, Enum):
     MEDIUM = "medium"
     HIGH = "high"
     XHIGH = "xhigh"
+    MAX = "max"
 
     @classmethod
     def all_values(cls):

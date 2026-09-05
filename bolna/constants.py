@@ -85,9 +85,18 @@ GPT5_MODEL_PREFIX = "gpt-5"
 GPT5_4_MODEL_PREFIX = "gpt-5.4"
 GPT5_5_MODEL_PREFIX = "gpt-5.5"
 GPT5_6_MODEL_PREFIX = "gpt-5.6"
+GPT6_MODEL_PREFIX = "gpt-6"
+# Families that fix temperature at 1, take max_completion_tokens rather than max_tokens,
+# reject stop, and carry a reasoning_effort.
+REASONING_MODEL_PREFIXES = (GPT5_MODEL_PREFIX, GPT6_MODEL_PREFIX)
 # Function tools with reasoning_effort are rejected on chat completions for these models,
 # so tool-using agents are routed through the Responses API.
-RESPONSES_API_MODEL_PREFIXES = (GPT5_4_MODEL_PREFIX, GPT5_5_MODEL_PREFIX, GPT5_6_MODEL_PREFIX)
+RESPONSES_API_MODEL_PREFIXES = (
+    GPT5_4_MODEL_PREFIX,
+    GPT5_5_MODEL_PREFIX,
+    GPT5_6_MODEL_PREFIX,
+    GPT6_MODEL_PREFIX,
+)
 
 HIGH_LEVEL_ASSISTANT_ANALYTICS_DATA = {
     "extraction_details": {},
@@ -337,11 +346,17 @@ MODEL_REASONING_EFFORT_MAP = {
     "gpt-5.6-sol": [RE.NONE, RE.LOW, RE.MEDIUM, RE.HIGH, RE.XHIGH],
     "gpt-5.6-terra": [RE.NONE, RE.LOW, RE.MEDIUM, RE.HIGH, RE.XHIGH],
     "gpt-5.6-luna": [RE.NONE, RE.LOW, RE.MEDIUM, RE.HIGH, RE.XHIGH],
+    "gpt-6-astra": [RE.LOW, RE.MEDIUM, RE.HIGH, RE.XHIGH, RE.MAX],
     # Realtime speech-to-speech. gpt-realtime-1.5 has no reasoning and is deliberately absent.
     "gpt-realtime-2": [RE.MINIMAL, RE.LOW, RE.MEDIUM, RE.HIGH, RE.XHIGH],
     "gpt-realtime-2.1": [RE.MINIMAL, RE.LOW, RE.MEDIUM, RE.HIGH, RE.XHIGH],
     "gpt-realtime-2.1-mini": [RE.MINIMAL, RE.LOW, RE.MEDIUM, RE.HIGH, RE.XHIGH],
 }
+
+
+def is_reasoning_model(model: str) -> bool:
+    """Whether the model takes reasoning parameters. Pass a model family, never a deployment name."""
+    return (model or "").startswith(REASONING_MODEL_PREFIXES)
 
 
 def default_reasoning_effort(model: str) -> str:
