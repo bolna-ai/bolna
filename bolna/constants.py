@@ -1,3 +1,4 @@
+import os
 from datetime import datetime, timezone
 from bolna.enums import ReasoningEffort as RE
 
@@ -326,6 +327,11 @@ MAYA_TTS_SUPPORTED_LANGUAGES = {
     "en",
     "auto",
 }
+
+# Gemini TTS (Vertex generateContent). The model id is supplied per agent, so none is pinned.
+GEMINI_TTS_DEFAULT_MODEL = os.getenv("GEMINI_TTS_MODEL", "gemini-tts")
+GEMINI_TTS_NATIVE_SAMPLE_RATE = 24000
+GEMINI_TTS_LOCATION = "global"
 
 MODEL_REASONING_EFFORT_MAP = {
     "gpt-5": [RE.MINIMAL, RE.LOW, RE.MEDIUM, RE.HIGH],

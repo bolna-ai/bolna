@@ -7,6 +7,7 @@ from bolna.models import (
     SYNTHESIZER_CONFIG_MODELS,
     CartesiaConfig,
     ElevenLabsConfig,
+    GeminiConfig,
     PixaConfig,
     RimeConfig,
     SarvamConfig,
@@ -44,6 +45,7 @@ EXPECTED_FIELDS = {
         "repetition_penalty": False,
     },
     "maya": {"voice_id": True, "voice": True, "model": True, "language": False},
+    "gemini": {"voice": True, "voice_id": True, "model": True, "language": True, "style": False},
     "kalpa": {
         "voice": False,
         "voice_id": False,
@@ -72,7 +74,9 @@ def test_config_shapes_are_stable(provider):
     assert {name: f.is_required() for name, f in fields.items()} == EXPECTED_FIELDS[provider]
 
 
-@pytest.mark.parametrize("config_model", [CartesiaConfig, RimeConfig, SmallestConfig, SarvamConfig, PixaConfig])
+@pytest.mark.parametrize(
+    "config_model", [CartesiaConfig, RimeConfig, SmallestConfig, SarvamConfig, PixaConfig, GeminiConfig]
+)
 def test_standard_shape_providers_extend_the_base(config_model):
     assert issubclass(config_model, StandardVoiceConfig)
 
