@@ -22,7 +22,7 @@ from openai import (
 import websockets
 from websockets.protocol import State as WSState
 
-from bolna.constants import DEFAULT_LANGUAGE_CODE, GPT5_MODEL_PREFIX, default_reasoning_effort
+from bolna.constants import DEFAULT_LANGUAGE_CODE, default_reasoning_effort, is_reasoning_model
 from bolna.enums import ResponseStreamEvent, ResponseItemType, Verbosity
 from bolna.helpers.ssl_context import get_ssl_context
 from bolna.helpers.utils import compute_function_pre_call_message, now_ms
@@ -209,7 +209,7 @@ class OpenAiLLM(OpenAICompatibleLLM):
 
         max_tokens_key = "max_tokens"
         self.model_args = {}
-        if model.startswith(GPT5_MODEL_PREFIX):
+        if is_reasoning_model(model):
             max_tokens_key = "max_completion_tokens"
             self.model_args["reasoning_effort"] = kwargs.get("reasoning_effort") or default_reasoning_effort(model)
             self.model_args["verbosity"] = kwargs.get("verbosity", None) or Verbosity.LOW.value
@@ -302,7 +302,7 @@ class OpenAiLLM(OpenAICompatibleLLM):
             "stream_options": {"include_usage": True},
         }
 
-        if not self.model.startswith(GPT5_MODEL_PREFIX):
+        if not is_reasoning_model(self.model):
             model_args["stop"] = ["User:"]
 
         if self.trigger_function_call:
