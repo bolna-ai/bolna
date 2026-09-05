@@ -11,7 +11,14 @@ WEB_BASED_CALL_PROVIDER = "web_based_call"
 WEBCALL_TTS_SAMPLE_RATE = 24000
 
 OPENAI_TRANSCRIBER_HEARTBEAT_INTERVAL_S = 5
-OPENAI_TRANSCRIBER_UTTERANCE_TIMEOUT_S = 0.5
+# Last-resort safety net for a missing/dropped transcription.completed event, NOT a
+# normal-path timeout. OpenAI's realtime transcription completion can legitimately take a
+# couple of seconds after commit, so this must stay well above typical completion latency.
+# Regressed from 3.0 to 0.5 in #721 with no stated rationale; at 0.5s the monitor fires on
+# ordinary turns and silently discards the user's speech before OpenAI's real transcript
+# ever arrives, which is what issue #711 ("final transcript comes too late, so agent never
+# replies") actually observed. Restored to the pre-regression value.
+OPENAI_TRANSCRIBER_UTTERANCE_TIMEOUT_S = 3.0
 
 # ElevenLabs realtime (scribe_v2_realtime) accepts up to 50 keyterms for biasing.
 ELEVENLABS_REALTIME_MAX_KEYTERMS = 50
