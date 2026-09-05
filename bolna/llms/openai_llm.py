@@ -190,6 +190,9 @@ class OpenAiLLM(OpenAICompatibleLLM):
     ):
         super().__init__(max_tokens, buffer_size)
         self.model = model
+        # Keep these opt-ins separate: shared model_args also feed routing and other transports.
+        self.prompt_cache_key = kwargs.get("prompt_cache_key")
+        self.omit_request_parameters = kwargs.get("omit_request_parameters") or ()
 
         self.custom_tools = kwargs.get("api_tools", None)
         self.language = language
@@ -311,6 +314,14 @@ class OpenAiLLM(OpenAICompatibleLLM):
                 model_args["tools"] = _tools
                 model_args["tool_choice"] = tool_choice or "auto"
                 model_args["parallel_tool_calls"] = False
+
+        # Apply omissions after defaults, on this request only; core messages, tools and caps stay intact.
+        for key in ("temperature", "stop", "verbosity"):
+            if key in self.omit_request_parameters:
+                model_args.pop(key, None)
+        # A caller-supplied workload key enables cache routing without changing unconfigured requests.
+        if self.prompt_cache_key is not None:
+            model_args["prompt_cache_key"] = self.prompt_cache_key
 
         answer, buffer = "", ""
         tools = model_args.get("tools", [])

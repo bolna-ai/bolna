@@ -579,12 +579,20 @@ class TaskManager(BaseManager):
                         "temperature": self.llm_agent_config["temperature"],
                     }
 
+                    # This dict is rebuilt for simple agents, so copy opt-ins before transport auto-selection.
+                    for key in ("prompt_cache_key", "omit_request_parameters", "use_responses_api"):
+                        value = self.llm_agent_config.get(key)
+                        if value is not None:
+                            self.llm_config[key] = value
+
                 for key in ("reasoning_effort", "verbosity", "reasoning_summary", "thinking_budget"):
                     if key in self.llm_agent_config:
                         self.llm_config[key] = self.llm_agent_config[key]
 
-                if self.llm_agent_config.get("use_responses_api") or any(
-                    p in self.llm_config.get("model", "") for p in RESPONSES_API_MODEL_PREFIXES
+                # An explicit simple-agent Chat choice must not be overridden by model-prefix defaults.
+                if self.llm_config.get("use_responses_api") is not False and (
+                    self.llm_agent_config.get("use_responses_api")
+                    or any(p in self.llm_config.get("model", "") for p in RESPONSES_API_MODEL_PREFIXES)
                 ):
                     self.llm_config["use_responses_api"] = True
 
@@ -1825,7 +1833,8 @@ class TaskManager(BaseManager):
 
             if llm_config["provider"] in SUPPORTED_LLM_PROVIDERS.keys():
                 llm_class = SUPPORTED_LLM_PROVIDERS.get(llm_config["provider"])
-                llm = llm_class(language=self.language, **llm_config, **self.kwargs)
+                # Stored and runtime controls can overlap; merge once to avoid duplicate-key TypeError.
+                llm = llm_class(**{"language": self.language, **llm_config, **self.kwargs})
                 return llm
             else:
                 raise Exception(f"LLM {llm_config['provider']} not supported")

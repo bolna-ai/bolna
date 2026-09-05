@@ -20,6 +20,9 @@ def _make_llm(**overrides):
     defaults.update(overrides)
     with patch.object(OpenAiLLM, "__init__", lambda self, **kw: None):
         llm = OpenAiLLM.__new__(OpenAiLLM)
+    # This fixture bypasses __init__; retain the absent opt-ins for its legacy Chat-path checks.
+    llm.prompt_cache_key = None
+    llm.omit_request_parameters = ()
     llm.model = defaults["model"]
     llm.max_tokens = defaults["max_tokens"]
     llm.buffer_size = defaults["buffer_size"]

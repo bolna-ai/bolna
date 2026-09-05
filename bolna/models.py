@@ -323,6 +323,12 @@ class Llm(BaseModel):
 
 
 class SimpleLlmAgent(Llm):
+    # Unspecified keeps automatic selection; explicit False must survive schema serialization.
+    use_responses_api: Optional[bool] = None
+    # Persist an optional workload cache key instead of silently dropping it from agent config.
+    prompt_cache_key: Optional[str] = Field(default=None, min_length=1, strict=True)
+    # Some endpoints reject these defaults. Do not allow callers to omit messages, tools or caps.
+    omit_request_parameters: List[Literal["temperature", "stop", "verbosity"]] = Field(default_factory=list)
     agent_flow_type: Optional[str] = "streaming"  # It is used for backwards compatibility
     extraction_details: Optional[str] = None
     summarization_details: Optional[str] = None
