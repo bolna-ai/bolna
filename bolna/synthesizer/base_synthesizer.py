@@ -1,4 +1,5 @@
 import io
+import time
 import uuid
 import asyncio
 import re
@@ -34,6 +35,21 @@ class BaseSynthesizer:
                 self.turn_latencies[i] = entry
                 return
         self.turn_latencies.append(entry)
+
+    def _record_http_turn_latency(self, meta_info, text, render_ms):
+        """Per-turn latency for the one-shot HTTP path, shaped like the streaming record. A
+        non-streaming render produces the whole utterance at once, so first_result == total."""
+        self._upsert_turn_latency(
+            {
+                "turn_id": meta_info.get("turn_id"),
+                "sequence_id": meta_info.get("sequence_id"),
+                "tts_start_ms": meta_info.get("tts_start_ms"),
+                "first_result_latency_ms": render_ms,
+                "total_stream_duration_ms": render_ms,
+                "characters": len(text or ""),
+                "message_category": meta_info.get("message_category"),
+            }
+        )
 
     async def synthesize_pcm_clip(self, text, sample_rate):
         """Override where the provider renders PCM natively; None → caller converts."""
@@ -145,11 +161,13 @@ class BaseSynthesizer:
                 logger.info(f"Not synthesizing: sequence_id {meta_info.get('sequence_id')} not current")
                 return
 
+            render_start = time.perf_counter()
             audio = await self._fetch_http_audio(text, meta_info)
             audio = self._process_http_audio(audio)
             # A failed render still terminates the turn: a None packet crashes the output handler.
             if not audio:
                 audio = b"\x00"
+            render_ms = round((time.perf_counter() - render_start) * 1000)
 
             self._stamp_first_chunk(meta_info)
             self._stamp_end_of_stream(meta_info)
@@ -158,6 +176,7 @@ class BaseSynthesizer:
             meta_info["text"] = text
             meta_info["text_synthesized"] = f"{text} "
             self._stamp_mark_id(meta_info)
+            self._record_http_turn_latency(meta_info, text, render_ms)
             yield create_ws_data_packet(audio, meta_info)
 
     async def _fetch_http_audio(self, text, meta_info=None):
