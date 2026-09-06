@@ -4944,7 +4944,16 @@ class TaskManager(BaseManager):
                         break
                     continue
 
-                if self.stream:
+                # The TTS streaming flag does not describe the ASR packet format.
+                # Keep ASR control packets out of plain-text transcription handling.
+                data = message["data"]
+                is_asr_event = isinstance(data, dict) or data in (
+                    "speech_started",
+                    "speech_ended",
+                    "session_started",
+                    "transcriber_error",
+                )
+                if self.stream or is_asr_event:
                     self._set_call_details(message)
                     meta_info = message["meta_info"]
                     sequence = await self.process_transcriber_request(meta_info)
@@ -5263,7 +5272,8 @@ class TaskManager(BaseManager):
                             await self._handle_transcriber_output(next_task, transcriber_message, meta_info)
 
                     # Handle speech_ended notification (UtteranceEnd with no new transcript)
-                    elif isinstance(message.get("data"), dict) and message["data"].get("type", "") == "speech_ended":
+                    elif data == "speech_ended" or (isinstance(data, dict) and data.get("type") == "speech_ended"):
+                        # Sarvam sends a bare event; other adapters use a typed packet.
                         logger.info(f"Received speech_ended notification, resetting callee_speaking state")
                         self.interruption_manager.on_user_speech_ended(update_utterance_time=False)
                         self._speech_started_before_welcome = False
