@@ -57,7 +57,7 @@ async def make_call(request: Request):
         print(f"bolna_host: {bolna_host}")
 
         try:
-            call = twilio_client.calls.create(
+            twilio_client.calls.create(
                 to=call_details.get("recipient_phone_number"),
                 from_=twilio_phone_number,
                 url=f"{telephony_host}/twilio_connect?bolna_host={bolna_host}&agent_id={agent_id}",

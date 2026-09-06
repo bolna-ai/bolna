@@ -159,7 +159,7 @@ async def test_the_next_turn_after_an_abandoned_stream_reconnects():
     await agen.__anext__()
     await agen.aclose()
 
-    events = await _drain(t.stream_response({"input": "b"}))
+    await _drain(t.stream_response({"input": "b"}))
     assert t.connects == 2
     assert t.sockets[0].closed is True
     assert t._needs_reset is False
@@ -426,7 +426,6 @@ async def test_disconnect_does_not_leak_the_socket_a_prewarm_is_still_opening():
     inside that window would find nothing to close, then inherit a live socket nobody owns."""
     t = _transport([completed("r1")], [completed("r2")])
     await t.ensure_connected()
-    first = t._ws
 
     opening = asyncio.Event()
     release = asyncio.Event()

@@ -395,9 +395,9 @@ def get_required_input_types(task):
     for i, chain in enumerate(task["toolchain"]["pipelines"]):
         first_model = chain[0]
         # An s2s pipeline takes caller audio directly, with no transcriber in front of it.
-        if chain[0] in ("transcriber", "s2s"):
+        if first_model in ("transcriber", "s2s"):
             input_types["audio"] = i
-        elif chain[0] == "synthesizer" or chain[0] == "llm":
+        elif first_model in ("synthesizer", "llm"):
             input_types["text"] = i
     return input_types
 
@@ -420,7 +420,7 @@ def format_messages(messages, use_system_prompt=False, include_tools=False):
             if content:
                 try:
                     formatted_string += "system: " + content + "\n"
-                except Exception as e:
+                except Exception:
                     pass
         elif role == "assistant":
             if content:
@@ -633,7 +633,7 @@ def get_synth_audio_format(audio_bytes):
     # input to this can be WAV or PCM
     try:
         audio_buffer = io.BytesIO(audio_bytes)
-        with wave.open(audio_buffer, "rb") as wav_file:
+        with wave.open(audio_buffer, "rb"):
             return "wav"
     except wave.Error:
         return "pcm"

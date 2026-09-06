@@ -68,7 +68,6 @@ def _make_agent(config_overrides=None):
     mock_llm = MagicMock()
     mock_llm.generate_stream = AsyncMock(return_value=_async_iter([]))
     mock_llm.trigger_function_call = False
-    mock_openai_client = MagicMock()
     mock_openai_llm_cls = MagicMock(return_value=mock_llm)
 
     with (

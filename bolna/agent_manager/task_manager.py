@@ -1974,7 +1974,6 @@ class TaskManager(BaseManager):
         if self.task_config["task_type"] == "webhook":
             return
 
-        agent_type = (self.task_config["tools_config"].get("llm_agent") or {}).get("agent_type", "simple_llm_agent")
         self.is_local = local
         if task_id == 0:
             if (
@@ -3075,7 +3074,6 @@ class TaskManager(BaseManager):
             self.synthesizer_tasks.append(asyncio.ensure_future(task))
         elif self.tools["output"] is not None:
             logger.info("Synthesizer not the next step and hence simply returning back")
-            overall_time = time.time() - meta_info["llm_start_time"]
             # self.history = copy.deepcopy(self.interim_history)
             if is_function_call:
                 bos_packet = create_ws_data_packet("<beginning_of_stream>", meta_info)
@@ -3480,16 +3478,13 @@ class TaskManager(BaseManager):
                     logger.info(f"Merged API response into context_data: {list(response_data.keys())}")
             except (json.JSONDecodeError, TypeError) as e:
                 logger.debug(f"Could not parse API response as JSON for context merge: {e}")
-        if called_fun.startswith("check_availability_of_slots") and (
-            not get_res_values or (len(get_res_values) == 1 and len(get_res_values[0]) == 0)
+        if (
+            called_fun.startswith("book_appointment")
+            and "id" not in get_res_keys
+            and get_res_values
+            and get_res_values[0] == "no_available_users_found_error"
         ):
-            set_response_prompt = []
-        elif called_fun.startswith("book_appointment") and "id" not in get_res_keys:
-            if get_res_values and get_res_values[0] == "no_available_users_found_error":
-                function_response = "Sorry, the host isn't available at this time. Are you available at any other time?"
-            set_response_prompt = []
-        else:
-            set_response_prompt = function_response
+            function_response = "Sorry, the host isn't available at this time. Are you available at any other time?"
 
         textual_response = resp.get("textual_response", None)
         self.conversation_history.attach_tool_calls_to_turn(turn_id, resp["model_response"])
@@ -4172,7 +4167,6 @@ class TaskManager(BaseManager):
                 return
 
         self.llm_processed_request_ids.add(self.current_request_id)
-        llm_response = ""
 
     def _enter_hangup_state(self):
         self.hangup_triggered = True
@@ -4242,7 +4236,7 @@ class TaskManager(BaseManager):
         await asyncio.sleep(2)
         try:
             from_number = self.context_data["recipient_data"]["from_number"]
-        except Exception as e:
+        except Exception:
             from_number = None
 
         call_sid = None
@@ -4528,13 +4522,9 @@ class TaskManager(BaseManager):
         sequence = meta_info.get("sequence", 0)
 
         # check if previous request id is not in transmitted request id
-        if self.previous_request_id is None:
-            is_first_message = True
-        elif self.previous_request_id not in self.llm_processed_request_ids:
+        if self.previous_request_id and self.previous_request_id not in self.llm_processed_request_ids:
             logger.info(f"Adding previous request id to LLM rejected request if")
             self.llm_rejected_request_ids.add(self.previous_request_id)
-        else:
-            skip_append_to_data = False
         return sequence
 
     def _trigger_voicemail_check(self, transcriber_message, meta_info, is_final=True):
@@ -6821,7 +6811,6 @@ class TaskManager(BaseManager):
 
                             if self.stream:
                                 if meta_info.get("is_first_chunk", False):
-                                    first_chunk_generation_timestamp = time.time()
                                     # is_first_chunk re-stamps on every frame once the turn's text is flushed.
                                     _ttfb = meta_info.get("synthesizer_latency")
                                     _tts_key = (sequence_id, _ttfb)
@@ -8415,10 +8404,10 @@ class TaskManager(BaseManager):
                         await self._run_llm_task(self.input_parameters)
                 except BolnaComponentError:
                     raise
-                except Exception as e:
+                except Exception:
                     raise
 
-        except asyncio.CancelledError as e:
+        except asyncio.CancelledError:
             traceback.print_exc()
             logger.info(f"Websocket got cancelled {self.task_id}")
 

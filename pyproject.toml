@@ -47,6 +47,7 @@ target-version = "py310"
 select = [
     "E721",  # type comparison (use isinstance)
     "F811",  # redefined unused name
+    "F841",  # unused variable assignments
     "ISC",   # implicit string concatenation bugs
 ]
 
