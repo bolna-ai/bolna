@@ -63,6 +63,7 @@ class SynthesizerProvider(str, Enum):
     PIXA = "pixa"
     MAYA = "maya"
     KALPA = "kalpa"
+    GEMINI = "gemini"
 
     @classmethod
     def all_values(cls):
@@ -127,6 +128,7 @@ class ReasoningEffort(str, Enum):
     MEDIUM = "medium"
     HIGH = "high"
     XHIGH = "xhigh"
+    MAX = "max"
 
     @classmethod
     def all_values(cls):

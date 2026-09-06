@@ -26,6 +26,23 @@ def test_a_provider_prefixed_deployment_is_still_checked():
         validate_reasoning_effort_for_model("azure/gpt-5.1", "minimal")
 
 
+@pytest.mark.parametrize("effort", ["none", "minimal"])
+def test_the_floors_gpt6_dropped_are_rejected(effort):
+    """gpt-6 kept neither of the two lowest gpt-5 efforts, so "low" is as cheap as it gets."""
+    with pytest.raises(ValueError, match=effort):
+        validate_reasoning_effort_for_model("gpt-6-astra", effort)
+
+
+def test_the_max_effort_gpt6_added_is_accepted():
+    validate_reasoning_effort_for_model("gpt-6-astra", "max")
+
+
+def test_the_max_effort_is_not_opened_up_to_older_models():
+    """ "max" became a ReasoningEffort member for gpt-6; the gpt-5 line still tops out at xhigh."""
+    with pytest.raises(ValueError, match="max"):
+        validate_reasoning_effort_for_model("gpt-5.4", "max")
+
+
 def test_a_non_gpt_model_is_left_alone():
     validate_reasoning_effort_for_model("claude-sonnet-4", "minimal")
 

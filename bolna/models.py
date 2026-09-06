@@ -130,6 +130,11 @@ class AzureConfig(BaseModel):
     speed: Optional[float] = 1.0
 
 
+class GeminiConfig(StandardVoiceConfig):
+    # voice_id holds the Gemini voice_name; style feeds structured speech_metadata.
+    style: Optional[str] = None
+
+
 # The config class each provider's provider_config is validated against. Adding a provider means
 # one entry here.
 SYNTHESIZER_CONFIG_MODELS = {
@@ -145,6 +150,7 @@ SYNTHESIZER_CONFIG_MODELS = {
     SynthesizerProvider.PIXA.value: PixaConfig,
     SynthesizerProvider.MAYA.value: MayaConfig,
     SynthesizerProvider.KALPA.value: KalpaConfig,
+    SynthesizerProvider.GEMINI.value: GeminiConfig,
 }
 
 
