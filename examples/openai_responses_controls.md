@@ -45,6 +45,12 @@ chaining, truncation, reasoning include and fallback defaults remain unchanged.
 [OpenAI's WebSocket guide](https://developers.openai.com/api/docs/guides/websocket-mode)
 describes `store: false` and full-context starts with a null previous response ID.
 
+Bolna forwards the caller-supplied `prompt_cache_key`; it does not automatically
+distribute traffic across keys. Keep all turns of a call on the same key. If
+high traffic reduces cache hits, distribute calls across a stable key pool using
+a deterministic mapping, then tune the pool size using measured cache hits.
+See [OpenAI's cache-key guidance](https://developers.openai.com/api/docs/guides/prompt-caching#prompt-cache-key-best-practices).
+
 ## Strict text evaluation
 
 Use `generate_stream(..., synthesize=False, meta_info=metadata)` on the native

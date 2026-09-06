@@ -27,5 +27,11 @@ agent; absent/null retains it. Chat routing and non-streaming behavior are uncha
 For Responses history, storage and strict WebSocket controls, see
 [the Responses example](openai_responses_controls.md). Keep credentials in the existing environment.
 
+Bolna forwards the caller-supplied `prompt_cache_key`; it does not automatically
+distribute traffic across keys. Keep all turns of a call on the same key. If
+high traffic reduces cache hits, distribute calls across a stable key pool using
+a deterministic mapping, then tune the pool size using measured cache hits.
+See [OpenAI's cache-key guidance](https://developers.openai.com/api/docs/guides/prompt-caching#prompt-cache-key-best-practices).
+
 Tests use mocked SDK transport, not live model quality or voice validation.
 [API fields](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create).
