@@ -150,6 +150,7 @@ class GraphAgent(BaseAgent):
                 "verbosity",
                 "reasoning_summary",
                 "service_tier",
+                "prompt_cache_key",
                 "use_responses_api",
                 "compact_threshold",
                 "overflow_llm",

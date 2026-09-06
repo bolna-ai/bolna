@@ -89,6 +89,10 @@ class AzureLLM(OpenAICompatibleLLM):
 
         self.model_args.update({max_tokens_key: self.max_tokens, "temperature": self.temperature, "model": self.model})
         self.model_args["service_tier"] = kwargs.get("service_tier", "default")
+        # Opaque routing hint: same key lands on the same server, so a warm prompt prefix is reused.
+        # Only sent when the caller supplies one, since an OpenAI-compatible base_url may reject it.
+        if kwargs.get("prompt_cache_key"):
+            self.model_args["prompt_cache_key"] = kwargs["prompt_cache_key"]
 
         azure_endpoint = kwargs.get("base_url", os.getenv("AZURE_OPENAI_ENDPOINT"))
         api_key = kwargs.get("llm_key", os.getenv("AZURE_OPENAI_API_KEY"))

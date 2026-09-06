@@ -218,6 +218,10 @@ class OpenAiLLM(OpenAICompatibleLLM):
         self.model_args.update({max_tokens_key: self.max_tokens, "temperature": self.temperature, "model": self.model})
 
         self.model_args["service_tier"] = kwargs.get("service_tier", "default")
+        # Opaque routing hint: same key lands on the same server, so a warm prompt prefix is reused.
+        # Only sent when the caller supplies one, since an OpenAI-compatible base_url may reject it.
+        if kwargs.get("prompt_cache_key"):
+            self.model_args["prompt_cache_key"] = kwargs["prompt_cache_key"]
 
         # http2=False: cancelled h2 requests leak streams until the connection pins at 100 (barge-in)
         http_client = get_shared_http_client(base_url=kwargs.get("base_url"), http2=False)

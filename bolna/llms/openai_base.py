@@ -491,6 +491,10 @@ class OpenAICompatibleLLM(BaseLLM):
         if service_tier:
             create_kwargs["service_tier"] = service_tier
 
+        prompt_cache_key = self.model_args.get("prompt_cache_key")
+        if prompt_cache_key:
+            create_kwargs["prompt_cache_key"] = prompt_cache_key
+
         if is_reasoning_model(self.model_family):
             create_kwargs["temperature"] = 1
             reasoning_effort = self.model_args.get("reasoning_effort")

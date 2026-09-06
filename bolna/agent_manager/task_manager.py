@@ -1866,6 +1866,8 @@ class TaskManager(BaseManager):
                 injected_cfg["reasoning_summary"] = self.kwargs["reasoning_summary"]
             if "service_tier" in self.kwargs:
                 injected_cfg["service_tier"] = self.kwargs["service_tier"]
+            if "prompt_cache_key" in self.kwargs:
+                injected_cfg["prompt_cache_key"] = self.kwargs["prompt_cache_key"]
             if "overflow_llm" in self.kwargs:
                 injected_cfg["overflow_llm"] = self.kwargs["overflow_llm"]
             if "routing_reasoning_effort" in self.kwargs:
@@ -1917,6 +1919,8 @@ class TaskManager(BaseManager):
                 injected_cfg["reasoning_summary"] = self.kwargs["reasoning_summary"]
             if "service_tier" in self.kwargs:
                 injected_cfg["service_tier"] = self.kwargs["service_tier"]
+            if "prompt_cache_key" in self.kwargs:
+                injected_cfg["prompt_cache_key"] = self.kwargs["prompt_cache_key"]
             if "overflow_llm" in self.kwargs:
                 injected_cfg["overflow_llm"] = self.kwargs["overflow_llm"]
             if self.llm_config.get("use_responses_api"):
