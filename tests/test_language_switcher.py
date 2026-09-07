@@ -271,3 +271,69 @@ async def test_prewarm_fires_one_llm_call_and_swallows_errors():
     switcher2, fake_llm2 = _make_switcher("ok")
     fake_llm2.generate.side_effect = RuntimeError("boom")
     await switcher2.prewarm()  # _warm swallows the error internally, so this won't raise
+
+
+# ── cacheable prefix: the ambient prompt must clear Haiku 4.5's 4,096-token minimum ──
+
+
+def _system_text(model, explicit_only=False):
+    from bolna.helpers.language_switcher import LanguageSwitcher
+
+    with patch(f"{MOD}.LiteLLM", return_value=MagicMock()):
+        switcher = LanguageSwitcher(available_labels=["en", "hi"], model=model, explicit_only=explicit_only)
+    message = switcher._system_message()
+    return message["content"][0]
+
+
+async def test_ambient_prompt_clears_the_cache_minimum_on_claude():
+    """Under 4,096 tokens Anthropic silently skips caching — no error, just a full-price bill.
+
+    Counted with a real tokenizer, not chars/4: this is the guard that keeps a future prompt edit
+    from re-breaking caching invisibly, so it has to measure what the provider measures. litellm
+    reads lower than Bedrock's own usage counter on this text (4,352 vs ~4,680), so clearing the
+    minimum here means clearing it in production too.
+    """
+    import litellm
+
+    block = _system_text("bedrock/global.anthropic.claude-haiku-4-5-20251001-v1:0")
+    tokens = litellm.token_counter(model="anthropic/claude-haiku-4-5-20251001", text=block["text"])
+    assert tokens >= 4096, f"cached prefix is {tokens} tokens, under the 4096 minimum"
+    assert block["cache_control"] == {"type": "ephemeral"}
+
+
+async def test_pad_appended_once_and_after_the_rules():
+    from bolna.prompts import LANGUAGE_SWITCH_CACHE_PAD, LANGUAGE_SWITCH_SYSTEM_PROMPT
+
+    text = _system_text("anthropic/claude-haiku-4-5-20251001")["text"]
+    assert text.startswith(LANGUAGE_SWITCH_SYSTEM_PROMPT.rstrip())
+    assert text.count(LANGUAGE_SWITCH_CACHE_PAD) == 1
+
+
+async def test_explicit_prompt_is_not_padded():
+    # It is already ~5.6k tokens; padding it would be dead weight in every explicit-mode request.
+    from bolna.prompts import EXPLICIT_LANGUAGE_SWITCH_SYSTEM_PROMPT, LANGUAGE_SWITCH_CACHE_PAD
+
+    import litellm
+
+    block = _system_text("anthropic/claude-haiku-4-5-20251001", explicit_only=True)
+    assert block["text"] == EXPLICIT_LANGUAGE_SWITCH_SYSTEM_PROMPT
+    assert LANGUAGE_SWITCH_CACHE_PAD not in block["text"]
+    assert litellm.token_counter(model="anthropic/claude-haiku-4-5-20251001", text=block["text"]) >= 4096
+
+
+async def test_non_claude_model_gets_neither_pad_nor_cache_control():
+    from bolna.prompts import LANGUAGE_SWITCH_CACHE_PAD, LANGUAGE_SWITCH_SYSTEM_PROMPT
+
+    block = _system_text("azure/gpt-4.1-mini")
+    assert block["text"] == LANGUAGE_SWITCH_SYSTEM_PROMPT
+    assert LANGUAGE_SWITCH_CACHE_PAD not in block["text"]
+    assert "cache_control" not in block
+
+
+async def test_pad_carries_no_judge_instructions():
+    # Extra tokens must not be able to bias a decision — the appendix says nothing operative.
+    from bolna.prompts import LANGUAGE_SWITCH_CACHE_PAD
+
+    body = LANGUAGE_SWITCH_CACHE_PAD.lower()
+    for word in ("switch", "detect", "target", "example", "confidence"):
+        assert word not in body, word
