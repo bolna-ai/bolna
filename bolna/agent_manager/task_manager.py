@@ -3828,11 +3828,9 @@ class TaskManager(BaseManager):
 
                     meta_info["end_of_llm_stream"] = True
                     meta_info["text"] = static_text
-                    # The clip skips the synthesizer, which is what normally stamps this. Without
-                    # it the mark carries no text and an interrupted node cannot be trimmed.
-                    meta_info["text_synthesized"] = static_text
                     meta_info["cached"] = True
                     meta_info["message_category"] = "static_node"
+                    meta_info["is_silence_trigger"] = is_silence_trigger
                     ws_packet = create_ws_data_packet(static_hash, meta_info=meta_info, is_md5_hash=True)
                     await self._synthesize(ws_packet)
                     return
@@ -6917,6 +6915,19 @@ class TaskManager(BaseManager):
         finally:
             await self.tools["synthesizer"].cleanup()
 
+    def _stamp_cached_clip_text(self, meta_info):
+        """A pre-generated clip skips the synthesizer, which is what normally stamps
+        text_synthesized, so its single mark would carry no text and an interrupted node could
+        not be trimmed. Only on the branch that sends the cached bytes: the cache-miss path
+        re-synthesizes live with this same meta_info, and every streaming provider but
+        ElevenLabs and Azure reuses one meta_info for all chunks, which would put the whole
+        message on every mark. Silence re-prompts stay unstamped: history deliberately never
+        records them, and mark text would let sync_history materialise an interrupted one.
+        """
+        if meta_info.get("message_category") != "static_node" or meta_info.get("is_silence_trigger"):
+            return
+        meta_info["text_synthesized"] = meta_info.get("text", "")
+
     async def __send_preprocessed_audio(self, meta_info, text):
         meta_info = copy.deepcopy(meta_info)
         yield_in_chunks = self.yield_chunks
@@ -6959,6 +6970,7 @@ class TaskManager(BaseManager):
                     await self._synthesize(create_ws_data_packet(meta_info["text"], meta_info=meta_info))
                     return
                 logger.info("Sending preprocessed audio")
+                self._stamp_cached_clip_text(meta_info)
                 meta_info["format"] = audio_format
                 meta_info["end_of_synthesizer_stream"] = True
                 await self.tools["output"].handle(create_ws_data_packet(audio_chunk, meta_info))
@@ -6994,6 +7006,7 @@ class TaskManager(BaseManager):
                         meta_info["cached"] = False
                         await self._synthesize(create_ws_data_packet(meta_info["text"], meta_info=meta_info))
                         return
+                    self._stamp_cached_clip_text(meta_info)
                 else:
                     start_time = time.perf_counter()
                     audio_chunk = self.preloaded_welcome_audio if self.preloaded_welcome_audio else None

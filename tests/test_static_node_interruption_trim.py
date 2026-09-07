@@ -135,9 +135,8 @@ async def test_a_cached_single_mark_is_waited_for_at_hangup(category):
 # --------------------------------------------------------- the field the mark reads
 
 
-async def test_the_static_packet_carries_the_text_the_mark_needs():
-    """The mark is built from meta_info["text_synthesized"]; the synthesizer that normally sets
-    it is bypassed here, so the static branch has to stamp it itself."""
+async def _static_turn(is_silence_trigger=False):
+    """Drive the static branch of __do_llm_generation_impl and return the synthesized packet's meta."""
     from unittest.mock import AsyncMock, MagicMock, patch
 
     tm = TaskManager.__new__(TaskManager)
@@ -159,15 +158,55 @@ async def test_the_static_packet_carries_the_text_the_mark_needs():
     tm._synthesize = AsyncMock()
 
     async def _generate(*args, **kwargs):
-        yield {"routing_info": {"current_node": "n1", "is_silence_trigger": False}}
+        yield {"routing_info": {"current_node": "n1", "is_silence_trigger": is_silence_trigger}}
         yield {"static_message": FULL_TEXT, "static_audio_hash": "hash123"}
 
     tm.tools["llm_agent"].generate = _generate
-
     with patch("bolna.agent_manager.task_manager.convert_to_request_log"):
         await TaskManager._TaskManager__do_llm_generation_impl(tm, [], {"turn_id": 4}, "synthesizer")
-
     tm._synthesize.assert_awaited_once()
-    sent_meta = tm._synthesize.await_args.args[0]["meta_info"]
-    assert sent_meta["text_synthesized"] == FULL_TEXT
-    assert sent_meta["text"] == FULL_TEXT
+    return tm._synthesize.await_args.args[0]["meta_info"]
+
+
+async def test_the_generation_branch_leaves_the_text_unstamped():
+    """It must not stamp here: on a cache miss __send_preprocessed_audio re-synthesizes live with
+    this same meta_info, and every streaming provider but ElevenLabs/Azure reuses one meta_info
+    for all chunks — the whole message would land on every mark."""
+    meta = await _static_turn()
+    assert meta["text"] == FULL_TEXT
+    assert "text_synthesized" not in meta
+    assert meta["message_category"] == "static_node"
+
+
+async def test_the_generation_branch_carries_the_silence_flag_forward():
+    assert (await _static_turn(is_silence_trigger=True))["is_silence_trigger"] is True
+
+
+def _stamp(**meta):
+    TaskManager._stamp_cached_clip_text(TaskManager.__new__(TaskManager), meta)
+    return meta
+
+
+def test_the_cached_send_branch_stamps_the_text():
+    meta = _stamp(message_category="static_node", text=FULL_TEXT)
+    assert meta["text_synthesized"] == FULL_TEXT
+
+
+def test_a_silence_reprompt_is_never_stamped():
+    """History deliberately never records a re-prompt; mark text would let sync_history
+    materialise one that was interrupted, so a barged re-prompt would appear and a fully
+    played one would not."""
+    meta = _stamp(message_category="static_node", text=FULL_TEXT, is_silence_trigger=True)
+    assert "text_synthesized" not in meta
+
+
+def test_other_cached_clips_are_not_stamped():
+    for category in ("agent_welcome_message", "filler", "event_proactive"):
+        assert "text_synthesized" not in _stamp(message_category=category, text=FULL_TEXT)
+
+
+def test_event_proactive_is_not_a_cached_single_mark_category():
+    """It runs on sequence_id -1, which every output handler blanks text_synthesized for, so its
+    mark never carries text and neither the hangup guard nor the trim can act on it."""
+    assert "event_proactive" not in CACHED_SINGLE_MARK_CATEGORIES
+    assert CACHED_SINGLE_MARK_CATEGORIES == ("static_node",)

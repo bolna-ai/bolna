@@ -82,8 +82,10 @@ SONIOX_AUTO_LANGUAGE_VALUES = {"", "multi", "auto", "multilingual", "unknown"}
 CONTENT_POLICY_ERROR_MARKERS = ("content policy", "content_policy", "content_filter", "content management")
 
 # Pre-generated clips that bypass the synthesizer and go out as one mark covering the whole
-# message, unlike streamed speech which arrives as many marks.
-CACHED_SINGLE_MARK_CATEGORIES = ("static_node", "event_proactive")
+# message, unlike streamed speech which arrives as many marks. event_proactive is deliberately
+# absent: it runs on sequence_id -1, which every output handler blanks text_synthesized for, so
+# its mark never carries text and neither the hangup guard nor the trim can act on it.
+CACHED_SINGLE_MARK_CATEGORIES = ("static_node",)
 
 # Model prefixes
 GPT5_MODEL_PREFIX = "gpt-5"
