@@ -22,6 +22,7 @@ from pydub import AudioSegment
 
 from bolna.constants import (
     ACCIDENTAL_INTERRUPTION_PHRASES,
+    CACHED_SINGLE_MARK_CATEGORIES,
     DEFAULT_USER_ONLINE_MESSAGE,
     DEFAULT_USER_ONLINE_MESSAGE_TRIGGER_DURATION,
     FILLER_DICT,
@@ -2788,7 +2789,13 @@ class TaskManager(BaseManager):
                 ):
                     break
 
-            if first_item.get("text_synthesized") and first_item.get("is_final_chunk") is True:
+            # Cached clips are a single mark that is always the final chunk, so this shortcut
+            # would skip waiting for the whole message rather than just its tail.
+            if (
+                first_item.get("text_synthesized")
+                and first_item.get("is_final_chunk") is True
+                and first_item.get("type") not in CACHED_SINGLE_MARK_CATEGORIES
+            ):
                 break
 
             # Use entry_time (not time.time()) so the deadline is a fixed point in the
@@ -3823,6 +3830,7 @@ class TaskManager(BaseManager):
                     meta_info["text"] = static_text
                     meta_info["cached"] = True
                     meta_info["message_category"] = "static_node"
+                    meta_info["is_silence_trigger"] = is_silence_trigger
                     ws_packet = create_ws_data_packet(static_hash, meta_info=meta_info, is_md5_hash=True)
                     await self._synthesize(ws_packet)
                     return
@@ -6907,6 +6915,15 @@ class TaskManager(BaseManager):
         finally:
             await self.tools["synthesizer"].cleanup()
 
+    def _stamp_cached_clip_text(self, meta_info):
+        """Give the mark its text so an interrupted clip can be trimmed. Cached-send branch
+        only: the cache-miss path re-synthesizes live and would stamp every chunk. See INIT.md."""
+        if meta_info.get("message_category") not in CACHED_SINGLE_MARK_CATEGORIES or meta_info.get(
+            "is_silence_trigger"
+        ):
+            return
+        meta_info["text_synthesized"] = meta_info.get("text", "")
+
     async def __send_preprocessed_audio(self, meta_info, text):
         meta_info = copy.deepcopy(meta_info)
         yield_in_chunks = self.yield_chunks
@@ -6949,6 +6966,7 @@ class TaskManager(BaseManager):
                     await self._synthesize(create_ws_data_packet(meta_info["text"], meta_info=meta_info))
                     return
                 logger.info("Sending preprocessed audio")
+                self._stamp_cached_clip_text(meta_info)
                 meta_info["format"] = audio_format
                 meta_info["end_of_synthesizer_stream"] = True
                 await self.tools["output"].handle(create_ws_data_packet(audio_chunk, meta_info))
@@ -6984,6 +7002,7 @@ class TaskManager(BaseManager):
                         meta_info["cached"] = False
                         await self._synthesize(create_ws_data_packet(meta_info["text"], meta_info=meta_info))
                         return
+                    self._stamp_cached_clip_text(meta_info)
                 else:
                     start_time = time.perf_counter()
                     audio_chunk = self.preloaded_welcome_audio if self.preloaded_welcome_audio else None
