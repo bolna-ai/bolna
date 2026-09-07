@@ -49,6 +49,7 @@ class GovernanceLedger:
     input_tokens: int = 0
     output_tokens: int = 0
     receipts: list[dict] = field(default_factory=list)
+    source_config: dict | None = None
 
 
 class GovernanceMiddleware:
@@ -68,10 +69,22 @@ class GovernanceMiddleware:
         self.usd_per_1m_output = cfg.get("usd_per_1m_output")
         allowed = cfg.get("allowed_tools")
         denied = cfg.get("denied_tools")
-        self.allowed_tools = {str(x) for x in allowed} if allowed else None
+        self.allowed_tools = {str(x) for x in allowed} if allowed is not None else None
         self.denied_tools = {str(x) for x in denied} if denied else set()
         self.run_id = run_id
         self.ledger = ledger or GovernanceLedger()
+        if self.enabled and getattr(self.ledger, "source_config", None) is None:
+            self.ledger.source_config = dict(cfg)
+        elif not self.enabled and getattr(self.ledger, "source_config", None):
+            inherited = dict(self.ledger.source_config)
+            self.enabled = True
+            self.mode = (inherited.get("mode") or "enforce").lower()
+            self.redact_pii = bool(inherited.get("redact_pii", True))
+            self.output_dlp = bool(inherited.get("output_dlp", True))
+            self.max_cost_per_call = None
+            self.max_cost_per_session = inherited.get("max_cost_per_session")
+            self.usd_per_1m_input = inherited.get("usd_per_1m_input")
+            self.usd_per_1m_output = inherited.get("usd_per_1m_output")
         self._call_usd = 0.0
         self._blocked_llm = False
 
@@ -182,11 +195,9 @@ class GovernanceMiddleware:
     def _estimate_usd(self, model, input_tokens, output_tokens) -> float:
         in_tok = int(input_tokens or 0)
         out_tok = int(output_tokens or 0)
-        if self.usd_per_1m_input is not None or self.usd_per_1m_output is not None:
-            in_rate = float(self.usd_per_1m_input or 0)
-            out_rate = float(self.usd_per_1m_output or 0)
-        else:
-            in_rate, out_rate = _DEFAULT_RATES.get(_normalize_model(model), _FALLBACK_RATE)
+        default_in, default_out = _DEFAULT_RATES.get(_normalize_model(model), _FALLBACK_RATE)
+        in_rate = float(self.usd_per_1m_input) if self.usd_per_1m_input is not None else default_in
+        out_rate = float(self.usd_per_1m_output) if self.usd_per_1m_output is not None else default_out
         return (in_tok / 1_000_000.0) * in_rate + (out_tok / 1_000_000.0) * out_rate
 
     def record_usage(self, *, model=None, input_tokens=None, output_tokens=None, meta_info=None) -> GovernanceDecision:
@@ -226,6 +237,10 @@ class GovernanceMiddleware:
     def check_budget(self) -> GovernanceDecision:
         if not self.enabled:
             return GovernanceDecision(True, "allow", "governance_disabled", {})
+        if self._blocked_llm:
+            return GovernanceDecision(
+                not self._enforce(), "deny" if self._enforce() else "monitor_deny", "already_blocked", {}
+            )
         breached = self._budget_breach()
         if not breached:
             return GovernanceDecision(True, "allow", "within_budget", {})

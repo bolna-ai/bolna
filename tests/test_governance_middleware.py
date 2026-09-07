@@ -82,12 +82,50 @@ def test_tool_allowlist_and_denylist():
     assert g.authorize_tool("lookup_order").allow
 
 
+def test_empty_allowlist_denies_every_tool():
+    g = _enabled(allowed_tools=[])
+    assert not g.authorize_tool("lookup_order").allow
+    assert not g.authorize_tool("end_call").allow
+
+
+def test_runtime_args_extractor_drops_spoken_payload():
+    from bolna.agent_manager.task_manager import TaskManager
+
+    resp = {
+        "order_id": "A1",
+        "textual_response": f"ssn {SSN}",
+        "model_response": [{"function": {"arguments": f"ssn {SSN}"}}],
+        "tool_call_id": "c1",
+    }
+    args = TaskManager._extract_api_call_runtime_args(resp)
+    assert "textual_response" not in args
+    assert "model_response" not in args
+    args.pop("tool_call_id", None)
+    g = _enabled()
+    assert g.authorize_tool("lookup_order", args).allow
+
+
 def test_tool_args_with_pii_are_denied():
     g = _enabled()
     decision = g.authorize_tool("update_account", {"ssn": SSN})
     assert not decision.allow
     assert decision.reason == "tool_args_pii"
     assert SSN not in json.dumps(g.receipts())
+
+
+def test_check_budget_does_not_spam_receipts_once_blocked():
+    g = _enabled(mode="monitor", max_cost_per_call=0.0001, usd_per_1m_input=10.0, usd_per_1m_output=10.0)
+    g.record_usage(model="x", input_tokens=50_000, output_tokens=50_000)
+    before = len(g.receipts())
+    g.check_budget()
+    g.check_budget()
+    assert len(g.receipts()) == before
+
+
+def test_partial_rate_override_keeps_the_other_side():
+    g = _enabled(usd_per_1m_input=10.0)
+    usd = g._estimate_usd("gpt-4o-mini", 1_000_000, 1_000_000)
+    assert usd == 10.0 + 0.60
 
 
 def test_monitor_mode_logs_but_does_not_block_tools():
@@ -105,6 +143,19 @@ def test_cost_cap_blocks_further_llm_after_breach():
     assert first.reason == "max_cost_per_call"
     assert not g.allows_llm()
     assert not g.check_budget().allow
+
+
+def test_followup_task_inherits_session_cap_from_ledger():
+    ledger = GovernanceLedger()
+    first = GovernanceMiddleware(
+        {"enabled": True, "max_cost_per_session": 0.0001, "usd_per_1m_input": 10.0, "usd_per_1m_output": 0},
+        run_id="r",
+        ledger=ledger,
+    )
+    first.record_usage(model="x", input_tokens=50_000, output_tokens=0)
+    second = GovernanceMiddleware.from_conversation_config({}, "r", ledger=ledger)
+    assert second.enabled
+    assert not second.check_budget().allow
 
 
 def test_session_ledger_is_shared_across_middleware_instances():
