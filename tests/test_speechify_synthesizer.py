@@ -79,12 +79,14 @@ def test_pcm_config_selects_supported_rate_and_falls_back_to_24000():
     assert _make_synth(audio_format="pcm", sampling_rate="12345").wire_output_format == "pcm_24000"
 
 
-# --- attribution: caller slug + version pinned on the SDK client, not the SDK's own ---
+# --- attribution: caller slug + version on the SDK client, not the SDK's own ---
 
 def test_client_configured_with_caller_slug_and_version(sdk):
     _make_synth()
-    args, kwargs = sdk["ctor"].call_args
-    assert args[0] == "2026-09-13"  # Speechify-Version API pin
+    _, kwargs = sdk["ctor"].call_args
+    # No explicit API `version` — take the SDK's default so the API contract
+    # stays coherent with the installed SDK.
+    assert "version" not in kwargs
     assert kwargs["token"] == "test-key"
     assert kwargs["headers"]["Speechify-Caller"] == CALLER == "bolna"
     assert kwargs["headers"]["Speechify-Caller-Version"] == CALLER_VERSION

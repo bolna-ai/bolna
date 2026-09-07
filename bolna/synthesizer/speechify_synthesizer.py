@@ -19,9 +19,6 @@ try:
 except PackageNotFoundError:
     CALLER_VERSION = "0.0.0"
 
-# Dated Speechify API version this integration is built against.
-SPEECHIFY_API_VERSION = "2026-09-13"
-
 # output_format sample rates the streaming endpoint accepts for pcm_* (wav_* is not).
 SUPPORTED_PCM_RATES = (8000, 16000, 22050, 24000, 44100)
 
@@ -62,7 +59,6 @@ class SpeechifySynthesizer(BaseSynthesizer):
 
         host = os.getenv("SPEECHIFY_API_HOST")
         self.client = AsyncSpeechify(
-            SPEECHIFY_API_VERSION,
             token=self.api_key,
             base_url=f"https://{host}" if host else None,
             headers={"Speechify-Caller": CALLER, "Speechify-Caller-Version": CALLER_VERSION},
