@@ -135,6 +135,10 @@ class GeminiConfig(StandardVoiceConfig):
     style: Optional[str] = None
 
 
+class SpeechifyConfig(StandardVoiceConfig):
+    pass
+
+
 # The config class each provider's provider_config is validated against. Adding a provider means
 # one entry here.
 SYNTHESIZER_CONFIG_MODELS = {
@@ -151,6 +155,7 @@ SYNTHESIZER_CONFIG_MODELS = {
     SynthesizerProvider.MAYA.value: MayaConfig,
     SynthesizerProvider.KALPA.value: KalpaConfig,
     SynthesizerProvider.GEMINI.value: GeminiConfig,
+    SynthesizerProvider.SPEECHIFY.value: SpeechifyConfig,
 }
 
 
