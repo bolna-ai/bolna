@@ -7,6 +7,7 @@ from .task_manager import TaskManager
 from bolna.helpers.logger_config import configure_logger
 from bolna.models import AGENT_WELCOME_MESSAGE
 from bolna.helpers.utils import update_prompt_with_context
+from bolna.governance import GovernanceLedger
 
 logger = configure_logger(__name__)
 
@@ -53,6 +54,9 @@ class AssistantManager(BaseManager):
         """
         if run_id:
             self.run_id = run_id
+
+        if self.kwargs.get("governance_ledger") is None:
+            self.kwargs["governance_ledger"] = GovernanceLedger()
 
         input_parameters = None
         for task_id, task in enumerate(self.tasks):
