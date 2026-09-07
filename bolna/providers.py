@@ -1,6 +1,7 @@
 from .synthesizer import (
     PollySynthesizer,
     ElevenlabsSynthesizer,
+    ElevenlabsV3Synthesizer,
     OPENAISynthesizer,
     DeepgramSynthesizer,
     AzureSynthesizer,
@@ -9,6 +10,9 @@ from .synthesizer import (
     SarvamSynthesizer,
     RimeSynthesizer,
     PixaSynthesizer,
+    MayaSynthesizer,
+    KalpaSynthesizer,
+    GeminiSynthesizer,
     SpeechifySynthesizer,
 )
 from .transcriber import (
@@ -23,6 +27,7 @@ from .transcriber import (
     SmallestTranscriber,
     OpenAITranscriber,
     SonioxTranscriber,
+    GeminiTranscriber,
 )
 from .input_handlers import (
     DefaultInputHandler,
@@ -43,11 +48,21 @@ from .output_handlers import (
     FreeSwitchOutputHandler,
 )
 from .llms import OpenAiLLM, LiteLLM, AzureLLM, GeminiLLM
-from .enums import TelephonyProvider, SynthesizerProvider, TranscriberProvider, LLMProvider
+from .s2s import GeminiLiveS2S, OpenAIRealtimeS2S
+from .enums import TelephonyProvider, SynthesizerProvider, TranscriberProvider, LLMProvider, S2SProvider
+
+
+def elevenlabs_synthesizer(**kwargs):
+    """Eleven v3 is served only from the text-to-dialogue socket; multi-stream-input 403s
+    on those model ids. Everything else stays on the original synthesizer."""
+    # `or ""` rather than a get() default: a stored config can carry an explicit null model.
+    cls = ElevenlabsV3Synthesizer if (kwargs.get("model") or "").startswith("eleven_v3") else ElevenlabsSynthesizer
+    return cls(**kwargs)
+
 
 SUPPORTED_SYNTHESIZER_MODELS = {
     SynthesizerProvider.POLLY.value: PollySynthesizer,
-    SynthesizerProvider.ELEVENLABS.value: ElevenlabsSynthesizer,
+    SynthesizerProvider.ELEVENLABS.value: elevenlabs_synthesizer,
     SynthesizerProvider.OPENAI.value: OPENAISynthesizer,
     SynthesizerProvider.DEEPGRAM.value: DeepgramSynthesizer,
     SynthesizerProvider.AZURETTS.value: AzureSynthesizer,
@@ -56,6 +71,9 @@ SUPPORTED_SYNTHESIZER_MODELS = {
     SynthesizerProvider.SARVAM.value: SarvamSynthesizer,
     SynthesizerProvider.RIME.value: RimeSynthesizer,
     SynthesizerProvider.PIXA.value: PixaSynthesizer,
+    SynthesizerProvider.MAYA.value: MayaSynthesizer,
+    SynthesizerProvider.KALPA.value: KalpaSynthesizer,
+    SynthesizerProvider.GEMINI.value: GeminiSynthesizer,
     SynthesizerProvider.SPEECHIFY.value: SpeechifySynthesizer,
 }
 
@@ -71,6 +89,7 @@ SUPPORTED_TRANSCRIBER_PROVIDERS = {
     TranscriberProvider.SMALLEST.value: SmallestTranscriber,
     TranscriberProvider.OPENAI.value: OpenAITranscriber,
     TranscriberProvider.SONIOX.value: SonioxTranscriber,
+    TranscriberProvider.GEMINI.value: GeminiTranscriber,
 }
 
 # Backwards compatibility
@@ -127,4 +146,8 @@ SUPPORTED_OUTPUT_TELEPHONY_HANDLERS = {
     TelephonyProvider.PLIVO.value: PlivoOutputHandler,
     TelephonyProvider.VOBIZ.value: VobizOutputHandler,
     TelephonyProvider.SIP_TRUNK.value: SipTrunkOutputHandler,
+}
+SUPPORTED_S2S_PROVIDERS = {
+    S2SProvider.OPENAI_REALTIME.value: OpenAIRealtimeS2S,
+    S2SProvider.GEMINI_LIVE.value: GeminiLiveS2S,
 }

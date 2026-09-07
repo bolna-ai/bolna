@@ -23,12 +23,21 @@ class BaseSynthesizer:
         self.model = "default"
 
     def _upsert_turn_latency(self, entry: dict) -> None:
-        """Replace existing turn_latencies entry with matching sequence_id, or append if new."""
+        """Replace existing turn_latencies entry with matching sequence_id, or append if new.
+
+        Canned speech all shares sequence_id -1, so category joins the key — otherwise the
+        goodbye's entry overwrites the follow-up's and every earlier canned synthesis."""
         for i, t in enumerate(self.turn_latencies):
-            if t.get("sequence_id") == entry.get("sequence_id"):
+            if t.get("sequence_id") == entry.get("sequence_id") and t.get("message_category") == entry.get(
+                "message_category"
+            ):
                 self.turn_latencies[i] = entry
                 return
         self.turn_latencies.append(entry)
+
+    async def synthesize_pcm_clip(self, text, sample_rate):
+        """Override where the provider renders PCM natively; None → caller converts."""
+        return None
 
     async def synthesize_telephony_clip(self, text):
         """One-shot render of `text` as raw mu-law 8000 bytes, or None when the provider
@@ -138,6 +147,9 @@ class BaseSynthesizer:
 
             audio = await self._fetch_http_audio(text, meta_info)
             audio = self._process_http_audio(audio)
+            # A failed render still terminates the turn: a None packet crashes the output handler.
+            if not audio:
+                audio = b"\x00"
 
             self._stamp_first_chunk(meta_info)
             self._stamp_end_of_stream(meta_info)
@@ -162,7 +174,9 @@ class BaseSynthesizer:
                 meta_info["is_cached"] = False
             self.synthesized_characters += len(text)
             audio = await self._generate_http(text)
-            self.cache.set(text, audio)
+            if audio:
+                # Caching a failed render would repeat it for every later turn with this text.
+                self.cache.set(text, audio)
             return audio
         else:
             if meta_info is not None:

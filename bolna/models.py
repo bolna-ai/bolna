@@ -7,6 +7,7 @@ from .enums import (
     TelephonyProvider,
     SynthesizerProvider,
     TranscriberProvider,
+    S2SProvider,
     ReasoningEffort,
     Verbosity,
     ExpressionOperator,
@@ -70,43 +71,56 @@ class DeepgramConfig(BaseModel):
     model: str
 
 
-class CartesiaConfig(BaseModel):
-    voice_id: str
+class StandardVoiceConfig(BaseModel):
+    """The four fields every voice provider needs; extend it with provider-specific knobs."""
+
     voice: str
+    voice_id: str
     model: str
     language: str
+
+
+class CartesiaConfig(StandardVoiceConfig):
     speed: Optional[float] = 1.0
 
 
-class RimeConfig(BaseModel):
-    voice_id: str
-    language: str
-    voice: str
-    model: str
+class RimeConfig(StandardVoiceConfig):
+    pass
 
 
-class SmallestConfig(BaseModel):
-    voice_id: str
-    language: str
-    voice: str
-    model: str
+class SmallestConfig(StandardVoiceConfig):
+    pass
 
 
-class SarvamConfig(BaseModel):
-    voice_id: str
-    language: str
-    voice: str
-    model: str
+class SarvamConfig(StandardVoiceConfig):
     speed: Optional[float] = 1.0
 
 
-class PixaConfig(BaseModel):
-    voice_id: str
-    voice: str
-    model: str
-    language: str
+class PixaConfig(StandardVoiceConfig):
     top_p: Optional[float] = 0.95
     repetition_penalty: Optional[float] = 1.3
+
+
+class MayaConfig(BaseModel):
+    # "Ananya" (female) or "Arjun" (male) — the only two voices, both speak every language.
+    # Case-sensitive: Maya rejects "ananya" with a 400.
+    voice_id: str
+    voice: str
+    model: str
+    # One of hi/bn/gu/kn/ml/mr/or/pa/ta/te/en/auto. "en" is Indian English, "auto" lets Maya
+    # detect per utterance. Region-qualified codes ("en-IN") reduce to the primary subtag.
+    language: Optional[str] = "en"
+
+
+class KalpaConfig(BaseModel):
+    voice: str = "Kiara"
+    voice_id: Optional[str] = None
+    model: str = "kalpa-tts-multilingual-beta-v0.1"
+    temperature: Optional[float] = None
+    acoustic_temperature: Optional[float] = None
+    max_new_tokens: Optional[int] = None
+    audio_quality: Optional[str] = None
+    chunk_length_schedule: Optional[List[int]] = None
 
 
 class AzureConfig(BaseModel):
@@ -114,6 +128,30 @@ class AzureConfig(BaseModel):
     model: str
     language: str
     speed: Optional[float] = 1.0
+
+
+class GeminiConfig(StandardVoiceConfig):
+    # voice_id holds the Gemini voice_name; style feeds structured speech_metadata.
+    style: Optional[str] = None
+
+
+# The config class each provider's provider_config is validated against. Adding a provider means
+# one entry here.
+SYNTHESIZER_CONFIG_MODELS = {
+    SynthesizerProvider.POLLY.value: PollyConfig,
+    SynthesizerProvider.ELEVENLABS.value: ElevenLabsConfig,
+    SynthesizerProvider.OPENAI.value: OpenAIConfig,
+    SynthesizerProvider.DEEPGRAM.value: DeepgramConfig,
+    SynthesizerProvider.AZURETTS.value: AzureConfig,
+    SynthesizerProvider.CARTESIA.value: CartesiaConfig,
+    SynthesizerProvider.SMALLEST.value: SmallestConfig,
+    SynthesizerProvider.SARVAM.value: SarvamConfig,
+    SynthesizerProvider.RIME.value: RimeConfig,
+    SynthesizerProvider.PIXA.value: PixaConfig,
+    SynthesizerProvider.MAYA.value: MayaConfig,
+    SynthesizerProvider.KALPA.value: KalpaConfig,
+    SynthesizerProvider.GEMINI.value: GeminiConfig,
+}
 
 
 class Transcriber(BaseModel):
@@ -145,18 +183,8 @@ class Transcriber(BaseModel):
 
 class Synthesizer(BaseModel):
     provider: str
-    provider_config: Union[
-        PollyConfig,
-        ElevenLabsConfig,
-        AzureConfig,
-        RimeConfig,
-        SmallestConfig,
-        SarvamConfig,
-        PixaConfig,
-        CartesiaConfig,
-        DeepgramConfig,
-        OpenAIConfig,
-    ] = Field(union_mode="smart")
+    # Derived from the registry so a provider registered there is always accepted here.
+    provider_config: Union[tuple(SYNTHESIZER_CONFIG_MODELS.values())] = Field(union_mode="smart")
     stream: bool = False
     buffer_size: Optional[int] = 40  # 40 characters in a buffer
     audio_format: Optional[str] = "pcm"
@@ -167,38 +195,15 @@ class Synthesizer(BaseModel):
         provider = values.get("provider")
         config = values.get("provider_config", {})
 
-        if provider == "elevenlabs":
-            if not config.get("voice") or not config.get("voice_id"):
-                raise ValueError("ElevenLabs config requires 'voice' or 'voice_id'.")
-            if isinstance(config, dict):
-                values["provider_config"] = ElevenLabsConfig(**config)
-        elif provider == "pixa":
-            if isinstance(config, dict):
-                values["provider_config"] = PixaConfig(**config)
-        elif provider == "cartesia":
-            if isinstance(config, dict):
-                values["provider_config"] = CartesiaConfig(**config)
-        elif provider == "polly":
-            if isinstance(config, dict):
-                values["provider_config"] = PollyConfig(**config)
-        elif provider == "azuretts":
-            if isinstance(config, dict):
-                values["provider_config"] = AzureConfig(**config)
-        elif provider == "deepgram":
-            if isinstance(config, dict):
-                values["provider_config"] = DeepgramConfig(**config)
-        elif provider == "openai":
-            if isinstance(config, dict):
-                values["provider_config"] = OpenAIConfig(**config)
-        elif provider == "smallest":
-            if isinstance(config, dict):
-                values["provider_config"] = SmallestConfig(**config)
-        elif provider == "sarvam":
-            if isinstance(config, dict):
-                values["provider_config"] = SarvamConfig(**config)
-        elif provider == "rime":
-            if isinstance(config, dict):
-                values["provider_config"] = RimeConfig(**config)
+        if not isinstance(config, dict):
+            return values
+
+        if provider == SynthesizerProvider.ELEVENLABS.value and (not config.get("voice") or not config.get("voice_id")):
+            raise ValueError("ElevenLabs config requires both 'voice' and 'voice_id'.")
+
+        config_model = SYNTHESIZER_CONFIG_MODELS.get(provider)
+        if config_model:
+            values["provider_config"] = config_model(**config)
 
         return values
 
@@ -378,6 +383,7 @@ class GraphEdge(BaseModel):
 
     to_node_id: str
     condition: str = ""  # Human-readable description of when to transition
+    label: Optional[str] = None
     condition_type: Optional[EdgeConditionType] = None  # None → "llm" (backward compat)
     expression: Optional[ExpressionGroup] = None  # required when condition_type == "expression"
     event_name: Optional[str] = None  # Matches CallEvent.event when condition_type="event"
@@ -579,6 +585,76 @@ class ToolModel(BaseModel):
     tools_params: Dict[str, APIParams]
 
 
+class OpenAIRealtimeConfig(BaseModel):
+    model: str = "gpt-realtime-2.1"
+    voice: str = "marin"
+    # Playback rate (0.25 to 1.5), not how the reply is worded.
+    speed: Optional[float] = 1.0
+    # semantic_vad scores whether the caller has actually finished from what they said, so
+    # it waits longer on a trailing "ummm" than on a finished sentence. That is the job the
+    # llm pipeline does with a word count and a phrase list, done by a model instead.
+    turn_detection_type: str = "semantic_vad"
+    # auto | low | medium | high. Lower gives the caller longer before the model takes over.
+    eagerness: Optional[str] = "auto"
+    # server_vad only; ignored under semantic_vad.
+    vad_threshold: Optional[float] = 0.5
+    vad_silence_duration_ms: Optional[int] = 500
+    vad_prefix_padding_ms: Optional[int] = 300
+    reasoning_effort: Optional[ReasoningEffort] = None
+    max_output_tokens: Optional[int] = None
+    transcription_model: Optional[str] = "gpt-4o-mini-transcribe"
+    language: Optional[str] = None
+
+    @model_validator(mode="after")
+    def validate_reasoning(self):
+        if self.reasoning_effort:
+            if self.model not in MODEL_REASONING_EFFORT_MAP:
+                raise ValueError(f"reasoning_effort is not supported for realtime model '{self.model}'.")
+            validate_reasoning_effort_for_model(self.model, self.reasoning_effort.value)
+        return self
+
+
+class GeminiLiveConfig(BaseModel):
+    model: str = "gemini-3.1-flash-live-preview"
+    voice: str = "Kore"
+    language: Optional[str] = None
+    temperature: Optional[float] = None
+    start_sensitivity: Optional[str] = None
+    end_sensitivity: Optional[str] = None
+    # Gemini's guide puts the usable band at 500-800ms: below it utterances fragment and
+    # transcription quality drops, above it the caller waits on every reply.
+    vad_silence_duration_ms: Optional[int] = 600
+    vad_prefix_padding_ms: Optional[int] = None
+    # Gemini closes an audio session at ~15 minutes, so both stay on unless explicitly disabled.
+    enable_session_resumption: bool = True
+    enable_context_compression: bool = True
+
+
+S2S_PROVIDER_CONFIGS = {
+    S2SProvider.OPENAI_REALTIME.value: OpenAIRealtimeConfig,
+    S2SProvider.GEMINI_LIVE.value: GeminiLiveConfig,
+}
+
+
+class S2SConfig(BaseModel):
+    provider: str
+    provider_config: Union[OpenAIRealtimeConfig, GeminiLiveConfig]
+    # Suppresses inbound audio while the agent opens, so its own greeting cannot trip provider VAD.
+    welcome_audio_gate_ms: int = 1500
+
+    @model_validator(mode="before")
+    def preprocess(cls, values):
+        if not isinstance(values, dict):
+            return values
+        provider = values.get("provider")
+        validate_attribute(provider, S2SProvider.all_values())
+        config = values.get("provider_config") or {}
+        if isinstance(config, BaseModel):
+            config = config.model_dump()
+        values["provider_config"] = S2S_PROVIDER_CONFIGS[provider](**config)
+        return values
+
+
 class ToolsConfig(BaseModel):
     llm_agent: Optional[Union[LlmAgent, SimpleLlmAgent]] = None
     synthesizer: Optional[Synthesizer] = None
@@ -586,6 +662,7 @@ class ToolsConfig(BaseModel):
     input: Optional[IOModel] = None
     output: Optional[IOModel] = None
     api_tools: Optional[ToolModel] = None
+    s2s: Optional[S2SConfig] = None
     switch_tool_description: Optional[str] = None
     switch_handoff_messages: Optional[Dict[str, str]] = None
     agent_names: Optional[Dict[str, str]] = None

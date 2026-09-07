@@ -61,6 +61,9 @@ class SynthesizerProvider(str, Enum):
     SARVAM = "sarvam"
     RIME = "rime"
     PIXA = "pixa"
+    MAYA = "maya"
+    KALPA = "kalpa"
+    GEMINI = "gemini"
     SPEECHIFY = "speechify"
 
     @classmethod
@@ -83,6 +86,7 @@ class TranscriberProvider(str, Enum):
     SMALLEST = "smallest"
     OPENAI = "openai"
     SONIOX = "soniox"
+    GEMINI = "gemini"
 
     @classmethod
     def all_values(cls):
@@ -125,6 +129,7 @@ class ReasoningEffort(str, Enum):
     MEDIUM = "medium"
     HIGH = "high"
     XHIGH = "xhigh"
+    MAX = "max"
 
     @classmethod
     def all_values(cls):
@@ -170,6 +175,12 @@ class ResponseStreamEvent(str, Enum):
         return frozenset({cls.COMPLETED, cls.FAILED, cls.INCOMPLETE, cls.ERROR})
 
     @classmethod
+    def response_terminal_events(cls):
+        """Terminals that settle the response itself. `error` is excluded: it can be raised
+        against the session and still be followed by the response's own terminal event."""
+        return frozenset({cls.COMPLETED, cls.FAILED, cls.INCOMPLETE})
+
+    @classmethod
     def all_values(cls):
         return [e.value for e in cls]
 
@@ -199,6 +210,7 @@ class HangupReason(str, Enum):
     SYNTHESIZER_ERROR = "synthesizer_error"
     LLM_ERROR = "llm_error"
     END_CALL_TOOL = "end_call_tool"
+    S2S_ERROR = "s2s_error"
 
     @classmethod
     def all_values(cls):
@@ -216,6 +228,7 @@ class LogComponent(str, Enum):
     LLM_LANGUAGE_DETECTION = "llm_language_detection"
     LLM_LANGUAGE_SWITCH = "llm_language_switch"
     LLM_VOICEMAIL = "llm_voicemail"
+    S2S = "s2s"
     SYNTHESIZER = "synthesizer"
     TRANSCRIBER = "transcriber"
     WARNING = "warning"
@@ -291,6 +304,17 @@ class NodeType(str, Enum):
     LLM = "llm"
     STATIC = "static"
     ROUTER = "router"
+
+
+class S2SProvider(str, Enum):
+    """Enum for speech-to-speech providers."""
+
+    OPENAI_REALTIME = "openai_realtime"
+    GEMINI_LIVE = "gemini_live"
+
+    @classmethod
+    def all_values(cls):
+        return [p.value for p in cls]
 
 
 class ToolScope(str, Enum):

@@ -10,22 +10,36 @@ from openai import (
     AuthenticationError,
     PermissionDeniedError,
     NotFoundError,
+    APIStatusError,
     RateLimitError,
     APIError,
     APIConnectionError,
     BadRequestError,
 )
 
-from bolna.constants import DEFAULT_LANGUAGE_CODE, GPT5_MODEL_PREFIX, default_reasoning_effort
+from bolna.constants import (
+    DEFAULT_LANGUAGE_CODE,
+    canonical_model,
+    default_reasoning_effort,
+    is_reasoning_model,
+)
 from bolna.enums import Verbosity
 from bolna.helpers.utils import convert_to_request_log, compute_function_pre_call_message, now_ms
 from .openai_base import OpenAICompatibleLLM
 from .tool_call_accumulator import ToolCallAccumulator
 from .types import LLMStreamChunk, LatencyData
+from .message_models import strip_internal_keys
 from bolna.helpers.logger_config import configure_logger
 
 logger = configure_logger(__name__)
 load_dotenv()
+
+
+def should_overflow(error) -> bool:
+    """Whether another backend is worth trying: saturation, a server fault, or no connection."""
+    if isinstance(error, APIConnectionError):
+        return True
+    return isinstance(error, APIStatusError) and (error.status_code == 429 or error.status_code >= 500)
 
 
 class AzureLLM(OpenAICompatibleLLM):
@@ -44,6 +58,9 @@ class AzureLLM(OpenAICompatibleLLM):
             self.model = model.replace("azure/", "", 1)
         else:
             self.model = model
+        # self.model is the Azure deployment name, which need not resemble the model it serves.
+        self._request_log_model = model
+        self._model_family = canonical_model(self.model)
 
         self.custom_tools = kwargs.get("api_tools", None)
         self.language = language
@@ -62,12 +79,13 @@ class AzureLLM(OpenAICompatibleLLM):
         self.temperature = temperature
         max_tokens_key = "max_tokens"
         self.model_args = {}
-        if self.model.startswith(GPT5_MODEL_PREFIX):
+        if is_reasoning_model(self.model_family):
             max_tokens_key = "max_completion_tokens"
             self.model_args["reasoning_effort"] = kwargs.get("reasoning_effort", None) or default_reasoning_effort(
-                self.model
+                self.model_family
             )
             self.model_args["verbosity"] = kwargs.get("verbosity", None) or Verbosity.LOW.value
+            self.reasoning_summary = kwargs.get("reasoning_summary")
 
         self.model_args.update({max_tokens_key: self.max_tokens, "temperature": self.temperature, "model": self.model})
         self.model_args["service_tier"] = kwargs.get("service_tier", "default")
@@ -78,12 +96,33 @@ class AzureLLM(OpenAICompatibleLLM):
 
         http_client = get_shared_http_client(base_url=azure_endpoint, http2=False)
 
+        overflow = kwargs.get("overflow_llm") or {}
+        has_overflow = bool(overflow.get("api_key") and overflow.get("base_url") and overflow.get("model"))
+
+        # Retries stay on unless there is an overflow to fall to, which serves the same purpose faster.
         self.async_client = AsyncAzureOpenAI(
-            azure_endpoint=azure_endpoint, api_key=api_key, api_version=api_version, http_client=http_client
+            azure_endpoint=azure_endpoint,
+            api_key=api_key,
+            api_version=api_version,
+            http_client=http_client,
+            **({"max_retries": 0} if has_overflow else {}),
         )
 
         self.run_id = kwargs.get("run_id", None)
         self.llm_host = urlparse(azure_endpoint).netloc if azure_endpoint else None
+
+        # Fallback backend for turns the provisioned deployment cannot serve.
+        self._overflow_client = None
+        # Required, not derived: a deployment name need not resemble the model it serves.
+        if has_overflow:
+            self._overflow_model = overflow["model"]
+            self._overflow_service_tier = overflow.get("service_tier") or "priority"
+            self._overflow_client = AsyncOpenAI(
+                api_key=overflow["api_key"],
+                base_url=overflow["base_url"],
+                http_client=get_shared_http_client(base_url=overflow["base_url"], http2=False),
+            )
+            logger.info(f"Azure LLM overflow target ready: {self._overflow_model} @ {overflow['base_url']}")
 
         # Responses API: uses v1 endpoint with regular AsyncOpenAI client
         self._init_responses_api(
@@ -115,6 +154,24 @@ class AzureLLM(OpenAICompatibleLLM):
             ):
                 yield chunk
 
+    async def _route_completion(self, model_args):
+        return await self._create_completion(model_args)
+
+    async def _create_completion(self, model_args):
+        """Start a completion, overflowing when the pool cannot serve it. Returns (completion, overflowed)."""
+        try:
+            return await self.async_client.chat.completions.create(**model_args), False
+        except (APIStatusError, APIConnectionError) as e:
+            if self._overflow_client is None or not should_overflow(e):
+                raise
+            overflow_args = {
+                **model_args,
+                "model": self._overflow_model,
+                "service_tier": self._overflow_service_tier,
+            }
+            logger.warning(f"Azure OpenAI saturated, overflowing turn to {self._overflow_model} run_id={self.run_id}")
+            return await self._overflow_client.chat.completions.create(**overflow_args), True
+
     async def _generate_stream_chat(
         self, messages, synthesize=True, request_json=False, meta_info=None, tool_choice=None, tools=None
     ):
@@ -125,12 +182,12 @@ class AzureLLM(OpenAICompatibleLLM):
         model_args = {
             **self.model_args,
             "response_format": response_format,
-            "messages": messages,
+            "messages": strip_internal_keys(messages),
             "stream": True,
             "stream_options": {"include_usage": True},
         }
 
-        if not self.model.startswith(GPT5_MODEL_PREFIX):
+        if not is_reasoning_model(self.model_family):
             model_args["stop"] = ["User:"]
 
         if self.trigger_function_call:
@@ -144,7 +201,9 @@ class AzureLLM(OpenAICompatibleLLM):
         tools = model_args.get("tools", [])
         accumulator = None
         if self.trigger_function_call:
-            accumulator = ToolCallAccumulator(self.api_params, tools, self.language, self.model, self.run_id)
+            accumulator = ToolCallAccumulator(
+                self.api_params, tools, self.language, self.request_log_model, self.run_id
+            )
 
         text_tool_buffer = None
         captured_tool_text = None
@@ -155,7 +214,7 @@ class AzureLLM(OpenAICompatibleLLM):
         stream_usage = None
 
         try:
-            completion_stream = await self.async_client.chat.completions.create(**model_args)
+            completion_stream, turn_overflowed = await self._create_completion(model_args)
         except BadRequestError as e:
             logger.error(f"Azure OpenAI bad request: {e}")
             raise
@@ -296,10 +355,12 @@ class AzureLLM(OpenAICompatibleLLM):
                     _pd = getattr(stream_usage, "prompt_tokens_details", None)
                     if _pd:
                         fc_chunk.cached_tokens = getattr(_pd, "cached_tokens", None)
+                fc_chunk.overflowed = turn_overflowed
                 yield fc_chunk
 
         # Extract actual token counts from stream usage
         usage_kwargs = {}
+        usage_kwargs["overflowed"] = turn_overflowed
         if stream_usage:
             usage_kwargs["input_tokens"] = getattr(stream_usage, "prompt_tokens", None)
             usage_kwargs["output_tokens"] = getattr(stream_usage, "completion_tokens", None)
@@ -326,8 +387,15 @@ class AzureLLM(OpenAICompatibleLLM):
         response_format = self.get_response_format(request_json)
 
         try:
-            completion = await self.async_client.chat.completions.create(
-                model=self.model, temperature=0.0, messages=messages, stream=False, response_format=response_format
+            completion, _ = await self._create_completion(
+                {
+                    "model": self.model,
+                    "temperature": 0.0,
+                    # Same guarantee as the streaming path: bookkeeping keys never reach the wire.
+                    "messages": strip_internal_keys(messages),
+                    "stream": False,
+                    "response_format": response_format,
+                }
             )
 
             res = completion.choices[0].message.content

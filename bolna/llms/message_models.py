@@ -1,3 +1,4 @@
+import json
 from typing import Optional
 
 from pydantic import BaseModel
@@ -20,6 +21,52 @@ class ChatMessage(BaseModel):
     content: Optional[str] = None
     tool_calls: Optional[list[ChatToolCall]] = None
     tool_call_id: Optional[str] = None
+
+
+# Bookkeeping bolna attaches to history messages for correlation and audio gating. Removed
+# before the request is built: OpenAI-compatible providers forward unknown message keys
+# verbatim, and nothing should depend on the server ignoring them. Denylist rather than an
+# allowlist so a legitimate provider key (name, cache_control, multimodal parts) is never
+# silently dropped.
+INTERNAL_MESSAGE_KEYS = frozenset(
+    {"turn_id", "response_uid", "asr_turn_id", "sequence_id", "message_category", "exclude_from_llm"}
+)
+
+
+def strip_internal_keys(messages: list[dict]) -> list[dict]:
+    """Drop bolna's own bookkeeping keys, leaving every other key untouched."""
+    return [
+        {k: v for k, v in m.items() if k not in INTERNAL_MESSAGE_KEYS} if isinstance(m, dict) else m for m in messages
+    ]
+
+
+def first_tool_call_result(completion, overflowed: bool = False) -> Optional[dict]:
+    """Normalize an OpenAI-shaped forced tool-call completion into a routing result.
+
+    Shared by every provider whose SDK returns OpenAI-shaped tool_calls (OpenAI, Azure, LiteLLM).
+    Returns None when the model emitted no tool call.
+    """
+    message = completion.choices[0].message
+    if not getattr(message, "tool_calls", None):
+        return None
+    call = message.tool_calls[0].function
+    usage = {}
+    u = getattr(completion, "usage", None)
+    if u:
+        usage = {"input_tokens": u.prompt_tokens, "output_tokens": u.completion_tokens}
+        details = getattr(u, "completion_tokens_details", None)
+        if details:
+            usage["reasoning_tokens"] = getattr(details, "reasoning_tokens", None)
+        prompt_details = getattr(u, "prompt_tokens_details", None)
+        if prompt_details:
+            usage["cached_tokens"] = getattr(prompt_details, "cached_tokens", None)
+    return {
+        "function_name": call.name,
+        "arguments": json.loads(call.arguments) if call.arguments else {},
+        "usage": usage,
+        "service_tier": getattr(completion, "service_tier", None),
+        "overflowed": overflowed,
+    }
 
 
 class ChatToolFunction(BaseModel):

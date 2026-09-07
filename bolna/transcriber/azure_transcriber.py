@@ -82,10 +82,12 @@ class AzureTranscriber(BaseTranscriber):
             meta["connection_error"] = self.connection_error
             await self.transcriber_output_queue.put(create_ws_data_packet("transcriber_connection_closed", meta))
 
-    def _check_and_process_end_of_stream(self, ws_data_packet):
+    async def _check_and_process_end_of_stream(self, ws_data_packet):
         if "eos" in ws_data_packet["meta_info"] and ws_data_packet["meta_info"]["eos"] is True:
             logger.info("End of stream detected")
-            self._sync_cleanup()
+            # Native SDK teardown blocks for seconds against a degraded endpoint, so release
+            # the recognizer off the loop rather than freezing every other call on this worker.
+            await asyncio.get_event_loop().run_in_executor(None, self._sync_cleanup)
             return True
         return False
 
@@ -126,7 +128,7 @@ class AzureTranscriber(BaseTranscriber):
                     except Exception:
                         pass
 
-                end_of_stream = self._check_and_process_end_of_stream(ws_data_packet)
+                end_of_stream = await self._check_and_process_end_of_stream(ws_data_packet)
                 if end_of_stream:
                     break
 
@@ -137,13 +139,57 @@ class AzureTranscriber(BaseTranscriber):
                     self.audio_frame_timestamps.append((frame_start, frame_end, send_timestamp))
                     self.num_frames += 1
 
-                    self.push_stream.write(ws_data_packet.get("data"))
+                    # None while a reconnect swaps the connection. That audio has nowhere to
+                    # go, but the pump has to survive the gap to serve the new stream.
+                    push_stream = self.push_stream
+                    if push_stream is not None:
+                        push_stream.write(ws_data_packet.get("data"))
         except Exception as e:
             exc_type, exc_obj, exc_tb = sys.exc_info()
             logger.error(f"Error occurred in send_audio_to_transcriber - {e} at {exc_tb.tb_lineno}")
 
+    def _release_previous_connection(self):
+        """Stop the superseded recognizer and drop it here, off the event loop."""
+        recognizer, self.recognizer = self.recognizer, None
+        push_stream, self.push_stream = self.push_stream, None
+
+        if recognizer is not None:
+            # Detach first: stopping raises session_stopped, whose handler asks for a reconnect,
+            # and a late recognizing event would land a stale transcript in the new turn.
+            for signal in (
+                recognizer.recognizing,
+                recognizer.recognized,
+                recognizer.canceled,
+                recognizer.session_started,
+                recognizer.session_stopped,
+            ):
+                try:
+                    signal.disconnect_all()
+                except Exception as e:
+                    logger.error(f"Error detaching previous recognizer signal: {e}")
+
+        if push_stream is not None:
+            try:
+                push_stream.close()
+            except Exception as e:
+                logger.error(f"Error closing previous push stream: {e}")
+
+        if recognizer is not None:
+            try:
+                recognizer.stop_continuous_recognition_async().get()
+            except Exception as e:
+                logger.error(f"Error stopping previous recognition: {e}")
+
     async def initialize_connection(self):
         try:
+            # The SDK's native teardown blocks for tens of seconds against an unresponsive
+            # endpoint, so a reconnect releases the previous recognizer off the loop.
+            if self.recognizer is not None or self.push_stream is not None:
+                await asyncio.get_event_loop().run_in_executor(None, self._release_previous_connection)
+
+            # run() reads this as "connection dead", so it must describe only this attempt.
+            self.connection_error = None
+
             speech_config = speechsdk.SpeechConfig(subscription=self.subscription_key, region=self.service_region)
             speech_config.speech_recognition_language = self.recognition_language
 
@@ -338,7 +384,7 @@ class AzureTranscriber(BaseTranscriber):
                 pass
             self.send_audio_to_transcriber_task = None
 
-        self._sync_cleanup()
+        await asyncio.get_event_loop().run_in_executor(None, self._sync_cleanup)
 
     def _sync_cleanup(self):
         """Synchronous cleanup of Azure resources."""

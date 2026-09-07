@@ -24,7 +24,7 @@ class VobizOutputHandler(TelephonyOutputHandler):
                 "event": "clearAudio",
                 "streamId": self.stream_sid,
             }
-            await self.websocket.send_text(json.dumps(message_clear))
+            await self._send_text(json.dumps(message_clear))
             self.mark_event_meta_data.clear_data()
         except Exception as e:
             logger.info(f"WebSocket closed during interruption: {e}")

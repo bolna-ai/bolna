@@ -672,7 +672,6 @@ class DeepgramTranscriber(BaseTranscriber):
                         self._turn_first_speech_epoch_ms = timestamp_ms()
                         self._turn_pending = True  # counter incremented on first real interim
                     self.speech_start_time = timestamp_ms()
-                    self.current_turn_interim_details = []
                     self.is_transcript_sent_for_processing = False
 
                     logger.info(f"Starting new turn with turn_id: {self.current_turn_id}")
@@ -740,6 +739,8 @@ class DeepgramTranscriber(BaseTranscriber):
                         self.current_turn_interim_details.append(interim_detail)
                         # Track time of last interim for timeout monitoring
                         self.last_interim_time = time.time()
+                        # A turn that never reaches is_final must still be finalizable.
+                        self.is_transcript_sent_for_processing = False
 
                         data = {"type": "interim_transcript_received", "content": transcript}
                         yield create_ws_data_packet(data, self.meta_info)
@@ -755,9 +756,6 @@ class DeepgramTranscriber(BaseTranscriber):
                             len(self.final_transcript.strip()),
                             transcript[:80],
                         )
-
-                        if self.is_transcript_sent_for_processing:
-                            self.is_transcript_sent_for_processing = False
 
                     if msg["speech_final"] and self.final_transcript.strip():
                         if not self.is_transcript_sent_for_processing and self.final_transcript.strip():

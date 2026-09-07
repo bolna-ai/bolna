@@ -26,6 +26,9 @@ from bolna.helpers.utils import create_ws_data_packet, timestamp_ms
 load_dotenv()
 logger = configure_logger(__name__)
 
+# saaras models that transcribe directly on /speech-to-text; older ones need the translate endpoint.
+SAARAS_TRANSCRIBE_MODELS = {"saaras:v3", "saaras:v4"}
+
 
 class SarvamTranscriber(BaseTranscriber):
     def __init__(
@@ -121,7 +124,7 @@ class SarvamTranscriber(BaseTranscriber):
 
         # old saaras models use translate endpoint, saarika models use transcription endpoint
         # saaras:v3 supports direct transcription
-        if self.model.startswith("saaras") and self.model != "saaras:v3":
+        if self.model.startswith("saaras") and self.model not in SAARAS_TRANSCRIBE_MODELS:
             self.api_url = f"https://{self.api_host}/speech-to-text-translate"
             ws_url = f"wss://{self.api_host}/speech-to-text-translate/ws"
 
@@ -375,6 +378,14 @@ class SarvamTranscriber(BaseTranscriber):
                             # turn_latencies (observability/eval). Each Sarvam "data" message
                             # is a finalized segment; join the segments within the turn.
                             self.final_transcript = " ".join(filter(None, [self.final_transcript, transcript.strip()]))
+                            # Segments can arrive AFTER END_SPEECH closed the turn (short
+                            # utterances) — backfill the closed entry, else it stores null text.
+                            if (
+                                self.current_turn_id is None
+                                and self.turn_latencies
+                                and not self.turn_latencies[-1].get("final_transcript")
+                            ):
+                                self.turn_latencies[-1]["final_transcript"] = self.final_transcript
 
                             self.last_vocal_frame_timestamp = now_timestamp
                             self.meta_info["last_vocal_frame_timestamp"] = self.last_vocal_frame_timestamp
@@ -397,6 +408,8 @@ class SarvamTranscriber(BaseTranscriber):
                             # Reset the per-turn transcript so the final_transcript recorded
                             # in turn_latencies (below) only holds this turn's text.
                             self.final_transcript = ""
+                            # New turn: drop the previous turn's speech-end stamp so it can't leak.
+                            self.meta_info.pop("user_stop_ts_wall", None)
                             yield create_ws_data_packet("speech_started", self.meta_info)
 
                         elif vad.get("signal_type") == "END_SPEECH":
@@ -404,6 +417,9 @@ class SarvamTranscriber(BaseTranscriber):
                             now = time.time()
                             self.last_vocal_frame_timestamp = now
                             self.meta_info["last_vocal_frame_timestamp"] = self.last_vocal_frame_timestamp
+                            # Real speech end for user_end_ms (task_manager prefers this over
+                            # dispatch time), so per-turn user timing stops being a late stamp.
+                            self.meta_info["user_stop_ts_wall"] = now
 
                             if self.current_turn_start_time:
                                 total_stream_duration = time.perf_counter() - self.current_turn_start_time
@@ -421,7 +437,9 @@ class SarvamTranscriber(BaseTranscriber):
                                     "asr_finalized_epoch_ms": timestamp_ms(),
                                     "final_transcript": self.final_transcript or None,
                                 }
-                                self.turn_latencies.append(turn_info)
+                                # Via the base helper so meta_info["asr_turn_id"] is published —
+                                # a raw append left user messages unjoinable (asr_turn_id null).
+                                self._upsert_turn_latency(turn_info)
                                 self.meta_info["turn_latencies"] = self.turn_latencies
 
                                 # Reset turn tracking

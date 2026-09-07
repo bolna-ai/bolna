@@ -12,6 +12,7 @@ from bolna.helpers.utils import convert_to_request_log, compute_function_pre_cal
 from .llm import BaseLLM
 from .tool_call_accumulator import ToolCallAccumulator
 from .types import LLMStreamChunk, LatencyData
+from .message_models import strip_internal_keys, first_tool_call_result
 from bolna.helpers.logger_config import configure_logger
 
 logger = configure_logger(__name__)
@@ -47,6 +48,9 @@ class LiteLLM(BaseLLM):
                 self.model_args["api_key"] = kwargs["llm_key"]
             if kwargs.get("api_version", None):
                 self.model_args["api_version"] = kwargs["api_version"]
+            if kwargs.get("aws_region_name", None):
+                # Bedrock models: region for boto3 under litellm (no per-box aws config needed).
+                self.model_args["aws_region_name"] = kwargs["aws_region_name"]
 
         self.custom_tools = kwargs.get("api_tools", None)
         logger.info(f"API Tools {self.custom_tools}")
@@ -67,7 +71,7 @@ class LiteLLM(BaseLLM):
         first_token_time = None
 
         model_args = self.model_args.copy()
-        model_args["messages"] = messages
+        model_args["messages"] = strip_internal_keys(messages)
         model_args["stream"] = True
         model_args["stop"] = ["User:"]
 
@@ -92,25 +96,8 @@ class LiteLLM(BaseLLM):
         try:
             completion_stream = await acompletion(**model_args)
         except ContentPolicyViolationError as e:
-            error_message = str(e)
-            logger.error(f"Content policy violation in stream: {error_message}")
-
-            # Log to CSV trace as warning (non-call-breaking)
-            if meta_info and self.run_id:
-                convert_to_request_log(
-                    f"Content Policy Violation: {error_message}",
-                    meta_info,
-                    self.model,
-                    component=LogComponent.WARNING,
-                    direction=LogDirection.WARNING,
-                    is_cached=False,
-                    run_id=self.run_id,
-                )
-            if isinstance(meta_info, dict):
-                meta_info.setdefault("_non_fatal_errors", []).append(
-                    {"error_type": "content_policy_violation", "error": error_message, "model": self.model}
-                )
-            return
+            logger.error(f"LiteLLM content policy violation: {e}")
+            raise
         except AuthenticationError as e:
             logger.error(f"LiteLLM authentication failed: Invalid or expired API key - {e}")
             raise
@@ -184,11 +171,29 @@ class LiteLLM(BaseLLM):
 
         self.started_streaming = False
 
+    async def route(self, messages, tools, tool_choice="required", meta_info=None):
+        parsed_tools = json.loads(tools) if isinstance(tools, str) else tools
+        model_args = self.model_args.copy()
+        model_args.update(
+            {
+                "model": self.model,
+                "messages": strip_internal_keys(messages),
+                "tools": parsed_tools,
+                "tool_choice": tool_choice,
+                "parallel_tool_calls": False,
+                "stream": False,
+                "temperature": 0.0,
+            }
+        )
+        completion = await acompletion(**model_args)
+        return first_tool_call_result(completion)
+
     async def generate(self, messages, stream=False, request_json=False, meta_info=None, ret_metadata=False):
         text = ""
+        completion = None
         model_args = self.model_args.copy()
         model_args["model"] = self.model
-        model_args["messages"] = messages
+        model_args["messages"] = strip_internal_keys(messages)
         model_args["stream"] = stream
 
         if request_json:
@@ -198,25 +203,8 @@ class LiteLLM(BaseLLM):
             completion = await acompletion(**model_args)
             text = completion.choices[0].message.content
         except ContentPolicyViolationError as e:
-            error_message = str(e)
-            logger.error(f"Content policy violation: {error_message}")
-
-            # Log to CSV trace as warning (non-call-breaking)
-            if meta_info and self.run_id:
-                convert_to_request_log(
-                    f"Content Policy Violation: {error_message}",
-                    meta_info,
-                    self.model,
-                    component=LogComponent.WARNING,
-                    direction=LogDirection.WARNING,
-                    is_cached=False,
-                    run_id=self.run_id,
-                )
-            if isinstance(meta_info, dict):
-                meta_info.setdefault("_non_fatal_errors", []).append(
-                    {"error_type": "content_policy_violation", "error": error_message, "model": self.model}
-                )
-            # Don't re-raise - allow graceful degradation for content policy violations
+            logger.error(f"LiteLLM content policy violation: {e}")
+            raise
         except AuthenticationError as e:
             logger.error(f"LiteLLM authentication failed: Invalid or expired API key - {e}")
             raise
@@ -234,6 +222,17 @@ class LiteLLM(BaseLLM):
             logger.error(f"LiteLLM unexpected error generating response: {error_message}")
             raise
         if ret_metadata:
-            return text, {}
+            metadata = {}
+            usage = getattr(completion, "usage", None)
+            if usage is not None:
+                metadata = {
+                    "input_tokens": getattr(usage, "prompt_tokens", 0) or 0,
+                    "output_tokens": getattr(usage, "completion_tokens", 0) or 0,
+                }
+                details = getattr(usage, "prompt_tokens_details", None)
+                cached = getattr(details, "cached_tokens", 0) if details is not None else 0
+                if cached:
+                    metadata["cached_tokens"] = cached
+            return text, metadata
         else:
             return text

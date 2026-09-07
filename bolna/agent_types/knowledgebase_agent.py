@@ -8,8 +8,8 @@ from bolna.models import *
 from bolna.agent_types.base_agent import BaseAgent
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.rag_service_client import RAGServiceClientSingleton
-from bolna.helpers.utils import now_ms, format_messages
-from bolna.llms.types import LLMStreamChunk, LatencyData
+from bolna.helpers.function_calling_helpers import guard_llm_base_url
+from bolna.helpers.utils import format_messages
 from bolna.providers import SUPPORTED_LLM_PROVIDERS
 from bolna.llms import OpenAiLLM
 from bolna.prompts import VOICEMAIL_DETECTION_PROMPT
@@ -33,6 +33,7 @@ class KnowledgeBaseAgent(BaseAgent):
         self.agent_information = self.config.get("agent_information", "Knowledge-based AI assistant")
         self.context_data = self.config.get("context_data", {})
         self.llm_model = self.config.get("model", "gpt-4o")
+        self._base_url_validated = False
 
         # Main LLM for conversation
         self.llm = self._initialize_llm()
@@ -70,9 +71,12 @@ class KnowledgeBaseAgent(BaseAgent):
                 "api_tools",
                 "buffer_size",
                 "reasoning_effort",
+                "verbosity",
+                "reasoning_summary",
                 "service_tier",
                 "use_responses_api",
                 "compact_threshold",
+                "overflow_llm",
             ]:
                 if self.config.get(key, None):
                     llm_kwargs[key] = self.config[key]
@@ -303,11 +307,18 @@ Use this information naturally when it helps answer the user's questions. Don't 
         """
         meta_info = kwargs.get("meta_info")
         synthesize = kwargs.get("synthesize", True)
-        start_time = now_ms()
 
         meta_info["llm_metadata"] = meta_info.get("llm_metadata", {})
         meta_info["llm_metadata"]["rag_info"] = {}
         meta_info["llm_metadata"]["rag_info"]["all_sources"] = self.rag_config.get("used_sources", [])
+
+        # Ahead of the try so a blocked endpoint ends the call instead of being spoken.
+        provider = self.config.get("provider") or self.config.get("llm_provider")
+        base_url = self.config.get("base_url") if provider == "custom" else None
+        if base_url and not self._base_url_validated:
+            await guard_llm_base_url(base_url)
+            self._base_url_validated = True
+
         try:
             messages_with_context, metadata = await self._add_rag_context(message)
 
@@ -325,10 +336,7 @@ Use this information naturally when it helps answer the user's questions. Don't 
                 yield chunk
 
         except Exception as e:
+            # Never yield the error as text: a chunk here is indistinguishable from model output
+            # and gets spoken. Propagate so the task manager ends the call with an LLMError.
             logger.error(f"generate() error: {e}")
-            latency_data = LatencyData(
-                sequence_id=meta_info.get("sequence_id") if meta_info else None,
-                first_token_latency_ms=0,
-                total_stream_duration_ms=now_ms() - start_time,
-            )
-            yield LLMStreamChunk(data=f"An error occurred: {str(e)}", end_of_stream=True, latency=latency_data)
+            raise

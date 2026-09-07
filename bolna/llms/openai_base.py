@@ -5,7 +5,7 @@ from typing import Optional
 
 from openai import BadRequestError, APIError
 
-from bolna.constants import GPT5_MODEL_PREFIX
+from bolna.constants import is_reasoning_model
 from bolna.enums import ChatRole, ResponseStreamEvent, ResponseItemType, LogComponent, LogDirection
 from bolna.helpers.utils import (
     convert_to_request_log,
@@ -14,7 +14,7 @@ from bolna.helpers.utils import (
     SERVER_OWNED_CALL_IDENTIFIERS,
 )
 from .llm import BaseLLM
-from .message_models import MessageFormatAdapter
+from .message_models import MessageFormatAdapter, strip_internal_keys, first_tool_call_result
 from .types import APIParams, LLMStreamChunk, LatencyData, FunctionCallPayload
 from bolna.helpers.logger_config import configure_logger
 
@@ -53,6 +53,24 @@ class OpenAICompatibleLLM(BaseLLM):
     - Call _init_responses_api() during __init__
     - Override _responses_client property if they need a different client
     """
+
+    # Both are set by subclasses whose self.model is a deployment name rather than the model itself.
+    _request_log_model = None
+    _model_family = None
+
+    # A reasoning summary streams ahead of the answer text, so it is opt-in: requesting one costs
+    # time to first spoken token on a live call. Set from config by subclasses; None omits it.
+    reasoning_summary = None
+
+    @property
+    def request_log_model(self):
+        """Provider-qualified model name, so request logs key the same way the task manager records."""
+        return self._request_log_model or self.model
+
+    @property
+    def model_family(self):
+        """Model self.model actually serves; family checks must use this, not the deployment name."""
+        return self._model_family or self.model
 
     @staticmethod
     def _find_tool_call_end(text):
@@ -271,23 +289,25 @@ class OpenAICompatibleLLM(BaseLLM):
         With previous_response_id set, only sends items after the last
         assistant. Falls back to full history when pending tool outputs are
         missing. Any pending interruption hint is consumed exactly once and
-        only prepended on the chain-alive happy path.
+        prepended on every path.
         """
         hint = self._interruption_hint
         self._interruption_hint = None
 
-        if self.previous_response_id:
-            if self._pending_call_ids:
-                completed = {m.get("tool_call_id") for m in messages if m.get("role") == ChatRole.TOOL}
-                if not self._pending_call_ids.issubset(completed):
-                    logger.info("Pending tool call outputs missing, sending full context")
-                    self.previous_response_id = None
-                    return MessageFormatAdapter.chat_to_responses_input(messages)
+        chained = bool(self.previous_response_id)
+        if chained and self._pending_call_ids:
+            completed = {m.get("tool_call_id") for m in messages if m.get("role") == ChatRole.TOOL}
+            if not self._pending_call_ids.issubset(completed):
+                logger.info("Pending tool call outputs missing, sending full context")
+                self.previous_response_id = None
+                chained = False
+        if chained:
             instructions, input_items = self._extract_new_input(messages)
-            if hint is not None:
-                input_items = [self._build_interruption_hint_item(hint), *input_items]
-            return instructions, input_items
-        return MessageFormatAdapter.chat_to_responses_input(messages)
+        else:
+            instructions, input_items = MessageFormatAdapter.chat_to_responses_input(messages)
+        if hint is not None:
+            input_items = [self._build_interruption_hint_item(hint), *input_items]
+        return instructions, input_items
 
     @staticmethod
     def _build_interruption_hint_item(heard_text: str) -> dict:
@@ -339,6 +359,31 @@ class OpenAICompatibleLLM(BaseLLM):
         src = tools if tools is not None else self.tools
         parsed = json.loads(src) if isinstance(src, str) else src
         return _strip_server_injected_params(parsed)
+
+    async def _route_completion(self, model_args):
+        """Issue the routing completion. Returns (completion, overflowed). Azure overrides for PTU overflow."""
+        return await self.async_client.chat.completions.create(**model_args), False
+
+    async def route(self, messages, tools, tool_choice="required", meta_info=None):
+        # Same SSRF guard the streaming path runs before reaching a customer base_url.
+        guard = getattr(self, "_ensure_base_url_allowed", None)
+        if guard:
+            await guard()
+        parsed_tools = json.loads(tools) if isinstance(tools, str) else tools
+        model_args = {
+            **self.model_args,
+            "messages": strip_internal_keys(messages),
+            "tools": parsed_tools,
+            "tool_choice": tool_choice,
+            "parallel_tool_calls": False,
+            "stream": False,
+        }
+        if "reasoning_effort" in model_args:  # gpt-5 family fixes temperature, so leave it unset
+            model_args.pop("temperature", None)
+        else:
+            model_args["temperature"] = 0.0
+        completion, overflowed = await self._route_completion(model_args)
+        return first_tool_call_result(completion, overflowed)
 
     def invalidate_response_chain(self):
         self.previous_response_id = None
@@ -402,7 +447,7 @@ class OpenAICompatibleLLM(BaseLLM):
                     convert_to_request_log(
                         arguments_str,
                         meta_info,
-                        self.model,
+                        self.request_log_model,
                         LogComponent.LLM,
                         direction=LogDirection.RESPONSE,
                         is_cached=False,
@@ -446,13 +491,14 @@ class OpenAICompatibleLLM(BaseLLM):
         if service_tier:
             create_kwargs["service_tier"] = service_tier
 
-        if self.model.startswith(GPT5_MODEL_PREFIX):
+        if is_reasoning_model(self.model_family):
             create_kwargs["temperature"] = 1
             reasoning_effort = self.model_args.get("reasoning_effort")
             reasoning_config = {}
             if reasoning_effort:
                 reasoning_config["effort"] = reasoning_effort
-            reasoning_config["summary"] = "auto"
+            if self.reasoning_summary:
+                reasoning_config["summary"] = self.reasoning_summary
             create_kwargs["reasoning"] = reasoning_config
             verbosity = self.model_args.get("verbosity")
             if verbosity:
@@ -474,7 +520,14 @@ class OpenAICompatibleLLM(BaseLLM):
         return create_kwargs, responses_tools
 
     async def _generate_stream_responses(
-        self, messages, synthesize=True, request_json=False, meta_info=None, tool_choice=None, tools=None
+        self,
+        messages,
+        synthesize=True,
+        request_json=False,
+        meta_info=None,
+        tool_choice=None,
+        tools=None,
+        retry_on_empty=True,
     ):
         if not messages:
             raise ValueError("No messages provided")
@@ -497,6 +550,8 @@ class OpenAICompatibleLLM(BaseLLM):
         service_tier = None
         llm_host = getattr(self, "llm_host", None)
         response_usage = None
+        incomplete = False
+        incomplete_reason = None
 
         try:
             stream = await self._responses_client.responses.create(**create_kwargs)
@@ -509,7 +564,7 @@ class OpenAICompatibleLLM(BaseLLM):
                     )
                 self.previous_response_id = None
                 async for chunk in self._generate_stream_responses(
-                    messages, synthesize, request_json, meta_info, tool_choice, tools
+                    messages, synthesize, request_json, meta_info, tool_choice, tools, retry_on_empty=retry_on_empty
                 ):
                     yield chunk
                 return
@@ -538,7 +593,9 @@ class OpenAICompatibleLLM(BaseLLM):
                 raise APIError(message=f"Response failed: {error_info}", request=None, body=None)
 
             if event.type == ResponseStreamEvent.INCOMPLETE:
-                logger.warning("Responses API stream incomplete, partial response returned")
+                incomplete = True
+                incomplete_reason = getattr(getattr(event.response, "incomplete_details", None), "reason", None)
+                logger.warning(f"Responses API stream incomplete, reason={incomplete_reason}")
                 self.invalidate_response_chain()
                 break
 
@@ -612,6 +669,19 @@ class OpenAICompatibleLLM(BaseLLM):
                     response_usage = event.response.usage
                 break
 
+        # Nothing was yielded yet, so a retry cannot duplicate speech.
+        if incomplete and not answer and not func_call_args and retry_on_empty:
+            logger.warning(f"Responses API returned no output (reason={incomplete_reason}), retrying once")
+            if isinstance(meta_info, dict):
+                meta_info.setdefault("_non_fatal_errors", []).append(
+                    {"error_type": "incomplete_empty_response", "error": incomplete_reason, "model": self.model}
+                )
+            async for chunk in self._generate_stream_responses(
+                messages, synthesize, request_json, meta_info, tool_choice, tools, retry_on_empty=False
+            ):
+                yield chunk
+            return
+
         if latency_data:
             latency_data.total_stream_duration_ms = now_ms() - start_time
             if service_tier:
@@ -681,13 +751,14 @@ class OpenAICompatibleLLM(BaseLLM):
         if service_tier:
             create_kwargs["service_tier"] = service_tier
 
-        if self.model.startswith(GPT5_MODEL_PREFIX):
+        if is_reasoning_model(self.model_family):
             create_kwargs["temperature"] = 1
             reasoning_config = {}
             reasoning_effort = self.model_args.get("reasoning_effort")
             if reasoning_effort:
                 reasoning_config["effort"] = reasoning_effort
-            reasoning_config["summary"] = "auto"
+            if self.reasoning_summary:
+                reasoning_config["summary"] = self.reasoning_summary
             create_kwargs["reasoning"] = reasoning_config
             verbosity = self.model_args.get("verbosity")
             if verbosity:

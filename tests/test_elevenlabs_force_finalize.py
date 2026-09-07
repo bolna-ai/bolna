@@ -10,7 +10,6 @@ gate, so only the stale commit is swallowed.
 
 import asyncio
 
-import pytest
 
 from bolna.transcriber.elevenlabs_transcriber import ElevenLabsTranscriber
 
@@ -26,7 +25,6 @@ def make_transcriber():
     return t
 
 
-@pytest.mark.asyncio
 async def test_force_finalize_suppresses_late_commit():
     t = make_transcriber()
     t.current_turn_interim_details = [{"transcript": "I want to book a", "latency_ms": 1.0}]
@@ -43,7 +41,6 @@ async def test_force_finalize_suppresses_late_commit():
     assert t.is_transcript_sent_for_processing is True
 
 
-@pytest.mark.asyncio
 async def test_next_utterance_reopens_the_gate():
     """The partial handler flips the flag back to False when new speech arrives,
     so suppressing the stale commit cannot block the following turn."""
@@ -59,7 +56,6 @@ async def test_next_utterance_reopens_the_gate():
     assert t.is_transcript_sent_for_processing is False
 
 
-@pytest.mark.asyncio
 async def test_force_finalize_with_nothing_to_send_keeps_gate_open():
     """No transcript and no interims → nothing was pushed, so a genuine commit
     arriving later must still be processed."""

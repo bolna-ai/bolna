@@ -1,6 +1,7 @@
 import os
 import asyncio
 import json
+from contextlib import suppress
 import re
 import time
 from typing import Optional
@@ -21,11 +22,13 @@ from openai import (
 import websockets
 from websockets.protocol import State as WSState
 
-from bolna.constants import DEFAULT_LANGUAGE_CODE, GPT5_MODEL_PREFIX, default_reasoning_effort
+from bolna.constants import DEFAULT_LANGUAGE_CODE, default_reasoning_effort, is_reasoning_model
 from bolna.enums import ResponseStreamEvent, ResponseItemType, Verbosity
 from bolna.helpers.ssl_context import get_ssl_context
 from bolna.helpers.utils import compute_function_pre_call_message, now_ms
+from bolna.helpers.function_calling_helpers import guard_llm_base_url
 from .openai_base import OpenAICompatibleLLM
+from .message_models import strip_internal_keys
 from .tool_call_accumulator import ToolCallAccumulator
 from .types import APIParams, LLMStreamChunk, LatencyData
 from bolna.helpers.logger_config import configure_logger
@@ -45,10 +48,12 @@ class OpenAIWSConnection:
     WS_URL = "wss://api.openai.com/v1/responses"
     RECONNECT_BEFORE_SECS = 55 * 60
     TERMINAL_EVENTS = ResponseStreamEvent.terminal_events()
+    RESPONSE_TERMINAL_EVENTS = ResponseStreamEvent.response_terminal_events()
 
     def __init__(self, api_key: str):
         self._api_key = api_key
         self._ws = None
+        self._needs_reset = False
         self._connected_at: float = 0
         self._lock = asyncio.Lock()
         self._connect_task: Optional[asyncio.Task] = None
@@ -70,7 +75,11 @@ class OpenAIWSConnection:
             self._connect_task = None
 
         if self._ws is not None:
-            if self._ws.state is not WSState.OPEN:
+            if self._needs_reset:
+                # An abandoned stream's queued events would be read as the next turn's.
+                logger.info("WebSocket dirty after an abandoned stream, reconnecting")
+                self.discard_socket(prewarm=False)
+            elif self._ws.state is not WSState.OPEN:
                 logger.info("WebSocket closed unexpectedly, reconnecting")
                 await self._close_ws()
             elif time.monotonic() - self._connected_at >= self.RECONNECT_BEFORE_SECS:
@@ -79,6 +88,7 @@ class OpenAIWSConnection:
             else:
                 return
 
+        self._needs_reset = False
         await self._connect()
 
     async def _connect(self):
@@ -96,14 +106,25 @@ class OpenAIWSConnection:
         """Send response.create and yield raw event dicts until terminal event."""
         async with self._lock:
             await self.ensure_connected()
-            await self._ws.send(json.dumps({"type": ResponseStreamEvent.CREATE, **create_params}))
-
-            async for raw_msg in self._ws:
-                evt = json.loads(raw_msg)
-                evt_type = evt.get("type", "")
-                yield evt
-                if evt_type in self.TERMINAL_EVENTS:
-                    return
+            # Before the send: a cancelled send may still have put the frame on the wire,
+            # and leaves the connection inconsistent either way. The try covers it too.
+            self._needs_reset = True
+            try:
+                await self._ws.send(json.dumps({"type": ResponseStreamEvent.CREATE, **create_params}))
+                async for raw_msg in self._ws:
+                    evt = json.loads(raw_msg)
+                    evt_type = evt.get("type", "")
+                    if evt_type in self.RESPONSE_TERMINAL_EVENTS:
+                        # Before the yield: consumers break here and never let this resume.
+                        self._needs_reset = False
+                        yield evt
+                        return
+                    yield evt
+                    if evt_type in self.TERMINAL_EVENTS:
+                        return
+            finally:
+                if self._needs_reset:
+                    self.discard_socket()
 
     async def cancel_response(self, response_id: str):
         """Best-effort cancel: signal the server to terminate the in-flight
@@ -119,6 +140,13 @@ class OpenAIWSConnection:
             pass
 
     async def disconnect(self):
+        # Settle any in-flight pre-warm first: it assigns _ws after the fact, so closing
+        # before it lands would leave a live socket nobody owns.
+        task, self._connect_task = self._connect_task, None
+        if task is not None and not task.done():
+            task.cancel()
+            with suppress(asyncio.CancelledError, Exception):
+                await task
         await self._close_ws()
 
     async def _close_ws(self):
@@ -129,8 +157,28 @@ class OpenAIWSConnection:
                 pass
             self._ws = None
 
+    def discard_socket(self, prewarm=True):
+        """Drop a socket carrying an abandoned response. The close is not awaited and the
+        replacement is warmed in the background, so no handshake lands on the next turn."""
+        ws, self._ws = self._ws, None
+        self._needs_reset = False
+        if ws is not None:
+            asyncio.ensure_future(self._close_quietly(ws))
+        if prewarm:
+            self.start_connect()
+
+    @staticmethod
+    async def _close_quietly(ws):
+        try:
+            await ws.close()
+        except Exception:
+            pass
+
 
 class OpenAiLLM(OpenAICompatibleLLM):
+    _base_url = None
+    _base_url_validated = False
+
     def __init__(
         self,
         max_tokens=100,
@@ -161,10 +209,11 @@ class OpenAiLLM(OpenAICompatibleLLM):
 
         max_tokens_key = "max_tokens"
         self.model_args = {}
-        if model.startswith(GPT5_MODEL_PREFIX):
+        if is_reasoning_model(model):
             max_tokens_key = "max_completion_tokens"
             self.model_args["reasoning_effort"] = kwargs.get("reasoning_effort") or default_reasoning_effort(model)
             self.model_args["verbosity"] = kwargs.get("verbosity", None) or Verbosity.LOW.value
+            self.reasoning_summary = kwargs.get("reasoning_summary")
 
         self.model_args.update({max_tokens_key: self.max_tokens, "temperature": self.temperature, "model": self.model})
 
@@ -186,6 +235,9 @@ class OpenAiLLM(OpenAICompatibleLLM):
                 self.async_client = AsyncOpenAI(api_key=llm_key, http_client=http_client)
             api_key = llm_key
         self.llm_host = urlparse(base_url).netloc if base_url else None
+        # Only a customer endpoint is guarded; platform ones keep the SDK's connection retries.
+        self._base_url = base_url if kwargs.get("provider", "openai") == "custom" else None
+        self._base_url_validated = False
         self.assistant_id = kwargs.get("assistant_id", None)
         if self.assistant_id:
             logger.info(f"Initializing OpenAI assistant with assistant id {self.assistant_id}")
@@ -198,18 +250,26 @@ class OpenAiLLM(OpenAICompatibleLLM):
             # logger.info(f'thread id : {self.thread_id}')
         self.run_id = kwargs.get("run_id", None)
 
-        self._init_responses_api(
-            kwargs.get("use_responses_api", False), compact_threshold=kwargs.get("compact_threshold")
-        )
+        # Self-hosted endpoints speak chat completions only; Responses-API chaining is OpenAI-specific.
+        use_responses_api = kwargs.get("use_responses_api", False) and kwargs.get("provider", "openai") != "custom"
+        self._init_responses_api(use_responses_api, compact_threshold=kwargs.get("compact_threshold"))
 
         self._ws_transport = None
         if self.use_responses_api and kwargs.get("provider", "openai") != "custom" and not base_url:
             self._ws_transport = OpenAIWSConnection(api_key=api_key)
             self._ws_transport.start_connect()
 
+    async def _ensure_base_url_allowed(self):
+        """SSRF-guard a customer-supplied base_url once before the first outbound request."""
+        if self._base_url_validated:
+            return
+        await guard_llm_base_url(self._base_url)
+        self._base_url_validated = True
+
     async def generate_stream(
         self, messages, synthesize=True, request_json=False, meta_info=None, tool_choice=None, tools=None
     ):
+        await self._ensure_base_url_allowed()
         if self.use_responses_api:
             if self._ws_transport:
                 async for chunk in self._generate_stream_ws_responses(
@@ -237,12 +297,12 @@ class OpenAiLLM(OpenAICompatibleLLM):
         model_args = {
             **self.model_args,
             "response_format": response_format,
-            "messages": messages,
+            "messages": strip_internal_keys(messages),
             "stream": True,
             "stream_options": {"include_usage": True},
         }
 
-        if not self.model.startswith(GPT5_MODEL_PREFIX):
+        if not is_reasoning_model(self.model):
             model_args["stop"] = ["User:"]
 
         if self.trigger_function_call:
@@ -439,6 +499,7 @@ class OpenAiLLM(OpenAICompatibleLLM):
         self.started_streaming = False
 
     async def generate(self, messages, request_json=False, ret_metadata=False, meta_info=None):
+        await self._ensure_base_url_allowed()
         if self.use_responses_api:
             return await self._generate_responses(messages, request_json, ret_metadata, meta_info)
         return await self._generate_chat(messages, request_json, ret_metadata)
@@ -448,7 +509,12 @@ class OpenAiLLM(OpenAICompatibleLLM):
 
         try:
             completion = await self.async_client.chat.completions.create(
-                model=self.model, temperature=0.0, messages=messages, stream=False, response_format=response_format
+                model=self.model,
+                temperature=0.0,
+                # Same guarantee as the streaming path: bookkeeping keys never reach the wire.
+                messages=strip_internal_keys(messages),
+                stream=False,
+                response_format=response_format,
             )
             res = completion.choices[0].message.content
             if ret_metadata:
@@ -496,6 +562,14 @@ class OpenAiLLM(OpenAICompatibleLLM):
         else:
             return {"type": "text"}
 
+    async def _retry_full_history(self, messages, synthesize, request_json, meta_info, tool_choice, tools):
+        """Drop the chain and re-run the turn on full history (single home for both WS retries)."""
+        self.previous_response_id = None
+        async for chunk in self._generate_stream_ws_responses(
+            messages, synthesize, request_json, meta_info, tool_choice, tools
+        ):
+            yield chunk
+
     async def _generate_stream_ws_responses(
         self, messages, synthesize=True, request_json=False, meta_info=None, tool_choice=None, tools=None
     ):
@@ -528,6 +602,8 @@ class OpenAiLLM(OpenAICompatibleLLM):
         ws_service_tier = None
         llm_host = self.llm_host
         response_usage = None
+        incomplete = False
+        incomplete_reason = None
 
         try:
             async for evt in self._ws_transport.stream_response(create_params):
@@ -539,9 +615,36 @@ class OpenAiLLM(OpenAICompatibleLLM):
                     error_code = error_info.get("code", "")
                     if error_code == "previous_response_not_found" and self.previous_response_id:
                         logger.warning(f"WS previous_response_id not found, retrying with full history")
-                        self.previous_response_id = None
-                        async for chunk in self._generate_stream_ws_responses(
-                            messages, synthesize, request_json, meta_info, tool_choice
+                        async for chunk in self._retry_full_history(
+                            messages, synthesize, request_json, meta_info, tool_choice, tools
+                        ):
+                            yield chunk
+                        return
+                    # lineage/pairing rejection of a CHAINED request (code None, param input — e.g.
+                    # "No tool output found ...") gets one full-history retry; nothing yielded yet.
+                    # Coded errors like context_length_exceeded raise — a retry can't fix those.
+                    if (
+                        self.previous_response_id
+                        and error_info.get("type") == "invalid_request_error"
+                        and not error_code
+                        and error_info.get("param") == "input"
+                        and not answer
+                        and not func_call_args
+                        and not gave_pre_call_msg
+                    ):
+                        logger.warning(
+                            f"WS chained request rejected ({error_info.get('message')}), retrying with full history"
+                        )
+                        if isinstance(meta_info, dict):
+                            meta_info.setdefault("_non_fatal_errors", []).append(
+                                {
+                                    "error_type": "chained_request_rejected",
+                                    "error": error_info.get("message"),
+                                    "model": self.model,
+                                }
+                            )
+                        async for chunk in self._retry_full_history(
+                            messages, synthesize, request_json, meta_info, tool_choice, tools
                         ):
                             yield chunk
                         return
@@ -569,7 +672,9 @@ class OpenAiLLM(OpenAICompatibleLLM):
                     raise APIError(message=f"Response failed: {error_info}", request=None, body=None)
 
                 if evt_type == ResponseStreamEvent.INCOMPLETE:
-                    logger.warning("WS Responses API stream incomplete")
+                    incomplete = True
+                    incomplete_reason = ((evt.get("response") or {}).get("incomplete_details") or {}).get("reason")
+                    logger.warning(f"WS Responses API stream incomplete, reason={incomplete_reason}")
                     self.invalidate_response_chain()
                     break
 
@@ -652,7 +757,20 @@ class OpenAiLLM(OpenAICompatibleLLM):
             logger.error(f"WS streaming error: {e}, falling back to HTTP SSE")
             self.invalidate_response_chain()
             async for chunk in self._generate_stream_responses(
-                messages, synthesize, request_json, meta_info, tool_choice
+                messages, synthesize, request_json, meta_info, tool_choice, tools
+            ):
+                yield chunk
+            return
+
+        # Nothing was yielded yet, so a retry cannot duplicate speech.
+        if incomplete and not answer and not func_call_args:
+            logger.warning(f"WS Responses API returned no output (reason={incomplete_reason}), retrying once over HTTP")
+            if isinstance(meta_info, dict):
+                meta_info.setdefault("_non_fatal_errors", []).append(
+                    {"error_type": "incomplete_empty_response", "error": incomplete_reason, "model": self.model}
+                )
+            async for chunk in self._generate_stream_responses(
+                messages, synthesize, request_json, meta_info, tool_choice, tools, retry_on_empty=False
             ):
                 yield chunk
             return
@@ -708,9 +826,13 @@ class OpenAiLLM(OpenAICompatibleLLM):
         self.started_streaming = False
 
     def cancel_in_flight_response(self):
-        """Cancel the in-flight WS response; keeps previous_response_id alive."""
+        """Cancel the in-flight WS response and drop the chain — a lost cancel race can leave a
+        server-committed function_call this client never saw, poisoning every later chained
+        request. Chain state only: the hint sync_history sets right after this must survive."""
         if self._ws_transport and self.previous_response_id:
             asyncio.ensure_future(self._ws_transport.cancel_response(self.previous_response_id))
+            self.previous_response_id = None
+            self._pending_call_ids = set()
 
     async def close(self):
         # httpx client is shared via pool, don't close it here

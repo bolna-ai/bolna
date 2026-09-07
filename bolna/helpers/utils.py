@@ -1,4 +1,5 @@
 from datetime import datetime
+from functools import lru_cache
 from typing import Union, Optional
 import json
 import asyncio
@@ -22,7 +23,13 @@ from enum import Enum
 from dotenv import load_dotenv
 from pydantic import create_model
 from .logger_config import configure_logger
-from bolna.constants import PREPROCESS_DIR, PRE_FUNCTION_CALL_MESSAGE, TRANSFERING_CALL_FILLER, END_CALL_FUNCTION_PREFIX
+from bolna.constants import (
+    CONTENT_POLICY_ERROR_MARKERS,
+    PREPROCESS_DIR,
+    PRE_FUNCTION_CALL_MESSAGE,
+    TRANSFERING_CALL_FILLER,
+    END_CALL_FUNCTION_PREFIX,
+)
 from bolna.enums import LogComponent, LogDirection, UsageSource
 from bolna.prompts import DATE_PROMPT
 from pydub import AudioSegment
@@ -47,6 +54,132 @@ class DictWithMissing(dict):
 # Server-owned telephony ids; never exposed to the model (prompt var, {placeholder}, or tool param).
 SERVER_OWNED_CALL_IDENTIFIERS = frozenset({"call_sid", "stream_sid"})
 
+# Public so dashboard/frontend mirror it; hyphens in dot segments only, keeping {price-list} a non-match.
+VARIABLE_PATH = r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z0-9_-]+|\[[^\[\]{}]+\])*"
+
+# {{path}} before {path}; non-paths match nothing so JSON survives, and there is no {{ -> { unescaping.
+PROMPT_TOKEN_PATTERN = re.compile(
+    r"\{\{\s*(?P<double>" + VARIABLE_PATH + r")\s*\}\}|\{(?P<single>" + VARIABLE_PATH + r")(?P<spec>:[^{}]*)?\}"
+)
+
+
+def parse_json_container(value):
+    """A JSON object/array that arrived as a string -> the parsed container, else unchanged.
+
+    Callers hand us variables in whatever shape their transport produced: the web-call panel
+    parses JSON client-side, but a telephony /call payload (or any API caller) commonly sends
+    the same value as a JSON *string*. Only objects and arrays are accepted — a bare number or
+    quoted string stays a string, so "720" never silently becomes an int.
+    """
+    if not isinstance(value, str):
+        return value
+    trimmed = value.strip()
+    if not trimmed.startswith("{") and not trimmed.startswith("["):
+        return value
+    try:
+        parsed = json.loads(trimmed)
+    except (ValueError, TypeError):
+        return value
+    return parsed if isinstance(parsed, (dict, list)) else value
+
+
+def resolve_variable_path(path, data):
+    """Walk a dotted/indexed path through nested dicts and lists.
+
+    Returns (found, value). `a.b.c`, `a.0.b` and the legacy `a[b][c]` all resolve.
+
+    A stringified JSON payload is parsed ONLY when a path actually walks into it. Doing it
+    here rather than at ingress is what keeps existing prompts byte-identical: a bare {var}
+    or {{var}} never triggers parsing, so a string-valued variable still renders as the exact
+    string it always did.
+    """
+    current = data
+    for part in path.replace("[", ".").replace("]", "").split("."):
+        if not part:
+            continue
+        current = parse_json_container(current)
+        if isinstance(current, dict):
+            if part not in current:
+                return False, None
+            current = current[part]
+        elif isinstance(current, (list, tuple)):
+            if not part.lstrip("-").isdigit():
+                return False, None
+            index = int(part)
+            if not -len(current) <= index < len(current):
+                return False, None
+            current = current[index]
+        else:
+            return False, None
+    return True, current
+
+
+def render_variable_value(value, as_json=False):
+    """Stringify a resolved value.
+
+    as_json is set only for the {{path}} syntax, where dicts and lists become real JSON
+    (a Python repr emits single quotes and True/None, which the model cannot parse).
+    The legacy {path} syntax keeps str(), because prod recipient_data already carries
+    object-valued variables — product_details, items, cart_data_json, nearest_store —
+    and switching those to JSON would change output on live calls.
+    """
+    if isinstance(value, str):
+        return value
+    if as_json and isinstance(value, (dict, list, tuple)):
+        try:
+            return json.dumps(value, ensure_ascii=False, default=str)
+        except (TypeError, ValueError):
+            return str(value)
+    return str(value)
+
+
+def render_prompt(template, data, missing=""):
+    """Substitute {{path}} and {path} variables into a prompt.
+
+    Replaces str.format_map, which parsed every brace and therefore raised on any
+    JSON literal in the prompt — and because callers swallowed that exception, one
+    JSON snippet silently left EVERY variable in the prompt unsubstituted.
+
+    An unresolved {{path}} unescapes to {path}, preserving the legacy meaning of a
+    double-braced identifier. An unresolved {path} renders `missing`, matching the
+    previous DictWithMissing.
+
+    missing=None is partial-fill mode: substitute only what resolves and leave every
+    other token byte-identical. Agent template seeding needs this, because its leftover
+    placeholders are the runtime variables and must survive to the live call.
+    """
+    if not template or not isinstance(template, str):
+        return template
+    if not isinstance(data, dict):
+        data = {}
+
+    def substitute(match):
+        double = match.group("double")
+        path = double if double is not None else match.group("single")
+        spec = match.group("spec")
+        found, value = resolve_variable_path(path, data)
+        if not found:
+            # Unresolved spec tokens stay literal — more likely pseudo-JSON like "{name: string}" than a variable.
+            if missing is None or spec:
+                return match.group(0)
+            return "{" + path + "}" if double is not None else missing
+        if spec:
+            # Partial fill leaves specs alone; applying one here would bake a seed-time value into the template.
+            if missing is None:
+                return match.group(0)
+            try:
+                return format(value, spec[1:])
+            except Exception:
+                # Broad on purpose: an escaping error upstream would lose every variable, as format_map did.
+                return match.group(0)
+        return render_variable_value(value, as_json=double is not None)
+
+    try:
+        return PROMPT_TOKEN_PATTERN.sub(substitute, template)
+    except Exception as e:
+        logger.error(f"render_prompt failed, returning template unchanged: {e}")
+        return template
+
 
 def load_file(file_path, is_json=False):
     data = None
@@ -62,6 +195,11 @@ def load_file(file_path, is_json=False):
 def write_json_file(file_path, data):
     with open(file_path, "w") as file:
         json.dump(data, file, indent=4, ensure_ascii=False)
+
+
+def safe_log_text(text, limit=120):
+    """Strip control chars from caller text and truncate — blocks forged log entries."""
+    return re.sub(r"[\x00-\x1f\x7f]+", " ", str(text or ""))[:limit]
 
 
 def create_ws_data_packet(data, meta_info=None, is_md5_hash=False, llm_generated=False):
@@ -256,11 +394,19 @@ def get_required_input_types(task):
     input_types = dict()
     for i, chain in enumerate(task["toolchain"]["pipelines"]):
         first_model = chain[0]
-        if chain[0] == "transcriber":
+        # An s2s pipeline takes caller audio directly, with no transcriber in front of it.
+        if chain[0] in ("transcriber", "s2s"):
             input_types["audio"] = i
         elif chain[0] == "synthesizer" or chain[0] == "llm":
             input_types["text"] = i
     return input_types
+
+
+def is_s2s_agent(task):
+    """True when a task runs speech-to-speech instead of the transcriber/LLM/synthesizer chain."""
+    if not isinstance(task, dict):
+        return False
+    return bool((task.get("tools_config") or {}).get("s2s"))
 
 
 def format_messages(messages, use_system_prompt=False, include_tools=False):
@@ -321,16 +467,11 @@ def enrich_context_with_time_variables(context_data, timezone):
 
 
 def update_prompt_with_context(prompt, context_data):
-    try:
-        if not context_data or not isinstance(context_data.get("recipient_data"), dict):
-            return prompt.format_map(DictWithMissing({}))
-        # A {call_sid}/{stream_sid} template renders empty instead of leaking the real id.
-        recipient_data = {
-            k: v for k, v in context_data["recipient_data"].items() if k not in SERVER_OWNED_CALL_IDENTIFIERS
-        }
-        return prompt.format_map(DictWithMissing(recipient_data))
-    except Exception as e:
-        return prompt
+    if not context_data or not isinstance(context_data.get("recipient_data"), dict):
+        return render_prompt(prompt, {})
+    # A {call_sid}/{stream_sid} template renders empty instead of leaking the real id.
+    recipient_data = {k: v for k, v in context_data["recipient_data"].items() if k not in SERVER_OWNED_CALL_IDENTIFIERS}
+    return render_prompt(prompt, recipient_data)
 
 
 async def get_prompt_responses(assistant_id, local=False):
@@ -445,6 +586,13 @@ def mp3_bytes_to_pcm(mp3_bytes, target_sample_rate=8000):
     return audio.raw_data
 
 
+@lru_cache(maxsize=32)
+def _resample_fir(up, down):
+    """resample_poly's default kaiser design, cached per ratio; it applies its own up scaling."""
+    max_rate = max(up, down)
+    return scipy.signal.firwin(20 * max_rate + 1, 1.0 / max_rate, window=("kaiser", 5.0)).astype(np.float32)
+
+
 def resample(audio_bytes, target_sample_rate, format="mp3", pcm_channels=1, original_sample_rate=None):
     """
     Resample audio bytes
@@ -466,7 +614,8 @@ def resample(audio_bytes, target_sample_rate, format="mp3", pcm_channels=1, orig
         if pcm_channels > 1:
             audio_array = audio_array.reshape(-1, pcm_channels)
         g = math.gcd(original_sample_rate, target_sample_rate)
-        resampled = scipy.signal.resample_poly(audio_array, target_sample_rate // g, original_sample_rate // g, axis=0)
+        up, down = target_sample_rate // g, original_sample_rate // g
+        resampled = scipy.signal.resample_poly(audio_array, up, down, axis=0, window=_resample_fir(up, down))
         return np.clip(resampled, -32768, 32767).astype(np.int16).tobytes()
 
     # Handle other formats (wav, mp3, etc.) via pydub
@@ -504,7 +653,8 @@ def merge_wav_bytes(wav_files_bytes):
 
 
 def calculate_audio_duration(size_bytes, sampling_rate, bit_depth=16, channels=1, format="wav"):
-    bytes_per_sample = (bit_depth / 8) * channels if format != "mulaw" else 1
+    # "ulaw" is the same 1-byte-per-sample encoding as "mulaw"; both spellings are in use.
+    bytes_per_sample = 1 if format in ("mulaw", "ulaw") else (bit_depth / 8) * channels
     total_samples = size_bytes / bytes_per_sample
     duration_seconds = total_samples / sampling_rate
     return duration_seconds
@@ -613,6 +763,18 @@ async def write_request_logs(message, run_id):
             None,
         ]
         metadata = message.get("graph_routing_metadata", {})
+    elif message["component"] == LogComponent.S2S:
+        component_details = [
+            message_data,
+            message.get("input_tokens", 0),
+            message.get("output_tokens", 0),
+            None,
+            message.get("latency", None),
+            False,
+            None,
+            None,
+        ]
+        metadata = message.get("s2s_metadata", {})
     elif message["component"] == LogComponent.ERROR:
         component_details = [message_data, None, None, None, message.get("latency", None), False, None, None]
         metadata = message.get("error_metadata", {})
@@ -730,7 +892,7 @@ def format_error_message(component, provider, error_str):
     provider_str = f" ({provider})" if provider and provider != "-" else ""
     err_lower = error_str.lower() if error_str else ""
 
-    if "content policy" in err_lower or "content_policy" in err_lower:
+    if any(marker in err_lower for marker in CONTENT_POLICY_ERROR_MARKERS):
         return "Content policy violation - response blocked by safety filter"
     if "timeout" in err_lower:
         return f"{display} service{provider_str} connection timed out"
@@ -772,12 +934,16 @@ def convert_to_request_log(
     reasoning_tokens=None,
     cached_tokens=None,
     reasoning_content=None,
+    ts=None,
+    latency=None,
 ):
     log = dict()
     log["direction"] = direction.value if isinstance(direction, Enum) else direction
     log["data"] = message
     log["leg_id"] = meta_info["request_id"] if "request_id" in meta_info else "-"
-    log["time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")
+    # ts (epoch seconds) stamps the row when the event happened rather than when it is logged —
+    # callers that log after the fact (LLM response, graph routing request) must pass it.
+    log["time"] = (datetime.fromtimestamp(ts) if ts else datetime.now()).strftime("%Y-%m-%d %H:%M:%S.%f")
     log["component"] = component.value if isinstance(component, Enum) else component
     log["sequence_id"] = meta_info.get("sequence_id", None)
     log["model"] = model
@@ -805,6 +971,21 @@ def convert_to_request_log(
                     else UsageSource.ESTIMATED.value
                 )
                 log["llm_metadata"] = llm_metadata
+        case LogComponent.S2S:
+            log["latency"] = meta_info.get("s2s_latency", None) if direction == LogDirection.RESPONSE else None
+            if direction == LogDirection.RESPONSE:
+                log["input_tokens"] = input_tokens or 0
+                log["output_tokens"] = output_tokens or 0
+                # Audio and text are priced apart, so the split has to survive to billing.
+                s2s_metadata = dict(meta_info.get("s2s_usage") or {})
+                if cached_tokens:
+                    s2s_metadata["cached_tokens"] = cached_tokens
+                s2s_metadata["usage_source"] = (
+                    UsageSource.API_REPORTED.value
+                    if (input_tokens is not None or output_tokens is not None)
+                    else UsageSource.ESTIMATED.value
+                )
+                log["s2s_metadata"] = s2s_metadata
         case LogComponent.SYNTHESIZER:
             log["latency"] = meta_info.get("synthesizer_latency", None) if direction == LogDirection.RESPONSE else None
         case LogComponent.TRANSCRIBER:
@@ -831,7 +1012,12 @@ def convert_to_request_log(
                 log["graph_routing_metadata"] = graph_routing_metadata
             else:
                 log["graph_routing_metadata"] = meta_info.get("llm_metadata", {})
-        case LogComponent.LLM_HANGUP | LogComponent.LLM_VOICEMAIL | LogComponent.LLM_LANGUAGE_DETECTION:
+        case (
+            LogComponent.LLM_HANGUP
+            | LogComponent.LLM_VOICEMAIL
+            | LogComponent.LLM_LANGUAGE_DETECTION
+            | LogComponent.LLM_LANGUAGE_SWITCH
+        ):
             log["latency"] = meta_info.get("llm_latency", None) if direction == LogDirection.RESPONSE else None
             if direction == LogDirection.RESPONSE:
                 log["input_tokens"] = input_tokens or 0
@@ -847,6 +1033,9 @@ def convert_to_request_log(
                     else UsageSource.ESTIMATED.value
                 )
                 log["llm_metadata"] = llm_metadata
+    # Explicit latency (seconds) wins over the meta_info lookups above.
+    if latency is not None:
+        log["latency"] = latency
     log["engine"] = engine
     asyncio.create_task(write_request_logs(log, run_id))
 
@@ -907,16 +1096,20 @@ def pcm_to_ulaw(pcm_bytes):
     return ulaw_bytes
 
 
-def audio_to_mulaw8k(audio, rate_hint=8000, format_hint=""):
-    """One-shot synth output (base64 str / WAV / raw PCM) → mono 16-bit 8kHz mu-law.
-    Undecodable compressed containers (MP3/Ogg/FLAC) return None — never raw noise."""
+def ulaw_to_pcm(ulaw_bytes):
+    """Convert 8-bit ulaw audio to 16-bit signed linear PCM."""
+    return audioop.ulaw2lin(ulaw_bytes, 2)  # 2 = sample width in bytes (16-bit)
+
+
+def decode_audio_segment(audio, rate_hint=8000, format_hint=""):
+    """base64/WAV/raw PCM → AudioSegment; undecodable containers → None."""
     import base64
 
     if isinstance(audio, str):
         audio = base64.b64decode(audio)
     try:
         # Explicit format for WAV takes pydub's native reader — no ffprobe/ffmpeg.
-        segment = AudioSegment.from_file(io.BytesIO(audio), format="wav" if audio[:4] == b"RIFF" else None)
+        return AudioSegment.from_file(io.BytesIO(audio), format="wav" if audio[:4] == b"RIFF" else None)
     except Exception:
         if (
             audio[:3] == b"ID3"
@@ -927,9 +1120,24 @@ def audio_to_mulaw8k(audio, rate_hint=8000, format_hint=""):
         # Headerless audio: trust the caller's declared rate/format.
         if "law" in str(format_hint or ""):
             audio = audioop.ulaw2lin(audio, 2)
-        segment = AudioSegment(data=audio, sample_width=2, frame_rate=int(rate_hint or 8000), channels=1)
+        return AudioSegment(data=audio, sample_width=2, frame_rate=int(rate_hint or 8000), channels=1)
+
+
+def audio_to_mulaw8k(audio, rate_hint=8000, format_hint=""):
+    """One-shot synth output → mono 16-bit 8kHz mu-law, or None if undecodable."""
+    segment = decode_audio_segment(audio, rate_hint, format_hint)
+    if segment is None:
+        return None
     segment = segment.set_frame_rate(8000).set_channels(1).set_sample_width(2)
     return pcm_to_ulaw(segment.raw_data)
+
+
+def audio_to_pcm(audio, *, target_sample_rate, rate_hint=8000, format_hint=""):
+    """→ mono 16-bit PCM, or None. Keyword-only: the sibling's 2nd arg is the SOURCE rate."""
+    segment = decode_audio_segment(audio, rate_hint, format_hint)
+    if segment is None:
+        return None
+    return segment.set_frame_rate(int(target_sample_rate)).set_channels(1).set_sample_width(2).raw_data
 
 
 def soniox_ws_url(host):
@@ -979,6 +1187,23 @@ def now_ms() -> float:
 
 def timestamp_ms() -> float:
     return time.time() * 1000
+
+
+def clean_gemini_schema(schema):
+    """Strip JSON Schema keys Gemini's proto-based Schema rejects.
+
+    Both the Gemini LLM and the Live API refuse a function declaration carrying
+    additionalProperties, and the Live API rejects the whole setup frame for it.
+    """
+    if not isinstance(schema, dict):
+        return schema
+    cleaned = {k: v for k, v in schema.items() if k != "additionalProperties"}
+    for k, v in cleaned.items():
+        if isinstance(v, dict):
+            cleaned[k] = clean_gemini_schema(v)
+        elif isinstance(v, list):
+            cleaned[k] = [clean_gemini_schema(i) if isinstance(i, dict) else i for i in v]
+    return cleaned
 
 
 def structure_system_prompt(
