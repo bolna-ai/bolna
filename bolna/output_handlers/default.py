@@ -145,6 +145,12 @@ class DefaultOutputHandler:
                         "is_final_chunk": meta_info.get("end_of_llm_stream", False)
                         and meta_info.get("end_of_synthesizer_stream", False),
                         "sequence_id": meta_info["sequence_id"],
+                        # Carry the turn/response identifiers (as the telephony handler does) so the
+                        # input handler's ack path can attribute heard text to the right turn and
+                        # sync_history can trim the interrupted response instead of the whole turn.
+                        "turn_id": meta_info.get("turn_id"),
+                        "response_uid": meta_info.get("response_uid"),
+                        "response_group_uid": meta_info.get("response_group_uid"),
                         "sent_ts": time.time(),
                         # Feeds the completion watchdog's playout estimate, as on telephony.
                         "duration": self._playout_duration(packet["data"], meta_info.get("format", "pcm")),
