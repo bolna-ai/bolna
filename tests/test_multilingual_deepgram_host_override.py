@@ -1,4 +1,8 @@
-"""The per-call Deepgram host override must reach every label in the multilingual transcriber pool."""
+"""Per-label Deepgram host overrides reach the pool; the top-level host is NOT inherited into legs.
+
+The router (dashboard-backend) stamps only the legs a chosen endpoint can actually serve, so an
+unstamped leg must keep its default host rather than inherit a base host it may not support.
+"""
 
 from unittest.mock import MagicMock
 
@@ -7,11 +11,7 @@ from bolna.agent_manager.task_manager import TaskManager
 
 
 def _run_setup(monkeypatch, transcriber_config):
-    """Drive the real __setup_transcriber multilingual branch against a mock TaskManager.
-
-    The branch mutates each per-label cfg dict in place before spreading it into the
-    transcriber, so we assert on the mutated multilingual dicts directly.
-    """
+    """Drive the real __setup_transcriber multilingual branch against a mock TaskManager."""
     monkeypatch.setattr(tmmod, "SUPPORTED_TRANSCRIBER_PROVIDERS", {"deepgram": MagicMock()})
     monkeypatch.setattr(tmmod, "TranscriberPool", MagicMock())
 
@@ -27,43 +27,49 @@ def _run_setup(monkeypatch, transcriber_config):
     tm._TaskManager__setup_transcriber()
 
 
-def test_override_propagates_to_every_label(monkeypatch):
+def test_per_label_hosts_are_preserved(monkeypatch):
     cfg = {
         "provider": "deepgram",
-        "deepgram_host": "self-hosted:8080",
-        "deepgram_flux_host": "self-hosted-flux:8080",
-        "deepgram_host_protocol": "ws",
         "multilingual": {
-            "en": {"provider": "deepgram", "model": "nova-2"},
-            "hi": {"provider": "deepgram", "model": "flux-general-hi"},
+            "en": {
+                "provider": "deepgram",
+                "model": "nova-3",
+                "deepgram_host": "gcp:8080",
+                "deepgram_host_protocol": "ws",
+            },
+            "hi": {
+                "provider": "deepgram",
+                "model": "nova-2",
+                "deepgram_host": "modal:443",
+                "deepgram_host_protocol": "wss",
+            },
         },
     }
     _run_setup(monkeypatch, cfg)
 
-    for label in ("en", "hi"):
-        per_label = cfg["multilingual"][label]
-        assert per_label["deepgram_host"] == "self-hosted:8080"
-        assert per_label["deepgram_flux_host"] == "self-hosted-flux:8080"
-        assert per_label["deepgram_host_protocol"] == "ws"
-
-
-def test_per_label_override_wins(monkeypatch):
-    cfg = {
-        "provider": "deepgram",
-        "deepgram_host": "top-level:8080",
-        "deepgram_host_protocol": "ws",
-        "multilingual": {
-            "en": {"provider": "deepgram", "model": "nova-2", "deepgram_host": "en-specific:9090"},
-            "hi": {"provider": "deepgram", "model": "nova-2"},
-        },
-    }
-    _run_setup(monkeypatch, cfg)
-
-    assert cfg["multilingual"]["en"]["deepgram_host"] == "en-specific:9090"
-    assert cfg["multilingual"]["hi"]["deepgram_host"] == "top-level:8080"
-    # Protocol has no per-label value, so both inherit the top-level one.
+    assert cfg["multilingual"]["en"]["deepgram_host"] == "gcp:8080"
     assert cfg["multilingual"]["en"]["deepgram_host_protocol"] == "ws"
-    assert cfg["multilingual"]["hi"]["deepgram_host_protocol"] == "ws"
+    assert cfg["multilingual"]["hi"]["deepgram_host"] == "modal:443"
+    assert cfg["multilingual"]["hi"]["deepgram_host_protocol"] == "wss"
+
+
+def test_top_level_host_not_inherited_into_legs(monkeypatch):
+    # An unstamped leg (no per-label host) must NOT pick up the top-level host — that inheritance is
+    # exactly what would force an unsupported model onto the wrong endpoint.
+    cfg = {
+        "provider": "deepgram",
+        "deepgram_host": "gcp:8080",
+        "deepgram_host_protocol": "ws",
+        "multilingual": {
+            "en": {"provider": "deepgram", "model": "nova-3", "deepgram_host": "gcp:8080"},
+            "hi": {"provider": "deepgram", "model": "flux-general-hi"},  # deliberately left on default
+        },
+    }
+    _run_setup(monkeypatch, cfg)
+
+    assert cfg["multilingual"]["en"]["deepgram_host"] == "gcp:8080"
+    assert "deepgram_host" not in cfg["multilingual"]["hi"]
+    assert "deepgram_host_protocol" not in cfg["multilingual"]["hi"]
 
 
 def test_no_override_leaves_labels_untouched(monkeypatch):

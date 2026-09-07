@@ -1588,22 +1588,14 @@ class TaskManager(BaseManager):
 
                     is_sip = provider == TelephonyProvider.SIP_TRUNK.value
 
-                    # Per-call Deepgram host override lives at the transcriber-config top level; each
-                    # per-label cfg is a separate dict, so carry it down (a per-label value wins).
-                    host_override = {
-                        k: transcriber_config[k]
-                        for k in ("deepgram_host", "deepgram_flux_host", "deepgram_host_protocol")
-                        if transcriber_config.get(k) is not None
-                    }
-
                     transcribers = {}
                     for label, cfg in multilingual.items():
                         private_queue = asyncio.Queue()
                         cfg["input_queue"] = private_queue
                         cfg["output_queue"] = self.transcriber_output_queue
-                        for k, v in host_override.items():
-                            if cfg.get(k) is None:
-                                cfg[k] = v
+                        # Per-call Deepgram host override arrives per-label on cfg itself (the caller
+                        # stamps only the legs a chosen endpoint can serve); do not inherit from the
+                        # top-level config, or an unsupported leg would be forced onto that endpoint.
                         if is_sip:
                             cfg["encoding"] = "mulaw"
                             cfg["sampling_rate"] = 8000
