@@ -1,7 +1,10 @@
+import asyncio
 import os
 from importlib.metadata import PackageNotFoundError, version as _package_version
 
+import httpx
 from speechify import AsyncSpeechify
+from speechify.core.api_error import ApiError
 
 from .base_synthesizer import BaseSynthesizer
 from bolna.helpers.logger_config import configure_logger
@@ -20,7 +23,7 @@ except PackageNotFoundError:
     CALLER_VERSION = "0.0.0"
 
 # output_format sample rates the streaming endpoint accepts for pcm_* (wav_* is not).
-SUPPORTED_PCM_RATES = (8000, 16000, 22050, 24000, 44100)
+SUPPORTED_PCM_RATES = (8000, 16000, 22050, 24000, 44100, 48000)
 
 
 class SpeechifySynthesizer(BaseSynthesizer):
@@ -58,14 +61,21 @@ class SpeechifySynthesizer(BaseSynthesizer):
             self.wire_output_format = f"pcm_{self.pcm_wire_rate}"
 
         host = os.getenv("SPEECHIFY_API_HOST")
+        # Own the httpx client so its connection pool is closed deterministically
+        # in cleanup() rather than leaked when the synthesizer is torn down.
+        self._httpx_client = httpx.AsyncClient(timeout=30)
         self.client = AsyncSpeechify(
             token=self.api_key,
             base_url=f"https://{host}" if host else None,
             headers={"Speechify-Caller": CALLER, "Speechify-Caller-Version": CALLER_VERSION},
+            httpx_client=self._httpx_client,
         )
 
     def supports_websocket(self):
         return False
+
+    async def cleanup(self):
+        await self._httpx_client.aclose()
 
     # ------------------------------------------------------------------
     # BaseSynthesizer hooks
@@ -94,6 +104,16 @@ class SpeechifySynthesizer(BaseSynthesizer):
             async for chunk in self.client.audio.stream(**params):
                 chunks.extend(chunk)
             return bytes(chunks)
+        except asyncio.CancelledError:
+            # An interruption/shutdown — propagate, never mask as a failed render.
+            raise
+        except ApiError as e:
+            # Classify so failures are diagnosable rather than silently degrading
+            # to a click of silence: auth errors are terminal (a retry can't help),
+            # every other status may be transient.
+            kind = "auth" if e.status_code in (401, 403) else "api"
+            logger.error(f"Speechify TTS {kind} error (status={e.status_code}): {e.body}")
+            return None
         except Exception as e:
             logger.error(f"Speechify TTS error: {e}")
             return None
