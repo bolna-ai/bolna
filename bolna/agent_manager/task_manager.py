@@ -6916,14 +6916,8 @@ class TaskManager(BaseManager):
             await self.tools["synthesizer"].cleanup()
 
     def _stamp_cached_clip_text(self, meta_info):
-        """A pre-generated clip skips the synthesizer, which is what normally stamps
-        text_synthesized, so its single mark would carry no text and an interrupted node could
-        not be trimmed. Only on the branch that sends the cached bytes: the cache-miss path
-        re-synthesizes live with this same meta_info, and every streaming provider but
-        ElevenLabs and Azure reuses one meta_info for all chunks, which would put the whole
-        message on every mark. Silence re-prompts stay unstamped: history deliberately never
-        records them, and mark text would let sync_history materialise an interrupted one.
-        """
+        """Give the mark its text so an interrupted clip can be trimmed. Cached-send branch
+        only: the cache-miss path re-synthesizes live and would stamp every chunk. See INIT.md."""
         if meta_info.get("message_category") != "static_node" or meta_info.get("is_silence_trigger"):
             return
         meta_info["text_synthesized"] = meta_info.get("text", "")

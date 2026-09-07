@@ -81,10 +81,8 @@ SONIOX_AUTO_LANGUAGE_VALUES = {"", "multi", "auto", "multilingual", "unknown"}
 # "content management policy" and carries code content_filter.
 CONTENT_POLICY_ERROR_MARKERS = ("content policy", "content_policy", "content_filter", "content management")
 
-# Pre-generated clips that bypass the synthesizer and go out as one mark covering the whole
-# message, unlike streamed speech which arrives as many marks. event_proactive is deliberately
-# absent: it runs on sequence_id -1, which every output handler blanks text_synthesized for, so
-# its mark never carries text and neither the hangup guard nor the trim can act on it.
+# Pre-generated clips sent as one mark for the whole message. Not event_proactive: on
+# sequence_id -1 the handlers blank text_synthesized, so its mark never carries text.
 CACHED_SINGLE_MARK_CATEGORIES = ("static_node",)
 
 # Model prefixes
