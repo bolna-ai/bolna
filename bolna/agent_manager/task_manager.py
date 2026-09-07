@@ -6918,7 +6918,9 @@ class TaskManager(BaseManager):
     def _stamp_cached_clip_text(self, meta_info):
         """Give the mark its text so an interrupted clip can be trimmed. Cached-send branch
         only: the cache-miss path re-synthesizes live and would stamp every chunk. See INIT.md."""
-        if meta_info.get("message_category") != "static_node" or meta_info.get("is_silence_trigger"):
+        if meta_info.get("message_category") not in CACHED_SINGLE_MARK_CATEGORIES or meta_info.get(
+            "is_silence_trigger"
+        ):
             return
         meta_info["text_synthesized"] = meta_info.get("text", "")
 
