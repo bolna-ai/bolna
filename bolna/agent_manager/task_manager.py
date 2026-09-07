@@ -7377,7 +7377,9 @@ class TaskManager(BaseManager):
             logger.error(f"Error in processing message output: {str(e)}")
 
     async def _inject_and_run_llm(self, injected_message: str):
-        self.conversation_history.append_user(injected_message)
+        # exclude_from_transcript, not exclude_from_llm: the nudge is the whole point for the
+        # LLM, but the caller never spoke it, so it must not surface as a user turn.
+        self.conversation_history.append_user(injected_message, exclude_from_transcript=True)
         meta_info = self.__get_updated_meta_info(
             {
                 "io": self.tools["output"].get_provider(),
