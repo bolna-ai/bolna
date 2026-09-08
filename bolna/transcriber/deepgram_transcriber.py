@@ -60,8 +60,12 @@ class DeepgramTranscriber(BaseTranscriber):
         self.sampling_rate = int(sampling_rate) if isinstance(sampling_rate, (str, int)) else 16000
         self.encoding = encoding
         self.api_key = kwargs.get("transcriber_key", os.getenv("DEEPGRAM_AUTH_TOKEN"))
-        self.deepgram_host = os.getenv("DEEPGRAM_HOST", "api.deepgram.com")
-        self.deepgram_flux_host = os.getenv("DEEPGRAM_FLUX_HOST", "api.deepgram.com")
+        # Per-call host override (multi-cloud router) takes precedence over the fleet-wide env default.
+        self.deepgram_host = kwargs.get("deepgram_host") or os.getenv("DEEPGRAM_HOST", "api.deepgram.com")
+        self.deepgram_flux_host = kwargs.get("deepgram_flux_host") or os.getenv(
+            "DEEPGRAM_FLUX_HOST", "api.deepgram.com"
+        )
+        self.deepgram_host_protocol = kwargs.get("deepgram_host_protocol") or os.getenv("DEEPGRAM_HOST_PROTOCOL", "wss")
         self.transcriber_output_queue = output_queue
         self.transcription_task = None
         self.keywords = keywords
@@ -191,7 +195,7 @@ class DeepgramTranscriber(BaseTranscriber):
             dg_params["tag"] = self.run_id
             dg_params["extra"] = f"run_id:{self.run_id}"
 
-        websocket_api = "{}://{}/v1/listen?".format(os.getenv("DEEPGRAM_HOST_PROTOCOL", "wss"), self.deepgram_host)
+        websocket_api = "{}://{}/v1/listen?".format(self.deepgram_host_protocol, self.deepgram_host)
         websocket_url = websocket_api + urlencode(dg_params)
 
         if self.keywords:
@@ -250,7 +254,7 @@ class DeepgramTranscriber(BaseTranscriber):
         if self.run_id:
             dg_params["tag"] = self.run_id
 
-        websocket_api = "{}://{}/v2/listen?".format(os.getenv("DEEPGRAM_HOST_PROTOCOL", "wss"), self.deepgram_flux_host)
+        websocket_api = "{}://{}/v2/listen?".format(self.deepgram_host_protocol, self.deepgram_flux_host)
         websocket_url = websocket_api + urlencode(dg_params, doseq=True)
         return websocket_url
 

@@ -1594,6 +1594,9 @@ class TaskManager(BaseManager):
                         private_queue = asyncio.Queue()
                         cfg["input_queue"] = private_queue
                         cfg["output_queue"] = self.transcriber_output_queue
+                        # Per-call Deepgram host override arrives per-label on cfg itself (the caller
+                        # stamps only the legs a chosen endpoint can serve); do not inherit from the
+                        # top-level config, or an unsupported leg would be forced onto that endpoint.
                         if is_sip:
                             cfg["encoding"] = "mulaw"
                             cfg["sampling_rate"] = 8000
