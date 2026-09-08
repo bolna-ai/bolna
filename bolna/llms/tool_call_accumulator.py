@@ -68,12 +68,18 @@ class ToolCallAccumulator:
         if not self.final_tool_calls:
             return None
 
-        first_func_name = self.final_tool_calls[0]["function"]["name"]
+        # final_tool_calls is keyed by the provider's tool-call index, which is not
+        # guaranteed to start at 0 (some providers, notably via LiteLLM normalization,
+        # report a non-zero or absent first index). Take the first accumulated call by
+        # insertion order — consistent with model_response=list(...values()) below —
+        # instead of assuming key 0 exists, which would otherwise raise KeyError.
+        first_tool_call = next(iter(self.final_tool_calls.values()))
+        first_func_name = first_tool_call["function"]["name"]
         if first_func_name not in self.api_params:
             return None
 
         func_conf = self.api_params[first_func_name]
-        arguments_received = self.final_tool_calls[0]["function"]["arguments"]
+        arguments_received = first_tool_call["function"]["arguments"]
 
         logger.info(f"Payload to send {arguments_received} func_dict {func_conf}")
         self._gave_pre_call_msg = False
@@ -89,7 +95,7 @@ class ToolCallAccumulator:
             meta_info=meta_info,
             called_fun=first_func_name,
             model_response=list(self.final_tool_calls.values()),
-            tool_call_id=self.final_tool_calls[0].get("id", ""),
+            tool_call_id=first_tool_call.get("id", ""),
             textual_response=answer.strip() if self.received_textual else None,
         )
 
