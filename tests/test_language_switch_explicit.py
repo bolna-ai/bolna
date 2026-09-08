@@ -59,7 +59,12 @@ async def test_ambient_mode_prompts_unchanged_and_ignores_last_agent_turn():
         recent_turns=[("hi", 2.1)],
         last_agent_turn="Would you like Hindi?",
     )
-    assert system_text(fake_llm) == LANGUAGE_SWITCH_SYSTEM_PROMPT
+    # Ambient mode uses the ambient rules, never the explicit ones. Cacheable models also get an
+    # inert appendix appended so the prefix clears the 4,096-token cache minimum, so this is a
+    # prefix check rather than equality.
+    text = system_text(fake_llm)
+    assert text.startswith(LANGUAGE_SWITCH_SYSTEM_PROMPT.rstrip())
+    assert EXPLICIT_LANGUAGE_SWITCH_SYSTEM_PROMPT not in text
     turn = turn_text(fake_llm)
     assert "Would you like Hindi?" not in turn
     assert "RECENT TURNS" in turn

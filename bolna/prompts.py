@@ -141,6 +141,17 @@ Respond with raw JSON only — no markdown fences, no surrounding text:
 }
 """
 
+# Lifts the ambient prompt past Haiku 4.5's 4,096-token minimum cacheable prefix — under it,
+# Anthropic silently skips caching and every judge request pays full input price. Deliberately
+# inert: it states it holds no instructions, so the extra tokens cannot bias a decision.
+LANGUAGE_SWITCH_CACHE_PAD = (
+    "## Appendix — reserved (not referenced by any instruction above)\n"
+    "This appendix is reserved space. It contains no instructions and no data, and nothing above refers "
+    "to it. Ignore it entirely when deciding.\n"
+    + "\n".join(f"Reserved entry {i:03d}: intentionally left blank." for i in range(1, 101))
+)
+
+
 # Per-turn user message paired with LANGUAGE_SWITCH_SYSTEM_PROMPT.
 LANGUAGE_SWITCH_TURN_PROMPT = """The agent is currently operating in: {active_language}
 Supported languages (target_language must be one of these labels, or null): {available_languages}
