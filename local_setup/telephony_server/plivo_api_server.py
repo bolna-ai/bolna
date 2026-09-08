@@ -57,7 +57,7 @@ async def make_call(request: Request):
 
         # adding hangup_url since plivo opens a 2nd websocket once the call is cut.
         # https://github.com/bolna-ai/bolna/issues/148#issuecomment-2127980509
-        call = plivo_client.calls.create(
+        plivo_client.calls.create(
             from_=plivo_phone_number,
             to_=call_details.get("recipient_phone_number"),
             answer_url=f"{telephony_host}/plivo_connect?bolna_host={bolna_host}&agent_id={agent_id}",

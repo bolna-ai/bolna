@@ -542,7 +542,6 @@ class SmallestTranscriber(BaseTranscriber):
 
                 # Get transcript text
                 transcript = data.get("transcript", "").strip()
-                full_transcript = data.get("full_transcript", "").strip()
                 is_final = data.get("is_final", False)
                 is_last = data.get("is_last", False)
                 detected_language = data.get("language")

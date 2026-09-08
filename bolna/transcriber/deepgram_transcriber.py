@@ -896,7 +896,7 @@ class DeepgramTranscriber(BaseTranscriber):
                         self.meta_info["deepgram_duration"] = deepgram_duration
                         logger.info(f"Received Deepgram Metadata with duration: {deepgram_duration}s")
 
-            except Exception as e:
+            except Exception:
                 traceback.print_exc()
                 self.interruption_signalled = False
 

@@ -264,7 +264,7 @@ class DefaultInputHandler:
                     request = await self.websocket.receive_json()
                 await self.process_message(request)
 
-        except WebSocketDisconnect as e:
+        except WebSocketDisconnect:
             ws_data_packet = create_ws_data_packet(data=None, meta_info={"io": "default", "eos": True})
             await self.queues["transcriber"].put(ws_data_packet)
             self.running = False

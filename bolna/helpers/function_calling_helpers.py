@@ -355,7 +355,7 @@ async def computed_api_response(response):
     try:
         get_res_keys = list(json.loads(response).keys())
         get_res_values = list(json.loads(response).values())
-    except Exception as e:
+    except Exception:
         pass
 
     return get_res_keys, get_res_values
