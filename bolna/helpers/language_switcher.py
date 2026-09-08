@@ -8,6 +8,7 @@ from bolna.llms import LiteLLM
 from bolna.prompts import (
     EXPLICIT_LANGUAGE_SWITCH_SYSTEM_PROMPT,
     EXPLICIT_LANGUAGE_SWITCH_TURN_PROMPT,
+    LANGUAGE_SWITCH_CACHE_PAD,
     LANGUAGE_SWITCH_SYSTEM_PROMPT,
     LANGUAGE_SWITCH_TURN_PROMPT,
 )
@@ -124,10 +125,14 @@ class LanguageSwitcher:
         # Bedrock-hosted Claude also caches (litellm translates cache_control → cachePoint);
         # scoped to claude ids so a non-Anthropic bedrock model never gets an unsupported block.
         system_text = EXPLICIT_LANGUAGE_SWITCH_SYSTEM_PROMPT if self.explicit_only else LANGUAGE_SWITCH_SYSTEM_PROMPT
-        block = {"type": "text", "text": system_text}
         cacheable = self.model.startswith(("anthropic/", "claude")) or (
             self.model.startswith("bedrock/") and "claude" in self.model
         )
+        # The ambient prompt is ~3.5k tokens, under Haiku's 4,096 minimum, so the marker below was
+        # a no-op and 94% of judge input billed uncached. The explicit prompt already clears it.
+        if cacheable and not self.explicit_only:
+            system_text = f"{system_text.rstrip()}\n\n{LANGUAGE_SWITCH_CACHE_PAD}"
+        block = {"type": "text", "text": system_text}
         if cacheable:
             block["cache_control"] = {"type": "ephemeral"}
         return {"role": "system", "content": [block]}
