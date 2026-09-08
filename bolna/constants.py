@@ -81,6 +81,10 @@ SONIOX_AUTO_LANGUAGE_VALUES = {"", "multi", "auto", "multilingual", "unknown"}
 # "content management policy" and carries code content_filter.
 CONTENT_POLICY_ERROR_MARKERS = ("content policy", "content_policy", "content_filter", "content management")
 
+# Pre-generated clips sent as one mark for the whole message. Not event_proactive: on
+# sequence_id -1 the handlers blank text_synthesized, so its mark never carries text.
+CACHED_SINGLE_MARK_CATEGORIES = ("static_node",)
+
 # Model prefixes
 GPT5_MODEL_PREFIX = "gpt-5"
 GPT5_4_MODEL_PREFIX = "gpt-5.4"
