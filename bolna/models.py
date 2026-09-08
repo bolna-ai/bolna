@@ -677,6 +677,26 @@ class ToolsChainModel(BaseModel):
     pipelines: List[List[str]]
 
 
+class GovernanceConfig(BaseModel):
+    """Opt-in voice-pipeline governance. Off unless ``enabled`` is true.
+
+    Decisions are regex + policy only (no extra LLM). Receipts never store the
+    original PII span — only labels such as ``ssn`` or ``credit_card``.
+    """
+
+    enabled: bool = False
+    mode: Literal["enforce", "monitor"] = "enforce"
+    redact_pii: bool = True
+    pii_types: Optional[List[str]] = None
+    output_dlp: bool = True
+    max_cost_per_call: Optional[float] = None
+    max_cost_per_session: Optional[float] = None
+    usd_per_1m_input: Optional[float] = None
+    usd_per_1m_output: Optional[float] = None
+    allowed_tools: Optional[List[str]] = None
+    denied_tools: Optional[List[str]] = None
+
+
 class ConversationConfig(BaseModel):
     optimize_latency: Optional[bool] = True  # This will work on in conversation
     hangup_after_silence: Optional[int] = 20
@@ -702,6 +722,7 @@ class ConversationConfig(BaseModel):
     voicemail_detection_duration: Optional[float] = 30.0  # Time window in seconds
     voicemail_check_interval: Optional[float] = 7.0  # Min time between interim checks
     voicemail_min_transcript_length: Optional[int] = 7  # Min words for interim check
+    governance: Optional[GovernanceConfig] = None
 
     @field_validator("hangup_after_silence", mode="before")
     def set_hangup_after_silence(cls, v):

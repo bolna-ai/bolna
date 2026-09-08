@@ -58,6 +58,7 @@ from bolna.helpers.function_calling_helpers import (
     validate_outbound_url,
 )
 from bolna.helpers.conversation_history import ConversationHistory
+from bolna.governance import GovernanceMiddleware
 from .base_manager import BaseManager
 from .interruption_manager import InterruptionManager
 from bolna.agent_types import *
@@ -118,6 +119,19 @@ from .models import ComponentLatencies
 from .voicemail_handler import VoicemailHandler
 
 logger = configure_logger(__name__)
+
+
+def _governance_of(owner):
+    """Missing or stub governance must not fail the call."""
+    gov = getattr(owner, "governance", None)
+    if not isinstance(gov, GovernanceMiddleware):
+        return GovernanceMiddleware.disabled()
+    return gov
+
+
+def _govern_text(owner, text, meta_info=None):
+    redacted, _decision = _governance_of(owner).inspect_transcript(text or "", meta_info)
+    return redacted
 
 
 @lru_cache(maxsize=256)
@@ -383,6 +397,11 @@ class TaskManager(BaseManager):
         # Assistant persistance stuff
         self.assistant_id = assistant_id
         self.run_id = kwargs.get("run_id")
+        self.governance = GovernanceMiddleware.from_conversation_config(
+            task.get("task_config") or {},
+            run_id=self.run_id,
+            ledger=self.kwargs.get("governance_ledger"),
+        )
 
         self.mark_event_meta_data = MarkEventMetaData()
         self.sampling_rate = 24000
@@ -955,6 +974,12 @@ class TaskManager(BaseManager):
         latency_dict["cached_tokens"] = actual_cached_tokens
         if response_text:
             latency_dict["response_text"] = response_text.strip()
+        _governance_of(self).record_usage(
+            model=latency_dict.get("model"),
+            input_tokens=actual_input_tokens,
+            output_tokens=actual_output_tokens,
+            meta_info=meta_info,
+        )
 
     @staticmethod
     def _extract_api_call_runtime_args(resp):
@@ -2705,6 +2730,9 @@ class TaskManager(BaseManager):
             self.webhook_response = await self.tools["webhook_agent"].execute(extraction_details)
             logger.info(f"Response from the server {self.webhook_response}")
         else:
+            if self._governance_blocks_generation():
+                logger.info("governance blocked follow-up task run_id=%s", self.run_id)
+                return
             message = format_messages(
                 self.input_parameters["messages"], include_tools=True
             )  # Remove the initial system prompt
@@ -3160,6 +3188,36 @@ class TaskManager(BaseManager):
     async def __execute_function_call(
         self, url, method, param, api_token, headers, model_args, meta_info, next_step, called_fun, **resp
     ):
+        runtime_args = self._extract_api_call_runtime_args(resp)
+        runtime_args.pop("tool_call_id", None)
+        runtime_args.pop("resp", None)
+        gov = _governance_of(self)
+        auth = gov.authorize_tool(called_fun, runtime_args, meta_info)
+        if auth.allow:
+            budget = gov.check_budget()
+            if not budget.allow:
+                auth = budget
+        if not auth.allow:
+            turn_id = meta_info.get("turn_id")
+            tool_result = json.dumps({"status": "denied", "message": auth.reason})
+            if resp.get("model_response") is not None:
+                model_response = resp["model_response"]
+                if isinstance(model_response, str):
+                    model_response, _ = _governance_of(self).inspect_output(model_response)
+                self.conversation_history.attach_tool_calls_to_turn(turn_id, model_response)
+            self.conversation_history.append_tool_result(resp.get("tool_call_id", ""), tool_result)
+            convert_to_request_log(
+                tool_result, meta_info, None, "function_call", direction="response", run_id=self.run_id
+            )
+            logger.warning("governance denied tool %s reason=%s run_id=%s", called_fun, auth.reason, self.run_id)
+            # Feed the denial back so the model can tell the caller, instead of going silent.
+            if not self._governance_blocks_generation():
+                messages = self.conversation_history.get_copy()
+                followup_meta_info = self._spawn_followup_meta_info(meta_info)
+                await self.__do_llm_generation(
+                    messages, followup_meta_info, next_step, should_trigger_function_call=False
+                )
+            return
         self.check_if_user_online = False
         function_call_log = None
         turn_id = meta_info.get("turn_id")
@@ -3558,6 +3616,8 @@ class TaskManager(BaseManager):
         llm_latency=None,
     ):
         self.llm_response_generated = True
+        if isinstance(llm_response, str):
+            llm_response, _ = _governance_of(self).inspect_output(llm_response, meta_info)
         # task 0 only, so aux LLMs (hangup/voicemail) never tally, and never an overflowed turn,
         # which ran on another backend. Cached is exempt and output is weighted by the consumer.
         if self.task_id == 0 and input_tokens:
@@ -4068,6 +4128,9 @@ class TaskManager(BaseManager):
         )
 
     async def _process_conversation_task(self, message, sequence, meta_info):
+        if self._governance_blocks_generation():
+            logger.info("governance blocked conversation LLM turn run_id=%s", self.run_id)
+            return
         should_bypass_synth = "bypass_synth" in meta_info and meta_info["bypass_synth"] is True
         next_step = self._get_next_step(sequence, "llm")
         meta_info["llm_start_time"] = time.time()
@@ -4075,6 +4138,7 @@ class TaskManager(BaseManager):
         self._append_eager_llm_stub(meta_info)
 
         if self.turn_based_conversation:
+            message["data"] = self._govern_user_text(message.get("data") or "", meta_info)
             self.history.append({"role": "user", "content": message["data"]})
         messages = self.conversation_history.get_copy()
 
@@ -4631,8 +4695,22 @@ class TaskManager(BaseManager):
             reason,
         )
 
+    def _govern_user_text(self, text, meta_info=None):
+        """Redact PII on the ASR/text path. Always returns a string safe to store and send to the LLM."""
+        return _govern_text(self, text, meta_info)
+
+    def _governance_blocks_generation(self):
+        gov = _governance_of(self)
+        if not gov.allows_llm():
+            return True
+        decision = gov.check_budget()
+        return not decision.allow
+
     def kickoff_llm_generation(self, transcriber_message, meta_info):
         """Start the LLM turn for a final transcript (immediate path and settle-window path)."""
+        if self._governance_blocks_generation():
+            logger.info("governance blocked LLM generation run_id=%s", self.run_id)
+            return
         logger.info(f"Running llm Tasks")
         transcriber_package = create_ws_data_packet(transcriber_message, meta_info)
 
@@ -4724,16 +4802,17 @@ class TaskManager(BaseManager):
             self._retire_dropped_response(meta_info, "speech_started_before_welcome_finished")
             return
 
-        if self.conversation_history.is_duplicate_user(transcriber_message):
-            logger.info(f"Skipping duplicate transcript (same content): {transcriber_message}")
-            self._retire_dropped_response(meta_info, "duplicate_user_transcript")
-            return
-
         self._trigger_voicemail_check(transcriber_message, meta_info, is_final=True)
 
         if self.voicemail_handler.detected:
             logger.info("Voicemail already detected - skipping normal transcriber output processing")
             self._retire_dropped_response(meta_info, "voicemail_detected")
+            return
+
+        transcriber_message = self._govern_user_text(transcriber_message, meta_info)
+        if self.conversation_history.is_duplicate_user(transcriber_message):
+            logger.info(f"Skipping duplicate transcript (same content): {transcriber_message}")
+            self._retire_dropped_response(meta_info, "duplicate_user_transcript")
             return
 
         await self.language_detector.collect_transcript(transcriber_message)
@@ -5088,7 +5167,7 @@ class TaskManager(BaseManager):
                     elif (
                         isinstance(message.get("data"), dict) and message["data"].get("type", "") == "eager_end_of_turn"
                     ):
-                        eager_transcript = message["data"].get("content", "").strip()
+                        eager_transcript = self._govern_user_text(message["data"].get("content", "").strip())
                         eot_confidence = message["data"].get("confidence")
                         logger.info(f"EagerEndOfTurn received (confidence={eot_confidence}): {eager_transcript}")
 
@@ -6237,7 +6316,12 @@ class TaskManager(BaseManager):
         # produced no turn at all, so append the detector transcript as the user turn.
         transcript_corrected = True
         if active_transcript:
-            replaced = self.conversation_history.replace_last_user(active_transcript, detector_transcript)
+            detector_clean = _govern_text(self, detector_transcript)
+            replaced = self.conversation_history.replace_last_user(active_transcript, detector_clean)
+            if not replaced:
+                replaced = self.conversation_history.replace_last_user(
+                    _govern_text(self, active_transcript), detector_clean
+                )
             if not replaced:
                 # A newer turn landed during decide; the truncate cancelled its generation,
                 transcript_corrected = False
@@ -6259,7 +6343,7 @@ class TaskManager(BaseManager):
         else:
             self.user_spoke = True
             # Reply to the caller's LAST utterance, not the whole buffer — with the
-            self.conversation_history.append_user(idle_flush_user_text)
+            self.conversation_history.append_user(_govern_text(self, idle_flush_user_text))
             logger.info(
                 f"LanguageSwitcher: idle-flush — appended detector transcript as user turn {idle_flush_user_text[:80]!r}"
             )
@@ -6652,11 +6736,19 @@ class TaskManager(BaseManager):
             for i in range(len(messages) - 1, -1, -1):
                 if messages[i].get("role") == "user":
                     if messages[i].get("content", "").strip() == active_transcript.strip():
-                        messages[i] = {"role": "user", "content": detector_transcript}
+                        messages[i] = {
+                            "role": "user",
+                            "content": _govern_text(self, detector_transcript),
+                        }
                     break
         else:
             # Idle-flush: the locked ASR produced no turn — append the SAME trailing-utterance
-            messages.append({"role": "user", "content": idle_user_text or detector_transcript})
+            messages.append(
+                {
+                    "role": "user",
+                    "content": _govern_text(self, idle_user_text or detector_transcript),
+                }
+            )
         spec_meta = {
             "request_id": str(uuid.uuid4()),
             "sequence_id": -1,
@@ -7046,6 +7138,9 @@ class TaskManager(BaseManager):
     async def _synthesize(self, message):
         meta_info = message["meta_info"]
         text = message["data"]
+        if isinstance(text, str) and not meta_info.get("is_md5_hash"):
+            text, _dlp = _governance_of(self).inspect_output(text, meta_info)
+            message["data"] = text
         meta_info["type"] = "audio"
         meta_info["synthesizer_start_time"] = time.time()
         meta_info["tts_start_ms"] = round(
@@ -7317,6 +7412,10 @@ class TaskManager(BaseManager):
             logger.error(f"Error in processing message output: {str(e)}")
 
     async def _inject_and_run_llm(self, injected_message: str):
+        injected_message = self._govern_user_text(injected_message)
+        if self._governance_blocks_generation():
+            logger.info("governance blocked injected LLM turn run_id=%s", self.run_id)
+            return
         self.conversation_history.append_user(injected_message)
         meta_info = self.__get_updated_meta_info(
             {
@@ -7984,7 +8083,7 @@ class TaskManager(BaseManager):
                 if event.is_final and event.content:
                     logger.info(f"S2S caller: {event.content[:200]}")
                     self.user_spoke = True
-                    self.conversation_history.append_user(event.content)
+                    self.conversation_history.append_user(self._govern_user_text(event.content))
                     self.time_since_last_spoken_human_word = time.time()
                     # Cleared here rather than in the output loop: the prompt's audio is not
                     # distinguishable from any other turn, but the caller answering is.
@@ -8180,6 +8279,14 @@ class TaskManager(BaseManager):
             args = json.loads(event.arguments or "{}")
         except ValueError:
             args = {}
+
+        auth = _governance_of(self).authorize_tool(event.name, args, meta_info)
+        if not auth.allow:
+            denied = json.dumps({"status": "denied", "message": auth.reason})
+            await s2s.send_function_result(event.call_id, event.name, denied)
+            await s2s.commit_function_results()
+            logger.warning("governance denied s2s tool %s reason=%s run_id=%s", event.name, auth.reason, self.run_id)
+            return
 
         logger.info(f"S2S tool call: {event.name} args={args}")
         convert_to_request_log(
@@ -8587,6 +8694,7 @@ class TaskManager(BaseManager):
                     "conversation_time": time.time() - self.start_time,
                     "label_flow": self.label_flow,
                     "function_tool_api_call_details": copy.deepcopy(self.function_tool_api_call_details),
+                    "governance_receipts": _governance_of(self).receipts(),
                     "lid_detection_events": list(self.__snapshot_lid_events()),
                     "asr_lid_events": self._collect_flux_lid_events(),
                     "language_switch_events": list(self.language_switch_events),
