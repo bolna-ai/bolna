@@ -613,6 +613,8 @@ class TaskManager(BaseManager):
         # Debounce for overlapped finals: one regen per merged utterance, not per fragment.
         self.regen_settle_task = None
         self.regen_settle_payload = None
+        # Sequence this debounce episode means to replace; a regen cannot supersede it once spoken.
+        self.regen_settle_supersedes = None
         # Legacy-flow handoff state (populated by __inject_switch_language_tool
         # when the LLM-driven switch flow is NOT enabled for this call).
         self.switch_handoff_messages = {}
@@ -2529,6 +2531,7 @@ class TaskManager(BaseManager):
         if self.regen_settle_armed():
             self.regen_settle_task.cancel()
         self.regen_settle_payload = None
+        self.regen_settle_supersedes = None
         await self.tools["output"].handle_interruption()
         await self.tools["synthesizer"].handle_interruption()
 
@@ -4671,6 +4674,10 @@ class TaskManager(BaseManager):
         """(Re)arm the regeneration debounce with the latest merged turn."""
         if self.regen_settle_armed():
             self.regen_settle_task.cancel()
+        else:
+            # Episode start. Re-arms keep this anchor, so a burst of finals still measures
+            # against the response that was in flight, not the latest fragment's neighbour.
+            self.regen_settle_supersedes = (meta_info.get("sequence_id") or 0) - 1
         self.regen_settle_payload = (transcriber_message, meta_info)
         self.regen_settle_task = asyncio.create_task(self.__regen_after_settle())
         logger.info(
@@ -4688,6 +4695,18 @@ class TaskManager(BaseManager):
         if payload is None:
             return
         transcriber_message, meta_info = payload
+        superseded = self.regen_settle_supersedes
+        self.regen_settle_supersedes = None
+        # Its audio already shipped, so regenerating now appends a near-duplicate of a turn the
+        # caller has heard instead of replacing it. The merged text stays in history either way.
+        if superseded is not None and superseded in self._sent_audio_sequences:
+            logger.info(
+                "BOLNA_TRACE_TM regen_settle skipped seq=%s turn=%s superseded=%s reason=already_spoken",
+                meta_info.get("sequence_id"),
+                meta_info.get("turn_id"),
+                superseded,
+            )
+            return
         logger.info(
             "BOLNA_TRACE_TM regen_settle fired seq=%s turn=%s text=%r",
             meta_info.get("sequence_id"),
