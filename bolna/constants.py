@@ -57,6 +57,10 @@ LANGUAGE_SWITCH_SPEAKING_STALE_CAP_S = 2.5
 
 # Debounce for overlapped finals: one regenerate after this quiet window instead of per fragment.
 LLM_REGEN_SETTLE_S = 0.7
+
+# Above this, a turn is a restatement of the one just spoken and its audio is dropped. The incident
+# pair (BOLNA-2621) differed only by a leading "कृपया" and scores ~0.94; distinct answers sit far below.
+DUPLICATE_RESPONSE_SIMILARITY = 0.9
 # Class-name prefixes whose endpointing rules out an in-window final: they skip the debounce.
 REGEN_SETTLE_EXCLUDED_TRANSCRIBERS = ("deepgram",)
 

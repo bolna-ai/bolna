@@ -1,113 +1,112 @@
-"""A regen must not fire once the turn it meant to replace has already been spoken.
+"""A turn that only restates the one just spoken must not be played twice.
 
-Incident 9b14c2b2 (Spinny): the caller's utterance arrived as two finals. The first turn's reply was
-committed and marked ~2ms before the debounce was armed, so the regen replaced nothing and appended a
-near-identical second utterance — the opening line was spoken twice with no interrupting user turn.
+Incident 9b14c2b2 (Spinny): the caller's utterance arrived as two finals, the first turn's reply was
+dispatched, and the regen then produced the same sentence again — the opening line was spoken twice
+with no interrupting user turn. The gate is on the *output*: the regen still runs, so a second final
+that carries a real continuation is answered normally; only a near-identical restatement is dropped.
 """
-
-import asyncio
 
 import pytest
 
 from bolna.agent_manager.task_manager import TaskManager
+from bolna.constants import DUPLICATE_RESPONSE_SIMILARITY
+from bolna.helpers.utils import normalized_similarity
+
+# The two replies from the incident: identical but for a leading "कृपया".
+SPOKEN = "आपने अपने car loan को लेकर कोई concern raise किया था। बताइए, आपको किस बारे में help चाहिए?"
+REGEN = "आपने अपने car loan को लेकर कोई concern raise किया था। कृपया बताइए, आपको किस बारे में help चाहिए?"
 
 
 class _Stub:
-    """Only the attributes arm_regen_settle / __regen_after_settle touch."""
+    """Only the attributes _duplicates_last_spoken_turn touches."""
 
 
-class _FakeTask:
-    """Stands in for a live debounce timer so arm_regen_settle takes its re-arm branch."""
-
-    def cancel(self):
-        pass
-
-    def done(self):
-        return False
-
-
-def _manager(sent_audio_sequences=(), armed=False):
+def _manager(staged=None, last_spoken=None, blocked=()):
     tm = _Stub()
-    tm.regen_settle_task = _FakeTask() if armed else None
-    tm.regen_settle_payload = None
-    tm.regen_settle_supersedes = None
-    tm._sent_audio_sequences = set(sent_audio_sequences)
-    tm.kicked_off = []
-    tm.kickoff_llm_generation = lambda msg, meta: tm.kicked_off.append((msg, meta))
-    tm.regen_settle_armed = lambda: TaskManager.regen_settle_armed(tm)
-
-    async def _noop():
-        return None
-
-    # arm_regen_settle schedules this; the tests drive the real coroutine themselves.
-    tm._TaskManager__regen_after_settle = _noop
+    tm._pending_assistant_history = dict(staged or {})
+    tm._last_spoken_assistant = last_spoken
+    tm._blocked_sequences = set(blocked)
     return tm
 
 
-def _arm(tm, text, seq, turn):
-    TaskManager.arm_regen_settle(tm, text, {"sequence_id": seq, "turn_id": turn})
+def _staged(content, turn_id, message_category=None):
+    return {"content": content, "turn_id": turn_id, "response_uid": "r", "message_category": message_category}
 
 
-async def _fire(tm):
-    await TaskManager._TaskManager__regen_after_settle(tm)
+def _is_duplicate(tm, sequence_id, meta_info=None):
+    return TaskManager._duplicates_last_spoken_turn(tm, sequence_id, meta_info or {})
 
 
-@pytest.fixture(autouse=True)
-def _instant_settle(monkeypatch):
-    """Collapse the 0.7s window; real asyncio.sleep stays intact for everything else."""
-    monkeypatch.setattr("bolna.agent_manager.task_manager.LLM_REGEN_SETTLE_S", 0)
+def test_a_restatement_of_the_last_spoken_turn_is_dropped():
+    # The 9b14c2b2 shape: seq=1 was dispatched, seq=2 says the same thing again.
+    tm = _manager(staged={2: _staged(REGEN, turn_id=2)}, last_spoken=(1, SPOKEN))
+    assert _is_duplicate(tm, 2) is True
 
 
-async def test_regen_is_skipped_when_the_superseded_turn_was_already_spoken():
-    # The 9b14c2b2 shape: seq=1's audio shipped, then the second final armed a regen as seq=2.
-    tm = _manager(sent_audio_sequences={1})
-    _arm(tm, "हेलो। हाँ, बताइए।", seq=2, turn=2)
-    await _fire(tm)
-    assert tm.kicked_off == []
+def test_a_second_final_that_adds_new_content_is_still_answered():
+    """The reviewer's case: 'book me a slot' -> 'for tomorrow at 5'.
 
-
-async def test_regen_still_fires_when_nothing_has_been_spoken():
-    # The healthy supersede: the first turn is still in the pipeline, so replacing it is correct.
-    tm = _manager(sent_audio_sequences=set())
-    _arm(tm, "हेलो। हाँ, बताइए।", seq=2, turn=2)
-    await _fire(tm)
-    assert [m for m, _ in tm.kicked_off] == ["हेलो। हाँ, बताइए।"]
-
-
-async def test_an_unrelated_earlier_turn_does_not_block_the_regen():
-    # seq=1 was spoken turns ago; this episode supersedes seq=3, which has not been spoken.
-    tm = _manager(sent_audio_sequences={1})
-    _arm(tm, "merged", seq=4, turn=4)
-    await _fire(tm)
-    assert len(tm.kicked_off) == 1
-
-
-async def test_a_burst_of_finals_keeps_the_original_supersede_anchor():
-    """Re-arms must measure against the response actually in flight, not the newest neighbour.
-
-    Without the episode anchor the guard would test seq=3 (never spoken) and the duplicate would
-    still reach the caller.
+    The regen runs either way; this asserts its reply is not mistaken for a restatement, so the
+    caller gets an answer instead of silence on a completed request.
     """
-    tm = _manager(sent_audio_sequences={1})
-    _arm(tm, "हेलो।", seq=2, turn=2)
-    assert tm.regen_settle_supersedes == 1
-    tm.regen_settle_task = _FakeTask()  # episode still armed
-    _arm(tm, "हेलो। हाँ,", seq=3, turn=3)
-    _arm(tm, "हेलो। हाँ, बताइए।", seq=4, turn=4)
-    assert tm.regen_settle_supersedes == 1
-    await _fire(tm)
-    assert tm.kicked_off == []
+    tm = _manager(
+        staged={2: _staged("Sure — booked for tomorrow at 5pm. Anything else?", turn_id=2)},
+        last_spoken=(1, "Sure, for when-"),
+    )
+    assert _is_duplicate(tm, 2) is False
 
 
-async def test_the_anchor_is_cleared_after_firing():
-    tm = _manager(sent_audio_sequences=set())
-    _arm(tm, "merged", seq=2, turn=2)
-    await _fire(tm)
-    assert tm.regen_settle_supersedes is None
+def test_two_different_answers_are_not_confused():
+    # Same sentence frame, different branch address — must both be spoken.
+    tm = _manager(
+        staged={2: _staged("Andheri mein hamara studio Four Bungalows, Mada mein hai.", turn_id=2)},
+        last_spoken=(1, "Surat mein hamara studio Rushabh Char Rasta, Adaajan mein hai."),
+    )
+    assert _is_duplicate(tm, 2) is False
 
 
-async def test_no_payload_is_a_no_op():
-    tm = _manager()
-    tm.regen_settle_payload = None
-    await _fire(tm)
-    assert tm.kicked_off == []
+def test_a_later_repeat_is_left_alone():
+    # Several turns on, the agent repeating itself is deliberate, not a regen artefact.
+    tm = _manager(staged={9: _staged(REGEN, turn_id=9)}, last_spoken=(1, SPOKEN))
+    assert _is_duplicate(tm, 9) is False
+
+
+def test_special_message_categories_are_never_suppressed():
+    # "are you still there?" is asked repeatedly by design.
+    online = "Hello, क्या आप अभी भी लाइन पर हैं?"
+    tm = _manager(staged={2: _staged(online, turn_id=2)}, last_spoken=(1, online))
+    assert _is_duplicate(tm, 2, {"message_category": "is_user_online_message"}) is False
+
+
+def test_later_chunks_of_a_blocked_turn_stay_blocked():
+    """Once ruled duplicate the staged entry is dropped, so without this the next chunk would send."""
+    tm = _manager(staged={}, last_spoken=(1, SPOKEN), blocked={2})
+    assert _is_duplicate(tm, 2) is True
+
+
+def test_background_audio_and_missing_sequences_are_ignored():
+    tm = _manager(staged={2: _staged(REGEN, turn_id=2)}, last_spoken=(1, SPOKEN))
+    assert _is_duplicate(tm, -1) is False
+    assert _is_duplicate(tm, None) is False
+
+
+def test_nothing_spoken_yet_is_not_a_duplicate():
+    tm = _manager(staged={1: _staged(SPOKEN, turn_id=1)}, last_spoken=None)
+    assert _is_duplicate(tm, 1) is False
+
+
+def test_the_incident_pair_clears_the_threshold_and_distinct_answers_do_not():
+    """Pins the threshold against real text, so tuning it can't silently regress either case."""
+    assert normalized_similarity(SPOKEN, REGEN) >= DUPLICATE_RESPONSE_SIMILARITY
+    assert (
+        normalized_similarity(
+            "Surat mein hamara studio Rushabh Char Rasta, Adaajan mein hai.",
+            "Andheri mein hamara studio Four Bungalows, Mada mein hai.",
+        )
+        < DUPLICATE_RESPONSE_SIMILARITY
+    )
+
+
+@pytest.mark.parametrize("first,second", [("", "text"), ("text", ""), (None, "text")])
+def test_similarity_is_zero_when_either_side_is_empty(first, second):
+    assert normalized_similarity(first, second) == 0.0
