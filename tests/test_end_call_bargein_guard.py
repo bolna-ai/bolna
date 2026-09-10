@@ -7,6 +7,7 @@ never set, and the agent loops goodbyes until the caller drops.
 """
 
 import asyncio
+import pytest
 import inspect
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -48,6 +49,41 @@ def test_processes_input_during_normal_conversation():
 def test_interruptible_window_lets_input_through_despite_hangup():
     # Toggle on: a barge-in during the goodbye must reach the interruption path.
     assert _ignore(hangup_triggered=True, end_call_in_progress=True, interruptible_window=True) is False
+
+
+@pytest.mark.parametrize(
+    "hangup,end_call,transfer,ended,window,expected",
+    [
+        # nothing underway: input always flows, window is irrelevant
+        (False, False, False, False, False, False),
+        (False, False, False, False, True, False),
+        (False, False, False, True, False, False),
+        # hangup underway, no window: the pre-existing lockout
+        (True, False, False, False, False, True),
+        (False, True, False, False, False, True),
+        (True, True, False, False, False, True),
+        # interruptible goodbye: the only combination that lets speech through mid-hangup
+        (True, True, False, False, True, False),
+        (True, False, False, False, True, False),
+        # a committed disconnect always wins over the window
+        (True, True, False, True, True, True),
+        # a transfer is never interruptible, even with the window open
+        (False, False, True, False, False, True),
+        (False, False, True, False, True, True),
+        (True, True, True, False, True, True),
+    ],
+)
+def test_ignore_transcriber_input_truth_table(hangup, end_call, transfer, ended, window, expected):
+    assert (
+        _ignore(
+            hangup_triggered=hangup,
+            end_call_in_progress=end_call,
+            has_transfer=transfer,
+            conversation_ended=ended,
+            interruptible_window=window,
+        )
+        is expected
+    )
 
 
 def test_ended_conversation_ignores_input_even_in_window():

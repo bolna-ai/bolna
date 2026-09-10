@@ -4207,10 +4207,14 @@ class TaskManager(BaseManager):
         self.interruption_manager.on_user_speech_ended(update_utterance_time=False)
 
     def _should_ignore_transcriber_input(self) -> bool:
-        if not (self.hangup_triggered or self._end_call_in_progress or self.has_transfer):
+        # A transfer is never interruptible: the caller keeps talking to the transferred leg and
+        # fresh turns here re-emit transfer_call.
+        if self.has_transfer:
+            return True
+        if not (self.hangup_triggered or self._end_call_in_progress):
             return False
-        # A hangup or transfer is underway. Only an open interruptible-goodbye window lets speech
-        # through, and only until the disconnect commits.
+        # A hangup is underway. Only an open interruptible-goodbye window lets speech through,
+        # and only until the disconnect commits.
         return self.conversation_ended or self._hangup_interruptible_window is not True
 
     def _cancel_pending_hangup(self):
