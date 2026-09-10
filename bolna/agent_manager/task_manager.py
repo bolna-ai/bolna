@@ -4207,12 +4207,11 @@ class TaskManager(BaseManager):
         self.interruption_manager.on_user_speech_ended(update_utterance_time=False)
 
     def _should_ignore_transcriber_input(self) -> bool:
-        if self.conversation_ended:
-            return True
-        # Interruptible goodbye: let speech through so a barge-in can cancel the hangup.
-        if self._hangup_interruptible_window:
+        if not (self.hangup_triggered or self._end_call_in_progress or self.has_transfer):
             return False
-        return self.hangup_triggered or self._end_call_in_progress or self.has_transfer
+        # A hangup or transfer is underway. Only an open interruptible-goodbye window lets speech
+        # through, and only until the disconnect commits.
+        return self.conversation_ended or self._hangup_interruptible_window is not True
 
     def _cancel_pending_hangup(self):
         """Abort the interruptible end_call goodbye so the conversation resumes."""
@@ -5057,7 +5056,7 @@ class TaskManager(BaseManager):
                         # Defer interim barge-ins while a tool call is in flight (same as speech_final path).
                         # The interruptible goodbye is exempt: its tool result is already recorded, so
                         # letting the barge-in through cannot duplicate the tool call.
-                        if self.function_call_in_flight and not self._hangup_interruptible_window:
+                        if self.function_call_in_flight and self._hangup_interruptible_window is not True:
                             logger.info(f"Tool call in flight; deferring interim barge-in {transcript_content!r}")
                             continue
 
@@ -5236,7 +5235,7 @@ class TaskManager(BaseManager):
                         # Starting a new turn here cancels the in-flight tool call before its result is
                         # recorded, so the LLM re-emits the same tool and the side effect runs twice.
                         # The interruptible goodbye is exempt: its result is already recorded.
-                        if self.function_call_in_flight and not self._hangup_interruptible_window:
+                        if self.function_call_in_flight and self._hangup_interruptible_window is not True:
                             logger.info(f"Tool call in flight; deferring barge-in transcript {transcript_content!r}")
                             self.interruption_manager.on_user_speech_ended(update_utterance_time=False)
                             continue
