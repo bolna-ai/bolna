@@ -4255,6 +4255,9 @@ class TaskManager(BaseManager):
         self._hangup_processing = False
         self._end_of_conversation_in_progress = False
         self.hangup_detail = None
+        # __execute_function_call cleared this on entry and the end_call branch returns without
+        # restoring it, so a resumed call would never ask "are you still there" again.
+        self.check_if_user_online = self.conversation_config.get("check_if_user_online", True)
         logger.info("Interruptible hangup: barge-in cancelled pending hangup, resuming conversation")
 
     def __log_detached_hangup_exception(self, task: asyncio.Task) -> None:
@@ -4275,6 +4278,11 @@ class TaskManager(BaseManager):
 
         self._hangup_processing = True
         self.hangup_triggered = True
+        # An actuated hangup is no longer interruptible. Without this, the static-message branch
+        # below calls __cleanup_downstream_tasks, which would see a window still open from a
+        # concurrent end_call goodbye and reset the very flags this teardown needs, leaving the
+        # goodbye playing with nothing left to commit the disconnect.
+        self._hangup_interruptible_window = False
         if self.__is_s2s():
             # The model has already spoken the goodbye by now, prompted by the end_call result
             # or _hangup_after_goodbye, and there is no synthesizer to render one here anyway.

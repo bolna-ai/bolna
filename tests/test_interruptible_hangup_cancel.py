@@ -16,6 +16,8 @@ def _target(llm_task=None, hangup_task=None):
         _hangup_interruptible_window=True,
         _hangup_cancelled=False,
         conversation_ended=False,
+        conversation_config={"check_if_user_online": True},
+        check_if_user_online=False,
         llm_task=llm_task,
         _end_call_hangup_task=hangup_task,
         hangup_triggered=True,
@@ -86,6 +88,14 @@ async def test_does_not_mark_cancelled_once_conversation_ended():
     assert tm._hangup_cancelled is False
 
 
+async def test_restores_the_user_online_check_on_resume():
+    # __execute_function_call clears it on entry and the end_call branch returns without restoring,
+    # so without this a resumed call never asks "are you still there" again.
+    tm = _target()
+    TaskManager._cancel_pending_hangup(tm)
+    assert tm.check_if_user_online is True
+
+
 async def test_noop_once_conversation_ended():
     # A committed disconnect must survive an admitted-late barge-in: the hangup task keeps running.
     hangup_task = asyncio.ensure_future(_forever())
@@ -116,7 +126,10 @@ def _cleanup_target():
     """A TaskManager with just enough wired up to run the real __cleanup_downstream_tasks."""
     tm = TaskManager.__new__(TaskManager)
     tm._hangup_interruptible_window = True
+    tm._hangup_cancelled = False
     tm.conversation_ended = False
+    tm.conversation_config = {"check_if_user_online": True}
+    tm.check_if_user_online = False
     tm._end_call_hangup_task = None
     tm.hangup_triggered = True
     tm._end_call_in_progress = True
