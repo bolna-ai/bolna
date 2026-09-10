@@ -194,6 +194,13 @@ class TestSourceGuards:
             "end_call branch must open the interruptible window when the toggle is on"
         )
 
+    def test_end_call_branch_bails_out_when_cancelled(self):
+        src = inspect.getsource(TaskManager._TaskManager__execute_function_call)
+        assert "_hangup_cancelled" in src, (
+            "end_call branch must re-check _hangup_cancelled after its playout wait, or a barge-in "
+            "that rescued the call still gets disconnected"
+        )
+
     def test_cleanup_cancels_pending_hangup(self):
         src = inspect.getsource(TaskManager._TaskManager__cleanup_downstream_tasks)
         assert "_cancel_pending_hangup" in src, (

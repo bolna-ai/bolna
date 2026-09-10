@@ -14,6 +14,7 @@ from bolna.agent_manager.task_manager import TaskManager
 def _target(llm_task=None, hangup_task=None):
     return SimpleNamespace(
         _hangup_interruptible_window=True,
+        _hangup_cancelled=False,
         conversation_ended=False,
         llm_task=llm_task,
         _end_call_hangup_task=hangup_task,
@@ -65,6 +66,24 @@ async def test_cancels_goodbye_and_detached_hangup_tasks():
             pass
     assert llm_task.cancelled()
     assert hangup_task.cancelled()
+
+
+async def test_marks_the_hangup_cancelled_so_end_call_bails_out():
+    """Task cancellation alone does not stop the end_call branch: handle_interruption clears the
+    mark dict, so its playout wait can return normally and arm the teardown anyway. The branch
+    re-checks this flag, so setting it is what actually keeps the rescued call alive.
+    """
+    tm = _target()
+    TaskManager._cancel_pending_hangup(tm)
+    assert tm._hangup_cancelled is True
+
+
+async def test_does_not_mark_cancelled_once_conversation_ended():
+    # The disconnect already committed, so the end_call branch must not be told to bail out.
+    tm = _target()
+    tm.conversation_ended = True
+    TaskManager._cancel_pending_hangup(tm)
+    assert tm._hangup_cancelled is False
 
 
 async def test_noop_once_conversation_ended():

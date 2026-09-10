@@ -400,6 +400,7 @@ class TaskManager(BaseManager):
         self._end_call_in_progress = False
         self.interruptible_hangup_message = False
         self._hangup_interruptible_window = False
+        self._hangup_cancelled = False
         self._end_call_hangup_task = None
         self._turn_audio_flushed = asyncio.Event()
         self._turn_audio_flushed.set()
@@ -3182,6 +3183,7 @@ class TaskManager(BaseManager):
             # Lock out barge-in before the goodbye is generated, otherwise an interruption
             # cancels the turn task and the disconnect never runs. The toggle opens a window instead.
             self._end_call_in_progress = True
+            self._hangup_cancelled = False
             if self.interruptible_hangup_message:
                 self._hangup_interruptible_window = True
             reason = resp.get("reason", "")
@@ -3234,6 +3236,14 @@ class TaskManager(BaseManager):
 
             # Goodbye played out; close the window so the disconnect commits.
             self._hangup_interruptible_window = False
+
+            # A barge-in during the goodbye already reset the hangup and resumed the call. Cancelling
+            # this task is not enough to stop us here: handle_interruption clears the mark dict, so
+            # the playout wait above can return normally instead of raising, and we would arm the
+            # teardown and disconnect a call the caller just rescued.
+            if self._hangup_cancelled:
+                logger.info("end_call: hangup was cancelled by a barge-in, not arming the teardown")
+                return
 
             self.hangup_detail = HangupReason.END_CALL_TOOL
             self.call_hangup_message_config = None
@@ -4224,6 +4234,9 @@ class TaskManager(BaseManager):
         # mid stop_handler, and cancelling it would leave the caller in dead air.
         if self.conversation_ended:
             return
+        # Authoritative for the end_call branch, which re-checks this after its playout wait.
+        # Task cancellation alone is not reliable there (see the note at that check).
+        self._hangup_cancelled = True
 
         current = asyncio.current_task()
         if self.llm_task is not None and self.llm_task is not current and not self.llm_task.done():
