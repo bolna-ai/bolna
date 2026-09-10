@@ -1,7 +1,5 @@
-"""When interruptible_hangup_message is on, a barge-in during the goodbye cancels the pending
-hangup and resumes the call. _cancel_pending_hangup is the synchronous reset that makes the
-resume safe: it stops the goodbye's llm task and the detached hangup task before either can
-commit the disconnect, and clears every hangup flag.
+"""_cancel_pending_hangup is the synchronous reset that lets a barge-in during the end_call
+goodbye keep the call alive instead of disconnecting.
 """
 
 import asyncio
@@ -71,17 +69,13 @@ async def test_cancels_goodbye_and_detached_hangup_tasks():
 
 
 async def test_marks_the_hangup_cancelled_so_end_call_bails_out():
-    """Task cancellation alone does not stop the end_call branch: handle_interruption clears the
-    mark dict, so its playout wait can return normally and arm the teardown anyway. The branch
-    re-checks this flag, so setting it is what actually keeps the rescued call alive.
-    """
+    # The end_call branch re-checks this; task cancellation alone does not stop it.
     tm = _target()
     TaskManager._cancel_pending_hangup(tm)
     assert tm._hangup_cancelled is True
 
 
 async def test_does_not_mark_cancelled_once_conversation_ended():
-    # The disconnect already committed, so the end_call branch must not be told to bail out.
     tm = _target()
     tm.conversation_ended = True
     TaskManager._cancel_pending_hangup(tm)
@@ -89,15 +83,12 @@ async def test_does_not_mark_cancelled_once_conversation_ended():
 
 
 async def test_restores_the_user_online_check_on_resume():
-    # __execute_function_call clears it on entry and the end_call branch returns without restoring,
-    # so without this a resumed call never asks "are you still there" again.
     tm = _target()
     TaskManager._cancel_pending_hangup(tm)
     assert tm.check_if_user_online is True
 
 
 async def test_noop_once_conversation_ended():
-    # A committed disconnect must survive an admitted-late barge-in: the hangup task keeps running.
     hangup_task = asyncio.ensure_future(_forever())
     await asyncio.sleep(0)
     tm = _target(hangup_task=hangup_task)
@@ -114,8 +105,6 @@ async def test_noop_once_conversation_ended():
 
 
 async def test_never_cancels_the_current_task():
-    # _cancel_pending_hangup runs on the transcriber task's stack; it must not cancel a task it
-    # is itself executing inside, or the resume unwinds before it finishes.
     current = asyncio.current_task()
     tm = _target(llm_task=current, hangup_task=current)
     TaskManager._cancel_pending_hangup(tm)
@@ -174,15 +163,12 @@ def _cleanup_target():
 
 
 async def test_cleanup_cancels_goodbye_before_it_can_rearm_the_disconnect():
-    """The keystone race: a barge-in reaches __cleanup_downstream_tasks while the goodbye task is
-    parked in its playout wait. The goodbye must be cancelled before this cleanup's first await,
-    or it resumes during those awaits and arms the disconnect after we chose to keep the call.
-    """
+    # The goodbye must be cancelled before this cleanup's first await, or it resumes and
+    # arms the disconnect anyway.
     tm = _cleanup_target()
     tm._rearmed = False
 
     async def _goodbye_that_would_rearm():
-        # Stand-in for the inline wait_for_current_message resuming and arming the detached hangup.
         for _ in range(10):
             await asyncio.sleep(0)
         tm._rearmed = True
@@ -192,7 +178,6 @@ async def test_cleanup_cancels_goodbye_before_it_can_rearm_the_disconnect():
     await asyncio.sleep(0)  # let the goodbye task start and park
 
     await TaskManager._TaskManager__cleanup_downstream_tasks(tm)
-    # Gathering would run the goodbye to completion (setting _rearmed) had it not been cancelled.
     await asyncio.gather(goodbye, return_exceptions=True)
 
     assert goodbye.cancelled()

@@ -2530,8 +2530,7 @@ class TaskManager(BaseManager):
         current_ts = time.time()
         logger.info(f"Cleaning up downstream task")
         start_time = time.time()
-        # Reset before the first await below, so the goodbye task cannot resume and commit the
-        # disconnect after this barge-in.
+        # Reset before the first await, or the goodbye task resumes and commits the disconnect.
         if self._hangup_interruptible_window:
             self._cancel_pending_hangup()
         self._cancel_in_flight_llm_response()
@@ -3234,13 +3233,10 @@ class TaskManager(BaseManager):
                 self._enter_hangup_state()
                 await self.wait_for_current_message()
 
-            # Goodbye played out; close the window so the disconnect commits.
             self._hangup_interruptible_window = False
 
-            # A barge-in during the goodbye already reset the hangup and resumed the call. Cancelling
-            # this task is not enough to stop us here: handle_interruption clears the mark dict, so
-            # the playout wait above can return normally instead of raising, and we would arm the
-            # teardown and disconnect a call the caller just rescued.
+            # Cancelling this task is not enough: handle_interruption clears the mark dict, so the
+            # playout wait above returns normally and we would disconnect a call just rescued.
             if self._hangup_cancelled:
                 logger.info("end_call: hangup was cancelled by a barge-in, not arming the teardown")
                 return
@@ -4217,25 +4213,19 @@ class TaskManager(BaseManager):
         self.interruption_manager.on_user_speech_ended(update_utterance_time=False)
 
     def _should_ignore_transcriber_input(self) -> bool:
-        # A transfer is never interruptible: the caller keeps talking to the transferred leg and
-        # fresh turns here re-emit transfer_call.
+        # A transfer is never interruptible: fresh turns here re-emit transfer_call.
         if self.has_transfer:
             return True
         if not (self.hangup_triggered or self._end_call_in_progress):
             return False
-        # A hangup is underway. Only an open interruptible-goodbye window lets speech through,
-        # and only until the disconnect commits.
         return self.conversation_ended or self._hangup_interruptible_window is not True
 
     def _cancel_pending_hangup(self):
         """Abort the interruptible end_call goodbye so the conversation resumes."""
         self._hangup_interruptible_window = False
-        # A committed disconnect must never be cancelled: past this point the hangup task may be
-        # mid stop_handler, and cancelling it would leave the caller in dead air.
+        # Never cancel a committed disconnect: the hangup task may already be in stop_handler.
         if self.conversation_ended:
             return
-        # Authoritative for the end_call branch, which re-checks this after its playout wait.
-        # Task cancellation alone is not reliable there (see the note at that check).
         self._hangup_cancelled = True
 
         current = asyncio.current_task()
@@ -4255,8 +4245,7 @@ class TaskManager(BaseManager):
         self._hangup_processing = False
         self._end_of_conversation_in_progress = False
         self.hangup_detail = None
-        # __execute_function_call cleared this on entry and the end_call branch returns without
-        # restoring it, so a resumed call would never ask "are you still there" again.
+        # Cleared on entry to __execute_function_call, whose end_call branch never restores it.
         self.check_if_user_online = self.conversation_config.get("check_if_user_online", True)
         logger.info("Interruptible hangup: barge-in cancelled pending hangup, resuming conversation")
 
@@ -4278,10 +4267,8 @@ class TaskManager(BaseManager):
 
         self._hangup_processing = True
         self.hangup_triggered = True
-        # An actuated hangup is no longer interruptible. Without this, the static-message branch
-        # below calls __cleanup_downstream_tasks, which would see a window still open from a
-        # concurrent end_call goodbye and reset the very flags this teardown needs, leaving the
-        # goodbye playing with nothing left to commit the disconnect.
+        # An actuated hangup is no longer interruptible, or __cleanup_downstream_tasks below
+        # resets the very flags this teardown needs to commit the disconnect.
         self._hangup_interruptible_window = False
         if self.__is_s2s():
             # The model has already spoken the goodbye by now, prompted by the end_call result
@@ -5079,8 +5066,7 @@ class TaskManager(BaseManager):
                             continue
 
                         # Defer interim barge-ins while a tool call is in flight (same as speech_final path).
-                        # The interruptible goodbye is exempt: its tool result is already recorded, so
-                        # letting the barge-in through cannot duplicate the tool call.
+                        # The interruptible goodbye is exempt: its tool result is already recorded.
                         if self.function_call_in_flight and self._hangup_interruptible_window is not True:
                             logger.info(f"Tool call in flight; deferring interim barge-in {transcript_content!r}")
                             continue
