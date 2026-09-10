@@ -398,6 +398,9 @@ class TaskManager(BaseManager):
         self.hangup_message_queued = False
         self._end_of_conversation_in_progress = False
         self._end_call_in_progress = False
+        self.interruptible_hangup_message = False
+        self._hangup_interruptible_window = False
+        self._end_call_hangup_task = None
         self._turn_audio_flushed = asyncio.Event()
         self._turn_audio_flushed.set()
         self.hangup_mark_event_timeout = 10
@@ -728,6 +731,8 @@ class TaskManager(BaseManager):
                         self.call_hangup_message_config = update_prompt_with_context(
                             self.call_hangup_message_config, self.context_data
                         )
+                self.interruptible_hangup_message = self.conversation_config.get("interruptible_hangup_message", False)
+
                 self.check_for_completion_llm = os.getenv("CHECK_FOR_COMPLETION_LLM")
 
                 cancellation_prompt = self.conversation_config.get("call_cancellation_prompt")
@@ -2524,6 +2529,10 @@ class TaskManager(BaseManager):
         current_ts = time.time()
         logger.info(f"Cleaning up downstream task")
         start_time = time.time()
+        # Reset before the first await below, so the goodbye task cannot resume and commit the
+        # disconnect after this barge-in.
+        if self._hangup_interruptible_window:
+            self._cancel_pending_hangup()
         self._cancel_in_flight_llm_response()
         # The overlapped-final path re-arms after this cleanup, so the newest turn wins.
         if self.regen_settle_armed():
@@ -3171,8 +3180,10 @@ class TaskManager(BaseManager):
 
         if called_fun.startswith(END_CALL_FUNCTION_PREFIX):
             # Lock out barge-in before the goodbye is generated, otherwise an interruption
-            # cancels the turn task and the disconnect never runs.
+            # cancels the turn task and the disconnect never runs. The toggle opens a window instead.
             self._end_call_in_progress = True
+            if self.interruptible_hangup_message:
+                self._hangup_interruptible_window = True
             reason = resp.get("reason", "")
 
             logger.info(f"end_call tool invoked, reason: {reason}")
@@ -3220,6 +3231,9 @@ class TaskManager(BaseManager):
                 )
                 self._enter_hangup_state()
                 await self.wait_for_current_message()
+
+            # Goodbye played out; close the window so the disconnect commits.
+            self._hangup_interruptible_window = False
 
             self.hangup_detail = HangupReason.END_CALL_TOOL
             self.call_hangup_message_config = None
@@ -4193,7 +4207,39 @@ class TaskManager(BaseManager):
         self.interruption_manager.on_user_speech_ended(update_utterance_time=False)
 
     def _should_ignore_transcriber_input(self) -> bool:
+        if self.conversation_ended:
+            return True
+        # Interruptible goodbye: let speech through so a barge-in can cancel the hangup.
+        if self._hangup_interruptible_window:
+            return False
         return self.hangup_triggered or self._end_call_in_progress or self.has_transfer
+
+    def _cancel_pending_hangup(self):
+        """Abort the interruptible end_call goodbye so the conversation resumes."""
+        self._hangup_interruptible_window = False
+        # A committed disconnect must never be cancelled: past this point the hangup task may be
+        # mid stop_handler, and cancelling it would leave the caller in dead air.
+        if self.conversation_ended:
+            return
+
+        current = asyncio.current_task()
+        if self.llm_task is not None and self.llm_task is not current and not self.llm_task.done():
+            self.llm_task.cancel()
+            self.llm_task = None
+        hangup_task = self._end_call_hangup_task
+        self._end_call_hangup_task = None
+        if hangup_task is not None and hangup_task is not current and not hangup_task.done():
+            hangup_task.cancel()
+
+        self.hangup_triggered = False
+        self._end_call_in_progress = False
+        self.hangup_message_queued = False
+        self.hangup_triggered_at = None
+        self.hangup_decision_at = None
+        self._hangup_processing = False
+        self._end_of_conversation_in_progress = False
+        self.hangup_detail = None
+        logger.info("Interruptible hangup: barge-in cancelled pending hangup, resuming conversation")
 
     def __log_detached_hangup_exception(self, task: asyncio.Task) -> None:
         """A bare create_task with no done callback drops the exception along with the task, so
@@ -5009,7 +5055,9 @@ class TaskManager(BaseManager):
                             continue
 
                         # Defer interim barge-ins while a tool call is in flight (same as speech_final path).
-                        if self.function_call_in_flight:
+                        # The interruptible goodbye is exempt: its tool result is already recorded, so
+                        # letting the barge-in through cannot duplicate the tool call.
+                        if self.function_call_in_flight and not self._hangup_interruptible_window:
                             logger.info(f"Tool call in flight; deferring interim barge-in {transcript_content!r}")
                             continue
 
@@ -5187,7 +5235,8 @@ class TaskManager(BaseManager):
 
                         # Starting a new turn here cancels the in-flight tool call before its result is
                         # recorded, so the LLM re-emits the same tool and the side effect runs twice.
-                        if self.function_call_in_flight:
+                        # The interruptible goodbye is exempt: its result is already recorded.
+                        if self.function_call_in_flight and not self._hangup_interruptible_window:
                             logger.info(f"Tool call in flight; deferring barge-in transcript {transcript_content!r}")
                             self.interruption_manager.on_user_speech_ended(update_utterance_time=False)
                             continue
