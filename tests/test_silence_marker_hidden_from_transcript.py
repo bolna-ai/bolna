@@ -65,3 +65,65 @@ async def test_the_injection_marks_the_turn():
     assert row["content"] == MARKER
     assert row["exclude_from_transcript"] is True
     assert MARKER not in format_messages(tm.conversation_history.messages)
+
+
+# ── The two visibility flags are independent and point opposite ways ──────────────────────
+#
+#   exclude_from_llm         dropped by get_copy(),      kept by format_messages()
+#   exclude_from_transcript  kept by get_copy(),         dropped by format_messages()
+#
+# The online-check ("are you still there?") relies on the first, the silence nudge on the
+# second. Collapsing them — e.g. teaching format_messages to skip exclude_from_llm too —
+# would silently delete a line the caller actually heard.
+
+ONLINE_CHECK = "Hello, are you still there?"
+
+
+def _history_with_both_flags():
+    h = ConversationHistory()
+    h.append_user("I need help with my order")
+    h.append_assistant(ONLINE_CHECK, exclude_from_llm=True)
+    h.append_user(MARKER, exclude_from_transcript=True)
+    h.append_assistant("Sure, take your time.")
+    return h
+
+
+def test_an_llm_excluded_turn_still_appears_in_the_transcript():
+    """The caller heard the online check, so removing it would misreport the call."""
+    transcript = format_messages(_history_with_both_flags().messages)
+    assert ONLINE_CHECK in transcript
+    assert MARKER not in transcript
+
+
+def test_an_llm_excluded_turn_is_withheld_from_the_llm():
+    contents = [m.get("content") for m in _history_with_both_flags().get_copy()]
+    assert ONLINE_CHECK not in contents
+    assert MARKER in contents  # the nudge is the one thing that must survive to the LLM
+
+
+def test_the_flag_hides_an_assistant_row_too():
+    """The filter keys off the flag, not the role, so it must not be user-only by accident."""
+    h = ConversationHistory()
+    h.append_assistant("internal bookkeeping", exclude_from_transcript=True)
+    h.append_user("hello")
+    transcript = format_messages(h.messages)
+    assert "internal bookkeeping" not in transcript
+    assert "user: hello" in transcript
+
+
+def test_consecutive_nudges_all_stay_hidden():
+    h = ConversationHistory()
+    h.append_assistant("Are you there?")
+    h.append_user("[silence] User was silent for 12.0 seconds", exclude_from_transcript=True)
+    h.append_user("[silence] User was silent for 24.0 seconds", exclude_from_transcript=True)
+    h.append_user("sorry, I am back")
+    transcript = format_messages(h.messages)
+    assert "[silence]" not in transcript
+    assert transcript.count("user:") == 1
+
+
+def test_the_filter_survives_the_other_format_messages_modes():
+    """use_system_prompt / include_tools take different branches inside the loop."""
+    h = _history_with_marker()
+    for kwargs in ({"use_system_prompt": True}, {"include_tools": True}):
+        assert MARKER not in format_messages(h.messages, **kwargs)
