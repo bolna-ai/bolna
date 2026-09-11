@@ -686,6 +686,7 @@ class ConversationConfig(BaseModel):
     )
     interruption_backoff_period: Optional[int] = 100
     hangup_after_LLMCall: Optional[bool] = False
+    interruptible_hangup_message: Optional[bool] = False
     call_cancellation_prompt: Optional[str] = None
     backchanneling: Optional[bool] = False
     backchanneling_message_gap: Optional[int] = 5
