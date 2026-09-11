@@ -402,6 +402,10 @@ class TaskManager(BaseManager):
         self.hangup_message_queued = False
         self._end_of_conversation_in_progress = False
         self._end_call_in_progress = False
+        self.interruptible_hangup_message = False
+        self._hangup_interruptible_window = False
+        self._hangup_cancelled = False
+        self._end_call_hangup_task = None
         self._turn_audio_flushed = asyncio.Event()
         self._turn_audio_flushed.set()
         self.hangup_mark_event_timeout = 10
@@ -732,6 +736,8 @@ class TaskManager(BaseManager):
                         self.call_hangup_message_config = update_prompt_with_context(
                             self.call_hangup_message_config, self.context_data
                         )
+                self.interruptible_hangup_message = self.conversation_config.get("interruptible_hangup_message", False)
+
                 self.check_for_completion_llm = os.getenv("CHECK_FOR_COMPLETION_LLM")
 
                 cancellation_prompt = self.conversation_config.get("call_cancellation_prompt")
@@ -2528,6 +2534,9 @@ class TaskManager(BaseManager):
         current_ts = time.time()
         logger.info(f"Cleaning up downstream task")
         start_time = time.time()
+        # Reset before the first await, or the goodbye task resumes and commits the disconnect.
+        if self._hangup_interruptible_window:
+            self._cancel_pending_hangup()
         self._cancel_in_flight_llm_response()
         # The overlapped-final path re-arms after this cleanup, so the newest turn wins.
         if self.regen_settle_armed():
@@ -3175,8 +3184,11 @@ class TaskManager(BaseManager):
 
         if called_fun.startswith(END_CALL_FUNCTION_PREFIX):
             # Lock out barge-in before the goodbye is generated, otherwise an interruption
-            # cancels the turn task and the disconnect never runs.
+            # cancels the turn task and the disconnect never runs. The toggle opens a window instead.
             self._end_call_in_progress = True
+            self._hangup_cancelled = False
+            if self.interruptible_hangup_message:
+                self._hangup_interruptible_window = True
             reason = resp.get("reason", "")
 
             logger.info(f"end_call tool invoked, reason: {reason}")
@@ -3199,31 +3211,40 @@ class TaskManager(BaseManager):
                 tool_result, meta_info, None, "function_call", direction="response", run_id=self.run_id
             )
 
-            if textual_response:
-                # The LLM emitted the goodbye in the same response as the tool call;
-                # it has already been streamed to TTS. Skip the follow-up LLM to avoid
-                # generating a duplicate goodbye.
-                self._enter_hangup_state()
-                await self.wait_for_current_message()
-            else:
-                # No goodbye text in this turn. Feed the tool result back so the LLM
-                # generates one.
-                messages = self.conversation_history.get_copy()
-                convert_to_request_log(
-                    format_messages(messages, True),
-                    meta_info,
-                    self.llm_config["model"],
-                    "llm",
-                    direction="request",
-                    run_id=self.run_id,
-                )
+            try:
+                if textual_response:
+                    # The LLM emitted the goodbye in the same response as the tool call;
+                    # it has already been streamed to TTS. Skip the follow-up LLM to avoid
+                    # generating a duplicate goodbye.
+                    self._enter_hangup_state()
+                    await self.wait_for_current_message()
+                else:
+                    # No goodbye text in this turn. Feed the tool result back so the LLM
+                    # generates one.
+                    messages = self.conversation_history.get_copy()
+                    convert_to_request_log(
+                        format_messages(messages, True),
+                        meta_info,
+                        self.llm_config["model"],
+                        "llm",
+                        direction="request",
+                        run_id=self.run_id,
+                    )
 
-                followup_meta_info = self._spawn_followup_meta_info(meta_info)
-                await self.__do_llm_generation(
-                    messages, followup_meta_info, next_step, should_trigger_function_call=False
-                )
-                self._enter_hangup_state()
-                await self.wait_for_current_message()
+                    followup_meta_info = self._spawn_followup_meta_info(meta_info)
+                    await self.__do_llm_generation(
+                        messages, followup_meta_info, next_step, should_trigger_function_call=False
+                    )
+                    self._enter_hangup_state()
+                    await self.wait_for_current_message()
+            finally:
+                self._hangup_interruptible_window = False
+
+            # Cancelling this task is not enough: handle_interruption clears the mark dict, so the
+            # playout wait above returns normally and we would disconnect a call just rescued.
+            if self._hangup_cancelled:
+                logger.info("end_call: hangup was cancelled by a barge-in, not arming the teardown")
+                return
 
             self.hangup_detail = HangupReason.END_CALL_TOOL
             self.call_hangup_message_config = None
@@ -4197,7 +4218,41 @@ class TaskManager(BaseManager):
         self.interruption_manager.on_user_speech_ended(update_utterance_time=False)
 
     def _should_ignore_transcriber_input(self) -> bool:
-        return self.hangup_triggered or self._end_call_in_progress or self.has_transfer
+        # A transfer is never interruptible: fresh turns here re-emit transfer_call.
+        if self.has_transfer:
+            return True
+        if not (self.hangup_triggered or self._end_call_in_progress):
+            return False
+        return self.conversation_ended or self._hangup_interruptible_window is not True
+
+    def _cancel_pending_hangup(self):
+        """Abort the interruptible end_call goodbye so the conversation resumes."""
+        self._hangup_interruptible_window = False
+        # Never cancel a committed disconnect: the hangup task may already be in stop_handler.
+        if self.conversation_ended:
+            return
+        self._hangup_cancelled = True
+
+        current = asyncio.current_task()
+        if self.llm_task is not None and self.llm_task is not current and not self.llm_task.done():
+            self.llm_task.cancel()
+            self.llm_task = None
+        hangup_task = self._end_call_hangup_task
+        self._end_call_hangup_task = None
+        if hangup_task is not None and hangup_task is not current and not hangup_task.done():
+            hangup_task.cancel()
+
+        self.hangup_triggered = False
+        self._end_call_in_progress = False
+        self.hangup_message_queued = False
+        self.hangup_triggered_at = None
+        self.hangup_decision_at = None
+        self._hangup_processing = False
+        self._end_of_conversation_in_progress = False
+        self.hangup_detail = None
+        # Cleared on entry to __execute_function_call, whose end_call branch never restores it.
+        self.check_if_user_online = self.conversation_config.get("check_if_user_online", True)
+        logger.info("Interruptible hangup: barge-in cancelled pending hangup, resuming conversation")
 
     def __log_detached_hangup_exception(self, task: asyncio.Task) -> None:
         """A bare create_task with no done callback drops the exception along with the task, so
@@ -4217,6 +4272,9 @@ class TaskManager(BaseManager):
 
         self._hangup_processing = True
         self.hangup_triggered = True
+        # An actuated hangup is no longer interruptible, or __cleanup_downstream_tasks below
+        # resets the very flags this teardown needs to commit the disconnect.
+        self._hangup_interruptible_window = False
         if self.__is_s2s():
             # The model has already spoken the goodbye by now, prompted by the end_call result
             # or _hangup_after_goodbye, and there is no synthesizer to render one here anyway.
@@ -5048,7 +5106,8 @@ class TaskManager(BaseManager):
                             continue
 
                         # Defer interim barge-ins while a tool call is in flight (same as speech_final path).
-                        if self.function_call_in_flight:
+                        # The interruptible goodbye is exempt: its tool result is already recorded.
+                        if self.function_call_in_flight and self._hangup_interruptible_window is not True:
                             logger.info(f"Tool call in flight; deferring interim barge-in {transcript_content!r}")
                             continue
 
@@ -5226,7 +5285,8 @@ class TaskManager(BaseManager):
 
                         # Starting a new turn here cancels the in-flight tool call before its result is
                         # recorded, so the LLM re-emits the same tool and the side effect runs twice.
-                        if self.function_call_in_flight:
+                        # The interruptible goodbye is exempt: its result is already recorded.
+                        if self.function_call_in_flight and self._hangup_interruptible_window is not True:
                             logger.info(f"Tool call in flight; deferring barge-in transcript {transcript_content!r}")
                             self.interruption_manager.on_user_speech_ended(update_utterance_time=False)
                             continue

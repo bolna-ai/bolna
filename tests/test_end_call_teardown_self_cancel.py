@@ -89,6 +89,7 @@ async def test_end_call_hangup_teardown_is_not_awaited_inline():
     tm.hangup_decision_at = None
     tm.interruption_manager = MagicMock()
     tm.wait_for_current_message = AsyncMock()
+    tm.interruptible_hangup_message = False
 
     hangup_started = asyncio.Event()
 
@@ -121,6 +122,7 @@ async def test_end_call_hangup_failure_is_logged_not_swallowed(caplog):
     tm.hangup_decision_at = None
     tm.interruption_manager = MagicMock()
     tm.wait_for_current_message = AsyncMock()
+    tm.interruptible_hangup_message = False
 
     async def _boom():
         raise RuntimeError("teardown exploded")
