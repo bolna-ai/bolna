@@ -127,3 +127,54 @@ def test_the_filter_survives_the_other_format_messages_modes():
     h = _history_with_marker()
     for kwargs in ({"use_system_prompt": True}, {"include_tools": True}):
         assert MARKER not in format_messages(h.messages, **kwargs)
+
+
+# ── The merge branch must not launder the marker into caller speech ───────────────────────
+#
+# _inject_and_run_llm sets response_in_pipeline, so a caller final arriving while the nudge is
+# still generating takes the overlapped branch in _handle_transcriber_output, which calls
+# pop_and_merge_user. That helper returns a bare string, so every kwarg on the popped row —
+# including the flag — was being discarded and the marker re-appended as a caller turn.
+
+
+def test_merging_onto_a_nudge_drops_the_marker_instead_of_concatenating_it():
+    h = ConversationHistory()
+    h.append_assistant("Are you still there?")
+    h.append_user(MARKER, exclude_from_transcript=True)
+
+    merged = h.pop_and_merge_user("Hello.")
+
+    assert merged == "Hello."
+    assert "[silence]" not in merged
+
+
+def test_merging_onto_a_real_caller_turn_still_concatenates():
+    """The split-utterance case the branch exists for must keep working."""
+    h = ConversationHistory()
+    h.append_user("my number is")
+
+    assert h.pop_and_merge_user("21 65") == "my number is 21 65"
+
+
+def test_the_nudge_row_leaves_history_on_merge():
+    h = ConversationHistory()
+    h.append_assistant("Are you still there?")
+    h.append_user(MARKER, exclude_from_transcript=True)
+
+    h.pop_and_merge_user("Hello.")
+
+    assert all(MARKER not in (m.get("content") or "") for m in h.messages)
+
+
+def test_the_merged_turn_reaches_neither_transcript_nor_llm_carrying_the_marker():
+    """End to end: what the caller said stands alone, in both views."""
+    h = ConversationHistory()
+    h.append_assistant("Are you still there?")
+    h.append_user(MARKER, exclude_from_transcript=True)
+
+    h.append_user(h.pop_and_merge_user("Hello."), asr_turn_id=7)
+
+    transcript = format_messages(h.messages)
+    assert "user: Hello." in transcript
+    assert "[silence]" not in transcript
+    assert all("[silence]" not in (m.get("content") or "") for m in h.get_copy())
