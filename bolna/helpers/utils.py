@@ -412,6 +412,9 @@ def is_s2s_agent(task):
 def format_messages(messages, use_system_prompt=False, include_tools=False):
     formatted_string = ""
     for message in messages:
+        # Control tokens the engine injects for the LLM; the caller never said them.
+        if message.get("exclude_from_transcript"):
+            continue
         role = message["role"]
         content = message.get("content")
         tool_calls = message.get("tool_calls")
