@@ -221,21 +221,36 @@ class OpenAiLLM(OpenAICompatibleLLM):
 
         # http2=False: cancelled h2 requests leak streams until the connection pins at 100 (barge-in)
         http_client = get_shared_http_client(base_url=kwargs.get("base_url"), http2=False)
+        max_retries = kwargs.get("max_retries", 2)
 
         if kwargs.get("provider", "openai") == "custom":
             base_url = kwargs.get("base_url")
             api_key = kwargs.get("llm_key", None)
-            self.async_client = AsyncOpenAI(base_url=base_url, api_key=api_key, http_client=http_client)
+            self.async_client = AsyncOpenAI(
+                base_url=base_url,
+                api_key=api_key,
+                http_client=http_client,
+                max_retries=max_retries,
+            )
         else:
             llm_key = kwargs.get("llm_key", os.getenv("OPENAI_API_KEY"))
             base_url = kwargs.get("base_url")
             if base_url:
-                self.async_client = AsyncOpenAI(base_url=base_url, api_key=llm_key, http_client=http_client)
+                self.async_client = AsyncOpenAI(
+                    base_url=base_url,
+                    api_key=llm_key,
+                    http_client=http_client,
+                    max_retries=max_retries,
+                )
             else:
-                self.async_client = AsyncOpenAI(api_key=llm_key, http_client=http_client)
+                self.async_client = AsyncOpenAI(
+                    api_key=llm_key,
+                    http_client=http_client,
+                    max_retries=max_retries,
+                )
             api_key = llm_key
         self.llm_host = urlparse(base_url).netloc if base_url else None
-        # Only a customer endpoint is guarded; platform ones keep the SDK's connection retries.
+        # Only a customer endpoint is guarded; platform endpoints keep standard SDK behavior.
         self._base_url = base_url if kwargs.get("provider", "openai") == "custom" else None
         self._base_url_validated = False
         self.assistant_id = kwargs.get("assistant_id", None)
