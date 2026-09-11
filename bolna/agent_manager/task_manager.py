@@ -3207,33 +3207,34 @@ class TaskManager(BaseManager):
                 tool_result, meta_info, None, "function_call", direction="response", run_id=self.run_id
             )
 
-            if textual_response:
-                # The LLM emitted the goodbye in the same response as the tool call;
-                # it has already been streamed to TTS. Skip the follow-up LLM to avoid
-                # generating a duplicate goodbye.
-                self._enter_hangup_state()
-                await self.wait_for_current_message()
-            else:
-                # No goodbye text in this turn. Feed the tool result back so the LLM
-                # generates one.
-                messages = self.conversation_history.get_copy()
-                convert_to_request_log(
-                    format_messages(messages, True),
-                    meta_info,
-                    self.llm_config["model"],
-                    "llm",
-                    direction="request",
-                    run_id=self.run_id,
-                )
+            try:
+                if textual_response:
+                    # The LLM emitted the goodbye in the same response as the tool call;
+                    # it has already been streamed to TTS. Skip the follow-up LLM to avoid
+                    # generating a duplicate goodbye.
+                    self._enter_hangup_state()
+                    await self.wait_for_current_message()
+                else:
+                    # No goodbye text in this turn. Feed the tool result back so the LLM
+                    # generates one.
+                    messages = self.conversation_history.get_copy()
+                    convert_to_request_log(
+                        format_messages(messages, True),
+                        meta_info,
+                        self.llm_config["model"],
+                        "llm",
+                        direction="request",
+                        run_id=self.run_id,
+                    )
 
-                followup_meta_info = self._spawn_followup_meta_info(meta_info)
-                await self.__do_llm_generation(
-                    messages, followup_meta_info, next_step, should_trigger_function_call=False
-                )
-                self._enter_hangup_state()
-                await self.wait_for_current_message()
-
-            self._hangup_interruptible_window = False
+                    followup_meta_info = self._spawn_followup_meta_info(meta_info)
+                    await self.__do_llm_generation(
+                        messages, followup_meta_info, next_step, should_trigger_function_call=False
+                    )
+                    self._enter_hangup_state()
+                    await self.wait_for_current_message()
+            finally:
+                self._hangup_interruptible_window = False
 
             # Cancelling this task is not enough: handle_interruption clears the mark dict, so the
             # playout wait above returns normally and we would disconnect a call just rescued.

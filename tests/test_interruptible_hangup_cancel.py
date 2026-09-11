@@ -3,6 +3,7 @@ goodbye keep the call alive instead of disconnecting.
 """
 
 import asyncio
+import pytest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -109,6 +110,41 @@ async def test_never_cancels_the_current_task():
     tm = _target(llm_task=current, hangup_task=current)
     TaskManager._cancel_pending_hangup(tm)
     assert not current.cancelled()
+
+
+async def test_window_closes_even_when_the_goodbye_raises(monkeypatch):
+    # A latched-open window disables the function_call_in_flight defer for the rest of the call.
+    monkeypatch.setattr("bolna.agent_manager.task_manager.convert_to_request_log", lambda *a, **k: None)
+
+    tm = TaskManager.__new__(TaskManager)
+    tm.check_if_user_online = True
+    tm.interruptible_hangup_message = True
+    tm._hangup_interruptible_window = False
+    tm._hangup_cancelled = False
+    tm._end_call_in_progress = False
+    tm.run_id = "run"
+    tm.conversation_history = MagicMock()
+    tm._enter_hangup_state = MagicMock()
+    tm.wait_for_current_message = AsyncMock(side_effect=RuntimeError("tts died mid-goodbye"))
+
+    with pytest.raises(RuntimeError):
+        await TaskManager._TaskManager__execute_function_call(
+            tm,
+            url=None,
+            method=None,
+            param=None,
+            api_token=None,
+            headers=None,
+            model_args=None,
+            meta_info={"turn_id": 1, "response_uid": "u"},
+            next_step="synthesizer",
+            called_fun="end_call",
+            textual_response="Goodbye!",
+            model_response=None,
+            tool_call_id="tc",
+        )
+
+    assert tm._hangup_interruptible_window is False
 
 
 def _cleanup_target():
