@@ -25,6 +25,7 @@ from bolna.constants import (
     CACHED_SINGLE_MARK_CATEGORIES,
     DEFAULT_USER_ONLINE_MESSAGE,
     DEFAULT_USER_ONLINE_MESSAGE_TRIGGER_DURATION,
+    DUPLICATE_RESPONSE_SIMILARITY,
     FILLER_DICT,
     DEFAULT_LANGUAGE_CODE,
     DEFAULT_TIMEZONE,
@@ -90,6 +91,7 @@ from bolna.helpers.utils import (
     is_valid_md5,
     get_required_input_types,
     format_messages,
+    normalized_similarity,
     safe_log_text,
     get_prompt_responses,
     resample,
@@ -323,6 +325,8 @@ class TaskManager(BaseManager):
         self._blocked_sequences: set = set()  # dedup: only record first block per sequence
         self._sent_audio_sequences: set = set()
         self._committed_assistant_sequences: set = set()
+        # (turn_id, text) of the turn whose audio was last dispatched; the duplicate gate reads it.
+        self._last_spoken_assistant = None
 
         self.task_config = task
 
@@ -4633,6 +4637,40 @@ class TaskManager(BaseManager):
         if sequence_id in self._sent_audio_sequences and sequence_id not in self._blocked_sequences:
             self._commit_staged_assistant_history(sequence_id)
 
+    def _duplicates_last_spoken_turn(self, sequence_id, meta_info):
+        """True when this turn only restates the one the caller just heard.
+
+        A regenerated turn can arrive after its predecessor was already dispatched; speaking both
+        plays the same sentence twice. Only the adjacent turn counts — a later echo is the agent
+        legitimately repeating itself — and only plain responses, so a welcome or online-check
+        message is never suppressed.
+        """
+        if sequence_id is None or sequence_id == -1:
+            return False
+        # Later chunks of a turn already ruled duplicate must not slip through and play a fragment.
+        if sequence_id in self._blocked_sequences:
+            return True
+        if meta_info.get("message_category"):
+            return False
+        staged = self._pending_assistant_history.get(sequence_id)
+        if not staged or staged.get("message_category") or not self._last_spoken_assistant:
+            return False
+        previous_turn_id, previous_text = self._last_spoken_assistant
+        turn_id = staged.get("turn_id")
+        if turn_id is None or previous_turn_id is None or turn_id - previous_turn_id > 1:
+            return False
+        similarity = normalized_similarity(staged["content"], previous_text)
+        if similarity < DUPLICATE_RESPONSE_SIMILARITY:
+            return False
+        logger.info(
+            "BOLNA_TRACE_TM duplicate_of_last_spoken seq=%s turn=%s previous_turn=%s similarity=%.2f",
+            sequence_id,
+            turn_id,
+            previous_turn_id,
+            similarity,
+        )
+        return True
+
     def _commit_staged_assistant_history(self, sequence_id):
         if sequence_id in self._committed_assistant_sequences:
             return
@@ -4641,6 +4679,7 @@ class TaskManager(BaseManager):
             return
 
         self._committed_assistant_sequences.add(sequence_id)
+        self._last_spoken_assistant = (staged["turn_id"], staged["content"])
         self.conversation_history.append_assistant(
             staged["content"],
             turn_id=staged["turn_id"],
@@ -7236,6 +7275,13 @@ class TaskManager(BaseManager):
                     # No-op on every non-multilingual call: the gate is None and short-circuits.
                     if status == "SEND" and not is_hangup_message and self.__lid_playback_gate_holds(sequence_id):
                         status = "WAIT"
+                    # A regenerated turn can restate what the caller just heard; speak it once.
+                    if (
+                        status == "SEND"
+                        and not is_hangup_message
+                        and self._duplicates_last_spoken_turn(sequence_id, message["meta_info"])
+                    ):
+                        status = "BLOCK"
 
                     if status == "SEND":
                         # Audio approved - send it
