@@ -74,6 +74,8 @@ class GraphAgent(BaseAgent):
         self.llm_key = self.config.get("llm_key") or os.getenv("OPENAI_API_KEY")
         self.base_url = self.config.get("base_url")
         self._base_url_validated = False
+        self._routing_base_url = None
+        self._routing_base_url_validated = False
 
         self.node_history = [self.current_node_id]
         self.current_node_entry_index = 0
@@ -292,6 +294,7 @@ class GraphAgent(BaseAgent):
             routing_kwargs["overflow_llm"] = self.config["overflow_llm"]
 
         self._routing_reasoning_effort_used = routing_kwargs.get("reasoning_effort")
+        self._routing_base_url = routing_kwargs.get("base_url")
         self.routing_llm = llm_class(**routing_kwargs)
         logger.info(f"Routing initialized with {self.routing_provider} ({self.routing_model})")
 
@@ -870,6 +873,11 @@ class GraphAgent(BaseAgent):
             user_message = history[-1].get("content", "") if history else ""
             if user_message:
                 messages.append({"role": "user", "content": user_message})
+
+        # The conversation base_url is guarded in generate(); routing carries its own.
+        if self._routing_base_url and not self._routing_base_url_validated:
+            await guard_llm_base_url(self._routing_base_url)
+            self._routing_base_url_validated = True
 
         try:
             result = await self.routing_llm.route(messages, tools)
