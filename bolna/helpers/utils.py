@@ -517,12 +517,15 @@ def has_placeholders(s):
 
 
 def infer_type(value):
-    if isinstance(value, int):
+    # bool must be checked before int: in Python bool is a subclass of int, so
+    # isinstance(True, int) is True. Ordering int first made the bool branch
+    # unreachable and inferred every boolean as int.
+    if isinstance(value, bool):
+        return (bool, ...)
+    elif isinstance(value, int):
         return (int, ...)
     elif isinstance(value, float):
         return (float, ...)
-    elif isinstance(value, bool):
-        return (bool, ...)
     elif isinstance(value, list):
         return (list, ...)
     elif isinstance(value, dict):
