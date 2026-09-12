@@ -133,6 +133,38 @@ class ConversationHistory:
         )
         self.append_assistant(None, tool_calls=tool_calls, turn_id=turn_id)
 
+    def drop_tool_call(self, tool_call_id: str) -> bool:
+        """Erase a tool call and its result, keeping anything the agent actually said.
+
+        A cancelled end_call otherwise leaves "Call is ending now" in history, and the model reads
+        that as already having hung up: it repeats the goodbye and never re-invokes the tool.
+        """
+        if not tool_call_id:
+            return False
+
+        def call_id(call):
+            return call.get("id") if isinstance(call, dict) else getattr(call, "id", None)
+
+        removed = False
+        for messages in (self._messages, self._interim):
+            messages[:] = [m for m in messages if m.get("tool_call_id") != tool_call_id]
+            for index in range(len(messages) - 1, -1, -1):
+                message = messages[index]
+                calls = message.get("tool_calls")
+                if not calls:
+                    continue
+                kept = [c for c in calls if call_id(c) != tool_call_id]
+                if len(kept) == len(calls):
+                    continue
+                removed = True
+                if kept:
+                    message["tool_calls"] = kept
+                elif message.get("content"):
+                    message.pop("tool_calls", None)
+                else:
+                    messages.pop(index)
+        return removed
+
     def update_system_prompt(self, content: str):
         if self._messages and self._messages[0].get("role") == ChatRole.SYSTEM:
             self._messages[0]["content"] = content
