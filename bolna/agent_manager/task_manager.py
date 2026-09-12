@@ -405,6 +405,7 @@ class TaskManager(BaseManager):
         self.interruptible_hangup_message = False
         self._hangup_interruptible_window = False
         self._hangup_cancelled = False
+        self._end_call_tool_call_id = None
         self._end_call_hangup_task = None
         self._turn_audio_flushed = asyncio.Event()
         self._turn_audio_flushed.set()
@@ -3187,6 +3188,7 @@ class TaskManager(BaseManager):
             # cancels the turn task and the disconnect never runs. The toggle opens a window instead.
             self._end_call_in_progress = True
             self._hangup_cancelled = False
+            self._end_call_tool_call_id = resp.get("tool_call_id", "")
             if self.interruptible_hangup_message:
                 self._hangup_interruptible_window = True
             reason = resp.get("reason", "")
@@ -4250,6 +4252,9 @@ class TaskManager(BaseManager):
         self._hangup_processing = False
         self._end_of_conversation_in_progress = False
         self.hangup_detail = None
+        # The call did not end, so the tool result claiming it did must not survive the cancel.
+        self.conversation_history.drop_tool_call(self._end_call_tool_call_id)
+        self._end_call_tool_call_id = None
         # Cleared on entry to __execute_function_call, whose end_call branch never restores it.
         self.check_if_user_online = self.conversation_config.get("check_if_user_online", True)
         logger.info("Interruptible hangup: barge-in cancelled pending hangup, resuming conversation")
