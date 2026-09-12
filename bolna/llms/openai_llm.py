@@ -1,6 +1,7 @@
 import os
 import asyncio
 import json
+import copy
 from contextlib import suppress
 import re
 import time
@@ -42,7 +43,7 @@ class OpenAIWSConnection:
 
     - Eager connect at init, ready before first LLM call
     - Auto-reconnect on connection drop or before 60-min server limit
-    - Sequential: one in-flight response at a time (API constraint)
+    - Sequential: one in-flight response at a time in this client
     """
 
     WS_URL = "wss://api.openai.com/v1/responses"
@@ -190,6 +191,19 @@ class OpenAiLLM(OpenAICompatibleLLM):
     ):
         super().__init__(max_tokens, buffer_size)
         self.model = model
+        # Keep these opt-ins separate: shared model_args also feed routing and other transports.
+        self.prompt_cache_key = kwargs.get("prompt_cache_key")
+        self.omit_request_parameters = kwargs.get("omit_request_parameters") or ()
+        self.responses_store = kwargs.get("responses_store")
+        self.responses_history = kwargs.get("responses_history", "chained")
+        self.responses_omit_parameters = kwargs.get("responses_omit_parameters") or ()
+        self.strict_websocket = kwargs.get("strict_websocket", False)
+        if self.strict_websocket and (
+            not kwargs.get("use_responses_api")
+            or kwargs.get("provider", "openai") != "openai"
+            or kwargs.get("base_url")
+        ):
+            raise ValueError("strict_websocket requires native OpenAI Responses without a custom base_url")
 
         self.custom_tools = kwargs.get("api_tools", None)
         self.language = language
@@ -269,6 +283,8 @@ class OpenAiLLM(OpenAICompatibleLLM):
     async def generate_stream(
         self, messages, synthesize=True, request_json=False, meta_info=None, tool_choice=None, tools=None
     ):
+        if self.strict_websocket and (not self.use_responses_api or self._ws_transport is None):
+            raise ValueError("strict_websocket requires an available WebSocket transport")
         await self._ensure_base_url_allowed()
         if self.use_responses_api:
             if self._ws_transport:
@@ -311,6 +327,14 @@ class OpenAiLLM(OpenAICompatibleLLM):
                 model_args["tools"] = _tools
                 model_args["tool_choice"] = tool_choice or "auto"
                 model_args["parallel_tool_calls"] = False
+
+        # Apply omissions after defaults, on this request only; core messages, tools and caps stay intact.
+        for key in ("temperature", "stop", "verbosity"):
+            if key in self.omit_request_parameters:
+                model_args.pop(key, None)
+        # A caller-supplied workload key enables cache routing without changing unconfigured requests.
+        if self.prompt_cache_key is not None:
+            model_args["prompt_cache_key"] = self.prompt_cache_key
 
         answer, buffer = "", ""
         tools = model_args.get("tools", [])
@@ -499,6 +523,8 @@ class OpenAiLLM(OpenAICompatibleLLM):
         self.started_streaming = False
 
     async def generate(self, messages, request_json=False, ret_metadata=False, meta_info=None):
+        if self.strict_websocket:
+            raise ValueError("strict_websocket requires generate_stream, not HTTP generate")
         await self._ensure_base_url_allowed()
         if self.use_responses_api:
             return await self._generate_responses(messages, request_json, ret_metadata, meta_info)
@@ -577,8 +603,7 @@ class OpenAiLLM(OpenAICompatibleLLM):
         if not messages:
             raise ValueError("No messages provided")
 
-        # store=True activates server-side prompt-cache (cached_tokens in usage)
-        # on top of the WS connection-local cache. Storage is free per OpenAI.
+        # The shared builder applies storage/history opt-ins independently of prompt caching.
         create_params, responses_tools = self._build_responses_create_kwargs(
             messages, meta_info, request_json, tool_choice, store=True, tools=tools
         )
@@ -605,15 +630,49 @@ class OpenAiLLM(OpenAICompatibleLLM):
         incomplete = False
         incomplete_reason = None
 
+        # Strict callers need the original terminal usage, including zero/missing fields,
+        # even when the attempt raises. These timings start before transport setup, not at response.created.
+        attempt = None
+        if self.strict_websocket:
+            attempt = {
+                "transport": "websocket",
+                "status": "started",
+                "response_id": None,
+                "model": None,
+                "service_tier": None,
+                "usage": None,
+                "first_visible_text_ms": None,
+                "duration_ms": None,
+            }
+            if isinstance(meta_info, dict):
+                meta_info.setdefault("responses_ws_attempts", []).append(attempt)
+
         try:
             async for evt in self._ws_transport.stream_response(create_params):
                 now = now_ms()
                 evt_type = evt.get("type", "")
 
+                if attempt is not None:
+                    resp = evt.get("response") or {}
+                    for key, source in (("response_id", "id"), ("model", "model"), ("service_tier", "service_tier")):
+                        if source in resp:
+                            attempt[key] = resp[source]
+                    if evt_type == ResponseStreamEvent.OUTPUT_TEXT_DELTA and evt.get("delta"):
+                        if attempt["first_visible_text_ms"] is None:
+                            attempt["first_visible_text_ms"] = now - start_time
+                    if evt_type in OpenAIWSConnection.RESPONSE_TERMINAL_EVENTS:
+                        attempt["status"] = evt_type.removeprefix("response.")
+                        attempt["usage"] = copy.deepcopy(resp.get("usage"))
+                        attempt["incomplete_details"] = copy.deepcopy(resp.get("incomplete_details"))
+
                 if evt_type == ResponseStreamEvent.ERROR:
                     error_info = evt.get("error", {})
                     error_code = error_info.get("code", "")
-                    if error_code == "previous_response_not_found" and self.previous_response_id:
+                    if (
+                        not self.strict_websocket
+                        and error_code == "previous_response_not_found"
+                        and self.previous_response_id
+                    ):
                         logger.warning(f"WS previous_response_id not found, retrying with full history")
                         async for chunk in self._retry_full_history(
                             messages, synthesize, request_json, meta_info, tool_choice, tools
@@ -624,7 +683,8 @@ class OpenAiLLM(OpenAICompatibleLLM):
                     # "No tool output found ...") gets one full-history retry; nothing yielded yet.
                     # Coded errors like context_length_exceeded raise — a retry can't fix those.
                     if (
-                        self.previous_response_id
+                        not self.strict_websocket
+                        and self.previous_response_id
                         and error_info.get("type") == "invalid_request_error"
                         and not error_code
                         and error_info.get("param") == "input"
@@ -676,6 +736,8 @@ class OpenAiLLM(OpenAICompatibleLLM):
                     incomplete_reason = ((evt.get("response") or {}).get("incomplete_details") or {}).get("reason")
                     logger.warning(f"WS Responses API stream incomplete, reason={incomplete_reason}")
                     self.invalidate_response_chain()
+                    if self.strict_websocket:
+                        raise APIError(message=f"WS response incomplete: {incomplete_reason}", request=None, body=None)
                     break
 
                 if not first_token_time and evt_type in (
@@ -749,11 +811,24 @@ class OpenAiLLM(OpenAICompatibleLLM):
                     response_usage = resp.get("usage")
                     break
 
+            if attempt is not None and attempt["status"] != "completed":
+                raise APIError(message="WebSocket ended without response.completed", request=None, body=None)
+
         except APIError:
+            if attempt is not None:
+                if attempt["status"] == "started":
+                    attempt["status"] = "error"
+                self.invalidate_response_chain()
             raise
         except asyncio.CancelledError:
+            if attempt is not None:
+                attempt["status"] = "cancelled"
             raise
         except Exception as e:
+            if self.strict_websocket:
+                attempt["status"] = "error"
+                self.invalidate_response_chain()
+                raise
             logger.error(f"WS streaming error: {e}, falling back to HTTP SSE")
             self.invalidate_response_chain()
             async for chunk in self._generate_stream_responses(
@@ -761,6 +836,11 @@ class OpenAiLLM(OpenAICompatibleLLM):
             ):
                 yield chunk
             return
+        finally:
+            if attempt is not None:
+                attempt["duration_ms"] = now_ms() - start_time
+                if attempt["status"] == "started":
+                    attempt["status"] = "cancelled"
 
         # Nothing was yielded yet, so a retry cannot duplicate speech.
         if incomplete and not answer and not func_call_args:
@@ -796,10 +876,10 @@ class OpenAiLLM(OpenAICompatibleLLM):
                 fc_chunk.input_tokens = response_usage.get("input_tokens")
                 fc_chunk.output_tokens = response_usage.get("output_tokens")
                 _od = response_usage.get("output_tokens_details") or {}
-                if _od.get("reasoning_tokens"):
+                if _od.get("reasoning_tokens") is not None:
                     fc_chunk.reasoning_tokens = _od["reasoning_tokens"]
                 _id = response_usage.get("input_tokens_details") or {}
-                if _id.get("cached_tokens"):
+                if _id.get("cached_tokens") is not None:
                     fc_chunk.cached_tokens = _id["cached_tokens"]
             yield fc_chunk
 
@@ -808,10 +888,10 @@ class OpenAiLLM(OpenAICompatibleLLM):
             usage_kwargs["input_tokens"] = response_usage.get("input_tokens")
             usage_kwargs["output_tokens"] = response_usage.get("output_tokens")
             output_details = response_usage.get("output_tokens_details", {}) or {}
-            if output_details.get("reasoning_tokens"):
+            if output_details.get("reasoning_tokens") is not None:
                 usage_kwargs["reasoning_tokens"] = output_details["reasoning_tokens"]
             input_details = response_usage.get("input_tokens_details", {}) or {}
-            if input_details.get("cached_tokens"):
+            if input_details.get("cached_tokens") is not None:
                 usage_kwargs["cached_tokens"] = input_details["cached_tokens"]
 
         reasoning_content = "".join(reasoning_summary_parts) if reasoning_summary_parts else None

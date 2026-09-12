@@ -61,6 +61,10 @@ class OpenAICompatibleLLM(BaseLLM):
     # A reasoning summary streams ahead of the answer text, so it is opt-in: requesting one costs
     # time to first spoken token on a live call. Set from config by subclasses; None omits it.
     reasoning_summary = None
+    responses_store = None
+    responses_history = "chained"
+    responses_omit_parameters = ()
+    strict_websocket = False
 
     @property
     def request_log_model(self):
@@ -294,7 +298,8 @@ class OpenAICompatibleLLM(BaseLLM):
         hint = self._interruption_hint
         self._interruption_hint = None
 
-        chained = bool(self.previous_response_id)
+        # Keep the response ID for cancellation, but never use hidden chain state in full-history mode.
+        chained = self.responses_history == "chained" and bool(self.previous_response_id)
         if chained and self._pending_call_ids:
             completed = {m.get("tool_call_id") for m in messages if m.get("role") == ChatRole.TOOL}
             if not self._pending_call_ids.issubset(completed):
@@ -517,7 +522,29 @@ class OpenAICompatibleLLM(BaseLLM):
         if request_json:
             create_kwargs.setdefault("text", {})["format"] = {"type": "json_object"}
 
+        self._apply_responses_request_controls(create_kwargs)
         return create_kwargs, responses_tools
+
+    def _apply_responses_request_controls(self, create_kwargs):
+        """Apply opt-ins after defaults without changing tools, caps or shared model_args."""
+        if self.responses_store is not None:
+            create_kwargs["store"] = self.responses_store
+        if self.responses_history == "full":
+            create_kwargs["previous_response_id"] = None
+            create_kwargs.setdefault("text", {}).setdefault("format", {"type": "text"})
+        cache_key = getattr(self, "prompt_cache_key", None)
+        if cache_key is not None:
+            create_kwargs["prompt_cache_key"] = cache_key
+        omissions = getattr(self, "omit_request_parameters", ())
+        if "temperature" in omissions:
+            create_kwargs.pop("temperature", None)
+        if "verbosity" in omissions and "text" in create_kwargs:
+            create_kwargs["text"].pop("verbosity", None)
+            if not create_kwargs["text"]:
+                create_kwargs.pop("text")
+        for key in self.responses_omit_parameters:
+            if key in {"truncation", "include"}:
+                create_kwargs.pop(key, None)
 
     async def _generate_stream_responses(
         self,
@@ -529,6 +556,8 @@ class OpenAICompatibleLLM(BaseLLM):
         tools=None,
         retry_on_empty=True,
     ):
+        if self.strict_websocket:
+            raise ValueError("strict_websocket requires WebSocket generate_stream; HTTP fallback is disabled")
         if not messages:
             raise ValueError("No messages provided")
 
@@ -771,6 +800,7 @@ class OpenAICompatibleLLM(BaseLLM):
         if request_json:
             create_kwargs.setdefault("text", {})["format"] = {"type": "json_object"}
 
+        self._apply_responses_request_controls(create_kwargs)
         llm_host = getattr(self, "llm_host", None)
 
         try:

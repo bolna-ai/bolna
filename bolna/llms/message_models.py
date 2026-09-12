@@ -94,8 +94,8 @@ class MessageFormatAdapter:
     def chat_to_responses_input(messages: list[dict]) -> tuple[str, list[dict]]:
         """Chat Completions messages -> (instructions, Responses API input items).
 
-        System is emitted as a role=system input item, not as `instructions`,
-        because the instructions field breaks prompt-cache hashing.
+        System remains a role=system input item so the caller's visible history
+        retains its role order. Response storage and prompt caching are separate controls.
         """
         instructions = ""
         input_items = []

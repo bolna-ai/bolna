@@ -333,9 +333,29 @@ class Llm(BaseModel):
 
 
 class SimpleLlmAgent(Llm):
+    # Unspecified keeps automatic selection; explicit False must survive schema serialization.
+    use_responses_api: Optional[bool] = None
+    # Persist an optional workload cache key instead of silently dropping it from agent config.
+    prompt_cache_key: Optional[str] = Field(default=None, min_length=1, strict=True)
+    # Some endpoints reject these defaults. Do not allow callers to omit messages, tools or caps.
+    omit_request_parameters: List[Literal["temperature", "stop", "verbosity"]] = Field(default_factory=list)
+    # Storage and history are independent: a caller may replay visible history without storing responses.
+    responses_store: Optional[bool] = Field(default=None, strict=True)
+    responses_history: Literal["chained", "full"] = "chained"
+    # Keep endpoint defaults unless the caller explicitly requests an exact Responses projection.
+    responses_omit_parameters: List[Literal["truncation", "include"]] = Field(default_factory=list)
+    # Evaluation callers must be able to reject fallback/replay instead of silently changing transport.
+    strict_websocket: bool = Field(default=False, strict=True)
     agent_flow_type: Optional[str] = "streaming"  # It is used for backwards compatibility
     extraction_details: Optional[str] = None
     summarization_details: Optional[str] = None
+
+    @model_validator(mode="after")
+    def validate_strict_websocket(self):
+        # Reject incompatible endpoints before simple-agent config assembly can discard base_url.
+        if self.strict_websocket and (self.provider != "openai" or self.base_url or self.use_responses_api is False):
+            raise ValueError("strict_websocket requires native OpenAI Responses without a custom base_url")
+        return self
 
 
 class Node(BaseModel):
