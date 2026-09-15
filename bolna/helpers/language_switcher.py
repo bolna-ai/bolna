@@ -224,10 +224,16 @@ class LanguageSwitcher:
 
         messages = [self._system_message(), {"role": "user", "content": turn_content}]
         start_time = time.time()
+        # Logged before the await so the row carries the send time, not the reply time.
+        log_meta = self._log_request(detector_transcript, start_time)
         try:
             result = await self._hedged_generate(messages)
             if result is None:
-                # A parsed `null` is the model validly declining, not a broken judge.
+                # A parsed `null` is the model validly declining, not a broken judge — say which,
+                # or a throttled judge looks identical to a decline in the trace.
+                self._log_response(
+                    {"error": "generate_failed"} if self.last_generate_errored else None, log_meta, start_time
+                )
                 if self.last_generate_errored:
                     self._note_failure()
                 else:
@@ -238,10 +244,12 @@ class LanguageSwitcher:
             logger.info(
                 f"LanguageSwitcher decision: {result} (latency_ms={self.latency_ms:.0f}, hedge_won={self.hedge_won})"
             )
-            self._log_decision(detector_transcript, result)
+            self._log_response(result, log_meta, start_time)
             return result
         except Exception as e:
             logger.error(f"LanguageSwitcher decision error: {e}")
+            # Without this a failed decision left a request row with no reply in the trace.
+            self._log_response({"error": str(e)}, log_meta, start_time)
             self._note_failure()
             return None
 
@@ -354,7 +362,8 @@ class LanguageSwitcher:
             text = text[start : end + 1]
         return json.loads(text)
 
-    def _log_decision(self, transcript: str, result: dict):
+    def _log_request(self, transcript: str, sent_at: float) -> dict:
+        """Stamp the request row at send time and return the meta both rows share."""
         meta_info = {"request_id": str(uuid.uuid4())}
         convert_to_request_log(
             message={"transcript": transcript, "available_languages": self.available_labels},
@@ -363,7 +372,13 @@ class LanguageSwitcher:
             direction=LogDirection.REQUEST,
             model=self.model,
             run_id=self.run_id,
+            ts=sent_at,
         )
+        return meta_info
+
+    def _log_response(self, result, meta_info: dict, sent_at: float):
+        """Stamp the reply row when it arrived, carrying the round trip it actually took."""
+        received_at = time.time()
         usage = self.last_usage or {}
         convert_to_request_log(
             message=result,
@@ -375,4 +390,6 @@ class LanguageSwitcher:
             input_tokens=usage.get("input_tokens"),
             output_tokens=usage.get("output_tokens"),
             cached_tokens=usage.get("cached_tokens"),
+            ts=received_at,
+            latency=round(received_at - sent_at, 6),
         )

@@ -126,7 +126,8 @@ async def test_decide_passes_recent_turns_into_the_prompt(monkeypatch):
 
     sw._llm = MagicMock()
     sw._llm.generate = generate
-    sw._log_decision = MagicMock()
+    sw._log_request = MagicMock(return_value={})
+    sw._log_response = MagicMock()
     await sw.decide("not sure sir", "", "hi", recent_turns=[("en", 1.8), ("en", 1.6)])
     assert "en(1.8), en(1.6)" in sent["user"]
 
