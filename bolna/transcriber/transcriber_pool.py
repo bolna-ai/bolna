@@ -185,12 +185,7 @@ class TranscriberPool:
 
     def is_active_transcriber_alive(self):
         """True if the active transcriber's provider connection is still usable."""
-        active = self.transcribers[self.active_label]
-        probe = getattr(active, "is_connected", None)
-        if probe is not None:
-            return probe()
-        task = getattr(active, "transcription_task", None)
-        return task is not None and not task.done()
+        return self.transcribers[self.active_label].is_connected()
 
     # ------------------------------------------------------------------
     # Duck-typed interface
@@ -521,6 +516,8 @@ class TranscriberPool:
                 )
                 return False
             active = self.transcribers[self.active_label]
+            # Stale error would ride the next close and end a recovered call.
+            active.connection_error = None
             try:
                 await active.run()
             except Exception as e:

@@ -111,3 +111,15 @@ async def test_reconnect_does_not_leave_the_previous_audio_pump_running():
     assert len(pumps) == 1
     assert t.send_audio_to_transcriber_task is pumps[0]
     await t.cancel_audio_pump()
+
+
+async def test_the_single_transcriber_reconnect_clears_a_stale_connection_error():
+    # Runs for any provider; non-azure ones never clear it themselves.
+    transcriber = MagicMock(run=AsyncMock(), connection_error="socket died")
+    tm = SimpleNamespace(
+        single_transcriber_reconnect_count=0,
+        MAX_SINGLE_TRANSCRIBER_RECONNECTS=TaskManager.MAX_SINGLE_TRANSCRIBER_RECONNECTS,
+        tools={"transcriber": transcriber},
+    )
+    assert await TaskManager.reconnect_single_transcriber(tm) is True
+    assert transcriber.connection_error is None

@@ -20,13 +20,13 @@ class AzureTranscriber(BaseTranscriber):
         self, telephony_provider, input_queue=None, output_queue=None, language="en-US", encoding="linear16", **kwargs
     ):
         super().__init__(input_queue)
+        # Never set: the SDK owns the socket, not a task — see is_connected() override.
         self.transcription_task = None
         self.subscription_key = os.getenv("AZURE_SPEECH_KEY")
         self.service_region = os.getenv("AZURE_SPEECH_REGION")
         self.push_stream = None
         self.recognizer = None
-        # Liveness for is_connected(). transcription_task is never set here, so the pool's old
-        # task probe read Azure as permanently dead and treated standby closes as active deaths.
+        # Liveness for is_connected(), driven by the SDK session events.
         self.connection_live = False
         self.transcriber_output_queue = output_queue
         self.audio_submitted = False

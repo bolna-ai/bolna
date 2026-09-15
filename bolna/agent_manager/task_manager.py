@@ -4975,8 +4975,11 @@ class TaskManager(BaseManager):
         if self.single_transcriber_reconnect_count >= self.MAX_SINGLE_TRANSCRIBER_RECONNECTS:
             logger.error(f"Transcriber reconnect cap ({self.MAX_SINGLE_TRANSCRIBER_RECONNECTS}) reached — ending call")
             return False
+        transcriber = self.tools["transcriber"]
+        # Stale error would ride the next close and end a recovered call.
+        transcriber.connection_error = None
         try:
-            await self.tools["transcriber"].run()
+            await transcriber.run()
         except Exception as e:
             logger.error(f"Transcriber reconnect failed: {e}")
             return False

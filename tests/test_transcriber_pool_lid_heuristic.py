@@ -18,6 +18,9 @@ class FakeTranscriber:
         self.input_queue = asyncio.Queue()
         self.transcription_task = None
 
+    def is_connected(self):
+        return self.transcription_task is not None and not self.transcription_task.done()
+
 
 def _pool(on_lid_switch=None, mode="shadow"):
     pool = TranscriberPool(
