@@ -397,6 +397,28 @@ class GraphEdge(BaseModel):
     priority: Optional[int] = None
 
 
+class GraphNodeLlmOverride(BaseModel):
+    """Per-node conversation LLM settings. Every field None inherits the agent-level value.
+
+    Mirrors the "LLM overrides" controls in the graph editor's node inspector. Without this declared,
+    the whole object was an unknown key and Pydantic's default extra="ignore" dropped it on save.
+    """
+
+    model: Optional[str] = None
+    provider: Optional[str] = None
+    temperature: Optional[float] = None
+    max_tokens: Optional[int] = None
+    reasoning_effort: Optional[ReasoningEffort] = None
+
+    @model_validator(mode="after")
+    def validate_effort_for_model(self):
+        # Only checkable when the node names its own model; otherwise the effort rides whatever the
+        # agent-level model is, which GraphAgentConfig validates.
+        if self.reasoning_effort is not None and self.model:
+            validate_reasoning_effort_for_model(self.model, self.reasoning_effort.value)
+        return self
+
+
 class GraphNode(BaseModel):
     id: str
     description: Optional[str] = None
@@ -406,13 +428,23 @@ class GraphNode(BaseModel):
     repeat_after_silence_seconds: Optional[float] = None
     # Per-node override of ConversationConfig.number_of_words_for_interruption; None inherits it.
     number_of_words_for_interruption: Optional[int] = None
+    # Per-node conversation LLM (the model that speaks); None inherits the agent's.
+    llm_config: Optional[GraphNodeLlmOverride] = None
     # Per-node routing model, served on the agent's routing provider and credentials; None inherits.
     routing_model: Optional[str] = None
+    # Per-node routing effort; None inherits the agent's routing_reasoning_effort.
+    routing_reasoning_effort: Optional[ReasoningEffort] = None
     examples: Optional[Dict[str, str]] = None
     edges: List[GraphEdge] = Field(default_factory=list)
     function_call: Optional[str] = None
     completion_check: Optional[Callable[[List[dict]], bool]] = None
     rag_config: Optional[RagConfig] = None
+
+    @model_validator(mode="after")
+    def validate_routing_effort_for_model(self):
+        if self.routing_reasoning_effort is not None and self.routing_model:
+            validate_reasoning_effort_for_model(self.routing_model, self.routing_reasoning_effort.value)
+        return self
 
     @model_validator(mode="after")
     def validate_router_node(self):

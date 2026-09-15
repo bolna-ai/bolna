@@ -91,6 +91,11 @@ class GraphAgent(BaseAgent):
         self._transition_tools_cache: Dict[str, List[dict]] = {}
         self._transition_tools_cache_max_size = 100
 
+        # Per-node conversation LLMs, keyed by the override itself so nodes sharing settings share
+        # an instance. Populated lazily; a graph with no overrides never allocates one.
+        self._conversation_llm_cache: Dict[str, Any] = {}
+        self._conversation_llm_cache_max_size = 20
+
         # Routing runs on its own LLM, built from the same registry as the conversation model.
         self.routing_provider = self.config.get("routing_provider")
         self.routing_model = self.config.get("routing_model")
@@ -157,11 +162,80 @@ class GraphAgent(BaseAgent):
                 if self.config.get(key, None):
                     llm_kwargs[key] = self.config[key]
 
+            # Everything a per-node override starts from, so _conversation_llm_for() inherits the
+            # agent's credentials, tools and tier and changes only what the node names.
+            self._conversation_provider = provider
+            self._conversation_base_kwargs = dict(llm_kwargs)
+
             llm_class = SUPPORTED_LLM_PROVIDERS[provider]
             return llm_class(**llm_kwargs)
         except Exception as e:
             logger.error(f"Failed to create LLM: {e}, falling back to default OpenAiLLM")
-            return OpenAiLLM(model=self.llm_model or "gpt-4o-mini", llm_key=self.llm_key or os.getenv("OPENAI_API_KEY"))
+            fallback_kwargs = {
+                "model": self.llm_model or "gpt-4o-mini",
+                "llm_key": self.llm_key or os.getenv("OPENAI_API_KEY"),
+            }
+            self._conversation_provider = "openai"
+            self._conversation_base_kwargs = dict(fallback_kwargs)
+            return OpenAiLLM(**fallback_kwargs)
+
+    def _conversation_llm_for(self, node: Optional[dict]):
+        """The node's own conversation LLM if it overrides one, else the agent's.
+
+        Unset fields inherit; the agent-level LLM is returned untouched when a node overrides
+        nothing, so the common path allocates nothing and behaves exactly as before.
+        """
+        raw = (node or {}).get("llm_config") or {}
+        # Nodes reach us as dicts, but a shallow dict() of a validated config leaves this one nested
+        # model intact — and an AttributeError here would kill the turn.
+        if hasattr(raw, "model_dump"):
+            raw = raw.model_dump()
+        override = {k: v for k, v in raw.items() if v is not None}
+        if not override:
+            return self.llm
+
+        cache_key = repr(sorted((k, str(v)) for k, v in override.items()))
+        llm = self._conversation_llm_cache.get(cache_key)
+        if llm is not None:
+            return llm
+
+        provider = override.get("provider") or self._conversation_provider
+        if provider not in SUPPORTED_LLM_PROVIDERS:
+            logger.warning(f"Unknown provider {provider!r} in node llm_config, using {self._conversation_provider!r}")
+            provider = self._conversation_provider
+
+        kwargs = dict(self._conversation_base_kwargs)
+        kwargs["provider"] = provider
+        if provider != self._conversation_provider:
+            # Another provider cannot authenticate with this one's credentials; let its own
+            # env defaults serve the node instead of sending a key that will be rejected.
+            for key in ("llm_key", "base_url", "api_version"):
+                kwargs.pop(key, None)
+        for key in ("model", "temperature", "max_tokens"):
+            if key in override:
+                kwargs[key] = override[key]
+
+        llm_class = SUPPORTED_LLM_PROVIDERS.get(provider, OpenAiLLM)
+        # LiteLLM addresses a backend by a "provider/model" string; a bare name resolves to OpenAI.
+        if llm_class is LiteLLM and "/" not in (kwargs.get("model") or ""):
+            kwargs["model"] = f"{provider}/{kwargs['model']}"
+
+        effort = override.get("reasoning_effort")
+        if effort is not None:
+            kwargs["reasoning_effort"] = getattr(effort, "value", effort)
+        # An inherited effort would be rejected by a non-reasoning override model.
+        if not is_reasoning_model(canonical_model(kwargs.get("model") or "")):
+            kwargs.pop("reasoning_effort", None)
+
+        llm = llm_class(**kwargs)
+        if len(self._conversation_llm_cache) >= self._conversation_llm_cache_max_size:
+            self._conversation_llm_cache.pop(next(iter(self._conversation_llm_cache)))
+        self._conversation_llm_cache[cache_key] = llm
+        logger.info(
+            f"Conversation LLM override ready: {kwargs.get('model')} on {provider} "
+            f"(effort={kwargs.get('reasoning_effort')}) for node {(node or {}).get('id')!r}"
+        )
+        return llm
 
     @staticmethod
     def _extract_rag_collections(rag_config: Dict) -> List[str]:
@@ -280,7 +354,7 @@ class GraphAgent(BaseAgent):
         if self.config.get("overflow_llm"):
             base_kwargs["overflow_llm"] = self.config["overflow_llm"]
         self._routing_base_kwargs = base_kwargs
-        self._routing_llm_cache: Dict[str, Any] = {}
+        self._routing_llm_cache: Dict[Tuple[Optional[str], Optional[str]], Any] = {}
         self._routing_llm_cache_max_size = 100
 
         routing_kwargs = self._routing_kwargs_for_model(self.routing_model)
@@ -318,20 +392,31 @@ class GraphAgent(BaseAgent):
         self._last_routing_effort = self._routing_reasoning_effort_used
 
     def _routing_llm_for(self, node: Optional[dict]):
-        """The node's own routing model on the agent's provider and credentials, else the agent's.
-        Returns (llm, model, reasoning_effort)."""
-        override = (node or {}).get("routing_model")
-        if not override:
+        """The node's own routing model and/or effort on the agent's provider and credentials,
+        else the agent's. Either override alone is enough. Returns (llm, model, reasoning_effort)."""
+        node = node or {}
+        model_override = node.get("routing_model")
+        effort_override = node.get("routing_reasoning_effort")
+        if not model_override and effort_override is None:
             return self.routing_llm, self.routing_model, self._routing_reasoning_effort_used
-        model = self._qualify_routing_model(override)
+
+        model = self._qualify_routing_model(model_override) if model_override else self.routing_model
         kwargs = self._routing_kwargs_for_model(model)
-        llm = self._routing_llm_cache.get(model)
+        if effort_override is not None and is_reasoning_model(canonical_model(model)):
+            # A non-reasoning model would reject the effort, so it only lands where it applies.
+            kwargs["reasoning_effort"] = getattr(effort_override, "value", effort_override)
+
+        # Keyed on both: the same model at two efforts is two different clients.
+        cache_key = (model, kwargs.get("reasoning_effort"))
+        llm = self._routing_llm_cache.get(cache_key)
         if llm is None:
             if len(self._routing_llm_cache) >= self._routing_llm_cache_max_size:
                 self._routing_llm_cache.pop(next(iter(self._routing_llm_cache)))
             llm = self._routing_llm_class()(**kwargs)
-            self._routing_llm_cache[model] = llm
-            logger.info(f"Routing override ready: {model} for node {(node or {}).get('id')!r}")
+            self._routing_llm_cache[cache_key] = llm
+            logger.info(
+                f"Routing override ready: {model} (effort={kwargs.get('reasoning_effort')}) for node {node.get('id')!r}"
+            )
         return llm, model, kwargs.get("reasoning_effort")
 
     async def check_for_completion(self, messages, check_for_completion_prompt, meta_info=None):
@@ -1367,7 +1452,8 @@ class GraphAgent(BaseAgent):
                 tool_choice = self._get_tool_choice_for_node(history=message)
                 forced_name = tool_choice["function"]["name"] if tool_choice else None
                 node_tools = self._tools_for_node(current_node, forced_name)
-                async for chunk in self.llm.generate_stream(
+                node_llm = self._conversation_llm_for(current_node)
+                async for chunk in node_llm.generate_stream(
                     messages, synthesize=synthesize, meta_info=meta_info, tool_choice=tool_choice, tools=node_tools
                 ):
                     yield chunk
@@ -1468,7 +1554,8 @@ class GraphAgent(BaseAgent):
             tool_choice = self._get_tool_choice_for_node(history=message)
             forced_name = tool_choice["function"]["name"] if tool_choice else None
             node_tools = self._tools_for_node(current_node, forced_name)
-            async for chunk in self.llm.generate_stream(
+            node_llm = self._conversation_llm_for(current_node)
+            async for chunk in node_llm.generate_stream(
                 messages, synthesize=synthesize, meta_info=meta_info, tool_choice=tool_choice, tools=node_tools
             ):
                 yield chunk

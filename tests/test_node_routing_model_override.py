@@ -81,7 +81,7 @@ def test_the_override_is_cached_per_model_and_shared_across_nodes():
         c, _, _ = agent._routing_llm_for({"id": "n3", "routing_model": "gpt-4o"})
         assert a is b
         assert c is not a
-        assert set(agent._routing_llm_cache) == {"gpt-4.1", "gpt-4o"}
+        assert set(agent._routing_llm_cache) == {("gpt-4.1", None), ("gpt-4o", None)}
 
 
 def test_the_cache_is_bounded():
@@ -90,7 +90,7 @@ def test_the_cache_is_bounded():
         for m in ("m1", "m2", "m3"):
             agent._routing_llm_for({"id": m, "routing_model": m})
         assert len(agent._routing_llm_cache) == 2
-        assert "m1" not in agent._routing_llm_cache  # oldest evicted
+        assert ("m1", None) not in agent._routing_llm_cache  # oldest evicted
 
 
 def test_a_gpt5_override_gets_a_reasoning_effort_and_a_non_gpt5_one_does_not():
@@ -134,7 +134,7 @@ async def test_routing_uses_the_nodes_override_and_reports_it():
             node, node["edges"], [{"role": "user", "content": "next"}], time.perf_counter()
         )
 
-        override_llm = agent._routing_llm_cache["gpt-4.1"]
+        override_llm = agent._routing_llm_cache[("gpt-4.1", None)]
         assert override_llm.route.await_count == 1
         assert agent.routing_llm.route.await_count == 0
         assert agent._last_routing_model == "gpt-4.1"
@@ -168,3 +168,43 @@ def test_a_turn_that_makes_no_routing_call_reports_the_agent_model():
         agent._last_routing_model, agent._last_routing_effort = "gpt-4.1", "low"  # left over from an override
         agent._reset_routing_identity()
         assert (agent._last_routing_model, agent._last_routing_effort) == (agent.routing_model, None)
+
+
+# ------------------------------------------------------------------ per-node routing effort
+
+
+def test_a_node_may_override_only_the_routing_effort():
+    # No routing_model: the agent's model stays, the node just thinks harder on the hop.
+    with _agent(routing_model="gpt-5") as agent:
+        llm, model, effort = agent._routing_llm_for({"id": "n1", "routing_reasoning_effort": "high"})
+        assert llm is not agent.routing_llm
+        assert model == "gpt-5"
+        assert effort == "high"
+        assert llm.captured_kwargs["reasoning_effort"] == "high"
+
+
+def test_model_and_effort_can_be_overridden_together():
+    with _agent() as agent:
+        llm, model, effort = agent._routing_llm_for(
+            {"id": "n1", "routing_model": "gpt-5", "routing_reasoning_effort": "minimal"}
+        )
+        assert model == "gpt-5"
+        assert effort == "minimal"
+        assert llm.captured_kwargs["model"] == "gpt-5"
+
+
+def test_an_effort_override_is_ignored_for_a_non_reasoning_routing_model():
+    with _agent() as agent:
+        llm, _, effort = agent._routing_llm_for(
+            {"id": "n1", "routing_model": "gpt-4.1-mini", "routing_reasoning_effort": "high"}
+        )
+        assert effort is None
+        assert "reasoning_effort" not in llm.captured_kwargs
+
+
+def test_the_same_routing_model_at_two_efforts_is_two_clients():
+    with _agent(routing_model="gpt-5") as agent:
+        low, _, _ = agent._routing_llm_for({"id": "n1", "routing_reasoning_effort": "low"})
+        high, _, _ = agent._routing_llm_for({"id": "n2", "routing_reasoning_effort": "high"})
+        assert low is not high
+        assert set(agent._routing_llm_cache) == {("gpt-5", "low"), ("gpt-5", "high")}
