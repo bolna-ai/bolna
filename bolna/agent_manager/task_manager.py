@@ -1620,7 +1620,10 @@ class TaskManager(BaseManager):
                             cls = SUPPORTED_TRANSCRIBER_PROVIDERS.get(cfg["provider"])
                         else:
                             cls = SUPPORTED_TRANSCRIBER_MODELS.get(cfg["model"])
-                        transcribers[label] = cls(provider, **cfg, **self.kwargs)
+                        leg_kwargs = self.kwargs
+                        if cfg.get("provider") and cfg["provider"] != transcriber_config.get("provider"):
+                            leg_kwargs = {k: v for k, v in self.kwargs.items() if k != "transcriber_key"}
+                        transcribers[label] = cls(provider, **cfg, **leg_kwargs)
 
                         if label == active_label:
                             self.transcriber_provider = cfg.get("provider", cfg.get("model"))
@@ -1760,7 +1763,10 @@ class TaskManager(BaseManager):
                         cfg["stream"] = True if self.enforce_streaming else False
 
                     cls = SUPPORTED_SYNTHESIZER_MODELS.get(provider_name)
-                    synthesizers[label] = cls(**cfg, **provider_config, **synthesizer_kwargs, caching=caching)
+                    leg_kwargs = synthesizer_kwargs
+                    if provider_name != synth_config.get("provider"):
+                        leg_kwargs = {k: v for k, v in synthesizer_kwargs.items() if k != "synthesizer_key"}
+                    synthesizers[label] = cls(**cfg, **provider_config, **leg_kwargs, caching=caching)
 
                 # Use active synth's provider/voice for logging metadata, and buffer_size
                 # Note that in the current state, buffer_size of other synth configs is ignored
