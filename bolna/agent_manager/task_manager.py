@@ -22,8 +22,10 @@ from pydub import AudioSegment
 
 from bolna.constants import (
     ACCIDENTAL_INTERRUPTION_PHRASES,
+    CACHED_SINGLE_MARK_CATEGORIES,
     DEFAULT_USER_ONLINE_MESSAGE,
     DEFAULT_USER_ONLINE_MESSAGE_TRIGGER_DURATION,
+    DUPLICATE_RESPONSE_SIMILARITY,
     FILLER_DICT,
     DEFAULT_LANGUAGE_CODE,
     DEFAULT_TIMEZONE,
@@ -42,9 +44,10 @@ from bolna.constants import (
     END_CALL_FUNCTION_PREFIX,
     END_CALL_TOOL_DEFINITION,
     RESPONSES_API_MODEL_PREFIXES,
+    LLM_GENERATION_TIMEOUT_S,
     S2S_GOODBYE_TIMEOUT_S,
     S2S_STREAM_SID_TIMEOUT_S,
-    STALL_HANGUP_FLOOR_S,
+    STALL_HANGUP_HARD_CAP_S,
     STUCK_AUDIO_GATE_RELEASE_S,
     WEB_BASED_CALL_PROVIDER,
     WEBCALL_TTS_SAMPLE_RATE,
@@ -88,6 +91,7 @@ from bolna.helpers.utils import (
     is_valid_md5,
     get_required_input_types,
     format_messages,
+    normalized_similarity,
     safe_log_text,
     get_prompt_responses,
     resample,
@@ -210,6 +214,9 @@ def build_lid_decision_record(
         "target_language": dec.get("target_language"),
         "target_confidence": dec.get("target_confidence"),
         "explicit_request": dec.get("explicit_request"),
+        # Explicit-only judge fields; None on the ambient prompt.
+        "request_status": dec.get("request_status"),
+        "request_source": dec.get("request_source"),
         "reasoning": (dec.get("reasoning") or "").strip(),
         "buffered_max_segment_s": round(buffered_max_segment_s, 3),
         "speculation_started": speculation_started,
@@ -318,6 +325,8 @@ class TaskManager(BaseManager):
         self._blocked_sequences: set = set()  # dedup: only record first block per sequence
         self._sent_audio_sequences: set = set()
         self._committed_assistant_sequences: set = set()
+        # (turn_id, text) of the turn whose audio was last dispatched; the duplicate gate reads it.
+        self._last_spoken_assistant = None
 
         self.task_config = task
 
@@ -393,6 +402,10 @@ class TaskManager(BaseManager):
         self.hangup_message_queued = False
         self._end_of_conversation_in_progress = False
         self._end_call_in_progress = False
+        self.interruptible_hangup_message = False
+        self._hangup_interruptible_window = False
+        self._hangup_cancelled = False
+        self._end_call_hangup_task = None
         self._turn_audio_flushed = asyncio.Event()
         self._turn_audio_flushed.set()
         self.hangup_mark_event_timeout = 10
@@ -497,6 +510,7 @@ class TaskManager(BaseManager):
         self.consider_next_transcript_after = time.time()
         self.llm_response_generated = False
         self.response_in_pipeline = False
+        self._synthesis_awaiting_first_audio = False
         self._response_turn_id = 0
         self._turn_msg_map = {}  # turn_id → assistant message dict ref in _messages
         self._pending_assistant_history = {}  # sequence_id -> {content, turn_id, response_uid}
@@ -514,6 +528,10 @@ class TaskManager(BaseManager):
         self.transcriber_duration = 0
         self.synthesizer_characters = 0
         self.ended_by_assistant = False
+        # False until the caller's own words land in conversation history as a user turn.
+        # Synthetic user turns (silence nudges, injected prompts) deliberately do not set it,
+        # so a call where only the agent ever spoke stays False.
+        self.user_spoke = False
         self.start_time = time.time()
 
         # Tasks
@@ -718,6 +736,8 @@ class TaskManager(BaseManager):
                         self.call_hangup_message_config = update_prompt_with_context(
                             self.call_hangup_message_config, self.context_data
                         )
+                self.interruptible_hangup_message = self.conversation_config.get("interruptible_hangup_message", False)
+
                 self.check_for_completion_llm = os.getenv("CHECK_FOR_COMPLETION_LLM")
 
                 cancellation_prompt = self.conversation_config.get("call_cancellation_prompt")
@@ -1584,6 +1604,9 @@ class TaskManager(BaseManager):
                         private_queue = asyncio.Queue()
                         cfg["input_queue"] = private_queue
                         cfg["output_queue"] = self.transcriber_output_queue
+                        # Per-call Deepgram host override arrives per-label on cfg itself (the caller
+                        # stamps only the legs a chosen endpoint can serve); do not inherit from the
+                        # top-level config, or an unsupported leg would be forced onto that endpoint.
                         if is_sip:
                             cfg["encoding"] = "mulaw"
                             cfg["sampling_rate"] = 8000
@@ -1618,6 +1641,10 @@ class TaskManager(BaseManager):
                             available_labels=list(transcribers.keys()),
                             run_id=self.run_id,
                             model=self.task_config.get("tools_config", {}).get("language_switch_llm"),
+                            # Per-agent toggle: judge switches only on an explicit request/selection.
+                            explicit_only=bool(
+                                self.task_config.get("tools_config", {}).get("language_switch_explicit_only")
+                            ),
                         )
                         self.language_switcher.prewarm()  # pay the TLS handshake now
 
@@ -1859,6 +1886,9 @@ class TaskManager(BaseManager):
                 injected_cfg["routing_reasoning_effort"] = self.kwargs["routing_reasoning_effort"]
             if "routing_max_tokens" in self.kwargs:
                 injected_cfg["routing_max_tokens"] = self.kwargs["routing_max_tokens"]
+            for key in ("routing_llm_key", "routing_base_url", "routing_api_version"):
+                if self.kwargs.get(key) is not None:
+                    injected_cfg[key] = self.kwargs[key]
             # Set when the caller serves the conversation LLM from a different backend than the agent's own.
             for key in ("aux_model", "aux_provider", "route_routing_to_conversation"):
                 if key in self.kwargs:
@@ -2076,6 +2106,9 @@ class TaskManager(BaseManager):
                 extraction_json = (
                     task.get("tools_config").get("llm_agent", {}).get("llm_config", {}).get("extraction_json")
                 )
+                # Schema goes in as a .format() argument, so variables inside it reached the model as literal braces.
+                if isinstance(extraction_json, str):
+                    extraction_json = update_prompt_with_context(extraction_json, self.context_data)
                 prompt = EXTRACTION_PROMPT.format(current_date, current_time, self.timezone, extraction_json)
                 return {"system_prompt": prompt}
             elif task_type == "summarization":
@@ -2501,6 +2534,9 @@ class TaskManager(BaseManager):
         current_ts = time.time()
         logger.info(f"Cleaning up downstream task")
         start_time = time.time()
+        # Reset before the first await, or the goodbye task resumes and commits the disconnect.
+        if self._hangup_interruptible_window:
+            self._cancel_pending_hangup()
         self._cancel_in_flight_llm_response()
         # The overlapped-final path re-arms after this cleanup, so the newest turn wins.
         if self.regen_settle_armed():
@@ -2520,6 +2556,7 @@ class TaskManager(BaseManager):
         self.interruption_manager.invalidate_pending_responses()
         self._drop_all_staged_assistant_history("cleanup_downstream_tasks")
         self.response_in_pipeline = False
+        self._synthesis_awaiting_first_audio = False
         await self.tools["synthesizer"].flush_synthesizer_stream()
 
         # Stop the output loop first so that we do not transmit anything else
@@ -2768,7 +2805,13 @@ class TaskManager(BaseManager):
                 ):
                     break
 
-            if first_item.get("text_synthesized") and first_item.get("is_final_chunk") is True:
+            # Cached clips are a single mark that is always the final chunk, so this shortcut
+            # would skip waiting for the whole message rather than just its tail.
+            if (
+                first_item.get("text_synthesized")
+                and first_item.get("is_final_chunk") is True
+                and first_item.get("type") not in CACHED_SINGLE_MARK_CATEGORIES
+            ):
                 break
 
             # Use entry_time (not time.time()) so the deadline is a fixed point in the
@@ -3040,9 +3083,17 @@ class TaskManager(BaseManager):
             meta_info["message_category"] = "filler"
 
         if next_step == "synthesizer" and not should_bypass_synth:
-            if not text_chunk or not text_chunk.strip():
+            if text_chunk and text_chunk.strip():
+                self._turn_audio_flushed.clear()
+            elif self.stream and meta_info.get("end_of_llm_stream") and not self._turn_audio_flushed.is_set():
+                # The turn's last LLM buffer is often empty (the wrapper's rsplit leaves no
+                # remainder for the final flush); dropping it would swallow end_of_llm_stream
+                # and a streaming synthesizer would never flush the turn. Forward the bare
+                # marker — but only for a turn that actually sent text (_turn_audio_flushed
+                # cleared above), so a fully empty turn stays silent as before.
+                text_chunk = ""
+            else:
                 return
-            self._turn_audio_flushed.clear()
             task = asyncio.create_task(self._synthesize(create_ws_data_packet(text_chunk, meta_info)))
             self.synthesizer_tasks.append(asyncio.ensure_future(task))
         elif self.tools["output"] is not None:
@@ -3133,8 +3184,11 @@ class TaskManager(BaseManager):
 
         if called_fun.startswith(END_CALL_FUNCTION_PREFIX):
             # Lock out barge-in before the goodbye is generated, otherwise an interruption
-            # cancels the turn task and the disconnect never runs.
+            # cancels the turn task and the disconnect never runs. The toggle opens a window instead.
             self._end_call_in_progress = True
+            self._hangup_cancelled = False
+            if self.interruptible_hangup_message:
+                self._hangup_interruptible_window = True
             reason = resp.get("reason", "")
 
             logger.info(f"end_call tool invoked, reason: {reason}")
@@ -3157,35 +3211,54 @@ class TaskManager(BaseManager):
                 tool_result, meta_info, None, "function_call", direction="response", run_id=self.run_id
             )
 
-            if textual_response:
-                # The LLM emitted the goodbye in the same response as the tool call;
-                # it has already been streamed to TTS. Skip the follow-up LLM to avoid
-                # generating a duplicate goodbye.
-                self._enter_hangup_state()
-                await self.wait_for_current_message()
-            else:
-                # No goodbye text in this turn. Feed the tool result back so the LLM
-                # generates one.
-                messages = self.conversation_history.get_copy()
-                convert_to_request_log(
-                    format_messages(messages, True),
-                    meta_info,
-                    self.llm_config["model"],
-                    "llm",
-                    direction="request",
-                    run_id=self.run_id,
-                )
+            try:
+                if textual_response:
+                    # The LLM emitted the goodbye in the same response as the tool call;
+                    # it has already been streamed to TTS. Skip the follow-up LLM to avoid
+                    # generating a duplicate goodbye.
+                    self._enter_hangup_state()
+                    await self.wait_for_current_message()
+                else:
+                    # No goodbye text in this turn. Feed the tool result back so the LLM
+                    # generates one.
+                    messages = self.conversation_history.get_copy()
+                    convert_to_request_log(
+                        format_messages(messages, True),
+                        meta_info,
+                        self.llm_config["model"],
+                        "llm",
+                        direction="request",
+                        run_id=self.run_id,
+                    )
 
-                followup_meta_info = self._spawn_followup_meta_info(meta_info)
-                await self.__do_llm_generation(
-                    messages, followup_meta_info, next_step, should_trigger_function_call=False
-                )
-                self._enter_hangup_state()
-                await self.wait_for_current_message()
+                    followup_meta_info = self._spawn_followup_meta_info(meta_info)
+                    await self.__do_llm_generation(
+                        messages, followup_meta_info, next_step, should_trigger_function_call=False
+                    )
+                    self._enter_hangup_state()
+                    await self.wait_for_current_message()
+            finally:
+                self._hangup_interruptible_window = False
+
+            # Cancelling this task is not enough: handle_interruption clears the mark dict, so the
+            # playout wait above returns normally and we would disconnect a call just rescued.
+            if self._hangup_cancelled:
+                logger.info("end_call: hangup was cancelled by a barge-in, not arming the teardown")
+                return
 
             self.hangup_detail = HangupReason.END_CALL_TOOL
             self.call_hangup_message_config = None
-            await self.process_call_hangup()
+            # Detached, not awaited: this call site runs inside __do_llm_generation's own
+            # LLM_GENERATION_TIMEOUT_S window (the end_call tool is handled here, mid-generation).
+            # process_call_hangup's teardown (goodbye playout wait, hangup-chunk wait,
+            # stop_handler) can legitimately take longer than that and must not be cancelled
+            # mid-way - same failure mode as BOLNA-2563, reached via the end_call tool instead
+            # of the hangup-decision check. Held on self, not _usage_tasks, so a reference
+            # survives (see _usage_tasks' own comment) without an unrelated cleanup sweep
+            # ever cancelling this specific task. Done callback so a raised exception doesn't
+            # just vanish with the task (mirrors _s2s_on_task_done, same reasoning).
+            self._end_call_hangup_task = asyncio.create_task(self.process_call_hangup())
+            self._end_call_hangup_task.add_done_callback(self.__log_detached_hangup_exception)
             return
 
         if called_fun.startswith("transfer_call"):
@@ -3318,6 +3391,8 @@ class TaskManager(BaseManager):
                     handoff_text = handoff_template.replace("{agent_name}", target_agent_name).replace(
                         "{language}", language_display
                     )
+                    # Rendered after the two runtime replaces, so agent/language values win over a same-named variable.
+                    handoff_text = update_prompt_with_context(handoff_text, self.context_data)
                     meta_info_handoff = {
                         "io": self.tools["output"].get_provider(),
                         "request_id": str(uuid.uuid4()),
@@ -3504,6 +3579,8 @@ class TaskManager(BaseManager):
         reasoning_content=None,
         log_message=None,
         overflowed=False,
+        ts=None,
+        llm_latency=None,
     ):
         self.llm_response_generated = True
         # task 0 only, so aux LLMs (hangup/voicemail) never tally, and never an overflowed turn,
@@ -3527,6 +3604,8 @@ class TaskManager(BaseManager):
             reasoning_tokens=reasoning_tokens,
             cached_tokens=cached_tokens,
             reasoning_content=reasoning_content,
+            ts=ts,
+            latency=llm_latency,
         )
         turn_id = meta_info.get("turn_id")
         response_uid = meta_info.get("response_uid")
@@ -3541,6 +3620,20 @@ class TaskManager(BaseManager):
             self.conversation_history.sync_interim(messages)
 
     async def __do_llm_generation(
+        self, messages, meta_info, next_step, should_bypass_synth=False, should_trigger_function_call=False
+    ):
+        """Bounds one generation call to LLM_GENERATION_TIMEOUT_S. Scoped here (not around the
+        whole conversation task) so a hung LLM raises promptly without also racing the
+        hangup-decision call or the hangup teardown that can follow it - those can legitimately
+        take a while and must not be cut off mid-way. BOLNA-2563."""
+        await asyncio.wait_for(
+            self.__do_llm_generation_impl(
+                messages, meta_info, next_step, should_bypass_synth, should_trigger_function_call
+            ),
+            timeout=LLM_GENERATION_TIMEOUT_S,
+        )
+
+    async def __do_llm_generation_impl(
         self, messages, meta_info, next_step, should_bypass_synth=False, should_trigger_function_call=False
     ):
         if self.hangup_triggered or self.conversation_ended:
@@ -3565,6 +3658,11 @@ class TaskManager(BaseManager):
         )
         actual_overflowed = False
         actual_reasoning_content = None
+        # Stamped per chunk: after the loop these hold when the LLM actually finished and how
+        # fast it started. __store_into_history runs much later (once every chunk has been
+        # pushed to TTS), so the response trace row must be stamped from here, not from there.
+        llm_stream_end_ts = None
+        llm_first_token_latency = None
         synthesize = True
         if should_bypass_synth:
             synthesize = False
@@ -3597,6 +3695,12 @@ class TaskManager(BaseManager):
                 if isinstance(llm_message, dict) and "routing_info" in llm_message:
                     routing_info = llm_message["routing_info"]
 
+                    # Both rows are written here, after the hop already finished — stamp the
+                    # request row at the hop's start so the trace stays chronological.
+                    routing_started_at = routing_info.get("routing_started_at")
+                    routing_latency_ms = routing_info.get("routing_latency_ms")
+                    routing_latency = round(routing_latency_ms / 1000, 6) if routing_latency_ms is not None else None
+
                     # Log routing request with tools
                     routing_messages = routing_info.get("routing_messages")
                     routing_tools = routing_info.get("routing_tools", [])
@@ -3620,6 +3724,7 @@ class TaskManager(BaseManager):
                             component=LogComponent.GRAPH_ROUTING,
                             direction=LogDirection.REQUEST,
                             run_id=self.run_id,
+                            ts=routing_started_at,
                         )
                     elif routing_info.get("routing_type") == "deterministic":
                         expression_trace = (
@@ -3632,6 +3737,7 @@ class TaskManager(BaseManager):
                             component=LogComponent.GRAPH_ROUTING,
                             direction=LogDirection.REQUEST,
                             run_id=self.run_id,
+                            ts=routing_started_at,
                         )
 
                     # Build routing response data
@@ -3709,6 +3815,7 @@ class TaskManager(BaseManager):
                         output_tokens=routing_usage.get("output_tokens"),
                         reasoning_tokens=routing_usage.get("reasoning_tokens"),
                         cached_tokens=routing_usage.get("cached_tokens"),
+                        latency=routing_latency,
                     )
 
                     is_silence_trigger = routing_info.get("is_silence_trigger", False)
@@ -3751,6 +3858,7 @@ class TaskManager(BaseManager):
                     meta_info["text"] = static_text
                     meta_info["cached"] = True
                     meta_info["message_category"] = "static_node"
+                    meta_info["is_silence_trigger"] = is_silence_trigger
                     ws_packet = create_ws_data_packet(static_hash, meta_info=meta_info, is_md5_hash=True)
                     await self._synthesize(ws_packet)
                     return
@@ -3758,6 +3866,9 @@ class TaskManager(BaseManager):
                 data = llm_message.data
                 end_of_llm_stream = llm_message.end_of_stream
                 latency = llm_message.latency
+                llm_stream_end_ts = time.time()
+                if latency and latency.first_token_latency_ms is not None and llm_first_token_latency is None:
+                    llm_first_token_latency = round(latency.first_token_latency_ms / 1000, 6)
                 trigger_function_call = llm_message.is_function_call
                 function_tool = llm_message.function_name
                 function_tool_message = llm_message.function_message
@@ -3814,6 +3925,8 @@ class TaskManager(BaseManager):
                             cached_tokens=actual_cached_tokens,
                             reasoning_content=actual_reasoning_content,
                             overflowed=actual_overflowed,
+                            ts=llm_stream_end_ts,
+                            llm_latency=llm_first_token_latency,
                         )
                     try:
                         await self.__execute_function_call(next_step=next_step, **data.model_dump())
@@ -3916,6 +4029,8 @@ class TaskManager(BaseManager):
                 reasoning_content=actual_reasoning_content,
                 log_message=empty_turn_detail,
                 overflowed=actual_overflowed,
+                ts=llm_stream_end_ts,
+                llm_latency=llm_first_token_latency,
             )
         elif not self.stream:
             llm_response = llm_response.strip()
@@ -3936,6 +4051,8 @@ class TaskManager(BaseManager):
                 reasoning_tokens=actual_reasoning_tokens,
                 cached_tokens=actual_cached_tokens,
                 reasoning_content=actual_reasoning_content,
+                ts=llm_stream_end_ts,
+                latency=llm_first_token_latency,
             )
 
         # Stamp full response text on the last LLM turn entry (new field, no existing fields changed)
@@ -3947,6 +4064,7 @@ class TaskManager(BaseManager):
         if empty_turn_detail:
             logger.info(f"{empty_turn_detail}; clearing response_in_pipeline")
             self.response_in_pipeline = False
+            self._synthesis_awaiting_first_audio = False
 
         # Collect RAG latency if present (from KnowledgeBaseAgent)
         if meta_info.get("rag_latency"):
@@ -4100,7 +4218,50 @@ class TaskManager(BaseManager):
         self.interruption_manager.on_user_speech_ended(update_utterance_time=False)
 
     def _should_ignore_transcriber_input(self) -> bool:
-        return self.hangup_triggered or self._end_call_in_progress or self.has_transfer
+        # A transfer is never interruptible: fresh turns here re-emit transfer_call.
+        if self.has_transfer:
+            return True
+        if not (self.hangup_triggered or self._end_call_in_progress):
+            return False
+        return self.conversation_ended or self._hangup_interruptible_window is not True
+
+    def _cancel_pending_hangup(self):
+        """Abort the interruptible end_call goodbye so the conversation resumes."""
+        self._hangup_interruptible_window = False
+        # Never cancel a committed disconnect: the hangup task may already be in stop_handler.
+        if self.conversation_ended:
+            return
+        self._hangup_cancelled = True
+
+        current = asyncio.current_task()
+        if self.llm_task is not None and self.llm_task is not current and not self.llm_task.done():
+            self.llm_task.cancel()
+            self.llm_task = None
+        hangup_task = self._end_call_hangup_task
+        self._end_call_hangup_task = None
+        if hangup_task is not None and hangup_task is not current and not hangup_task.done():
+            hangup_task.cancel()
+
+        self.hangup_triggered = False
+        self._end_call_in_progress = False
+        self.hangup_message_queued = False
+        self.hangup_triggered_at = None
+        self.hangup_decision_at = None
+        self._hangup_processing = False
+        self._end_of_conversation_in_progress = False
+        self.hangup_detail = None
+        # Cleared on entry to __execute_function_call, whose end_call branch never restores it.
+        self.check_if_user_online = self.conversation_config.get("check_if_user_online", True)
+        logger.info("Interruptible hangup: barge-in cancelled pending hangup, resuming conversation")
+
+    def __log_detached_hangup_exception(self, task: asyncio.Task) -> None:
+        """A bare create_task with no done callback drops the exception along with the task, so
+        a failed hangup would look identical to a successful one. Mirrors _s2s_on_task_done."""
+        if task.cancelled():
+            return
+        exception = task.exception()
+        if exception is not None:
+            logger.error(f"Detached end_call hangup failed | error={type(exception).__name__}: {exception}")
 
     async def process_call_hangup(self):
         if self.hangup_decision_at is None:
@@ -4111,6 +4272,9 @@ class TaskManager(BaseManager):
 
         self._hangup_processing = True
         self.hangup_triggered = True
+        # An actuated hangup is no longer interruptible, or __cleanup_downstream_tasks below
+        # resets the very flags this teardown needs to commit the disconnect.
+        self._hangup_interruptible_window = False
         if self.__is_s2s():
             # The model has already spoken the goodbye by now, prompted by the end_call result
             # or _hangup_after_goodbye, and there is no synthesizer to render one here anyway.
@@ -4368,6 +4532,7 @@ class TaskManager(BaseManager):
                 await self.tools["output"].handle(bos_packet)
                 # self.interim_history = self.history.copy()
                 # self.history.append({'role': 'user', 'content': ws_data_packet['data']})
+                self.user_spoke = True
                 await self._run_llm_task(create_ws_data_packet(ws_data_packet["data"], meta_info))
                 eos_packet = create_ws_data_packet("<end_of_stream>", meta_info)
                 await self.tools["output"].handle(eos_packet)
@@ -4382,18 +4547,42 @@ class TaskManager(BaseManager):
 
         try:
             if self._is_extraction_task() or self._is_summarization_task():
+                # No timeout: this is post-call extraction/summarization, not a live call - there
+                # is no caller to rescue. Capping it here only risks discarding a slow-but-working
+                # result and running live-call cleanup (_report_provider_health(False),
+                # __process_end_of_conversation) against a task manager with no telephony handler.
                 await self._process_followup_task(message)
             elif self._is_conversation_task():
+                # No outer timeout here: __do_llm_generation bounds each individual generation
+                # call on its own. The hangup-decision LLM call and any hangup teardown that
+                # follows it in _process_conversation_task must not share that same clock.
                 await self._process_conversation_task(message, sequence, meta_info)
             else:
                 logger.error("unsupported task type: {}".format(self.task_config["task_type"]))
             self.llm_task = None
         except BolnaComponentError as e:
             self.response_in_pipeline = False
+            self._synthesis_awaiting_first_audio = False
             await self._end_call_on_component_error(e, HangupReason.LLM_ERROR)
             raise
+        except asyncio.TimeoutError:
+            # The LLM never came back within LLM_GENERATION_TIMEOUT_S seconds - treat it as
+            # stuck and hang up, same as any other LLM failure, instead of waiting forever.
+            # BOLNA-2563.
+            logger.error(f"LLM generation stuck for {LLM_GENERATION_TIMEOUT_S}s (run_id={self.run_id}) - hanging up")
+            self.response_in_pipeline = False
+            self._synthesis_awaiting_first_audio = False
+            await self._end_call_on_component_error(
+                LLMError(
+                    f"LLM generation timed out after {LLM_GENERATION_TIMEOUT_S}s",
+                    provider=self.llm_config.get("provider", "unknown"),
+                    model=self.llm_config.get("model"),
+                ),
+                HangupReason.LLM_ERROR,
+            )
         except Exception as e:
             self.response_in_pipeline = False
+            self._synthesis_awaiting_first_audio = False
             await self._end_call_on_component_error(
                 LLMError(
                     str(e), provider=self.llm_config.get("provider", "unknown"), model=self.llm_config.get("model")
@@ -4448,6 +4637,40 @@ class TaskManager(BaseManager):
         if sequence_id in self._sent_audio_sequences and sequence_id not in self._blocked_sequences:
             self._commit_staged_assistant_history(sequence_id)
 
+    def _duplicates_last_spoken_turn(self, sequence_id, meta_info):
+        """True when this turn only restates the one the caller just heard.
+
+        A regenerated turn can arrive after its predecessor was already dispatched; speaking both
+        plays the same sentence twice. Only the adjacent turn counts — a later echo is the agent
+        legitimately repeating itself — and only plain responses, so a welcome or online-check
+        message is never suppressed.
+        """
+        if sequence_id is None or sequence_id == -1:
+            return False
+        # Later chunks of a turn already ruled duplicate must not slip through and play a fragment.
+        if sequence_id in self._blocked_sequences:
+            return True
+        if meta_info.get("message_category"):
+            return False
+        staged = self._pending_assistant_history.get(sequence_id)
+        if not staged or staged.get("message_category") or not self._last_spoken_assistant:
+            return False
+        previous_turn_id, previous_text = self._last_spoken_assistant
+        turn_id = staged.get("turn_id")
+        if turn_id is None or previous_turn_id is None or turn_id - previous_turn_id > 1:
+            return False
+        similarity = normalized_similarity(staged["content"], previous_text)
+        if similarity < DUPLICATE_RESPONSE_SIMILARITY:
+            return False
+        logger.info(
+            "BOLNA_TRACE_TM duplicate_of_last_spoken seq=%s turn=%s previous_turn=%s similarity=%.2f",
+            sequence_id,
+            turn_id,
+            previous_turn_id,
+            similarity,
+        )
+        return True
+
     def _commit_staged_assistant_history(self, sequence_id):
         if sequence_id in self._committed_assistant_sequences:
             return
@@ -4456,6 +4679,7 @@ class TaskManager(BaseManager):
             return
 
         self._committed_assistant_sequences.add(sequence_id)
+        self._last_spoken_assistant = (staged["turn_id"], staged["content"])
         self.conversation_history.append_assistant(
             staged["content"],
             turn_id=staged["turn_id"],
@@ -4642,6 +4866,7 @@ class TaskManager(BaseManager):
                 meta_info.get("response_uid"),
             )
 
+        self.user_spoke = True
         # asr_turn_id (int-coerced), not meta_info["turn_id"] — that one counts responses, not ASR turns.
         self.conversation_history.append_user(
             transcriber_message, asr_turn_id=asr_id_to_int(meta_info.get("asr_turn_id"))
@@ -4849,9 +5074,9 @@ class TaskManager(BaseManager):
                         and message["data"].get("type", "") == "interim_transcript_received"
                     ):
                         self.time_since_last_spoken_human_word = time.time()
-                        # Before every early exit below: an interim is proof the caller is still
-                        # talking, so it must refresh liveness even when this turn ignores it.
-                        self.interruption_manager.note_user_liveness()
+                        # Before every early exit below: a changed interim is proof the caller is
+                        # still talking, so it must refresh liveness even when this turn ignores it.
+                        self.interruption_manager.note_user_liveness(message["data"].get("content", ""))
                         if temp_transcriber_message == message["data"].get("content"):
                             logger.info("Received the same transcript as the previous one we have hence continuing")
                             continue
@@ -4881,7 +5106,8 @@ class TaskManager(BaseManager):
                             continue
 
                         # Defer interim barge-ins while a tool call is in flight (same as speech_final path).
-                        if self.function_call_in_flight:
+                        # The interruptible goodbye is exempt: its tool result is already recorded.
+                        if self.function_call_in_flight and self._hangup_interruptible_window is not True:
                             logger.info(f"Tool call in flight; deferring interim barge-in {transcript_content!r}")
                             continue
 
@@ -5004,6 +5230,7 @@ class TaskManager(BaseManager):
                             )
                             # Committed user row when EndOfTurn(was_eager) skips _handle_transcriber_output.
                             # meta_info["asr_turn_id"] is stale until EndOfTurn, so read the live id.
+                            self.user_spoke = True
                             eager_user_row = {"role": "user", "content": eager_transcript}
                             eager_asr_turn_id = asr_id_to_int(getattr(active_transcriber, "current_turn_id", None))
                             if eager_asr_turn_id is not None:
@@ -5058,7 +5285,8 @@ class TaskManager(BaseManager):
 
                         # Starting a new turn here cancels the in-flight tool call before its result is
                         # recorded, so the LLM re-emits the same tool and the side effect runs twice.
-                        if self.function_call_in_flight:
+                        # The interruptible goodbye is exempt: its result is already recorded.
+                        if self.function_call_in_flight and self._hangup_interruptible_window is not True:
                             logger.info(f"Tool call in flight; deferring barge-in transcript {transcript_content!r}")
                             self.interruption_manager.on_user_speech_ended(update_utterance_time=False)
                             continue
@@ -5525,7 +5753,32 @@ class TaskManager(BaseManager):
                 record()
             except Exception as e:
                 logger.warning(f"detector_health record failed: {e}")
+        self.__record_lid_usage(pool)
         return list(getattr(pool, "lid_detection_events", []))
+
+    def __record_lid_usage(self, pool) -> None:
+        """One per-call spend record in lid_detection_events: judge tokens + detector audio seconds."""
+        events = getattr(pool, "lid_detection_events", None)
+        if events is None or any(e.get("type") == "lid_usage" for e in events):
+            return
+        switcher = self.language_switcher
+        detector_seconds = pool.lid_audio_seconds()
+        if switcher is None and not detector_seconds:
+            return
+        record = {"type": "lid_usage", "ts": time.time(), "detector_audio_seconds": detector_seconds}
+        if switcher is not None:
+            record.update(
+                {
+                    # Every model that answered this call — the runtime fallback can swap mid-call.
+                    "judge_models": switcher.models_used or [switcher.model],
+                    "judge_model": switcher.model,
+                    "judge_requests": switcher.usage_totals.get("requests", 0),
+                    "judge_input_tokens": switcher.usage_totals.get("input_tokens", 0),
+                    "judge_output_tokens": switcher.usage_totals.get("output_tokens", 0),
+                    "judge_cached_tokens": switcher.usage_totals.get("cached_tokens", 0),
+                }
+            )
+        events.append(record)
 
     def __record_lid_event(self, record: dict) -> None:
         """Append a metrics record to the pool's lid_detection_events (persisted to
@@ -5810,6 +6063,7 @@ class TaskManager(BaseManager):
         spec_agent_type = self.task_config["tools_config"]["llm_agent"].get("agent_type", "simple_llm_agent")
         if (
             spec_agent_type == "simple_llm_agent"
+            and not self.language_switcher.explicit_only
             and detected_lang
             and detected_lang != active
             and detected_lang in labels
@@ -5870,7 +6124,11 @@ class TaskManager(BaseManager):
         try:
             decision = await asyncio.wait_for(
                 self.language_switcher.decide(
-                    detector_transcript, active_transcript, active, recent_turns=self.__recent_detected_turns(pool)
+                    detector_transcript,
+                    active_transcript,
+                    active,
+                    recent_turns=None if self.language_switcher.explicit_only else self.__recent_detected_turns(pool),
+                    last_agent_turn=self.conversation_history.last_assistant_content(),
                 ),
                 timeout=decide_timeout_s,
             )
@@ -5947,53 +6205,69 @@ class TaskManager(BaseManager):
                     None,
                 )
             )
-        # Corroboration: when the detector independently agrees on the target, accept a lower LLM
-        # self-report. Both signals are noisy alone (the LLM's float is self-assessed; the detector
-        # tag can be wrong) but they fail independently, so agreement is real evidence.
-        # Only ever LOWERS the bar, never raises it.
-        #
-        # Read the evidence from a SUBSTANTIVE segment tagged as the target, not from the buffer's
-        # last-segment aggregates: those describe different segments of the turn (buffer_language /
-        # its prob come from the FINAL fragment, buffer_max_segment_seconds is a max over ALL of
-        # them), so a one-token "okay" could lend its 1.0 token-share purity to a whole Hindi turn.
-        corroborated = self.__detector_corroborates(detector_segments, target)
-        effective_min_conf = min_conf
-        if corroborated:
-            effective_min_conf = float(os.getenv("LANGUAGE_SWITCH_CORROBORATED_MIN_CONFIDENCE", "0.55"))
-        if target_conf is None or target_conf < effective_min_conf:
+        # Explicit-only mode: a switch is authorized iff the judge returned a consistent
+        # explicit verdict (request_status="switch" AND explicit_request) — the ambient
+        # detection gates below grade evidence the explicit contract does not produce.
+        if self.language_switcher.explicit_only:
+            if decision.get("request_status") != "switch" or not decision.get("explicit_request"):
+                logger.info(
+                    f"LanguageSwitcher: explicit-only mode — target '{target}' without an explicit verdict "
+                    f"(status={decision.get('request_status')}, explicit={decision.get('explicit_request')}) — no switch"
+                )
+                emit_lid_decision("gated:not_explicit")
+                return
             logger.info(
-                f"LanguageSwitcher: target '{target}' confidence {target_conf} below {effective_min_conf} "
-                f"(corroborated={corroborated}, detector_prob={detector_lang_confidence}) (or missing) — "
-                f"no switch (reason={reasoning})"
+                f"LanguageSwitcher: explicit-only mode — switch to '{target}' authorized "
+                f"(status=switch, source={decision.get('request_source')}, conf={target_conf})"
             )
-            emit_lid_decision("gated:low_confidence")
-            return
+        else:
+            # Corroboration: when the detector independently agrees on the target, accept a lower LLM
+            # self-report. Both signals are noisy alone (the LLM's float is self-assessed; the detector
+            # tag can be wrong) but they fail independently, so agreement is real evidence.
+            # Only ever LOWERS the bar, never raises it.
+            #
+            # Read the evidence from a SUBSTANTIVE segment tagged as the target, not from the buffer's
+            # last-segment aggregates: those describe different segments of the turn (buffer_language /
+            # its prob come from the FINAL fragment, buffer_max_segment_seconds is a max over ALL of
+            # them), so a one-token "okay" could lend its 1.0 token-share purity to a whole Hindi turn.
+            corroborated = self.__detector_corroborates(detector_segments, target)
+            effective_min_conf = min_conf
+            if corroborated:
+                effective_min_conf = float(os.getenv("LANGUAGE_SWITCH_CORROBORATED_MIN_CONFIDENCE", "0.55"))
+            if target_conf is None or target_conf < effective_min_conf:
+                logger.info(
+                    f"LanguageSwitcher: target '{target}' confidence {target_conf} below {effective_min_conf} "
+                    f"(corroborated={corroborated}, detector_prob={detector_lang_confidence}) (or missing) — "
+                    f"no switch (reason={reasoning})"
+                )
+                emit_lid_decision("gated:low_confidence")
+                return
 
-        # Substance gate: acknowledgment-length audio mis-tags languages. Short turns need at
-        # least one substantive segment — an explicit by-name request is legitimately short and
-        # bypasses instead. Its bar defaults to min_conf, never above it: a stricter explicit
-        # bar would reject the caller-asked case while admitting the incidental one.
-        explicit_min_conf = float(os.getenv("LANGUAGE_SWITCH_EXPLICIT_MIN_CONFIDENCE", str(min_conf)))
-        explicit_bypass = bool(decision.get("explicit_request")) and (target_conf or 0.0) >= explicit_min_conf
-        if not explicit_bypass and foreign_max_segment_s < min_segment_s:
-            logger.info(
-                f"LanguageSwitcher: target '{target}' but longest foreign segment "
-                f"{foreign_max_segment_s:.2f}s < {min_segment_s}s (buffer max {buffered_max_segment_s:.2f}s) "
-                f"and no confident explicit request "
-                f"(explicit={decision.get('explicit_request')}, conf={target_conf}) — "
-                f"no switch (short audio is unreliable LID evidence; reason={reasoning})"
-            )
-            emit_lid_decision("gated:short_audio")
-            return
+            # Substance gate: acknowledgment-length audio mis-tags languages. Short turns need at
+            # least one substantive segment — an explicit by-name request is legitimately short and
+            # bypasses instead. Its bar defaults to min_conf, never above it: a stricter explicit
+            # bar would reject the caller-asked case while admitting the incidental one.
+            explicit_min_conf = float(os.getenv("LANGUAGE_SWITCH_EXPLICIT_MIN_CONFIDENCE", str(min_conf)))
+            explicit_bypass = bool(decision.get("explicit_request")) and (target_conf or 0.0) >= explicit_min_conf
+            if not explicit_bypass and foreign_max_segment_s < min_segment_s:
+                logger.info(
+                    f"LanguageSwitcher: target '{target}' but longest foreign segment "
+                    f"{foreign_max_segment_s:.2f}s < {min_segment_s}s (buffer max {buffered_max_segment_s:.2f}s) "
+                    f"and no confident explicit request "
+                    f"(explicit={decision.get('explicit_request')}, conf={target_conf}) — "
+                    f"no switch (short audio is unreliable LID evidence; reason={reasoning})"
+                )
+                emit_lid_decision("gated:short_audio")
+                return
 
-        # Rule-3a backstop: the judge still reads "This B1" as English.
-        if not explicit_bypass and is_alphanumeric_readout(detector_transcript):
-            logger.info(
-                f"LanguageSwitcher: target '{target}' vetoed — rule-3a alphanumeric readout "
-                f"({detector_transcript[:60]!r}); no switch (reason={reasoning})"
-            )
-            emit_lid_decision("gated:alphanumeric_readout")
-            return
+            # Rule-3a backstop: the judge still reads "This B1" as English.
+            if not explicit_bypass and is_alphanumeric_readout(detector_transcript):
+                logger.info(
+                    f"LanguageSwitcher: target '{target}' vetoed — rule-3a alphanumeric readout "
+                    f"({detector_transcript[:60]!r}); no switch (reason={reasoning})"
+                )
+                emit_lid_decision("gated:alphanumeric_readout")
+                return
 
         # Truncate the in-flight old-language reply (barge-in cleanup) before switching.
         activity = self._inflight_response_activity()  # captured pre-truncation for telemetry
@@ -6009,7 +6283,7 @@ class TaskManager(BaseManager):
             self.lid_playback_gate = None
             logger.info("LanguageSwitcher: in-flight function call — switching in parallel, not truncating the action")
             if target != self.language:
-                context_note = self.__switch_context_note(target, detector_transcript, reasoning)
+                context_note = self.__language_directive(target)
                 await self.switch_language(target, triggered_by="lid_llm", context_note=context_note)
                 emit_lid_decision("switched", switched_to=target, context_note=context_note, inflight_activity=activity)
             else:
@@ -6048,7 +6322,7 @@ class TaskManager(BaseManager):
             emit_lid_decision("gated:concurrent_switch", inflight_activity=activity)
             return
 
-        context_note = self.__switch_context_note(target, detector_transcript, reasoning)
+        context_note = self.__language_directive(target)
         logger.info(
             f"LanguageSwitcher: switching '{current}' → '{target}' (confidence={target_conf}, langs={languages}, reason={reasoning})"
         )
@@ -6082,6 +6356,7 @@ class TaskManager(BaseManager):
                 "generating follow-up for the latest turn"
             )
         else:
+            self.user_spoke = True
             # Reply to the caller's LAST utterance, not the whole buffer — with the
             self.conversation_history.append_user(idle_flush_user_text)
             logger.info(
@@ -6232,9 +6507,11 @@ class TaskManager(BaseManager):
         template = self.switch_handoff_messages.get(label, "")
         if not template:
             return ""
-        return template.replace("{agent_name}", self._get_voice_name_for_label(label)).replace(
+        text = template.replace("{agent_name}", self._get_voice_name_for_label(label)).replace(
             "{language}", LANGUAGE_NAMES.get(label, label)
         )
+        # As in the legacy handoff: render after the runtime placeholders so {customer_name} resolves.
+        return update_prompt_with_context(text, self.context_data)
 
     def __handoff_mulaw_wire(self) -> bool:
         """True on telephony (mu-law@8k clip), False on web/freeswitch (raw PCM@24k)."""
@@ -6322,13 +6599,7 @@ class TaskManager(BaseManager):
         return clip
 
     def __language_directive(self, label: str) -> str:
-        """Generic standing order pinned to the system prompt: reply ONLY in the active language.
-
-        Used whenever a richer switch-time note isn't available — tool-driven switches
-        (which pass no context_note) and the call's starting language. Starts with the
-        same "## Language note:" header as __switch_context_note so replacement logic
-        can find and strip whichever variant is currently installed.
-        """
+        """The one standing language order, installed at setup and on every switch."""
         name = LANGUAGE_NAMES.get(label, label)
         return (
             f"## Language note:\nThe user is now speaking {name} ('{label}'). From this point onward, "
@@ -6361,30 +6632,8 @@ class TaskManager(BaseManager):
         new_prompt = f"{base}\n\n{context_note or self.__language_directive(label)}"
         self.conversation_history.update_system_prompt(new_prompt)
         self.system_prompt["content"] = new_prompt
-
-    def __switch_context_note(self, target: str, detector_transcript: str, reasoning: str = None) -> str:
-        """Build the language note installed in the system prompt on a switch.
-
-        Must be a DIRECTIVE, not a description: with history dominated by the old
-        language (and customer prompts often written in one language), the main LLM
-        follows conversation momentum and keeps replying in the OLD language unless
-        explicitly ordered (QA 16db0968: pipeline switched hi→en but every reply
-        stayed Hindi). Shared by the real switch path and the speculative follow-up
-        so the committed speculation obeys the same directive. The reasoning line is
-        omitted on the speculative path — the decision hasn't returned yet there.
-        """
-        target_name = LANGUAGE_NAMES.get(target, target)
-        note = (
-            f"## Language note:\nThe caller is now speaking {target_name} ('{target}'). "
-            f"From this point, respond ONLY in {target_name} — every reply must be in {target_name}, "
-            f"regardless of the language of earlier conversation turns or the language these "
-            f"instructions are written in. In your NEXT reply only, first briefly restate your "
-            f"previous line in {target_name} so the caller can follow, then continue from there. "
-            f'Their latest message: "{detector_transcript}".'
-        )
-        if reasoning:
-            note += f" Reason: {reasoning}"
-        return note
+        # Responses API keeps the system prompt server-side, so a rewrite only ships once the chain drops.
+        self._invalidate_response_chain()
 
     def __log_committed_speculation(self, spec_text: str, capture):
         """Log a committed speculative follow-up exactly like a normal turn:
@@ -6491,7 +6740,7 @@ class TaskManager(BaseManager):
         """
         messages = self.conversation_history.get_copy()
         target_prompt = self.multilingual_prompts.get(target_label)
-        note = self.__switch_context_note(target_label, detector_transcript)
+        note = self.__language_directive(target_label)
         target_prompt = f"{target_prompt}\n\n{note}" if target_prompt else note
         if messages and messages[0].get("role") == "system":
             messages[0]["content"] = target_prompt
@@ -6768,6 +7017,15 @@ class TaskManager(BaseManager):
         finally:
             await self.tools["synthesizer"].cleanup()
 
+    def _stamp_cached_clip_text(self, meta_info):
+        """Give the mark its text so an interrupted clip can be trimmed. Cached-send branch
+        only: the cache-miss path re-synthesizes live and would stamp every chunk. See INIT.md."""
+        if meta_info.get("message_category") not in CACHED_SINGLE_MARK_CATEGORIES or meta_info.get(
+            "is_silence_trigger"
+        ):
+            return
+        meta_info["text_synthesized"] = meta_info.get("text", "")
+
     async def __send_preprocessed_audio(self, meta_info, text):
         meta_info = copy.deepcopy(meta_info)
         yield_in_chunks = self.yield_chunks
@@ -6810,6 +7068,7 @@ class TaskManager(BaseManager):
                     await self._synthesize(create_ws_data_packet(meta_info["text"], meta_info=meta_info))
                     return
                 logger.info("Sending preprocessed audio")
+                self._stamp_cached_clip_text(meta_info)
                 meta_info["format"] = audio_format
                 meta_info["end_of_synthesizer_stream"] = True
                 await self.tools["output"].handle(create_ws_data_packet(audio_chunk, meta_info))
@@ -6845,6 +7104,7 @@ class TaskManager(BaseManager):
                         meta_info["cached"] = False
                         await self._synthesize(create_ws_data_packet(meta_info["text"], meta_info=meta_info))
                         return
+                    self._stamp_cached_clip_text(meta_info)
                 else:
                     start_time = time.perf_counter()
                     audio_chunk = self.preloaded_welcome_audio if self.preloaded_welcome_audio else None
@@ -6896,6 +7156,8 @@ class TaskManager(BaseManager):
                 and meta_info["is_first_message"]
                 or self.interruption_manager.is_valid_sequence(message["meta_info"]["sequence_id"])
             ):
+                if meta_info.get("sequence_id") not in (None, -1):
+                    self._synthesis_awaiting_first_audio = True
                 if meta_info["is_md5_hash"]:
                     logger.info(
                         "sending preprocessed audio response to {}".format(
@@ -7013,6 +7275,13 @@ class TaskManager(BaseManager):
                     # No-op on every non-multilingual call: the gate is None and short-circuits.
                     if status == "SEND" and not is_hangup_message and self.__lid_playback_gate_holds(sequence_id):
                         status = "WAIT"
+                    # A regenerated turn can restate what the caller just heard; speak it once.
+                    if (
+                        status == "SEND"
+                        and not is_hangup_message
+                        and self._duplicates_last_spoken_turn(sequence_id, message["meta_info"])
+                    ):
+                        status = "BLOCK"
 
                     if status == "SEND":
                         # Audio approved - send it
@@ -7021,6 +7290,7 @@ class TaskManager(BaseManager):
                         self._commit_staged_assistant_history(sequence_id)
                         self.tools["input"].update_is_audio_being_played(True)
                         self.response_in_pipeline = False
+                        self._synthesis_awaiting_first_audio = False
                         await self.tools["output"].handle(message)
                         # Track when agent audio first starts flowing for this sequence.
                         # Only fire on real audio bytes — BOS/EOS control packets are strings
@@ -7068,6 +7338,7 @@ class TaskManager(BaseManager):
                             # the SEND path that normally resets this flag. Clear it here so
                             # subsequent user speech is not permanently treated as an interruption.
                             self.response_in_pipeline = False
+                            self._synthesis_awaiting_first_audio = False
                         should_continue_outer_loop = True
                         break  # Exit inner loop, skip to next message
 
@@ -7078,7 +7349,7 @@ class TaskManager(BaseManager):
                         if staleness > STUCK_AUDIO_GATE_RELEASE_S:
                             logger.warning(
                                 f"Releasing stuck audio gate: callee_speaking held {staleness:.1f}s "
-                                f"with no interim (sequence_id={sequence_id})"
+                                f"with no new speech (sequence_id={sequence_id})"
                             )
                             self.interruption_manager.on_user_speech_ended(update_utterance_time=False)
                             continue
@@ -7152,7 +7423,9 @@ class TaskManager(BaseManager):
             logger.error(f"Error in processing message output: {str(e)}")
 
     async def _inject_and_run_llm(self, injected_message: str):
-        self.conversation_history.append_user(injected_message)
+        # exclude_from_transcript, not exclude_from_llm: the nudge is the whole point for the
+        # LLM, but the caller never spoke it, so it must not surface as a user turn.
+        self.conversation_history.append_user(injected_message, exclude_from_transcript=True)
         meta_info = self.__get_updated_meta_info(
             {
                 "io": self.tools["output"].get_provider(),
@@ -7170,22 +7443,30 @@ class TaskManager(BaseManager):
             logger.info("Silence repeat generation cancelled by interruption")
             return
 
-    def _should_stall_hangup(
-        self, audio_playing, has_pending_generation, time_since_last_spoken_ai_word, time_since_user_last_spoke
-    ):
-        """Hang up when the call has made no forward progress at all: no audio playing, nothing
-        in flight, and both sides silent past the floor. Runs above the audio/pipeline gate so it
-        still applies when a pipeline flag is stuck. Floor stays above hangup_after_silence so the
-        normal inactivity path takes precedence whenever it is reachable."""
+    def _should_stall_hangup(self, audio_playing, time_since_last_spoken_ai_word, time_since_user_last_spoke):
+        """Hang up when the call has made no forward progress at all: no audio playing and both
+        sides silent past the hard cap. Runs above the audio/pipeline gate so it still applies
+        when a pipeline flag is stuck (e.g. a hung LLM call). An agent's own hangup_after_silence
+        wins over the hard cap when configured higher - this is insurance on top of that
+        configured patience, not a replacement for it."""
         if self.hang_conversation_after <= 0:
             return False
-        stall_timeout = max(self.hang_conversation_after, STALL_HANGUP_FLOOR_S)
-        return (
+        stall_timeout = max(self.hang_conversation_after, STALL_HANGUP_HARD_CAP_S)
+        fires = (
             not audio_playing
-            and not has_pending_generation
             and time_since_last_spoken_ai_word > stall_timeout
             and time_since_user_last_spoke > stall_timeout
         )
+        if fires:
+            logger.debug(
+                f"_should_stall_hangup: firing (ai_silent={time_since_last_spoken_ai_word:.1f}s "
+                f"user_silent={time_since_user_last_spoke:.1f}s stall_timeout={stall_timeout}s)"
+            )
+        return fires
+
+    def _pipeline_busy(self, audio_playing):
+        """True while the agent is speaking or about to: response_in_pipeline can read False in the gap between a response's synth push and its first audio chunk, so _synthesis_awaiting_first_audio covers it."""
+        return audio_playing or self.response_in_pipeline or self._synthesis_awaiting_first_audio
 
     def compute_last_ai_audio_timestamp(self):
         """Most recent moment agent audio was still reaching the user.
@@ -7242,13 +7523,15 @@ class TaskManager(BaseManager):
             # running inside it) means a response is still being produced even though
             # response_in_pipeline has flipped False after the filler audio. Treat that
             # window as busy so we don't synthesize "are you still there" over the
-            # upcoming follow-up response. hang_conversation_after intentionally remains
-            # ungated so a truly hung task still triggers the inactivity hangup.
+            # upcoming follow-up response, or repeat-after-silence over it either (both checks
+            # below are gated on this). hang_conversation_after intentionally remains ungated so
+            # a truly hung task still triggers the inactivity hangup - and so does the stall
+            # backstop's own hard cap (_should_stall_hangup, below, does not look at this flag
+            # at all): a tool call or s2s call that outlasts that cap with no audio playing can
+            # still be read as no forward progress and hung up mid-tool. BOLNA-2563.
             has_pending_generation = (
                 (self.llm_task is not None and not self.llm_task.done())
                 or (self.execute_function_call_task is not None and not self.execute_function_call_task.done())
-                # An s2s tool call lives here instead, and outlasting the floor would otherwise
-                # read as no forward progress and hang up mid-tool.
                 or any(not task.done() for task in getattr(self, "_s2s_tool_tasks", ()))
             )
 
@@ -7262,21 +7545,20 @@ class TaskManager(BaseManager):
             # Must run above the audio/pipeline gate below (see method docstring).
             if self._should_stall_hangup(
                 audio_playing=self.tools["input"].is_audio_being_played_to_user(),
-                has_pending_generation=has_pending_generation,
                 time_since_last_spoken_ai_word=time_since_last_spoken_ai_word,
                 time_since_user_last_spoke=time_since_user_last_spoke,
             ):
                 logger.warning(
                     f"Stall backstop: no forward progress for {time_since_last_spoken_ai_word:.1f}s "
-                    f"(audio_playing=False, no pending generation, response_in_pipeline={self.response_in_pipeline}) "
-                    f"- forcing hangup"
+                    f"(audio_playing=False, has_pending_generation={has_pending_generation}, "
+                    f"response_in_pipeline={self.response_in_pipeline}) - forcing hangup"
                 )
                 await self._hangup_after_goodbye(HangupReason.INACTIVITY_TIMEOUT)
                 break
 
             # Draining audio needs no term here: every branch below is gated on
             # time_since_last_spoken_ai_word, which stays at 0 while the caller can still hear.
-            if self.tools["input"].is_audio_being_played_to_user() or self.response_in_pipeline:
+            if self._pipeline_busy(self.tools["input"].is_audio_being_played_to_user()):
                 continue
 
             if (
@@ -7809,6 +8091,7 @@ class TaskManager(BaseManager):
             elif isinstance(event, s2s_events.InputTranscript):
                 if event.is_final and event.content:
                     logger.info(f"S2S caller: {event.content[:200]}")
+                    self.user_spoke = True
                     self.conversation_history.append_user(event.content)
                     self.time_since_last_spoken_human_word = time.time()
                     # Cleared here rather than in the output loop: the prompt's audio is not
@@ -7827,6 +8110,8 @@ class TaskManager(BaseManager):
                 # the provider's VAD has already stopped generating, so nothing decided here
                 # can give the agent the floor back. Barge-in sensitivity is tuned provider-side.
                 self.interruption_manager.on_user_speech_started()
+                # A speech start refreshes liveness, barge-in or not.
+                self.time_since_last_spoken_human_word = time.time()
                 if self._s2s_agent_has_floor():
                     logger.info("S2S: caller barged in, dropping queued audio")
                     self.interruption_manager.on_interruption_triggered()
@@ -8420,6 +8705,7 @@ class TaskManager(BaseManager):
                         self.tools["synthesizer"].get_synthesized_characters() if _has_asr_tts else 0
                     ),
                     "ended_by_assistant": self.ended_by_assistant,
+                    "user_spoke": self.user_spoke,
                     "latency_dict": {
                         "llm_latencies": self.llm_latencies.model_dump(),
                         "transcriber_latencies": self.transcriber_latencies.model_dump(),

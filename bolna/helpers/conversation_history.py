@@ -148,8 +148,17 @@ class ConversationHistory:
         return popped
 
     def pop_and_merge_user(self, new_content: str) -> str:
+        """Fold a split-utterance tail back into the caller turn it belongs to.
+
+        A row flagged exclude_from_transcript is an engine control token (the silence nudge), not
+        caller speech. Merging it would paste the marker into a real utterance, where it surfaces
+        in the transcript and reads to the LLM as something the caller said, so its content is
+        dropped instead. The row still goes: the turn it was driving is being superseded.
+        """
         if self._messages and self._messages[-1].get("role") == ChatRole.USER:
             prev_user = self._messages.pop()
+            if prev_user.get("exclude_from_transcript"):
+                return new_content
             return prev_user["content"] + " " + new_content
         return new_content
 
@@ -245,6 +254,13 @@ class ConversationHistory:
     @property
     def last_content(self) -> str | None:
         return self._messages[-1].get("content") if self._messages else None
+
+    def last_assistant_content(self) -> str | None:
+        """The agent's most recent spoken line (skips tool rows and tool-call-only stubs)."""
+        for message in reversed(self._messages):
+            if message.get("role") == ChatRole.ASSISTANT and message.get("content"):
+                return message["content"]
+        return None
 
     def get_copy(self) -> list[dict]:
         self._sanitize_tool_messages(self._messages)

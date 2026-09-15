@@ -39,7 +39,6 @@ def _make_graph_agent(nodes, current_node_id="n1"):
         "nodes": nodes,
     }
     with (
-        patch("bolna.agent_types.graph_agent.OpenAI", return_value=MagicMock()),
         patch("bolna.agent_types.graph_agent.SUPPORTED_LLM_PROVIDERS", {"openai": MagicMock(return_value=MagicMock())}),
         patch("bolna.agent_types.graph_agent.OpenAiLLM", return_value=MagicMock()),
     ):

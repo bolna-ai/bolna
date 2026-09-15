@@ -662,6 +662,7 @@ class TestUserOnlinePrompt:
         tm.asked_if_user_is_still_there = False
         tm.hangup_triggered = False
         tm.response_in_pipeline = False
+        tm._synthesis_awaiting_first_audio = False
         tm.llm_task = None
         tm.execute_function_call_task = None
         return tm

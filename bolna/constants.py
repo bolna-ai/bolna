@@ -1,3 +1,4 @@
+import os
 from datetime import datetime, timezone
 from bolna.enums import ReasoningEffort as RE
 
@@ -22,8 +23,14 @@ DEEPGRAM_FLUX_EAGER_EOT_THRESHOLD = 0.5  # confidence to trigger speculative LLM
 DEEPGRAM_FLUX_EOT_TIMEOUT_MS = 500  # max silence before forcing end-of-turn
 # Min time a Flux turn may stay open with no transcriber events before it is force-closed.
 DEEPGRAM_FLUX_TURN_STALL_FLOOR_S = 3.0
-# Min idle time before the inactivity backstop hangs up; kept above hangup_after_silence.
-STALL_HANGUP_FLOOR_S = 20.0
+# Past this much silence (no audio playing, both sides silent), force a hangup - the call has
+# made no forward progress at all, e.g. a hung LLM call or an s2s tool task that never
+# completes. BOLNA-2563.
+STALL_HANGUP_HARD_CAP_S = 60.0
+# Max time to wait for one LLM reply (_run_llm_task). If the LLM never comes back - no reply,
+# no error, it just hangs - force it to fail after this many seconds and hang up, instead of
+# leaving the call stuck forever. BOLNA-2563.
+LLM_GENERATION_TIMEOUT_S = 60.0
 
 # LLM-driven language-switch defaults, all overridable by the matching LANGUAGE_SWITCH_* env.
 # Read via os.getenv(..., CONSTANT) at call time, never frozen at import (load_dotenv runs later).
@@ -50,12 +57,16 @@ LANGUAGE_SWITCH_SPEAKING_STALE_CAP_S = 2.5
 
 # Debounce for overlapped finals: one regenerate after this quiet window instead of per fragment.
 LLM_REGEN_SETTLE_S = 0.7
+
+# Above this, a turn is a restatement of the one just spoken and its audio is dropped. The incident
+# pair (BOLNA-2621) differed only by a leading "कृपया" and scores ~0.94; distinct answers sit far below.
+DUPLICATE_RESPONSE_SIMILARITY = 0.9
 # Class-name prefixes whose endpointing rules out an in-window final: they skip the debounce.
 REGEN_SETTLE_EXCLUDED_TRANSCRIBERS = ("deepgram",)
 
-# Past this much caller silence, callee_speaking is stale and held audio ships. Deepgram closes a
-# healthy turn within utterance_end_ms (1s floor), so a real speaker stays well inside this.
-STUCK_AUDIO_GATE_RELEASE_S = 3.0
+# Past this much with no new words from the caller, callee_speaking is stale and held audio ships.
+# Deepgram closes a healthy turn within utterance_end_ms (1s floor), so a real speaker stays inside it.
+STUCK_AUDIO_GATE_RELEASE_S = 2.0
 
 # Above __await_stream_sid's own 10s timeout, so that path is what ends the call.
 S2S_STREAM_SID_TIMEOUT_S = 12.0
@@ -70,14 +81,31 @@ SONIOX_ENDPOINT_TOKEN = "<end>"  # sentinel token emitted when the speaker stops
 SONIOX_DEFAULT_MULTILINGUAL_HINTS = ["en", "hi", "ta", "te", "kn", "ml", "mr", "bn", "gu", "pa", "ur"]
 SONIOX_AUTO_LANGUAGE_VALUES = {"", "multi", "auto", "multilingual", "unknown"}
 
+# How each provider words a moderation rejection: OpenAI says "content policy", Azure says
+# "content management policy" and carries code content_filter.
+CONTENT_POLICY_ERROR_MARKERS = ("content policy", "content_policy", "content_filter", "content management")
+
+# Pre-generated clips sent as one mark for the whole message. Not event_proactive: on
+# sequence_id -1 the handlers blank text_synthesized, so its mark never carries text.
+CACHED_SINGLE_MARK_CATEGORIES = ("static_node",)
+
 # Model prefixes
 GPT5_MODEL_PREFIX = "gpt-5"
 GPT5_4_MODEL_PREFIX = "gpt-5.4"
 GPT5_5_MODEL_PREFIX = "gpt-5.5"
 GPT5_6_MODEL_PREFIX = "gpt-5.6"
+GPT6_MODEL_PREFIX = "gpt-6"
+# Families that fix temperature at 1, take max_completion_tokens rather than max_tokens,
+# reject stop, and carry a reasoning_effort.
+REASONING_MODEL_PREFIXES = (GPT5_MODEL_PREFIX, GPT6_MODEL_PREFIX)
 # Function tools with reasoning_effort are rejected on chat completions for these models,
 # so tool-using agents are routed through the Responses API.
-RESPONSES_API_MODEL_PREFIXES = (GPT5_4_MODEL_PREFIX, GPT5_5_MODEL_PREFIX, GPT5_6_MODEL_PREFIX)
+RESPONSES_API_MODEL_PREFIXES = (
+    GPT5_4_MODEL_PREFIX,
+    GPT5_5_MODEL_PREFIX,
+    GPT5_6_MODEL_PREFIX,
+    GPT6_MODEL_PREFIX,
+)
 
 HIGH_LEVEL_ASSISTANT_ANALYTICS_DATA = {
     "extraction_details": {},
@@ -310,6 +338,11 @@ MAYA_TTS_SUPPORTED_LANGUAGES = {
     "auto",
 }
 
+# Gemini TTS (Vertex generateContent). The model id is supplied per agent, so none is pinned.
+GEMINI_TTS_DEFAULT_MODEL = os.getenv("GEMINI_TTS_MODEL", "gemini-tts")
+GEMINI_TTS_NATIVE_SAMPLE_RATE = 24000
+GEMINI_TTS_LOCATION = "global"
+
 MODEL_REASONING_EFFORT_MAP = {
     "gpt-5": [RE.MINIMAL, RE.LOW, RE.MEDIUM, RE.HIGH],
     "gpt-5-mini": [RE.MINIMAL, RE.LOW, RE.MEDIUM, RE.HIGH],
@@ -329,11 +362,17 @@ MODEL_REASONING_EFFORT_MAP = {
     "gpt-5.6-sol": [RE.NONE, RE.LOW, RE.MEDIUM, RE.HIGH, RE.XHIGH],
     "gpt-5.6-terra": [RE.NONE, RE.LOW, RE.MEDIUM, RE.HIGH, RE.XHIGH],
     "gpt-5.6-luna": [RE.NONE, RE.LOW, RE.MEDIUM, RE.HIGH, RE.XHIGH],
+    "gpt-6-astra": [RE.LOW, RE.MEDIUM, RE.HIGH, RE.XHIGH, RE.MAX],
     # Realtime speech-to-speech. gpt-realtime-1.5 has no reasoning and is deliberately absent.
     "gpt-realtime-2": [RE.MINIMAL, RE.LOW, RE.MEDIUM, RE.HIGH, RE.XHIGH],
     "gpt-realtime-2.1": [RE.MINIMAL, RE.LOW, RE.MEDIUM, RE.HIGH, RE.XHIGH],
     "gpt-realtime-2.1-mini": [RE.MINIMAL, RE.LOW, RE.MEDIUM, RE.HIGH, RE.XHIGH],
 }
+
+
+def is_reasoning_model(model: str) -> bool:
+    """Whether the model takes reasoning parameters. Pass a model family, never a deployment name."""
+    return (model or "").startswith(REASONING_MODEL_PREFIXES)
 
 
 def default_reasoning_effort(model: str) -> str:

@@ -62,6 +62,8 @@ class SynthesizerProvider(str, Enum):
     RIME = "rime"
     PIXA = "pixa"
     MAYA = "maya"
+    KALPA = "kalpa"
+    GEMINI = "gemini"
 
     @classmethod
     def all_values(cls):
@@ -83,6 +85,7 @@ class TranscriberProvider(str, Enum):
     SMALLEST = "smallest"
     OPENAI = "openai"
     SONIOX = "soniox"
+    GEMINI = "gemini"
 
     @classmethod
     def all_values(cls):
@@ -125,6 +128,7 @@ class ReasoningEffort(str, Enum):
     MEDIUM = "medium"
     HIGH = "high"
     XHIGH = "xhigh"
+    MAX = "max"
 
     @classmethod
     def all_values(cls):
@@ -168,6 +172,12 @@ class ResponseStreamEvent(str, Enum):
     def terminal_events(cls):
         """Events that signal the end of a response stream."""
         return frozenset({cls.COMPLETED, cls.FAILED, cls.INCOMPLETE, cls.ERROR})
+
+    @classmethod
+    def response_terminal_events(cls):
+        """Terminals that settle the response itself. `error` is excluded: it can be raised
+        against the session and still be followed by the response's own terminal event."""
+        return frozenset({cls.COMPLETED, cls.FAILED, cls.INCOMPLETE})
 
     @classmethod
     def all_values(cls):

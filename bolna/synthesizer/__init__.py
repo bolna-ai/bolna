@@ -11,4 +11,6 @@ from .smallest_synthesizer import SmallestSynthesizer
 from .sarvam_synthesizer import SarvamSynthesizer
 from .pixa_synthesizer import PixaSynthesizer
 from .maya_synthesizer import MayaSynthesizer
+from .kalpa_synthesizer import KalpaSynthesizer
+from .gemini_synthesizer import GeminiSynthesizer
 from .synthesizer_pool import SynthesizerPool

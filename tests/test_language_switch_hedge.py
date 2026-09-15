@@ -29,7 +29,7 @@ async def _decide(sw):
 
 
 async def test_fast_decide_fires_only_one_request(monkeypatch):
-    gen = AsyncMock(return_value=REPLY)
+    gen = AsyncMock(return_value=(REPLY, {}))
     sw = _switcher(monkeypatch, gen, hedge_after=0.5)
     assert (await _decide(sw))["target_language"] == "mr"
     assert gen.await_count == 1  # the common turn must not pay for two
@@ -39,11 +39,11 @@ async def test_fast_decide_fires_only_one_request(monkeypatch):
 async def test_slow_first_request_is_hedged_and_second_wins(monkeypatch):
     calls = {"n": 0}
 
-    async def generate(_messages):
+    async def generate(_messages, **kwargs):
         calls["n"] += 1
         if calls["n"] == 1:
             await asyncio.sleep(5)  # the straggler
-        return REPLY
+        return REPLY, {}
 
     sw = _switcher(monkeypatch, generate, hedge_after=0.05)
     result = await asyncio.wait_for(_decide(sw), timeout=2.0)
@@ -55,7 +55,7 @@ async def test_slow_first_request_is_hedged_and_second_wins(monkeypatch):
 
 
 async def test_hedge_disabled_by_zero(monkeypatch):
-    gen = AsyncMock(return_value=REPLY)
+    gen = AsyncMock(return_value=(REPLY, {}))
     sw = _switcher(monkeypatch, gen, hedge_after=0)
     assert (await _decide(sw))["target_language"] == "mr"
     assert gen.await_count == 1
@@ -64,13 +64,13 @@ async def test_hedge_disabled_by_zero(monkeypatch):
 async def test_failing_straggler_does_not_lose_the_hedged_answer(monkeypatch):
     calls = {"n": 0}
 
-    async def generate(_messages):
+    async def generate(_messages, **kwargs):
         calls["n"] += 1
         if calls["n"] == 1:
             await asyncio.sleep(0.1)
             raise RuntimeError("provider 500")
         await asyncio.sleep(0.3)
-        return REPLY
+        return REPLY, {}
 
     sw = _switcher(monkeypatch, generate, hedge_after=0.05)
     # First attempt raises before the second answers — the reply must still be returned.
@@ -78,7 +78,7 @@ async def test_failing_straggler_does_not_lose_the_hedged_answer(monkeypatch):
 
 
 async def test_both_failing_returns_none(monkeypatch):
-    async def generate(_messages):
+    async def generate(_messages, **kwargs):
         await asyncio.sleep(0.05)
         raise RuntimeError("provider down")
 
@@ -95,16 +95,16 @@ async def test_hedge_won_resets_between_decides(monkeypatch):
     # fast decide would be misreported as hedged in the logs.
     calls = {"n": 0}
 
-    async def generate(_messages):
+    async def generate(_messages, **kwargs):
         calls["n"] += 1
         if calls["n"] == 1:
             await asyncio.sleep(5)  # force a hedge on the first decide
-        return REPLY
+        return REPLY, {}
 
     sw = _switcher(monkeypatch, generate, hedge_after=0.05)
     await asyncio.wait_for(_decide(sw), timeout=2.0)
     assert sw.hedge_won is True
 
-    sw._llm.generate = AsyncMock(return_value=REPLY)  # second decide answers immediately
+    sw._llm.generate = AsyncMock(return_value=(REPLY, {}))  # second decide answers immediately
     await _decide(sw)
     assert sw.hedge_won is False

@@ -16,6 +16,14 @@ class BaseLLM:
         """Generate an LLM response for the given message history."""
         pass
 
+    async def route(self, messages, tools, tool_choice="required", meta_info=None):
+        """One forced tool-call for graph routing.
+
+        Returns a normalized dict {function_name, arguments, usage, service_tier, overflowed}, or
+        None when the model emitted no tool call. Overridden per provider.
+        """
+        raise NotImplementedError(f"{type(self).__name__} does not support graph routing")
+
     def invalidate_response_chain(self):
         """Reset stateful response chaining (e.g., previous_response_id).
 

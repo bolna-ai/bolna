@@ -71,41 +71,32 @@ class DeepgramConfig(BaseModel):
     model: str
 
 
-class CartesiaConfig(BaseModel):
-    voice_id: str
+class StandardVoiceConfig(BaseModel):
+    """The four fields every voice provider needs; extend it with provider-specific knobs."""
+
     voice: str
+    voice_id: str
     model: str
     language: str
+
+
+class CartesiaConfig(StandardVoiceConfig):
     speed: Optional[float] = 1.0
 
 
-class RimeConfig(BaseModel):
-    voice_id: str
-    language: str
-    voice: str
-    model: str
+class RimeConfig(StandardVoiceConfig):
+    pass
 
 
-class SmallestConfig(BaseModel):
-    voice_id: str
-    language: str
-    voice: str
-    model: str
+class SmallestConfig(StandardVoiceConfig):
+    pass
 
 
-class SarvamConfig(BaseModel):
-    voice_id: str
-    language: str
-    voice: str
-    model: str
+class SarvamConfig(StandardVoiceConfig):
     speed: Optional[float] = 1.0
 
 
-class PixaConfig(BaseModel):
-    voice_id: str
-    voice: str
-    model: str
-    language: str
+class PixaConfig(StandardVoiceConfig):
     top_p: Optional[float] = 0.95
     repetition_penalty: Optional[float] = 1.3
 
@@ -121,11 +112,46 @@ class MayaConfig(BaseModel):
     language: Optional[str] = "en"
 
 
+class KalpaConfig(BaseModel):
+    voice: str = "Kiara"
+    voice_id: Optional[str] = None
+    model: str = "kalpa-tts-multilingual-beta-v0.1"
+    temperature: Optional[float] = None
+    acoustic_temperature: Optional[float] = None
+    max_new_tokens: Optional[int] = None
+    audio_quality: Optional[str] = None
+    chunk_length_schedule: Optional[List[int]] = None
+
+
 class AzureConfig(BaseModel):
     voice: str
     model: str
     language: str
     speed: Optional[float] = 1.0
+
+
+class GeminiConfig(StandardVoiceConfig):
+    # voice_id holds the Gemini voice_name; style feeds structured speech_metadata.
+    style: Optional[str] = None
+
+
+# The config class each provider's provider_config is validated against. Adding a provider means
+# one entry here.
+SYNTHESIZER_CONFIG_MODELS = {
+    SynthesizerProvider.POLLY.value: PollyConfig,
+    SynthesizerProvider.ELEVENLABS.value: ElevenLabsConfig,
+    SynthesizerProvider.OPENAI.value: OpenAIConfig,
+    SynthesizerProvider.DEEPGRAM.value: DeepgramConfig,
+    SynthesizerProvider.AZURETTS.value: AzureConfig,
+    SynthesizerProvider.CARTESIA.value: CartesiaConfig,
+    SynthesizerProvider.SMALLEST.value: SmallestConfig,
+    SynthesizerProvider.SARVAM.value: SarvamConfig,
+    SynthesizerProvider.RIME.value: RimeConfig,
+    SynthesizerProvider.PIXA.value: PixaConfig,
+    SynthesizerProvider.MAYA.value: MayaConfig,
+    SynthesizerProvider.KALPA.value: KalpaConfig,
+    SynthesizerProvider.GEMINI.value: GeminiConfig,
+}
 
 
 class Transcriber(BaseModel):
@@ -140,6 +166,10 @@ class Transcriber(BaseModel):
     provider: Optional[str] = "deepgram"
     multilingual: Optional[Dict[str, Any]] = None
     active: Optional[str] = None
+    # Per-call self-hosted Deepgram endpoint override; unset falls back to DEEPGRAM_HOST* env.
+    deepgram_host: Optional[str] = None
+    deepgram_flux_host: Optional[str] = None
+    deepgram_host_protocol: Optional[str] = None
     # Flux model parameters
     eot_threshold: Optional[float] = None
     eager_eot_threshold: Optional[float] = None
@@ -157,19 +187,8 @@ class Transcriber(BaseModel):
 
 class Synthesizer(BaseModel):
     provider: str
-    provider_config: Union[
-        PollyConfig,
-        ElevenLabsConfig,
-        AzureConfig,
-        RimeConfig,
-        SmallestConfig,
-        SarvamConfig,
-        PixaConfig,
-        CartesiaConfig,
-        DeepgramConfig,
-        OpenAIConfig,
-        MayaConfig,
-    ] = Field(union_mode="smart")
+    # Derived from the registry so a provider registered there is always accepted here.
+    provider_config: Union[tuple(SYNTHESIZER_CONFIG_MODELS.values())] = Field(union_mode="smart")
     stream: bool = False
     buffer_size: Optional[int] = 40  # 40 characters in a buffer
     audio_format: Optional[str] = "pcm"
@@ -180,41 +199,15 @@ class Synthesizer(BaseModel):
         provider = values.get("provider")
         config = values.get("provider_config", {})
 
-        if provider == "elevenlabs":
-            if not config.get("voice") or not config.get("voice_id"):
-                raise ValueError("ElevenLabs config requires 'voice' or 'voice_id'.")
-            if isinstance(config, dict):
-                values["provider_config"] = ElevenLabsConfig(**config)
-        elif provider == "pixa":
-            if isinstance(config, dict):
-                values["provider_config"] = PixaConfig(**config)
-        elif provider == "cartesia":
-            if isinstance(config, dict):
-                values["provider_config"] = CartesiaConfig(**config)
-        elif provider == "polly":
-            if isinstance(config, dict):
-                values["provider_config"] = PollyConfig(**config)
-        elif provider == "azuretts":
-            if isinstance(config, dict):
-                values["provider_config"] = AzureConfig(**config)
-        elif provider == "deepgram":
-            if isinstance(config, dict):
-                values["provider_config"] = DeepgramConfig(**config)
-        elif provider == "openai":
-            if isinstance(config, dict):
-                values["provider_config"] = OpenAIConfig(**config)
-        elif provider == "smallest":
-            if isinstance(config, dict):
-                values["provider_config"] = SmallestConfig(**config)
-        elif provider == "sarvam":
-            if isinstance(config, dict):
-                values["provider_config"] = SarvamConfig(**config)
-        elif provider == "rime":
-            if isinstance(config, dict):
-                values["provider_config"] = RimeConfig(**config)
-        elif provider == "maya":
-            if isinstance(config, dict):
-                values["provider_config"] = MayaConfig(**config)
+        if not isinstance(config, dict):
+            return values
+
+        if provider == SynthesizerProvider.ELEVENLABS.value and (not config.get("voice") or not config.get("voice_id")):
+            raise ValueError("ElevenLabs config requires both 'voice' and 'voice_id'.")
+
+        config_model = SYNTHESIZER_CONFIG_MODELS.get(provider)
+        if config_model:
+            values["provider_config"] = config_model(**config)
 
         return values
 
@@ -394,6 +387,7 @@ class GraphEdge(BaseModel):
 
     to_node_id: str
     condition: str = ""  # Human-readable description of when to transition
+    label: Optional[str] = None
     condition_type: Optional[EdgeConditionType] = None  # None → "llm" (backward compat)
     expression: Optional[ExpressionGroup] = None  # required when condition_type == "expression"
     event_name: Optional[str] = None  # Matches CallEvent.event when condition_type="event"
@@ -598,6 +592,8 @@ class ToolModel(BaseModel):
 class OpenAIRealtimeConfig(BaseModel):
     model: str = "gpt-realtime-2.1"
     voice: str = "marin"
+    # Playback rate (0.25 to 1.5), not how the reply is worded.
+    speed: Optional[float] = 1.0
     # semantic_vad scores whether the caller has actually finished from what they said, so
     # it waits longer on a trailing "ummm" than on a finished sentence. That is the job the
     # llm pipeline does with a word count and a phrase list, done by a model instead.
@@ -690,6 +686,7 @@ class ConversationConfig(BaseModel):
     )
     interruption_backoff_period: Optional[int] = 100
     hangup_after_LLMCall: Optional[bool] = False
+    interruptible_hangup_message: Optional[bool] = False
     call_cancellation_prompt: Optional[str] = None
     backchanneling: Optional[bool] = False
     backchanneling_message_gap: Optional[int] = 5

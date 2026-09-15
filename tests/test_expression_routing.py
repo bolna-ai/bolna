@@ -72,7 +72,6 @@ def _make_agent(config_overrides=None):
     mock_openai_llm_cls = MagicMock(return_value=mock_llm)
 
     with (
-        patch("bolna.agent_types.graph_agent.OpenAI", return_value=mock_openai_client),
         patch("bolna.agent_types.graph_agent.SUPPORTED_LLM_PROVIDERS", {"openai": mock_openai_llm_cls}),
         patch("bolna.agent_types.graph_agent.OpenAiLLM", return_value=MagicMock()),
     ):
@@ -88,17 +87,14 @@ async def _async_iter(items):
 
 
 def _mock_routing_response(function_name, function_args_dict):
-    mock_tool_call = MagicMock()
-    mock_tool_call.function.name = function_name
-    mock_tool_call.function.arguments = json.dumps(function_args_dict)
-    mock_message = MagicMock()
-    mock_message.tool_calls = [mock_tool_call]
-    mock_choice = MagicMock()
-    mock_choice.message = mock_message
-    mock_response = MagicMock()
-    mock_response.choices = [mock_choice]
-    # _routing_create hands back (response, overflowed).
-    return mock_response, False
+    # The shape routing_llm.route() returns.
+    return {
+        "function_name": function_name,
+        "arguments": dict(function_args_dict),
+        "usage": {},
+        "service_tier": None,
+        "overflowed": False,
+    }
 
 
 def _uncond_intent_config():
@@ -249,10 +245,9 @@ class TestExpressionMatchSkipsLLM:
 
         agent.context_data = {"detected_language": "hindi"}
 
-        with patch("asyncio.to_thread", new_callable=AsyncMock) as mock_thread:
-            result = await agent.decide_next_node_with_functions([{"role": "user", "content": "namaste"}])
-            # LLM should NOT have been called
-            mock_thread.assert_not_called()
+        result = await agent.decide_next_node_with_functions([{"role": "user", "content": "namaste"}])
+        # LLM should NOT have been called
+        agent.routing_llm.route.assert_not_called()
 
         next_node, params, latency_ms, msgs, tools, reasoning, confidence, usage_info = result
         assert next_node == "hindi_agent"
@@ -276,9 +271,8 @@ class TestExpressionMatchSkipsLLM:
             }
         )
 
-        with patch("asyncio.to_thread", new_callable=AsyncMock) as mock_thread:
-            result = await agent.decide_next_node_with_functions([{"role": "user", "content": "hello"}])
-            mock_thread.assert_not_called()
+        result = await agent.decide_next_node_with_functions([{"role": "user", "content": "hello"}])
+        agent.routing_llm.route.assert_not_called()
 
         assert result[0] == "fallback"
         assert result[6] == 1.0  # confidence
@@ -332,8 +326,8 @@ class TestFallThroughToLLM:
             },
         )
 
-        with patch("asyncio.to_thread", new_callable=AsyncMock, return_value=mock_resp):
-            result = await agent.decide_next_node_with_functions([{"role": "user", "content": "I want to book"}])
+        agent.routing_llm.route = AsyncMock(return_value=mock_resp)
+        result = await agent.decide_next_node_with_functions([{"role": "user", "content": "I want to book"}])
 
         next_node, params, latency_ms, msgs, tools, reasoning, confidence, usage_info = result
         assert next_node == "booking"
@@ -383,8 +377,8 @@ class TestFallThroughToLLM:
             },
         )
 
-        with patch("asyncio.to_thread", new_callable=AsyncMock, return_value=mock_resp):
-            result = await agent.decide_next_node_with_functions([{"role": "user", "content": "hi"}])
+        agent.routing_llm.route = AsyncMock(return_value=mock_resp)
+        result = await agent.decide_next_node_with_functions([{"role": "user", "content": "hi"}])
 
         # Check that tools (result[4]) only has go_to_booking + stay_on_current_node
         tools = result[4]
@@ -415,8 +409,8 @@ class TestBackwardCompatibility:
             },
         )
 
-        with patch("asyncio.to_thread", new_callable=AsyncMock, return_value=mock_resp):
-            result = await agent.decide_next_node_with_functions([{"role": "user", "content": "I want an oil change"}])
+        agent.routing_llm.route = AsyncMock(return_value=mock_resp)
+        result = await agent.decide_next_node_with_functions([{"role": "user", "content": "I want an oil change"}])
 
         assert result[0] == "booking"
         assert result[6] == 0.95
@@ -467,9 +461,8 @@ class TestPriorityOrdering:
         history = [{"role": "user", "content": f"msg {i}"} for i in range(5)]
         agent.context_data = {}
 
-        with patch("asyncio.to_thread", new_callable=AsyncMock) as mock_thread:
-            result = await agent.decide_next_node_with_functions(history)
-            mock_thread.assert_not_called()
+        result = await agent.decide_next_node_with_functions(history)
+        agent.routing_llm.route.assert_not_called()
 
         assert result[0] == "escalation"
 
@@ -544,9 +537,8 @@ class TestPriorityOrdering:
         agent.context_data = {}
         agent.current_node_entry_index = 0
 
-        with patch("asyncio.to_thread", new_callable=AsyncMock) as mock_thread:
-            result = await agent.decide_next_node_with_functions([{"role": "user", "content": "hi"}])
-            mock_thread.assert_not_called()  # deterministic, no routing LLM
+        result = await agent.decide_next_node_with_functions([{"role": "user", "content": "hi"}])
+        agent.routing_llm.route.assert_not_called()  # deterministic, no routing LLM
         assert result[0] == "escalation"  # expression wins over the lower-priority unconditional default
 
 
@@ -563,9 +555,9 @@ class TestUnconditionalWithIntentEdges:
         agent = _make_agent(_uncond_intent_config())
         agent.context_data = {}
         mock_resp = _mock_routing_response("transition_to_escalate", {"reasoning": "wants a human", "confidence": 0.9})
-        with patch("asyncio.to_thread", new_callable=AsyncMock, return_value=mock_resp) as mock_thread:
-            result = await agent.decide_next_node_with_functions([{"role": "user", "content": "get me a human"}])
-        mock_thread.assert_called_once()  # intent LLM ran; the unconditional did NOT short-circuit it
+        agent.routing_llm.route = AsyncMock(return_value=mock_resp)
+        result = await agent.decide_next_node_with_functions([{"role": "user", "content": "get me a human"}])
+        agent.routing_llm.route.assert_called_once()  # intent LLM ran; the unconditional did NOT short-circuit it
         assert result[0] == "escalate"
         assert not result[5].startswith(_DETERMINISTIC_REASONING_PREFIX)
 
@@ -573,15 +565,15 @@ class TestUnconditionalWithIntentEdges:
         agent = _make_agent(_uncond_intent_config())
         agent.context_data = {}
         mock_resp = _mock_routing_response("transition_to_proceed", {"reasoning": "no escalation", "confidence": 0.8})
-        with patch("asyncio.to_thread", new_callable=AsyncMock, return_value=mock_resp):
-            result = await agent.decide_next_node_with_functions([{"role": "user", "content": "ok great"}])
+        agent.routing_llm.route = AsyncMock(return_value=mock_resp)
+        result = await agent.decide_next_node_with_functions([{"role": "user", "content": "ok great"}])
         assert result[0] == "proceed"
 
     async def test_default_taken_deterministically_on_llm_error(self):
         agent = _make_agent(_uncond_intent_config())
         agent.context_data = {}
-        with patch("asyncio.to_thread", new_callable=AsyncMock, side_effect=RuntimeError("boom")):
-            result = await agent.decide_next_node_with_functions([{"role": "user", "content": "hmm"}])
+        agent.routing_llm.route = AsyncMock(side_effect=RuntimeError("boom"))
+        result = await agent.decide_next_node_with_functions([{"role": "user", "content": "hmm"}])
         assert result[0] == "proceed"  # node still advances via its default
         assert result[5].startswith(_DETERMINISTIC_REASONING_PREFIX)
 
@@ -589,8 +581,8 @@ class TestUnconditionalWithIntentEdges:
         agent = _make_agent(_uncond_intent_config())
         agent.context_data = {}
         mock_resp = _mock_routing_response("transition_to_proceed", {"reasoning": "x", "confidence": 0.5})
-        with patch("asyncio.to_thread", new_callable=AsyncMock, return_value=mock_resp):
-            result = await agent.decide_next_node_with_functions([{"role": "user", "content": "hi"}])
+        agent.routing_llm.route = AsyncMock(return_value=mock_resp)
+        result = await agent.decide_next_node_with_functions([{"role": "user", "content": "hi"}])
         tool_names = [t["function"]["name"] for t in result[4]]
         assert "stay_on_current_node" not in tool_names
         assert "transition_to_escalate" in tool_names
@@ -728,13 +720,12 @@ class TestRoutingInfoType:
         agent._mock_llm.generate_stream = fake_stream
         agent.context_data = {"detected_language": "hindi"}
 
-        with patch("asyncio.to_thread", new_callable=AsyncMock):
-            chunks = []
-            async for chunk in agent.generate(
-                [{"role": "user", "content": "namaste"}],
-                meta_info={"detected_language": "hindi"},
-            ):
-                chunks.append(chunk)
+        chunks = []
+        async for chunk in agent.generate(
+            [{"role": "user", "content": "namaste"}],
+            meta_info={"detected_language": "hindi"},
+        ):
+            chunks.append(chunk)
 
         routing_info = chunks[0].get("routing_info")
         assert routing_info["routing_type"] == "deterministic"
@@ -759,13 +750,13 @@ class TestRoutingInfoType:
             },
         )
 
-        with patch("asyncio.to_thread", new_callable=AsyncMock, return_value=mock_resp):
-            chunks = []
-            async for chunk in agent.generate(
-                [{"role": "user", "content": "book me"}],
-                meta_info={},
-            ):
-                chunks.append(chunk)
+        agent.routing_llm.route = AsyncMock(return_value=mock_resp)
+        chunks = []
+        async for chunk in agent.generate(
+            [{"role": "user", "content": "book me"}],
+            meta_info={},
+        ):
+            chunks.append(chunk)
 
         routing_info = chunks[0].get("routing_info")
         assert routing_info["routing_type"] == "llm"

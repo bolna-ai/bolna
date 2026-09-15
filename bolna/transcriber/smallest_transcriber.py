@@ -76,6 +76,10 @@ class SmallestTranscriber(BaseTranscriber):
         self.sampling_rate = int(sampling_rate)
         self.audio_frame_duration = 0.2  # Default 200ms chunks
 
+        # Dashboard connection flag — must be set BEFORE _configure_audio_params, which reads it
+        # for providers with no explicit branch (a freeswitch webcall crashed on the ordering).
+        self.connected_via_dashboard = kwargs.get("enforce_streaming", True)
+
         # Configure audio params based on telephony provider
         self._configure_audio_params()
 
@@ -118,9 +122,6 @@ class SmallestTranscriber(BaseTranscriber):
         self.last_interim_time = None
         self.interim_timeout = kwargs.get("interim_timeout", 5.0)  # Default 5 seconds
 
-        # Dashboard connection flag
-        self.connected_via_dashboard = kwargs.get("enforce_streaming", True)
-
     def _configure_audio_params(self):
         """Configure audio parameters based on telephony provider."""
         if self.provider in TelephonyProvider.mulaw_values():
@@ -138,6 +139,11 @@ class SmallestTranscriber(BaseTranscriber):
             self.encoding = "linear16"
             self.sampling_rate = 16000
             self.audio_frame_duration = 0.256
+        elif self.provider == TelephonyProvider.FREESWITCH.value:
+            # FreeSWITCH webcall media fork streams linear16 mono @16k (dialplan: `mono 16k`)
+            self.encoding = "linear16"
+            self.sampling_rate = 16000
+            self.audio_frame_duration = 0.2
         elif self.provider == "playground":
             # Playground/dashboard mode
             self.encoding = "linear16"
