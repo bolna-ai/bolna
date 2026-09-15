@@ -9,6 +9,7 @@ import asyncio
 
 import pytest
 
+from bolna.input_handlers.dtmf import DtmfAccumulator
 from bolna.input_handlers.telephony_providers import sip_trunk as sip_trunk_input
 from bolna.input_handlers.telephony_providers.sip_trunk import SipTrunkInputHandler
 
@@ -40,7 +41,7 @@ def _make_handler(websocket, listen_task):
     handler.websocket_listen_task = listen_task
     handler.channel_id = "test-channel_1"
     handler.running = True
-    handler._dtmf_timer_task = None
+    handler._dtmf = DtmfAccumulator(lambda digits: None)
     handler._queue_drained = asyncio.Event()
     return handler
 

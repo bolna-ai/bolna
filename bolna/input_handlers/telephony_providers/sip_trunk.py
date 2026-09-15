@@ -10,6 +10,7 @@ import os
 import time
 import traceback
 from bolna.input_handlers.telephony import TelephonyInputHandler
+from bolna.input_handlers.dtmf import DtmfAccumulator
 from bolna.helpers.utils import create_ws_data_packet
 from bolna.helpers.logger_config import configure_logger
 from starlette.websockets import WebSocketDisconnect
@@ -41,10 +42,6 @@ HANGUP_DRAIN_MAX_WAIT_S = float(os.environ.get("SIP_HANGUP_DRAIN_MAX_WAIT_S", "3
 
 # Extra wait after QUEUE_DRAINED for the far-end jitter buffer. Overridable via env.
 HANGUP_DRAIN_SETTLE_S = float(os.environ.get("SIP_HANGUP_DRAIN_SETTLE_S", "0.5"))
-
-# Submit accumulated DTMF digits after this much inter-digit silence (reset on each
-# keypress), or immediately when '#' is pressed. Overridable via env.
-DTMF_INTERDIGIT_TIMEOUT_S = float(os.environ.get("SIP_DTMF_INTERDIGIT_TIMEOUT_S", "3"))
 
 
 def _parse_asterisk_control_message(text: str) -> dict:
@@ -115,7 +112,7 @@ class SipTrunkInputHandler(TelephonyInputHandler):
         self.connection_id = None
         self.ptime = 20
         self._pending_stream_sid = None  # promoted to stream_sid on first audio frame
-        self._dtmf_timer_task = None  # inter-digit timeout for DTMF accumulation
+        self._dtmf = DtmfAccumulator(self.queues["dtmf"].put_nowait)
         self._queue_drained = asyncio.Event()  # set by Asterisk's QUEUE_DRAINED event
 
         input_config = self._get_input_config()
@@ -220,7 +217,7 @@ class SipTrunkInputHandler(TelephonyInputHandler):
             # hangup, so sending HANGUP from finally is what keeps a cancelled teardown from
             # leaving the caller on a live channel.
             self.running = False
-            self._cancel_dtmf_timer()
+            self._dtmf.close()
             await self.disconnect_stream()
         await asyncio.sleep(HANGUP_SETTLE_S)
         try:
@@ -332,33 +329,6 @@ class SipTrunkInputHandler(TelephonyInputHandler):
         self.queues["transcriber"].put_nowait(ws_data_packet)
         logger.info(f"sip-trunk WebSocket closed for channel {self.channel_id}")
 
-    def _flush_dtmf(self):
-        """Enqueue the accumulated DTMF digits as one entry and clear the buffer."""
-        if self.dtmf_digits:
-            self.queues["dtmf"].put_nowait(self.dtmf_digits)
-            self.dtmf_digits = ""
-
-    def _cancel_dtmf_timer(self):
-        if self._dtmf_timer_task and not self._dtmf_timer_task.done():
-            self._dtmf_timer_task.cancel()
-        self._dtmf_timer_task = None
-
-    def _restart_dtmf_timer(self):
-        """(Re)arm the inter-digit timeout — reset on every keypress so multi-digit input
-        with short pauses still collects, then submits after DTMF_INTERDIGIT_TIMEOUT_S."""
-        self._cancel_dtmf_timer()
-        self._dtmf_timer_task = asyncio.create_task(self._dtmf_timeout())
-
-    async def _dtmf_timeout(self):
-        try:
-            await asyncio.sleep(DTMF_INTERDIGIT_TIMEOUT_S)
-        except asyncio.CancelledError:
-            return
-        self._dtmf_timer_task = None
-        if self.dtmf_digits:
-            logger.info(f"DTMF inter-digit timeout — submitting '{self.dtmf_digits}'")
-            self._flush_dtmf()
-
     async def _handle_control_message(self, text: str):
         """Handle Asterisk TEXT: MEDIA_START, DTMF_END, MEDIA_XOFF/XON, QUEUE_DRAINED, etc."""
         parsed = _parse_asterisk_control_message(text)
@@ -368,16 +338,8 @@ class SipTrunkInputHandler(TelephonyInputHandler):
             await self.call_start(parsed)
             return
         if event == "DTMF_END":
-            digit = parsed.get("digit", "")
-            if digit and self.is_dtmf_active:
-                # Accumulate digits; submit on the '#' terminator OR after an inter-digit
-                # timeout, so callers who don't press '#' still get their input through.
-                is_complete = await self._handle_dtmf_digit(digit)
-                if is_complete:
-                    self._cancel_dtmf_timer()
-                    self._flush_dtmf()
-                elif self.dtmf_digits:
-                    self._restart_dtmf_timer()
+            if self.is_dtmf_active:
+                self._dtmf.press(parsed.get("digit", ""))
             return
         if event == "MEDIA_XOFF":
             self._media_xoff = True

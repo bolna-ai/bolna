@@ -25,8 +25,9 @@ from bolna.providers import (
     SUPPORTED_TRANSCRIBER_PROVIDERS,
 )
 
-# Declared for the config layer's benefit; it names a source of numbers, not a media transport.
-NON_TRANSPORT_TELEPHONY = {TelephonyProvider.DATABASE.value}
+# Declared for the config layer's benefit: DATABASE names a source of numbers and TRUNK the
+# agent/execution label for SIP trunk calls whose audio rides the freeswitch fork.
+NON_TRANSPORT_TELEPHONY = {TelephonyProvider.DATABASE.value, TelephonyProvider.TRUNK.value}
 
 REGISTRIES = [
     ("synthesizer", SynthesizerProvider, SUPPORTED_SYNTHESIZER_MODELS),
