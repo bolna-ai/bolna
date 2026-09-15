@@ -319,6 +319,7 @@ class TaskManager(BaseManager):
         self.stream_sid_ts = None
         self.welcome_message_duration_ms = None
         self.transcriber_error_events: list[dict] = []
+        self.single_transcriber_reconnect_count: int = 0
         self.blocked_audio_events: list[dict] = []
         self._blocked_sequences: set = set()  # dedup: only record first block per sequence
         self._sent_audio_sequences: set = set()
@@ -4964,6 +4965,28 @@ class TaskManager(BaseManager):
             self.hangup_detail = hangup_detail
             await self.__process_end_of_conversation()
 
+    # Same budget as TranscriberPool._MAX_RECONNECTS_PER_CALL, for agents that hold a bare
+    # transcriber instead of a pool — those had no recovery at all, so one refused socket
+    # ended the call (every Azure agent during the 2026-09 centralindia outage).
+    MAX_SINGLE_TRANSCRIBER_RECONNECTS = 5
+
+    async def reconnect_single_transcriber(self):
+        """Reconnect a non-pooled transcriber whose connection faulted. Bounded per call."""
+        if self.single_transcriber_reconnect_count >= self.MAX_SINGLE_TRANSCRIBER_RECONNECTS:
+            logger.error(f"Transcriber reconnect cap ({self.MAX_SINGLE_TRANSCRIBER_RECONNECTS}) reached — ending call")
+            return False
+        try:
+            await self.tools["transcriber"].run()
+        except Exception as e:
+            logger.error(f"Transcriber reconnect failed: {e}")
+            return False
+        self.single_transcriber_reconnect_count += 1
+        logger.info(
+            f"Transcriber reconnected "
+            f"({self.single_transcriber_reconnect_count}/{self.MAX_SINGLE_TRANSCRIBER_RECONNECTS})"
+        )
+        return True
+
     async def _log_transcriber_connection_error(self, connection_error):
         provider = self.task_config["tools_config"]["transcriber"].get("provider", "unknown")
         # Always record the drop — "error" when exception drove it, "drop" for clean closes
@@ -5363,6 +5386,12 @@ class TaskManager(BaseManager):
                             ):
                                 continue
                             logger.info(f"TranscriberPool: active transcriber closed, ending call")
+                        elif (
+                            (message.get("meta_info") or {}).get("connection_error")
+                            and not (self.conversation_ended or self.hangup_triggered)
+                            and await self.reconnect_single_transcriber()
+                        ):
+                            continue
                         await self._log_transcriber_connection_error(
                             (message.get("meta_info") or {}).get("connection_error")
                         )
@@ -5390,6 +5419,12 @@ class TaskManager(BaseManager):
                             ):
                                 continue
                             logger.info(f"TranscriberPool: active transcriber closed, ending call")
+                        elif (
+                            (message.get("meta_info") or {}).get("connection_error")
+                            and not (self.conversation_ended or self.hangup_triggered)
+                            and await self.reconnect_single_transcriber()
+                        ):
+                            continue
                         await self._log_transcriber_connection_error(
                             (message.get("meta_info") or {}).get("connection_error")
                         )

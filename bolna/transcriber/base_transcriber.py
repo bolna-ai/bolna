@@ -81,6 +81,15 @@ class BaseTranscriber:
         """Clean up transcriber resources. Override in subclasses."""
         pass
 
+    def is_connected(self):
+        """True while the provider connection is usable.
+
+        The websocket transcribers own their socket for the lifetime of transcribe(), so the task
+        is the connection. Azure is SDK-driven, owns no such task, and overrides this.
+        """
+        task = getattr(self, "transcription_task", None)
+        return task is not None and not task.done()
+
     def calculate_interim_to_final_latencies(self, interim_details):
         """Calculate time from first/last interim to final result."""
         if not interim_details:
