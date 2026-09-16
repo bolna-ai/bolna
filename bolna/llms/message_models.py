@@ -29,7 +29,15 @@ class ChatMessage(BaseModel):
 # allowlist so a legitimate provider key (name, cache_control, multimodal parts) is never
 # silently dropped.
 INTERNAL_MESSAGE_KEYS = frozenset(
-    {"turn_id", "response_uid", "asr_turn_id", "sequence_id", "message_category", "exclude_from_llm"}
+    {
+        "turn_id",
+        "response_uid",
+        "asr_turn_id",
+        "sequence_id",
+        "message_category",
+        "exclude_from_llm",
+        "exclude_from_transcript",
+    }
 )
 
 
