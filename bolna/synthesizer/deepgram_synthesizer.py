@@ -46,7 +46,7 @@ class DeepgramSynthesizer(StreamSynthesizer):
         self.voice_id = voice_id
         self.sample_rate = str(sampling_rate)
         self.model = model
-        self.api_key = kwargs.get("transcriber_key", os.getenv("DEEPGRAM_AUTH_TOKEN"))
+        self.api_key = kwargs.get("synthesizer_key") or os.getenv("DEEPGRAM_AUTH_TOKEN")
 
         self.use_mulaw = kwargs.get("use_mulaw", False)
         if self.use_mulaw or audio_format in ("pcm", "wav"):
