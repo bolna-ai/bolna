@@ -25,6 +25,7 @@ from bolna.constants import (
     CACHED_SINGLE_MARK_CATEGORIES,
     DEFAULT_USER_ONLINE_MESSAGE,
     DEFAULT_USER_ONLINE_MESSAGE_TRIGGER_DURATION,
+    DUPLICATE_RESPONSE_SIMILARITY,
     FILLER_DICT,
     DEFAULT_LANGUAGE_CODE,
     DEFAULT_TIMEZONE,
@@ -90,6 +91,7 @@ from bolna.helpers.utils import (
     is_valid_md5,
     get_required_input_types,
     format_messages,
+    normalized_similarity,
     safe_log_text,
     get_prompt_responses,
     resample,
@@ -323,6 +325,8 @@ class TaskManager(BaseManager):
         self._blocked_sequences: set = set()  # dedup: only record first block per sequence
         self._sent_audio_sequences: set = set()
         self._committed_assistant_sequences: set = set()
+        # (turn_id, text) of the turn whose audio was last dispatched; the duplicate gate reads it.
+        self._last_spoken_assistant = None
 
         self.task_config = task
 
@@ -401,6 +405,7 @@ class TaskManager(BaseManager):
         self.interruptible_hangup_message = False
         self._hangup_interruptible_window = False
         self._hangup_cancelled = False
+        self._end_call_tool_call_id = None
         self._end_call_hangup_task = None
         self._turn_audio_flushed = asyncio.Event()
         self._turn_audio_flushed.set()
@@ -3183,6 +3188,7 @@ class TaskManager(BaseManager):
             # cancels the turn task and the disconnect never runs. The toggle opens a window instead.
             self._end_call_in_progress = True
             self._hangup_cancelled = False
+            self._end_call_tool_call_id = resp.get("tool_call_id", "")
             if self.interruptible_hangup_message:
                 self._hangup_interruptible_window = True
             reason = resp.get("reason", "")
@@ -4246,6 +4252,9 @@ class TaskManager(BaseManager):
         self._hangup_processing = False
         self._end_of_conversation_in_progress = False
         self.hangup_detail = None
+        # The call did not end, so the tool result claiming it did must not survive the cancel.
+        self.conversation_history.drop_tool_call(self._end_call_tool_call_id)
+        self._end_call_tool_call_id = None
         # Cleared on entry to __execute_function_call, whose end_call branch never restores it.
         self.check_if_user_online = self.conversation_config.get("check_if_user_online", True)
         logger.info("Interruptible hangup: barge-in cancelled pending hangup, resuming conversation")
@@ -4633,6 +4642,40 @@ class TaskManager(BaseManager):
         if sequence_id in self._sent_audio_sequences and sequence_id not in self._blocked_sequences:
             self._commit_staged_assistant_history(sequence_id)
 
+    def _duplicates_last_spoken_turn(self, sequence_id, meta_info):
+        """True when this turn only restates the one the caller just heard.
+
+        A regenerated turn can arrive after its predecessor was already dispatched; speaking both
+        plays the same sentence twice. Only the adjacent turn counts — a later echo is the agent
+        legitimately repeating itself — and only plain responses, so a welcome or online-check
+        message is never suppressed.
+        """
+        if sequence_id is None or sequence_id == -1:
+            return False
+        # Later chunks of a turn already ruled duplicate must not slip through and play a fragment.
+        if sequence_id in self._blocked_sequences:
+            return True
+        if meta_info.get("message_category"):
+            return False
+        staged = self._pending_assistant_history.get(sequence_id)
+        if not staged or staged.get("message_category") or not self._last_spoken_assistant:
+            return False
+        previous_turn_id, previous_text = self._last_spoken_assistant
+        turn_id = staged.get("turn_id")
+        if turn_id is None or previous_turn_id is None or turn_id - previous_turn_id > 1:
+            return False
+        similarity = normalized_similarity(staged["content"], previous_text)
+        if similarity < DUPLICATE_RESPONSE_SIMILARITY:
+            return False
+        logger.info(
+            "BOLNA_TRACE_TM duplicate_of_last_spoken seq=%s turn=%s previous_turn=%s similarity=%.2f",
+            sequence_id,
+            turn_id,
+            previous_turn_id,
+            similarity,
+        )
+        return True
+
     def _commit_staged_assistant_history(self, sequence_id):
         if sequence_id in self._committed_assistant_sequences:
             return
@@ -4641,6 +4684,7 @@ class TaskManager(BaseManager):
             return
 
         self._committed_assistant_sequences.add(sequence_id)
+        self._last_spoken_assistant = (staged["turn_id"], staged["content"])
         self.conversation_history.append_assistant(
             staged["content"],
             turn_id=staged["turn_id"],
@@ -5035,9 +5079,9 @@ class TaskManager(BaseManager):
                         and message["data"].get("type", "") == "interim_transcript_received"
                     ):
                         self.time_since_last_spoken_human_word = time.time()
-                        # Before every early exit below: an interim is proof the caller is still
-                        # talking, so it must refresh liveness even when this turn ignores it.
-                        self.interruption_manager.note_user_liveness()
+                        # Before every early exit below: a changed interim is proof the caller is
+                        # still talking, so it must refresh liveness even when this turn ignores it.
+                        self.interruption_manager.note_user_liveness(message["data"].get("content", ""))
                         if temp_transcriber_message == message["data"].get("content"):
                             logger.info("Received the same transcript as the previous one we have hence continuing")
                             continue
@@ -7236,6 +7280,13 @@ class TaskManager(BaseManager):
                     # No-op on every non-multilingual call: the gate is None and short-circuits.
                     if status == "SEND" and not is_hangup_message and self.__lid_playback_gate_holds(sequence_id):
                         status = "WAIT"
+                    # A regenerated turn can restate what the caller just heard; speak it once.
+                    if (
+                        status == "SEND"
+                        and not is_hangup_message
+                        and self._duplicates_last_spoken_turn(sequence_id, message["meta_info"])
+                    ):
+                        status = "BLOCK"
 
                     if status == "SEND":
                         # Audio approved - send it
@@ -7303,7 +7354,7 @@ class TaskManager(BaseManager):
                         if staleness > STUCK_AUDIO_GATE_RELEASE_S:
                             logger.warning(
                                 f"Releasing stuck audio gate: callee_speaking held {staleness:.1f}s "
-                                f"with no interim (sequence_id={sequence_id})"
+                                f"with no new speech (sequence_id={sequence_id})"
                             )
                             self.interruption_manager.on_user_speech_ended(update_utterance_time=False)
                             continue
@@ -7377,7 +7428,9 @@ class TaskManager(BaseManager):
             logger.error(f"Error in processing message output: {str(e)}")
 
     async def _inject_and_run_llm(self, injected_message: str):
-        self.conversation_history.append_user(injected_message)
+        # exclude_from_transcript, not exclude_from_llm: the nudge is the whole point for the
+        # LLM, but the caller never spoke it, so it must not surface as a user turn.
+        self.conversation_history.append_user(injected_message, exclude_from_transcript=True)
         meta_info = self.__get_updated_meta_info(
             {
                 "io": self.tools["output"].get_provider(),

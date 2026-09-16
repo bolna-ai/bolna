@@ -19,6 +19,8 @@ def _target(llm_task=None, hangup_task=None):
         check_if_user_online=False,
         llm_task=llm_task,
         _end_call_hangup_task=hangup_task,
+        _end_call_tool_call_id=None,
+        conversation_history=MagicMock(),
         hangup_triggered=True,
         _end_call_in_progress=True,
         hangup_message_queued=True,
@@ -156,6 +158,8 @@ def _cleanup_target():
     tm.conversation_config = {"check_if_user_online": True}
     tm.check_if_user_online = False
     tm._end_call_hangup_task = None
+    tm._end_call_tool_call_id = None
+    tm.conversation_history = MagicMock()
     tm.hangup_triggered = True
     tm._end_call_in_progress = True
     tm.hangup_message_queued = True

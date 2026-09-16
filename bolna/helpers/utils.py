@@ -7,6 +7,7 @@ import time
 import math
 import re
 import copy
+import difflib
 import hashlib
 import os
 import traceback
@@ -412,6 +413,9 @@ def is_s2s_agent(task):
 def format_messages(messages, use_system_prompt=False, include_tools=False):
     formatted_string = ""
     for message in messages:
+        # Control tokens the engine injects for the LLM; the caller never said them.
+        if message.get("exclude_from_transcript"):
+            continue
         role = message["role"]
         content = message.get("content")
         tool_calls = message.get("tool_calls")
@@ -627,6 +631,15 @@ def resample(audio_bytes, target_sample_rate, format="mp3", pcm_channels=1, orig
     buffer = io.BytesIO()
     audio.export(buffer, format="wav")
     return buffer.getvalue()
+
+
+def normalized_similarity(first: str, second: str) -> float:
+    """Similarity in [0,1] over whitespace-collapsed, case-folded text."""
+    first = " ".join((first or "").split()).casefold()
+    second = " ".join((second or "").split()).casefold()
+    if not first or not second:
+        return 0.0
+    return difflib.SequenceMatcher(None, first, second).ratio()
 
 
 def get_synth_audio_format(audio_bytes):
