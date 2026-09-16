@@ -1576,10 +1576,8 @@ class TaskManager(BaseManager):
         return self.agent_names.get(label, "")
 
     def __pool_leg_kwargs(self, base_kwargs, key_name, provider):
-        """Swap in this leg's own provider key; dropping it leaves the provider's env fallback.
-
-        An absent map means an older caller that cannot resolve per-leg keys, so the base key stands.
-        """
+        """Swap in this leg's own provider key; dropping it leaves the provider's env fallback."""
+        # Without a map the caller cannot resolve per-leg keys, so the base key stands.
         if not provider or not self.provider_api_keys:
             return base_kwargs
         leg_kwargs = dict(base_kwargs)

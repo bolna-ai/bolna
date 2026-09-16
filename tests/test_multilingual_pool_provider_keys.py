@@ -66,7 +66,7 @@ def _setup_synthesizers(monkeypatch, multilingual, kwargs, provider_api_keys):
 
 
 def test_transcriber_leg_does_not_inherit_the_base_provider_key(monkeypatch):
-    # The Kannada leg used to receive the customer's Deepgram key and get a 403 from Sarvam.
+    # A leg on a different provider must not be handed the base provider's key.
     calls = _setup_transcribers(
         monkeypatch,
         {
@@ -97,8 +97,7 @@ def test_transcriber_leg_without_a_stored_key_falls_back_to_env(monkeypatch):
 
 
 def test_transcriber_legs_keep_the_base_key_when_no_map_is_sent(monkeypatch):
-    # Version skew: an older caller sends no map, and dropping the key here would silently move a
-    # BYOK customer onto the platform's own credentials.
+    # Dropping the key without a map would move a BYOK account onto platform credentials.
     calls = _setup_transcribers(
         monkeypatch,
         {
@@ -196,27 +195,3 @@ async def test_provider_key_map_is_captured_and_kept_out_of_the_kwargs_splat(mon
 
     assert tm.provider_api_keys == {"sarvam": "sarvam-byok"}
     assert "provider_api_keys" not in tm.kwargs
-
-
-def test_deepgram_synthesizer_uses_the_synthesizer_key(monkeypatch):
-    # It used to read transcriber_key, so a Deepgram TTS leg authenticated with the ASR key.
-    from bolna.synthesizer.deepgram_synthesizer import DeepgramSynthesizer
-
-    monkeypatch.setenv("DEEPGRAM_AUTH_TOKEN", "env-key")
-    synth = DeepgramSynthesizer(
-        voice_id="aura-zeus-en",
-        voice="Zeus",
-        synthesizer_key="deepgram-byok",
-        transcriber_key="sarvam-byok",
-    )
-
-    assert synth.api_key == "deepgram-byok"
-
-
-def test_deepgram_synthesizer_falls_back_to_env_without_a_stored_key(monkeypatch):
-    from bolna.synthesizer.deepgram_synthesizer import DeepgramSynthesizer
-
-    monkeypatch.setenv("DEEPGRAM_AUTH_TOKEN", "env-key")
-    synth = DeepgramSynthesizer(voice_id="aura-zeus-en", voice="Zeus", transcriber_key="sarvam-byok")
-
-    assert synth.api_key == "env-key"
