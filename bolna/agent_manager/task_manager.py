@@ -4017,6 +4017,11 @@ class TaskManager(BaseManager):
             errors = meta_info.get("_non_fatal_errors", [])
             reason = next((e.get("error") for e in reversed(errors) if e.get("error")), None)
             empty_turn_detail = f"LLM returned no output ({reason})" if reason else "LLM returned no output"
+            if reason is None:
+                # Chat-completions has no incomplete event, so record the empty turn here to keep it observable.
+                meta_info.setdefault("_non_fatal_errors", []).append(
+                    {"error_type": "empty_response", "error": None, "model": self.llm_config.get("model")}
+                )
 
         if self.stream and llm_response != filler_message:
             self.__store_into_history(
