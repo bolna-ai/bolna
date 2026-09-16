@@ -1,4 +1,5 @@
 import asyncio
+from collections import OrderedDict
 import os
 import re
 import time
@@ -25,7 +26,13 @@ from bolna.llms.types import LLMStreamChunk, LatencyData
 from bolna.llms import OpenAiLLM, LiteLLM
 from bolna.providers import SUPPORTED_LLM_PROVIDERS
 from bolna.prompts import VOICEMAIL_DETECTION_PROMPT
-from bolna.constants import LANGUAGE_NAMES, canonical_model, default_reasoning_effort, is_reasoning_model
+from bolna.constants import (
+    LANGUAGE_NAMES,
+    RESPONSES_API_MODEL_PREFIXES,
+    canonical_model,
+    default_reasoning_effort,
+    is_reasoning_model,
+)
 
 from typing import List, Tuple, AsyncGenerator, Optional, Dict, Any
 
@@ -93,8 +100,10 @@ class GraphAgent(BaseAgent):
 
         # Per-node conversation LLMs, keyed by the override itself so nodes sharing settings share
         # an instance. Populated lazily; a graph with no overrides never allocates one.
-        self._conversation_llm_cache: Dict[str, Any] = {}
+        self._conversation_llm_cache: "OrderedDict[str, Any]" = OrderedDict()
         self._conversation_llm_cache_max_size = 20
+        # The client serving the active node; interruption hooks follow this, not self.llm.
+        self._active_conversation_llm = None
 
         # Routing runs on its own LLM, built from the same registry as the conversation model.
         self.routing_provider = self.config.get("routing_provider")
@@ -110,6 +119,8 @@ class GraphAgent(BaseAgent):
 
         # Initialize main LLM for response generation (supports api_tools/function calling + real streaming)
         self.llm = self._initialize_llm()
+        self._active_conversation_llm = self.llm
+        self._prewarm_conversation_overrides()
 
         # Hangup/voicemail run on OpenAiLLM, so a conversation on a non-OpenAI provider lends no
         # usable key and these fall back to the platform OpenAI key.
@@ -192,50 +203,145 @@ class GraphAgent(BaseAgent):
             raw = raw.model_dump()
         override = {k: v for k, v in raw.items() if v is not None}
         if not override:
+            self._active_conversation_llm = self.llm
             return self.llm
 
         cache_key = repr(sorted((k, str(v)) for k, v in override.items()))
         llm = self._conversation_llm_cache.get(cache_key)
         if llm is not None:
+            self._active_conversation_llm = llm
             return llm
 
-        provider = override.get("provider") or self._conversation_provider
+        node_id = (node or {}).get("id")
+        try:
+            built = self._build_conversation_llm(override, node_id)
+        except Exception as e:
+            # _initialize_llm falls back on construction failure; this runs inline in generate(),
+            # which re-raises and ends the call, so it needs the same safety net.
+            logger.error(f"Conversation LLM override failed for node {node_id!r} ({e}) — using the agent LLM")
+            built = None
+        if built is None:
+            self._active_conversation_llm = self.llm
+            return self.llm
+
+        llm, kwargs = built
+        if len(self._conversation_llm_cache) >= self._conversation_llm_cache_max_size:
+            evicted_key, evicted = self._conversation_llm_cache.popitem(last=False)
+            self._close_conversation_llm(evicted, evicted_key)
+        self._conversation_llm_cache[cache_key] = llm
+        logger.info(
+            f"Conversation LLM override ready: {kwargs.get('model')} on {kwargs.get('provider')} "
+            f"(effort={kwargs.get('reasoning_effort')}, responses_api={kwargs.get('use_responses_api', False)}) "
+            f"for node {node_id!r}"
+        )
+        self._active_conversation_llm = llm
+        return llm
+
+    def _prewarm_conversation_overrides(self):
+        """Build the override clients at graph load — the nodes are known, and constructing one
+        opens a socket in Responses mode, which would otherwise land in a turn's first-token path."""
+        seen = set()
+        for node in self.config.get("nodes", []) or []:
+            raw = (node or {}).get("llm_config") or {}
+            if hasattr(raw, "model_dump"):
+                raw = raw.model_dump()
+            if not any(v is not None for v in raw.values()):
+                continue
+            key = repr(sorted((k, str(v)) for k, v in raw.items() if v is not None))
+            if key in seen:
+                continue
+            seen.add(key)
+            self._conversation_llm_for(node)
+        # Prewarming resolves nodes that are not active yet; the first turn re-resolves its own.
+        self._active_conversation_llm = self.llm
+
+    def _build_conversation_llm(self, override: dict, node_id=None):
+        """Derive a client from the override's (provider, model), not by patching the agent's.
+
+        Returns (llm, kwargs), or None when the override cannot be served — model, provider,
+        credentials and transport are all coupled, so a changed model or provider invalidates
+        every value the agent derived from its own.
+        """
+        agent_provider = self._conversation_provider
+        provider = override.get("provider") or agent_provider
         if provider not in SUPPORTED_LLM_PROVIDERS:
-            logger.warning(f"Unknown provider {provider!r} in node llm_config, using {self._conversation_provider!r}")
-            provider = self._conversation_provider
+            logger.warning(f"Unknown provider {provider!r} in node llm_config, using {agent_provider!r}")
+            provider = agent_provider
+        switched_provider = provider != agent_provider
 
         kwargs = dict(self._conversation_base_kwargs)
         kwargs["provider"] = provider
-        if provider != self._conversation_provider:
-            # Another provider cannot authenticate with this one's credentials; let its own
-            # env defaults serve the node instead of sending a key that will be rejected.
-            for key in ("llm_key", "base_url", "api_version"):
-                kwargs.pop(key, None)
-        for key in ("model", "temperature", "max_tokens"):
+        for key in ("temperature", "max_tokens"):
             if key in override:
                 kwargs[key] = override[key]
 
+        if switched_provider:
+            # A node carries no credentials of its own, so the only options are the agent's key
+            # (wrong provider) or the platform env default (moves a BYOK customer onto our
+            # account, silently). Neither is acceptable — refuse until nodes can carry their own.
+            logger.error(
+                f"Node {node_id!r} switches provider {agent_provider!r}→{provider!r}, which carries no "
+                f"credentials of its own — override refused, serving the node on the agent LLM"
+            )
+            return None
+
         llm_class = SUPPORTED_LLM_PROVIDERS.get(provider, OpenAiLLM)
-        # LiteLLM addresses a backend by a "provider/model" string; a bare name resolves to OpenAI.
-        if llm_class is LiteLLM and "/" not in (kwargs.get("model") or ""):
-            kwargs["model"] = f"{provider}/{kwargs['model']}"
+        model_changed = "model" in override or switched_provider
+        model = override.get("model") or kwargs.get("model") or ""
+        if llm_class is LiteLLM:
+            # Re-qualify from the BARE name: an inherited "groq/llama-3.3" already has a slash, so
+            # leaving it alone would keep dispatching to groq under a different provider's client.
+            bare = model.split("/")[-1]
+            model = f"{provider}/{bare}"
+        kwargs["model"] = model
+
+        if model_changed:
+            # Transport follows the model. Inheriting the agent's flag put a Responses-only model on
+            # chat completions, and a chat-only model into a Responses previous_response_id chain.
+            if any(prefix in model for prefix in RESPONSES_API_MODEL_PREFIXES):
+                kwargs["use_responses_api"] = True
+            else:
+                kwargs.pop("use_responses_api", None)
 
         effort = override.get("reasoning_effort")
         if effort is not None:
             kwargs["reasoning_effort"] = getattr(effort, "value", effort)
         # An inherited effort would be rejected by a non-reasoning override model.
-        if not is_reasoning_model(canonical_model(kwargs.get("model") or "")):
+        if not is_reasoning_model(canonical_model(model)):
             kwargs.pop("reasoning_effort", None)
 
-        llm = llm_class(**kwargs)
-        if len(self._conversation_llm_cache) >= self._conversation_llm_cache_max_size:
-            self._conversation_llm_cache.pop(next(iter(self._conversation_llm_cache)))
-        self._conversation_llm_cache[cache_key] = llm
-        logger.info(
-            f"Conversation LLM override ready: {kwargs.get('model')} on {provider} "
-            f"(effort={kwargs.get('reasoning_effort')}) for node {(node or {}).get('id')!r}"
-        )
-        return llm
+        return llm_class(**kwargs), kwargs
+
+    @staticmethod
+    def _close_conversation_llm(llm, label=""):
+        """Release an override client. Responses-mode clients hold a socket only close() drops."""
+        close = getattr(llm, "close", None)
+        if close is None:
+            return
+        try:
+            result = close()
+            if asyncio.iscoroutine(result):
+                asyncio.create_task(result)
+        except Exception as e:
+            logger.error(f"Error closing conversation LLM override {label}: {e}")
+
+    async def close_conversation_llm_overrides(self):
+        """Close every per-node client built this call. Teardown only walks self.llm and the aux pair."""
+        while self._conversation_llm_cache:
+            key, llm = self._conversation_llm_cache.popitem()
+            close = getattr(llm, "close", None)
+            if close is None:
+                continue
+            try:
+                result = close()
+                if asyncio.iscoroutine(result):
+                    await result
+            except Exception as e:
+                logger.error(f"Error closing conversation LLM override {key}: {e}")
+
+    def current_conversation_llm(self):
+        """The client actually serving the active node — interruption hooks must target this one."""
+        return self._active_conversation_llm or self.llm
 
     @staticmethod
     def _extract_rag_collections(rag_config: Dict) -> List[str]:

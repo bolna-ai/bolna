@@ -1212,27 +1212,37 @@ class TaskManager(BaseManager):
     #     agent_type = self.task_config['tools_config']["llm_agent"].get("agent_type", None)
     #     return agent_type == "knowledge_agent"
 
+    def _active_llm_client(self):
+        """The client serving the current turn — a node LLM override means it is not always .llm."""
+        llm_agent = self.tools.get("llm_agent")
+        if llm_agent is None:
+            return None
+        resolve = getattr(llm_agent, "current_conversation_llm", None)
+        if resolve is not None:
+            return resolve()
+        return getattr(llm_agent, "llm", None)
+
     def _invalidate_response_chain(self):
         try:
-            llm_agent = self.tools.get("llm_agent")
-            if llm_agent and hasattr(llm_agent, "llm"):
-                llm_agent.llm.invalidate_response_chain()
+            llm = self._active_llm_client()
+            if llm is not None:
+                llm.invalidate_response_chain()
         except Exception as e:
             logger.debug(f"Failed to invalidate response chain: {e}")
 
     def _set_interruption_hint(self, heard_text):
         try:
-            llm_agent = self.tools.get("llm_agent")
-            if llm_agent and hasattr(llm_agent, "llm"):
-                llm_agent.llm.set_interruption_hint(heard_text)
+            llm = self._active_llm_client()
+            if llm is not None:
+                llm.set_interruption_hint(heard_text)
         except Exception as e:
             logger.debug(f"Failed to set interruption hint: {e}")
 
     def _cancel_in_flight_llm_response(self):
         try:
-            llm_agent = self.tools.get("llm_agent")
-            if llm_agent and hasattr(llm_agent, "llm"):
-                llm_agent.llm.cancel_in_flight_response()
+            llm = self._active_llm_client()
+            if llm is not None:
+                llm.cancel_in_flight_response()
         except Exception as e:
             logger.debug(f"cancel_in_flight_response failed: {e}")
 
@@ -8832,6 +8842,12 @@ class TaskManager(BaseManager):
                             await agent.llm.close()
                         except Exception as e:
                             logger.error(f"Error closing LLM: {e}")
+                    close_overrides = getattr(agent, "close_conversation_llm_overrides", None)
+                    if close_overrides is not None:
+                        try:
+                            await close_overrides()
+                        except Exception as e:
+                            logger.error(f"Error closing conversation LLM overrides: {e}")
                     for attr in ("conversation_completion_llm", "voicemail_llm"):
                         aux = getattr(agent, attr, None)
                         if aux and hasattr(aux, "close"):

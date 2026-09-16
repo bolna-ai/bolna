@@ -145,13 +145,20 @@ def test_an_effort_enum_is_serialized_to_its_value():
 # ------------------------------------------------------------------ provider
 
 
-def test_switching_provider_does_not_carry_the_agents_credentials():
+def test_a_provider_switch_is_refused_rather_than_silently_rekeyed():
+    # A node carries no credentials, so the only options are the agent's key against the wrong
+    # provider, or the platform env default — which would move a BYOK customer onto our account.
     with _agent() as agent:
         llm = agent._conversation_llm_for({"id": "n1", "llm_config": {"provider": "groq", "model": "llama-3.3"}})
-        assert llm.captured_kwargs["provider"] == "groq"
-        # Another provider cannot authenticate with openai's key/base_url.
-        assert "llm_key" not in llm.captured_kwargs
-        assert "base_url" not in llm.captured_kwargs
+        assert llm is agent.llm
+        assert agent._conversation_llm_cache == {}
+
+
+def test_a_model_override_on_the_agents_own_provider_is_served():
+    with _agent() as agent:
+        llm = agent._conversation_llm_for({"id": "n1", "llm_config": {"provider": "openai", "model": "gpt-5"}})
+        assert llm is not agent.llm
+        assert llm.captured_kwargs["llm_key"] == "conv-key"
 
 
 def test_an_unknown_provider_falls_back_to_the_agents():
@@ -160,7 +167,9 @@ def test_an_unknown_provider_falls_back_to_the_agents():
         assert llm.captured_kwargs["provider"] == "openai"
 
 
-def test_a_litellm_provider_qualifies_the_override_model():
+def test_a_litellm_model_override_is_qualified_from_the_bare_name():
+    # Same provider as the agent, so it is served; the inherited model already carries a prefix and
+    # re-qualifying from it would keep dispatching to the old backend.
     captured = {}
 
     def make_litellm(**kwargs):
@@ -169,9 +178,23 @@ def test_a_litellm_provider_qualifies_the_override_model():
 
     litellm_cls = MagicMock(side_effect=make_litellm)
     with patch("bolna.agent_types.graph_agent.LiteLLM", litellm_cls):
-        with _agent(real_registry={"groq": litellm_cls}) as agent:
-            agent._conversation_llm_for({"id": "n1", "llm_config": {"provider": "groq", "model": "llama-3.3"}})
-    assert captured["model"] == "groq/llama-3.3"
+        with _agent(real_registry={"groq": litellm_cls}, provider="groq", model="groq/llama-3.1-8b") as agent:
+            agent._conversation_llm_for({"id": "n1", "llm_config": {"model": "llama-3.3-70b"}})
+    assert captured["model"] == "groq/llama-3.3-70b"
+
+
+def test_an_inherited_prefixed_model_is_not_double_prefixed():
+    captured = {}
+
+    def make_litellm(**kwargs):
+        captured.update(kwargs)
+        return MagicMock()
+
+    litellm_cls = MagicMock(side_effect=make_litellm)
+    with patch("bolna.agent_types.graph_agent.LiteLLM", litellm_cls):
+        with _agent(real_registry={"groq": litellm_cls}, provider="groq", model="groq/llama-3.1-8b") as agent:
+            agent._conversation_llm_for({"id": "n1", "llm_config": {"temperature": 0.1}})
+    assert captured["model"] == "groq/llama-3.1-8b"
 
 
 # ------------------------------------------------------------------ caching
@@ -290,3 +313,124 @@ async def test_a_node_without_an_override_still_streams_from_the_agent_llm():
 
         assert len(streamed) == 1
         assert agent._conversation_llm_cache == {}
+
+
+# ------------------------------------------------------------------ transport follows the model
+
+
+def test_a_responses_only_override_model_gets_the_responses_transport():
+    # Agent on a chat-completions model, node on a Responses-API one. Inheriting the agent's flag
+    # put the override on chat completions with an effort and transition tools.
+    with _agent(model="gpt-4.1-mini") as agent:
+        llm = agent._conversation_llm_for({"id": "n1", "llm_config": {"model": "gpt-5.4-mini"}})
+        assert llm.captured_kwargs.get("use_responses_api") is True
+
+
+def test_a_chat_only_override_model_does_not_inherit_the_responses_transport():
+    # The reverse: a gpt-4.1 node under a Responses agent would otherwise join a
+    # previous_response_id chain it cannot serve.
+    with _agent(model="gpt-5.4", use_responses_api=True) as agent:
+        llm = agent._conversation_llm_for({"id": "n1", "llm_config": {"model": "gpt-4.1-mini"}})
+        assert "use_responses_api" not in llm.captured_kwargs
+
+
+def test_an_override_that_keeps_the_model_keeps_the_agents_transport():
+    with _agent(model="gpt-5.4", use_responses_api=True) as agent:
+        llm = agent._conversation_llm_for({"id": "n1", "llm_config": {"temperature": 0.1}})
+        assert llm.captured_kwargs.get("use_responses_api") is True
+
+
+# ------------------------------------------------------------------ construction safety
+
+
+def test_a_failed_override_construction_falls_back_to_the_agent_llm():
+    # _initialize_llm has a fallback; this path runs inline in generate(), which re-raises and
+    # would end the call.
+    def explode_on_the_override(**kwargs):
+        # Only the override model fails; the agent and routing clients must still build.
+        if kwargs.get("model") == "gpt-5.4-mini":
+            raise RuntimeError("azure_endpoint is None")
+        client = MagicMock()
+        client.captured_kwargs = kwargs
+        return client
+
+    with _agent(real_registry={"openai": explode_on_the_override}) as agent:
+        llm = agent._conversation_llm_for({"id": "n1", "llm_config": {"model": "gpt-5.4-mini"}})
+        assert llm is agent.llm
+        assert agent._conversation_llm_cache == {}
+
+
+# ------------------------------------------------------------------ lifecycle
+
+
+async def test_overrides_are_closed_on_teardown():
+    closed = []
+
+    def make(**kwargs):
+        client = MagicMock()
+        client.captured_kwargs = kwargs
+        client.close = AsyncMock(side_effect=lambda: closed.append(kwargs.get("model")))
+        return client
+
+    with _agent(real_registry={"openai": make}) as agent:
+        agent._conversation_llm_for({"id": "n1", "llm_config": {"model": "gpt-5"}})
+        agent._conversation_llm_for({"id": "n2", "llm_config": {"model": "gpt-4o"}})
+        assert len(agent._conversation_llm_cache) == 2
+        await agent.close_conversation_llm_overrides()
+
+    assert sorted(closed) == ["gpt-4o", "gpt-5"]
+    assert agent._conversation_llm_cache == {}
+
+
+def test_overrides_are_prewarmed_at_graph_load():
+    # Constructing opens a socket in Responses mode; doing it lazily puts that in a first-token path.
+    nodes = [
+        {"id": "a", "prompt": "hi", "edges": [], "llm_config": {"model": "gpt-5"}},
+        {"id": "b", "prompt": "hi", "edges": [], "llm_config": {"model": "gpt-5"}},  # same -> shared
+        {"id": "c", "prompt": "hi", "edges": [], "llm_config": {"model": "gpt-4o"}},
+        {"id": "d", "prompt": "hi", "edges": []},  # no override
+    ]
+    with _agent(nodes=nodes, current_node_id="a") as agent:
+        assert len(agent._conversation_llm_cache) == 2
+        # Prewarm must not leave a half-resolved node as the active client.
+        assert agent.current_conversation_llm() is agent.llm
+
+
+def test_the_active_client_follows_the_node():
+    with _agent() as agent:
+        override = agent._conversation_llm_for({"id": "n1", "llm_config": {"model": "gpt-5"}})
+        assert agent.current_conversation_llm() is override
+        agent._conversation_llm_for({"id": "n2"})
+        assert agent.current_conversation_llm() is agent.llm
+
+
+# ------------------------------------------------------------------ real client, real transport
+
+
+def _real_agent(**overrides):
+    """No mock registry — SUPPORTED_LLM_PROVIDERS builds an actual OpenAiLLM per node."""
+    config = {
+        "agent_information": "Test agent",
+        "model": "gpt-4.1-mini",
+        "provider": "openai",
+        "current_node_id": "start",
+        "nodes": [{"id": "start", "prompt": "hi", "edges": []}],
+    }
+    config.update(overrides)
+    with patch.dict(os.environ, {"OPENAI_API_KEY": "sk-test"}, clear=True):
+        yield GraphAgent(config)
+
+
+async def test_a_real_override_client_picks_the_transport_from_its_own_model():
+    # The mocked registry can't see this: every factory there is a MagicMock, so the transport
+    # decision that use_responses_api drives is invisible. Async because a Responses-mode client
+    # opens its socket at construction and needs a running loop.
+    for agent in _real_agent():
+        chat = agent._conversation_llm_for({"id": "n1", "llm_config": {"model": "gpt-4.1-mini", "temperature": 0.1}})
+        responses = agent._conversation_llm_for({"id": "n2", "llm_config": {"model": "gpt-5.4-mini"}})
+
+        assert chat is not agent.llm and responses is not agent.llm
+        assert getattr(chat, "use_responses_api", False) is False
+        assert getattr(responses, "use_responses_api", False) is True
+        # And the agent's own client is untouched by either.
+        assert getattr(agent.llm, "use_responses_api", False) is False
