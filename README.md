@@ -279,6 +279,11 @@ For LiteLLM based LLMs, add either of the following to the `.env` file depending
 For LLMs hosted via VLLM, add the following to the `.env` file:<br>
 `VLLM_SERVER_BASE_URL`: URL of the hosted LLM using VLLM
 
+For Atlas Cloud, set `provider="atlascloud"` in the LLM configuration and add:<br>
+`ATLASCLOUD_API_KEY`: Atlas Cloud API key<br>
+`ATLASCLOUD_API_BASE`: Optional API base URL (defaults to `https://api.atlascloud.ai/v1`)<br>
+If no model is specified, the provider uses `qwen/qwen3.5-397b-a17b`.
+
 </details>
 &nbsp;<br>
 

@@ -46,7 +46,7 @@ from .output_handlers import (
     SipTrunkOutputHandler,
     FreeSwitchOutputHandler,
 )
-from .llms import OpenAiLLM, LiteLLM, AzureLLM, GeminiLLM
+from .llms import AtlasCloudLLM, OpenAiLLM, LiteLLM, AzureLLM, GeminiLLM
 from .s2s import GeminiLiveS2S, OpenAIRealtimeS2S
 from .enums import TelephonyProvider, SynthesizerProvider, TranscriberProvider, LLMProvider, S2SProvider
 
@@ -95,6 +95,7 @@ SUPPORTED_TRANSCRIBER_MODELS = {"deepgram": DeepgramTranscriber}
 
 SUPPORTED_LLM_PROVIDERS = {
     LLMProvider.OPENAI.value: OpenAiLLM,
+    LLMProvider.ATLASCLOUD.value: AtlasCloudLLM,
     LLMProvider.COHERE.value: LiteLLM,
     LLMProvider.OLLAMA.value: LiteLLM,
     LLMProvider.DEEPINFRA.value: LiteLLM,
