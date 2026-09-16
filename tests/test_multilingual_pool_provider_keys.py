@@ -196,3 +196,27 @@ async def test_provider_key_map_is_captured_and_kept_out_of_the_kwargs_splat(mon
 
     assert tm.provider_api_keys == {"sarvam": "sarvam-byok"}
     assert "provider_api_keys" not in tm.kwargs
+
+
+def test_deepgram_synthesizer_uses_the_synthesizer_key(monkeypatch):
+    # It used to read transcriber_key, so a Deepgram TTS leg authenticated with the ASR key.
+    from bolna.synthesizer.deepgram_synthesizer import DeepgramSynthesizer
+
+    monkeypatch.setenv("DEEPGRAM_AUTH_TOKEN", "env-key")
+    synth = DeepgramSynthesizer(
+        voice_id="aura-zeus-en",
+        voice="Zeus",
+        synthesizer_key="deepgram-byok",
+        transcriber_key="sarvam-byok",
+    )
+
+    assert synth.api_key == "deepgram-byok"
+
+
+def test_deepgram_synthesizer_falls_back_to_env_without_a_stored_key(monkeypatch):
+    from bolna.synthesizer.deepgram_synthesizer import DeepgramSynthesizer
+
+    monkeypatch.setenv("DEEPGRAM_AUTH_TOKEN", "env-key")
+    synth = DeepgramSynthesizer(voice_id="aura-zeus-en", voice="Zeus", transcriber_key="sarvam-byok")
+
+    assert synth.api_key == "env-key"
