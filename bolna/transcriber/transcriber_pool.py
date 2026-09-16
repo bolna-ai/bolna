@@ -258,8 +258,7 @@ class TranscriberPool:
                         continue
                     # Skip if this transcriber's connection already dropped —
                     # reconnect-on-demand in switch() handles that case.
-                    task = getattr(transcriber, "transcription_task", None)
-                    if task is not None and task.done():
+                    if not transcriber.is_connected():
                         continue
                     encoding = getattr(transcriber, "encoding", "linear16")
                     silence = self._silence_frame(encoding)
@@ -560,9 +559,11 @@ class TranscriberPool:
             # after eos: a switch decision landing post-hangup must not resurrect
             # connections on a call that is tearing down.
             target = self.transcribers[label]
-            transcription_task = getattr(target, "transcription_task", None)
-            if transcription_task is not None and transcription_task.done() and not self.call_ended:
+            # is_connected(), not the task: Azure never sets transcription_task, so the old probe
+            # read None and never reconnected a dropped standby here.
+            if not target.is_connected() and not self.call_ended:
                 logger.info(f"TranscriberPool: transcriber '{label}' connection dropped, reconnecting")
+                target.connection_error = None
                 await target.run()
                 self.reconnect_count += 1
 

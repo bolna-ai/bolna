@@ -10,7 +10,6 @@ import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
-from bolna.agent_manager.task_manager import TaskManager
 from bolna.transcriber.azure_transcriber import AzureTranscriber
 from bolna.transcriber.transcriber_pool import TranscriberPool
 
@@ -69,33 +68,10 @@ async def test_pool_asks_azure_instead_of_probing_its_task():
     assert pool.is_active_transcriber_alive() is False
 
 
-async def test_single_transcriber_reconnects_until_the_cap():
-    tm = SimpleNamespace(
-        single_transcriber_reconnect_count=0,
-        MAX_SINGLE_TRANSCRIBER_RECONNECTS=TaskManager.MAX_SINGLE_TRANSCRIBER_RECONNECTS,
-        tools={"transcriber": MagicMock(run=AsyncMock())},
-    )
-    for attempt in range(1, TaskManager.MAX_SINGLE_TRANSCRIBER_RECONNECTS + 1):
-        assert await TaskManager.reconnect_single_transcriber(tm) is True
-        assert tm.single_transcriber_reconnect_count == attempt
-    # Budget spent — the call ends rather than reconnecting forever.
-    assert await TaskManager.reconnect_single_transcriber(tm) is False
-
-
-async def test_single_transcriber_reconnect_failure_does_not_consume_budget():
-    tm = SimpleNamespace(
-        single_transcriber_reconnect_count=0,
-        MAX_SINGLE_TRANSCRIBER_RECONNECTS=TaskManager.MAX_SINGLE_TRANSCRIBER_RECONNECTS,
-        tools={"transcriber": MagicMock(run=AsyncMock(side_effect=RuntimeError("connect refused")))},
-    )
-    assert await TaskManager.reconnect_single_transcriber(tm) is False
-    assert tm.single_transcriber_reconnect_count == 0
-
-
 async def test_reconnect_does_not_leave_the_previous_audio_pump_running():
-    # The single-transcriber reconnect path above calls run() repeatedly. Each call used to add
-    # a consumer on the same input_queue while only tracking the newest, so the pumps raced
-    # frames into the shared push stream.
+    # TranscriberPool.reconnect_active() calls run() repeatedly. Each call used to add a consumer
+    # on the same input_queue while only tracking the newest, so the pumps raced frames into the
+    # shared push stream.
     t = _azure()
 
     async def skip_native_sdk():
@@ -103,7 +79,7 @@ async def test_reconnect_does_not_leave_the_previous_audio_pump_running():
 
     t.initialize_connection = skip_native_sdk
 
-    for _ in range(TaskManager.MAX_SINGLE_TRANSCRIBER_RECONNECTS):
+    for _ in range(TranscriberPool._MAX_RECONNECTS_PER_CALL):
         await t.run()
         await asyncio.sleep(0)
 
@@ -111,15 +87,3 @@ async def test_reconnect_does_not_leave_the_previous_audio_pump_running():
     assert len(pumps) == 1
     assert t.send_audio_to_transcriber_task is pumps[0]
     await t.cancel_audio_pump()
-
-
-async def test_the_single_transcriber_reconnect_clears_a_stale_connection_error():
-    # Runs for any provider; non-azure ones never clear it themselves.
-    transcriber = MagicMock(run=AsyncMock(), connection_error="socket died")
-    tm = SimpleNamespace(
-        single_transcriber_reconnect_count=0,
-        MAX_SINGLE_TRANSCRIBER_RECONNECTS=TaskManager.MAX_SINGLE_TRANSCRIBER_RECONNECTS,
-        tools={"transcriber": transcriber},
-    )
-    assert await TaskManager.reconnect_single_transcriber(tm) is True
-    assert transcriber.connection_error is None
