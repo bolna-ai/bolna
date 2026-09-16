@@ -25,9 +25,9 @@ def _switcher_capturing_prompt(monkeypatch, sent):
     monkeypatch.setenv("LANGUAGE_SWITCH_HEDGE_AFTER_S", "0")
     sw = LanguageSwitcher(available_labels=["en", "te", "hi"], run_id="r")
 
-    async def generate(messages):
+    async def generate(messages, **kwargs):
         sent["user"] = messages[-1]["content"]
-        return '{"target_language": null, "target_confidence": 0.0}'
+        return '{"target_language": null, "target_confidence": 0.0}', {}
 
     sw._llm = MagicMock()
     sw._llm.generate = generate

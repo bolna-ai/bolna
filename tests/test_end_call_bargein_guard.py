@@ -7,6 +7,7 @@ never set, and the agent loops goodbyes until the caller drops.
 """
 
 import asyncio
+import pytest
 import inspect
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -15,11 +16,19 @@ from unittest.mock import AsyncMock, MagicMock
 from bolna.agent_manager.task_manager import TaskManager
 
 
-def _ignore(hangup_triggered, end_call_in_progress, has_transfer=False):
+def _ignore(
+    hangup_triggered,
+    end_call_in_progress,
+    has_transfer=False,
+    conversation_ended=False,
+    interruptible_window=False,
+):
     fake = SimpleNamespace(
         hangup_triggered=hangup_triggered,
         _end_call_in_progress=end_call_in_progress,
         has_transfer=has_transfer,
+        conversation_ended=conversation_ended,
+        _hangup_interruptible_window=interruptible_window,
     )
     return TaskManager._should_ignore_transcriber_input(fake)
 
@@ -37,6 +46,54 @@ def test_processes_input_during_normal_conversation():
     assert _ignore(hangup_triggered=False, end_call_in_progress=False) is False
 
 
+def test_interruptible_window_lets_input_through_despite_hangup():
+    # Toggle on: a barge-in during the goodbye must reach the interruption path.
+    assert _ignore(hangup_triggered=True, end_call_in_progress=True, interruptible_window=True) is False
+
+
+@pytest.mark.parametrize(
+    "hangup,end_call,transfer,ended,window,expected",
+    [
+        # nothing underway: input always flows, window is irrelevant
+        (False, False, False, False, False, False),
+        (False, False, False, False, True, False),
+        (False, False, False, True, False, False),
+        # hangup underway, no window: the pre-existing lockout
+        (True, False, False, False, False, True),
+        (False, True, False, False, False, True),
+        (True, True, False, False, False, True),
+        # interruptible goodbye: the only combination that lets speech through mid-hangup
+        (True, True, False, False, True, False),
+        (True, False, False, False, True, False),
+        # a committed disconnect always wins over the window
+        (True, True, False, True, True, True),
+        # a transfer is never interruptible, even with the window open
+        (False, False, True, False, False, True),
+        (False, False, True, False, True, True),
+        (True, True, True, False, True, True),
+    ],
+)
+def test_ignore_transcriber_input_truth_table(hangup, end_call, transfer, ended, window, expected):
+    assert (
+        _ignore(
+            hangup_triggered=hangup,
+            end_call_in_progress=end_call,
+            has_transfer=transfer,
+            conversation_ended=ended,
+            interruptible_window=window,
+        )
+        is expected
+    )
+
+
+def test_ended_conversation_ignores_input_even_in_window():
+    # Once the disconnect has committed, the window no longer matters.
+    assert (
+        _ignore(hangup_triggered=True, end_call_in_progress=True, interruptible_window=True, conversation_ended=True)
+        is True
+    )
+
+
 # An interim transcript that crosses the interruption threshold. In the real
 # call this is what fired "Condition for interruption hit" -> __cleanup_downstream_tasks
 # -> "Cancelling LLM Task", killing the in-flight end_call handler.
@@ -46,12 +103,16 @@ _INTERIM_BARGEIN = {
 }
 
 
-def _make_tm(*, end_call_in_progress, hangup_triggered, function_call_in_flight=False):
+def _make_tm(
+    *, end_call_in_progress, hangup_triggered, function_call_in_flight=False, hangup_interruptible_window=False
+):
     tm = MagicMock()
     tm.hangup_triggered = hangup_triggered
     tm._end_call_in_progress = end_call_in_progress
     tm.function_call_in_flight = function_call_in_flight
     tm.has_transfer = False
+    tm.conversation_ended = False
+    tm._hangup_interruptible_window = hangup_interruptible_window
     tm.stream = True
     tm.response_in_pipeline = False
     tm.transcriber_output_queue = asyncio.Queue()
@@ -99,6 +160,19 @@ async def test_bargein_does_not_cancel_turn_during_tool_call():
     tm._TaskManager__cleanup_downstream_tasks.assert_not_called()
 
 
+async def test_bargein_cancels_turn_during_interruptible_goodbye():
+    # Toggle on: mid-goodbye the end_call tool is in flight and hangup is triggered, yet the
+    # barge-in must reach cleanup so the pending hangup is cancelled and the call resumes.
+    tm = _make_tm(
+        end_call_in_progress=True,
+        hangup_triggered=True,
+        function_call_in_flight=True,
+        hangup_interruptible_window=True,
+    )
+    await _drive_with_bargein(tm)
+    tm._TaskManager__cleanup_downstream_tasks.assert_awaited_once()
+
+
 class TestSourceGuards:
     """Catch accidental removal of the wiring that closes the barge-in race."""
 
@@ -112,4 +186,23 @@ class TestSourceGuards:
         src = inspect.getsource(TaskManager._listen_transcriber)
         assert "_should_ignore_transcriber_input" in src, (
             "_listen_transcriber must drop user speech while a hangup/end_call actuation is underway"
+        )
+
+    def test_end_call_branch_opens_window(self):
+        src = inspect.getsource(TaskManager._TaskManager__execute_function_call)
+        assert "_hangup_interruptible_window = True" in src, (
+            "end_call branch must open the interruptible window when the toggle is on"
+        )
+
+    def test_end_call_branch_bails_out_when_cancelled(self):
+        src = inspect.getsource(TaskManager._TaskManager__execute_function_call)
+        assert "_hangup_cancelled" in src, (
+            "end_call branch must re-check _hangup_cancelled after its playout wait, or a barge-in "
+            "that rescued the call still gets disconnected"
+        )
+
+    def test_cleanup_cancels_pending_hangup(self):
+        src = inspect.getsource(TaskManager._TaskManager__cleanup_downstream_tasks)
+        assert "_cancel_pending_hangup" in src, (
+            "__cleanup_downstream_tasks must cancel the pending hangup when the window is open"
         )

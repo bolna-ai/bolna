@@ -99,6 +99,7 @@ async def test_switch_path_holds_gate_until_cleanup(language_switch_tm):
 
 def test_snapshot_flushes_detector_health():
     tm = MagicMock()
+    tm.language_switcher.explicit_only = False
     pool = MagicMock(spec=TranscriberPool)
     pool.lid_detection_events = []
 

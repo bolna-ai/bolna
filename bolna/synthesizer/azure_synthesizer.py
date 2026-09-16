@@ -32,7 +32,8 @@ class AzureSynthesizer(BaseSynthesizer):
         super().__init__(kwargs.get("task_manager_instance"), stream, buffer_size)
         self.model = model
         self.language = language
-        self.voice = f"{language}-{voice}{model}"
+        suffixed = voice if voice.lower().endswith(model.lower()) else f"{voice}{model}"
+        self.voice = f"{language}-{suffixed}"
         logger.info(f"{self.voice} initialized")
         self.sample_rate = str(sampling_rate)
         self.stream = stream
@@ -187,10 +188,13 @@ class AzureSynthesizer(BaseSynthesizer):
                         logger.error(f"Error in synthesizing handler: {e}")
 
                 def on_completed(evt):
-                    if evt.result.reason == speechsdk.ResultReason.Canceled:
-                        cancellation = evt.result.cancellation_details
-                        if cancellation.reason == speechsdk.CancellationReason.Error:
-                            self._log_cancellation_error(cancellation)
+                    asyncio.run_coroutine_threadsafe(_set_done(), self.loop)
+
+                def on_canceled(evt):
+                    cancellation = evt.result.cancellation_details
+                    logger.error(f"Azure TTS canceled: {cancellation.reason} - voice {self.voice}")
+                    if cancellation.reason == speechsdk.CancellationReason.Error:
+                        self._log_cancellation_error(cancellation)
                     asyncio.run_coroutine_threadsafe(_set_done(), self.loop)
 
                 async def _set_done():
@@ -198,6 +202,7 @@ class AzureSynthesizer(BaseSynthesizer):
 
                 synthesizer.synthesizing.connect(on_synthesizing)
                 synthesizer.synthesis_completed.connect(on_completed)
+                synthesizer.synthesis_canceled.connect(on_canceled)
 
                 ssml = self._build_ssml(text)
                 start_time = time.perf_counter()

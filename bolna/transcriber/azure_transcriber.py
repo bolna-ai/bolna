@@ -82,10 +82,12 @@ class AzureTranscriber(BaseTranscriber):
             meta["connection_error"] = self.connection_error
             await self.transcriber_output_queue.put(create_ws_data_packet("transcriber_connection_closed", meta))
 
-    def _check_and_process_end_of_stream(self, ws_data_packet):
+    async def _check_and_process_end_of_stream(self, ws_data_packet):
         if "eos" in ws_data_packet["meta_info"] and ws_data_packet["meta_info"]["eos"] is True:
             logger.info("End of stream detected")
-            self._sync_cleanup()
+            # Native SDK teardown blocks for seconds against a degraded endpoint, so release
+            # the recognizer off the loop rather than freezing every other call on this worker.
+            await asyncio.get_event_loop().run_in_executor(None, self._sync_cleanup)
             return True
         return False
 
@@ -126,7 +128,7 @@ class AzureTranscriber(BaseTranscriber):
                     except Exception:
                         pass
 
-                end_of_stream = self._check_and_process_end_of_stream(ws_data_packet)
+                end_of_stream = await self._check_and_process_end_of_stream(ws_data_packet)
                 if end_of_stream:
                     break
 
@@ -382,7 +384,7 @@ class AzureTranscriber(BaseTranscriber):
                 pass
             self.send_audio_to_transcriber_task = None
 
-        self._sync_cleanup()
+        await asyncio.get_event_loop().run_in_executor(None, self._sync_cleanup)
 
     def _sync_cleanup(self):
         """Synchronous cleanup of Azure resources."""

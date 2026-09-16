@@ -28,8 +28,23 @@ class FreeSwitchInputHandler(DefaultInputHandler):
         # set by FreeSwitchOutputHandler: called when mod_audio_stream reports its playout
         # buffer ACTUALLY drained (real playback-complete, vs the byte-count estimate)
         self.on_playout_done = None
+        # set by FreeSwitchOutputHandler: per-mark playback echoes from the module
+        self.on_mark_played = None
 
     async def process_message(self, message):
+        if message.get("type") == "markPlayed":
+            name = message.get("name")
+            # cleared = dropped unplayed (killAudio/ring overflow): drop from the registry with
+            # no ack stamp — heard text, tail-credit and turn-end must never count it
+            if message.get("cleared"):
+                if self.mark_event_meta_data:
+                    self.mark_event_meta_data.drop_data(name)
+                return
+            # real per-chunk playback ack: registry ack here, turn-end in the output handler
+            self.process_mark_message({"type": "mark", "name": name})
+            if self.on_mark_played:
+                self.on_mark_played(name)
+            return
         if message.get("type") == "playoutDone":
             # mod_audio_stream: all queued TTS has really been played to the caller — hand the
             # signal to the output handler so turn-taking state matches what was heard

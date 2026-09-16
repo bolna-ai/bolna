@@ -60,7 +60,7 @@ async def test_success_resets_the_failure_counter(monkeypatch):
     sw = LanguageSwitcher(available_labels=["en", "hi"], model=BEDROCK)
     sw._log_decision = MagicMock()
     sw._llm = MagicMock()
-    sw._llm.generate = AsyncMock(side_effect=[Exception("throttled"), '{"target_language": null}'])
+    sw._llm.generate = AsyncMock(side_effect=[Exception("throttled"), ('{"target_language": null}', {})])
     await sw.decide("hello", "", "hi")
     await sw.decide("hello", "", "hi")
     assert sw._consecutive_failures == 0
@@ -112,7 +112,7 @@ async def test_parsed_null_is_not_a_judge_failure(monkeypatch):
     sw = LanguageSwitcher(available_labels=["en", "hi"], model=BEDROCK)
     sw._log_decision = MagicMock()
     sw._llm = MagicMock()
-    sw._llm.generate = AsyncMock(return_value="null")
+    sw._llm.generate = AsyncMock(return_value=("null", {}))
     for _ in range(4):
         await sw.decide("hello", "", "hi")
     assert sw.model == BEDROCK
@@ -140,7 +140,7 @@ async def test_null_resets_an_error_streak(monkeypatch):
     sw = LanguageSwitcher(available_labels=["en", "hi"], model=BEDROCK)
     sw._log_decision = MagicMock()
     sw._llm = MagicMock()
-    sw._llm.generate = AsyncMock(side_effect=[Exception("throttled"), "null", "null"])
+    sw._llm.generate = AsyncMock(side_effect=[Exception("throttled"), ("null", {}), ("null", {})])
     await sw.decide("hello", "", "hi")  # errored first attempt; hedge parses null → valid decide
     await sw.decide("hello", "", "hi")
     assert sw._consecutive_failures == 0

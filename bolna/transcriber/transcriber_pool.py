@@ -630,6 +630,13 @@ class TranscriberPool:
             f"unknown_frames={getattr(lid, 'unknown_frames', 0)}) — language switching was inert"
         )
 
+    def lid_audio_seconds(self) -> float | None:
+        """Detector usage: seconds of caller audio streamed to the LID tap, or None if no tap."""
+        lid = self._lid
+        if lid is None:
+            return None
+        return lid.audio_seconds_fed()
+
     async def cleanup(self):
         """Clean up all transcribers, cancel pool tasks, and stop LID tap."""
         for task_name, task in [("router", self._router_task), ("keepalive", self._keepalive_task)]:

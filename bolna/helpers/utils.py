@@ -7,6 +7,7 @@ import time
 import math
 import re
 import copy
+import difflib
 import hashlib
 import os
 import traceback
@@ -23,7 +24,13 @@ from enum import Enum
 from dotenv import load_dotenv
 from pydantic import create_model
 from .logger_config import configure_logger
-from bolna.constants import PREPROCESS_DIR, PRE_FUNCTION_CALL_MESSAGE, TRANSFERING_CALL_FILLER, END_CALL_FUNCTION_PREFIX
+from bolna.constants import (
+    CONTENT_POLICY_ERROR_MARKERS,
+    PREPROCESS_DIR,
+    PRE_FUNCTION_CALL_MESSAGE,
+    TRANSFERING_CALL_FILLER,
+    END_CALL_FUNCTION_PREFIX,
+)
 from bolna.enums import LogComponent, LogDirection, UsageSource
 from bolna.prompts import DATE_PROMPT
 from pydub import AudioSegment
@@ -47,6 +54,132 @@ class DictWithMissing(dict):
 
 # Server-owned telephony ids; never exposed to the model (prompt var, {placeholder}, or tool param).
 SERVER_OWNED_CALL_IDENTIFIERS = frozenset({"call_sid", "stream_sid"})
+
+# Public so dashboard/frontend mirror it; hyphens in dot segments only, keeping {price-list} a non-match.
+VARIABLE_PATH = r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z0-9_-]+|\[[^\[\]{}]+\])*"
+
+# {{path}} before {path}; non-paths match nothing so JSON survives, and there is no {{ -> { unescaping.
+PROMPT_TOKEN_PATTERN = re.compile(
+    r"\{\{\s*(?P<double>" + VARIABLE_PATH + r")\s*\}\}|\{(?P<single>" + VARIABLE_PATH + r")(?P<spec>:[^{}]*)?\}"
+)
+
+
+def parse_json_container(value):
+    """A JSON object/array that arrived as a string -> the parsed container, else unchanged.
+
+    Callers hand us variables in whatever shape their transport produced: the web-call panel
+    parses JSON client-side, but a telephony /call payload (or any API caller) commonly sends
+    the same value as a JSON *string*. Only objects and arrays are accepted — a bare number or
+    quoted string stays a string, so "720" never silently becomes an int.
+    """
+    if not isinstance(value, str):
+        return value
+    trimmed = value.strip()
+    if not trimmed.startswith("{") and not trimmed.startswith("["):
+        return value
+    try:
+        parsed = json.loads(trimmed)
+    except (ValueError, TypeError):
+        return value
+    return parsed if isinstance(parsed, (dict, list)) else value
+
+
+def resolve_variable_path(path, data):
+    """Walk a dotted/indexed path through nested dicts and lists.
+
+    Returns (found, value). `a.b.c`, `a.0.b` and the legacy `a[b][c]` all resolve.
+
+    A stringified JSON payload is parsed ONLY when a path actually walks into it. Doing it
+    here rather than at ingress is what keeps existing prompts byte-identical: a bare {var}
+    or {{var}} never triggers parsing, so a string-valued variable still renders as the exact
+    string it always did.
+    """
+    current = data
+    for part in path.replace("[", ".").replace("]", "").split("."):
+        if not part:
+            continue
+        current = parse_json_container(current)
+        if isinstance(current, dict):
+            if part not in current:
+                return False, None
+            current = current[part]
+        elif isinstance(current, (list, tuple)):
+            if not part.lstrip("-").isdigit():
+                return False, None
+            index = int(part)
+            if not -len(current) <= index < len(current):
+                return False, None
+            current = current[index]
+        else:
+            return False, None
+    return True, current
+
+
+def render_variable_value(value, as_json=False):
+    """Stringify a resolved value.
+
+    as_json is set only for the {{path}} syntax, where dicts and lists become real JSON
+    (a Python repr emits single quotes and True/None, which the model cannot parse).
+    The legacy {path} syntax keeps str(), because prod recipient_data already carries
+    object-valued variables — product_details, items, cart_data_json, nearest_store —
+    and switching those to JSON would change output on live calls.
+    """
+    if isinstance(value, str):
+        return value
+    if as_json and isinstance(value, (dict, list, tuple)):
+        try:
+            return json.dumps(value, ensure_ascii=False, default=str)
+        except (TypeError, ValueError):
+            return str(value)
+    return str(value)
+
+
+def render_prompt(template, data, missing=""):
+    """Substitute {{path}} and {path} variables into a prompt.
+
+    Replaces str.format_map, which parsed every brace and therefore raised on any
+    JSON literal in the prompt — and because callers swallowed that exception, one
+    JSON snippet silently left EVERY variable in the prompt unsubstituted.
+
+    An unresolved {{path}} unescapes to {path}, preserving the legacy meaning of a
+    double-braced identifier. An unresolved {path} renders `missing`, matching the
+    previous DictWithMissing.
+
+    missing=None is partial-fill mode: substitute only what resolves and leave every
+    other token byte-identical. Agent template seeding needs this, because its leftover
+    placeholders are the runtime variables and must survive to the live call.
+    """
+    if not template or not isinstance(template, str):
+        return template
+    if not isinstance(data, dict):
+        data = {}
+
+    def substitute(match):
+        double = match.group("double")
+        path = double if double is not None else match.group("single")
+        spec = match.group("spec")
+        found, value = resolve_variable_path(path, data)
+        if not found:
+            # Unresolved spec tokens stay literal — more likely pseudo-JSON like "{name: string}" than a variable.
+            if missing is None or spec:
+                return match.group(0)
+            return "{" + path + "}" if double is not None else missing
+        if spec:
+            # Partial fill leaves specs alone; applying one here would bake a seed-time value into the template.
+            if missing is None:
+                return match.group(0)
+            try:
+                return format(value, spec[1:])
+            except Exception:
+                # Broad on purpose: an escaping error upstream would lose every variable, as format_map did.
+                return match.group(0)
+        return render_variable_value(value, as_json=double is not None)
+
+    try:
+        return PROMPT_TOKEN_PATTERN.sub(substitute, template)
+    except Exception as e:
+        logger.error(f"render_prompt failed, returning template unchanged: {e}")
+        return template
 
 
 def load_file(file_path, is_json=False):
@@ -280,6 +413,9 @@ def is_s2s_agent(task):
 def format_messages(messages, use_system_prompt=False, include_tools=False):
     formatted_string = ""
     for message in messages:
+        # Control tokens the engine injects for the LLM; the caller never said them.
+        if message.get("exclude_from_transcript"):
+            continue
         role = message["role"]
         content = message.get("content")
         tool_calls = message.get("tool_calls")
@@ -335,16 +471,11 @@ def enrich_context_with_time_variables(context_data, timezone):
 
 
 def update_prompt_with_context(prompt, context_data):
-    try:
-        if not context_data or not isinstance(context_data.get("recipient_data"), dict):
-            return prompt.format_map(DictWithMissing({}))
-        # A {call_sid}/{stream_sid} template renders empty instead of leaking the real id.
-        recipient_data = {
-            k: v for k, v in context_data["recipient_data"].items() if k not in SERVER_OWNED_CALL_IDENTIFIERS
-        }
-        return prompt.format_map(DictWithMissing(recipient_data))
-    except Exception as e:
-        return prompt
+    if not context_data or not isinstance(context_data.get("recipient_data"), dict):
+        return render_prompt(prompt, {})
+    # A {call_sid}/{stream_sid} template renders empty instead of leaking the real id.
+    recipient_data = {k: v for k, v in context_data["recipient_data"].items() if k not in SERVER_OWNED_CALL_IDENTIFIERS}
+    return render_prompt(prompt, recipient_data)
 
 
 async def get_prompt_responses(assistant_id, local=False):
@@ -500,6 +631,15 @@ def resample(audio_bytes, target_sample_rate, format="mp3", pcm_channels=1, orig
     buffer = io.BytesIO()
     audio.export(buffer, format="wav")
     return buffer.getvalue()
+
+
+def normalized_similarity(first: str, second: str) -> float:
+    """Similarity in [0,1] over whitespace-collapsed, case-folded text."""
+    first = " ".join((first or "").split()).casefold()
+    second = " ".join((second or "").split()).casefold()
+    if not first or not second:
+        return 0.0
+    return difflib.SequenceMatcher(None, first, second).ratio()
 
 
 def get_synth_audio_format(audio_bytes):
@@ -765,7 +905,7 @@ def format_error_message(component, provider, error_str):
     provider_str = f" ({provider})" if provider and provider != "-" else ""
     err_lower = error_str.lower() if error_str else ""
 
-    if "content policy" in err_lower or "content_policy" in err_lower:
+    if any(marker in err_lower for marker in CONTENT_POLICY_ERROR_MARKERS):
         return "Content policy violation - response blocked by safety filter"
     if "timeout" in err_lower:
         return f"{display} service{provider_str} connection timed out"
@@ -807,12 +947,16 @@ def convert_to_request_log(
     reasoning_tokens=None,
     cached_tokens=None,
     reasoning_content=None,
+    ts=None,
+    latency=None,
 ):
     log = dict()
     log["direction"] = direction.value if isinstance(direction, Enum) else direction
     log["data"] = message
     log["leg_id"] = meta_info["request_id"] if "request_id" in meta_info else "-"
-    log["time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")
+    # ts (epoch seconds) stamps the row when the event happened rather than when it is logged —
+    # callers that log after the fact (LLM response, graph routing request) must pass it.
+    log["time"] = (datetime.fromtimestamp(ts) if ts else datetime.now()).strftime("%Y-%m-%d %H:%M:%S.%f")
     log["component"] = component.value if isinstance(component, Enum) else component
     log["sequence_id"] = meta_info.get("sequence_id", None)
     log["model"] = model
@@ -902,6 +1046,9 @@ def convert_to_request_log(
                     else UsageSource.ESTIMATED.value
                 )
                 log["llm_metadata"] = llm_metadata
+    # Explicit latency (seconds) wins over the meta_info lookups above.
+    if latency is not None:
+        log["latency"] = latency
     log["engine"] = engine
     asyncio.create_task(write_request_logs(log, run_id))
 

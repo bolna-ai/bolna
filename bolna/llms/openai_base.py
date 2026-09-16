@@ -5,7 +5,7 @@ from typing import Optional
 
 from openai import BadRequestError, APIError
 
-from bolna.constants import GPT5_MODEL_PREFIX
+from bolna.constants import is_reasoning_model
 from bolna.enums import ChatRole, ResponseStreamEvent, ResponseItemType, LogComponent, LogDirection
 from bolna.helpers.utils import (
     convert_to_request_log,
@@ -14,7 +14,7 @@ from bolna.helpers.utils import (
     SERVER_OWNED_CALL_IDENTIFIERS,
 )
 from .llm import BaseLLM
-from .message_models import MessageFormatAdapter
+from .message_models import MessageFormatAdapter, strip_internal_keys, first_tool_call_result
 from .types import APIParams, LLMStreamChunk, LatencyData, FunctionCallPayload
 from bolna.helpers.logger_config import configure_logger
 
@@ -289,23 +289,25 @@ class OpenAICompatibleLLM(BaseLLM):
         With previous_response_id set, only sends items after the last
         assistant. Falls back to full history when pending tool outputs are
         missing. Any pending interruption hint is consumed exactly once and
-        only prepended on the chain-alive happy path.
+        prepended on every path.
         """
         hint = self._interruption_hint
         self._interruption_hint = None
 
-        if self.previous_response_id:
-            if self._pending_call_ids:
-                completed = {m.get("tool_call_id") for m in messages if m.get("role") == ChatRole.TOOL}
-                if not self._pending_call_ids.issubset(completed):
-                    logger.info("Pending tool call outputs missing, sending full context")
-                    self.previous_response_id = None
-                    return MessageFormatAdapter.chat_to_responses_input(messages)
+        chained = bool(self.previous_response_id)
+        if chained and self._pending_call_ids:
+            completed = {m.get("tool_call_id") for m in messages if m.get("role") == ChatRole.TOOL}
+            if not self._pending_call_ids.issubset(completed):
+                logger.info("Pending tool call outputs missing, sending full context")
+                self.previous_response_id = None
+                chained = False
+        if chained:
             instructions, input_items = self._extract_new_input(messages)
-            if hint is not None:
-                input_items = [self._build_interruption_hint_item(hint), *input_items]
-            return instructions, input_items
-        return MessageFormatAdapter.chat_to_responses_input(messages)
+        else:
+            instructions, input_items = MessageFormatAdapter.chat_to_responses_input(messages)
+        if hint is not None:
+            input_items = [self._build_interruption_hint_item(hint), *input_items]
+        return instructions, input_items
 
     @staticmethod
     def _build_interruption_hint_item(heard_text: str) -> dict:
@@ -357,6 +359,31 @@ class OpenAICompatibleLLM(BaseLLM):
         src = tools if tools is not None else self.tools
         parsed = json.loads(src) if isinstance(src, str) else src
         return _strip_server_injected_params(parsed)
+
+    async def _route_completion(self, model_args):
+        """Issue the routing completion. Returns (completion, overflowed). Azure overrides for PTU overflow."""
+        return await self.async_client.chat.completions.create(**model_args), False
+
+    async def route(self, messages, tools, tool_choice="required", meta_info=None):
+        # Same SSRF guard the streaming path runs before reaching a customer base_url.
+        guard = getattr(self, "_ensure_base_url_allowed", None)
+        if guard:
+            await guard()
+        parsed_tools = json.loads(tools) if isinstance(tools, str) else tools
+        model_args = {
+            **self.model_args,
+            "messages": strip_internal_keys(messages),
+            "tools": parsed_tools,
+            "tool_choice": tool_choice,
+            "parallel_tool_calls": False,
+            "stream": False,
+        }
+        if "reasoning_effort" in model_args:  # gpt-5 family fixes temperature, so leave it unset
+            model_args.pop("temperature", None)
+        else:
+            model_args["temperature"] = 0.0
+        completion, overflowed = await self._route_completion(model_args)
+        return first_tool_call_result(completion, overflowed)
 
     def invalidate_response_chain(self):
         self.previous_response_id = None
@@ -464,7 +491,7 @@ class OpenAICompatibleLLM(BaseLLM):
         if service_tier:
             create_kwargs["service_tier"] = service_tier
 
-        if self.model_family.startswith(GPT5_MODEL_PREFIX):
+        if is_reasoning_model(self.model_family):
             create_kwargs["temperature"] = 1
             reasoning_effort = self.model_args.get("reasoning_effort")
             reasoning_config = {}
@@ -549,6 +576,7 @@ class OpenAICompatibleLLM(BaseLLM):
 
             if event.type == ResponseStreamEvent.CREATED:
                 self.previous_response_id = event.response.id
+                self._log_llm_request_id(stream, event.response.id)
                 service_tier = getattr(event.response, "service_tier", None)
                 if latency_data is None:
                     latency_data = LatencyData(
@@ -724,7 +752,7 @@ class OpenAICompatibleLLM(BaseLLM):
         if service_tier:
             create_kwargs["service_tier"] = service_tier
 
-        if self.model_family.startswith(GPT5_MODEL_PREFIX):
+        if is_reasoning_model(self.model_family):
             create_kwargs["temperature"] = 1
             reasoning_config = {}
             reasoning_effort = self.model_args.get("reasoning_effort")

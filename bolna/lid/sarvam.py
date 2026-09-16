@@ -52,6 +52,7 @@ class SarvamLID(LIDBackend):
             self._encoding = "linear16"
             self._input_sr = self._sr
         self._resample_state = None
+        self.set_input_audio_format(self._encoding, self._input_sr)
 
     def _on_reconnect_reset(self):
         self._resample_state = None

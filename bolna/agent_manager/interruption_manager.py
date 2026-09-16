@@ -33,6 +33,7 @@ class InterruptionManager:
         self.incremental_delay: int = incremental_delay
         self.utterance_end_time: float = -1
         self.last_interim_ts: float = -1
+        self.last_interim_text: str = ""
 
         # Configuration
         self.number_of_words_for_interruption: int = number_of_words_for_interruption
@@ -177,6 +178,7 @@ class InterruptionManager:
         self.let_remaining_audio_pass_through = True
         self.time_since_first_interim_result = -1
         self.last_interim_ts = -1
+        self.last_interim_text = ""
 
         now_s = time.time()
         if update_utterance_time:
@@ -468,12 +470,16 @@ class InterruptionManager:
         """Returns current turn ID."""
         return self.turn_id
 
-    def note_user_liveness(self) -> None:
-        """Record that an interim arrived, whether or not this turn acts on it."""
+    def note_user_liveness(self, transcript: str = "") -> None:
+        """Record that an interim arrived, whether or not this turn acts on it. An unchanged
+        transcript is the ASR re-emitting, not new speech, so it must not refresh liveness."""
+        if transcript and transcript == self.last_interim_text:
+            return
+        self.last_interim_text = transcript
         self.last_interim_ts = time.time()
 
     def user_speech_staleness_s(self) -> float:
-        """Seconds since the last interim, or since speech start if none yet, -1 when not speaking."""
+        """Seconds since the last new speech, or since speech start if none yet, -1 when not speaking."""
         if not self.callee_speaking:
             return -1
         anchor = max(self.last_interim_ts, self.callee_speaking_start_time)

@@ -147,6 +147,9 @@ class BaseSynthesizer:
 
             audio = await self._fetch_http_audio(text, meta_info)
             audio = self._process_http_audio(audio)
+            # A failed render still terminates the turn: a None packet crashes the output handler.
+            if not audio:
+                audio = b"\x00"
 
             self._stamp_first_chunk(meta_info)
             self._stamp_end_of_stream(meta_info)
@@ -171,7 +174,9 @@ class BaseSynthesizer:
                 meta_info["is_cached"] = False
             self.synthesized_characters += len(text)
             audio = await self._generate_http(text)
-            self.cache.set(text, audio)
+            if audio:
+                # Caching a failed render would repeat it for every later turn with this text.
+                self.cache.set(text, audio)
             return audio
         else:
             if meta_info is not None:

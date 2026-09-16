@@ -1,9 +1,7 @@
 import asyncio
-from collections import defaultdict
 import os
 import re
 import time
-from openai import OpenAI, AzureOpenAI, APIStatusError, APIConnectionError
 from dotenv import load_dotenv
 import json
 
@@ -11,42 +9,40 @@ from bolna.models import *
 from bolna.agent_types.base_agent import BaseAgent
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.rag_service_client import RAGServiceClientSingleton
+from bolna.helpers.function_calling_helpers import guard_llm_base_url
 from bolna.helpers.utils import (
     now_ms,
     format_messages,
     update_prompt_with_context,
+    render_prompt,
     enrich_context_with_time_variables,
-    DictWithMissing,
     get_md5_hash,
     select_message_by_language,
 )
 from bolna.helpers.expression_evaluator import evaluate_edge_expression, describe_edge_expression
 from bolna.enums import EdgeConditionType, NodeType, ToolScope
 from bolna.llms.types import LLMStreamChunk, LatencyData
-from bolna.llms import OpenAiLLM
-from bolna.llms.azure_llm import should_overflow
-from bolna.llms.http_client_pool import get_shared_sync_http_client
+from bolna.llms import OpenAiLLM, LiteLLM
 from bolna.providers import SUPPORTED_LLM_PROVIDERS
 from bolna.prompts import VOICEMAIL_DETECTION_PROMPT
-from bolna.constants import GPT5_MODEL_PREFIX, LANGUAGE_NAMES, canonical_model, default_reasoning_effort
+from bolna.constants import LANGUAGE_NAMES, canonical_model, default_reasoning_effort, is_reasoning_model
 
 from typing import List, Tuple, AsyncGenerator, Optional, Dict, Any
 
-# Optional Groq support for fast routing
-try:
-    from groq import Groq
-
-    GROQ_AVAILABLE = True
-except ImportError:
-    GROQ_AVAILABLE = False
-    Groq = None
+# Conversation providers whose own key authenticates the hangup/voicemail OpenAiLLM hops; any
+# other provider (Gemini, Azure, the LiteLLM backends) needs the platform OpenAI key instead.
+OPENAI_KEYED_PROVIDERS = frozenset(p for p, cls in SUPPORTED_LLM_PROVIDERS.items() if cls is OpenAiLLM)
 
 load_dotenv()
 logger = configure_logger(__name__)
 
 _DETERMINISTIC_REASONING_PREFIX = "deterministic:"
 _ROUTER_REASONING_PREFIX = f"{_DETERMINISTIC_REASONING_PREFIX}router:"
-_PROMPT_VAR_PATTERN = re.compile(r"\{([a-zA-Z_][a-zA-Z0-9_]*)\}")
+# Root identifier in either syntax, so {{prior.loans}} still validates against recipient_data["prior"].
+_PROMPT_VAR_PATTERN = re.compile(r"\{\{?\s*([a-zA-Z_][a-zA-Z0-9_]*)(?:\.[a-zA-Z0-9_]+|\[[^\[\]{}]+\])*\s*\}\}?")
+_ROUTER_RATIONALE_ENABLED = os.getenv("GRAPH_ROUTER_RATIONALE", "").strip().lower() in ("1", "true", "yes")
+_ROUTER_REASONING_DESC = "Brief explanation of why this routing decision was made"
+_ROUTER_CONFIDENCE_DESC = "Confidence score from 0.0 to 1.0 for this routing decision"
 
 # Time variables frozen per call for the conversation prompt; see _prompt_context.
 _TIME_VAR_KEYS = (
@@ -77,13 +73,7 @@ class GraphAgent(BaseAgent):
         # Get credentials from config (injected by task_manager) or fall back to env vars
         self.llm_key = self.config.get("llm_key") or os.getenv("OPENAI_API_KEY")
         self.base_url = self.config.get("base_url")
-
-        # Initialize OpenAI client with credentials (supports EU routing)
-        if self.base_url:
-            self.openai = OpenAI(api_key=self.llm_key, base_url=self.base_url)
-            logger.info(f"OpenAI client initialized with custom base_url: {self.base_url}")
-        else:
-            self.openai = OpenAI(api_key=self.llm_key)
+        self._base_url_validated = False
 
         self.node_history = [self.current_node_id]
         self.current_node_entry_index = 0
@@ -101,7 +91,7 @@ class GraphAgent(BaseAgent):
         self._transition_tools_cache: Dict[str, List[dict]] = {}
         self._transition_tools_cache_max_size = 100
 
-        # Initialize routing client (Groq for speed, or fallback to OpenAI)
+        # Routing runs on its own LLM, built from the same registry as the conversation model.
         self.routing_provider = self.config.get("routing_provider")
         self.routing_model = self.config.get("routing_model")
         self.routing_instructions = self.config.get("routing_instructions")  # Custom routing instructions
@@ -116,15 +106,15 @@ class GraphAgent(BaseAgent):
         # Initialize main LLM for response generation (supports api_tools/function calling + real streaming)
         self.llm = self._initialize_llm()
 
-        # Hangup/voicemail run on OpenAiLLM, which has no Azure support, so an Azure conversation LLM
-        # cannot serve them and they fall back to the platform OpenAI key.
+        # Hangup/voicemail run on OpenAiLLM, so a conversation on a non-OpenAI provider lends no
+        # usable key and these fall back to the platform OpenAI key.
         aux_provider = self.config.get("aux_provider") or self.config.get("provider") or "openai"
         aux_model = (self.config.get("aux_model") or self.llm_model or "").split("/", 1)[-1]
         llm_kwargs = {}
-        if aux_provider == "azure" and os.getenv("OPENAI_API_KEY"):
+        if aux_provider not in OPENAI_KEYED_PROVIDERS and os.getenv("OPENAI_API_KEY"):
             llm_kwargs["llm_key"] = os.getenv("OPENAI_API_KEY")
         else:
-            # No platform key to fall back to, so keep the agent's own creds rather than fail construction.
+            # Otherwise the conversation's own creds serve the hop.
             if self.llm_key:
                 llm_kwargs["llm_key"] = self.llm_key
             if self.base_url:
@@ -246,86 +236,64 @@ class GraphAgent(BaseAgent):
             "used_sources": used_sources or [],
         }
 
-    def _routing_create(self, routing_kwargs):
-        """Run the routing hop, moving it off the pool when it cannot serve. Returns (response, overflowed)."""
-        try:
-            return self.routing_client.chat.completions.create(**routing_kwargs), False
-        except (APIStatusError, APIConnectionError) as e:
-            cfg = getattr(self, "_routing_overflow_cfg", None)
-            if cfg is None or not should_overflow(e):
-                raise
-            if self._routing_overflow_client is None:
-                self._routing_overflow_client = OpenAI(
-                    api_key=cfg["api_key"],
-                    base_url=cfg["base_url"],
-                    http_client=get_shared_sync_http_client(base_url=cfg["base_url"], http2=False),
-                )
-            logger.warning(f"Routing hop saturated, overflowing to {cfg['model']}")
-            overflow_kwargs = {
-                **routing_kwargs,
-                "model": cfg["model"],
-                "service_tier": cfg.get("service_tier") or "priority",
-            }
-            return self._routing_overflow_client.chat.completions.create(**overflow_kwargs), True
-
     def _init_routing_client(self):
-        """Initialize routing client. Uses Groq if available, else OpenAI."""
-        groq_available = GROQ_AVAILABLE and os.getenv("GROQ_API_KEY")
-
-        # Auto-detect provider if not specified
-        if not self.routing_provider:
-            self.routing_provider = "groq" if groq_available else "openai"
-
-        # Point routing at whatever backend the conversation LLM ended up on. Groq routing stays put: it is
-        # the faster hop and does not share the conversation provider anyway.
-        if self.config.get("route_routing_to_conversation") and not (
-            self.routing_provider == "groq" and groq_available
-        ):
-            self.routing_provider = self.config.get("provider") or self.routing_provider
+        """Build the routing LLM from the same registry as the conversation model."""
+        conv_provider = self.config.get("provider") or self.config.get("llm_provider") or "openai"
+        # Self-hosted OpenAI-compatible endpoints (custom/ola) have no platform router, so they route on
+        # their own model and endpoint; everything else defaults to the platform OpenAI router. Either can
+        # be told to follow the conversation model explicitly.
+        follow_conversation = self.config.get("route_routing_to_conversation") or (
+            not self.routing_provider and conv_provider in ("custom", "ola")
+        )
+        if follow_conversation:
+            self.routing_provider = conv_provider
             conv_model = self.config.get("model")
-            if conv_model:
+            if conv_model and not self.routing_model:
                 self.routing_model = conv_model.split("/", 1)[-1]
+        elif not self.routing_provider:
+            self.routing_provider = "openai"
+        if not self.routing_model:
+            self.routing_model = os.getenv("DEFAULT_ROUTING_MODEL_OPENAI", "gpt-4.1-mini")
 
-        if self.routing_provider == "groq":
-            if groq_available:
-                self.routing_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
-                # Default to llama-3.3-70b-versatile (best for multilingual routing)
-                if not self.routing_model:
-                    self.routing_model = os.getenv("DEFAULT_ROUTING_MODEL_GROQ", "llama-3.3-70b-versatile")
-                logger.info(f"Routing initialized with Groq ({self.routing_model}) - fast mode ~200ms")
-            else:
-                logger.warning(
-                    "Groq requested but GROQ_API_KEY not set or groq package not installed, falling back to OpenAI"
-                )
-                self.routing_client = self.openai
-                self.routing_provider = "openai"
-                self.routing_model = os.getenv("DEFAULT_ROUTING_MODEL_OPENAI", "gpt-4.1-mini")
-        elif self.routing_provider == "azure":
-            azure_endpoint = self.base_url or os.getenv("AZURE_OPENAI_ENDPOINT")
-            api_version = self.config.get("api_version") or os.getenv("AZURE_OPENAI_API_VERSION", "2024-12-01-preview")
-            overflow = self.config.get("overflow_llm") or {}
-            # Built on first use: overflowing is rare, and an unused client still holds a pool.
-            self._routing_overflow_cfg = (
-                overflow if overflow.get("api_key") and overflow.get("base_url") and overflow.get("model") else None
+        llm_class = SUPPORTED_LLM_PROVIDERS.get(self.routing_provider, OpenAiLLM)
+        # LiteLLM addresses a backend by a "provider/model" string; a bare model name resolves to OpenAI.
+        if llm_class is LiteLLM and "/" not in self.routing_model:
+            self.routing_model = f"{self.routing_provider}/{self.routing_model}"
+
+        routing_kwargs = {
+            "model": self.routing_model,
+            "provider": self.routing_provider,
+            "temperature": 0,
+            "max_tokens": self.routing_max_tokens or 250,
+        }
+        explicit_routing_creds = {
+            "llm_key": self.config.get("routing_llm_key"),
+            "base_url": self.config.get("routing_base_url"),
+            "api_version": self.config.get("routing_api_version"),
+        }
+        if not follow_conversation and any(explicit_routing_creds.values()):
+            # follow_conversation (a PTU swap) overrides these: routing then rides the conversation's own.
+            routing_kwargs.update({k: v for k, v in explicit_routing_creds.items() if v})
+        elif self.routing_provider == conv_provider:
+            for key in ("llm_key", "base_url", "api_version"):
+                if self.config.get(key):
+                    routing_kwargs[key] = self.config[key]
+        # Only reasoning models take an effort; resolve deployment names to the model family first.
+        routing_family = canonical_model(self.routing_model)
+        if is_reasoning_model(routing_family):
+            routing_kwargs["reasoning_effort"] = (
+                self.routing_reasoning_effort
+                or os.getenv("GPT5_ROUTING_REASONING_EFFORT")
+                or default_reasoning_effort(routing_family)
             )
-            self._routing_overflow_client = None
-            # Same trade as the conversation client, on a hop the caller is already waiting through.
-            self.routing_client = AzureOpenAI(
-                azure_endpoint=azure_endpoint,
-                api_key=self.llm_key,
-                api_version=api_version,
-                **({"max_retries": 0} if self._routing_overflow_cfg else {}),
-            )
-            if self.routing_model:
-                self.routing_model = self.routing_model.split("/", 1)[-1]
-            else:
-                self.routing_model = os.getenv("DEFAULT_ROUTING_MODEL_AZURE", "gpt-4.1-mini")
-            logger.info(f"Routing initialized with Azure ({self.routing_model})")
-        else:
-            self.routing_client = self.openai
-            if not self.routing_model:
-                self.routing_model = os.getenv("DEFAULT_ROUTING_MODEL_OPENAI", "gpt-4.1-mini")
-            logger.info(f"Routing initialized with OpenAI ({self.routing_model})")
+        if self.service_tier:
+            routing_kwargs["service_tier"] = self.service_tier
+        if self.config.get("overflow_llm"):
+            routing_kwargs["overflow_llm"] = self.config["overflow_llm"]
+
+        self._routing_reasoning_effort_used = routing_kwargs.get("reasoning_effort")
+        self.routing_llm = llm_class(**routing_kwargs)
+        logger.info(f"Routing initialized with {self.routing_provider} ({self.routing_model})")
 
     async def check_for_completion(self, messages, check_for_completion_prompt, meta_info=None):
         """Check if the conversation should end. Returns (hangup_dict, metadata)."""
@@ -403,15 +371,17 @@ class GraphAgent(BaseAgent):
                     }
                     parameters["required"].append(param_name)
 
-            parameters["properties"]["reasoning"] = {
-                "type": "string",
-                "description": "Brief explanation of why this routing decision was made",
-            }
+            if _ROUTER_RATIONALE_ENABLED:
+                parameters["properties"]["reasoning"] = {
+                    "type": "string",
+                    "description": _ROUTER_REASONING_DESC,
+                }
+                parameters["required"].append("reasoning")
             parameters["properties"]["confidence"] = {
                 "type": "number",
-                "description": "Confidence score from 0.0 to 1.0 for this routing decision",
+                "description": _ROUTER_CONFIDENCE_DESC,
             }
-            parameters["required"].extend(["reasoning", "confidence"])
+            parameters["required"].append("confidence")
 
             tools.append(
                 {
@@ -421,6 +391,16 @@ class GraphAgent(BaseAgent):
             )
 
         if allow_stay:
+            stay_properties = {}
+            if _ROUTER_RATIONALE_ENABLED:
+                stay_properties["reasoning"] = {
+                    "type": "string",
+                    "description": _ROUTER_REASONING_DESC,
+                }
+            stay_properties["confidence"] = {
+                "type": "number",
+                "description": _ROUTER_CONFIDENCE_DESC,
+            }
             tools.append(
                 {
                     "type": "function",
@@ -429,17 +409,8 @@ class GraphAgent(BaseAgent):
                         "description": "No transition matches. Need more info or clarification.",
                         "parameters": {
                             "type": "object",
-                            "properties": {
-                                "reasoning": {
-                                    "type": "string",
-                                    "description": "Brief explanation of why this routing decision was made",
-                                },
-                                "confidence": {
-                                    "type": "number",
-                                    "description": "Confidence score from 0.0 to 1.0 for this routing decision",
-                                },
-                            },
-                            "required": ["reasoning", "confidence"],
+                            "properties": stay_properties,
+                            "required": list(stay_properties),
                         },
                     },
                 }
@@ -607,6 +578,7 @@ class GraphAgent(BaseAgent):
         *,
         routing_type: str,
         latency_ms: float,
+        started_at: float,
         reasoning: Optional[str],
         confidence: Optional[float],
         is_silence_trigger: bool = False,
@@ -627,6 +599,8 @@ class GraphAgent(BaseAgent):
             "routing_model": self.routing_model if made_llm_call else None,
             "routing_provider": self.routing_provider if made_llm_call else None,
             "routing_latency_ms": round(latency_ms, 1),
+            # Wall clock at hop start — the trace row is written after the hop finished.
+            "routing_started_at": started_at,
             "extracted_params": extracted_params or {},
             "node_history": list(self.node_history),
             "routing_messages": routing_messages,
@@ -657,6 +631,7 @@ class GraphAgent(BaseAgent):
             visited.add(self.current_node_id)
 
             hop_start = time.perf_counter()
+            hop_started_at = time.time()
             self._enrich_routing_context(history)
             router_node = self.get_node_by_id(self.current_node_id)
             previous_node = self.current_node_id
@@ -695,6 +670,7 @@ class GraphAgent(BaseAgent):
                             previous_node,
                             routing_type="llm",
                             latency_ms=latency_ms,
+                            started_at=hop_started_at,
                             reasoning=reasoning,
                             confidence=confidence,
                             is_silence_trigger=is_silence_trigger,
@@ -730,6 +706,7 @@ class GraphAgent(BaseAgent):
                     previous_node,
                     routing_type="deterministic",
                     latency_ms=latency_ms,
+                    started_at=hop_started_at,
                     reasoning=f"{_ROUTER_REASONING_PREFIX}{condition}",
                     confidence=1.0,
                     is_silence_trigger=is_silence_trigger,
@@ -771,6 +748,7 @@ class GraphAgent(BaseAgent):
             "routing_model": None,
             "routing_provider": None,
             "routing_latency_ms": None,
+            "routing_started_at": time.time(),
             "extracted_params": {},
             "node_history": list(self.node_history),
             "routing_messages": None,
@@ -820,13 +798,13 @@ class GraphAgent(BaseAgent):
             option_edges.append(default_edge)
         tools = self._build_transition_tools_for_edges(option_edges, allow_stay=default_edge is None)
 
-        # Build compact context for routing
+        # Skip internal _-prefixed keys so the routing prompt prefix stays cacheable.
         context_section = ""
         if self.context_data:
             context_items = [
                 f"{k}={v}"
                 for k, v in self.context_data.items()
-                if v is not None and not isinstance(v, dict) and k != "detected_language"
+                if v is not None and not isinstance(v, dict) and k != "detected_language" and not k.startswith("_")
             ]
             if context_items:
                 context_section = f"\nContext: {', '.join(context_items)}"
@@ -842,19 +820,21 @@ class GraphAgent(BaseAgent):
             )
         instructions = self.routing_instructions or default_instructions
 
-        if self.context_data and instructions:
+        # The same frozen context the spoken prompt uses: the router otherwise reads "{Name}" while
+        # the history shows the real value, and live time variables rewrite the prompt every turn.
+        prompt_context = self._prompt_context()
+
+        if prompt_context and instructions:
             try:
-                substitution_data = dict(self.context_data)
-                if "recipient_data" in self.context_data and isinstance(self.context_data["recipient_data"], dict):
-                    substitution_data.update(self.context_data["recipient_data"])
-                instructions = instructions.format_map(defaultdict(lambda: "NULL", substitution_data))
+                substitution_data = dict(prompt_context)
+                recipient_data = prompt_context.get("recipient_data")
+                if isinstance(recipient_data, dict):
+                    substitution_data.update(recipient_data)
+                instructions = render_prompt(instructions, substitution_data, missing="NULL")
             except Exception as e:
                 logger.debug(f"Variable substitution in routing_instructions failed: {e}")
 
-        # Substituted with the same frozen context the spoken prompt uses: the router
-        # otherwise reads "{Name}" while the conversation history shows the real value.
         node_objective = node.get("prompt") or node.get("description") or ""
-        prompt_context = self._prompt_context()
         if prompt_context:
             node_objective = update_prompt_with_context(node_objective, prompt_context)
         system_prompt = f"""Routing Guidelines: \n {instructions}\n Current Node: {node["id"]}{context_section} \n Node Objective: {node_objective}\n\n Node Conversation History:\n"""
@@ -892,87 +872,49 @@ class GraphAgent(BaseAgent):
                 messages.append({"role": "user", "content": user_message})
 
         try:
-            routing_kwargs = {
-                "model": self.routing_model,
-                "messages": messages,
-                "tools": tools,
-                "tool_choice": "required",
-                "parallel_tool_calls": False,
-            }
-
-            routing_model = canonical_model(self.routing_model)
-            if routing_model.startswith(GPT5_MODEL_PREFIX):
-                routing_kwargs["max_completion_tokens"] = self.routing_max_tokens or 150
-                routing_kwargs["reasoning_effort"] = (
-                    self.routing_reasoning_effort
-                    or os.getenv("GPT5_ROUTING_REASONING_EFFORT")
-                    or default_reasoning_effort(routing_model)
-                )
-            else:
-                routing_kwargs["max_tokens"] = self.routing_max_tokens or 250
-                routing_kwargs["temperature"] = 0.0
-
-            if self.routing_provider in ("openai", "azure") and self.service_tier:
-                routing_kwargs["service_tier"] = self.service_tier
-
-            self._routing_reasoning_effort_used = routing_kwargs.get("reasoning_effort")
-
-            response, routing_overflowed = await asyncio.to_thread(self._routing_create, routing_kwargs)
+            result = await self.routing_llm.route(messages, tools)
             latency_ms = (time.perf_counter() - start_time) * 1000
 
-            # Extract token usage from routing LLM call
-            usage_info = None
-            if response.usage:
+            if result is None:
+                logger.warning("No tool call in response")
+                return None, None, latency_ms, messages, tools, None, None, None
+
+            function_name = result["function_name"]
+            function_args = result["arguments"]
+            # Pop reasoning and confidence before they pollute extracted_params/context_data
+            reasoning = function_args.pop("reasoning", None)
+            confidence = function_args.pop("confidence", None)
+
+            usage_info = result.get("usage") or None
+            if usage_info:
                 usage_info = {
-                    "input_tokens": response.usage.prompt_tokens,
-                    "output_tokens": response.usage.completion_tokens,
-                    "reasoning_tokens": response.usage.completion_tokens_details.reasoning_tokens
-                    if response.usage.completion_tokens_details
-                    else None,
-                    "cached_tokens": response.usage.prompt_tokens_details.cached_tokens
-                    if response.usage.prompt_tokens_details
-                    else None,
-                    "service_tier": getattr(response, "service_tier", None),
-                    "overflowed": routing_overflowed,
+                    **usage_info,
+                    "service_tier": result.get("service_tier"),
+                    "overflowed": result.get("overflowed", False),
                 }
 
-            # Extract the function call
-            message = response.choices[0].message
-            if message.tool_calls:
-                tool_call = message.tool_calls[0]
-                function_name = tool_call.function.name
-                function_args = json.loads(tool_call.function.arguments) if tool_call.function.arguments else {}
+            logger.info(
+                f"Routing decision (LLM): {function_name} | confidence: {confidence} | reasoning: {reasoning} (latency: {latency_ms:.1f}ms)"
+            )
 
-                # Pop reasoning and confidence before they pollute extracted_params/context_data
-                reasoning = function_args.pop("reasoning", None)
-                confidence = function_args.pop("confidence", None)
+            if function_name == "stay_on_current_node":
+                return None, None, latency_ms, messages, tools, reasoning, confidence, usage_info
 
-                logger.info(
-                    f"Routing decision (LLM): {function_name} | confidence: {confidence} | reasoning: {reasoning} (latency: {latency_ms:.1f}ms)"
+            # Find the edge for this function (may be the default)
+            edge = self._get_edge_by_function_name_from_edges(option_edges, function_name)
+            if edge:
+                return (
+                    edge["to_node_id"],
+                    function_args,
+                    latency_ms,
+                    messages,
+                    tools,
+                    reasoning,
+                    confidence,
+                    usage_info,
                 )
-
-                if function_name == "stay_on_current_node":
-                    return None, None, latency_ms, messages, tools, reasoning, confidence, usage_info
-
-                # Find the edge for this function (may be the default)
-                edge = self._get_edge_by_function_name_from_edges(option_edges, function_name)
-                if edge:
-                    return (
-                        edge["to_node_id"],
-                        function_args,
-                        latency_ms,
-                        messages,
-                        tools,
-                        reasoning,
-                        confidence,
-                        usage_info,
-                    )
-                else:
-                    logger.warning(f"Function {function_name} not found in edges")
-                    return None, None, latency_ms, messages, tools, reasoning, confidence, usage_info
-            else:
-                logger.warning("No tool call in response")
-                return None, None, latency_ms, messages, tools, None, None, usage_info
+            logger.warning(f"Function {function_name} not found in edges")
+            return None, None, latency_ms, messages, tools, reasoning, confidence, usage_info
 
         except Exception as e:
             latency_ms = (time.perf_counter() - start_time) * 1000
@@ -1318,6 +1260,12 @@ class GraphAgent(BaseAgent):
         if detected_language:
             self.context_data["detected_language"] = detected_language
 
+        # Ahead of the try so a blocked endpoint ends the call instead of being spoken.
+        is_custom = (self.config.get("provider") or self.config.get("llm_provider")) == "custom"
+        if is_custom and self.base_url and not self._base_url_validated:
+            await guard_llm_base_url(self.base_url)
+            self._base_url_validated = True
+
         try:
             # Event-triggered generation: process_event() already handled routing
             is_event = self._event_triggered_generation
@@ -1335,6 +1283,7 @@ class GraphAgent(BaseAgent):
                         "routing_model": None,
                         "routing_provider": None,
                         "routing_latency_ms": 0,
+                        "routing_started_at": time.time(),
                         "extracted_params": {},
                         "node_history": list(self.node_history),
                         "routing_messages": None,
@@ -1402,6 +1351,7 @@ class GraphAgent(BaseAgent):
                 yield {"routing_info": self._hold_routing_info(is_silence_trigger)}
             else:
                 previous_node = self.current_node_id
+                routing_started_at = time.time()
                 (
                     next_node_id,
                     extracted_params,
@@ -1433,6 +1383,7 @@ class GraphAgent(BaseAgent):
                         "routing_model": self.routing_model,
                         "routing_provider": getattr(self, "routing_provider", None),
                         "routing_latency_ms": round(routing_latency_ms, 1),
+                        "routing_started_at": routing_started_at,
                         "routing_reasoning_effort": getattr(self, "_routing_reasoning_effort_used", None),
                         "extracted_params": extracted_params or {},
                         "node_history": list(self.node_history),
@@ -1479,10 +1430,7 @@ class GraphAgent(BaseAgent):
                 yield chunk
 
         except Exception as e:
+            # Never yield the error as text: a chunk here is indistinguishable from model output
+            # and gets spoken. Propagate so the task manager ends the call with an LLMError.
             logger.error(f"Error in generate: {e}")
-            latency_data = LatencyData(
-                sequence_id=meta_info.get("sequence_id") if meta_info else None,
-                first_token_latency_ms=0,
-                total_stream_duration_ms=now_ms() - start_time,
-            )
-            yield LLMStreamChunk(data=f"An error occurred: {str(e)}", end_of_stream=True, latency=latency_data)
+            raise
