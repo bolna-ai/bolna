@@ -32,6 +32,8 @@ def _setup_transcribers(monkeypatch, multilingual, kwargs, provider_api_keys):
         "SUPPORTED_TRANSCRIBER_PROVIDERS",
         {p: _recorder(calls, p) for p in ("deepgram", "sarvam", "azure")},
     )
+    # Legs carrying only a model resolve through this registry instead.
+    monkeypatch.setattr(tmmod, "SUPPORTED_TRANSCRIBER_MODELS", {"nova-2": _recorder(calls, "nova-2")})
     monkeypatch.setattr(tmmod, "TranscriberPool", MagicMock())
 
     tm = _mock_task_manager(kwargs, provider_api_keys)
@@ -119,6 +121,7 @@ def test_transcriber_leg_identified_only_by_model_keeps_the_base_key(monkeypatch
     )
 
     assert calls["deepgram"]["transcriber_key"] == "deepgram-byok"
+    assert calls["nova-2"]["transcriber_key"] == "deepgram-byok"
 
 
 def test_synthesizer_leg_does_not_inherit_the_base_provider_key(monkeypatch):
