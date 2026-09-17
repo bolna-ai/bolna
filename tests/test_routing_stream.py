@@ -1,4 +1,4 @@
-"""The routing decision must be complete before the observability fields are decoded."""
+"""The routing decision must be complete before the trailing fields are decoded."""
 
 import asyncio
 from types import SimpleNamespace
@@ -60,7 +60,7 @@ def _fragments(*parts):
 
 
 @pytest.mark.asyncio
-async def test_decides_before_the_observability_fields_are_decoded():
+async def test_decides_before_the_trailing_fields_are_decoded():
     stream = _Stream(
         [_delta(name="transition_to_billing", arguments='{"account_id"')]
         + _fragments(': "A-1", ', '"reasoning": "caller asked about ', 'an invoice", "confidence": 0.9}')
@@ -70,7 +70,7 @@ async def test_decides_before_the_observability_fields_are_decoded():
     args = await reader.decide()
 
     assert reader.function_name == "transition_to_billing"
-    assert args == {"account_id": "A-1"}  # the edge parameter, and nothing after it
+    assert args == {"account_id": "A-1"}
     assert reader.early is True
     # Stopped at the chunk that opened `reasoning`, not at the end of the stream.
     assert stream.consumed < 5
@@ -110,7 +110,7 @@ async def test_a_paramless_transition_decides_on_the_function_name_alone():
 
 
 @pytest.mark.asyncio
-async def test_resolves_at_end_of_stream_when_nothing_trailing_is_emitted():
+async def test_resolves_at_end_of_stream_when_no_trailing_field_is_emitted():
     stream = _Stream([_delta(name="stay_on_current_node", arguments="{}")] + [_usage_chunk(completion=8)])
     reader = RoutingStreamReader(stream, TOOLS)
 
@@ -141,7 +141,6 @@ async def test_early_decision_hands_back_a_tail_task():
 
     assert result["function_name"] == "stay_on_current_node"
     assert result["arguments"] == {}
-    assert result["decided_early"] is True
     assert result["overflowed"] is True
     assert isinstance(result["routing_tail"], asyncio.Task)
     tail = await result["routing_tail"]

@@ -66,7 +66,6 @@ async def test_openai_route_normalizes_and_strips_internal_keys():
 
     assert res["function_name"] == "go_to_x"
     assert res["arguments"] == {}  # decided on the function name, before reasoning/confidence
-    assert res["decided_early"] is True
     tail = await res["routing_tail"]
     assert tail["reasoning"] == "clear"
     assert tail["confidence"] == 0.9

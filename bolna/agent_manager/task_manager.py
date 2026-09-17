@@ -64,6 +64,7 @@ from .interruption_manager import InterruptionManager
 from bolna.agent_types import *
 from bolna.providers import *
 from bolna.s2s import events as s2s_events
+from bolna.llms.routing_stream import CONFIDENCE_KEY, REASONING_KEY
 from bolna.enums import (
     TelephonyProvider,
     LogComponent,
@@ -3646,32 +3647,21 @@ class TaskManager(BaseManager):
             self.conversation_history.sync_interim(messages)
 
     async def _apply_routing_tail(self, tail, routing_info, entry, meta_info):
-        """Fold in the observability fields that arrived after the routing decision.
-
-        The decision dispatches on the streamed function name, so `reasoning`, `confidence`
-        and the usage record land after the turn has already moved on. `entry` is only
-        serialised when the call ends, so patching it here keeps `routing_latencies[]` whole.
-        """
+        """Fold in the rationale, confidence and usage that arrive after the routing decision."""
         try:
             result = await tail
-        except asyncio.CancelledError:
-            raise
         except Exception as e:
             logger.error(f"Routing tail failed for node '{routing_info.get('previous_node', '?')}': {e}")
             return
 
-        confidence = result.get("confidence")
-        if confidence is not None:
-            entry["confidence"] = confidence
-            routing_info["confidence"] = confidence
-
-        reasoning = result.get("reasoning")
-        if reasoning:
-            entry["reasoning"] = reasoning
-            routing_info["reasoning"] = reasoning
-            logger.info(f"Routing rationale on node '{routing_info.get('previous_node', '?')}': {reasoning}")
+        node = routing_info.get("previous_node", "?")
+        if result.get(CONFIDENCE_KEY) is not None:
+            entry[CONFIDENCE_KEY] = result[CONFIDENCE_KEY]
+        if result.get(REASONING_KEY):
+            entry[REASONING_KEY] = result[REASONING_KEY]
+            logger.info(f"Routing rationale on node '{node}': {result[REASONING_KEY]}")
             convert_to_request_log(
-                message=f"Reasoning: {reasoning}",
+                message=f"Reasoning: {result[REASONING_KEY]}",
                 meta_info=meta_info,
                 model=routing_info.get("routing_model", ""),
                 component=LogComponent.GRAPH_ROUTING,
@@ -3683,13 +3673,10 @@ class TaskManager(BaseManager):
         usage = result.get("usage") or {}
         if not usage:
             return
-        entry["input_tokens"] = usage.get("input_tokens")
-        entry["output_tokens"] = usage.get("output_tokens")
-        entry["reasoning_tokens"] = usage.get("reasoning_tokens")
-        entry["cached_tokens"] = usage.get("cached_tokens")
+        for key in ("input_tokens", "output_tokens", "reasoning_tokens", "cached_tokens"):
+            entry[key] = usage.get(key)
 
-        # Same metering the synchronous path does: routing on azure draws on the conversation
-        # LLM's capacity, so its tokens count against the same pool.
+        # Routing on azure shares the conversation LLM's pool, so its tokens meter against it.
         cb = self.on_overflow if (routing_info.get("routing_usage") or {}).get("overflowed") else self.on_turn_usage
         if cb and routing_info.get("routing_provider") == "azure" and usage.get("input_tokens"):
             await cb(usage.get("input_tokens"), usage.get("output_tokens"), usage.get("cached_tokens"))
@@ -3769,8 +3756,7 @@ class TaskManager(BaseManager):
                 # Handle graph agent routing info
                 if isinstance(llm_message, dict) and "routing_info" in llm_message:
                     routing_info = llm_message["routing_info"]
-                    # Not serialisable, and the rationale it carries arrives after the decision.
-                    routing_tail = routing_info.pop("routing_tail", None)
+                    routing_tail = routing_info.pop("routing_tail", None)  # a task, not serialisable
 
                     # Both rows are written here, after the hop already finished — stamp the
                     # request row at the hop's start so the trace stays chronological.

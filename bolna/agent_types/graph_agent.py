@@ -790,7 +790,6 @@ class GraphAgent(BaseAgent):
         return min(unconditional, key=lambda e: e["priority"] if e.get("priority") is not None else 0)
 
     def _consume_routing_tail(self):
-        """Take the rationale/usage task left by the last routing call, if there was one."""
         tail, self._pending_routing_tail = self._pending_routing_tail, None
         return tail
 
@@ -1111,8 +1110,7 @@ class GraphAgent(BaseAgent):
 
             function_name = result["function_name"]
             function_args = result["arguments"]
-            # Consumed by the _router_hop_info / routing_info built right after this returns;
-            # there is no await in between, so a single slot is enough.
+            # Read by the routing_info built right after this returns, with no await in between.
             self._pending_routing_tail = result.get("routing_tail")
             # Pop reasoning and confidence before they pollute extracted_params/context_data
             reasoning = function_args.pop("reasoning", None)
