@@ -175,7 +175,9 @@ class _StubManager:
 
     def spawn(self, tail, entry, routing_info=None):
         task = asyncio.create_task(
-            self._apply_routing_tail(tail, routing_info or {"previous_node": "dispatch"}, entry, {})
+            self._apply_routing_tail(
+                tail, routing_info or {"previous_node": "dispatch", "routing_type": "llm"}, entry, {}
+            )
         )
         self._routing_tail_tasks.add(task)
         task.add_done_callback(self._routing_tail_tasks.discard)
@@ -241,8 +243,10 @@ async def test_the_response_row_carries_the_rationale_and_the_token_counts():
         "previous_node": "dispatch",
         "current_node": "billing",
         "transitioned": True,
+        "routing_type": "llm",
         "routing_model": "gpt-4.1-mini",
         "routing_latency_ms": 612.0,
+        "routing_started_at": 1_000_000.0,
     }
     manager = _StubManager()
     with patch("bolna.agent_manager.task_manager.convert_to_request_log") as log:
@@ -253,6 +257,8 @@ async def test_the_response_row_carries_the_rationale_and_the_token_counts():
     assert row["message"] == "Node: dispatch → billing | Confidence: 0.9 | Reasoning: caller asked about an invoice"
     assert (row["input_tokens"], row["output_tokens"], row["cached_tokens"]) == (1800, 44, 1024)
     assert row["latency"] == 0.612
+    # Stamped at the hop, not when the tail happened to land.
+    assert row["ts"] == 1_000_000.612
 
 
 @pytest.mark.asyncio
@@ -299,6 +305,7 @@ async def test_an_overflowed_hop_meters_against_the_overflow_backend():
         "previous_node": "dispatch",
         "current_node": "billing",
         "transitioned": True,
+        "routing_type": "llm",
         "routing_provider": "azure",
         "routing_usage": {"overflowed": True, "service_tier": "priority"},
     }
@@ -309,3 +316,42 @@ async def test_an_overflowed_hop_meters_against_the_overflow_backend():
 
     manager.on_overflow.assert_awaited_once_with(1800, 40, None)
     manager.on_turn_usage.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_deterministic_hop_keeps_its_marker_but_takes_the_spent_tokens():
+    # An intent call that declined leaves its telemetry on the catch-all hop. The tokens
+    # belong there; the free-text rationale does not, or the hop stops classifying as
+    # deterministic downstream.
+    async def tail():
+        return {"reasoning": "free text", "confidence": 0.4, "usage": {"input_tokens": 1800}}
+
+    entry = {"reasoning": "deterministic:router:unconditional"}
+    routing_info = {
+        "previous_node": "dispatch",
+        "current_node": "general",
+        "transitioned": True,
+        "routing_type": "deterministic",
+    }
+    manager = _StubManager()
+    with patch("bolna.agent_manager.task_manager.convert_to_request_log"):
+        manager.spawn(tail(), entry, routing_info)
+        await manager._settle_routing_tails()
+
+    assert entry["reasoning"] == "deterministic:router:unconditional"
+    assert entry["input_tokens"] == 1800
+
+
+@pytest.mark.asyncio
+async def test_a_tail_without_usage_does_not_blank_the_recorded_counts():
+    # Some providers never send a usage chunk; the hop's own counts must survive.
+    async def tail():
+        return {"reasoning": "r", "usage": {}}
+
+    entry = {"input_tokens": 1800, "output_tokens": 44}
+    manager = _StubManager()
+    with patch("bolna.agent_manager.task_manager.convert_to_request_log"):
+        manager.spawn(tail(), entry)
+        await manager._settle_routing_tails()
+
+    assert (entry["input_tokens"], entry["output_tokens"]) == (1800, 44)

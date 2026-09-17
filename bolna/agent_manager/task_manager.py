@@ -234,8 +234,9 @@ def build_lid_decision_record(
 # doesn't pay N TTS renders per call, concurrent with the welcome message. Process-wide.
 HANDOFF_CLIP_CACHE: dict = {}
 HANDOFF_CLIP_CACHE_MAX = 256
-# A routing rationale trails its decision by ~200ms; past this the call ends without it.
-ROUTING_TAIL_SETTLE_TIMEOUT = 2.0
+# A routing rationale trails its decision by ~200ms. Teardown waits at most this long for one,
+# so a stalled routing stream delays the latency snapshot by this much and no more.
+ROUTING_TAIL_SETTLE_TIMEOUT = 1.0
 
 _NON_NODE_RESPONSE_CATEGORIES = frozenset(
     {"is_user_online_message", "filler", "backchanneling", "agent_welcome_message", "handoff"}
@@ -3668,6 +3669,10 @@ class TaskManager(BaseManager):
 
     def _log_routing_response(self, routing_info: dict, usage: dict, meta_info: dict) -> None:
         latency_ms = routing_info.get("routing_latency_ms")
+        started_at = routing_info.get("routing_started_at")
+        # Deferred rows are written when the tail lands, which for the last hop is at hangup;
+        # stamp the hop's own end so the trace stays in call order.
+        ts = started_at + (latency_ms or 0) / 1000 if started_at else None
         convert_to_request_log(
             message=self._routing_response_line(routing_info),
             meta_info=meta_info,
@@ -3680,10 +3685,12 @@ class TaskManager(BaseManager):
             reasoning_tokens=usage.get("reasoning_tokens"),
             cached_tokens=usage.get("cached_tokens"),
             latency=round(latency_ms / 1000, 6) if latency_ms is not None else None,
+            ts=ts,
         )
 
     async def _settle_routing_tails(self):
-        """Let outstanding rationales land before the latency snapshot, but never hold up a hangup."""
+        """Let outstanding rationales land before the latency snapshot, bounded so a stalled
+        stream costs at most ROUTING_TAIL_SETTLE_TIMEOUT of teardown."""
         pending = list(self._routing_tail_tasks)
         if not pending:
             return
@@ -3703,15 +3710,21 @@ class TaskManager(BaseManager):
         usage = {}
         try:
             result = await tail
-            for key in (REASONING_KEY, CONFIDENCE_KEY):
-                if result.get(key) is not None:
-                    entry[key] = routing_info[key] = result[key]
-            if result.get(REASONING_KEY):
-                logger.info(f"Routing rationale on node '{node}': {result[REASONING_KEY]}")
+            # A deterministic hop that carries a declined intent call's telemetry keeps its
+            # `deterministic:` marker; only its tokens come from the tail.
+            if routing_info.get("routing_type") == "llm":
+                for key in (REASONING_KEY, CONFIDENCE_KEY):
+                    if result.get(key) is not None:
+                        entry[key] = routing_info[key] = result[key]
+                if result.get(REASONING_KEY):
+                    logger.info(f"Routing rationale on node '{node}': {result[REASONING_KEY]}")
 
             usage = result.get("usage") or {}
+            # Only what the tail supplied: a provider that never sends a usage chunk must not
+            # blank the counts the hop already recorded.
             for key in ("input_tokens", "output_tokens", "reasoning_tokens", "cached_tokens"):
-                entry[key] = usage.get(key)
+                if usage.get(key) is not None:
+                    entry[key] = usage[key]
 
             # Routing on azure shares the conversation LLM's pool, so its tokens meter against it.
             overflowed = (routing_info.get("routing_usage") or {}).get("overflowed")
@@ -3875,7 +3888,12 @@ class TaskManager(BaseManager):
                         if routing_tail is not None:
                             _tail_task = asyncio.create_task(
                                 self._apply_routing_tail(
-                                    routing_tail, routing_info, self.routing_latencies["turn_latencies"][-1], meta_info
+                                    routing_tail,
+                                    routing_info,
+                                    self.routing_latencies["turn_latencies"][-1],
+                                    # Later hops of the same turn overwrite llm_metadata in place,
+                                    # so the row would otherwise carry the next hop's routing info.
+                                    {**meta_info, "llm_metadata": dict(meta_info.get("llm_metadata") or {})},
                                 )
                             )
                             self._routing_tail_tasks.add(_tail_task)

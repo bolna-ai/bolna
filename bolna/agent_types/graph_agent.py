@@ -793,6 +793,12 @@ class GraphAgent(BaseAgent):
         tail, self._pending_routing_tail = self._pending_routing_tail, None
         return tail
 
+    def _begin_routing_turn(self):
+        """Drop a tail whose hop was never built, so a later hop cannot adopt its telemetry."""
+        stranded = self._consume_routing_tail()
+        if stranded is not None:
+            stranded.cancel()
+
     @staticmethod
     def _catch_all_reasoning(edge: dict) -> str:
         ct = edge.get("condition_type", "unconditional")
@@ -846,6 +852,7 @@ class GraphAgent(BaseAgent):
         The visited-set bounds the hops so the chain always terminates."""
         hops = []
         visited = set()
+        self._begin_routing_turn()
         is_silence_trigger = bool(history and history[-1].get("content", "").startswith("[silence]"))
 
         while self._node_type_of(self.get_node_by_id(self.current_node_id)) == NodeType.ROUTER:
@@ -1016,11 +1023,6 @@ class GraphAgent(BaseAgent):
     ]:
         """LLM routing over the intent edges. A default_edge (the catch-all) is offered as
         a described transition instead of stay_on_current_node, so the model commits."""
-        # A hop that was never built leaves its tail behind; drop it rather than let the next
-        # hop consume it and record this turn's rationale and tokens against that one.
-        stranded = self._consume_routing_tail()
-        if stranded is not None:
-            stranded.cancel()
         option_edges = list(llm_edges)
         if default_edge is not None:
             # Always mark the default so the model can tell it apart from the intent edges,
@@ -1171,6 +1173,7 @@ class GraphAgent(BaseAgent):
     ]:
         """Precedence: expression edges, then intent edges via one LLM call, then the
         unconditional default. Without an unconditional edge the node may stay."""
+        self._begin_routing_turn()
         start_time = time.perf_counter()
         self._last_deterministic_eval = None
         self._reset_routing_identity()

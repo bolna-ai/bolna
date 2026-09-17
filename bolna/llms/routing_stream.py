@@ -48,6 +48,7 @@ class RoutingStreamReader:
     """Reads a streamed forced tool call, resolving the decision before the rationale."""
 
     def __init__(self, stream, tools: list):
+        self._stream = stream
         self._iter = stream.__aiter__()
         self._required = {
             t["function"]["name"]: [
@@ -106,6 +107,15 @@ class RoutingStreamReader:
                 return decision
         return self._parse_all() if self.function_name else None
 
+    async def _close(self) -> None:
+        closer = getattr(self._stream, "close", None) or getattr(self._stream, "aclose", None)
+        if closer is None:
+            return
+        try:
+            await closer()
+        except Exception as e:
+            logger.warning(f"Could not close the routing stream: {e}")
+
     async def finish(self) -> dict:
         """Drain the remainder for the trailing fields and the usage record in the last chunk."""
         try:
@@ -114,6 +124,9 @@ class RoutingStreamReader:
         except Exception as e:
             # Observability only: a stream that dies here costs the rationale, nothing else.
             logger.warning(f"Routing stream ended before the rationale: {e}")
+        finally:
+            # Reached on cancellation too, where abandoning the iterator would leak the response.
+            await self._close()
         tail = {"usage": self.usage}
         full = self._parse_all() or {}
         return {**tail, **{k: full[k] for k in TRAILING_KEYS if k in full}}

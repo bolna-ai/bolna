@@ -619,9 +619,7 @@ class TestRouterIntentRouting:
                 "routing_tail": None,
             }
         )
-        node = agent.get_node_by_id("dispatch")
-        intent_edges = [e for e in node["edges"] if e.get("condition") and not e.get("condition_type")]
-        await agent._decide_next_node_llm(node, intent_edges, [{"role": "user", "content": "my invoice"}], 0.0)
+        await agent.decide_next_node_with_functions([{"role": "user", "content": "my invoice"}])
 
         await asyncio.sleep(0)  # let the cancellation land
         assert stranded.cancelled()
