@@ -211,13 +211,13 @@ async def test_a_hung_rationale_does_not_hold_up_the_hangup(monkeypatch):
     with patch("bolna.agent_manager.task_manager.convert_to_request_log") as log:
         task = manager.spawn(never(), entry)
         await manager._settle_routing_tails()  # returns on the timeout rather than after 30s
+        # Asserted without awaiting the task: cancel() only schedules, so the row has to be
+        # written by the time settling returns or it lands after the latency snapshot.
+        assert log.call_count == 1
+        assert "Reasoning" not in log.call_args.kwargs["message"]
 
-        with pytest.raises(asyncio.CancelledError):
-            await task
+    assert task.cancelled()
     assert entry == {}
-    # The hop still gets a response row, without the rationale it never received.
-    assert log.call_count == 1
-    assert "Reasoning" not in log.call_args.kwargs["message"]
 
 
 @pytest.mark.asyncio

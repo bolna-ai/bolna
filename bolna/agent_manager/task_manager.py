@@ -3688,10 +3688,14 @@ class TaskManager(BaseManager):
         if not pending:
             return
         _, unfinished = await asyncio.wait(pending, timeout=ROUTING_TAIL_SETTLE_TIMEOUT)
+        if not unfinished:
+            return
         for task in unfinished:
             task.cancel()
-        if unfinished:
-            logger.warning(f"{len(unfinished)} routing rationale(s) did not land before the call ended")
+        logger.warning(f"{len(unfinished)} routing rationale(s) did not land before the call ended")
+        # cancel() only schedules it. Await so each tail runs the finally that writes its
+        # response row, which would otherwise land after the latency snapshot, or never.
+        await asyncio.gather(*unfinished, return_exceptions=True)
 
     async def _apply_routing_tail(self, tail, routing_info, entry, meta_info):
         """Fold in the rationale, confidence and usage that arrive after the routing decision."""
