@@ -576,6 +576,7 @@ class OpenAICompatibleLLM(BaseLLM):
 
             if event.type == ResponseStreamEvent.CREATED:
                 self.previous_response_id = event.response.id
+                self._log_llm_request_id(stream, event.response.id)
                 service_tier = getattr(event.response, "service_tier", None)
                 if latency_data is None:
                     latency_data = LatencyData(

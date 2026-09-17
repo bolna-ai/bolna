@@ -328,6 +328,7 @@ class GeminiLLM(BaseLLM):
                         sequence_id=meta_info.get("sequence_id") if meta_info else None,
                         first_token_latency_ms=first_token_time - start_time,
                     )
+                    self._log_llm_request_id(response_id=getattr(chunk, "response_id", None))
 
                 # Read before the parts below, so a function_call yield carries this chunk's usage
                 if chunk.usage_metadata:

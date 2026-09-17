@@ -123,6 +123,7 @@ class LiteLLM(BaseLLM):
                     sequence_id=meta_info.get("sequence_id"),
                     first_token_latency_ms=first_token_time - start_time,
                 )
+                self._log_llm_request_id(completion_stream, getattr(chunk, "id", None))
 
             choice = chunk["choices"][0]
             delta = choice.get("delta", {})

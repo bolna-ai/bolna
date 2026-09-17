@@ -379,6 +379,7 @@ class OpenAiLLM(OpenAICompatibleLLM):
                     service_tier=service_tier,
                     llm_host=self.llm_host,
                 )
+                self._log_llm_request_id(completion_stream, getattr(chunk, "id", None))
 
             delta = chunk.choices[0].delta
 
@@ -654,6 +655,7 @@ class OpenAiLLM(OpenAICompatibleLLM):
                 if evt_type == ResponseStreamEvent.CREATED:
                     resp = evt.get("response", {})
                     self.previous_response_id = resp.get("id")
+                    self._log_llm_request_id(response_id=resp.get("id"))
                     ws_service_tier = resp.get("service_tier")
                     if latency_data is None:
                         latency_data = LatencyData(
