@@ -7,6 +7,9 @@ The OpenAI-shaped providers stream it so the decision lands before the rationale
 
 import json
 from types import SimpleNamespace
+
+import httpx
+from openai import APIStatusError
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from bolna.llms import OpenAiLLM, AzureLLM, LiteLLM, GeminiLLM
@@ -98,6 +101,26 @@ async def test_azure_route_reports_overflow():
     res = await llm.route(MSGS, TOOLS)
     assert res["overflowed"] is True
     assert res["function_name"] == "go_to_x"
+
+
+async def test_azure_route_overflows_a_saturated_pool_while_streaming():
+    # The SDK raises on the response status before it hands back a stream, so a saturated
+    # pool still falls through to the overflow backend on the routing call.
+    llm = AzureLLM(model="gpt-4.1-mini", llm_key="k", base_url="https://x.openai.azure.com")
+    saturated = APIStatusError(
+        "saturated", response=httpx.Response(429, request=httpx.Request("POST", "https://x")), body=None
+    )
+    llm.async_client = MagicMock()
+    llm.async_client.chat.completions.create = AsyncMock(side_effect=saturated)
+    llm._overflow_client = MagicMock()
+    llm._overflow_client.chat.completions.create = AsyncMock(return_value=_openai_stream())
+    llm._overflow_model, llm._overflow_service_tier = "gpt-4.1-mini-payg", "priority"
+
+    res = await llm.route(MSGS, TOOLS)
+
+    assert res["overflowed"] is True
+    assert res["function_name"] == "go_to_x"
+    assert llm._overflow_client.chat.completions.create.call_args.kwargs["stream"] is True
 
 
 async def test_litellm_route_normalizes():
