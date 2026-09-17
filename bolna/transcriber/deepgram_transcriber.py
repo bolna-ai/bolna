@@ -17,6 +17,7 @@ from bolna.helpers.utils import create_ws_data_packet, timestamp_ms
 from bolna.enums import TelephonyProvider
 from bolna.constants import (
     DEEPGRAM_FLUX_EOT_THRESHOLD,
+    MEASURED_FRAME_PROVIDERS,
     DEEPGRAM_FLUX_EAGER_EOT_THRESHOLD,
     DEEPGRAM_FLUX_EOT_TIMEOUT_MS,
     DEEPGRAM_FLUX_TURN_STALL_FLOOR_S,
@@ -608,9 +609,9 @@ class DeepgramTranscriber(BaseTranscriber):
             return
 
     def _audio_frame_seconds(self, num_bytes: int) -> float:
-        """Audio carried by one send. Only sip-trunk is measured: its input handler merges 4 x 20 ms,
-        so the 200 ms constant overstates it 2.5x. Every other path really does send the constant."""
-        if self.provider != TelephonyProvider.SIP_TRUNK.value:
+        """Audio carried by one send. Measured where the input handler batches something other than
+        the constant it is booked at; every other path really does send the constant."""
+        if self.provider not in MEASURED_FRAME_PROVIDERS:
             return self.audio_frame_duration
         return num_bytes / ((1 if self.encoding == "mulaw" else 2) * self.sampling_rate)
 

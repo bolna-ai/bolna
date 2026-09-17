@@ -1,6 +1,6 @@
 import os
 from datetime import datetime, timezone
-from bolna.enums import ReasoningEffort as RE
+from bolna.enums import ReasoningEffort as RE, TelephonyProvider
 
 PREPROCESS_DIR = "agent_data"
 PCM16_SCALE = 32768.0
@@ -10,6 +10,16 @@ PCM16_SCALE = 32768.0
 WEB_BASED_CALL_PROVIDER = "web_based_call"
 # Web + FreeSWITCH webcall paths play raw PCM at this fixed rate (telephony stays 8k mulaw).
 WEBCALL_TTS_SAMPLE_RATE = 24000
+# Input handlers on these providers batch a different amount of audio than the transcriber's
+# frame constant assumes, so the stream cursor measures the payload instead of trusting it.
+# sip-trunk batches 80ms against a 200ms constant; the webcall paths batch 200ms against 256ms/500ms.
+MEASURED_FRAME_PROVIDERS = frozenset(
+    {
+        TelephonyProvider.SIP_TRUNK.value,
+        TelephonyProvider.FREESWITCH.value,
+        WEB_BASED_CALL_PROVIDER,
+    }
+)
 
 OPENAI_TRANSCRIBER_HEARTBEAT_INTERVAL_S = 5
 OPENAI_TRANSCRIBER_UTTERANCE_TIMEOUT_S = 0.5

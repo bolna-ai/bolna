@@ -26,6 +26,8 @@ MULAW_BYTES_PER_SECOND = 8000
 SIP_TRUNK_PACKET_BYTES = 640
 # TranscriberPool._silence_frame keepalive -> 40 ms of ulaw at 8 kHz.
 POOL_KEEPALIVE_PACKET_BYTES = 320
+# freeswitch.INGEST_CHUNK_BYTES -> 200 ms of linear16 at 16 kHz.
+WEBCALL_CHUNK_BYTES = 6400
 STREAM_START_MS = 1_700_000_000_000.0
 
 
@@ -166,10 +168,10 @@ async def test_connection_start_time_lands_at_the_real_stream_start(monkeypatch)
     "provider",
     [pytest.param("twilio", id="twilio"), pytest.param("plivo", id="plivo"), pytest.param("exotel", id="exotel")],
 )
-async def test_only_sip_trunk_is_measured_every_other_provider_keeps_its_constant(monkeypatch, provider):
-    """INVARIANT: no provider except sip-trunk changes. These paths keep booking exactly the
-    constant they booked before, whatever payload size arrives — so neither this change nor a
-    later input-handler change can move their latency map without someone editing this test."""
+async def test_telephony_providers_keep_booking_their_constant(monkeypatch, provider):
+    """INVARIANT: the telephony providers whose handler really does batch 200 ms are untouched.
+    They keep booking exactly the constant they booked before, whatever payload size arrives, so
+    neither this change nor a later input-handler change can move their map unnoticed."""
     clock = _Clock()
     transcriber = _make_transcriber(monkeypatch, clock, provider=provider)
     legacy = transcriber.audio_frame_duration
@@ -242,3 +244,26 @@ async def test_reconnect_restarts_the_stream_position(monkeypatch):
     assert transcriber.audio_frame_timestamps[0][0] == 0.0
     assert transcriber._find_audio_send_timestamp(0.04) is not None
     assert abs(transcriber.connection_start_time - second_stream_start_s) <= 0.080
+
+
+@pytest.mark.parametrize(
+    "provider, legacy_constant",
+    [
+        pytest.param("web_based_call", 0.256, id="web_based_call"),
+        pytest.param("freeswitch", 0.500, id="freeswitch"),
+    ],
+)
+async def test_web_calls_are_booked_for_the_two_hundred_milliseconds_they_carry(monkeypatch, provider, legacy_constant):
+    """INVARIANT: the webcall paths carry 200 ms per send — freeswitch coalesces to
+    INGEST_CHUNK_BYTES, 6400 B of linear16 at 16 kHz — not the 256 ms / 500 ms they were booked
+    at. Same defect as sip-trunk, measured at a 0.64 drift slope in prod, so the cursor has to
+    measure here too and consecutive sends must tile without gap or overlap."""
+    clock = _Clock()
+    transcriber = _make_transcriber(monkeypatch, clock, provider=provider)
+    assert transcriber.audio_frame_duration == legacy_constant
+
+    transcriber.record_audio_frame(transcriber._audio_frame_seconds(WEBCALL_CHUNK_BYTES), clock.ms())
+    transcriber.record_audio_frame(transcriber._audio_frame_seconds(WEBCALL_CHUNK_BYTES), clock.ms())
+
+    assert transcriber.audio_frame_timestamps[0][:2] == (0.0, 0.200)
+    assert transcriber.audio_frame_timestamps[1][:2] == (0.200, 0.400)
