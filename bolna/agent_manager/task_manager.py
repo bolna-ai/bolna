@@ -234,6 +234,8 @@ def build_lid_decision_record(
 # doesn't pay N TTS renders per call, concurrent with the welcome message. Process-wide.
 HANDOFF_CLIP_CACHE: dict = {}
 HANDOFF_CLIP_CACHE_MAX = 256
+# A routing rationale trails its decision by ~200ms; past this the call ends without it.
+ROUTING_TAIL_SETTLE_TIMEOUT = 2.0
 
 _NON_NODE_RESPONSE_CATEGORIES = frozenset(
     {"is_user_online_message", "filler", "backchanneling", "agent_welcome_message", "handoff"}
@@ -305,6 +307,7 @@ class TaskManager(BaseManager):
         # Fired instead of on_turn_usage when another backend served the turn.
         self.on_overflow = kwargs.get("on_overflow")
         self._usage_tasks = set()  # strong refs so fire-and-forget tallies aren't GC'd before they run
+        self._routing_tail_tasks = set()  # settled before the latency snapshot, not fire-and-forget
         # Optional per-provider health callback (circuit-breaker shadow); never affects the call.
         self.on_provider_health = kwargs.get("on_provider_health")
         self._cb_tasks = set()
@@ -3646,6 +3649,17 @@ class TaskManager(BaseManager):
             self._stage_assistant_history(meta_info, llm_response)
             self.conversation_history.sync_interim(messages)
 
+    async def _settle_routing_tails(self):
+        """Let outstanding rationales land before the latency snapshot, but never hold up a hangup."""
+        pending = list(self._routing_tail_tasks)
+        if not pending:
+            return
+        _, unfinished = await asyncio.wait(pending, timeout=ROUTING_TAIL_SETTLE_TIMEOUT)
+        for task in unfinished:
+            task.cancel()
+        if unfinished:
+            logger.warning(f"{len(unfinished)} routing rationale(s) did not land before the call ended")
+
     async def _apply_routing_tail(self, tail, routing_info, entry, meta_info):
         """Fold in the rationale, confidence and usage that arrive after the routing decision."""
         try:
@@ -3850,8 +3864,8 @@ class TaskManager(BaseManager):
                                     routing_tail, routing_info, self.routing_latencies["turn_latencies"][-1], meta_info
                                 )
                             )
-                            self._usage_tasks.add(_tail_task)
-                            _tail_task.add_done_callback(self._usage_tasks.discard)
+                            self._routing_tail_tasks.add(_tail_task)
+                            _tail_task.add_done_callback(self._routing_tail_tasks.discard)
 
                     # on_turn_usage meters the conversation LLM's backend; routing on azure means the routing
                     # hop shares that backend, so its tokens draw on the same capacity.
@@ -8769,6 +8783,7 @@ class TaskManager(BaseManager):
                 # below — tasks_to_cancel is only awaited after the snapshot, so a cancelled-check
                 # record appended during that gather would never be persisted.
                 await process_task_cancellation(self.voicemail_handler.check_task, "voicemail_check_task")
+                await self._settle_routing_tails()
 
                 output = {
                     "messages": self._prepare_precise_transcript_messages(self.history),

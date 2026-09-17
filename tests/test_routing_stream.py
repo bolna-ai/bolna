@@ -2,9 +2,11 @@
 
 import asyncio
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from bolna.agent_manager.task_manager import TaskManager
 from bolna.llms.routing_stream import RoutingStreamReader, read_routing_stream
 
 
@@ -155,3 +157,58 @@ async def test_exhausted_stream_needs_no_tail():
 
     assert result["routing_tail"] is None
     assert result["usage"]["input_tokens"] == 1800
+
+
+class _StubManager:
+    """Only what `_apply_routing_tail` and `_settle_routing_tails` touch on a TaskManager."""
+
+    _apply_routing_tail = TaskManager._apply_routing_tail
+    _settle_routing_tails = TaskManager._settle_routing_tails
+
+    def __init__(self):
+        self.run_id = "run-1"
+        self.on_turn_usage = AsyncMock()
+        self.on_overflow = AsyncMock()
+        self._routing_tail_tasks = set()
+
+    def spawn(self, tail, entry, routing_info=None):
+        task = asyncio.create_task(
+            self._apply_routing_tail(tail, routing_info or {"previous_node": "dispatch"}, entry, {})
+        )
+        self._routing_tail_tasks.add(task)
+        task.add_done_callback(self._routing_tail_tasks.discard)
+        return task
+
+
+@pytest.mark.asyncio
+async def test_a_rationale_still_lands_when_the_call_ends_right_after_the_hop():
+    async def tail():
+        await asyncio.sleep(0.05)
+        return {"reasoning": "caller wants billing", "confidence": 0.9, "usage": {"input_tokens": 1800}}
+
+    entry = {}
+    manager = _StubManager()
+    with patch("bolna.agent_manager.task_manager.convert_to_request_log"):
+        manager.spawn(tail(), entry)
+        await manager._settle_routing_tails()
+
+    assert entry["reasoning"] == "caller wants billing"
+    assert entry["confidence"] == 0.9
+    assert entry["input_tokens"] == 1800
+
+
+@pytest.mark.asyncio
+async def test_a_hung_rationale_does_not_hold_up_the_hangup(monkeypatch):
+    monkeypatch.setattr("bolna.agent_manager.task_manager.ROUTING_TAIL_SETTLE_TIMEOUT", 0.05)
+
+    async def never():
+        await asyncio.sleep(30)
+
+    entry = {}
+    manager = _StubManager()
+    task = manager.spawn(never(), entry)
+    await manager._settle_routing_tails()  # returns on the timeout rather than after 30s
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert entry == {}
