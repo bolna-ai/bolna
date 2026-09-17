@@ -47,7 +47,6 @@ _DETERMINISTIC_REASONING_PREFIX = "deterministic:"
 _ROUTER_REASONING_PREFIX = f"{_DETERMINISTIC_REASONING_PREFIX}router:"
 # Root identifier in either syntax, so {{prior.loans}} still validates against recipient_data["prior"].
 _PROMPT_VAR_PATTERN = re.compile(r"\{\{?\s*([a-zA-Z_][a-zA-Z0-9_]*)(?:\.[a-zA-Z0-9_]+|\[[^\[\]{}]+\])*\s*\}\}?")
-_ROUTER_RATIONALE_ENABLED = os.getenv("GRAPH_ROUTER_RATIONALE", "").strip().lower() in ("1", "true", "yes")
 _ROUTER_REASONING_DESC = "Brief explanation of why this routing decision was made"
 _ROUTER_CONFIDENCE_DESC = "Confidence score from 0.0 to 1.0 for this routing decision"
 
@@ -110,6 +109,7 @@ class GraphAgent(BaseAgent):
         self.routing_model = self.config.get("routing_model")
         self.routing_instructions = self.config.get("routing_instructions")  # Custom routing instructions
         self.routing_reasoning_effort = self.config.get("routing_reasoning_effort")
+        self._pending_routing_tail = None
         self.routing_max_tokens = self.config.get("routing_max_tokens")
         self.service_tier = self.config.get("service_tier")
         logger.info(
@@ -601,17 +601,15 @@ class GraphAgent(BaseAgent):
                     }
                     parameters["required"].append(param_name)
 
-            if _ROUTER_RATIONALE_ENABLED:
-                parameters["properties"]["reasoning"] = {
-                    "type": "string",
-                    "description": _ROUTER_REASONING_DESC,
-                }
-                parameters["required"].append("reasoning")
+            parameters["properties"]["reasoning"] = {
+                "type": "string",
+                "description": _ROUTER_REASONING_DESC,
+            }
             parameters["properties"]["confidence"] = {
                 "type": "number",
                 "description": _ROUTER_CONFIDENCE_DESC,
             }
-            parameters["required"].append("confidence")
+            parameters["required"].extend(["reasoning", "confidence"])
 
             tools.append(
                 {
@@ -621,15 +619,9 @@ class GraphAgent(BaseAgent):
             )
 
         if allow_stay:
-            stay_properties = {}
-            if _ROUTER_RATIONALE_ENABLED:
-                stay_properties["reasoning"] = {
-                    "type": "string",
-                    "description": _ROUTER_REASONING_DESC,
-                }
-            stay_properties["confidence"] = {
-                "type": "number",
-                "description": _ROUTER_CONFIDENCE_DESC,
+            stay_properties = {
+                "reasoning": {"type": "string", "description": _ROUTER_REASONING_DESC},
+                "confidence": {"type": "number", "description": _ROUTER_CONFIDENCE_DESC},
             }
             tools.append(
                 {
@@ -797,6 +789,11 @@ class GraphAgent(BaseAgent):
             return None
         return min(unconditional, key=lambda e: e["priority"] if e.get("priority") is not None else 0)
 
+    def _consume_routing_tail(self):
+        """Take the rationale/usage task left by the last routing call, if there was one."""
+        tail, self._pending_routing_tail = self._pending_routing_tail, None
+        return tail
+
     @staticmethod
     def _catch_all_reasoning(edge: dict) -> str:
         ct = edge.get("condition_type", "unconditional")
@@ -839,6 +836,7 @@ class GraphAgent(BaseAgent):
             "routing_expression": routing_expression,
             "confidence": confidence,
             "routing_usage": routing_usage,
+            "routing_tail": self._consume_routing_tail(),
             "node_type": self._node_type_of(self.get_node_by_id(self.current_node_id)),
             "is_silence_trigger": is_silence_trigger,
         }
@@ -1113,6 +1111,9 @@ class GraphAgent(BaseAgent):
 
             function_name = result["function_name"]
             function_args = result["arguments"]
+            # Consumed by the _router_hop_info / routing_info built right after this returns;
+            # there is no await in between, so a single slot is enough.
+            self._pending_routing_tail = result.get("routing_tail")
             # Pop reasoning and confidence before they pollute extracted_params/context_data
             reasoning = function_args.pop("reasoning", None)
             confidence = function_args.pop("confidence", None)
@@ -1629,6 +1630,7 @@ class GraphAgent(BaseAgent):
                         "routing_expression": self._last_deterministic_eval,
                         "confidence": confidence,
                         "routing_usage": routing_usage,
+                        "routing_tail": self._consume_routing_tail(),
                         "node_type": node_type,
                         "is_silence_trigger": is_silence_trigger,
                     }

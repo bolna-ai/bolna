@@ -3645,6 +3645,55 @@ class TaskManager(BaseManager):
             self._stage_assistant_history(meta_info, llm_response)
             self.conversation_history.sync_interim(messages)
 
+    async def _apply_routing_tail(self, tail, routing_info, entry, meta_info):
+        """Fold in the observability fields that arrived after the routing decision.
+
+        The decision dispatches on the streamed function name, so `reasoning`, `confidence`
+        and the usage record land after the turn has already moved on. `entry` is only
+        serialised when the call ends, so patching it here keeps `routing_latencies[]` whole.
+        """
+        try:
+            result = await tail
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.error(f"Routing tail failed for node '{routing_info.get('previous_node', '?')}': {e}")
+            return
+
+        confidence = result.get("confidence")
+        if confidence is not None:
+            entry["confidence"] = confidence
+            routing_info["confidence"] = confidence
+
+        reasoning = result.get("reasoning")
+        if reasoning:
+            entry["reasoning"] = reasoning
+            routing_info["reasoning"] = reasoning
+            logger.info(f"Routing rationale on node '{routing_info.get('previous_node', '?')}': {reasoning}")
+            convert_to_request_log(
+                message=f"Reasoning: {reasoning}",
+                meta_info=meta_info,
+                model=routing_info.get("routing_model", ""),
+                component=LogComponent.GRAPH_ROUTING,
+                direction=LogDirection.RESPONSE,
+                run_id=self.run_id,
+                ts=routing_info.get("routing_started_at"),
+            )
+
+        usage = result.get("usage") or {}
+        if not usage:
+            return
+        entry["input_tokens"] = usage.get("input_tokens")
+        entry["output_tokens"] = usage.get("output_tokens")
+        entry["reasoning_tokens"] = usage.get("reasoning_tokens")
+        entry["cached_tokens"] = usage.get("cached_tokens")
+
+        # Same metering the synchronous path does: routing on azure draws on the conversation
+        # LLM's capacity, so its tokens count against the same pool.
+        cb = self.on_overflow if (routing_info.get("routing_usage") or {}).get("overflowed") else self.on_turn_usage
+        if cb and routing_info.get("routing_provider") == "azure" and usage.get("input_tokens"):
+            await cb(usage.get("input_tokens"), usage.get("output_tokens"), usage.get("cached_tokens"))
+
     async def __do_llm_generation(
         self, messages, meta_info, next_step, should_bypass_synth=False, should_trigger_function_call=False
     ):
@@ -3720,6 +3769,8 @@ class TaskManager(BaseManager):
                 # Handle graph agent routing info
                 if isinstance(llm_message, dict) and "routing_info" in llm_message:
                     routing_info = llm_message["routing_info"]
+                    # Not serialisable, and the rationale it carries arrives after the decision.
+                    routing_tail = routing_info.pop("routing_tail", None)
 
                     # Both rows are written here, after the hop already finished — stamp the
                     # request row at the hop's start so the trace stays chronological.
@@ -3807,6 +3858,14 @@ class TaskManager(BaseManager):
                                 "service_tier": routing_usage.get("service_tier"),
                             }
                         )
+                        if routing_tail is not None:
+                            _tail_task = asyncio.create_task(
+                                self._apply_routing_tail(
+                                    routing_tail, routing_info, self.routing_latencies["turn_latencies"][-1], meta_info
+                                )
+                            )
+                            self._usage_tasks.add(_tail_task)
+                            _tail_task.add_done_callback(self._usage_tasks.discard)
 
                     # on_turn_usage meters the conversation LLM's backend; routing on azure means the routing
                     # hop shares that backend, so its tokens draw on the same capacity.
