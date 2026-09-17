@@ -164,6 +164,8 @@ class _StubManager:
 
     _apply_routing_tail = TaskManager._apply_routing_tail
     _settle_routing_tails = TaskManager._settle_routing_tails
+    _log_routing_response = TaskManager._log_routing_response
+    _routing_response_line = staticmethod(TaskManager._routing_response_line)
 
     def __init__(self):
         self.run_id = "run-1"
@@ -218,3 +220,32 @@ async def test_a_hung_rationale_does_not_hold_up_the_hangup(monkeypatch):
 async def test_settling_is_a_no_op_on_a_call_that_never_routed():
     # Every call reaches this on teardown, not just graph agents, and asyncio.wait([]) raises.
     await _StubManager()._settle_routing_tails()
+
+
+@pytest.mark.asyncio
+async def test_the_response_row_carries_the_rationale_and_the_token_counts():
+    # The row is deferred to the tail precisely so it is not written while both are still
+    # in flight, which would leave the trace without a rationale and without usage.
+    async def tail():
+        return {
+            "reasoning": "caller asked about an invoice",
+            "confidence": 0.9,
+            "usage": {"input_tokens": 1800, "output_tokens": 44, "cached_tokens": 1024},
+        }
+
+    routing_info = {
+        "previous_node": "dispatch",
+        "current_node": "billing",
+        "transitioned": True,
+        "routing_model": "gpt-4.1-mini",
+        "routing_latency_ms": 612.0,
+    }
+    manager = _StubManager()
+    with patch("bolna.agent_manager.task_manager.convert_to_request_log") as log:
+        manager.spawn(tail(), {}, routing_info)
+        await manager._settle_routing_tails()
+
+    row = log.call_args.kwargs
+    assert row["message"] == "Node: dispatch → billing | Confidence: 0.9 | Reasoning: caller asked about an invoice"
+    assert (row["input_tokens"], row["output_tokens"], row["cached_tokens"]) == (1800, 44, 1024)
+    assert row["latency"] == 0.612

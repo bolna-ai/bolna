@@ -3649,6 +3649,38 @@ class TaskManager(BaseManager):
             self._stage_assistant_history(meta_info, llm_response)
             self.conversation_history.sync_interim(messages)
 
+    @staticmethod
+    def _routing_response_line(routing_info: dict) -> str:
+        if routing_info.get("transitioned"):
+            line = f"Node: {routing_info.get('previous_node', '?')} → {routing_info['current_node']}"
+        else:
+            line = f"Node: {routing_info['current_node']} (no transition)"
+        if routing_info.get("extracted_params"):
+            line += f" | Params: {json.dumps(routing_info['extracted_params'])}"
+        if routing_info.get("confidence") is not None:
+            line += f" | Confidence: {routing_info['confidence']}"
+        if routing_info.get("reasoning"):
+            line += f" | Reasoning: {routing_info['reasoning']}"
+        if routing_info.get("node_history"):
+            line += f" | Flow: {' → '.join(routing_info['node_history'])}"
+        return line
+
+    def _log_routing_response(self, routing_info: dict, usage: dict, meta_info: dict) -> None:
+        latency_ms = routing_info.get("routing_latency_ms")
+        convert_to_request_log(
+            message=self._routing_response_line(routing_info),
+            meta_info=meta_info,
+            model=routing_info.get("routing_model", ""),
+            component=LogComponent.GRAPH_ROUTING,
+            direction=LogDirection.RESPONSE,
+            run_id=self.run_id,
+            input_tokens=usage.get("input_tokens"),
+            output_tokens=usage.get("output_tokens"),
+            reasoning_tokens=usage.get("reasoning_tokens"),
+            cached_tokens=usage.get("cached_tokens"),
+            latency=round(latency_ms / 1000, 6) if latency_ms is not None else None,
+        )
+
     async def _settle_routing_tails(self):
         """Let outstanding rationales land before the latency snapshot, but never hold up a hangup."""
         pending = list(self._routing_tail_tasks)
@@ -3662,38 +3694,30 @@ class TaskManager(BaseManager):
 
     async def _apply_routing_tail(self, tail, routing_info, entry, meta_info):
         """Fold in the rationale, confidence and usage that arrive after the routing decision."""
+        node = routing_info.get("previous_node", "?")
         try:
             result = await tail
+            for key in (REASONING_KEY, CONFIDENCE_KEY):
+                if result.get(key) is not None:
+                    entry[key] = routing_info[key] = result[key]
+            if result.get(REASONING_KEY):
+                logger.info(f"Routing rationale on node '{node}': {result[REASONING_KEY]}")
+
+            usage = result.get("usage") or {}
+            for key in ("input_tokens", "output_tokens", "reasoning_tokens", "cached_tokens"):
+                entry[key] = usage.get(key)
+
+            # Deferred from the hop so the row carries the rationale and the token counts.
+            self._log_routing_response(routing_info, usage, meta_info)
+
+            # Routing on azure shares the conversation LLM's pool, so its tokens meter against it.
+            overflowed = (routing_info.get("routing_usage") or {}).get("overflowed")
+            cb = self.on_overflow if overflowed else self.on_turn_usage
+            if cb and routing_info.get("routing_provider") == "azure" and usage.get("input_tokens"):
+                await cb(usage.get("input_tokens"), usage.get("output_tokens"), usage.get("cached_tokens"))
         except Exception as e:
-            logger.error(f"Routing tail failed for node '{routing_info.get('previous_node', '?')}': {e}")
-            return
-
-        node = routing_info.get("previous_node", "?")
-        if result.get(CONFIDENCE_KEY) is not None:
-            entry[CONFIDENCE_KEY] = result[CONFIDENCE_KEY]
-        if result.get(REASONING_KEY):
-            entry[REASONING_KEY] = result[REASONING_KEY]
-            logger.info(f"Routing rationale on node '{node}': {result[REASONING_KEY]}")
-            convert_to_request_log(
-                message=f"Reasoning: {result[REASONING_KEY]}",
-                meta_info=meta_info,
-                model=routing_info.get("routing_model", ""),
-                component=LogComponent.GRAPH_ROUTING,
-                direction=LogDirection.RESPONSE,
-                run_id=self.run_id,
-                ts=routing_info.get("routing_started_at"),
-            )
-
-        usage = result.get("usage") or {}
-        if not usage:
-            return
-        for key in ("input_tokens", "output_tokens", "reasoning_tokens", "cached_tokens"):
-            entry[key] = usage.get(key)
-
-        # Routing on azure shares the conversation LLM's pool, so its tokens meter against it.
-        cb = self.on_overflow if (routing_info.get("routing_usage") or {}).get("overflowed") else self.on_turn_usage
-        if cb and routing_info.get("routing_provider") == "azure" and usage.get("input_tokens"):
-            await cb(usage.get("input_tokens"), usage.get("output_tokens"), usage.get("cached_tokens"))
+            # Observability only; it must never surface into the call or the teardown gather.
+            logger.error(f"Routing tail failed for node '{node}': {e}")
 
     async def __do_llm_generation(
         self, messages, meta_info, next_step, should_bypass_synth=False, should_trigger_function_call=False
@@ -3776,7 +3800,6 @@ class TaskManager(BaseManager):
                     # request row at the hop's start so the trace stays chronological.
                     routing_started_at = routing_info.get("routing_started_at")
                     routing_latency_ms = routing_info.get("routing_latency_ms")
-                    routing_latency = round(routing_latency_ms / 1000, 6) if routing_latency_ms is not None else None
 
                     # Log routing request with tools
                     routing_messages = routing_info.get("routing_messages")
@@ -3816,22 +3839,6 @@ class TaskManager(BaseManager):
                             run_id=self.run_id,
                             ts=routing_started_at,
                         )
-
-                    # Build routing response data
-                    if routing_info.get("transitioned"):
-                        routing_data = (
-                            f"Node: {routing_info.get('previous_node', '?')} → {routing_info['current_node']}"
-                        )
-                    else:
-                        routing_data = f"Node: {routing_info['current_node']} (no transition)"
-                    if routing_info.get("extracted_params"):
-                        routing_data += f" | Params: {json.dumps(routing_info['extracted_params'])}"
-                    if routing_info.get("confidence") is not None:
-                        routing_data += f" | Confidence: {routing_info['confidence']}"
-                    if routing_info.get("reasoning"):
-                        routing_data += f" | Reasoning: {routing_info['reasoning']}"
-                    if routing_info.get("node_history"):
-                        routing_data += f" | Flow: {' → '.join(routing_info['node_history'])}"
 
                     meta_info["llm_metadata"] = meta_info.get("llm_metadata") or {}
                     meta_info["llm_metadata"]["graph_routing_info"] = routing_info
@@ -3888,20 +3895,10 @@ class TaskManager(BaseManager):
                     if routing_info.get("node_history"):
                         self.routing_latencies["node_flow"] = list(routing_info["node_history"])
 
-                    # Log routing response
-                    convert_to_request_log(
-                        message=routing_data,
-                        meta_info=meta_info,
-                        model=routing_info.get("routing_model", ""),
-                        component=LogComponent.GRAPH_ROUTING,
-                        direction=LogDirection.RESPONSE,
-                        run_id=self.run_id,
-                        input_tokens=routing_usage.get("input_tokens"),
-                        output_tokens=routing_usage.get("output_tokens"),
-                        reasoning_tokens=routing_usage.get("reasoning_tokens"),
-                        cached_tokens=routing_usage.get("cached_tokens"),
-                        latency=routing_latency,
-                    )
+                    # With a tail the rationale and the token counts are still in flight, so the
+                    # row is written once they land rather than written twice.
+                    if routing_tail is None:
+                        self._log_routing_response(routing_info, routing_usage, meta_info)
 
                     is_silence_trigger = routing_info.get("is_silence_trigger", False)
 

@@ -12,6 +12,10 @@ from bolna.helpers.logger_config import configure_logger
 
 logger = configure_logger(__name__)
 
+# CPython may collect a task nobody holds, so keep a reference until it finishes. A hop that
+# is never built still drains its stream rather than being cancelled mid-flight.
+_TAILS: set = set()
+
 REASONING_KEY = "reasoning"
 CONFIDENCE_KEY = "confidence"
 # Emitted by the router for observability; neither is read to make the routing decision.
@@ -97,8 +101,12 @@ class RoutingStreamReader:
 
     async def finish(self) -> dict:
         """Drain the remainder for the trailing fields and the usage record in the last chunk."""
-        async for chunk in self._iter:
-            self._consume(chunk)
+        try:
+            async for chunk in self._iter:
+                self._consume(chunk)
+        except Exception as e:
+            # Observability only: a stream that dies here costs the rationale, nothing else.
+            logger.warning(f"Routing stream ended before the rationale: {e}")
         tail = {"usage": self.usage}
         full = self._parse_all() or {}
         return {**tail, **{k: full[k] for k in TRAILING_KEYS if k in full}}
@@ -110,11 +118,16 @@ async def read_routing_stream(stream, tools: list, overflowed: bool = False) -> 
     arguments = await reader.decide()
     if arguments is None:
         return None
+    tail = None
+    if reader.early:
+        tail = asyncio.create_task(reader.finish())
+        _TAILS.add(tail)
+        tail.add_done_callback(_TAILS.discard)
     return {
         "function_name": reader.function_name,
         "arguments": arguments,
         "usage": reader.usage,
         "service_tier": reader.service_tier,
         "overflowed": overflowed,
-        "routing_tail": asyncio.create_task(reader.finish()) if reader.early else None,
+        "routing_tail": tail,
     }
