@@ -212,3 +212,9 @@ async def test_a_hung_rationale_does_not_hold_up_the_hangup(monkeypatch):
     with pytest.raises(asyncio.CancelledError):
         await task
     assert entry == {}
+
+
+@pytest.mark.asyncio
+async def test_settling_is_a_no_op_on_a_call_that_never_routed():
+    # Every call reaches this on teardown, not just graph agents, and asyncio.wait([]) raises.
+    await _StubManager()._settle_routing_tails()
