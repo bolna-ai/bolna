@@ -23,6 +23,24 @@ class BaseTranscriber:
         self.turn_latencies = []
         self.connection_error = None
         self.is_transcript_sent_for_processing = False
+        self.reset_audio_frame_state()
+
+    def reset_audio_frame_state(self) -> None:
+        """Restart the audio position -> send-time map; ASR stream positions restart per connection."""
+        self.audio_cursor_s = 0.0
+        self.audio_frame_timestamps = []
+        self.num_frames = 0
+        self.connection_start_time = None
+
+    def record_audio_frame(self, frame_seconds: float, send_timestamp: float) -> None:
+        """Book a sent frame against the stream cursor, mapping its audio position to the send time."""
+        if frame_seconds <= 0.0:
+            # 0.0 marks a path that does not hand audio over at real-time pace; no position holds.
+            return
+        frame_start = self.audio_cursor_s
+        self.audio_cursor_s += frame_seconds
+        self.audio_frame_timestamps.append((frame_start, self.audio_cursor_s, send_timestamp))
+        self.num_frames += 1
 
     def _upsert_turn_latency(self, entry: dict) -> None:
         """Replace existing turn_latencies entry with matching turn_id, or append if new."""

@@ -535,7 +535,7 @@ class DeepgramTranscriber(BaseTranscriber):
                 self.connection_authenticated = False
 
         # Always clear accumulated per-call data to prevent memory leaks
-        self.audio_frame_timestamps = []
+        self.reset_audio_frame_state()
         self.current_turn_interim_details = []
 
     async def _get_http_transcription(self, audio_data):
@@ -607,6 +607,13 @@ class DeepgramTranscriber(BaseTranscriber):
             logger.info("Cancelled sender task")
             return
 
+    def _audio_frame_seconds(self, num_bytes: int) -> float:
+        """Audio carried by one send. Only sip-trunk is measured: its input handler merges 4 x 20 ms,
+        so the 200 ms constant overstates it 2.5x. Every other path really does send the constant."""
+        if self.provider != TelephonyProvider.SIP_TRUNK.value:
+            return self.audio_frame_duration
+        return num_bytes / ((1 if self.encoding == "mulaw" else 2) * self.sampling_rate)
+
     async def sender_stream(self, ws: ClientConnection):
         try:
             while True:
@@ -629,14 +636,12 @@ class DeepgramTranscriber(BaseTranscriber):
                 if end_of_stream:
                     break
 
-                frame_start = self.num_frames * self.audio_frame_duration
-                frame_end = (self.num_frames + 1) * self.audio_frame_duration
-                send_timestamp = timestamp_ms()
-                self.audio_frame_timestamps.append((frame_start, frame_end, send_timestamp))
-                self.num_frames += 1
+                data = ws_data_packet.get("data")
+                if isinstance(data, (bytes, bytearray)):
+                    self.record_audio_frame(self._audio_frame_seconds(len(data)), timestamp_ms())
 
                 try:
-                    await ws.send(ws_data_packet.get("data"))
+                    await ws.send(data)
                 except ConnectionClosedError as e:
                     logger.error(f"Connection closed while sending data: {e}")
                     break
@@ -668,7 +673,7 @@ class DeepgramTranscriber(BaseTranscriber):
 
                 # If connection_start_time is None, it is the durations of frame submitted till now minus current time
                 if self.connection_start_time is None:
-                    self.connection_start_time = time.time() - (self.num_frames * self.audio_frame_duration)
+                    self.connection_start_time = time.time() - self.audio_cursor_s
 
                 if msg["type"] == "SpeechStarted":
                     logger.info("Received SpeechStarted event from deepgram")
@@ -906,7 +911,7 @@ class DeepgramTranscriber(BaseTranscriber):
                 msg = json.loads(msg)
 
                 if self.connection_start_time is None:
-                    self.connection_start_time = time.time() - (self.num_frames * self.audio_frame_duration)
+                    self.connection_start_time = time.time() - self.audio_cursor_s
 
                 if msg["type"] == "Connected":
                     logger.info(f"Connected to Deepgram Flux: request_id={msg.get('request_id')}")
@@ -1225,9 +1230,7 @@ class DeepgramTranscriber(BaseTranscriber):
         # bookkeeping must restart with them. A pool reconnect re-runs transcribe()
         # on the same instance — stale values from the previous connection would
         # map new positions onto old wall-clock times.
-        self.num_frames = 0
-        self.audio_frame_timestamps = []
-        self.connection_start_time = None
+        self.reset_audio_frame_state()
         try:
             start_time = timestamp_ms()
             try:
