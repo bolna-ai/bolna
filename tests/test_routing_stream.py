@@ -12,7 +12,7 @@ def _tool(name, required):
     return {"function": {"name": name, "parameters": {"required": required, "properties": {}}}}
 
 
-# Production order: the edge's own parameters, then reasoning, then confidence.
+# Schema order the router emits: the edge's own parameters, then reasoning, then confidence.
 TOOLS = [
     _tool("transition_to_billing", ["account_id", "reasoning", "confidence"]),
     _tool("stay_on_current_node", ["reasoning", "confidence"]),
