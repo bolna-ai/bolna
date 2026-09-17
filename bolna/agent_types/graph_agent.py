@@ -1,4 +1,5 @@
 import asyncio
+from collections import OrderedDict
 import os
 import re
 import time
@@ -25,7 +26,13 @@ from bolna.llms.types import LLMStreamChunk, LatencyData
 from bolna.llms import OpenAiLLM, LiteLLM
 from bolna.providers import SUPPORTED_LLM_PROVIDERS
 from bolna.prompts import VOICEMAIL_DETECTION_PROMPT
-from bolna.constants import LANGUAGE_NAMES, canonical_model, default_reasoning_effort, is_reasoning_model
+from bolna.constants import (
+    LANGUAGE_NAMES,
+    RESPONSES_API_MODEL_PREFIXES,
+    canonical_model,
+    default_reasoning_effort,
+    is_reasoning_model,
+)
 
 from typing import List, Tuple, AsyncGenerator, Optional, Dict, Any
 
@@ -91,6 +98,13 @@ class GraphAgent(BaseAgent):
         self._transition_tools_cache: Dict[str, List[dict]] = {}
         self._transition_tools_cache_max_size = 100
 
+        # Per-node conversation LLMs, keyed by the override itself so nodes sharing settings share
+        # an instance. Populated lazily; a graph with no overrides never allocates one.
+        self._conversation_llm_cache: "OrderedDict[str, Any]" = OrderedDict()
+        self._conversation_llm_cache_max_size = 20
+        # The client serving the active node; interruption hooks follow this, not self.llm.
+        self._active_conversation_llm = None
+
         # Routing runs on its own LLM, built from the same registry as the conversation model.
         self.routing_provider = self.config.get("routing_provider")
         self.routing_model = self.config.get("routing_model")
@@ -105,6 +119,8 @@ class GraphAgent(BaseAgent):
 
         # Initialize main LLM for response generation (supports api_tools/function calling + real streaming)
         self.llm = self._initialize_llm()
+        self._active_conversation_llm = self.llm
+        self._prewarm_conversation_overrides()
 
         # Hangup/voicemail run on OpenAiLLM, so a conversation on a non-OpenAI provider lends no
         # usable key and these fall back to the platform OpenAI key.
@@ -157,11 +173,175 @@ class GraphAgent(BaseAgent):
                 if self.config.get(key, None):
                     llm_kwargs[key] = self.config[key]
 
+            # Everything a per-node override starts from, so _conversation_llm_for() inherits the
+            # agent's credentials, tools and tier and changes only what the node names.
+            self._conversation_provider = provider
+            self._conversation_base_kwargs = dict(llm_kwargs)
+
             llm_class = SUPPORTED_LLM_PROVIDERS[provider]
             return llm_class(**llm_kwargs)
         except Exception as e:
             logger.error(f"Failed to create LLM: {e}, falling back to default OpenAiLLM")
-            return OpenAiLLM(model=self.llm_model or "gpt-4o-mini", llm_key=self.llm_key or os.getenv("OPENAI_API_KEY"))
+            fallback_kwargs = {
+                "model": self.llm_model or "gpt-4o-mini",
+                "llm_key": self.llm_key or os.getenv("OPENAI_API_KEY"),
+            }
+            self._conversation_provider = "openai"
+            self._conversation_base_kwargs = dict(fallback_kwargs)
+            return OpenAiLLM(**fallback_kwargs)
+
+    def _conversation_llm_for(self, node: Optional[dict]):
+        """The node's own conversation LLM if it overrides one, else the agent's.
+
+        Unset fields inherit; the agent-level LLM is returned untouched when a node overrides
+        nothing, so the common path allocates nothing and behaves exactly as before.
+        """
+        raw = (node or {}).get("llm_config") or {}
+        # Nodes reach us as dicts, but a shallow dict() of a validated config leaves this one nested
+        # model intact — and an AttributeError here would kill the turn.
+        if hasattr(raw, "model_dump"):
+            raw = raw.model_dump()
+        override = {k: v for k, v in raw.items() if v is not None}
+        if not override:
+            self._active_conversation_llm = self.llm
+            return self.llm
+
+        cache_key = repr(sorted((k, str(v)) for k, v in override.items()))
+        llm = self._conversation_llm_cache.get(cache_key)
+        if llm is not None:
+            self._active_conversation_llm = llm
+            return llm
+
+        node_id = (node or {}).get("id")
+        try:
+            built = self._build_conversation_llm(override, node_id)
+        except Exception as e:
+            # _initialize_llm falls back on construction failure; this runs inline in generate(),
+            # which re-raises and ends the call, so it needs the same safety net.
+            logger.error(f"Conversation LLM override failed for node {node_id!r} ({e}) — using the agent LLM")
+            built = None
+        if built is None:
+            self._active_conversation_llm = self.llm
+            return self.llm
+
+        llm, kwargs = built
+        if len(self._conversation_llm_cache) >= self._conversation_llm_cache_max_size:
+            evicted_key, evicted = self._conversation_llm_cache.popitem(last=False)
+            self._close_conversation_llm(evicted, evicted_key)
+        self._conversation_llm_cache[cache_key] = llm
+        logger.info(
+            f"Conversation LLM override ready: {kwargs.get('model')} on {kwargs.get('provider')} "
+            f"(effort={kwargs.get('reasoning_effort')}, responses_api={kwargs.get('use_responses_api', False)}) "
+            f"for node {node_id!r}"
+        )
+        self._active_conversation_llm = llm
+        return llm
+
+    def _prewarm_conversation_overrides(self):
+        """Build the override clients at graph load — the nodes are known, and constructing one
+        opens a socket in Responses mode, which would otherwise land in a turn's first-token path."""
+        seen = set()
+        for node in self.config.get("nodes", []) or []:
+            raw = (node or {}).get("llm_config") or {}
+            if hasattr(raw, "model_dump"):
+                raw = raw.model_dump()
+            if not any(v is not None for v in raw.values()):
+                continue
+            key = repr(sorted((k, str(v)) for k, v in raw.items() if v is not None))
+            if key in seen:
+                continue
+            seen.add(key)
+            self._conversation_llm_for(node)
+        # Prewarming resolves nodes that are not active yet; the first turn re-resolves its own.
+        self._active_conversation_llm = self.llm
+
+    def _build_conversation_llm(self, override: dict, node_id=None):
+        """Derive a client from the override's (provider, model), not by patching the agent's.
+
+        Returns (llm, kwargs), or None when the override cannot be served — model, provider,
+        credentials and transport are all coupled, so a changed model or provider invalidates
+        every value the agent derived from its own.
+        """
+        agent_provider = self._conversation_provider
+        provider = override.get("provider") or agent_provider
+        if provider not in SUPPORTED_LLM_PROVIDERS:
+            logger.warning(f"Unknown provider {provider!r} in node llm_config, using {agent_provider!r}")
+            provider = agent_provider
+        switched_provider = provider != agent_provider
+
+        kwargs = dict(self._conversation_base_kwargs)
+        kwargs["provider"] = provider
+        for key in ("temperature", "max_tokens"):
+            if key in override:
+                kwargs[key] = override[key]
+
+        if switched_provider:
+            # A node carries no credentials of its own, so the only options are the agent's key
+            # (wrong provider) or the platform env default (moves a BYOK customer onto our
+            # account, silently). Neither is acceptable — refuse until nodes can carry their own.
+            logger.error(
+                f"Node {node_id!r} switches provider {agent_provider!r}→{provider!r}, which carries no "
+                f"credentials of its own — override refused, serving the node on the agent LLM"
+            )
+            return None
+
+        llm_class = SUPPORTED_LLM_PROVIDERS.get(provider, OpenAiLLM)
+        model_changed = "model" in override or switched_provider
+        model = override.get("model") or kwargs.get("model") or ""
+        if llm_class is LiteLLM:
+            # Re-qualify from the BARE name: an inherited "groq/llama-3.3" already has a slash, so
+            # leaving it alone would keep dispatching to groq under a different provider's client.
+            bare = model.split("/")[-1]
+            model = f"{provider}/{bare}"
+        kwargs["model"] = model
+
+        if model_changed:
+            # Transport follows the model. Inheriting the agent's flag put a Responses-only model on
+            # chat completions, and a chat-only model into a Responses previous_response_id chain.
+            if any(prefix in model for prefix in RESPONSES_API_MODEL_PREFIXES):
+                kwargs["use_responses_api"] = True
+            else:
+                kwargs.pop("use_responses_api", None)
+
+        effort = override.get("reasoning_effort")
+        if effort is not None:
+            kwargs["reasoning_effort"] = getattr(effort, "value", effort)
+        # An inherited effort would be rejected by a non-reasoning override model.
+        if not is_reasoning_model(canonical_model(model)):
+            kwargs.pop("reasoning_effort", None)
+
+        return llm_class(**kwargs), kwargs
+
+    @staticmethod
+    def _close_conversation_llm(llm, label=""):
+        """Release an override client. Responses-mode clients hold a socket only close() drops."""
+        close = getattr(llm, "close", None)
+        if close is None:
+            return
+        try:
+            result = close()
+            if asyncio.iscoroutine(result):
+                asyncio.create_task(result)
+        except Exception as e:
+            logger.error(f"Error closing conversation LLM override {label}: {e}")
+
+    async def close_conversation_llm_overrides(self):
+        """Close every per-node client built this call. Teardown only walks self.llm and the aux pair."""
+        while self._conversation_llm_cache:
+            key, llm = self._conversation_llm_cache.popitem()
+            close = getattr(llm, "close", None)
+            if close is None:
+                continue
+            try:
+                result = close()
+                if asyncio.iscoroutine(result):
+                    await result
+            except Exception as e:
+                logger.error(f"Error closing conversation LLM override {key}: {e}")
+
+    def current_conversation_llm(self):
+        """The client actually serving the active node — interruption hooks must target this one."""
+        return self._active_conversation_llm or self.llm
 
     @staticmethod
     def _extract_rag_collections(rag_config: Dict) -> List[str]:
@@ -255,13 +435,10 @@ class GraphAgent(BaseAgent):
         if not self.routing_model:
             self.routing_model = os.getenv("DEFAULT_ROUTING_MODEL_OPENAI", "gpt-4.1-mini")
 
-        llm_class = SUPPORTED_LLM_PROVIDERS.get(self.routing_provider, OpenAiLLM)
-        # LiteLLM addresses a backend by a "provider/model" string; a bare model name resolves to OpenAI.
-        if llm_class is LiteLLM and "/" not in self.routing_model:
-            self.routing_model = f"{self.routing_provider}/{self.routing_model}"
+        self.routing_model = self._qualify_routing_model(self.routing_model)
 
-        routing_kwargs = {
-            "model": self.routing_model,
+        # Everything but the model: provider, credentials, tier. A per-node routing_model reuses this.
+        base_kwargs = {
             "provider": self.routing_provider,
             "temperature": 0,
             "max_tokens": self.routing_max_tokens or 250,
@@ -273,27 +450,80 @@ class GraphAgent(BaseAgent):
         }
         if not follow_conversation and any(explicit_routing_creds.values()):
             # follow_conversation (a PTU swap) overrides these: routing then rides the conversation's own.
-            routing_kwargs.update({k: v for k, v in explicit_routing_creds.items() if v})
+            base_kwargs.update({k: v for k, v in explicit_routing_creds.items() if v})
         elif self.routing_provider == conv_provider:
             for key in ("llm_key", "base_url", "api_version"):
                 if self.config.get(key):
-                    routing_kwargs[key] = self.config[key]
+                    base_kwargs[key] = self.config[key]
+        if self.service_tier:
+            base_kwargs["service_tier"] = self.service_tier
+        if self.config.get("overflow_llm"):
+            base_kwargs["overflow_llm"] = self.config["overflow_llm"]
+        self._routing_base_kwargs = base_kwargs
+        self._routing_llm_cache: Dict[Tuple[Optional[str], Optional[str]], Any] = {}
+        self._routing_llm_cache_max_size = 100
+
+        routing_kwargs = self._routing_kwargs_for_model(self.routing_model)
+        self._routing_reasoning_effort_used = routing_kwargs.get("reasoning_effort")
+        self.routing_llm = self._routing_llm_class()(**routing_kwargs)
+        # What the last routing call actually ran on; a node override moves these for one call.
+        self._last_routing_model = self.routing_model
+        self._last_routing_effort = self._routing_reasoning_effort_used
+        logger.info(f"Routing initialized with {self.routing_provider} ({self.routing_model})")
+
+    def _routing_llm_class(self):
+        return SUPPORTED_LLM_PROVIDERS.get(self.routing_provider, OpenAiLLM)
+
+    def _qualify_routing_model(self, model: str) -> str:
+        # LiteLLM addresses a backend by a "provider/model" string; a bare model name resolves to OpenAI.
+        if self._routing_llm_class() is LiteLLM and "/" not in model:
+            return f"{self.routing_provider}/{model}"
+        return model
+
+    def _routing_kwargs_for_model(self, model: str) -> dict:
+        kwargs = {**self._routing_base_kwargs, "model": model}
         # Only reasoning models take an effort; resolve deployment names to the model family first.
-        routing_family = canonical_model(self.routing_model)
-        if is_reasoning_model(routing_family):
-            routing_kwargs["reasoning_effort"] = (
+        family = canonical_model(model)
+        if is_reasoning_model(family):
+            kwargs["reasoning_effort"] = (
                 self.routing_reasoning_effort
                 or os.getenv("GPT5_ROUTING_REASONING_EFFORT")
-                or default_reasoning_effort(routing_family)
+                or default_reasoning_effort(family)
             )
-        if self.service_tier:
-            routing_kwargs["service_tier"] = self.service_tier
-        if self.config.get("overflow_llm"):
-            routing_kwargs["overflow_llm"] = self.config["overflow_llm"]
+        return kwargs
 
-        self._routing_reasoning_effort_used = routing_kwargs.get("reasoning_effort")
-        self.routing_llm = llm_class(**routing_kwargs)
-        logger.info(f"Routing initialized with {self.routing_provider} ({self.routing_model})")
+    def _reset_routing_identity(self) -> None:
+        """Back to the agent's routing model, so a turn that makes no LLM call reports it."""
+        self._last_routing_model = self.routing_model
+        self._last_routing_effort = self._routing_reasoning_effort_used
+
+    def _routing_llm_for(self, node: Optional[dict]):
+        """The node's own routing model and/or effort on the agent's provider and credentials,
+        else the agent's. Either override alone is enough. Returns (llm, model, reasoning_effort)."""
+        node = node or {}
+        model_override = node.get("routing_model")
+        effort_override = node.get("routing_reasoning_effort")
+        if not model_override and effort_override is None:
+            return self.routing_llm, self.routing_model, self._routing_reasoning_effort_used
+
+        model = self._qualify_routing_model(model_override) if model_override else self.routing_model
+        kwargs = self._routing_kwargs_for_model(model)
+        if effort_override is not None and is_reasoning_model(canonical_model(model)):
+            # A non-reasoning model would reject the effort, so it only lands where it applies.
+            kwargs["reasoning_effort"] = getattr(effort_override, "value", effort_override)
+
+        # Keyed on both: the same model at two efforts is two different clients.
+        cache_key = (model, kwargs.get("reasoning_effort"))
+        llm = self._routing_llm_cache.get(cache_key)
+        if llm is None:
+            if len(self._routing_llm_cache) >= self._routing_llm_cache_max_size:
+                self._routing_llm_cache.pop(next(iter(self._routing_llm_cache)))
+            llm = self._routing_llm_class()(**kwargs)
+            self._routing_llm_cache[cache_key] = llm
+            logger.info(
+                f"Routing override ready: {model} (effort={kwargs.get('reasoning_effort')}) for node {node.get('id')!r}"
+            )
+        return llm, model, kwargs.get("reasoning_effort")
 
     async def check_for_completion(self, messages, check_for_completion_prompt, meta_info=None):
         """Check if the conversation should end. Returns (hangup_dict, metadata)."""
@@ -596,7 +826,7 @@ class GraphAgent(BaseAgent):
             "current_node": self.current_node_id,
             "transitioned": True,
             "routing_type": routing_type,
-            "routing_model": self.routing_model if made_llm_call else None,
+            "routing_model": self._last_routing_model if made_llm_call else None,
             "routing_provider": self.routing_provider if made_llm_call else None,
             "routing_latency_ms": round(latency_ms, 1),
             # Wall clock at hop start — the trace row is written after the hop finished.
@@ -632,6 +862,7 @@ class GraphAgent(BaseAgent):
 
             hop_start = time.perf_counter()
             hop_started_at = time.time()
+            self._reset_routing_identity()
             self._enrich_routing_context(history)
             router_node = self.get_node_by_id(self.current_node_id)
             previous_node = self.current_node_id
@@ -872,7 +1103,8 @@ class GraphAgent(BaseAgent):
                 messages.append({"role": "user", "content": user_message})
 
         try:
-            result = await self.routing_llm.route(messages, tools)
+            routing_llm, self._last_routing_model, self._last_routing_effort = self._routing_llm_for(node)
+            result = await routing_llm.route(messages, tools)
             latency_ms = (time.perf_counter() - start_time) * 1000
 
             if result is None:
@@ -937,6 +1169,7 @@ class GraphAgent(BaseAgent):
         unconditional default. Without an unconditional edge the node may stay."""
         start_time = time.perf_counter()
         self._last_deterministic_eval = None
+        self._reset_routing_identity()
 
         current_node = self.get_node_by_id(self.current_node_id)
         if not current_node:
@@ -1325,7 +1558,8 @@ class GraphAgent(BaseAgent):
                 tool_choice = self._get_tool_choice_for_node(history=message)
                 forced_name = tool_choice["function"]["name"] if tool_choice else None
                 node_tools = self._tools_for_node(current_node, forced_name)
-                async for chunk in self.llm.generate_stream(
+                node_llm = self._conversation_llm_for(current_node)
+                async for chunk in node_llm.generate_stream(
                     messages, synthesize=synthesize, meta_info=meta_info, tool_choice=tool_choice, tools=node_tools
                 ):
                     yield chunk
@@ -1380,11 +1614,13 @@ class GraphAgent(BaseAgent):
                         "current_node": self.current_node_id,
                         "transitioned": next_node_id is not None,
                         "routing_type": routing_type,
-                        "routing_model": self.routing_model,
+                        "routing_model": self._last_routing_model if routing_type == "llm" else self.routing_model,
                         "routing_provider": getattr(self, "routing_provider", None),
                         "routing_latency_ms": round(routing_latency_ms, 1),
                         "routing_started_at": routing_started_at,
-                        "routing_reasoning_effort": getattr(self, "_routing_reasoning_effort_used", None),
+                        "routing_reasoning_effort": self._last_routing_effort
+                        if routing_type == "llm"
+                        else getattr(self, "_routing_reasoning_effort_used", None),
                         "extracted_params": extracted_params or {},
                         "node_history": list(self.node_history),
                         "routing_messages": routing_messages,
@@ -1424,7 +1660,8 @@ class GraphAgent(BaseAgent):
             tool_choice = self._get_tool_choice_for_node(history=message)
             forced_name = tool_choice["function"]["name"] if tool_choice else None
             node_tools = self._tools_for_node(current_node, forced_name)
-            async for chunk in self.llm.generate_stream(
+            node_llm = self._conversation_llm_for(current_node)
+            async for chunk in node_llm.generate_stream(
                 messages, synthesize=synthesize, meta_info=meta_info, tool_choice=tool_choice, tools=node_tools
             ):
                 yield chunk

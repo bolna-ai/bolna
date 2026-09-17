@@ -806,6 +806,8 @@ class TaskManager(BaseManager):
                 self.number_of_words_for_interruption = self.conversation_config.get(
                     "number_of_words_for_interruption", 3
                 )
+                # Call-level value a node without its own override inherits.
+                self.default_number_of_words_for_interruption = self.number_of_words_for_interruption
                 self.asked_if_user_is_still_there = False  # Used to make sure that if user's phrase qualifies as acciedental interruption, we don't break the conversation loop
                 self.started_transmitting_audio = False
                 self.accidental_interruption_phrases = set(ACCIDENTAL_INTERRUPTION_PHRASES)
@@ -1221,29 +1223,49 @@ class TaskManager(BaseManager):
     #     agent_type = self.task_config['tools_config']["llm_agent"].get("agent_type", None)
     #     return agent_type == "knowledge_agent"
 
+    def _active_llm_client(self):
+        """The client serving the current turn — a node LLM override means it is not always .llm."""
+        llm_agent = self.tools.get("llm_agent")
+        if llm_agent is None:
+            return None
+        resolve = getattr(llm_agent, "current_conversation_llm", None)
+        if resolve is not None:
+            return resolve()
+        return getattr(llm_agent, "llm", None)
+
     def _invalidate_response_chain(self):
         try:
-            llm_agent = self.tools.get("llm_agent")
-            if llm_agent and hasattr(llm_agent, "llm"):
-                llm_agent.llm.invalidate_response_chain()
+            llm = self._active_llm_client()
+            if llm is not None:
+                llm.invalidate_response_chain()
         except Exception as e:
             logger.debug(f"Failed to invalidate response chain: {e}")
 
     def _set_interruption_hint(self, heard_text):
         try:
-            llm_agent = self.tools.get("llm_agent")
-            if llm_agent and hasattr(llm_agent, "llm"):
-                llm_agent.llm.set_interruption_hint(heard_text)
+            llm = self._active_llm_client()
+            if llm is not None:
+                llm.set_interruption_hint(heard_text)
         except Exception as e:
             logger.debug(f"Failed to set interruption hint: {e}")
 
     def _cancel_in_flight_llm_response(self):
         try:
-            llm_agent = self.tools.get("llm_agent")
-            if llm_agent and hasattr(llm_agent, "llm"):
-                llm_agent.llm.cancel_in_flight_response()
+            llm = self._active_llm_client()
+            if llm is not None:
+                llm.cancel_in_flight_response()
         except Exception as e:
             logger.debug(f"cancel_in_flight_response failed: {e}")
+
+    def _apply_node_interruption_threshold(self, node):
+        """A node may override the call-level word threshold; None inherits it. Written to both
+        holders of the value, since task_manager and InterruptionManager each read their own."""
+        override = (node or {}).get("number_of_words_for_interruption")
+        words = self.default_number_of_words_for_interruption if override is None else override
+        if words != self.number_of_words_for_interruption:
+            logger.info(f"number_of_words_for_interruption -> {words} for node {(node or {}).get('id')!r}")
+        self.number_of_words_for_interruption = words
+        self.interruption_manager.number_of_words_for_interruption = words
 
     def _inject_language_instruction(self, messages: list) -> list:
         """Inject language instruction into messages based on detected language."""
@@ -2899,6 +2921,7 @@ class TaskManager(BaseManager):
                         target_node = result.get("target_node")
                         if target_node:
                             self.repeat_after_silence_seconds = target_node.get("repeat_after_silence_seconds")
+                            self._apply_node_interruption_threshold(target_node)
                         logger.info(
                             f"Event '{event.get('event')}' transitioned node but user is speaking — deferring to conversation flow"
                         )
@@ -2935,6 +2958,7 @@ class TaskManager(BaseManager):
         # Update repeat_after_silence for the new node
         if target_node:
             self.repeat_after_silence_seconds = target_node.get("repeat_after_silence_seconds")
+            self._apply_node_interruption_threshold(target_node)
 
         if node_type == NodeType.STATIC:
             # Static node: play cached audio directly, no LLM cost
@@ -3825,6 +3849,7 @@ class TaskManager(BaseManager):
                     current_node = self.tools["llm_agent"].get_node_by_id(routing_info["current_node"])
                     if current_node:
                         self.repeat_after_silence_seconds = current_node.get("repeat_after_silence_seconds")
+                        self._apply_node_interruption_threshold(current_node)
 
                     continue
 
@@ -8938,6 +8963,12 @@ class TaskManager(BaseManager):
                             await agent.llm.close()
                         except Exception as e:
                             logger.error(f"Error closing LLM: {e}")
+                    close_overrides = getattr(agent, "close_conversation_llm_overrides", None)
+                    if close_overrides is not None:
+                        try:
+                            await close_overrides()
+                        except Exception as e:
+                            logger.error(f"Error closing conversation LLM overrides: {e}")
                     for attr in ("conversation_completion_llm", "voicemail_llm"):
                         aux = getattr(agent, attr, None)
                         if aux and hasattr(aux, "close"):
