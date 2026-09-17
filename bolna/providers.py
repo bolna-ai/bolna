@@ -34,6 +34,7 @@ from .input_handlers import (
     ExotelInputHandler,
     PlivoInputHandler,
     VobizInputHandler,
+    TelnyxInputHandler,
     SipTrunkInputHandler,
     FreeSwitchInputHandler,
 )
@@ -43,6 +44,7 @@ from .output_handlers import (
     ExotelOutputHandler,
     PlivoOutputHandler,
     VobizOutputHandler,
+    TelnyxOutputHandler,
     SipTrunkOutputHandler,
     FreeSwitchOutputHandler,
 )
@@ -119,6 +121,7 @@ SUPPORTED_INPUT_HANDLERS = {
     TelephonyProvider.EXOTEL.value: ExotelInputHandler,
     TelephonyProvider.PLIVO.value: PlivoInputHandler,
     TelephonyProvider.VOBIZ.value: VobizInputHandler,
+    TelephonyProvider.TELNYX.value: TelnyxInputHandler,
     TelephonyProvider.SIP_TRUNK.value: SipTrunkInputHandler,
     TelephonyProvider.FREESWITCH.value: FreeSwitchInputHandler,
 }
@@ -127,6 +130,7 @@ SUPPORTED_INPUT_TELEPHONY_HANDLERS = {
     TelephonyProvider.EXOTEL.value: ExotelInputHandler,
     TelephonyProvider.PLIVO.value: PlivoInputHandler,
     TelephonyProvider.VOBIZ.value: VobizInputHandler,
+    TelephonyProvider.TELNYX.value: TelnyxInputHandler,
     TelephonyProvider.SIP_TRUNK.value: SipTrunkInputHandler,
 }
 SUPPORTED_OUTPUT_HANDLERS = {
@@ -135,6 +139,7 @@ SUPPORTED_OUTPUT_HANDLERS = {
     TelephonyProvider.EXOTEL.value: ExotelOutputHandler,
     TelephonyProvider.PLIVO.value: PlivoOutputHandler,
     TelephonyProvider.VOBIZ.value: VobizOutputHandler,
+    TelephonyProvider.TELNYX.value: TelnyxOutputHandler,
     TelephonyProvider.SIP_TRUNK.value: SipTrunkOutputHandler,
     TelephonyProvider.FREESWITCH.value: FreeSwitchOutputHandler,
 }
@@ -143,6 +148,7 @@ SUPPORTED_OUTPUT_TELEPHONY_HANDLERS = {
     TelephonyProvider.EXOTEL.value: ExotelOutputHandler,
     TelephonyProvider.PLIVO.value: PlivoOutputHandler,
     TelephonyProvider.VOBIZ.value: VobizOutputHandler,
+    TelephonyProvider.TELNYX.value: TelnyxOutputHandler,
     TelephonyProvider.SIP_TRUNK.value: SipTrunkOutputHandler,
 }
 SUPPORTED_S2S_PROVIDERS = {
