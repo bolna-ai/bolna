@@ -55,6 +55,7 @@ class RoutingStreamReader:
             ]
             for t in tools
         }
+        self._index: Optional[int] = None
         self.function_name: Optional[str] = None
         self.arguments = ""
         self.service_tier = None
@@ -69,6 +70,12 @@ class RoutingStreamReader:
         if not chunk.choices:
             return
         for tool_call in getattr(chunk.choices[0].delta, "tool_calls", None) or []:
+            if self._index is None:
+                self._index = tool_call.index
+            # parallel_tool_calls is off, but a provider that ignores it would otherwise
+            # concatenate a second call's arguments onto the first and corrupt both.
+            if tool_call.index != self._index:
+                continue
             if tool_call.function.name:
                 self.function_name = tool_call.function.name
             self.arguments += tool_call.function.arguments or ""

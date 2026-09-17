@@ -3651,10 +3651,11 @@ class TaskManager(BaseManager):
 
     @staticmethod
     def _routing_response_line(routing_info: dict) -> str:
+        current = routing_info.get("current_node", "?")
         if routing_info.get("transitioned"):
-            line = f"Node: {routing_info.get('previous_node', '?')} → {routing_info['current_node']}"
+            line = f"Node: {routing_info.get('previous_node', '?')} → {current}"
         else:
-            line = f"Node: {routing_info['current_node']} (no transition)"
+            line = f"Node: {current} (no transition)"
         if routing_info.get("extracted_params"):
             line += f" | Params: {json.dumps(routing_info['extracted_params'])}"
         if routing_info.get("confidence") is not None:
@@ -3695,6 +3696,7 @@ class TaskManager(BaseManager):
     async def _apply_routing_tail(self, tail, routing_info, entry, meta_info):
         """Fold in the rationale, confidence and usage that arrive after the routing decision."""
         node = routing_info.get("previous_node", "?")
+        usage = {}
         try:
             result = await tail
             for key in (REASONING_KEY, CONFIDENCE_KEY):
@@ -3707,9 +3709,6 @@ class TaskManager(BaseManager):
             for key in ("input_tokens", "output_tokens", "reasoning_tokens", "cached_tokens"):
                 entry[key] = usage.get(key)
 
-            # Deferred from the hop so the row carries the rationale and the token counts.
-            self._log_routing_response(routing_info, usage, meta_info)
-
             # Routing on azure shares the conversation LLM's pool, so its tokens meter against it.
             overflowed = (routing_info.get("routing_usage") or {}).get("overflowed")
             cb = self.on_overflow if overflowed else self.on_turn_usage
@@ -3718,6 +3717,10 @@ class TaskManager(BaseManager):
         except Exception as e:
             # Observability only; it must never surface into the call or the teardown gather.
             logger.error(f"Routing tail failed for node '{node}': {e}")
+        finally:
+            # Deferred from the hop so the row carries the rationale and the token counts, but
+            # a hop always gets a row even when the tail was cancelled at teardown.
+            self._log_routing_response(routing_info, usage, meta_info)
 
     async def __do_llm_generation(
         self, messages, meta_info, next_step, should_bypass_synth=False, should_trigger_function_call=False

@@ -7,6 +7,8 @@ Covers:
   * generate(): transition into a router resolves to a speaking node, entry-node dispatch
 """
 
+import asyncio
+
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -597,6 +599,33 @@ class TestRouterIntentRouting:
             params = tool["function"]["parameters"]
             assert "reasoning" in params["properties"]
             assert "reasoning" in params["required"]
+
+    async def test_a_stranded_tail_never_reaches_the_next_hop(self):
+        # A hop that is never built leaves its tail on the agent. If the next decision picked
+        # it up, that hop would record the previous turn's rationale, confidence and tokens,
+        # and meter those tokens twice.
+        agent = _intent_router_agent(detected_language="en")
+        stranded = asyncio.create_task(asyncio.sleep(30))
+        agent._pending_routing_tail = stranded
+
+        agent.routing_llm = MagicMock()
+        agent.routing_llm.route = AsyncMock(
+            return_value={
+                "function_name": "go_to_billing",
+                "arguments": {},
+                "usage": {},
+                "service_tier": None,
+                "overflowed": False,
+                "routing_tail": None,
+            }
+        )
+        node = agent.get_node_by_id("dispatch")
+        intent_edges = [e for e in node["edges"] if e.get("condition") and not e.get("condition_type")]
+        await agent._decide_next_node_llm(node, intent_edges, [{"role": "user", "content": "my invoice"}], 0.0)
+
+        await asyncio.sleep(0)  # let the cancellation land
+        assert stranded.cancelled()
+        assert agent._pending_routing_tail is None
 
     async def test_chained_intent_routers_route_independently(self):
         # Two intent routers chained (built as raw dicts, bypassing the validation that

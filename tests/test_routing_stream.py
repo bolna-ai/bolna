@@ -208,12 +208,16 @@ async def test_a_hung_rationale_does_not_hold_up_the_hangup(monkeypatch):
 
     entry = {}
     manager = _StubManager()
-    task = manager.spawn(never(), entry)
-    await manager._settle_routing_tails()  # returns on the timeout rather than after 30s
+    with patch("bolna.agent_manager.task_manager.convert_to_request_log") as log:
+        task = manager.spawn(never(), entry)
+        await manager._settle_routing_tails()  # returns on the timeout rather than after 30s
 
-    with pytest.raises(asyncio.CancelledError):
-        await task
+        with pytest.raises(asyncio.CancelledError):
+            await task
     assert entry == {}
+    # The hop still gets a response row, without the rationale it never received.
+    assert log.call_count == 1
+    assert "Reasoning" not in log.call_args.kwargs["message"]
 
 
 @pytest.mark.asyncio
@@ -249,3 +253,59 @@ async def test_the_response_row_carries_the_rationale_and_the_token_counts():
     assert row["message"] == "Node: dispatch → billing | Confidence: 0.9 | Reasoning: caller asked about an invoice"
     assert (row["input_tokens"], row["output_tokens"], row["cached_tokens"]) == (1800, 44, 1024)
     assert row["latency"] == 0.612
+
+
+@pytest.mark.asyncio
+async def test_a_second_tool_call_does_not_corrupt_the_first():
+    # parallel_tool_calls is off, but some backends ignore it. Appending the second call's
+    # arguments onto the first would leave neither parseable and drop the hop to its catch-all.
+    second = SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                delta=SimpleNamespace(
+                    tool_calls=[
+                        SimpleNamespace(
+                            index=1,
+                            id="c2",
+                            function=SimpleNamespace(name="stay_on_current_node", arguments='{"reasoning": "no"}'),
+                        )
+                    ]
+                )
+            )
+        ],
+        usage=None,
+        service_tier=None,
+    )
+    stream = _Stream(
+        [_delta(name="transition_to_billing", arguments='{"account_id": "A-9", ')]
+        + [second]
+        + _fragments('"reasoning": "invoice", "confidence": 0.8}')
+        + [_usage_chunk()]
+    )
+    reader = RoutingStreamReader(stream, TOOLS)
+
+    assert await reader.decide() == {"account_id": "A-9"}
+    assert reader.function_name == "transition_to_billing"
+
+
+@pytest.mark.asyncio
+async def test_an_overflowed_hop_meters_against_the_overflow_backend():
+    # The streamed decision has no usage yet, so which backend served the hop has to survive
+    # on routing_usage or the PTU pool is billed for tokens the overflow backend served.
+    async def tail():
+        return {"reasoning": "r", "confidence": 1.0, "usage": {"input_tokens": 1800, "output_tokens": 40}}
+
+    routing_info = {
+        "previous_node": "dispatch",
+        "current_node": "billing",
+        "transitioned": True,
+        "routing_provider": "azure",
+        "routing_usage": {"overflowed": True, "service_tier": "priority"},
+    }
+    manager = _StubManager()
+    with patch("bolna.agent_manager.task_manager.convert_to_request_log"):
+        manager.spawn(tail(), {}, routing_info)
+        await manager._settle_routing_tails()
+
+    manager.on_overflow.assert_awaited_once_with(1800, 40, None)
+    manager.on_turn_usage.assert_not_awaited()

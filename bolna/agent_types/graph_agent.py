@@ -1016,6 +1016,11 @@ class GraphAgent(BaseAgent):
     ]:
         """LLM routing over the intent edges. A default_edge (the catch-all) is offered as
         a described transition instead of stay_on_current_node, so the model commits."""
+        # A hop that was never built leaves its tail behind; drop it rather than let the next
+        # hop consume it and record this turn's rationale and tokens against that one.
+        stranded = self._consume_routing_tail()
+        if stranded is not None:
+            stranded.cancel()
         option_edges = list(llm_edges)
         if default_edge is not None:
             # Always mark the default so the model can tell it apart from the intent edges,
@@ -1116,13 +1121,13 @@ class GraphAgent(BaseAgent):
             reasoning = function_args.pop("reasoning", None)
             confidence = function_args.pop("confidence", None)
 
-            usage_info = result.get("usage") or None
-            if usage_info:
-                usage_info = {
-                    **usage_info,
-                    "service_tier": result.get("service_tier"),
-                    "overflowed": result.get("overflowed", False),
-                }
+            # Built even when the streamed decision has no usage yet, so the backend that
+            # served the hop is not lost before the tail supplies the token counts.
+            usage_info = {
+                **(result.get("usage") or {}),
+                "service_tier": result.get("service_tier"),
+                "overflowed": result.get("overflowed", False),
+            }
 
             logger.info(
                 f"Routing decision (LLM): {function_name} | confidence: {confidence} | reasoning: {reasoning} (latency: {latency_ms:.1f}ms)"
