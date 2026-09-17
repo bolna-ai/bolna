@@ -19,6 +19,9 @@ class FakeTranscriber:
         self.transcription_task = None
         self.turn_latencies = turn_latencies
 
+    def is_connected(self):
+        return self.transcription_task is not None and not self.transcription_task.done()
+
 
 def _pool(transcribers, active):
     return TranscriberPool(

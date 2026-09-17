@@ -20,11 +20,14 @@ class AzureTranscriber(BaseTranscriber):
         self, telephony_provider, input_queue=None, output_queue=None, language="en-US", encoding="linear16", **kwargs
     ):
         super().__init__(input_queue)
+        # Never set: the SDK owns the socket, not a task — see is_connected() override.
         self.transcription_task = None
         self.subscription_key = os.getenv("AZURE_SPEECH_KEY")
         self.service_region = os.getenv("AZURE_SPEECH_REGION")
         self.push_stream = None
         self.recognizer = None
+        # Liveness for is_connected(), driven by the SDK session events.
+        self.connection_live = False
         self.transcriber_output_queue = output_queue
         self.audio_submitted = False
         self.audio_submission_time = None
@@ -68,6 +71,9 @@ class AzureTranscriber(BaseTranscriber):
 
     async def run(self):
         try:
+            # A reconnect leaves the previous pump alive on the same input_queue, so without this
+            # every attempt adds a consumer and they race frames into the shared push stream.
+            await self.cancel_audio_pump()
             await self.initialize_connection()
             if self.connection_error:
                 meta = dict(self.meta_info or {})
@@ -81,6 +87,18 @@ class AzureTranscriber(BaseTranscriber):
             meta = dict(self.meta_info or {})
             meta["connection_error"] = self.connection_error
             await self.transcriber_output_queue.put(create_ws_data_packet("transcriber_connection_closed", meta))
+
+    async def cancel_audio_pump(self):
+        """Stop the pump feeding the previous connection, if one is still running."""
+        task = self.send_audio_to_transcriber_task
+        self.send_audio_to_transcriber_task = None
+        if task is None or task.done():
+            return
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
 
     async def _check_and_process_end_of_stream(self, ws_data_packet):
         if "eos" in ws_data_packet["meta_info"] and ws_data_packet["meta_info"]["eos"] is True:
@@ -355,16 +373,28 @@ class AzureTranscriber(BaseTranscriber):
             self.duration += evt.result.duration
 
     async def canceled_handler(self, evt):
-        logger.info(f"Canceled event received: {evt} | run_id - {self.run_id}")
-        if evt.cancellation_details and evt.cancellation_details.error_details:
-            self.connection_error = evt.cancellation_details.error_details
+        # evt's repr carries only reason=ResultReason.Canceled, so log the details explicitly —
+        # during the 2026-09 centralindia outage the endpoint never appeared until the call ended.
+        details = evt.cancellation_details
+        logger.info(
+            f"Canceled event received: reason={getattr(details, 'reason', None)} "
+            f"details={getattr(details, 'error_details', None)} | run_id - {self.run_id}"
+        )
+        self.connection_live = False
+        if details and details.error_details:
+            self.connection_error = details.error_details
+
+    def is_connected(self):
+        return self.connection_live
 
     async def session_started_handler(self, evt):
         logger.info(f"Session start event received: {evt} | run_id - {self.run_id}")
+        self.connection_live = True
         self.start_time = time.time()
 
     async def session_stopped_handler(self, evt):
         logger.info(f"Session stop event received: {evt} | run_id - {self.run_id}")
+        self.connection_live = False
         self.end_time = time.time()
         if self.meta_info is not None and self.start_time is not None:
             self.meta_info["transcriber_duration"] = self.end_time - self.start_time
