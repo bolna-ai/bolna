@@ -226,32 +226,44 @@ class LanguageSwitcher:
         start_time = time.time()
         # Logged before the await so the row carries the send time, not the reply time.
         log_meta = self._log_request(detector_transcript, start_time)
+        # Only the await is guarded: a throw from the logging below must not be caught here, or it
+        # would write a second response row and discard a decision the model already returned.
         try:
             result = await self._hedged_generate(messages)
-            if result is None:
-                # A parsed `null` is the model validly declining, not a broken judge — say which,
-                # or a throttled judge looks identical to a decline in the trace.
-                self._log_response(
-                    {"error": "generate_failed"} if self.last_generate_errored else None, log_meta, start_time
-                )
-                if self.last_generate_errored:
-                    self._note_failure()
-                else:
-                    self._consecutive_failures = 0
-                return None
-            self._consecutive_failures = 0
-            self.latency_ms = (time.time() - start_time) * 1000
-            logger.info(
-                f"LanguageSwitcher decision: {result} (latency_ms={self.latency_ms:.0f}, hedge_won={self.hedge_won})"
-            )
-            self._log_response(result, log_meta, start_time)
-            return result
+        except asyncio.CancelledError:
+            # task_manager caps decide() with wait_for(LANGUAGE_SWITCH_DECIDE_TIMEOUT_S=6.0s) and the
+            # observed tail is 5.9s, so this fires — and CancelledError is a BaseException, so
+            # `except Exception` would leave the slowest decides with a request and no reply.
+            self._log_response({"error": "cancelled"}, log_meta, start_time)
+            raise
         except Exception as e:
             logger.error(f"LanguageSwitcher decision error: {e}")
-            # Without this a failed decision left a request row with no reply in the trace.
             self._log_response({"error": str(e)}, log_meta, start_time)
             self._note_failure()
             return None
+
+        if result is None:
+            # A parsed `null` is the model validly declining, not a broken judge — say which, or a
+            # throttled judge looks identical to a decline. An explicit payload either way: None
+            # would reach the trace as a blank Data cell and read as a truncated row.
+            self._log_response(
+                {"error": "generate_failed"} if self.last_generate_errored else {"target_language": None},
+                log_meta,
+                start_time,
+            )
+            if self.last_generate_errored:
+                self._note_failure()
+            else:
+                self._consecutive_failures = 0
+            return None
+
+        self._consecutive_failures = 0
+        self.latency_ms = (time.time() - start_time) * 1000
+        logger.info(
+            f"LanguageSwitcher decision: {result} (latency_ms={self.latency_ms:.0f}, hedge_won={self.hedge_won})"
+        )
+        self._log_response(result, log_meta, start_time)
+        return result
 
     def _note_failure(self):
         """Swap a persistently failing judge for the API-key default (Bedrock IAM/throttle
@@ -365,31 +377,37 @@ class LanguageSwitcher:
     def _log_request(self, transcript: str, sent_at: float) -> dict:
         """Stamp the request row at send time and return the meta both rows share."""
         meta_info = {"request_id": str(uuid.uuid4())}
-        convert_to_request_log(
-            message={"transcript": transcript, "available_languages": self.available_labels},
-            meta_info=meta_info,
-            component=LogComponent.LLM_LANGUAGE_SWITCH,
-            direction=LogDirection.REQUEST,
-            model=self.model,
-            run_id=self.run_id,
-            ts=sent_at,
-        )
+        try:
+            convert_to_request_log(
+                message={"transcript": transcript, "available_languages": self.available_labels},
+                meta_info=meta_info,
+                component=LogComponent.LLM_LANGUAGE_SWITCH,
+                direction=LogDirection.REQUEST,
+                model=self.model,
+                run_id=self.run_id,
+                ts=sent_at,
+            )
+        except Exception as e:
+            logger.error(f"LanguageSwitcher: request row not written: {e}")
         return meta_info
 
     def _log_response(self, result, meta_info: dict, sent_at: float):
         """Stamp the reply row when it arrived, carrying the round trip it actually took."""
         received_at = time.time()
-        usage = self.last_usage or {}
-        convert_to_request_log(
-            message=result,
-            meta_info=meta_info,
-            component=LogComponent.LLM_LANGUAGE_SWITCH,
-            direction=LogDirection.RESPONSE,
-            model=self.model,
-            run_id=self.run_id,
-            input_tokens=usage.get("input_tokens"),
-            output_tokens=usage.get("output_tokens"),
-            cached_tokens=usage.get("cached_tokens"),
-            ts=received_at,
-            latency=round(received_at - sent_at, 6),
-        )
+        usage = self.last_usage if isinstance(self.last_usage, dict) else {}
+        try:
+            convert_to_request_log(
+                message=result,
+                meta_info=meta_info,
+                component=LogComponent.LLM_LANGUAGE_SWITCH,
+                direction=LogDirection.RESPONSE,
+                model=self.model,
+                run_id=self.run_id,
+                input_tokens=usage.get("input_tokens"),
+                output_tokens=usage.get("output_tokens"),
+                cached_tokens=usage.get("cached_tokens"),
+                ts=received_at,
+                latency=round(received_at - sent_at, 6),
+            )
+        except Exception as e:
+            logger.error(f"LanguageSwitcher: response row not written: {e}")
