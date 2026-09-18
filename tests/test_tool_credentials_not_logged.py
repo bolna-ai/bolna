@@ -1,4 +1,4 @@
-"""Tool and LLM config must never be interpolated into a log line: Loki keeps whatever they print.
+"""Tool and LLM config must never be interpolated into a log line: the log store keeps whatever they print.
 
 The offending objects (FunctionCallPayload, APIParams, a tools_params entry, litellm model_args)
 all carry an api_token, auth headers or a BYOK api_key next to the fields worth logging.
@@ -15,7 +15,7 @@ AUTH_HEADER = "Bearer super-secret-header"
 BOLNA = Path(__file__).resolve().parent.parent / "bolna"
 
 # Each of these interpolated a whole tool or LLM config, so an api_token, an auth header or a
-# BYOK api_key went to stderr. Reintroducing any of them puts a customer credential in Loki.
+# BYOK api_key went to stderr. Reintroducing any of them puts a customer credential in the log store.
 FORBIDDEN = (
     "Triggering function call for {data}",
     "API Tools {self.custom_tools}",
