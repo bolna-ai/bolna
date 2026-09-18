@@ -417,7 +417,13 @@ class OpenAICompatibleLLM(BaseLLM):
             return None
 
         func_conf = APIParams.model_validate(self.api_params[func_name])
-        logger.info(f"Payload to send {arguments_str} func_dict {func_conf}")
+        logger.info(
+            "Payload to send %s func=%s url=%s method=%s",
+            arguments_str,
+            func_name,
+            func_conf.url,
+            func_conf.method,
+        )
 
         api_call_payload = FunctionCallPayload(
             url=func_conf.url,

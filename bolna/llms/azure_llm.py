@@ -29,6 +29,7 @@ from .openai_base import OpenAICompatibleLLM
 from .tool_call_accumulator import ToolCallAccumulator
 from .types import LLMStreamChunk, LatencyData
 from .message_models import strip_internal_keys
+from bolna.helpers.function_calling_helpers import tool_names
 from bolna.helpers.logger_config import configure_logger
 
 logger = configure_logger(__name__)
@@ -65,11 +66,10 @@ class AzureLLM(OpenAICompatibleLLM):
         self.custom_tools = kwargs.get("api_tools", None)
         self.language = language
         logger.info(f"Initializing Azure LLM with model: {self.model} and max tokens {max_tokens}")
-        logger.info(f"API Tools {self.custom_tools}")
+        logger.info("API Tools %s", tool_names(self.custom_tools))
         if self.custom_tools is not None:
             self.trigger_function_call = True
             self.api_params = self.custom_tools["tools_params"]
-            logger.info(f"Function dict {self.api_params}")
             self.tools = self.custom_tools["tools"]
         else:
             self.trigger_function_call = False

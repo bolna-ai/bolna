@@ -66,6 +66,7 @@ from bolna.providers import *
 from bolna.s2s import events as s2s_events
 from bolna.llms.routing_stream import CONFIDENCE_KEY, REASONING_KEY
 from bolna.enums import (
+    AudioPlaybackReason,
     TelephonyProvider,
     LogComponent,
     LogDirection,
@@ -353,7 +354,12 @@ class TaskManager(BaseManager):
         ):
             self.kwargs["assistant_id"] = task["tools_config"]["llm_agent"]["llm_config"]["assistant_id"]
 
-        logger.info(f"doing task {task}")
+        logger.info(
+            "doing task %s type=%s config_sha=%s",
+            task_id,
+            task.get("task_type"),
+            get_md5_hash(repr(task))[:12],
+        )
         self.task_id = task_id
         self.assistant_name = assistant_name
         self.tools = {}
@@ -670,7 +676,6 @@ class TaskManager(BaseManager):
             # For nitro
             self.nitro = True
             self.conversation_config = task.get("task_config", {})
-            logger.info(f"Conversation config {self.conversation_config}")
 
             # Enable DTMF flow
             dtmf_enabled = self.conversation_config.get("dtmf_enabled", False)
@@ -1525,7 +1530,7 @@ class TaskManager(BaseManager):
                 logger.info("No welcome message audio to send, marking welcome message as played")
                 self.tools["input"].is_welcome_message_played = True
             else:
-                self.tools["input"].update_is_audio_being_played(True)
+                self.tools["input"].update_is_audio_being_played(True, AudioPlaybackReason.WELCOME_MESSAGE_SENT)
                 self.conversation_history.append_welcome_message(text)
                 convert_to_request_log(
                     message=text,
@@ -2814,7 +2819,11 @@ class TaskManager(BaseManager):
         while not self.conversation_ended:
             mark_events = self.mark_event_meta_data.mark_event_meta_data
             mark_items_list = [{"mark_id": k, "mark_data": v} for k, v in mark_events.items()]
-            logger.info(f"current_list: {mark_items_list}")
+            logger.info(
+                "current_list: %s pending %s",
+                len(mark_items_list),
+                [(m["mark_id"], m["mark_data"].get("type")) for m in mark_items_list],
+            )
 
             if not mark_items_list:
                 break
@@ -3997,7 +4006,17 @@ class TaskManager(BaseManager):
 
                 if trigger_function_call:
                     self.function_call_in_flight = True  # so a parallel LID switch won't truncate it
-                    logger.info(f"Triggering function call for {data}")
+                    # model_extra is the model-produced arguments; the declared fields carry the
+                    # tool's api_token, its auth headers and the whole conversation history.
+                    logger.info(
+                        "Triggering function call %s url=%s method=%s seq=%s turn=%s args=%s",
+                        data.called_fun,
+                        data.url,
+                        data.method,
+                        data.meta_info.get("sequence_id"),
+                        data.meta_info.get("turn_id"),
+                        data.model_extra,
+                    )
                     # Stamp total_stream_duration_ms before early return — function call chunk carries the final latency
                     if latency:
                         fc_latency_dict = latency.model_dump()
@@ -5243,7 +5262,7 @@ class TaskManager(BaseManager):
                             self.interruption_manager.on_interruption_triggered(asr_turn_id=_asr_turn_id)
                             # Also record in the interrupted set for was_interrupted annotation
                             self.interruption_manager.record_interrupted_transcriber_turn(_asr_turn_id)
-                            self.tools["input"].update_is_audio_being_played(False)
+                            self.tools["input"].update_is_audio_being_played(False, AudioPlaybackReason.BARGE_IN)
                             await self.__cleanup_downstream_tasks()
                         # User continuation detection: cancel pending response if user continues within grace period
                         elif (
@@ -6412,7 +6431,7 @@ class TaskManager(BaseManager):
             # never arrives — clear it here as the barge-in path does, or it latches True and
             # blocks the silence prompt and the stall backstop for the rest of the call.
             if "input" in self.tools:
-                self.tools["input"].update_is_audio_being_played(False)
+                self.tools["input"].update_is_audio_being_played(False, AudioPlaybackReason.LID_SWITCH_TRUNCATE)
             await self.__cleanup_downstream_tasks()
             # Sequence invalidated — the held audio can no longer ship; safe to open the gate.
             self.lid_playback_gate = None
@@ -7097,7 +7116,9 @@ class TaskManager(BaseManager):
                             # as a false interruption. Mirror the BLOCK-path guard.
                             if meta_info.get("end_of_synthesizer_stream", False):
                                 self._turn_audio_flushed.set()
-                                self.tools["input"].update_is_audio_being_played(False)
+                                self.tools["input"].update_is_audio_being_played(
+                                    False, AudioPlaybackReason.SYNTHESIZER_STREAM_END
+                                )
 
                         # Give control to other tasks
                         sleep_time = self.tools["synthesizer"].get_sleep_time()
@@ -7404,7 +7425,7 @@ class TaskManager(BaseManager):
                         if sequence_id is not None:
                             self._sent_audio_sequences.add(sequence_id)
                         self._commit_staged_assistant_history(sequence_id)
-                        self.tools["input"].update_is_audio_being_played(True)
+                        self.tools["input"].update_is_audio_being_played(True, AudioPlaybackReason.AUDIO_SENT)
                         self.response_in_pipeline = False
                         self._synthesis_awaiting_first_audio = False
                         await self.tools["output"].handle(message)
@@ -7761,7 +7782,9 @@ class TaskManager(BaseManager):
                     # mark dictionary, so the final-chunk mark echo will never arrive and
                     # is_audio_being_played would stay stuck True forever — blocking the
                     # silence-hangup gate in this loop indefinitely.
-                    self.tools["input"].update_is_audio_being_played(False)
+                    self.tools["input"].update_is_audio_being_played(
+                        False, AudioPlaybackReason.SILENCE_HANGUP_INTERRUPT
+                    )
 
                 # Just in case we need to clear messages sent before
                 await self.tools["output"].handle_interruption()
@@ -8298,7 +8321,7 @@ class TaskManager(BaseManager):
             await self.tools["output"].handle_interruption()
         # handle_interruption clears the pending final-chunk mark, and that mark's echo is
         # the only thing that would otherwise flip this flag back off.
-        self.tools["input"].update_is_audio_being_played(False)
+        self.tools["input"].update_is_audio_being_played(False, AudioPlaybackReason.S2S_DROP_QUEUED)
         while not self.buffered_output_queue.empty():
             try:
                 self.buffered_output_queue.get_nowait()
@@ -8361,7 +8384,7 @@ class TaskManager(BaseManager):
                 continue
 
             try:
-                self.tools["input"].update_is_audio_being_played(True)
+                self.tools["input"].update_is_audio_being_played(True, AudioPlaybackReason.S2S_AUDIO_SENT)
                 await self.tools["output"].handle(message)
 
                 if self.should_record and isinstance(message["data"], bytes) and message["data"] != b"\x00":
