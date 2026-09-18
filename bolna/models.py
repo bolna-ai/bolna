@@ -162,6 +162,8 @@ class Transcriber(BaseModel):
     encoding: Optional[str] = "linear16"
     endpointing: Optional[int] = 500
     keywords: Optional[str] = None
+    # Free-form biasing text for engines that take one alongside the keyword list.
+    context: Optional[str] = None
     task: Optional[str] = "transcribe"
     provider: Optional[str] = "deepgram"
     multilingual: Optional[Dict[str, Any]] = None

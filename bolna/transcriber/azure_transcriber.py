@@ -7,6 +7,7 @@ from azure.cognitiveservices.speech import AudioStreamWaveFormat, AudioStreamCon
 from dotenv import load_dotenv
 from .base_transcriber import BaseTranscriber
 import azure.cognitiveservices.speech as speechsdk
+from bolna.helpers.asr_keywords import keyword_terms
 from bolna.helpers.utils import create_ws_data_packet, timestamp_ms
 from bolna.enums import TelephonyProvider
 from bolna.helpers.logger_config import configure_logger
@@ -14,10 +15,20 @@ from bolna.helpers.logger_config import configure_logger
 logger = configure_logger(__name__)
 load_dotenv()
 
+# Beyond this a phrase list costs accuracy and latency rather than buying either.
+MAX_PHRASES = 2000
+
 
 class AzureTranscriber(BaseTranscriber):
     def __init__(
-        self, telephony_provider, input_queue=None, output_queue=None, language="en-US", encoding="linear16", **kwargs
+        self,
+        telephony_provider,
+        input_queue=None,
+        output_queue=None,
+        language="en-US",
+        encoding="linear16",
+        keywords=None,
+        **kwargs,
     ):
         super().__init__(input_queue)
         # Never set: the SDK owns the socket, not a task — see is_connected() override.
@@ -39,6 +50,8 @@ class AzureTranscriber(BaseTranscriber):
         self.sampling_rate = 8000
         self.bits_per_sample = 16
         self.run_id = kwargs.get("run_id", "")
+        # Azure's phrase list takes bare phrases; a list-wide weight is not exposed by the SDK.
+        self.phrases = keyword_terms(keywords)[:MAX_PHRASES]
         self.duration = 0
         self.start_time = None
         self.end_time = None
@@ -225,6 +238,12 @@ class AzureTranscriber(BaseTranscriber):
             self.push_stream = speechsdk.audio.PushAudioInputStream(audio_format)
             audio_config = speechsdk.audio.AudioConfig(stream=self.push_stream)
             self.recognizer = speechsdk.SpeechRecognizer(speech_config=speech_config, audio_config=audio_config)
+
+            if self.phrases:
+                phrase_list = speechsdk.PhraseListGrammar.from_recognizer(self.recognizer)
+                for phrase in self.phrases:
+                    phrase_list.addPhrase(phrase)
+                logger.info(f"Azure phrase list applied with {len(self.phrases)} phrases")
 
             self.recognizer.recognizing.connect(self._sync_recognizing_handler)
             self.recognizer.recognized.connect(self._sync_recognized_handler)

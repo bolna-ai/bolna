@@ -13,12 +13,67 @@ from websockets.exceptions import ConnectionClosedError, InvalidHandshake
 
 from .base_transcriber import BaseTranscriber
 from bolna.enums import TelephonyProvider
+from bolna.helpers.asr_keywords import keyword_terms
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.ssl_context import get_ssl_context
 from bolna.helpers.utils import create_ws_data_packet, timestamp_ms
 
 logger = configure_logger(__name__)
 load_dotenv()
+
+# Catalog rows that predate the `speech_model` parameter, mapped to the model the API selects when
+# the parameter is absent.
+LEGACY_SPEECH_MODEL_ALIASES = {
+    "universal": "universal-streaming-english",
+    "universal-streaming": "universal-streaming-english",
+}
+
+# The universal-streaming models take `format_turns` and are fixed to the language set their name
+# implies. The universal-3-x family formats every turn and takes `language_codes` and `prompt`.
+LEGACY_STREAMING_MODELS = frozenset({"universal-streaming-english", "universal-streaming-multilingual"})
+
+# Past these the API rejects the session rather than truncating.
+MAX_KEYTERMS = 100
+MAX_PROMPT_CHARACTERS = 1750
+
+# Codes the universal-3-x family accepts. Anything else rejects the session, so an agent on an
+# unsupported language connects without the hint rather than failing to connect at all.
+SUPPORTED_LANGUAGE_CODES = frozenset(
+    {
+        "af",
+        "ar",
+        "ca",
+        "da",
+        "de",
+        "en",
+        "es",
+        "et",
+        "fa",
+        "fi",
+        "fr",
+        "gl",
+        "he",
+        "hi",
+        "it",
+        "ja",
+        "ko",
+        "mr",
+        "nl",
+        "nn",
+        "no",
+        "pt",
+        "ro",
+        "ru",
+        "sv",
+        "tr",
+        "ur",
+        "vi",
+        "xh",
+        "yue",
+        "zh",
+        "zu",
+    }
+)
 
 
 class AssemblyAITranscriber(BaseTranscriber):
@@ -33,6 +88,8 @@ class AssemblyAITranscriber(BaseTranscriber):
         encoding="pcm_s16le",
         output_queue=None,
         format_turns=True,
+        keywords=None,
+        context=None,
         **kwargs,
     ):
         super().__init__(input_queue)
@@ -42,9 +99,13 @@ class AssemblyAITranscriber(BaseTranscriber):
         self.heartbeat_task = None
         self.sender_task = None
         self.model = model
+        self.speech_model = LEGACY_SPEECH_MODEL_ALIASES.get(model, model)
+        self.is_legacy_streaming_model = self.speech_model in LEGACY_STREAMING_MODELS
         self.sampling_rate = int(sampling_rate)
         self.encoding = encoding
         self.format_turns = format_turns
+        self.keyterms = keyword_terms(keywords)[:MAX_KEYTERMS]
+        self.context = (context or "").strip()[:MAX_PROMPT_CHARACTERS]
 
         self.api_key = kwargs.get("transcriber_key", os.getenv("ASSEMBLY_API_KEY"))
         self.assemblyai_host = "streaming.assemblyai.com"
@@ -83,7 +144,9 @@ class AssemblyAITranscriber(BaseTranscriber):
 
     def get_assemblyai_ws_url(self):
         """Get the AssemblyAI WebSocket URL with appropriate parameters"""
-        connection_params = {"sample_rate": self.sampling_rate, "format_turns": self.format_turns}
+        connection_params = {"sample_rate": self.sampling_rate, "speech_model": self.speech_model}
+        if self.is_legacy_streaming_model:
+            connection_params["format_turns"] = self.format_turns
 
         if self.provider in TelephonyProvider.telephony_values():
             self.encoding = "mulaw" if self.provider in TelephonyProvider.mulaw_values() else "linear16"
@@ -105,8 +168,21 @@ class AssemblyAITranscriber(BaseTranscriber):
             self.sampling_rate = 8000
             self.audio_frame_duration = 0.0
 
-        if self.language != "en":
-            logger.warning("AssemblyAI Universal Streaming currently only supports English")
+        base_language = (self.language or "en").split("-")[0]
+        if self.is_legacy_streaming_model:
+            if self.speech_model == "universal-streaming-english" and base_language != "en":
+                logger.warning(f"AssemblyAI {self.speech_model} only supports English, got {self.language}")
+        elif base_language in SUPPORTED_LANGUAGE_CODES:
+            connection_params["language_codes"] = json.dumps([base_language])
+        else:
+            logger.warning(f"AssemblyAI {self.speech_model} has no language code for {self.language}, auto-detecting")
+
+        if self.keyterms:
+            connection_params["keyterms_prompt"] = json.dumps(self.keyterms)
+
+        # `prompt` is a universal-3-x parameter; the older models reject the session when it is set.
+        if self.context and not self.is_legacy_streaming_model:
+            connection_params["prompt"] = self.context
 
         websocket_url = f"wss://{self.assemblyai_host}/v3/ws?{urlencode(connection_params)}"
         return websocket_url
@@ -379,7 +455,9 @@ class AssemblyAITranscriber(BaseTranscriber):
 
                 elif message_type == "Turn":
                     transcript = msg.get("transcript", "").strip()
-                    turn_is_formatted = msg.get("turn_is_formatted", False)
+                    # `turn_is_formatted` is true on partials too, so end_of_turn is the only
+                    # finality signal.
+                    end_of_turn = msg.get("end_of_turn", False)
 
                     if transcript:
                         latency_ms = None
@@ -395,8 +473,8 @@ class AssemblyAITranscriber(BaseTranscriber):
                                 result_received_at = timestamp_ms()
                                 latency_ms = round(result_received_at - audio_sent_at, 5)
 
-                        if turn_is_formatted:
-                            logger.info(f"Received formatted transcript: {transcript}")
+                        if end_of_turn:
+                            logger.info(f"Received final transcript: {transcript}")
 
                             if self.current_turn_start_time is None:
                                 self.current_turn_start_time = time.perf_counter()

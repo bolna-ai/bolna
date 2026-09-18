@@ -7,6 +7,7 @@ import wave
 import time
 import traceback
 import audioop
+from urllib.parse import urlencode
 from dotenv import load_dotenv
 import aiohttp
 import websockets
@@ -45,6 +46,7 @@ class SarvamTranscriber(BaseTranscriber):
         high_vad_sensitivity=True,
         vad_signals=True,
         disable_sdk=False,
+        context=None,
         **kwargs,
     ):
         super().__init__(input_queue)
@@ -59,6 +61,8 @@ class SarvamTranscriber(BaseTranscriber):
         self.high_vad_sensitivity = high_vad_sensitivity
         self.vad_signals = vad_signals
         self.disable_sdk = disable_sdk
+        # Sarvam biases the final transcript on free-form text; it takes no term list on the socket.
+        self.context = (context or "").strip()
 
         self.api_key = kwargs.get("transcriber_key", os.getenv("SARVAM_API_KEY"))
         self.api_host = os.getenv("SARVAM_HOST", "api.sarvam.ai")
@@ -142,9 +146,10 @@ class SarvamTranscriber(BaseTranscriber):
             params["vad_signals"] = "true"
         if self.target_language:
             params["target_language"] = self.target_language
+        if self.context:
+            params["prompt"] = self.context
 
-        query_string = "&".join([f"{k}={v}" for k, v in params.items()])
-        self.ws_url = f"{ws_url}?{query_string}"
+        self.ws_url = f"{ws_url}?{urlencode(params)}"
 
     async def _get_http_transcription(self, audio_data):
         if self.session is None or self.session.closed:
