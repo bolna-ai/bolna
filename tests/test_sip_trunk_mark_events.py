@@ -8,6 +8,7 @@ along with the ordering rule that keeps a mark from overtaking its own audio.
 """
 
 import asyncio
+from bolna.enums import AudioPlaybackReason
 from collections import deque
 
 
@@ -55,7 +56,7 @@ class _FakeInputHandler:
     def is_audio_being_played_to_user(self):
         return self.audio_playing
 
-    def update_is_audio_being_played(self, value, reason):
+    def update_is_audio_being_played(self, value, reason: AudioPlaybackReason):
         self.audio_playing = value
         self.audio_playing_reason = reason
 

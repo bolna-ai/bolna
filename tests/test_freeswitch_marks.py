@@ -1,6 +1,7 @@
 """In-band playback marks on the FreeSWITCH webcall path: echoes end the turn, estimator is the fallback."""
 
 import asyncio
+from bolna.enums import AudioPlaybackReason
 import json
 from unittest.mock import AsyncMock, MagicMock
 
@@ -64,7 +65,9 @@ async def test_final_mark_echo_wins_the_real_race_once_echoes_confirmed():
     assert handler._finish_task is not estimator  # settle task replaced the watchdog
     await asyncio.sleep(0.05)  # settle (0.01) elapses
     assert estimator.done()  # cancelled mid-sleep (the coro swallows CancelledError by design)
-    input_handler.update_is_audio_being_played.assert_called_once_with(False, "freeswitch_playout_timer")
+    input_handler.update_is_audio_being_played.assert_called_once_with(
+        False, AudioPlaybackReason.FREESWITCH_PLAYOUT_TIMER
+    )
 
 
 @pytest.mark.asyncio
@@ -74,7 +77,7 @@ async def test_watchdog_completes_turn_when_echo_is_lost():
     handler.marks_echoed = True
     await handler.handle(_packet(final=True, mark_id="m-final"))
     await asyncio.wait_for(handler._finish_task, timeout=2)  # ~66ms estimate + 50ms grace
-    input_handler.update_is_audio_being_played.assert_called_with(False, "freeswitch_playout_timer")
+    input_handler.update_is_audio_being_played.assert_called_with(False, AudioPlaybackReason.FREESWITCH_PLAYOUT_TIMER)
 
 
 @pytest.mark.asyncio
@@ -84,7 +87,7 @@ async def test_no_echoes_falls_back_to_estimator():
     # unpatched module: no echoes ever arrive; the estimator (audio is 3200B @48kBps -> ~66ms)
     await asyncio.wait_for(handler._finish_task, timeout=2)
     assert handler.marks_echoed is False
-    input_handler.update_is_audio_being_played.assert_called_with(False, "freeswitch_playout_timer")
+    input_handler.update_is_audio_being_played.assert_called_with(False, AudioPlaybackReason.FREESWITCH_PLAYOUT_TIMER)
 
 
 @pytest.mark.asyncio

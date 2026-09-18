@@ -1,4 +1,5 @@
 import asyncio
+from bolna.enums import AudioPlaybackReason
 import base64
 import time
 import uuid
@@ -90,7 +91,7 @@ class DefaultInputHandler:
         self.audio_chunks_received = 0
         return audio_chunks_received
 
-    def update_is_audio_being_played(self, value, reason):
+    def update_is_audio_being_played(self, value, reason: AudioPlaybackReason):
         logger.info("Audio playback -> %s (reason=%s)", value, reason)
         if value is True:
             self.update_start_ts = time.time()
@@ -165,7 +166,7 @@ class DefaultInputHandler:
                 mark_event_meta_data_obj.get("turn_id"),
                 mark_event_meta_data_obj.get("response_uid"),
             )
-            self.update_is_audio_being_played(True, "pre_mark_ack")
+            self.update_is_audio_being_played(True, AudioPlaybackReason.PRE_MARK_ACK)
             return
 
         self.audio_chunks_received += 1
@@ -218,7 +219,7 @@ class DefaultInputHandler:
                 final_chunk_observable = self.observable_variables.get("final_chunk_played_observable")
                 if final_chunk_observable is not None:
                     final_chunk_observable.value = not final_chunk_observable.value
-            self.update_is_audio_being_played(False, "final_chunk_ack")
+            self.update_is_audio_being_played(False, AudioPlaybackReason.FINAL_CHUNK_ACK)
 
             if message_type == "agent_welcome_message":
                 logger.info("Received mark event for agent_welcome_message")
