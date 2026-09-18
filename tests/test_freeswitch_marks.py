@@ -1,12 +1,12 @@
 """In-band playback marks on the FreeSWITCH webcall path: echoes end the turn, estimator is the fallback."""
 
 import asyncio
-from bolna.enums import AudioPlaybackReason
 import json
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from bolna.enums import AudioPlaybackReason
 from bolna.input_handlers.telephony_providers.freeswitch import FreeSwitchInputHandler
 from bolna.output_handlers.telephony_providers.freeswitch import FreeSwitchOutputHandler
 

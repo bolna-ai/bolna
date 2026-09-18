@@ -7,11 +7,11 @@ await like any other, so teardown starting during it must abandon the switch.
 """
 
 import asyncio
-from bolna.enums import AudioPlaybackReason
 from unittest.mock import AsyncMock
 
 
 from bolna.agent_manager.task_manager import TaskManager
+from bolna.enums import AudioPlaybackReason
 
 
 async def _run(tm, active_transcript="garbled hi"):

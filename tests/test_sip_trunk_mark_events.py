@@ -8,10 +8,10 @@ along with the ordering rule that keeps a mark from overtaking its own audio.
 """
 
 import asyncio
-from bolna.enums import AudioPlaybackReason
 from collections import deque
 
 
+from bolna.enums import AudioPlaybackReason
 from bolna.helpers.mark_event_meta_data import MarkEventMetaData
 from bolna.input_handlers.telephony_providers.sip_trunk import (
     SipTrunkInputHandler,
