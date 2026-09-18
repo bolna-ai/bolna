@@ -1,11 +1,11 @@
 import asyncio
-from bolna.enums import AudioPlaybackReason
 import base64
 import json
 import os
 import time
 import uuid
 
+from bolna.enums import AudioPlaybackReason
 from bolna.output_handlers.default import DefaultOutputHandler
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.utils import wav_bytes_to_pcm

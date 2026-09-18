@@ -1,5 +1,4 @@
 import asyncio
-from bolna.enums import AudioPlaybackReason
 import base64
 import time
 import uuid
@@ -8,6 +7,7 @@ from starlette.websockets import WebSocketDisconnect
 
 from dotenv import load_dotenv
 from bolna.constants import IS_USER_ONLINE_MESSAGE
+from bolna.enums import AudioPlaybackReason
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.utils import create_ws_data_packet
 
