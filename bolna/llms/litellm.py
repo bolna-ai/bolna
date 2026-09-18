@@ -14,6 +14,7 @@ from .tool_call_accumulator import ToolCallAccumulator
 from .types import LLMStreamChunk, LatencyData
 from .message_models import strip_internal_keys
 from .routing_stream import read_routing_stream
+from bolna.helpers.function_calling_helpers import tool_names
 from bolna.helpers.logger_config import configure_logger
 
 logger = configure_logger(__name__)
@@ -54,11 +55,10 @@ class LiteLLM(BaseLLM):
                 self.model_args["aws_region_name"] = kwargs["aws_region_name"]
 
         self.custom_tools = kwargs.get("api_tools", None)
-        logger.info(f"API Tools {self.custom_tools}")
+        logger.info("API Tools %s", tool_names(self.custom_tools))
         if self.custom_tools is not None:
             self.trigger_function_call = True
             self.api_params = self.custom_tools["tools_params"]
-            logger.info(f"Function dict {self.api_params}")
             self.tools = self.custom_tools["tools"]
         else:
             self.trigger_function_call = False
@@ -201,12 +201,14 @@ class LiteLLM(BaseLLM):
 
         if request_json:
             model_args["response_format"] = {"type": "json_object"}
-        # model_args holds the BYOK api_key. The prompt itself is already persisted by
-        # convert_to_request_log, so stderr only needs the shape.
+        # model_args holds the BYOK api_key. The conversation path's prompt is persisted by
+        # convert_to_request_log; extraction and summarization keep only this shape.
+        messages = model_args.get("messages") or []
         logger.info(
-            "Request to litellm model=%s messages=%s stream=%s",
+            "Request to litellm model=%s messages=%s chars=%s stream=%s",
             model_args.get("model"),
-            len(model_args.get("messages") or []),
+            len(messages),
+            sum(len(str(m.get("content") or "")) for m in messages),
             stream,
         )
         try:

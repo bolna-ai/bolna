@@ -31,6 +31,11 @@ def header_names(headers):
     return sorted(headers or {})
 
 
+def tool_names(custom_tools):
+    """Tool names only: every tools_params entry carries that tool's api_token and headers."""
+    return sorted((custom_tools or {}).get("tools_params") or {})
+
+
 def _is_disallowed_ip(ip):
     """True if ``ip`` (an ``ipaddress`` object) is not safe to connect to."""
     if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:

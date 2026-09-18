@@ -75,7 +75,13 @@ class ToolCallAccumulator:
         func_conf = self.api_params[first_func_name]
         arguments_received = self.final_tool_calls[0]["function"]["arguments"]
 
-        logger.info(f"Payload to send {arguments_received} func_dict {func_conf}")
+        logger.info(
+            "Payload to send %s func=%s url=%s method=%s",
+            arguments_received,
+            first_func_name,
+            func_conf.get("url"),
+            func_conf.get("method"),
+        )
         self._gave_pre_call_msg = False
 
         method = func_conf.get("method")
