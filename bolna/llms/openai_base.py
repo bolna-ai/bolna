@@ -14,7 +14,8 @@ from bolna.helpers.utils import (
     SERVER_OWNED_CALL_IDENTIFIERS,
 )
 from .llm import BaseLLM
-from .message_models import MessageFormatAdapter, strip_internal_keys, first_tool_call_result
+from .message_models import MessageFormatAdapter, strip_internal_keys
+from .routing_stream import read_routing_stream
 from .types import APIParams, LLMStreamChunk, LatencyData, FunctionCallPayload
 from bolna.helpers.logger_config import configure_logger
 
@@ -376,14 +377,15 @@ class OpenAICompatibleLLM(BaseLLM):
             "tools": parsed_tools,
             "tool_choice": tool_choice,
             "parallel_tool_calls": False,
-            "stream": False,
+            "stream": True,
+            "stream_options": {"include_usage": True},
         }
         if "reasoning_effort" in model_args:  # gpt-5 family fixes temperature, so leave it unset
             model_args.pop("temperature", None)
         else:
             model_args["temperature"] = 0.0
-        completion, overflowed = await self._route_completion(model_args)
-        return first_tool_call_result(completion, overflowed)
+        stream, overflowed = await self._route_completion(model_args)
+        return await read_routing_stream(stream, parsed_tools, overflowed)
 
     def invalidate_response_chain(self):
         self.previous_response_id = None
