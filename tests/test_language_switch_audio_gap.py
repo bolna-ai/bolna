@@ -25,7 +25,7 @@ def _outcomes(tm):
 async def test_audio_flag_cleared_on_truncate(language_switch_tm):
     tm = language_switch_tm()
     await _run(tm)
-    tm.tools["input"].update_is_audio_being_played.assert_called_once_with(False)
+    tm.tools["input"].update_is_audio_being_played.assert_called_once_with(False, "lid_switch_truncate")
     tm.switch_language.assert_awaited_once()
     assert "switched" in _outcomes(tm)
 

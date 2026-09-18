@@ -1549,7 +1549,7 @@ class TaskManager(BaseManager):
                 logger.info("No welcome message audio to send, marking welcome message as played")
                 self.tools["input"].is_welcome_message_played = True
             else:
-                self.tools["input"].update_is_audio_being_played(True)
+                self.tools["input"].update_is_audio_being_played(True, "welcome_message_sent")
                 self.conversation_history.append_welcome_message(text)
                 convert_to_request_log(
                     message=text,
@@ -5394,7 +5394,7 @@ class TaskManager(BaseManager):
                             self.interruption_manager.on_interruption_triggered(asr_turn_id=_asr_turn_id)
                             # Also record in the interrupted set for was_interrupted annotation
                             self.interruption_manager.record_interrupted_transcriber_turn(_asr_turn_id)
-                            self.tools["input"].update_is_audio_being_played(False)
+                            self.tools["input"].update_is_audio_being_played(False, "barge_in")
                             await self.__cleanup_downstream_tasks()
                         # User continuation detection: cancel pending response if user continues within grace period
                         elif (
@@ -6563,7 +6563,7 @@ class TaskManager(BaseManager):
             # never arrives — clear it here as the barge-in path does, or it latches True and
             # blocks the silence prompt and the stall backstop for the rest of the call.
             if "input" in self.tools:
-                self.tools["input"].update_is_audio_being_played(False)
+                self.tools["input"].update_is_audio_being_played(False, "lid_switch_truncate")
             await self.__cleanup_downstream_tasks()
             # Sequence invalidated — the held audio can no longer ship; safe to open the gate.
             self.lid_playback_gate = None
@@ -7248,7 +7248,7 @@ class TaskManager(BaseManager):
                             # as a false interruption. Mirror the BLOCK-path guard.
                             if meta_info.get("end_of_synthesizer_stream", False):
                                 self._turn_audio_flushed.set()
-                                self.tools["input"].update_is_audio_being_played(False)
+                                self.tools["input"].update_is_audio_being_played(False, "synthesizer_stream_end")
 
                         # Give control to other tasks
                         sleep_time = self.tools["synthesizer"].get_sleep_time()
@@ -7562,7 +7562,7 @@ class TaskManager(BaseManager):
                         if sequence_id is not None:
                             self._sent_audio_sequences.add(sequence_id)
                         self._commit_staged_assistant_history(sequence_id)
-                        self.tools["input"].update_is_audio_being_played(True)
+                        self.tools["input"].update_is_audio_being_played(True, "audio_sent")
                         self.response_in_pipeline = False
                         self._synthesis_awaiting_first_audio = False
                         await self.tools["output"].handle(message)
@@ -7932,7 +7932,7 @@ class TaskManager(BaseManager):
                     # mark dictionary, so the final-chunk mark echo will never arrive and
                     # is_audio_being_played would stay stuck True forever — blocking the
                     # silence-hangup gate in this loop indefinitely.
-                    self.tools["input"].update_is_audio_being_played(False)
+                    self.tools["input"].update_is_audio_being_played(False, "silence_hangup_interrupt")
 
                 # Just in case we need to clear messages sent before
                 await self.tools["output"].handle_interruption()
@@ -8469,7 +8469,7 @@ class TaskManager(BaseManager):
             await self.tools["output"].handle_interruption()
         # handle_interruption clears the pending final-chunk mark, and that mark's echo is
         # the only thing that would otherwise flip this flag back off.
-        self.tools["input"].update_is_audio_being_played(False)
+        self.tools["input"].update_is_audio_being_played(False, "s2s_drop_queued")
         while not self.buffered_output_queue.empty():
             try:
                 self.buffered_output_queue.get_nowait()
@@ -8532,7 +8532,7 @@ class TaskManager(BaseManager):
                 continue
 
             try:
-                self.tools["input"].update_is_audio_being_played(True)
+                self.tools["input"].update_is_audio_being_played(True, "s2s_audio_sent")
                 await self.tools["output"].handle(message)
 
                 if self.should_record and isinstance(message["data"], bytes) and message["data"] != b"\x00":

@@ -90,11 +90,10 @@ class DefaultInputHandler:
         self.audio_chunks_received = 0
         return audio_chunks_received
 
-    def update_is_audio_being_played(self, value):
-        logger.info(f"Audio is being updated - {value}")
+    def update_is_audio_being_played(self, value, reason):
+        logger.info("Audio playback -> %s (reason=%s)", value, reason)
         if value is True:
             self.update_start_ts = time.time()
-            logger.info(f"updating ts as mark_message received: {self.update_start_ts}")
         self._is_audio_being_played_to_user = value
 
     def is_audio_being_played_to_user(self):
@@ -148,7 +147,6 @@ class DefaultInputHandler:
         return self.mark_event_meta_data.fetch_data(mark_id)
 
     def process_mark_message(self, packet):
-        logger.info("BOLNA_TRACE_ACK recv mark_id=%s", packet.get("name"))
         mark_event_meta_data_obj = self.get_mark_event_meta_data_obj(packet)
         if not mark_event_meta_data_obj:
             logger.info(
@@ -160,7 +158,14 @@ class DefaultInputHandler:
         is_content_audio = message_type not in ["backchanneling"]
 
         if message_type == "pre_mark_message":
-            self.update_is_audio_being_played(True)
+            logger.info(
+                "BOLNA_TRACE_ACK applied mark_id=%s type=pre_mark_message seq=%s turn=%s response_uid=%s",
+                packet.get("name"),
+                mark_event_meta_data_obj.get("sequence_id"),
+                mark_event_meta_data_obj.get("turn_id"),
+                mark_event_meta_data_obj.get("response_uid"),
+            )
+            self.update_is_audio_being_played(True, "pre_mark_ack")
             return
 
         self.audio_chunks_received += 1
@@ -213,7 +218,7 @@ class DefaultInputHandler:
                 final_chunk_observable = self.observable_variables.get("final_chunk_played_observable")
                 if final_chunk_observable is not None:
                     final_chunk_observable.value = not final_chunk_observable.value
-            self.update_is_audio_being_played(False)
+            self.update_is_audio_being_played(False, "final_chunk_ack")
 
             if message_type == "agent_welcome_message":
                 logger.info("Received mark event for agent_welcome_message")

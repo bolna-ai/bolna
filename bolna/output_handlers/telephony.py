@@ -84,13 +84,14 @@ class TelephonyOutputHandler(DefaultOutputHandler):
                         ):
                             self.mark_event_meta_data.welcome_pre_mark_id = mark_id
                         logger.info(
-                            "BOLNA_TRACE_TEL send_pre_mark mark_id=%s seq=%s turn=%s response_uid=%s group_uid=%s category=%s",
+                            "BOLNA_TRACE_TEL send_pre_mark mark_id=%s seq=%s turn=%s response_uid=%s group_uid=%s category=%s counter=%s",
                             mark_id,
                             meta_info.get("sequence_id"),
                             meta_info.get("turn_id"),
                             meta_info.get("response_uid"),
                             meta_info.get("response_group_uid"),
                             meta_info.get("message_category", ""),
+                            pre_mark_event_meta_data.get("counter"),
                         )
                         mark_message = await self.form_mark_message(mark_id)
                         await self._send_text(json.dumps(mark_message))
@@ -142,7 +143,7 @@ class TelephonyOutputHandler(DefaultOutputHandler):
                     # sending of post-mark message
                     self.mark_event_meta_data.update_data(mark_id, mark_event_meta_data)
                     logger.info(
-                        "BOLNA_TRACE_TEL send_post_mark mark_id=%s seq=%s turn=%s response_uid=%s group_uid=%s final=%s category=%s text_len=%s",
+                        "BOLNA_TRACE_TEL send_post_mark mark_id=%s seq=%s turn=%s response_uid=%s group_uid=%s final=%s category=%s text_len=%s counter=%s dur=%.3f",
                         mark_id,
                         meta_info.get("sequence_id"),
                         meta_info.get("turn_id"),
@@ -151,6 +152,8 @@ class TelephonyOutputHandler(DefaultOutputHandler):
                         mark_event_meta_data.get("is_final_chunk"),
                         meta_info.get("message_category", ""),
                         len(mark_event_meta_data.get("text_synthesized", "") or ""),
+                        mark_event_meta_data.get("counter"),
+                        duration,
                     )
                     mark_message = await self.form_mark_message(mark_id)
                     await self._send_text(json.dumps(mark_message))
