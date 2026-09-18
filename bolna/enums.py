@@ -258,7 +258,7 @@ _DISPLAY_NAMES = {
 
 
 class AudioPlaybackReason(str, Enum):
-    """Why the agent's audio-playing state flipped. Grepped in Loki to attribute a stuck flag."""
+    """Why the agent's audio-playing state flipped. Grepped in the logs to attribute a stuck flag."""
 
     # Enum.__str__ would render the member name, and these are logged with lazy %s args.
     __str__ = str.__str__
