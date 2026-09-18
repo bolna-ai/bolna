@@ -97,6 +97,21 @@ class MarkEventMetaData:
         duration = value.get("duration") or 0
         if value.get("type") != "pre_mark_message":
             self._mark_history[mark_id] = value
+        logger.info(
+            "BOLNA_TRACE_MARK send mark_id=%s type=%s category=%s seq=%s turn=%s response_uid=%s "
+            "group_uid=%s counter=%s dur=%.3f text_len=%s final=%s",
+            mark_id,
+            value.get("type"),
+            value.get("message_category") or value.get("type"),
+            value.get("sequence_id"),
+            value.get("turn_id"),
+            value.get("response_uid"),
+            value.get("response_group_uid"),
+            value.get("counter"),
+            duration,
+            len(value.get("text_synthesized", "") or ""),
+            value.get("is_final_chunk"),
+        )
         self.mark_changed.set()
         if value.get("type") != "pre_mark_message":
             self._note_audio_queued(value, duration)

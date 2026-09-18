@@ -169,6 +169,12 @@ class ElevenlabsSynthesizer(ElevenlabsBase):
         try:
             # Also covers a context already closed at end_of_llm_stream but still draining frames.
             if self.current_turn_context_id:
+                if self._eos_context_id != self.current_turn_context_id:
+                    logger.info(
+                        "Abandoning context with no end-of-stream: spoken_chars=%s seq_chars=%s",
+                        len(self.eos_accum_text),
+                        self.current_sequence_chars,
+                    )
                 self.context_ids_to_ignore.add(self.current_turn_context_id)
                 self.current_turn_context_id = None
                 # The interrupted context's end-of-stream is now dropped, so the

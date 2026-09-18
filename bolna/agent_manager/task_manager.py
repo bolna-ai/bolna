@@ -365,7 +365,7 @@ class TaskManager(BaseManager):
             "doing task %s type=%s config_sha=%s",
             task_id,
             task.get("task_type"),
-            get_md5_hash(json.dumps(task, sort_keys=True, default=str))[:12],
+            get_md5_hash(repr(task))[:12],
         )
         self.task_id = task_id
         self.assistant_name = assistant_name
