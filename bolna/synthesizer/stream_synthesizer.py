@@ -289,6 +289,11 @@ class StreamSynthesizer(BaseSynthesizer):
         except Exception:
             pass
 
+    def has_unsettled_turn(self):
+        """True when a turn was pushed but never reached its eos sentinel — left latched,
+        it disables the new-turn block in _stamp_turn_start for the rest of the call."""
+        return self.current_turn_start_time is not None
+
     def _record_turn_latency(self):
         """Append a latency record for the completed turn."""
         try:
