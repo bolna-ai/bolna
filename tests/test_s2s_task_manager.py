@@ -304,7 +304,7 @@ class TestBargeIn:
         # watchdog never fires and the call stays open and billing.
         tm = make_tm()
         await tm._s2s_drop_queued_audio()
-        tm.tools["input"].update_is_audio_being_played.assert_called_with(False)
+        tm.tools["input"].update_is_audio_being_played.assert_called_with(False, "s2s_drop_queued")
 
 
 class TestBargeInAccounting:

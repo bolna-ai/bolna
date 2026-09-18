@@ -284,8 +284,6 @@ class ElevenlabsSynthesizer(ElevenlabsBase):
                         )
                     last_recv_time = time.perf_counter()
 
-                logger.info("response for isFinal: {}".format(data.get("isFinal", False)))
-
                 if "audio" in data and data["audio"]:
                     chunk = base64.b64decode(data["audio"])
                     try:
@@ -320,13 +318,14 @@ class ElevenlabsSynthesizer(ElevenlabsBase):
                             self.current_sequence_chars <= 0
                             or len(self.eos_accum_text) >= 0.9 * self.current_sequence_chars
                         )
-                        logger.info(
-                            f"EOS check spoken_chars={len(self.eos_accum_text)} seq_chars={self.current_sequence_chars} enough={spoken_enough}"
-                        )
                         # End the stream only once the WHOLE turn text has been spoken, not when a
                         # truncated frame fragment (e.g. "s.") coincidentally suffixes it (87da790e).
                         if current_cmp and spoken_enough and spoken_cmp.endswith(current_cmp):
-                            logger.info("send end_of_synthesizer_stream")
+                            logger.info(
+                                "send end_of_synthesizer_stream spoken_chars=%s seq_chars=%s",
+                                len(self.eos_accum_text),
+                                self.current_sequence_chars,
+                            )
                             emit_eos = True
                     except Exception as e:
                         logger.error(f"Error matching spoken text - {e}")

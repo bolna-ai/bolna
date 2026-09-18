@@ -55,8 +55,9 @@ class _FakeInputHandler:
     def is_audio_being_played_to_user(self):
         return self.audio_playing
 
-    def update_is_audio_being_played(self, value):
+    def update_is_audio_being_played(self, value, reason):
         self.audio_playing = value
+        self.audio_playing_reason = reason
 
 
 def _make_output_handler(websocket, input_handler):

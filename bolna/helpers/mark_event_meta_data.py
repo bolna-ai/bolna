@@ -97,18 +97,6 @@ class MarkEventMetaData:
         duration = value.get("duration") or 0
         if value.get("type") != "pre_mark_message":
             self._mark_history[mark_id] = value
-        logger.info(
-            "BOLNA_TRACE_MARK update mark_id=%s type=%s seq=%s turn=%s response_uid=%s group_uid=%s counter=%s dur=%.3f text_len=%s",
-            mark_id,
-            value.get("type"),
-            value.get("sequence_id"),
-            value.get("turn_id"),
-            value.get("response_uid"),
-            value.get("response_group_uid"),
-            value.get("counter"),
-            duration,
-            len(value.get("text_synthesized", "") or ""),
-        )
         self.mark_changed.set()
         if value.get("type") != "pre_mark_message":
             self._note_audio_queued(value, duration)
@@ -183,16 +171,6 @@ class MarkEventMetaData:
             entry["ack_ts"] = time.time()
         result = self.mark_event_meta_data.pop(mark_id, {})
         if result:
-            logger.info(
-                "BOLNA_TRACE_MARK fetch mark_id=%s type=%s seq=%s turn=%s response_uid=%s group_uid=%s counter=%s",
-                mark_id,
-                result.get("type"),
-                result.get("sequence_id"),
-                result.get("turn_id"),
-                result.get("response_uid"),
-                result.get("response_group_uid"),
-                result.get("counter"),
-            )
             self.mark_changed.set()
         return result
 

@@ -200,7 +200,7 @@ class SipTrunkOutputHandler(TelephonyOutputHandler):
         for mid in remaining:
             self.input_handler.process_mark_message({"name": mid})
         if self.input_handler.is_audio_being_played_to_user():
-            self.input_handler.update_is_audio_being_played(False)
+            self.input_handler.update_is_audio_being_played(False, "sip_playback_finished")
 
     # ------------------------------------------------------------------
     # Audio framing / sending
@@ -324,7 +324,7 @@ class SipTrunkOutputHandler(TelephonyOutputHandler):
             if self.mark_event_meta_data:
                 self.mark_event_meta_data.clear_data()
             if self.input_handler:
-                self.input_handler.update_is_audio_being_played(False)
+                self.input_handler.update_is_audio_being_played(False, "sip_interruption")
         except Exception as e:
             logger.error(f"sip-trunk handle_interruption: {e}")
 
