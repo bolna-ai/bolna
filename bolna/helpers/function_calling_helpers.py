@@ -26,6 +26,11 @@ class SSRFError(ValueError):
     """Raised when an outbound request targets a non-public address."""
 
 
+def header_names(headers):
+    """Header keys only: the values carry the tool's bearer token."""
+    return sorted(headers or {})
+
+
 def _is_disallowed_ip(ip):
     """True if ``ip`` (an ``ipaddress`` object) is not safe to connect to."""
     if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
@@ -247,13 +252,13 @@ async def trigger_api(
             response_text = None
             if method.lower() == "get":
                 get_url = build_get_url(url, api_params)
-                logger.info(f"Sending request {request_body}, {get_url}, {headers}")
+                logger.info("Sending request %s, %s, header_keys=%s", request_body, get_url, header_names(headers))
                 # allow_redirects=False: the URL is validated pre-flight, but a redirect
                 # hop is not re-validated and would reopen the SSRF path (e.g. 302 -> IMDS).
                 async with session.get(get_url, headers=headers, allow_redirects=False) as response:
                     response_text = await response.text()
             elif method.lower() == "post":
-                logger.info(f"Sending request {api_params}, {url}, {headers}")
+                logger.info("Sending request %s, %s, header_keys=%s", api_params, url, header_names(headers))
                 if content_type == "json":
                     async with session.post(url, json=api_params, headers=headers, allow_redirects=False) as response:
                         response_text = await response.text()

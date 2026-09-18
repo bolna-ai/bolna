@@ -354,7 +354,12 @@ class TaskManager(BaseManager):
         ):
             self.kwargs["assistant_id"] = task["tools_config"]["llm_agent"]["llm_config"]["assistant_id"]
 
-        logger.info(f"doing task {task}")
+        logger.info(
+            "doing task %s type=%s config_sha=%s",
+            task_id,
+            task.get("task_type"),
+            get_md5_hash(json.dumps(task, sort_keys=True, default=str))[:12],
+        )
         self.task_id = task_id
         self.assistant_name = assistant_name
         self.tools = {}
@@ -671,7 +676,6 @@ class TaskManager(BaseManager):
             # For nitro
             self.nitro = True
             self.conversation_config = task.get("task_config", {})
-            logger.info(f"Conversation config {self.conversation_config}")
 
             # Enable DTMF flow
             dtmf_enabled = self.conversation_config.get("dtmf_enabled", False)
@@ -2815,7 +2819,11 @@ class TaskManager(BaseManager):
         while not self.conversation_ended:
             mark_events = self.mark_event_meta_data.mark_event_meta_data
             mark_items_list = [{"mark_id": k, "mark_data": v} for k, v in mark_events.items()]
-            logger.info(f"current_list: {mark_items_list}")
+            logger.info(
+                "current_list: %s pending %s",
+                len(mark_items_list),
+                [(m["mark_id"], m["mark_data"].get("type")) for m in mark_items_list],
+            )
 
             if not mark_items_list:
                 break
@@ -3998,7 +4006,15 @@ class TaskManager(BaseManager):
 
                 if trigger_function_call:
                     self.function_call_in_flight = True  # so a parallel LID switch won't truncate it
-                    logger.info(f"Triggering function call for {data}")
+                    # model_extra is the model-produced arguments; the declared fields carry the
+                    # tool's api_token, its auth headers and the whole conversation history.
+                    logger.info(
+                        "Triggering function call %s url=%s method=%s args=%s",
+                        data.called_fun,
+                        data.url,
+                        data.method,
+                        data.model_extra,
+                    )
                     # Stamp total_stream_duration_ms before early return — function call chunk carries the final latency
                     if latency:
                         fc_latency_dict = latency.model_dump()
