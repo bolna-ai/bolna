@@ -4009,10 +4009,12 @@ class TaskManager(BaseManager):
                     # model_extra is the model-produced arguments; the declared fields carry the
                     # tool's api_token, its auth headers and the whole conversation history.
                     logger.info(
-                        "Triggering function call %s url=%s method=%s args=%s",
+                        "Triggering function call %s url=%s method=%s seq=%s turn=%s args=%s",
                         data.called_fun,
                         data.url,
                         data.method,
+                        data.meta_info.get("sequence_id"),
+                        data.meta_info.get("turn_id"),
                         data.model_extra,
                     )
                     # Stamp total_stream_duration_ms before early return — function call chunk carries the final latency
