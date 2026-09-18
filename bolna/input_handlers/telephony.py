@@ -179,6 +179,14 @@ class TelephonyInputHandler(DefaultInputHandler):
                         f"{self.io_provider} websocket disconnected abnormally: code={e.code}, "
                         f"reason={getattr(e, 'reason', None)}, stream_sid={self.stream_sid}, call_sid={self.call_sid}"
                     )
+                # Without break+EOS here, the loop calls receive_text() again on an
+                # already-disconnected socket. Starlette then raises RuntimeError('Cannot
+                # call "receive" once a disconnect message has been received.') on that
+                # second call, which falls into the generic except below -- a spurious
+                # traceback for a normal hangup, and EOS sent one iteration late.
+                ws_data_packet = create_ws_data_packet(data=None, meta_info={"io": "default", "eos": True})
+                self.queues["transcriber"].put_nowait(ws_data_packet)
+                break
 
             except Exception as e:
                 traceback.print_exc()
