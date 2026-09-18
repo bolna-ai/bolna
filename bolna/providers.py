@@ -1,3 +1,5 @@
+import os
+
 from .synthesizer import (
     PollySynthesizer,
     ElevenlabsSynthesizer,
@@ -49,6 +51,18 @@ from .output_handlers import (
 from .llms import OpenAiLLM, LiteLLM, AzureLLM, GeminiLLM
 from .s2s import GeminiLiveS2S, OpenAIRealtimeS2S
 from .enums import TelephonyProvider, SynthesizerProvider, TranscriberProvider, LLMProvider, S2SProvider
+
+ORCAROUTER_DEFAULT_BASE_URL = "https://api.orcarouter.ai/v1"
+
+
+class OrcaRouterLLM(OpenAiLLM):
+    """OpenAI-compatible OrcaRouter client with provider-specific defaults."""
+
+    def __init__(self, *args, **kwargs):
+        kwargs["provider"] = LLMProvider.CUSTOM.value
+        kwargs.setdefault("base_url", os.getenv("ORCAROUTER_BASE_URL", ORCAROUTER_DEFAULT_BASE_URL))
+        kwargs.setdefault("llm_key", os.getenv("ORCAROUTER_API_KEY"))
+        super().__init__(*args, **kwargs)
 
 
 def elevenlabs_synthesizer(**kwargs):
@@ -110,6 +124,7 @@ SUPPORTED_LLM_PROVIDERS = {
     LLMProvider.ANTHROPIC.value: LiteLLM,
     LLMProvider.DEEPSEEK.value: LiteLLM,
     LLMProvider.OPENROUTER.value: LiteLLM,
+    LLMProvider.ORCAROUTER.value: OrcaRouterLLM,
     LLMProvider.AZURE.value: AzureLLM,
     LLMProvider.GOOGLE.value: GeminiLLM,
 }

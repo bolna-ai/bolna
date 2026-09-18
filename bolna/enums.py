@@ -112,6 +112,7 @@ class LLMProvider(str, Enum):
     ANTHROPIC = "anthropic"
     DEEPSEEK = "deepseek"
     OPENROUTER = "openrouter"
+    ORCAROUTER = "orcarouter"
     AZURE = "azure"
     GOOGLE = "google"
 
