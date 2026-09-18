@@ -201,7 +201,14 @@ class LiteLLM(BaseLLM):
 
         if request_json:
             model_args["response_format"] = {"type": "json_object"}
-        logger.info(f"Request to litellm {model_args}")
+        # model_args holds the BYOK api_key. The prompt itself is already persisted by
+        # convert_to_request_log, so stderr only needs the shape.
+        logger.info(
+            "Request to litellm model=%s messages=%s stream=%s",
+            model_args.get("model"),
+            len(model_args.get("messages") or []),
+            stream,
+        )
         try:
             completion = await acompletion(**model_args)
             text = completion.choices[0].message.content
