@@ -961,7 +961,7 @@ class TaskManager(BaseManager):
         if hasattr(_t, "transcribers") and hasattr(_t, "active_label"):
             _t = _t.transcribers.get(_t.active_label, _t)
         latency_dict["asr_turn_id"] = getattr(_t, "turn_counter", None)
-        latency_dict["model"] = self.llm_config.get("model") if self.llm_config else None
+        latency_dict["model"] = self._active_llm_model()
         latency_dict["input_tokens"] = actual_input_tokens
         latency_dict["output_tokens"] = actual_output_tokens
         latency_dict["reasoning_tokens"] = actual_reasoning_tokens
@@ -1232,6 +1232,16 @@ class TaskManager(BaseManager):
         if resolve is not None:
             return resolve()
         return getattr(llm_agent, "llm", None)
+
+    def _active_llm_model(self):
+        """Model label of the client serving this turn. A per-node override (graph agent) runs on a
+        different model than the base config, so logs/billing must record the client's own model,
+        not self.llm_config. Falls back to the base config for non-graph agents or a missing client."""
+        base = self.llm_config.get("model") if self.llm_config else None
+        client = self._active_llm_client()
+        if client is None:
+            return base
+        return getattr(client, "request_log_model", None) or getattr(client, "model", None) or base
 
     def _invalidate_response_chain(self):
         try:
@@ -3623,7 +3633,7 @@ class TaskManager(BaseManager):
             meta_info=meta_info,
             component=LogComponent.LLM,
             direction=LogDirection.RESPONSE,
-            model=self.llm_config["model"],
+            model=self._active_llm_model(),
             run_id=self.run_id,
             input_tokens=input_tokens,
             output_tokens=output_tokens,
@@ -3709,7 +3719,7 @@ class TaskManager(BaseManager):
                     convert_to_request_log(
                         format_messages(llm_message["messages"], use_system_prompt=True, include_tools=True),
                         meta_info,
-                        self.llm_config["model"],
+                        self._active_llm_model(),
                         LogComponent.LLM,
                         direction=LogDirection.REQUEST,
                         is_cached=False,
@@ -4076,7 +4086,7 @@ class TaskManager(BaseManager):
                 meta_info=meta_info,
                 component=LogComponent.LLM,
                 direction=LogDirection.RESPONSE,
-                model=self.llm_config["model"],
+                model=self._active_llm_model(),
                 run_id=self.run_id,
                 input_tokens=actual_input_tokens,
                 output_tokens=actual_output_tokens,
@@ -4119,7 +4129,7 @@ class TaskManager(BaseManager):
                 "sequence_id": meta_info.get("sequence_id"),
                 "turn_id": meta_info.get("turn_id"),
                 "asr_turn_id": getattr(_t_s, "turn_counter", None),
-                "model": self.llm_config.get("model") if self.llm_config else None,
+                "model": self._active_llm_model(),
                 "llm_start_ms": round(start * 1000 - self.conversation_start_init_ts, 2) if start else None,
             }
         )
