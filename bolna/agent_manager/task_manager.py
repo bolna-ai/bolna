@@ -1425,6 +1425,10 @@ class TaskManager(BaseManager):
                     input_kwargs["ws_context_data"] = self.context_data
                     input_kwargs["agent_config"] = {"tasks": [self.task_config]}
             self.tools["input"] = input_handler_class(**input_kwargs)
+            if self.task_config["tools_config"]["input"]["provider"] in SUPPORTED_INPUT_TELEPHONY_HANDLERS:
+                recipient_data = (self.context_data or {}).get("recipient_data") or {}
+                if recipient_data.get("call_sid"):
+                    self.tools["input"].set_fallback_call_sid(recipient_data["call_sid"])
         else:
             # raising a plain string surfaces as TypeError("exceptions must derive from
             # BaseException") and hides which provider was unsupported — this exact failure
@@ -3011,7 +3015,7 @@ class TaskManager(BaseManager):
             logger.info("Proactive generation cancelled by interruption")
             return
 
-    async def __process_end_of_conversation(self, web_call_timeout=False):
+    async def __process_end_of_conversation(self):
         if self._end_of_conversation_in_progress or self.conversation_ended:
             logger.info("__process_end_of_conversation: Already in progress or ended, skipping duplicate call")
             return
@@ -3035,7 +3039,7 @@ class TaskManager(BaseManager):
                 logger.error(f"Error while checking queue: {e}", exc_info=True)
                 break
 
-        if self.hangup_message_queued and not web_call_timeout:
+        if self.hangup_message_queued:
             self.history.append(
                 {
                     "role": "assistant",
@@ -7272,7 +7276,8 @@ class TaskManager(BaseManager):
                 and meta_info["is_first_message"]
                 or self.interruption_manager.is_valid_sequence(message["meta_info"]["sequence_id"])
             ):
-                if meta_info.get("sequence_id") not in (None, -1):
+                is_welcome = meta_info.get("message_category") == "agent_welcome_message"
+                if is_welcome or meta_info.get("sequence_id") not in (None, -1):
                     self._synthesis_awaiting_first_audio = True
                 if meta_info["is_md5_hash"]:
                     logger.info(
@@ -7591,27 +7596,40 @@ class TaskManager(BaseManager):
         frozen through a long turn and the watchdog scores a still-speaking agent as silent.
         The playout estimate covers that turn, and clamping it to now means the measured silence
         can only shrink, never grow, so this can delay a hangup but never cause an earlier one.
+
+        Before the first ack there is no stamp, so silence runs from the moment the stream could
+        first carry audio - the agent was not silent while the call was still being set up.
         """
+        if self.stream_sid_ts:
+            stream_ready = self.stream_sid_ts / 1000
+        else:
+            stream_ready = self.start_time + self.welcome_message_delay / 1000
         return max(
-            self.last_transmitted_timestamp, min(time.time(), self.mark_event_meta_data.get_audio_playing_until())
+            self.last_transmitted_timestamp or stream_ready,
+            min(time.time(), self.mark_event_meta_data.get_audio_playing_until()),
         )
 
     async def __check_for_completion(self):
         logger.info(f"Starting task to check for completion")
+        # Exotel and sip-trunk have no carrier-side stream timeout, so this is their only cap.
+        # A chat session is not a call and is never capped.
+        is_call = (
+            self.is_web_based_call
+            or self.task_config["tools_config"]["input"]["provider"] in SUPPORTED_INPUT_TELEPHONY_HANDLERS
+        )
+        call_terminate = int((self.task_config.get("task_config") or {}).get("call_terminate") or 0) if is_call else 0
         while True:
             await asyncio.sleep(2)
 
-            if self.is_web_based_call and time.time() - self.start_time >= int(
-                self.task_config["task_config"]["call_terminate"]
-            ):
-                logger.info("Hanging up for web call as max time of call has been reached")
-                await self.__process_end_of_conversation(web_call_timeout=True)
-                self.hangup_detail = HangupReason.WEB_CALL_MAX_DURATION_REACHED
+            if call_terminate > 0 and not self.has_transfer and time.time() - self.start_time >= call_terminate:
+                logger.info(f"Hanging up: call reached its {call_terminate}s call_terminate cap")
+                self.hangup_detail = (
+                    HangupReason.WEB_CALL_MAX_DURATION_REACHED
+                    if self.is_web_based_call
+                    else HangupReason.MAX_DURATION_REACHED
+                )
+                await self.__process_end_of_conversation()
                 break
-
-            if self.last_transmitted_timestamp == 0:
-                logger.info(f"Last transmitted timestamp is simply 0 and hence continuing")
-                continue
 
             if self.hangup_triggered:
                 if self.conversation_ended:
