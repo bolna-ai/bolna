@@ -411,11 +411,10 @@ class AssemblyAITranscriber(BaseTranscriber):
                 message_type = msg.get("type")
 
                 if message_type == "Begin":
-                    logger.info("AssemblyAI session began")
+                    # Nothing downstream consumes a session event, and `Begin` can beat the first
+                    # audio frame, which would forward a meta_info the pipeline cannot read.
                     self.session_id = msg.get("id")
-                    expires_at = msg.get("expires_at")
-                    logger.info(f"Session ID: {self.session_id}, Expires at: {expires_at}")
-                    yield create_ws_data_packet("session_started", self.meta_info)
+                    logger.info(f"AssemblyAI session began: {self.session_id}, expires at {msg.get('expires_at')}")
 
                 elif message_type == "Turn":
                     transcript = msg.get("transcript", "").strip()
