@@ -14,6 +14,7 @@ from dotenv import load_dotenv
 
 from .base_transcriber import BaseTranscriber
 from bolna.enums import TelephonyProvider
+from bolna.helpers.asr_keywords import keyword_terms
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.ssl_context import get_ssl_context
 from bolna.helpers.utils import create_ws_data_packet, timestamp_ms
@@ -207,7 +208,7 @@ class GladiaTranscriber(BaseTranscriber):
 
         # Add custom vocabulary if keywords provided
         if self.keywords:
-            vocabulary_list = [kw.strip() for kw in self.keywords.split(",") if kw.strip()]
+            vocabulary_list = keyword_terms(self.keywords)
             if vocabulary_list:
                 payload["realtime_processing"] = {
                     "custom_vocabulary": True,

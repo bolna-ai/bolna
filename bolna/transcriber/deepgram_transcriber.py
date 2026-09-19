@@ -11,6 +11,7 @@ from websockets.asyncio.client import ClientConnection
 from websockets.exceptions import ConnectionClosedError, InvalidHandshake, ConnectionClosed
 
 from .base_transcriber import BaseTranscriber
+from bolna.helpers.asr_keywords import keyword_entries
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.ssl_context import get_ssl_context
 from bolna.helpers.utils import create_ws_data_packet, timestamp_ms
@@ -81,7 +82,7 @@ class DeepgramTranscriber(BaseTranscriber):
                 self.api_url += f"&tag={quote(self.run_id)}&extra={quote(f'run_id:{self.run_id}')}"
             self.session = aiohttp.ClientSession()
             if self.keywords is not None:
-                keyword_list = [quote(kw.strip()) for kw in self.keywords.split(",") if kw.strip()]
+                keyword_list = [quote(entry) for entry in keyword_entries(self.keywords)]
                 if keyword_list:
                     if self.model.startswith("nova-3"):
                         keyword_string = "&keyterm=" + "&keyterm=".join(keyword_list)
@@ -200,7 +201,7 @@ class DeepgramTranscriber(BaseTranscriber):
         websocket_url = websocket_api + urlencode(dg_params)
 
         if self.keywords:
-            keyword_list = [quote(kw.strip()) for kw in self.keywords.split(",") if kw.strip()]
+            keyword_list = [quote(entry) for entry in keyword_entries(self.keywords)]
             if keyword_list:
                 if self.model.startswith("nova-3"):
                     websocket_url += "&keyterm=" + "&keyterm=".join(keyword_list)
@@ -243,7 +244,7 @@ class DeepgramTranscriber(BaseTranscriber):
             self.audio_frame_duration = 0.0
 
         if self.keywords:
-            keyword_list = [kw.strip() for kw in self.keywords.split(",") if kw.strip()]
+            keyword_list = keyword_entries(self.keywords)
             if keyword_list:
                 dg_params["keyterm"] = keyword_list
 

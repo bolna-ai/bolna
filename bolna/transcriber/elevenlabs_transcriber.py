@@ -13,6 +13,7 @@ from websockets.exceptions import ConnectionClosedError, InvalidHandshake, Conne
 from .base_transcriber import BaseTranscriber
 from bolna.constants import ELEVENLABS_REALTIME_MAX_KEYTERMS
 from bolna.enums import TelephonyProvider
+from bolna.helpers.asr_keywords import keyword_terms
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.ssl_context import get_ssl_context
 from bolna.helpers.utils import create_ws_data_packet, timestamp_ms
@@ -73,9 +74,8 @@ class ElevenLabsTranscriber(BaseTranscriber):
         self.include_language_detection = include_language_detection
 
         # Keyterm biasing: comma-separated config string -> array of terms (Scribe takes no weights)
-        self.keyterms = []
-        if keywords and isinstance(keywords, str):
-            self.keyterms = [kw.strip() for kw in keywords.split(",") if kw.strip()]
+        self.keyterms = keyword_terms(keywords)
+        if self.keyterms:
             if len(self.keyterms) > ELEVENLABS_REALTIME_MAX_KEYTERMS:
                 logger.warning(
                     f"ElevenLabs realtime supports up to {ELEVENLABS_REALTIME_MAX_KEYTERMS} keyterms; "

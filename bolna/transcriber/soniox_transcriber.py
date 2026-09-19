@@ -9,6 +9,7 @@ from websockets.asyncio.client import ClientConnection
 from websockets.exceptions import ConnectionClosedError, InvalidHandshake
 
 from .base_transcriber import BaseTranscriber
+from bolna.helpers.asr_keywords import keyword_terms
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.ssl_context import get_ssl_context
 from bolna.helpers.utils import build_soniox_config, create_ws_data_packet, soniox_ws_url, timestamp_ms
@@ -40,6 +41,7 @@ class SonioxTranscriber(BaseTranscriber):
         encoding="linear16",
         output_queue=None,
         keywords=None,
+        context=None,
         process_interim_results="true",
         language_hints=None,
         **kwargs,
@@ -52,6 +54,7 @@ class SonioxTranscriber(BaseTranscriber):
         self.encoding = encoding
         self.sampling_rate = int(sampling_rate) if isinstance(sampling_rate, (str, int)) else 16000
         self.keywords = keywords
+        self.context = (context or "").strip()
         self.language_hints = language_hints
         self.transcriber_output_queue = output_queue
         self.connected_via_dashboard = kwargs.get("enforce_streaming", True)
@@ -131,9 +134,18 @@ class SonioxTranscriber(BaseTranscriber):
             return SONIOX_DEFAULT_MULTILINGUAL_HINTS
         return [self.language]
 
+    def _build_soniox_context(self):
+        """Soniox takes free-form text and a term list in one `context` object."""
+        context = {}
+        if self.context:
+            context["text"] = self.context
+        terms = keyword_terms(self.keywords)
+        if terms:
+            context["terms"] = terms
+        return context or None
+
     def _build_config(self):
         """First WebSocket frame: auth + stream config (Soniox carries the api_key here, not a header)."""
-        terms = [kw.strip() for kw in self.keywords.split(",") if kw.strip()] if self.keywords else []
         return build_soniox_config(
             self.api_key,
             self.model,
@@ -142,7 +154,7 @@ class SonioxTranscriber(BaseTranscriber):
             max_endpoint_delay_ms=self.max_endpoint_delay_ms,
             endpoint_sensitivity=self.endpoint_sensitivity,
             language_hints=self._resolve_language_hints() or None,
-            context={"terms": terms} if terms else None,
+            context=self._build_soniox_context(),
         )
 
     def get_soniox_ws_url(self):
