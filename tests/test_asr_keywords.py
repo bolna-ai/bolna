@@ -10,7 +10,6 @@ from bolna.helpers.asr_keywords import keyword_entries, keyword_terms
         ("bolna:2", ["bolna"]),
         ("bolna:2.5", ["bolna"]),
         ("bolna, account number:3", ["bolna", "account number"]),
-        # A colon that is not a weight belongs to the term.
         ("3:30 pm", ["3:30 pm"]),
         ("acme:corp:2", ["acme:corp"]),
         ("", []),

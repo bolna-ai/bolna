@@ -411,8 +411,7 @@ class AssemblyAITranscriber(BaseTranscriber):
                 message_type = msg.get("type")
 
                 if message_type == "Begin":
-                    # Nothing downstream consumes a session event, and `Begin` can beat the first
-                    # audio frame, which would forward a meta_info the pipeline cannot read.
+                    # Not forwarded downstream: `Begin` can arrive before meta_info exists.
                     self.session_id = msg.get("id")
                     logger.info(f"AssemblyAI session began: {self.session_id}, expires at {msg.get('expires_at')}")
 
