@@ -50,7 +50,6 @@ class AzureTranscriber(BaseTranscriber):
         self.sampling_rate = 8000
         self.bits_per_sample = 16
         self.run_id = kwargs.get("run_id", "")
-        # Azure's phrase list takes bare phrases; a list-wide weight is not exposed by the SDK.
         self.phrases = keyword_terms(keywords)[:MAX_PHRASES]
         self.duration = 0
         self.start_time = None

@@ -21,58 +21,22 @@ from bolna.helpers.utils import create_ws_data_packet, timestamp_ms
 logger = configure_logger(__name__)
 load_dotenv()
 
-# Catalog rows that predate the `speech_model` parameter, mapped to the model the API selects when
-# the parameter is absent.
+# Catalog rows predating `speech_model`, mapped to the model the API defaults to.
 LEGACY_SPEECH_MODEL_ALIASES = {
     "universal": "universal-streaming-english",
     "universal-streaming": "universal-streaming-english",
 }
 
-# The universal-streaming models take `format_turns` and are fixed to the language set their name
-# implies. The universal-3-x family formats every turn and takes `language_codes` and `prompt`.
+# These take `format_turns` and a fixed language set; universal-3-x takes `language_codes` and `prompt`.
 LEGACY_STREAMING_MODELS = frozenset({"universal-streaming-english", "universal-streaming-multilingual"})
 
 # Past these the API rejects the session rather than truncating.
 MAX_KEYTERMS = 100
 MAX_PROMPT_CHARACTERS = 1750
 
-# Codes the universal-3-x family accepts. Anything else rejects the session, so an agent on an
-# unsupported language connects without the hint rather than failing to connect at all.
+# Codes the universal-3-x family accepts. Anything else rejects the session.
 SUPPORTED_LANGUAGE_CODES = frozenset(
-    {
-        "af",
-        "ar",
-        "ca",
-        "da",
-        "de",
-        "en",
-        "es",
-        "et",
-        "fa",
-        "fi",
-        "fr",
-        "gl",
-        "he",
-        "hi",
-        "it",
-        "ja",
-        "ko",
-        "mr",
-        "nl",
-        "nn",
-        "no",
-        "pt",
-        "ro",
-        "ru",
-        "sv",
-        "tr",
-        "ur",
-        "vi",
-        "xh",
-        "yue",
-        "zh",
-        "zu",
-    }
+    "af ar ca da de en es et fa fi fr gl he hi it ja ko mr nl nn no pt ro ru sv tr ur vi xh yue zh zu".split()
 )
 
 
@@ -180,7 +144,7 @@ class AssemblyAITranscriber(BaseTranscriber):
         if self.keyterms:
             connection_params["keyterms_prompt"] = json.dumps(self.keyterms)
 
-        # `prompt` is a universal-3-x parameter; the older models reject the session when it is set.
+        # The older models reject the session outright when `prompt` is set.
         if self.context and not self.is_legacy_streaming_model:
             connection_params["prompt"] = self.context
 
@@ -455,8 +419,7 @@ class AssemblyAITranscriber(BaseTranscriber):
 
                 elif message_type == "Turn":
                     transcript = msg.get("transcript", "").strip()
-                    # `turn_is_formatted` is true on partials too, so end_of_turn is the only
-                    # finality signal.
+                    # `turn_is_formatted` is true on partials too, so this is the only finality signal.
                     end_of_turn = msg.get("end_of_turn", False)
 
                     if transcript:

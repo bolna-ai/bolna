@@ -61,7 +61,7 @@ class SarvamTranscriber(BaseTranscriber):
         self.high_vad_sensitivity = high_vad_sensitivity
         self.vad_signals = vad_signals
         self.disable_sdk = disable_sdk
-        # Sarvam biases the final transcript on free-form text; it takes no term list on the socket.
+        # Sarvam biases on free-form text; it takes no term list on the socket.
         self.context = (context or "").strip()
 
         self.api_key = kwargs.get("transcriber_key", os.getenv("SARVAM_API_KEY"))

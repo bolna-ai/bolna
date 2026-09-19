@@ -1,12 +1,6 @@
-"""Parsing for the agent's comma-separated `keywords` field, shared by every transcriber.
+"""Parsing for the agent's comma-separated `keywords` field, shared by every transcriber."""
 
-One agent-level string, written as `term` or `term:weight`, feeds engines that want a bare term
-list, a weighted list, or the string itself.
-"""
-
-from typing import List, Optional, Tuple
-
-DEFAULT_KEYWORD_WEIGHT = 1.0
+from typing import List, Optional
 
 
 def keyword_entries(keywords: Optional[str]) -> List[str]:
@@ -14,24 +8,19 @@ def keyword_entries(keywords: Optional[str]) -> List[str]:
     return [entry.strip() for entry in (keywords or "").split(",") if entry.strip()]
 
 
-def parse_keywords(keywords: Optional[str]) -> List[Tuple[str, float]]:
-    """`[(term, weight)]`, defaulting the weight where the entry carries none."""
-    parsed = []
-    for entry in keyword_entries(keywords):
-        term, separator, weight = entry.rpartition(":")
-        try:
-            parsed.append((term.strip(), float(weight)) if separator else (entry, DEFAULT_KEYWORD_WEIGHT))
-        except ValueError:
-            # A colon that is not a weight belongs to the term.
-            parsed.append((entry, DEFAULT_KEYWORD_WEIGHT))
-    return [(term, weight) for term, weight in parsed if term]
-
-
 def keyword_terms(keywords: Optional[str]) -> List[str]:
-    """Terms alone, for engines that take an unweighted list."""
-    return [term for term, _ in parse_keywords(keywords)]
+    """Entries with any `:weight` suffix dropped, for engines that take a bare term list."""
+    terms = (_strip_weight(entry) for entry in keyword_entries(keywords))
+    return [term for term in terms if term]
 
 
-def format_weighted_keywords(parsed: List[Tuple[str, float]]) -> str:
-    """`term:weight` comma-separated, one explicit weight per entry."""
-    return ",".join(f"{term}:{weight:g}" for term, weight in parsed)
+def _strip_weight(entry: str) -> str:
+    """`bolna:2` becomes `bolna`. A colon that is not a weight belongs to the term, as in `3:30 pm`."""
+    term, separator, weight = entry.rpartition(":")
+    if not separator:
+        return entry
+    try:
+        float(weight)
+    except ValueError:
+        return entry
+    return term.strip()
