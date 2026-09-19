@@ -35,7 +35,7 @@ SMALLEST_MAX_KEYWORDS = 100
 # Beyond this a phrase list costs Azure accuracy and latency rather than buying either.
 AZURE_MAX_PHRASES = 2000
 
-# Language codes the AssemblyAI universal-3-x family accepts; anything else rejects the session.
+# Anything outside this set rejects the session.
 ASSEMBLYAI_SUPPORTED_LANGUAGES = {
     "af",
     "ar",
