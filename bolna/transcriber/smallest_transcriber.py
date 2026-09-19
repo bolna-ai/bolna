@@ -13,6 +13,7 @@ from dotenv import load_dotenv
 
 from .base_transcriber import BaseTranscriber
 from bolna.enums import TelephonyProvider
+from bolna.constants import SMALLEST_MAX_KEYWORDS
 from bolna.helpers.asr_keywords import keyword_entries
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.ssl_context import get_ssl_context
@@ -20,9 +21,6 @@ from bolna.helpers.utils import create_ws_data_packet, timestamp_ms
 
 load_dotenv()
 logger = configure_logger(__name__)
-
-# Past this Pulse rejects the session.
-MAX_KEYWORDS = 100
 
 
 class SmallestTranscriber(BaseTranscriber):
@@ -65,7 +63,7 @@ class SmallestTranscriber(BaseTranscriber):
         self.endpointing = endpointing
         self.model = model
         # Pulse takes the agent's own `term:intensifier` syntax.
-        self.keywords = ",".join(keyword_entries(keywords)[:MAX_KEYWORDS])
+        self.keywords = ",".join(keyword_entries(keywords)[:SMALLEST_MAX_KEYWORDS])
         self.word_timestamps = word_timestamps
         self.process_interim_results = process_interim_results
 

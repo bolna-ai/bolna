@@ -13,6 +13,7 @@ from websockets.exceptions import ConnectionClosedError, InvalidHandshake
 
 from .base_transcriber import BaseTranscriber
 from bolna.enums import TelephonyProvider
+from bolna.constants import ASSEMBLYAI_MAX_KEYTERMS, ASSEMBLYAI_MAX_PROMPT_CHARACTERS, ASSEMBLYAI_SUPPORTED_LANGUAGES
 from bolna.helpers.asr_keywords import keyword_terms
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.ssl_context import get_ssl_context
@@ -29,15 +30,6 @@ LEGACY_SPEECH_MODEL_ALIASES = {
 
 # These take `format_turns` and a fixed language set; universal-3-x takes `language_codes` and `prompt`.
 LEGACY_STREAMING_MODELS = frozenset({"universal-streaming-english", "universal-streaming-multilingual"})
-
-# Past these the API rejects the session rather than truncating.
-MAX_KEYTERMS = 100
-MAX_PROMPT_CHARACTERS = 1750
-
-# Codes the universal-3-x family accepts. Anything else rejects the session.
-SUPPORTED_LANGUAGE_CODES = frozenset(
-    "af ar ca da de en es et fa fi fr gl he hi it ja ko mr nl nn no pt ro ru sv tr ur vi xh yue zh zu".split()
-)
 
 
 class AssemblyAITranscriber(BaseTranscriber):
@@ -68,8 +60,8 @@ class AssemblyAITranscriber(BaseTranscriber):
         self.sampling_rate = int(sampling_rate)
         self.encoding = encoding
         self.format_turns = format_turns
-        self.keyterms = keyword_terms(keywords)[:MAX_KEYTERMS]
-        self.context = (context or "").strip()[:MAX_PROMPT_CHARACTERS]
+        self.keyterms = keyword_terms(keywords)[:ASSEMBLYAI_MAX_KEYTERMS]
+        self.context = (context or "").strip()[:ASSEMBLYAI_MAX_PROMPT_CHARACTERS]
 
         self.api_key = kwargs.get("transcriber_key", os.getenv("ASSEMBLY_API_KEY"))
         self.assemblyai_host = "streaming.assemblyai.com"
@@ -136,7 +128,7 @@ class AssemblyAITranscriber(BaseTranscriber):
         if self.is_legacy_streaming_model:
             if self.speech_model == "universal-streaming-english" and base_language != "en":
                 logger.warning(f"AssemblyAI {self.speech_model} only supports English, got {self.language}")
-        elif base_language in SUPPORTED_LANGUAGE_CODES:
+        elif base_language in ASSEMBLYAI_SUPPORTED_LANGUAGES:
             connection_params["language_codes"] = json.dumps([base_language])
         else:
             logger.warning(f"AssemblyAI {self.speech_model} has no language code for {self.language}, auto-detecting")

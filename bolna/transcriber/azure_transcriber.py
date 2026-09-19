@@ -7,6 +7,7 @@ from azure.cognitiveservices.speech import AudioStreamWaveFormat, AudioStreamCon
 from dotenv import load_dotenv
 from .base_transcriber import BaseTranscriber
 import azure.cognitiveservices.speech as speechsdk
+from bolna.constants import AZURE_MAX_PHRASES
 from bolna.helpers.asr_keywords import keyword_terms
 from bolna.helpers.utils import create_ws_data_packet, timestamp_ms
 from bolna.enums import TelephonyProvider
@@ -14,9 +15,6 @@ from bolna.helpers.logger_config import configure_logger
 
 logger = configure_logger(__name__)
 load_dotenv()
-
-# Beyond this a phrase list costs accuracy and latency rather than buying either.
-MAX_PHRASES = 2000
 
 
 class AzureTranscriber(BaseTranscriber):
@@ -50,7 +48,7 @@ class AzureTranscriber(BaseTranscriber):
         self.sampling_rate = 8000
         self.bits_per_sample = 16
         self.run_id = kwargs.get("run_id", "")
-        self.phrases = keyword_terms(keywords)[:MAX_PHRASES]
+        self.phrases = keyword_terms(keywords)[:AZURE_MAX_PHRASES]
         self.duration = 0
         self.start_time = None
         self.end_time = None
