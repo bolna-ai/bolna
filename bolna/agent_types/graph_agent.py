@@ -1561,11 +1561,11 @@ class GraphAgent(BaseAgent):
                         "content": f"[Event: {event_name}. Respond proactively — speak first, do not wait for the user.]",
                     }
                 )
+                node_llm = self._conversation_llm_for(current_node)
                 yield {"messages": messages}
                 tool_choice = self._get_tool_choice_for_node(history=message)
                 forced_name = tool_choice["function"]["name"] if tool_choice else None
                 node_tools = self._tools_for_node(current_node, forced_name)
-                node_llm = self._conversation_llm_for(current_node)
                 async for chunk in node_llm.generate_stream(
                     messages, synthesize=synthesize, meta_info=meta_info, tool_choice=tool_choice, tools=node_tools
                 ):
@@ -1664,11 +1664,12 @@ class GraphAgent(BaseAgent):
                 return
 
             messages = await self._build_messages(message, meta_info=meta_info)
+            # Set the active node client before the yield the caller logs the REQUEST off.
+            node_llm = self._conversation_llm_for(current_node)
             yield {"messages": messages}
             tool_choice = self._get_tool_choice_for_node(history=message)
             forced_name = tool_choice["function"]["name"] if tool_choice else None
             node_tools = self._tools_for_node(current_node, forced_name)
-            node_llm = self._conversation_llm_for(current_node)
             async for chunk in node_llm.generate_stream(
                 messages, synthesize=synthesize, meta_info=meta_info, tool_choice=tool_choice, tools=node_tools
             ):
