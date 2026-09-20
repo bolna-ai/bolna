@@ -15,6 +15,10 @@ logger = configure_logger(__name__)
 _LID_MODE = os.getenv("LID_MODE", "shadow").lower()
 
 
+# Providers bound single-frame duration; AssemblyAI rejects anything under 50ms.
+KEEPALIVE_SILENCE_MS = 100
+
+
 class TranscriberPool:
     """
     Holds multiple pre-warmed transcriber connections and routes audio to the active one.
@@ -209,12 +213,12 @@ class TranscriberPool:
             await self._start_lid_tap()
 
     @staticmethod
-    def _silence_frame(encoding):
-        """Return 10ms of silence in the given encoding (320 bytes at 16kHz)."""
+    def _silence_frame(encoding, sample_rate):
+        """Silence sized for the leg's own rate and encoding."""
+        samples = int(sample_rate * KEEPALIVE_SILENCE_MS / 1000)
         if encoding == "mulaw":
-            return b"\xff" * 320
-        # linear16 and anything else: zeros
-        return b"\x00" * 320
+            return b"\xff" * samples
+        return b"\x00" * samples * 2
 
     async def _audio_router(self):
         """Read from the shared input queue, forward to active transcriber, and feed LID tap."""
@@ -261,7 +265,10 @@ class TranscriberPool:
                     if not transcriber.is_connected():
                         continue
                     encoding = getattr(transcriber, "encoding", "linear16")
-                    silence = self._silence_frame(encoding)
+                    sample_rate = (
+                        getattr(transcriber, "sampling_rate", None) or getattr(transcriber, "sample_rate", None) or 8000
+                    )
+                    silence = self._silence_frame(encoding, int(sample_rate))
                     transcriber.input_queue.put_nowait(
                         {
                             "data": silence,

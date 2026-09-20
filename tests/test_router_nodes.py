@@ -7,6 +7,8 @@ Covers:
   * generate(): transition into a router resolves to a speaking node, entry-node dispatch
 """
 
+import asyncio
+
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -584,6 +586,44 @@ class TestRouterIntentRouting:
         assert "go_to_billing" in names
         assert "transition_to_general" in names  # catch-all offered as a real option
         assert "stay_on_current_node" not in names
+
+    async def test_every_routing_tool_asks_for_a_rationale(self):
+        # Required on every tool with no opt-in: streaming keeps it off the critical path
+        # rather than dropping it, and it is what a misroute is debugged from.
+        agent = _intent_router_agent(detected_language="en")
+        intent_edges = [{"to_node_id": "billing", "condition": "billing", "function_name": "go_to_billing"}]
+        tools = agent._build_transition_tools_for_edges(intent_edges, allow_stay=True)
+
+        assert len(tools) == 2
+        for tool in tools:
+            params = tool["function"]["parameters"]
+            assert "reasoning" in params["properties"]
+            assert "reasoning" in params["required"]
+
+    async def test_a_stranded_tail_never_reaches_the_next_hop(self):
+        # A hop that is never built leaves its tail on the agent. If the next decision picked
+        # it up, that hop would record the previous turn's rationale, confidence and tokens,
+        # and meter those tokens twice.
+        agent = _intent_router_agent(detected_language="en")
+        stranded = asyncio.create_task(asyncio.sleep(30))
+        agent._pending_routing_tail = stranded
+
+        agent.routing_llm = MagicMock()
+        agent.routing_llm.route = AsyncMock(
+            return_value={
+                "function_name": "go_to_billing",
+                "arguments": {},
+                "usage": {},
+                "service_tier": None,
+                "overflowed": False,
+                "routing_tail": None,
+            }
+        )
+        await agent.decide_next_node_with_functions([{"role": "user", "content": "my invoice"}])
+
+        await asyncio.sleep(0)  # let the cancellation land
+        assert stranded.cancelled()
+        assert agent._pending_routing_tail is None
 
     async def test_chained_intent_routers_route_independently(self):
         # Two intent routers chained (built as raw dicts, bypassing the validation that

@@ -64,6 +64,7 @@ from .interruption_manager import InterruptionManager
 from bolna.agent_types import *
 from bolna.providers import *
 from bolna.s2s import events as s2s_events
+from bolna.llms.routing_stream import CONFIDENCE_KEY, REASONING_KEY
 from bolna.enums import (
     TelephonyProvider,
     LogComponent,
@@ -233,6 +234,9 @@ def build_lid_decision_record(
 # doesn't pay N TTS renders per call, concurrent with the welcome message. Process-wide.
 HANDOFF_CLIP_CACHE: dict = {}
 HANDOFF_CLIP_CACHE_MAX = 256
+# A routing rationale trails its decision by ~200ms. Teardown waits at most this long for one,
+# so a stalled routing stream delays the latency snapshot by this much and no more.
+ROUTING_TAIL_SETTLE_TIMEOUT = 1.0
 
 _NON_NODE_RESPONSE_CATEGORIES = frozenset(
     {"is_user_online_message", "filler", "backchanneling", "agent_welcome_message", "handoff"}
@@ -304,6 +308,7 @@ class TaskManager(BaseManager):
         # Fired instead of on_turn_usage when another backend served the turn.
         self.on_overflow = kwargs.get("on_overflow")
         self._usage_tasks = set()  # strong refs so fire-and-forget tallies aren't GC'd before they run
+        self._routing_tail_tasks = set()  # settled before the latency snapshot, not fire-and-forget
         # Optional per-provider health callback (circuit-breaker shadow); never affects the call.
         self.on_provider_health = kwargs.get("on_provider_health")
         self._cb_tasks = set()
@@ -3655,6 +3660,95 @@ class TaskManager(BaseManager):
             self._stage_assistant_history(meta_info, llm_response)
             self.conversation_history.sync_interim(messages)
 
+    @staticmethod
+    def _routing_response_line(routing_info: dict) -> str:
+        current = routing_info.get("current_node", "?")
+        if routing_info.get("transitioned"):
+            line = f"Node: {routing_info.get('previous_node', '?')} → {current}"
+        else:
+            line = f"Node: {current} (no transition)"
+        if routing_info.get("extracted_params"):
+            line += f" | Params: {json.dumps(routing_info['extracted_params'])}"
+        if routing_info.get("confidence") is not None:
+            line += f" | Confidence: {routing_info['confidence']}"
+        if routing_info.get("reasoning"):
+            line += f" | Reasoning: {routing_info['reasoning']}"
+        if routing_info.get("node_history"):
+            line += f" | Flow: {' → '.join(routing_info['node_history'])}"
+        return line
+
+    def _log_routing_response(self, routing_info: dict, usage: dict, meta_info: dict) -> None:
+        latency_ms = routing_info.get("routing_latency_ms")
+        started_at = routing_info.get("routing_started_at")
+        # Deferred rows are written when the tail lands, which for the last hop is at hangup;
+        # stamp the hop's own end so the trace stays in call order.
+        ts = started_at + (latency_ms or 0) / 1000 if started_at else None
+        convert_to_request_log(
+            message=self._routing_response_line(routing_info),
+            meta_info=meta_info,
+            model=routing_info.get("routing_model", ""),
+            component=LogComponent.GRAPH_ROUTING,
+            direction=LogDirection.RESPONSE,
+            run_id=self.run_id,
+            input_tokens=usage.get("input_tokens"),
+            output_tokens=usage.get("output_tokens"),
+            reasoning_tokens=usage.get("reasoning_tokens"),
+            cached_tokens=usage.get("cached_tokens"),
+            latency=round(latency_ms / 1000, 6) if latency_ms is not None else None,
+            ts=ts,
+        )
+
+    async def _settle_routing_tails(self):
+        """Let outstanding rationales land before the latency snapshot, bounded so a stalled
+        stream costs at most ROUTING_TAIL_SETTLE_TIMEOUT of teardown."""
+        pending = list(self._routing_tail_tasks)
+        if not pending:
+            return
+        _, unfinished = await asyncio.wait(pending, timeout=ROUTING_TAIL_SETTLE_TIMEOUT)
+        if not unfinished:
+            return
+        for task in unfinished:
+            task.cancel()
+        logger.warning(f"{len(unfinished)} routing rationale(s) did not land before the call ended")
+        # cancel() only schedules it. Await so each tail runs the finally that writes its
+        # response row, which would otherwise land after the latency snapshot, or never.
+        await asyncio.gather(*unfinished, return_exceptions=True)
+
+    async def _apply_routing_tail(self, tail, routing_info, entry, meta_info):
+        """Fold in the rationale, confidence and usage that arrive after the routing decision."""
+        node = routing_info.get("previous_node", "?")
+        usage = {}
+        try:
+            result = await tail
+            # A deterministic hop that carries a declined intent call's telemetry keeps its
+            # `deterministic:` marker; only its tokens come from the tail.
+            if routing_info.get("routing_type") == "llm":
+                for key in (REASONING_KEY, CONFIDENCE_KEY):
+                    if result.get(key) is not None:
+                        entry[key] = routing_info[key] = result[key]
+                if result.get(REASONING_KEY):
+                    logger.info(f"Routing rationale on node '{node}': {result[REASONING_KEY]}")
+
+            usage = result.get("usage") or {}
+            # Only what the tail supplied: a provider that never sends a usage chunk must not
+            # blank the counts the hop already recorded.
+            for key in ("input_tokens", "output_tokens", "reasoning_tokens", "cached_tokens"):
+                if usage.get(key) is not None:
+                    entry[key] = usage[key]
+
+            # Routing on azure shares the conversation LLM's pool, so its tokens meter against it.
+            overflowed = (routing_info.get("routing_usage") or {}).get("overflowed")
+            cb = self.on_overflow if overflowed else self.on_turn_usage
+            if cb and routing_info.get("routing_provider") == "azure" and usage.get("input_tokens"):
+                await cb(usage.get("input_tokens"), usage.get("output_tokens"), usage.get("cached_tokens"))
+        except Exception as e:
+            # Observability only; it must never surface into the call or the teardown gather.
+            logger.error(f"Routing tail failed for node '{node}': {e}")
+        finally:
+            # Deferred from the hop so the row carries the rationale and the token counts, but
+            # a hop always gets a row even when the tail was cancelled at teardown.
+            self._log_routing_response(routing_info, usage, meta_info)
+
     async def __do_llm_generation(
         self, messages, meta_info, next_step, should_bypass_synth=False, should_trigger_function_call=False
     ):
@@ -3730,12 +3824,12 @@ class TaskManager(BaseManager):
                 # Handle graph agent routing info
                 if isinstance(llm_message, dict) and "routing_info" in llm_message:
                     routing_info = llm_message["routing_info"]
+                    routing_tail = routing_info.pop("routing_tail", None)  # a task, not serialisable
 
                     # Both rows are written here, after the hop already finished — stamp the
                     # request row at the hop's start so the trace stays chronological.
                     routing_started_at = routing_info.get("routing_started_at")
                     routing_latency_ms = routing_info.get("routing_latency_ms")
-                    routing_latency = round(routing_latency_ms / 1000, 6) if routing_latency_ms is not None else None
 
                     # Log routing request with tools
                     routing_messages = routing_info.get("routing_messages")
@@ -3776,22 +3870,6 @@ class TaskManager(BaseManager):
                             ts=routing_started_at,
                         )
 
-                    # Build routing response data
-                    if routing_info.get("transitioned"):
-                        routing_data = (
-                            f"Node: {routing_info.get('previous_node', '?')} → {routing_info['current_node']}"
-                        )
-                    else:
-                        routing_data = f"Node: {routing_info['current_node']} (no transition)"
-                    if routing_info.get("extracted_params"):
-                        routing_data += f" | Params: {json.dumps(routing_info['extracted_params'])}"
-                    if routing_info.get("confidence") is not None:
-                        routing_data += f" | Confidence: {routing_info['confidence']}"
-                    if routing_info.get("reasoning"):
-                        routing_data += f" | Reasoning: {routing_info['reasoning']}"
-                    if routing_info.get("node_history"):
-                        routing_data += f" | Flow: {' → '.join(routing_info['node_history'])}"
-
                     meta_info["llm_metadata"] = meta_info.get("llm_metadata") or {}
                     meta_info["llm_metadata"]["graph_routing_info"] = routing_info
 
@@ -3817,6 +3895,19 @@ class TaskManager(BaseManager):
                                 "service_tier": routing_usage.get("service_tier"),
                             }
                         )
+                        if routing_tail is not None:
+                            _tail_task = asyncio.create_task(
+                                self._apply_routing_tail(
+                                    routing_tail,
+                                    routing_info,
+                                    self.routing_latencies["turn_latencies"][-1],
+                                    # Later hops of the same turn overwrite llm_metadata in place,
+                                    # so the row would otherwise carry the next hop's routing info.
+                                    {**meta_info, "llm_metadata": dict(meta_info.get("llm_metadata") or {})},
+                                )
+                            )
+                            self._routing_tail_tasks.add(_tail_task)
+                            _tail_task.add_done_callback(self._routing_tail_tasks.discard)
 
                     # on_turn_usage meters the conversation LLM's backend; routing on azure means the routing
                     # hop shares that backend, so its tokens draw on the same capacity.
@@ -3839,20 +3930,10 @@ class TaskManager(BaseManager):
                     if routing_info.get("node_history"):
                         self.routing_latencies["node_flow"] = list(routing_info["node_history"])
 
-                    # Log routing response
-                    convert_to_request_log(
-                        message=routing_data,
-                        meta_info=meta_info,
-                        model=routing_info.get("routing_model", ""),
-                        component=LogComponent.GRAPH_ROUTING,
-                        direction=LogDirection.RESPONSE,
-                        run_id=self.run_id,
-                        input_tokens=routing_usage.get("input_tokens"),
-                        output_tokens=routing_usage.get("output_tokens"),
-                        reasoning_tokens=routing_usage.get("reasoning_tokens"),
-                        cached_tokens=routing_usage.get("cached_tokens"),
-                        latency=routing_latency,
-                    )
+                    # With a tail the rationale and the token counts are still in flight, so the
+                    # row is written once they land rather than written twice.
+                    if routing_tail is None:
+                        self._log_routing_response(routing_info, routing_usage, meta_info)
 
                     is_silence_trigger = routing_info.get("is_silence_trigger", False)
 
@@ -8734,6 +8815,7 @@ class TaskManager(BaseManager):
                 # below — tasks_to_cancel is only awaited after the snapshot, so a cancelled-check
                 # record appended during that gather would never be persisted.
                 await process_task_cancellation(self.voicemail_handler.check_task, "voicemail_check_task")
+                await self._settle_routing_tails()
 
                 output = {
                     "messages": self._prepare_precise_transcript_messages(self.history),

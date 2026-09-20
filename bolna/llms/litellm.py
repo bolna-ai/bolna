@@ -12,7 +12,8 @@ from bolna.helpers.utils import convert_to_request_log, compute_function_pre_cal
 from .llm import BaseLLM
 from .tool_call_accumulator import ToolCallAccumulator
 from .types import LLMStreamChunk, LatencyData
-from .message_models import strip_internal_keys, first_tool_call_result
+from .message_models import strip_internal_keys
+from .routing_stream import read_routing_stream
 from bolna.helpers.logger_config import configure_logger
 
 logger = configure_logger(__name__)
@@ -182,12 +183,13 @@ class LiteLLM(BaseLLM):
                 "tools": parsed_tools,
                 "tool_choice": tool_choice,
                 "parallel_tool_calls": False,
-                "stream": False,
+                "stream": True,
+                "stream_options": {"include_usage": True},
                 "temperature": 0.0,
             }
         )
-        completion = await acompletion(**model_args)
-        return first_tool_call_result(completion)
+        stream = await acompletion(**model_args)
+        return await read_routing_stream(stream, parsed_tools)
 
     async def generate(self, messages, stream=False, request_json=False, meta_info=None, ret_metadata=False):
         text = ""
