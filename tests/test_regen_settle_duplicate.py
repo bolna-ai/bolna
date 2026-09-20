@@ -10,7 +10,7 @@ import pytest
 
 from bolna.agent_manager.task_manager import TaskManager
 from bolna.constants import DUPLICATE_RESPONSE_SIMILARITY
-from bolna.helpers.utils import normalized_similarity
+from bolna.helpers.utils import normalized_similarity, restates_previous_text
 
 # The two replies from the incident: identical but for a leading "कृपया".
 SPOKEN = "आपने अपने car loan को लेकर कोई concern raise किया था। बताइए, आपको किस बारे में help चाहिए?"
@@ -110,3 +110,94 @@ def test_the_incident_pair_clears_the_threshold_and_distinct_answers_do_not():
 @pytest.mark.parametrize("first,second", [("", "text"), ("text", ""), (None, "text")])
 def test_similarity_is_zero_when_either_side_is_empty(first, second):
     assert normalized_similarity(first, second) == 0.0
+
+
+# A caller reading an ID out in digit groups got the same brush-off reply to each group. The replies
+# scored 1.00, so the gate suppressed the second — but the turns answered *different* user inputs, so
+# it discarded the only answer that input ever got, and its transcript line with it.
+
+BRUSH_OFF = "సరే, తర్వాత చెప్పండి."
+# A growing final: the user text the gate must still treat as a restatement.
+USER_FIRST_FINAL = "हेलो।"
+USER_GROWN_FINAL = "हेलो। हाँ, बताइए।"
+
+
+def _staged_with_user(content, turn_id, user_input, message_category=None):
+    entry = _staged(content, turn_id, message_category)
+    entry["user_input"] = user_input
+    return entry
+
+
+def _manager_with_user(staged=None, last_spoken=None, last_user=None, blocked=()):
+    tm = _manager(staged=staged, last_spoken=last_spoken, blocked=blocked)
+    tm._last_spoken_user_input = last_user
+    return tm
+
+
+def test_identical_reply_to_a_different_user_turn_is_spoken():
+    """Identical replies, disjoint user inputs — must NOT be suppressed."""
+    tm = _manager_with_user(
+        staged={5: _staged_with_user(BRUSH_OFF, turn_id=5, user_input="23124.")},
+        last_spoken=(4, BRUSH_OFF),
+        last_user="412415.",
+    )
+    assert _is_duplicate(tm, 5) is False
+
+
+def test_identical_reply_to_a_regrown_final_is_still_suppressed():
+    """The case the gate exists for: same utterance re-finalized, so the reply really is a repeat."""
+    tm = _manager_with_user(
+        staged={2: _staged_with_user(REGEN, turn_id=2, user_input=USER_GROWN_FINAL)},
+        last_spoken=(1, SPOKEN),
+        last_user=USER_FIRST_FINAL,
+    )
+    assert _is_duplicate(tm, 2) is True
+
+
+def test_a_rewritten_refinal_still_counts_as_a_restatement():
+    """Not every re-final grows; some only rewrite punctuation/casing."""
+    tm = _manager_with_user(
+        staged={2: _staged_with_user(REGEN, turn_id=2, user_input="Hello, yes tell me")},
+        last_spoken=(1, SPOKEN),
+        last_user="hello yes tell me.",
+    )
+    assert _is_duplicate(tm, 2) is True
+
+
+@pytest.mark.parametrize(
+    "staged_user,last_user",
+    [(None, "412415."), ("23124.", None), (None, None)],
+    ids=["current-unknown", "previous-unknown", "both-unknown"],
+)
+def test_unknown_user_input_preserves_the_original_behaviour(staged_user, last_user):
+    """No user text to compare (canned/injected turns) — must not reopen the regen incident."""
+    tm = _manager_with_user(
+        staged={2: _staged_with_user(REGEN, turn_id=2, user_input=staged_user)},
+        last_spoken=(1, SPOKEN),
+        last_user=last_user,
+    )
+    assert _is_duplicate(tm, 2) is True
+
+
+def test_the_incident_pair_is_only_separable_by_user_input():
+    """Pins WHY the old gate could not catch this: the replies are identical, so only the user
+    side carries the signal. Guards against anyone 'fixing' this by tuning the threshold."""
+    assert normalized_similarity(BRUSH_OFF, BRUSH_OFF) == 1.0
+    assert not restates_previous_text("412415.", "23124.", DUPLICATE_RESPONSE_SIMILARITY)
+    assert restates_previous_text(USER_FIRST_FINAL, USER_GROWN_FINAL, DUPLICATE_RESPONSE_SIMILARITY)
+
+
+@pytest.mark.parametrize(
+    "previous,current,expected",
+    [
+        ("hello", "hello there", True),  # growing final
+        ("Hello.", "hello.  yes", True),  # normalisation: case + whitespace
+        ("hello there", "hello", False),  # shrinking is not a re-final
+        ("412415.", "23124.", False),  # disjoint digit groups
+        ("", "hello", False),
+        ("hello", "", False),
+        (None, "hello", False),
+    ],
+)
+def test_restates_previous_text(previous, current, expected):
+    assert restates_previous_text(previous, current, DUPLICATE_RESPONSE_SIMILARITY) is expected
