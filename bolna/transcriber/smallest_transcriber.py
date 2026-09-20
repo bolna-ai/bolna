@@ -13,6 +13,8 @@ from dotenv import load_dotenv
 
 from .base_transcriber import BaseTranscriber
 from bolna.enums import TelephonyProvider
+from bolna.constants import SMALLEST_MAX_KEYWORDS
+from bolna.helpers.asr_keywords import keyword_entries
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.ssl_context import get_ssl_context
 from bolna.helpers.utils import create_ws_data_packet, timestamp_ms
@@ -60,7 +62,8 @@ class SmallestTranscriber(BaseTranscriber):
         self.language = language
         self.endpointing = endpointing
         self.model = model
-        self.keywords = keywords
+        # Pulse takes the agent's own `term:intensifier` syntax.
+        self.keywords = ",".join(keyword_entries(keywords)[:SMALLEST_MAX_KEYWORDS])
         self.word_timestamps = word_timestamps
         self.process_interim_results = process_interim_results
 
@@ -181,6 +184,9 @@ class SmallestTranscriber(BaseTranscriber):
         # Add word timestamps if enabled
         if self.word_timestamps:
             params["word_timestamps"] = "true"
+
+        if self.keywords:
+            params["keywords"] = self.keywords
 
         # Unified Waves endpoint (docs.smallest.ai -> /speech-to-text): WSS /waves/v1/stt/live
         websocket_url = f"wss://{self.smallest_host}/waves/v1/stt/live?{urlencode(params)}"
