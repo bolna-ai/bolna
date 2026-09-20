@@ -15,8 +15,7 @@ logger = configure_logger(__name__)
 _LID_MODE = os.getenv("LID_MODE", "shadow").lower()
 
 
-# A fixed byte count means a different duration at every rate. Providers bound the duration of a
-# single frame, and AssemblyAI rejects anything under 50ms, so size the frame from the rate.
+# Providers bound single-frame duration; AssemblyAI rejects anything under 50ms.
 KEEPALIVE_SILENCE_MS = 100
 
 
@@ -215,7 +214,7 @@ class TranscriberPool:
 
     @staticmethod
     def _silence_frame(encoding, sample_rate):
-        """Silence of KEEPALIVE_SILENCE_MS, sized for the leg's own rate and encoding."""
+        """Silence sized for the leg's own rate and encoding."""
         samples = int(sample_rate * KEEPALIVE_SILENCE_MS / 1000)
         if encoding == "mulaw":
             return b"\xff" * samples
