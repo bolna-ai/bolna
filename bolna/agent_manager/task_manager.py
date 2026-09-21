@@ -3263,8 +3263,15 @@ class TaskManager(BaseManager):
                     )
 
                     followup_meta_info = self._spawn_followup_meta_info(meta_info)
+                    # Turn-based chat delivers text only through the bypass-synth branch of
+                    # _handle_llm_output; without the flag the goodbye lands in a synthesizer
+                    # queue nothing consumes and the socket closes before the client sees it.
                     await self.__do_llm_generation(
-                        messages, followup_meta_info, next_step, should_trigger_function_call=False
+                        messages,
+                        followup_meta_info,
+                        next_step,
+                        should_bypass_synth=meta_info.get("bypass_synth", False),
+                        should_trigger_function_call=False,
                     )
                     self._enter_hangup_state()
                     await self.wait_for_current_message()
@@ -5131,6 +5138,12 @@ class TaskManager(BaseManager):
                 "ts_ms": round(time.time() * 1000 - self.conversation_start_init_ts, 2),
             }
         )
+        if connection_error and self.turn_based_conversation:
+            # Text chat needs no ASR: keep the conversation alive and let text turns continue.
+            logger.warning(
+                f"Transcriber connection error in turn-based chat, continuing without ASR: {connection_error}"
+            )
+            return
         if connection_error:
             await self._end_call_on_component_error(
                 TranscriberError(connection_error, provider=provider, model=self._component_model("transcriber")),
@@ -5556,6 +5569,10 @@ class TaskManager(BaseManager):
             # Normal WebSocket closure (code 1000)
             pass
         except Exception as e:
+            if self.turn_based_conversation:
+                # Same as a connection error above: a dead ASR leg must not end a text chat.
+                await self._log_transcriber_connection_error(str(e))
+                return
             provider = self.task_config["tools_config"]["transcriber"].get("provider")
             model = self._component_model("transcriber")
             await self._end_call_on_component_error(
