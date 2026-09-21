@@ -23,6 +23,7 @@ from pydub import AudioSegment
 from bolna.constants import (
     ACCIDENTAL_INTERRUPTION_PHRASES,
     CACHED_SINGLE_MARK_CATEGORIES,
+    CHAT_WATCHDOG_TICK_S,
     DEFAULT_USER_ONLINE_MESSAGE,
     DEFAULT_USER_ONLINE_MESSAGE_TRIGGER_DURATION,
     DUPLICATE_RESPONSE_SIMILARITY,
@@ -119,8 +120,6 @@ from ..helpers.observable_variable import ObservableVariable
 from bolna.models import S2SConfig
 from .models import ComponentLatencies
 from .voicemail_handler import VoicemailHandler
-
-CHAT_WATCHDOG_TICK_S = 1.0  # text-chat idle / max-duration check interval
 
 logger = configure_logger(__name__)
 

@@ -467,3 +467,7 @@ def canonical_model(name: str) -> str:
     bare = (name or "").rsplit("/", 1)[-1]
     known = [m for m in MODEL_REASONING_EFFORT_MAP if m in bare]
     return max(known, key=len) if known else bare
+
+
+# Text chat (turn-based) watchdog: how often idle / max-duration caps are checked.
+CHAT_WATCHDOG_TICK_S = 3.0
