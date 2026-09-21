@@ -206,6 +206,11 @@ TRANSFERING_CALL_FILLER = {
     "fr": "D'accord, je transfère l'appel. Un instant, s'il vous plaît.",
 }
 
+# Sent by the media node over the fork when a consultative transfer never connected.
+TRANSFER_FAILED_RESUME_MESSAGE = (
+    "[transfer failed] The transfer to the human agent did not connect ({cause}). Tell the caller and continue."
+)
+
 DEFAULT_USER_ONLINE_MESSAGE = "Hey, are you still there?"
 DEFAULT_USER_ONLINE_MESSAGE_TRIGGER_DURATION = 6
 DEFAULT_LANGUAGE_CODE = "en"

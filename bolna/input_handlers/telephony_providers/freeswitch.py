@@ -33,6 +33,8 @@ class FreeSwitchInputHandler(DefaultInputHandler):
         self.on_playout_done = None
         # set by FreeSwitchOutputHandler: per-mark playback echoes from the module
         self.on_mark_played = None
+        # set by TaskManager: the media node reporting a consultative transfer that never connected
+        self.on_transfer_failed = None
         self._dtmf = DtmfAccumulator(lambda digits: self.queues["dtmf"].put_nowait(digits))
 
     async def process_message(self, message):
@@ -53,6 +55,10 @@ class FreeSwitchInputHandler(DefaultInputHandler):
             # is_dtmf_active mirrors the agent's dtmf_enabled (set by task_manager)
             if self.is_dtmf_active:
                 self._dtmf.press(str(message.get("digit") or ""))
+            return
+        if message.get("type") == "transfer_failed":
+            if self.on_transfer_failed:
+                self.on_transfer_failed(message.get("cause") or "")
             return
         if message.get("type") == "playoutDone":
             # mod_audio_stream: all queued TTS has really been played to the caller — hand the

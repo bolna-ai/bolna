@@ -41,6 +41,7 @@ from bolna.constants import (
     REGEN_SETTLE_EXCLUDED_TRANSCRIBERS,
     NON_EVIDENCE_MARK_TYPES,
     SWITCH_LANGUAGE_TOOL_DEFINITION,
+    TRANSFER_FAILED_RESUME_MESSAGE,
     END_CALL_FUNCTION_PREFIX,
     END_CALL_TOOL_DEFINITION,
     RESPONSES_API_MODEL_PREFIXES,
@@ -406,6 +407,7 @@ class TaskManager(BaseManager):
         self._hangup_interruptible_window = False
         self._hangup_cancelled = False
         self._end_call_hangup_task = None
+        self._transfer_failed_task = None
         self._turn_audio_flushed = asyncio.Event()
         self._turn_audio_flushed.set()
         self.hangup_mark_event_timeout = 10
@@ -1397,6 +1399,8 @@ class TaskManager(BaseManager):
                     input_kwargs["ws_context_data"] = self.context_data
                     input_kwargs["agent_config"] = {"tasks": [self.task_config]}
             self.tools["input"] = input_handler_class(**input_kwargs)
+            if self.task_config["tools_config"]["input"]["provider"] == TelephonyProvider.FREESWITCH.value:
+                self.tools["input"].on_transfer_failed = self.on_transfer_failed
         else:
             # raising a plain string surfaces as TypeError("exceptions must derive from
             # BaseException") and hides which provider was unsupported — this exact failure
@@ -7443,6 +7447,21 @@ class TaskManager(BaseManager):
             logger.info("Silence repeat generation cancelled by interruption")
             return
 
+    @property
+    def _transfer_pending(self) -> bool:
+        """A transfer is ringing: the caller is hearing the target leg, not dead air."""
+        return self.has_transfer
+
+    def on_transfer_failed(self, cause: str) -> None:
+        """Fork says the target never connected - resume the conversation with one synthetic turn."""
+        if not self._transfer_pending:
+            logger.info(f"transfer_failed ({cause}) with no transfer pending for run_id={self.run_id}; ignoring")
+            return
+        self.has_transfer = False
+        self._transfer_failed_task = asyncio.create_task(
+            self._inject_and_run_llm(TRANSFER_FAILED_RESUME_MESSAGE.format(cause=cause))
+        )
+
     def _should_stall_hangup(self, audio_playing, time_since_last_spoken_ai_word, time_since_user_last_spoke):
         """Hang up when the call has made no forward progress at all: no audio playing and both
         sides silent past the hard cap. Runs above the audio/pipeline gate so it still applies
@@ -7517,6 +7536,10 @@ class TaskManager(BaseManager):
                         logger.info(
                             f"Waiting for hangup mark event ({time_since_hangup:.1f}s / {self.hangup_mark_event_timeout}s)"
                         )
+                continue
+
+            # Nothing below may fire mid-transfer: no synthetic turn over the ringback, no hangup.
+            if self._transfer_pending:
                 continue
 
             # An in-flight LLM task (including a tool-call API request + follow-up generation
