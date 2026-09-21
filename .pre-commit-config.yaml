@@ -11,3 +11,8 @@ repos:
       - id: bandit
         args: ["--severity-level", "medium", "--confidence-level", "high"]
         exclude: ^(tests|build|examples|local_setup)/
+
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.1
+    hooks:
+      - id: gitleaks

@@ -27,3 +27,28 @@ jobs:
       # pickle, yaml.load, etc.). Low-severity style noise is intentionally not gated.
       - name: Bandit SAST
         run: bandit -r bolna --severity-level medium --confidence-level high
+
+  gitleaks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install gitleaks
+        env:
+          GITLEAKS_VERSION: 8.30.1
+        run: |
+          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
+            | sudo tar -xz -C /usr/local/bin gitleaks
+          gitleaks version
+          
+      - name: Scan commits added by this PR
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: gitleaks git --redact --no-banner --log-opts="$BASE_SHA..$HEAD_SHA"
+
+      - name: Scan working tree
+        run: gitleaks dir . --redact --no-banner
