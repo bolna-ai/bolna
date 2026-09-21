@@ -133,6 +133,10 @@ class AzureConfig(BaseModel):
 class GeminiConfig(StandardVoiceConfig):
     # voice_id holds the Gemini voice_name; style feeds structured speech_metadata.
     style: Optional[str] = None
+class SonioxConfig(StandardVoiceConfig):
+    # `voice` carries a built-in voice name ("Adrian"); a cloned voice's id goes in voice_id.
+    speed: Optional[float] = None
+    reduce_silence: Optional[bool] = None
 
 
 # The config class each provider's provider_config is validated against. Adding a provider means
@@ -151,6 +155,7 @@ SYNTHESIZER_CONFIG_MODELS = {
     SynthesizerProvider.MAYA.value: MayaConfig,
     SynthesizerProvider.KALPA.value: KalpaConfig,
     SynthesizerProvider.GEMINI.value: GeminiConfig,
+    SynthesizerProvider.SONIOX.value: SonioxConfig,
 }
 
 
