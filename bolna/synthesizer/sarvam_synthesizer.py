@@ -14,7 +14,11 @@ from .stream_synthesizer import StreamSynthesizer
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.ssl_context import get_ssl_context
 from bolna.helpers.utils import create_ws_data_packet, get_synth_audio_format, resample, wav_bytes_to_pcm
-from bolna.constants import SARVAM_MODEL_SAMPLING_RATE_MAPPING, SARVAM_TTS_SUPPORTED_LANGUAGES
+from bolna.constants import (
+    SARVAM_MODEL_SAMPLING_RATE_MAPPING,
+    SARVAM_STREAMING_WAV_HEADER_MODELS,
+    SARVAM_TTS_SUPPORTED_LANGUAGES,
+)
 
 logger = configure_logger(__name__)
 
@@ -74,7 +78,7 @@ class SarvamSynthesizer(StreamSynthesizer):
     def _process_audio_data(self, audio):
         fmt = get_synth_audio_format(audio)
 
-        if fmt == "wav" and self.model == "bulbul:v3":
+        if fmt == "wav" and self.model in SARVAM_STREAMING_WAV_HEADER_MODELS:
             received_sampling_rate = int.from_bytes(audio[24:28], byteorder="little")
             if self.original_sampling_rate != received_sampling_rate:
                 logger.warning(
@@ -82,7 +86,7 @@ class SarvamSynthesizer(StreamSynthesizer):
                     f"received {received_sampling_rate} for model {self.model}. Using received."
                 )
                 self.original_sampling_rate = received_sampling_rate
-            return None  # Header-only chunk for bulbul:v3
+            return None  # Header-only chunk
 
         try:
             resampled_audio = resample(

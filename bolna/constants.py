@@ -354,11 +354,16 @@ END_CALL_TOOL_DEFINITION = {
 SARVAM_MODEL_SAMPLING_RATE_MAPPING = {
     "bulbul:v2": 22050,
     "bulbul:v3": 22050,  # NOTE: Documentation claims 24000, but WAV header shows 22050
+    "bulbul:v4-flash": 22050,
 }
+
+# These models open a stream with a bare WAV header and send raw PCM after it.
+SARVAM_STREAMING_WAV_HEADER_MODELS = {"bulbul:v3", "bulbul:v4-flash"}
 
 # bulbul TTS requires a concrete target_language_code (no "unknown"/auto).
 SARVAM_TTS_SUPPORTED_LANGUAGES = {
     "en-IN",
+    "as-IN",
     "hi-IN",
     "bn-IN",
     "ta-IN",
