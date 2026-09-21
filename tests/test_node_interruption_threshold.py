@@ -108,6 +108,7 @@ async def test_routing_info_applies_the_landed_nodes_threshold_before_it_speaks(
     tm.run_id = "run"
     tm.language = "en"
     tm.stream = True
+    tm.turn_based_conversation = False
     tm.on_turn_usage = None
     tm.on_overflow = None
     tm.llm_config = {"model": "gpt-4.1-mini", "provider": "openai"}
