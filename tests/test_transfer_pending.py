@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from bolna.agent_manager import task_manager as task_manager_module
 from bolna.agent_manager.task_manager import TaskManager
 from bolna.constants import STALL_HANGUP_HARD_CAP_S, TRANSFER_FAILED_RESUME_MESSAGE
 from bolna.input_handlers.telephony_providers.freeswitch import FreeSwitchInputHandler
@@ -107,16 +108,196 @@ async def test_the_same_window_fires_that_branch_without_a_pending_transfer(fast
     assert _watchdog_acted(tm), f"{mode} never fired, so the gated test above proves nothing"
 
 
-def _transfer_call(has_transfer):
+def _transfer_call(has_transfer, *, transfer_call_params=None):
     """A task manager with a transfer in flight, reached the way the media node reaches it."""
     tm = TaskManager.__new__(TaskManager)
     tm.run_id = "exec-1"
     tm.has_transfer = has_transfer
+    tm.conversation_ended = False
+    tm.s2s_config = None
+    tm.stream_sid = "stream-1"
+    tm.context_data = {}
+    tm.conversation_start_init_ts = time.time() * 1000
+    tm.transfer_call_params = transfer_call_params
+    tm.transfer_call_events = []
     tm._transfer_failed_task = None
+    tm._transfer_reconcile_task = None
+    tm._transfer_tasks = set()
     tm._inject_and_run_llm = AsyncMock()
+    tm._start_api_call_detail = MagicMock(return_value={})
+    tm._finalize_api_call_detail = MagicMock()
+    tm._extract_api_call_runtime_args = MagicMock(return_value={})
+    tm.conversation_history = MagicMock()
+    tm.tools = {
+        "input": MagicMock(
+            io_provider="freeswitch",
+            get_call_sid=MagicMock(return_value="uuid-1"),
+            is_audio_being_played_to_user=MagicMock(return_value=False),
+        )
+    }
     handler = FreeSwitchInputHandler.__new__(FreeSwitchInputHandler)
     handler.on_transfer_failed = tm.on_transfer_failed
     return tm, handler
+
+
+class _FakeResponse:
+    def __init__(self, status, body):
+        self.status = status
+        self._body = body
+        self.headers = {"Content-Type": "application/json"}
+
+    async def text(self):
+        return self._body
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+class _FakePost:
+    def __init__(self, error):
+        self._error = error
+
+    async def __aenter__(self):
+        raise self._error
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+class _FakeSession:
+    """Stands in for aiohttp.ClientSession: one canned /process_transfer outcome, payload captured."""
+
+    def __init__(self, status=200, body='{"success": true}', error=None):
+        self.status, self.body, self.error = status, body, error
+        self.posted = None
+
+    def __call__(self, *args, **kwargs):
+        return self
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    def post(self, url, json=None):
+        self.posted = json
+        if self.error is not None:
+            return _FakePost(self.error)
+        return _FakeResponse(self.status, self.body)
+
+
+@pytest.fixture
+def transfer_webhook(monkeypatch):
+    """Skip the 2s pre-POST settle and swap the HTTP session for a canned one."""
+    real_sleep = asyncio.sleep
+
+    async def _sleep(delay, *args, **kwargs):
+        return await real_sleep(0.001 if delay >= 1 else delay, *args, **kwargs)
+
+    monkeypatch.setattr(asyncio, "sleep", _sleep)
+    monkeypatch.setattr(task_manager_module, "convert_to_request_log", MagicMock())
+
+    def _install(**kwargs):
+        session = _FakeSession(**kwargs)
+        monkeypatch.setattr(task_manager_module.aiohttp, "ClientSession", session)
+        return session
+
+    return _install
+
+
+async def _post_transfer(tm):
+    tm.has_transfer = True
+    resp = {"tool_call_id": "call-1", "call_transfer_number": "+15550100"}
+    return await tm._execute_transfer_call_webhook("transfer_call", "http://backend/process_transfer", None, resp, {})
+
+
+async def test_refused_transfer_clears_the_flag_and_resumes_once(transfer_webhook):
+    tm, _ = _transfer_call(has_transfer=False, transfer_call_params={"provider": "trunk"})
+    transfer_webhook(status=409, body='{"success": false, "message": "at channel limit"}')
+
+    refusal = await _post_transfer(tm)
+    await asyncio.gather(*tm._transfer_tasks)
+
+    assert refusal == "at channel limit"
+    assert tm.has_transfer is False
+    tm.conversation_history.replace_tool_result.assert_called_once_with(
+        "call-1", '{"status": "failed", "message": "at channel limit"}'
+    )
+    tm._inject_and_run_llm.assert_awaited_once_with(TRANSFER_FAILED_RESUME_MESSAGE.format(cause="at channel limit"))
+    assert tm.transfer_call_events[-1]["success"] is False
+
+
+async def test_accepted_transfer_keeps_the_flag(transfer_webhook):
+    tm, _ = _transfer_call(has_transfer=False, transfer_call_params={"provider": "trunk"})
+    transfer_webhook(status=200, body='{"success": true, "status": "dialing"}')
+
+    refusal = await _post_transfer(tm)
+
+    assert refusal is None
+    assert tm.has_transfer is True
+    assert tm._transfer_reconcile_task is None
+    tm._inject_and_run_llm.assert_not_awaited()
+    assert tm.transfer_call_events[-1]["success"] is True
+
+
+async def test_ambiguous_transfer_arms_the_reconcile_timer_which_fires_once(transfer_webhook, monkeypatch):
+    monkeypatch.setenv("TRANSFER_RECONCILE_S", "0.01")
+    tm, _ = _transfer_call(has_transfer=False, transfer_call_params={"provider": "trunk"})
+    transfer_webhook(error=ConnectionError("backend unreachable"))
+
+    refusal = await _post_transfer(tm)
+    assert refusal is None
+    assert tm.has_transfer is True
+    reconcile = tm._transfer_reconcile_task
+    assert reconcile is not None
+    await asyncio.gather(reconcile)
+    await asyncio.gather(*tm._transfer_tasks)
+
+    assert tm.has_transfer is False
+    tm._inject_and_run_llm.assert_awaited_once_with(
+        TRANSFER_FAILED_RESUME_MESSAGE.format(cause="transfer status unknown")
+    )
+    assert tm._transfer_tasks == set()
+
+
+async def test_transfer_failed_frame_cancels_the_reconcile_timer(transfer_webhook, monkeypatch):
+    monkeypatch.setenv("TRANSFER_RECONCILE_S", "30")
+    tm, handler = _transfer_call(has_transfer=False, transfer_call_params={"provider": "trunk"})
+    transfer_webhook(error=ConnectionError("backend unreachable"))
+
+    await _post_transfer(tm)
+    reconcile = tm._transfer_reconcile_task
+    await handler.process_message({"type": "transfer_failed", "cause": "NO_ANSWER"})
+    await asyncio.gather(*tm._transfer_tasks, return_exceptions=True)
+
+    assert reconcile.cancelled()
+    assert tm._transfer_reconcile_task is None
+    tm._inject_and_run_llm.assert_awaited_once_with(TRANSFER_FAILED_RESUME_MESSAGE.format(cause="NO_ANSWER"))
+
+
+async def test_transfer_provider_comes_from_transfer_call_params(transfer_webhook):
+    tm, _ = _transfer_call(has_transfer=False, transfer_call_params={"provider": "trunk", "sub_account_id": "sa-1"})
+    session = transfer_webhook()
+
+    await _post_transfer(tm)
+
+    assert session.posted["provider"] == "trunk"
+    assert session.posted["sub_account_id"] == "sa-1"
+    assert tm.transfer_call_events[0]["provider"] == "trunk"
+    assert tm.tools["input"].io_provider == "freeswitch"
+
+
+async def test_transfer_provider_falls_back_to_the_fork_transport(transfer_webhook):
+    tm, _ = _transfer_call(has_transfer=False, transfer_call_params={"sub_account_id": "sa-1"})
+    session = transfer_webhook()
+
+    await _post_transfer(tm)
+
+    assert session.posted["provider"] == "freeswitch"
 
 
 async def test_transfer_failed_resumes_the_conversation_once():

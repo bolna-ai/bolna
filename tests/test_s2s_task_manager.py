@@ -738,7 +738,7 @@ class TestToolDispatch:
 
     async def test_transfer_call_reuses_the_shared_webhook_path(self):
         tm = make_tm(tools_params={"transfer_call": {"url": "https://hook.example/transfer"}})
-        tm._execute_transfer_call_webhook = AsyncMock()
+        tm._execute_transfer_call_webhook = AsyncMock(return_value=None)
         with patch("bolna.agent_manager.task_manager.convert_to_request_log"):
             await tm._s2s_execute_tool(
                 s2s_events.FunctionCall(name="transfer_call", call_id="c1", arguments='{"call_transfer_number":"+1"}')
@@ -751,7 +751,7 @@ class TestToolDispatch:
         # call_transfer_number is config, so the webhook cannot resolve a destination from
         # the model's arguments.
         tm = make_tm(tools_params={"transfer_call": {"url": None, "param": {"call_transfer_number": "+15550001"}}})
-        tm._execute_transfer_call_webhook = AsyncMock()
+        tm._execute_transfer_call_webhook = AsyncMock(return_value=None)
         with patch("bolna.agent_manager.task_manager.convert_to_request_log"):
             await tm._s2s_execute_tool(
                 s2s_events.FunctionCall(name="transfer_call", call_id="c1", arguments='{"reason":"wants a human"}')
@@ -764,7 +764,7 @@ class TestToolDispatch:
     async def test_duplicate_transfer_is_ignored(self):
         tm = make_tm(tools_params={"transfer_call": {"url": "https://hook.example/transfer"}})
         tm.has_transfer = True
-        tm._execute_transfer_call_webhook = AsyncMock()
+        tm._execute_transfer_call_webhook = AsyncMock(return_value=None)
         with patch("bolna.agent_manager.task_manager.convert_to_request_log"):
             await tm._s2s_execute_tool(s2s_events.FunctionCall(name="transfer_call", call_id="c1", arguments="{}"))
 
