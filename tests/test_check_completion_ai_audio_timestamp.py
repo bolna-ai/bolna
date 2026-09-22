@@ -7,6 +7,8 @@ scored a still-speaking agent as silent and cut the call.
 import time
 from types import SimpleNamespace
 
+import pytest
+
 from bolna.agent_manager.task_manager import TaskManager
 from bolna.helpers.mark_event_meta_data import MarkEventMetaData
 
@@ -68,10 +70,11 @@ def test_before_any_stream_silence_runs_from_the_call_start():
     assert _resolve(0, 0.0, start_time=now - 90) == now - 90
 
 
-def test_a_configured_welcome_delay_is_not_counted_as_silence():
+@pytest.mark.parametrize("welcome_delay_ms,silent_for", [(3000, 87), (None, 90)])
+def test_a_configured_welcome_delay_is_not_counted_as_silence(welcome_delay_ms, silent_for):
     # The delay is slept before the stream sid is stamped, so it falls in the start_time window.
     now = time.time()
-    assert _resolve(0, 0.0, start_time=now - 90, welcome_delay_ms=3000) == now - 87
+    assert _resolve(0, 0.0, start_time=now - 90, welcome_delay_ms=welcome_delay_ms) == now - silent_for
 
 
 def test_queued_audio_accumulates_beyond_send_time():

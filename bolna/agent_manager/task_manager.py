@@ -1425,7 +1425,10 @@ class TaskManager(BaseManager):
                     input_kwargs["ws_context_data"] = self.context_data
                     input_kwargs["agent_config"] = {"tasks": [self.task_config]}
             self.tools["input"] = input_handler_class(**input_kwargs)
-            if self.task_config["tools_config"]["input"]["provider"] in SUPPORTED_INPUT_TELEPHONY_HANDLERS:
+            if (
+                not turn_based_conversation
+                and self.task_config["tools_config"]["input"]["provider"] in SUPPORTED_INPUT_TELEPHONY_HANDLERS
+            ):
                 recipient_data = (self.context_data or {}).get("recipient_data") or {}
                 if recipient_data.get("call_sid"):
                     self.tools["input"].set_fallback_call_sid(recipient_data["call_sid"])
@@ -7603,7 +7606,7 @@ class TaskManager(BaseManager):
         if self.stream_sid_ts:
             stream_ready = self.stream_sid_ts / 1000
         else:
-            stream_ready = self.start_time + self.welcome_message_delay / 1000
+            stream_ready = self.start_time + (self.welcome_message_delay or 0) / 1000
         return max(
             self.last_transmitted_timestamp or stream_ready,
             min(time.time(), self.mark_event_meta_data.get_audio_playing_until()),
