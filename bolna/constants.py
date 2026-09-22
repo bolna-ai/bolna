@@ -471,3 +471,6 @@ def canonical_model(name: str) -> str:
 
 # Text chat (turn-based) watchdog: how often idle / max-duration caps are checked.
 CHAT_WATCHDOG_TICK_S = 3.0
+# Text chat: this many failed turns in a row end the chat (LLM_ERROR) instead of answering every message with an
+# empty end_of_stream forever.
+CHAT_MAX_CONSECUTIVE_TURN_FAILURES = 3

@@ -233,6 +233,9 @@ class DefaultInputHandler:
         self.process_mark_message(packet)
 
     def __process_audio(self, audio):
+        if self.turn_based_conversation:
+            # A text chat has no transcriber consuming this queue; an audio frame here would only accumulate.
+            return
         data = base64.b64decode(audio)
         ws_data_packet = create_ws_data_packet(
             data=data, meta_info={"io": "default", "type": "audio", "sequence": self.input_types["audio"]}

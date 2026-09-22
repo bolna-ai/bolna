@@ -23,6 +23,7 @@ from pydub import AudioSegment
 from bolna.constants import (
     ACCIDENTAL_INTERRUPTION_PHRASES,
     CACHED_SINGLE_MARK_CATEGORIES,
+    CHAT_MAX_CONSECUTIVE_TURN_FAILURES,
     CHAT_WATCHDOG_TICK_S,
     DEFAULT_USER_ONLINE_MESSAGE,
     DEFAULT_USER_ONLINE_MESSAGE_TRIGGER_DURATION,
@@ -498,6 +499,7 @@ class TaskManager(BaseManager):
         self.chat_watchdog_task = None
         self._chat_turn_in_flight = False
         self._chat_last_activity_ts = time.time()
+        self._chat_transfer_declined = False
         self.execute_function_call_task = None
         # Set while a tool call executes so a parallel LID switch won't truncate it.
         self.function_call_in_flight = False
@@ -1610,6 +1612,11 @@ class TaskManager(BaseManager):
     def _get_voice_name_for_label(self, label):
         """Get agent name for a language label from configured agent_names."""
         return self.agent_names.get(label, "")
+
+    def _owes_conversation_payload(self, has_asr_tts: bool) -> bool:
+        """run() hands the server a conversation payload (transcript, hangup_detail, …) for every conversation task
+        that ran as a conversation: voice (ASR+TTS), speech-to-speech, or a text chat with no speech legs at all."""
+        return self._is_conversation_task() and (has_asr_tts or "s2s" in self.tools or self.turn_based_conversation)
 
     def __setup_text_chat(self, llm_config=None):
         """Turn-based (dashboard / simulation) chat is text only: no transcriber or synthesizer is built."""
@@ -3326,17 +3333,29 @@ class TaskManager(BaseManager):
             # the transfer fires exactly once; record the result so the LLM stops re-triggering.
             if self.turn_based_conversation:
                 # A text chat has no telephony leg to hand off: tell the model instead of POSTing a real transfer.
+                # One shot, like has_transfer: the follow-up may re-emit the tool, and this branch is awaited inline.
                 logger.info(f"transfer_call requested in a text chat for run_id={self.run_id}; not available")
-                self.conversation_history.attach_tool_calls_to_turn(turn_id, resp["model_response"])
-                self.conversation_history.append_tool_result(
-                    resp.get("tool_call_id", ""),
-                    json.dumps(
-                        {
-                            "status": "unavailable",
-                            "message": "Call transfer is not available in a text chat. Keep helping the user here.",
-                        }
-                    ),
+                convert_to_request_log(
+                    json.dumps({"called_fun": called_fun, "text_chat": True}),
+                    meta_info,
+                    None,
+                    "function_call",
+                    direction="request",
+                    run_id=self.run_id,
                 )
+                if self._chat_transfer_declined:
+                    message = "Call transfer was already declined for this text chat. Do not request it again."
+                else:
+                    message = "Call transfer is not available in a text chat. Keep helping the user here."
+                tool_result = json.dumps({"status": "unavailable", "message": message})
+                self.conversation_history.attach_tool_calls_to_turn(turn_id, resp["model_response"])
+                self.conversation_history.append_tool_result(resp.get("tool_call_id", ""), tool_result)
+                convert_to_request_log(
+                    tool_result, meta_info, None, "function_call", direction="response", run_id=self.run_id
+                )
+                if self._chat_transfer_declined:
+                    return
+                self._chat_transfer_declined = True
                 messages = self.conversation_history.get_copy()
                 followup_meta_info = self._spawn_followup_meta_info(meta_info)
                 await self.__do_llm_generation(
@@ -4683,6 +4702,7 @@ class TaskManager(BaseManager):
         logger.info(
             f"Starting listening to LLM queue as either Connected to dashboard = {self.turn_based_conversation} or  it's a textual chat agent {self.textual_chat_agent}"
         )
+        consecutive_failures = 0
         while True:
             try:
                 ws_data_packet = await self.queues["llm"].get()
@@ -4702,7 +4722,8 @@ class TaskManager(BaseManager):
                     await self._run_llm_task(create_ws_data_packet(ws_data_packet["data"], meta_info))
                 finally:
                     self._chat_turn_in_flight = False
-                    self._chat_last_activity_ts = time.time()
+                consecutive_failures = 0
+                self._chat_last_activity_ts = time.time()  # only a served turn counts as activity for the watchdog
                 eos_packet = create_ws_data_packet("<end_of_stream>", meta_info)
                 await self.tools["output"].handle(eos_packet)
                 if self.conversation_ended:
@@ -4712,6 +4733,13 @@ class TaskManager(BaseManager):
                 traceback.print_exc()
                 logger.error(f"Something went wrong with LLM queue {e}")
                 if self.conversation_ended or self._end_of_conversation_in_progress:
+                    break
+                consecutive_failures += 1
+                if consecutive_failures >= CHAT_MAX_CONSECUTIVE_TURN_FAILURES:
+                    # Every message is failing the same way: end the chat with a reason instead of looping on it.
+                    logger.error(f"{consecutive_failures} chat turns failed in a row, ending the conversation")
+                    self.hangup_detail = HangupReason.LLM_ERROR
+                    await self.__process_end_of_conversation()
                     break
                 # One failed turn must not end the chat: clear the client's spinner and keep listening.
                 try:
@@ -8827,10 +8855,10 @@ class TaskManager(BaseManager):
                 if hasattr(self, "transcriber_task") and self.transcriber_task is not None:
                     tasks_to_cancel.append(process_task_cancellation(self.transcriber_task, "transcriber_task"))
 
-            # An S2S task has neither transcriber nor synthesizer, but still owes the caller
-            # a conversation payload: transcript, hangup detail, recording, progression.
+            # An S2S task has neither transcriber nor synthesizer, and a text chat has neither either, but both
+            # still owe the caller a conversation payload: transcript, hangup detail, recording, progression.
             _has_asr_tts = "transcriber" in self.tools and "synthesizer" in self.tools
-            if self._is_conversation_task() and (_has_asr_tts or "s2s" in self.tools):
+            if self._owes_conversation_payload(_has_asr_tts):
                 if _has_asr_tts:
                     self.transcriber_latencies.connection_latency_ms = self.tools["transcriber"].connection_time
                     self.synthesizer_latencies.connection_latency_ms = self.tools["synthesizer"].connection_time

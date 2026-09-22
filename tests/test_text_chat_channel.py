@@ -34,6 +34,7 @@ def make_chat_tm():
     tm._chat_last_activity_ts = time.time()
     tm.start_time = time.time()
     tm._TaskManager__get_updated_meta_info = lambda meta_info=None: dict(meta_info or {})
+    tm._chat_transfer_declined = False
     return tm
 
 
@@ -209,3 +210,83 @@ async def test_transfer_call_in_chat_tells_the_model_instead_of_posting_a_transf
     assert tm.has_transfer is False
     tm._execute_transfer_call_webhook.assert_not_awaited()
     assert tm._TaskManager__do_llm_generation.await_args.kwargs["should_bypass_synth"] is True
+
+
+# --- review follow-ups ------------------------------------------------------------------------------------------
+
+
+def test_a_chat_owes_a_conversation_payload_without_speech_legs():
+    tm = make_chat_tm()
+    tm._is_conversation_task = lambda: True
+    assert tm._owes_conversation_payload(has_asr_tts=False) is True
+    voice = make_chat_tm()
+    voice.turn_based_conversation = False
+    voice._is_conversation_task = lambda: True
+    assert voice._owes_conversation_payload(has_asr_tts=False) is False  # no legs, no s2s, no chat: nothing ran
+    assert voice._owes_conversation_payload(has_asr_tts=True) is True
+
+
+async def test_repeated_turn_failures_end_the_chat_with_a_reason():
+    tm = make_chat_tm()
+    tm._run_llm_task = AsyncMock(side_effect=RuntimeError("boom"))
+    ended = asyncio.Event()
+
+    async def end_conversation():
+        tm.conversation_ended = True
+        ended.set()
+
+    tm._TaskManager__process_end_of_conversation = AsyncMock(side_effect=end_conversation)
+    for _ in range(5):
+        tm.queues["llm"].put_nowait(create_ws_data_packet("again", {"type": "text"}))
+    with patch.object(task_manager_module, "CHAT_MAX_CONSECUTIVE_TURN_FAILURES", 3):
+        await asyncio.wait_for(tm._listen_llm_input_queue(), timeout=2)
+    assert tm._run_llm_task.await_count == 3 and ended.is_set()
+    assert tm.hangup_detail == HangupReason.LLM_ERROR
+    assert sent_texts(tm).count("<end_of_stream>") == 2  # flushed after the two tolerated failures only
+
+
+async def test_transfer_in_chat_is_declined_once_and_logged():
+    tm = make_chat_tm()
+    tm.check_if_user_online = True
+    tm.has_transfer = False
+    tm.conversation_history = MagicMock()
+    tm.conversation_history.get_copy.return_value = []
+    tm._spawn_followup_meta_info = lambda meta_info: dict(meta_info)
+    tm._TaskManager__do_llm_generation = AsyncMock()
+    tm._execute_transfer_call_webhook = AsyncMock()
+    tm.execute_function_call_task = None
+
+    async def transfer():
+        await tm._TaskManager__execute_function_call(
+            url=None,
+            method=None,
+            param=None,
+            api_token=None,
+            headers=None,
+            model_args=None,
+            meta_info={"turn_id": 2, "response_uid": "r2", "sequence_id": 2},
+            next_step="synthesizer",
+            called_fun="transfer_call",
+            model_response={},
+            tool_call_id="tool-1",
+        )
+
+    with patch(f"{MOD}.convert_to_request_log") as log:
+        await transfer()
+        await transfer()
+    assert tm._TaskManager__do_llm_generation.await_count == 1  # the re-emitted transfer gets no second follow-up
+    assert tm.conversation_history.append_tool_result.call_count == 2
+    assert "already declined" in tm.conversation_history.append_tool_result.call_args.args[1]
+    directions = [c.kwargs.get("direction") for c in log.call_args_list]
+    assert directions.count("request") == 2 and directions.count("response") == 2
+    tm._execute_transfer_call_webhook.assert_not_awaited()
+
+
+async def test_audio_frames_are_dropped_in_a_text_chat():
+    handler = DefaultInputHandler.__new__(DefaultInputHandler)
+    handler.queues = {"transcriber": asyncio.Queue(), "llm": asyncio.Queue()}
+    handler.turn_based_conversation = True
+    handler.conversation_recording = None
+    handler.input_types = {"audio": 1}
+    await handler.process_message({"type": "audio", "data": "AAAA"})
+    assert handler.queues["transcriber"].empty()
