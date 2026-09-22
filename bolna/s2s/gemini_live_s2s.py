@@ -6,6 +6,7 @@ from typing import AsyncGenerator, List, Optional
 
 import websockets
 
+from bolna.constants import gemini_live_capabilities
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.utils import clean_gemini_schema
 from .base_s2s import MAX_RECONNECT_ATTEMPTS, RECONNECT_DELAY_S, BaseS2SProvider
@@ -51,6 +52,7 @@ class GeminiLiveS2S(BaseS2SProvider):
         api_key: str,
         tools: Optional[List[dict]] = None,
         language: Optional[str] = None,
+        thinking_level: Optional[str] = None,
         temperature: Optional[float] = None,
         start_sensitivity: Optional[str] = None,
         end_sensitivity: Optional[str] = None,
@@ -68,7 +70,9 @@ class GeminiLiveS2S(BaseS2SProvider):
             tools=tools,
             **kwargs,
         )
+        self.capabilities = gemini_live_capabilities(model)
         self.language = language
+        self.thinking_level = thinking_level
         self.temperature = temperature
         self.start_sensitivity = start_sensitivity
         self.end_sensitivity = end_sensitivity
@@ -118,10 +122,12 @@ class GeminiLiveS2S(BaseS2SProvider):
             "responseModalities": ["AUDIO"],
             "speechConfig": {"voiceConfig": {"prebuiltVoiceConfig": {"voiceName": self.voice}}},
         }
-        if self.language:
+        if self.language and self.capabilities.language_code:
             generation_config["speechConfig"]["languageCode"] = self.language
         if self.temperature is not None:
             generation_config["temperature"] = self.temperature
+        if self.thinking_level:
+            generation_config["thinkingConfig"] = {"thinkingLevel": self.thinking_level}
 
         setup: dict = {
             "model": self.model if self.model.startswith("models/") else f"models/{self.model}",
@@ -161,6 +167,9 @@ class GeminiLiveS2S(BaseS2SProvider):
                 logger.warning(f"S2S: dropping malformed tool entry: {tool!r}")
                 continue
             declaration = {"name": spec["name"], "description": spec.get("description", "")}
+            if self.capabilities.tool_behavior:
+                # 3.8 defaults to async, where the model keeps speaking while the tool runs.
+                declaration["behavior"] = self.capabilities.tool_behavior
             parameters = spec.get("parameters")
             if parameters:
                 # An unsupported schema key does not just drop the tool: Gemini rejects the
@@ -339,6 +348,10 @@ class GeminiLiveS2S(BaseS2SProvider):
                 payload = {"result": payload}
         except (ValueError, TypeError):
             payload = {"result": result}
+        if self.capabilities.tool_behavior == "NON_BLOCKING":
+            # The caller is waiting on this answer, so it cuts into whatever the model is
+            # saying rather than queueing behind it.
+            payload["scheduling"] = "INTERRUPT"
         self._pending_tool_results.append({"id": call_id, "name": name, "response": payload})
 
     def _start_turn_clock(self) -> None:
@@ -415,5 +428,6 @@ def _map_usage(usage: dict) -> S2SUsage:
         input_tokens=usage.get("promptTokenCount", 0) or 0,
         output_tokens=usage.get("responseTokenCount", 0) or 0,
         cached_tokens=usage.get("cachedContentTokenCount", 0) or 0,
+        output_thinking_tokens=usage.get("thoughtsTokenCount", 0) or 0,
         **by_modality,
     )

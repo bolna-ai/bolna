@@ -32,6 +32,7 @@ from .constants import (
     SARVAM_LOUDNESS_MIN,
     SMALLEST_TTS_SPEED_MAX,
     SMALLEST_TTS_SPEED_MIN,
+    gemini_live_capabilities,
 )
 
 AGENT_WELCOME_MESSAGE = "This call is being recorded for quality assurance and training. Please speak now."
@@ -717,6 +718,7 @@ class GeminiLiveConfig(BaseModel):
     model: str = "gemini-3.1-flash-live-preview"
     voice: str = "Kore"
     language: Optional[str] = None
+    thinking_level: Optional[ReasoningEffort] = None
     temperature: Optional[float] = None
     start_sensitivity: Optional[str] = None
     end_sensitivity: Optional[str] = None
@@ -727,6 +729,13 @@ class GeminiLiveConfig(BaseModel):
     # Gemini closes an audio session at ~15 minutes, so both stay on unless explicitly disabled.
     enable_session_resumption: bool = True
     enable_context_compression: bool = True
+
+    @model_validator(mode="after")
+    def validate_thinking_level(self):
+        supported = gemini_live_capabilities(self.model).thinking_levels
+        if self.thinking_level and self.thinking_level not in supported:
+            raise ValueError(f"thinking_level is not supported for Live model '{self.model}'.")
+        return self
 
 
 S2S_PROVIDER_CONFIGS = {

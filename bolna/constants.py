@@ -1,5 +1,7 @@
 import os
+from dataclasses import dataclass
 from datetime import datetime, timezone
+from typing import Optional
 from bolna.enums import ReasoningEffort as RE, TelephonyProvider
 
 PREPROCESS_DIR = "agent_data"
@@ -490,6 +492,36 @@ def default_thinking_level(model: str) -> str:
     if not supported:
         return RE.LOW.value
     return supported[0].value
+
+
+@dataclass(frozen=True)
+class GeminiLiveCapabilities:
+    """What one Live API model accepts in its setup frame."""
+
+    language_code: bool = True
+    thinking_levels: tuple = ()
+    # None omits the field and takes the model's own default, which is blocking before 3.8.
+    tool_behavior: Optional[str] = None
+
+
+# 3.8 picks its own language and rejects a language code, only the extended-thinking variant
+# takes a thinking level, and 3.8 flipped the tool default to async, so a model that wants
+# today's blocking semantics has to ask for them.
+GEMINI_LIVE_MODEL_CAPABILITIES = {
+    "gemini-3.8-live": GeminiLiveCapabilities(language_code=False, tool_behavior="BLOCKING"),
+    "gemini-3.8-live-extended-thinking": GeminiLiveCapabilities(
+        language_code=False,
+        thinking_levels=(RE.LOW, RE.MEDIUM, RE.HIGH),
+        tool_behavior="NON_BLOCKING",
+    ),
+}
+
+GEMINI_LIVE_DEFAULT_CAPABILITIES = GeminiLiveCapabilities()
+
+
+def gemini_live_capabilities(model: str) -> GeminiLiveCapabilities:
+    """Capabilities of one Live model; an unknown id keeps the pre-3.8 wire shape."""
+    return GEMINI_LIVE_MODEL_CAPABILITIES.get(model.rsplit("/", 1)[-1], GEMINI_LIVE_DEFAULT_CAPABILITIES)
 
 
 def canonical_model(name: str) -> str:
