@@ -4802,11 +4802,13 @@ class TaskManager(BaseManager):
                 )
                 return False
         logger.info(
-            "BOLNA_TRACE_TM duplicate_of_last_spoken seq=%s turn=%s previous_turn=%s similarity=%.2f",
+            "BOLNA_TRACE_TM duplicate_of_last_spoken seq=%s turn=%s previous_turn=%s similarity=%.2f "
+            "user_input_known=%s",
             sequence_id,
             turn_id,
             previous_turn_id,
             similarity,
+            bool(current_user_input and self._last_spoken_user_input),
         )
         return True
 

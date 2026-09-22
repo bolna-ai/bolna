@@ -6,6 +6,8 @@ with no interrupting user turn. The gate is on the *output*: the regen still run
 that carries a real continuation is answered normally; only a near-identical restatement is dropped.
 """
 
+import logging
+
 import pytest
 
 from bolna.agent_manager.task_manager import TaskManager
@@ -201,3 +203,28 @@ def test_the_incident_pair_is_only_separable_by_user_input():
 )
 def test_restates_previous_text(previous, current, expected):
     assert restates_previous_text(previous, current, DUPLICATE_RESPONSE_SIMILARITY) is expected
+
+
+def test_a_followup_turn_stages_without_user_input(caplog):
+    """`_spawn_followup_meta_info` allocates a fresh turn_id, so a post-tool-call reply never
+    matches `_pending_user_input` and the gate silently falls back. The log has to say so."""
+    tm = _manager_with_user(
+        staged={2: _staged_with_user(REGEN, turn_id=2, user_input=None)},
+        last_spoken=(1, SPOKEN),
+        last_user="hello",
+    )
+    with caplog.at_level(logging.INFO):
+        assert _is_duplicate(tm, 2) is True
+    assert "user_input_known=False" in caplog.text
+
+
+def test_an_evaluated_gate_says_so(caplog):
+    """The other outcome: both sides known, so the suppression is the new gate's decision."""
+    tm = _manager_with_user(
+        staged={2: _staged_with_user(REGEN, turn_id=2, user_input=USER_GROWN_FINAL)},
+        last_spoken=(1, SPOKEN),
+        last_user=USER_FIRST_FINAL,
+    )
+    with caplog.at_level(logging.INFO):
+        assert _is_duplicate(tm, 2) is True
+    assert "user_input_known=True" in caplog.text
