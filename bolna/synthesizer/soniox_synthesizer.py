@@ -24,9 +24,11 @@ SPEED_RANGE = (0.7, 1.3)
 # pcm_mulaw/pcm_alaw are 8k-only; the linear formats accept any of these.
 PCM_SAMPLE_RATES = (8000, 16000, 24000, 44100, 48000)
 
-# Idle keepalive cadence. Docs say every 20–30s with no active stream, and the connection is
-# dropped at ~40s; 15s leaves room for a missed tick without being chatty.
-KEEPALIVE_INTERVAL = 15.0
+# Docs say 20-30s with no active stream and a drop at ~40s, but idle sockets go much sooner:
+# an observed call lost one ~11s after connect.
+KEEP_ALIVE_INTERVAL_S = 8
+# Named rather than inlined into the sleep purely so tests can drive the loop.
+KEEP_ALIVE_POLL_S = 1
 
 # Text frames cap at 5000 characters. Buffered LLM chunks never approach this, but a
 # pre-rendered clip (a long welcome message) can, so the one-shot path checks it.
@@ -90,6 +92,7 @@ class SonioxSynthesizer(StreamSynthesizer):
         self._turn_seq = None
         self._cancelled_streams = set()
         self._keepalive_task = None
+        self._last_send_time = time.perf_counter()
         self.first_chunk_generated = False
 
     # ------------------------------------------------------------------
@@ -158,10 +161,12 @@ class SonioxSynthesizer(StreamSynthesizer):
                 websockets.connect(self.ws_url, ssl=get_ssl_context(self.ws_url)),
                 timeout=10.0,
             )
-            # First dial only: a reconnect mid-call must not overwrite the figure
-            # observability reports as this call's TTS connect latency.
+            elapsed = round((time.perf_counter() - start) * 1000)
             if not self.connection_time:
-                self.connection_time = round((time.perf_counter() - start) * 1000)
+                self.connection_time = elapsed
+            # A live socket retires whatever the last one died of. A fatal handshake
+            # rejection returns before this, so it cannot clear one that must stop the call.
+            self.connection_error = None
             # Nothing is sent yet: the config frame opens a *stream*, not the connection, and
             # the first turn's sender emits it.
             self.stream_id = None
@@ -169,7 +174,7 @@ class SonioxSynthesizer(StreamSynthesizer):
             self._turn_seq = None
             self._cancelled_streams.clear()
             logger.info(
-                f"Connected to Soniox TTS in {self.connection_time}ms "
+                f"Connected to Soniox TTS in {elapsed}ms "
                 f"(model={self.model}, voice={self.voice}, "
                 f"format={self._wire_audio_format()}@{self.target_sample_rate})"
             )
@@ -194,32 +199,32 @@ class SonioxSynthesizer(StreamSynthesizer):
         return None
 
     async def _keepalive_loop(self):
-        """Hold the idle connection open between turns.
-
-        A pause between turns easily outlasts the ~40s idle close, so without this every turn
-        after a silence would pay a reconnect. It does not extend the in-stream text window,
-        which is a separate and much shorter timer.
-        """
-        try:
-            while True:
-                await asyncio.sleep(KEEPALIVE_INTERVAL)
-                if self._stream_open or self.conversation_ended:
-                    continue
-                if not await self._send_frame({"keep_alive": True}):
-                    return  
-        except asyncio.CancelledError:
-            pass
+        """Hold the idle connection open between turns."""
+        while not self.conversation_ended and not self.connection_error:
+            await asyncio.sleep(KEEP_ALIVE_POLL_S)
+            # Started before monitor_connection assigns the socket, so wait the gap out
+            # rather than exiting: this task is what keeps the connection alive.
+            if self._stream_open or not self._is_ws_connected():
+                continue
+            if time.perf_counter() - self._last_send_time < KEEP_ALIVE_INTERVAL_S:
+                continue
+            await self._send_frame({"keep_alive": True})
 
     async def _send_frame(self, payload):
-        """_send_json raises and records connection_error; a failed frame must not take the
-        turn down, so it is swallowed here and the caller settles the turn instead."""
+        """Send one frame; the caller settles the turn on a False.
+
+        Not the shared _send_json: that records connection_error, which _generate_ws_loop
+        treats as fatal and never clears. A socket dying mid-send is transient — the redial
+        settles it (cf. kalpa _send_frame)."""
         if not self._is_ws_connected():
             logger.info("Soniox TTS websocket is not connected; dropping frame")
             return False
         try:
-            await self._send_json(payload)
+            await self.websocket.send(json.dumps(payload))
+            self._last_send_time = time.perf_counter()
             return True
-        except Exception:
+        except Exception as e:
+            logger.error(f"Soniox TTS send failed; the redial settles it: {e}")
             return False
 
     # ------------------------------------------------------------------
