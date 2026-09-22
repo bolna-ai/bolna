@@ -12,6 +12,7 @@ from websockets.exceptions import InvalidHandshake
 from .stream_synthesizer import StreamSynthesizer
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.ssl_context import get_ssl_context
+from bolna.memory.cache.inmemory_scalar_cache import InmemoryScalarCache
 
 logger = configure_logger(__name__)
 
@@ -67,6 +68,10 @@ class SonioxSynthesizer(StreamSynthesizer):
         if not self.voice:
             raise ValueError("Soniox needs a voice name or a cloned voice id")
 
+        self.caching = caching
+        if caching:
+            self.cache = InmemoryScalarCache()
+
         self.model = model
         self.language = (language or "en").split("-")[0]
         self.speed = float(speed) if speed is not None else None
@@ -91,9 +96,9 @@ class SonioxSynthesizer(StreamSynthesizer):
         # belongs to a turn that has already been retired.
         self._turn_seq = None
         self._cancelled_streams = set()
+        self._pending_cancels = []
         self._keepalive_task = None
         self._last_send_time = time.perf_counter()
-        self.first_chunk_generated = False
 
     # ------------------------------------------------------------------
     # Config validation
@@ -173,6 +178,7 @@ class SonioxSynthesizer(StreamSynthesizer):
             self._stream_open = False
             self._turn_seq = None
             self._cancelled_streams.clear()
+            self._pending_cancels.clear()
             logger.info(
                 f"Connected to Soniox TTS in {elapsed}ms "
                 f"(model={self.model}, voice={self.voice}, "
@@ -240,6 +246,7 @@ class SonioxSynthesizer(StreamSynthesizer):
             logger.info(f"Soniox stream {self.stream_id} superseded by seq={seq}; abandoning it")
             if self.stream_id:
                 self._cancelled_streams.add(self.stream_id)
+                self._pending_cancels.append(self.stream_id)
             self._stream_open = False
             self.stream_id = None
 
@@ -254,6 +261,9 @@ class SonioxSynthesizer(StreamSynthesizer):
             await self._wait_for_ws()
             if not self._is_ws_connected():
                 return
+            
+            while self._pending_cancels:
+                await self._send_frame({"stream_id": self._pending_cancels.pop(0), "cancel": True})
 
             if not self._stream_open:
                 self.stream_id = f"{sequence_id}-{uuid.uuid4().hex[:8]}"
@@ -328,7 +338,8 @@ class SonioxSynthesizer(StreamSynthesizer):
                     f"{event.get('error_type')} {event.get('error_message')} "
                     f"(code={event.get('error_code')} request_id={event.get('request_id')})"
                 )
-                if not stale and stream_id == self.stream_id:
+               
+                if not stale and self.stream_id is not None and stream_id == self.stream_id:
                     self._stream_open = False
                     self.stream_id = None
                     yield b"\x00"
@@ -351,13 +362,10 @@ class SonioxSynthesizer(StreamSynthesizer):
                     logger.error(f"Could not decode Soniox TTS audio: {e}")
                     continue
                 if chunk:
-                    if not self.first_chunk_generated:
-                        self.first_chunk_generated = True
                     yield chunk
 
             if event.get("audio_end"):
                 if not stale:
-                    self.first_chunk_generated = False
                     yield b"\x00"
 
     # ------------------------------------------------------------------
