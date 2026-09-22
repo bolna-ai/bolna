@@ -133,6 +133,8 @@ class AzureConfig(BaseModel):
 class GeminiConfig(StandardVoiceConfig):
     # voice_id holds the Gemini voice_name; style feeds structured speech_metadata.
     style: Optional[str] = None
+
+
 class SonioxConfig(StandardVoiceConfig):
     # `voice` carries a built-in voice name ("Adrian"); a cloned voice's id goes in voice_id.
     speed: Optional[float] = None
