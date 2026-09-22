@@ -203,12 +203,12 @@ class LiteLLM(BaseLLM):
             model_args["response_format"] = {"type": "json_object"}
         # model_args holds the BYOK api_key. The conversation path's prompt is persisted by
         # convert_to_request_log; extraction and summarization keep only this shape.
-        messages = model_args.get("messages") or []
+        sent_messages = model_args["messages"] or []
         logger.info(
             "Request to litellm model=%s messages=%s chars=%s stream=%s",
             model_args.get("model"),
-            len(messages),
-            sum(len(str(m.get("content") or "")) for m in messages),
+            len(sent_messages),
+            sum(len(str(m.get("content") or "")) for m in sent_messages),
             stream,
         )
         try:

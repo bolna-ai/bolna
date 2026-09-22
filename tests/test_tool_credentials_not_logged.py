@@ -24,6 +24,8 @@ FORBIDDEN = (
     "Request to litellm {model_args}",
     "{get_url}, {headers}",
     "{url}, {headers}",
+    # The built GET url appends the query string, so a query-param-auth tool writes its key.
+    ", get_url",
 )
 
 

@@ -257,7 +257,9 @@ async def trigger_api(
             response_text = None
             if method.lower() == "get":
                 get_url = build_get_url(url, api_params)
-                logger.info("Sending request %s, %s, header_keys=%s", request_body, get_url, header_names(headers))
+                # The built URL carries the query string, so a tool whose auth is a query param
+                # would write its key here. request_body already holds the same arguments.
+                logger.info("Sending request %s, %s, header_keys=%s", request_body, url, header_names(headers))
                 # allow_redirects=False: the URL is validated pre-flight, but a redirect
                 # hop is not re-validated and would reopen the SSRF path (e.g. 302 -> IMDS).
                 async with session.get(get_url, headers=headers, allow_redirects=False) as response:
