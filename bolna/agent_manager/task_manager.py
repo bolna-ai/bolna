@@ -4112,11 +4112,6 @@ class TaskManager(BaseManager):
                             llm_latency=llm_first_token_latency,
                         )
                         if self.turn_based_conversation:
-                            # Chat generates with synthesize=False, so the LLM layer streams no text while a
-                            # tool call is being assembled: the words the model put in front of the call (the
-                            # goodbye before end_call, "let me check" before a lookup) only arrive here, on the
-                            # function-call chunk. Voice already heard them; chat has to send them now, or the
-                            # end_call branch skips the follow-up goodbye and the client sees nothing.
                             await self._handle_llm_output(next_step, textual_response, True, meta_info)
                     try:
                         await self.__execute_function_call(next_step=next_step, **data.model_dump())
