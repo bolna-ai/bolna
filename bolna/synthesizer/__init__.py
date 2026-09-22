@@ -13,4 +13,5 @@ from .pixa_synthesizer import PixaSynthesizer
 from .maya_synthesizer import MayaSynthesizer
 from .kalpa_synthesizer import KalpaSynthesizer
 from .gemini_synthesizer import GeminiSynthesizer
+from .soniox_synthesizer import SonioxSynthesizer
 from .synthesizer_pool import SynthesizerPool
