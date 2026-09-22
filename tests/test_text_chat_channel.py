@@ -290,3 +290,71 @@ async def test_audio_frames_are_dropped_in_a_text_chat():
     handler.input_types = {"audio": 1}
     await handler.process_message({"type": "audio", "data": "AAAA"})
     assert handler.queues["transcriber"].empty()
+
+
+# --- text that arrives WITH a tool call -----------------------------------------------------------------------------
+
+
+async def _generation_with_tool_call(textual_response, turn_based):
+    """Drive __do_llm_generation_impl with an LLM that answers with ONE function-call chunk carrying
+    `textual_response` (what openai_base yields when synthesize=False buffered the words before the call)."""
+    from types import SimpleNamespace
+
+    from bolna.llms.types import FunctionCallPayload, LatencyData, LLMStreamChunk
+
+    tm = make_chat_tm()
+    tm.turn_based_conversation = turn_based
+    tm.hangup_triggered = False
+    tm.language = "en"
+    tm.function_call_in_flight = False
+    tm.llm_latencies = SimpleNamespace(turn_latencies=[])
+    tm._stamp_llm_latency_dict = MagicMock()
+    tm.tools["input"] = MagicMock(reset_response_heard_by_user=MagicMock())
+    tm._inject_language_instruction = lambda messages: messages
+    tm._TaskManager__store_into_history = MagicMock()
+    tm._TaskManager__execute_function_call = AsyncMock()
+
+    payload = FunctionCallPayload(
+        called_fun="end_call", tool_call_id="tc1", model_response=[], textual_response=textual_response
+    )
+
+    async def generate(messages, synthesize, meta_info):
+        # Real function-call chunks always carry latency data; the text is only read when they do.
+        yield LLMStreamChunk(
+            data=payload,
+            is_function_call=True,
+            function_name="end_call",
+            end_of_stream=True,
+            latency=LatencyData(sequence_id=1, first_token_latency_ms=120.0),
+        )
+
+    tm.tools["llm_agent"] = MagicMock(generate=generate)
+    meta_info = {"llm_start_time": time.time(), "type": "text", "sequence_id": 1, "turn_id": 1}
+    await TaskManager._TaskManager__do_llm_generation_impl(
+        tm, [{"role": "user", "content": "no thanks"}], meta_info, "synthesizer"
+    )
+    return tm
+
+
+async def test_goodbye_sent_with_the_end_call_tool_call_reaches_the_chat_client():
+    """openai_base streams nothing while a tool call is assembled when synthesize=False, so in chat the
+    goodbye the model put in front of end_call only exists as the chunk's textual_response. It must go out
+    as a text frame before the tool runs, otherwise the end_call branch (which assumes the words were
+    already streamed) skips the follow-up goodbye and the client sees nothing."""
+    tm = await _generation_with_tool_call("Thanks for your time, goodbye.", turn_based=True)
+    assert sent_texts(tm) == ["Thanks for your time, goodbye."]
+    tm._TaskManager__execute_function_call.assert_awaited_once()
+    assert (
+        tm._TaskManager__execute_function_call.await_args.kwargs["textual_response"] == "Thanks for your time, goodbye."
+    )
+
+
+async def test_tool_call_without_text_sends_nothing_before_the_tool_runs():
+    tm = await _generation_with_tool_call(None, turn_based=True)
+    assert sent_texts(tm) == []
+    tm._TaskManager__execute_function_call.assert_awaited_once()
+
+
+async def test_voice_does_not_resend_text_that_was_already_streamed_to_tts():
+    tm = await _generation_with_tool_call("Thanks for your time, goodbye.", turn_based=False)
+    assert sent_texts(tm) == []
