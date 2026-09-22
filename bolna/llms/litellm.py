@@ -208,7 +208,7 @@ class LiteLLM(BaseLLM):
             "Request to litellm model=%s messages=%s chars=%s stream=%s",
             model_args.get("model"),
             len(sent_messages),
-            sum(len(str(m.get("content") or "")) for m in sent_messages),
+            sum(len(str(m.get("content") or "")) for m in sent_messages if isinstance(m, dict)),
             stream,
         )
         try:

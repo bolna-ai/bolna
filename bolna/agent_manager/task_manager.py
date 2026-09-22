@@ -103,6 +103,7 @@ from bolna.helpers.utils import (
     save_audio_file_to_s3,
     update_prompt_with_context,
     get_md5_hash,
+    scalar_fields,
     static_node_audio_key,
     clean_json_string,
     wav_bytes_to_pcm,
@@ -687,6 +688,7 @@ class TaskManager(BaseManager):
             # For nitro
             self.nitro = True
             self.conversation_config = task.get("task_config", {})
+            logger.info("Conversation config %s", scalar_fields(self.conversation_config))
 
             # Enable DTMF flow
             dtmf_enabled = self.conversation_config.get("dtmf_enabled", False)
@@ -4088,8 +4090,8 @@ class TaskManager(BaseManager):
                         data.called_fun,
                         data.url,
                         data.method,
-                        data.meta_info.get("sequence_id"),
-                        data.meta_info.get("turn_id"),
+                        meta_info.get("sequence_id"),
+                        meta_info.get("turn_id"),
                         data.model_extra,
                     )
                     # Stamp total_stream_duration_ms before early return — function call chunk carries the final latency
