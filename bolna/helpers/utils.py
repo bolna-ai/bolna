@@ -949,6 +949,7 @@ def convert_to_request_log(
     reasoning_content=None,
     ts=None,
     latency=None,
+    tool_name=None,
 ):
     log = dict()
     log["direction"] = direction.value if isinstance(direction, Enum) else direction
@@ -1005,7 +1006,14 @@ def convert_to_request_log(
             log["latency"] = meta_info.get("transcriber_latency", None) if direction == LogDirection.RESPONSE else None
             if "is_final" in meta_info and meta_info["is_final"]:
                 log["is_final"] = True
-        case LogComponent.FUNCTION_CALL | LogComponent.WARNING | LogComponent.ERROR:
+        case LogComponent.FUNCTION_CALL:
+            log["latency"] = None
+            # Which tool this row belongs to. The CSV has no dedicated column for it, so it
+            # rides in Metadata (write_request_logs already reads function_call_metadata) and
+            # the dashboard lifts it out to label the Component cell.
+            if tool_name:
+                log["function_call_metadata"] = {"tool_name": tool_name}
+        case LogComponent.WARNING | LogComponent.ERROR:
             log["latency"] = None
         case LogComponent.GRAPH_ROUTING:
             log["latency"] = None

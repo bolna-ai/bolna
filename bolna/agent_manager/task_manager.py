@@ -1036,8 +1036,9 @@ class TaskManager(BaseManager):
 
         # Record in function_tool_api_call_details so the pre-call webhook lands in the
         # same per-call S3 record as the other API/tool calls.
+        webhook_tool_name = f"{called_fun}:pre_call_webhook"
         api_call_detail = self._start_api_call_detail(
-            called_fun=f"{called_fun}:pre_call_webhook",
+            called_fun=webhook_tool_name,
             url=target_url,
             method="POST",
             param=None,
@@ -1061,6 +1062,7 @@ class TaskManager(BaseManager):
                     LogComponent.FUNCTION_CALL,
                     direction=LogDirection.REQUEST,
                     run_id=self.run_id,
+                    tool_name=webhook_tool_name,
                 )
                 async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
                     # allow_redirects=False: a redirect hop is not re-validated and would
@@ -1075,6 +1077,7 @@ class TaskManager(BaseManager):
                             LogComponent.FUNCTION_CALL,
                             direction=LogDirection.RESPONSE,
                             run_id=self.run_id,
+                            tool_name=webhook_tool_name,
                         )
                         self._finalize_api_call_detail(
                             api_call_detail,
@@ -3237,6 +3240,7 @@ class TaskManager(BaseManager):
                 "function_call",
                 direction="request",
                 run_id=self.run_id,
+                tool_name=called_fun,
             )
 
             textual_response = resp.get("textual_response", None)
@@ -3246,7 +3250,8 @@ class TaskManager(BaseManager):
             self.conversation_history.attach_tool_calls_to_turn(turn_id, resp["model_response"])
             self.conversation_history.append_tool_result(resp.get("tool_call_id", ""), tool_result)
             convert_to_request_log(
-                tool_result, meta_info, None, "function_call", direction="response", run_id=self.run_id
+                tool_result, meta_info, None, "function_call", direction="response", run_id=self.run_id,
+                tool_name=called_fun,
             )
 
             try:
@@ -3371,7 +3376,8 @@ class TaskManager(BaseManager):
                 self.conversation_history.attach_tool_calls_to_turn(turn_id, resp["model_response"])
                 self.conversation_history.append_tool_result(resp.get("tool_call_id", ""), function_response)
                 convert_to_request_log(
-                    function_response, meta_info, None, "function_call", direction="response", run_id=self.run_id
+                    function_response, meta_info, None, "function_call", direction="response", run_id=self.run_id,
+                    tool_name=called_fun,
                 )
 
                 messages = self.conversation_history.get_copy()
@@ -3458,7 +3464,8 @@ class TaskManager(BaseManager):
             self.conversation_history.attach_tool_calls_to_turn(turn_id, resp["model_response"])
             self.conversation_history.append_tool_result(resp.get("tool_call_id", ""), function_response)
             convert_to_request_log(
-                function_response, meta_info, None, "function_call", direction="response", run_id=self.run_id
+                function_response, meta_info, None, "function_call", direction="response", run_id=self.run_id,
+                tool_name=called_fun,
             )
 
             messages = self.conversation_history.get_copy()
@@ -3521,6 +3528,7 @@ class TaskManager(BaseManager):
                 meta_info=meta_info,
                 run_id=self.run_id,
                 return_response_metadata=True,
+                called_fun=called_fun,
                 **resp,
             )
         except asyncio.CancelledError:
@@ -3577,6 +3585,7 @@ class TaskManager(BaseManager):
             direction=LogDirection.RESPONSE,
             is_cached=False,
             run_id=self.run_id,
+            tool_name=called_fun,
         )
 
         messages = self.conversation_history.get_copy()
@@ -4514,6 +4523,7 @@ class TaskManager(BaseManager):
                 LogComponent.FUNCTION_CALL,
                 direction=LogDirection.REQUEST,
                 run_id=self.run_id,
+                tool_name=called_fun,
             )
             convert_to_request_log(
                 mock_response,
@@ -4522,6 +4532,7 @@ class TaskManager(BaseManager):
                 LogComponent.FUNCTION_CALL,
                 direction=LogDirection.RESPONSE,
                 run_id=self.run_id,
+                tool_name=called_fun,
             )
             self._finalize_api_call_detail(
                 function_call_log, response=mock_response, status_code=200, content_type="text/plain"
@@ -4572,6 +4583,7 @@ class TaskManager(BaseManager):
                 direction=LogDirection.REQUEST,
                 is_cached=False,
                 run_id=self.run_id,
+                tool_name=called_fun,
             )
             _transfer_end_recorded = False
             try:
@@ -4586,6 +4598,7 @@ class TaskManager(BaseManager):
                         direction=LogDirection.RESPONSE,
                         is_cached=False,
                         run_id=self.run_id,
+                        tool_name=called_fun,
                     )
                     self._finalize_api_call_detail(
                         function_call_log,
@@ -8435,6 +8448,7 @@ class TaskManager(BaseManager):
             direction=LogDirection.REQUEST,
             is_cached=False,
             run_id=self.run_id,
+            tool_name=event.name,
         )
 
         ends_call = event.name.startswith(END_CALL_FUNCTION_PREFIX)
@@ -8477,6 +8491,7 @@ class TaskManager(BaseManager):
             direction=LogDirection.RESPONSE,
             is_cached=False,
             run_id=self.run_id,
+            tool_name=event.name,
         )
         await s2s.send_function_result(event.call_id, event.name, result)
         await s2s.commit_function_results()
@@ -8526,6 +8541,7 @@ class TaskManager(BaseManager):
                 meta_info=meta_info,
                 run_id=self.run_id,
                 return_response_metadata=True,
+                called_fun=event.name,
                 **args,
             )
         except asyncio.CancelledError:

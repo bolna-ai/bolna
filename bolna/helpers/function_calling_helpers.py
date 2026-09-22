@@ -223,7 +223,16 @@ def build_get_url(url, api_params):
 
 
 async def trigger_api(
-    url, method, param, api_token, headers_data, meta_info, run_id, return_response_metadata=False, **kwargs
+    url,
+    method,
+    param,
+    api_token,
+    headers_data,
+    meta_info,
+    run_id,
+    return_response_metadata=False,
+    called_fun=None,
+    **kwargs,
 ):
     timeout_seconds = 10
     try:
@@ -241,6 +250,7 @@ async def trigger_api(
             direction=LogDirection.REQUEST,
             is_cached=False,
             run_id=run_id,
+            tool_name=called_fun,
         )
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=timeout_seconds)) as session:
             response = None
