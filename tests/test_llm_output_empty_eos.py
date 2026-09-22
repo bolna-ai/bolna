@@ -15,6 +15,7 @@ class _Stub:
 def _handler(turn_streamed_text):
     stub = _Stub()
     stub.stream = True
+    stub.turn_based_conversation = False
     # Cleared while a turn's audio is in flight — i.e. once a chunk reached the synthesizer.
     stub._turn_audio_flushed = asyncio.Event()
     if not turn_streamed_text:

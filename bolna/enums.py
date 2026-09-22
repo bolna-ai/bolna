@@ -212,6 +212,7 @@ class HangupReason(str, Enum):
     LLM_ERROR = "llm_error"
     END_CALL_TOOL = "end_call_tool"
     S2S_ERROR = "s2s_error"
+    CLIENT_DISCONNECTED = "client_disconnected"
 
     @classmethod
     def all_values(cls):
