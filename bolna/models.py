@@ -135,6 +135,12 @@ class GeminiConfig(StandardVoiceConfig):
     style: Optional[str] = None
 
 
+class SonioxConfig(StandardVoiceConfig):
+    # `voice` carries a built-in voice name ("Adrian"); a cloned voice's id goes in voice_id.
+    speed: Optional[float] = None
+    reduce_silence: Optional[bool] = None
+
+
 # The config class each provider's provider_config is validated against. Adding a provider means
 # one entry here.
 SYNTHESIZER_CONFIG_MODELS = {
@@ -151,6 +157,7 @@ SYNTHESIZER_CONFIG_MODELS = {
     SynthesizerProvider.MAYA.value: MayaConfig,
     SynthesizerProvider.KALPA.value: KalpaConfig,
     SynthesizerProvider.GEMINI.value: GeminiConfig,
+    SynthesizerProvider.SONIOX.value: SonioxConfig,
 }
 
 
