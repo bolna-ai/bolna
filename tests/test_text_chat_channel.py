@@ -312,6 +312,7 @@ async def _generation_with_tool_call(textual_response, turn_based):
     tm.tools["input"] = MagicMock(reset_response_heard_by_user=MagicMock())
     tm._inject_language_instruction = lambda messages: messages
     tm._TaskManager__store_into_history = MagicMock()
+    tm._commit_staged_assistant_history = MagicMock()
     tm._TaskManager__execute_function_call = AsyncMock()
 
     payload = FunctionCallPayload(
@@ -343,6 +344,7 @@ async def test_goodbye_sent_with_the_end_call_tool_call_reaches_the_chat_client(
     already streamed) skips the follow-up goodbye and the client sees nothing."""
     tm = await _generation_with_tool_call("Thanks for your time, goodbye.", turn_based=True)
     assert sent_texts(tm) == ["Thanks for your time, goodbye."]
+    tm._commit_staged_assistant_history.assert_called_once_with(1)  # the words the user read enter history
     tm._TaskManager__execute_function_call.assert_awaited_once()
     assert (
         tm._TaskManager__execute_function_call.await_args.kwargs["textual_response"] == "Thanks for your time, goodbye."
@@ -358,3 +360,29 @@ async def test_tool_call_without_text_sends_nothing_before_the_tool_runs():
 async def test_voice_does_not_resend_text_that_was_already_streamed_to_tts():
     tm = await _generation_with_tool_call("Thanks for your time, goodbye.", turn_based=False)
     assert sent_texts(tm) == []
+    tm._commit_staged_assistant_history.assert_not_called()  # voice commits when the audio is sent
+
+
+def test_committed_tool_call_text_is_the_turn_the_tool_call_attaches_to():
+    """End to end over the real history object: the goodbye staged with end_call is committed in chat, so the
+    tool call lands on that assistant row instead of an empty placeholder and the transcript keeps the words."""
+    from bolna.helpers.conversation_history import ConversationHistory
+
+    tm = make_chat_tm()
+    tm.conversation_history = ConversationHistory()
+    tm.conversation_history.append_user("no thanks", turn_id=7)
+    tm._pending_assistant_history = {}
+    tm._committed_assistant_sequences = set()
+    tm._sent_audio_sequences = set()
+    tm._blocked_sequences = set()
+    tm._pending_user_input = None
+    tm._turn_msg_map = {}
+    meta_info = {"sequence_id": 3, "turn_id": 7, "response_uid": "u1"}
+    tm._stage_assistant_history(meta_info, "Thanks for your time, goodbye.")
+    tm._commit_staged_assistant_history(meta_info["sequence_id"])
+    tool_call = [{"id": "call_1", "type": "function", "function": {"name": "end_call", "arguments": "{}"}}]
+    tm.conversation_history.attach_tool_calls_to_turn(7, tool_call)
+    assistant = [m for m in tm.conversation_history.messages if m["role"] == "assistant"]
+    assert len(assistant) == 1
+    assert assistant[0]["content"] == "Thanks for your time, goodbye." and assistant[0]["tool_calls"] == tool_call
+    assert tm._pending_assistant_history == {}
