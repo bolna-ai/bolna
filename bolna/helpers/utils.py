@@ -642,6 +642,19 @@ def normalized_similarity(first: str, second: str) -> float:
     return difflib.SequenceMatcher(None, first, second).ratio()
 
 
+def restates_previous_text(previous: str, current: str, similarity_threshold: float) -> bool:
+    """True when `current` re-states `previous` rather than adding something new.
+
+    A re-finalized ASR turn grows its predecessor, so a prefix match is the signal."""
+    first = " ".join((previous or "").split()).casefold()
+    second = " ".join((current or "").split()).casefold()
+    if not first or not second:
+        return False
+    if second.startswith(first):
+        return True
+    return normalized_similarity(first, second) >= similarity_threshold
+
+
 def get_synth_audio_format(audio_bytes):
     # input to this can be WAV or PCM
     try:

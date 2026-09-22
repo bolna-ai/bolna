@@ -95,6 +95,7 @@ from bolna.helpers.utils import (
     get_required_input_types,
     format_messages,
     normalized_similarity,
+    restates_previous_text,
     safe_log_text,
     get_prompt_responses,
     resample,
@@ -334,6 +335,10 @@ class TaskManager(BaseManager):
         self._committed_assistant_sequences: set = set()
         # (turn_id, text) of the turn whose audio was last dispatched; the duplicate gate reads it.
         self._last_spoken_assistant = None
+        # User utterance behind that turn — lets the gate tell a re-finalized ASR turn from a new
+        # one the LLM happened to answer identically.
+        self._last_spoken_user_input = None
+        self._pending_user_input = None  # (turn_id, text) of the turn being answered
 
         self.task_config = task
 
@@ -4853,11 +4858,13 @@ class TaskManager(BaseManager):
         turn_id = meta_info.get("turn_id")
         if sequence_id is None or not content or not str(content).strip():
             return
+        pending_user = self._pending_user_input
         self._pending_assistant_history[sequence_id] = {
             "content": content,
             "turn_id": turn_id,
             "response_uid": response_uid,
             "message_category": meta_info.get("message_category"),
+            "user_input": pending_user[1] if pending_user and pending_user[0] == turn_id else None,
         }
         logger.info(
             "BOLNA_TRACE_TM stage_assistant_history seq=%s turn=%s response_uid=%s text_len=%s",
@@ -4896,12 +4903,30 @@ class TaskManager(BaseManager):
         similarity = normalized_similarity(staged["content"], previous_text)
         if similarity < DUPLICATE_RESPONSE_SIMILARITY:
             return False
+        # Only a re-finalized utterance is a duplicate: the same reply to a *new* user turn is a
+        # real answer, and suppressing it leaves silence and no transcript line. Unknown → unchanged.
+        current_user_input = staged.get("user_input")
+        if current_user_input and self._last_spoken_user_input:
+            if not restates_previous_text(
+                self._last_spoken_user_input, current_user_input, DUPLICATE_RESPONSE_SIMILARITY
+            ):
+                logger.info(
+                    "BOLNA_TRACE_TM duplicate_reply_new_user_turn seq=%s turn=%s previous_turn=%s "
+                    "similarity=%.2f — speaking it, user input differs",
+                    sequence_id,
+                    turn_id,
+                    previous_turn_id,
+                    similarity,
+                )
+                return False
         logger.info(
-            "BOLNA_TRACE_TM duplicate_of_last_spoken seq=%s turn=%s previous_turn=%s similarity=%.2f",
+            "BOLNA_TRACE_TM duplicate_of_last_spoken seq=%s turn=%s previous_turn=%s similarity=%.2f "
+            "user_input_known=%s",
             sequence_id,
             turn_id,
             previous_turn_id,
             similarity,
+            bool(current_user_input and self._last_spoken_user_input),
         )
         return True
 
@@ -4914,6 +4939,7 @@ class TaskManager(BaseManager):
 
         self._committed_assistant_sequences.add(sequence_id)
         self._last_spoken_assistant = (staged["turn_id"], staged["content"])
+        self._last_spoken_user_input = staged.get("user_input")
         self.conversation_history.append_assistant(
             staged["content"],
             turn_id=staged["turn_id"],
@@ -5105,6 +5131,8 @@ class TaskManager(BaseManager):
         self.conversation_history.append_user(
             transcriber_message, asr_turn_id=asr_id_to_int(meta_info.get("asr_turn_id"))
         )
+        if meta_info.get("turn_id") is not None:
+            self._pending_user_input = (meta_info.get("turn_id"), transcriber_message)
         logger.info(
             "BOLNA_TRACE_TM append_user seq=%s turn=%s response_uid=%s history_len=%s text=%r",
             meta_info.get("sequence_id"),
