@@ -3250,7 +3250,12 @@ class TaskManager(BaseManager):
             self.conversation_history.attach_tool_calls_to_turn(turn_id, resp["model_response"])
             self.conversation_history.append_tool_result(resp.get("tool_call_id", ""), tool_result)
             convert_to_request_log(
-                tool_result, meta_info, None, "function_call", direction="response", run_id=self.run_id,
+                tool_result,
+                meta_info,
+                None,
+                "function_call",
+                direction="response",
+                run_id=self.run_id,
                 tool_name=called_fun,
             )
 
@@ -3376,7 +3381,12 @@ class TaskManager(BaseManager):
                 self.conversation_history.attach_tool_calls_to_turn(turn_id, resp["model_response"])
                 self.conversation_history.append_tool_result(resp.get("tool_call_id", ""), function_response)
                 convert_to_request_log(
-                    function_response, meta_info, None, "function_call", direction="response", run_id=self.run_id,
+                    function_response,
+                    meta_info,
+                    None,
+                    "function_call",
+                    direction="response",
+                    run_id=self.run_id,
                     tool_name=called_fun,
                 )
 
@@ -3464,7 +3474,12 @@ class TaskManager(BaseManager):
             self.conversation_history.attach_tool_calls_to_turn(turn_id, resp["model_response"])
             self.conversation_history.append_tool_result(resp.get("tool_call_id", ""), function_response)
             convert_to_request_log(
-                function_response, meta_info, None, "function_call", direction="response", run_id=self.run_id,
+                function_response,
+                meta_info,
+                None,
+                "function_call",
+                direction="response",
+                run_id=self.run_id,
                 tool_name=called_fun,
             )
 
