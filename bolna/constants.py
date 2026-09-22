@@ -363,7 +363,6 @@ SARVAM_STREAMING_WAV_HEADER_MODELS = {"bulbul:v3", "bulbul:v4-flash"}
 # bulbul TTS requires a concrete target_language_code (no "unknown"/auto).
 SARVAM_TTS_SUPPORTED_LANGUAGES = {
     "en-IN",
-    "as-IN",
     "hi-IN",
     "bn-IN",
     "ta-IN",
