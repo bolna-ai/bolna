@@ -43,7 +43,8 @@ class VobizInputHandler(TelephonyInputHandler):
 
     async def disconnect_stream(self):
         try:
-            logger.info("Disconnecting vobiz stream for call: {}".format(self.call_sid))
+            call_uuid = self.get_call_sid()
+            logger.info("Disconnecting vobiz stream for call: {}".format(call_uuid))
 
             if self.stream_sid and self.websocket is not None:
                 try:
@@ -55,7 +56,6 @@ class VobizInputHandler(TelephonyInputHandler):
 
             api_key = self.auth_credentials.get("auth_id") or os.getenv("VOBIZ_API_KEY")
             api_secret = self.auth_credentials.get("auth_token") or os.getenv("VOBIZ_API_SECRET")
-            call_uuid = self.call_sid
 
             if api_key and call_uuid:
                 url = f"https://api.vobiz.ai/api/v1/Account/{api_key}/Call/{call_uuid}/"
