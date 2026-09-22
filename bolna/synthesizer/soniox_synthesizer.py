@@ -261,7 +261,7 @@ class SonioxSynthesizer(StreamSynthesizer):
             await self._wait_for_ws()
             if not self._is_ws_connected():
                 return
-            
+
             while self._pending_cancels:
                 await self._send_frame({"stream_id": self._pending_cancels.pop(0), "cancel": True})
 
@@ -338,7 +338,7 @@ class SonioxSynthesizer(StreamSynthesizer):
                     f"{event.get('error_type')} {event.get('error_message')} "
                     f"(code={event.get('error_code')} request_id={event.get('request_id')})"
                 )
-               
+
                 if not stale and self.stream_id is not None and stream_id == self.stream_id:
                     self._stream_open = False
                     self.stream_id = None
