@@ -66,6 +66,8 @@ class StreamSynthesizer(BaseSynthesizer):
         self.current_turn_ttfb = None
         self.ws_send_time = None
         self.current_sequence_chars = 0
+        # Socket this turn's text was attempted on; only that socket's loss settles the turn.
+        self.current_turn_socket = None
 
     # ------------------------------------------------------------------
     # Subclass hooks (override these)
@@ -189,6 +191,7 @@ class StreamSynthesizer(BaseSynthesizer):
             self.current_turn_start_time = time.perf_counter()
             self.ws_send_time = None
             self.current_turn_ttfb = None
+            self.current_turn_socket = None
             # Anchor tts_start_ms to the first push — re-pushes of speculative responses
             # (e.g. after a tool call confirms the eager response) would overwrite this
             # to a later timestamp, making tts_start appear after agent_speech_start.
@@ -289,6 +292,13 @@ class StreamSynthesizer(BaseSynthesizer):
         except Exception:
             pass
 
+    def has_unsettled_turn_on(self, socket):
+        """True when the open turn's text was attempted on `socket` and never reached its eos.
+
+        Pushing a turn only stamps the start; its sender may still be waiting for a connection,
+        so ownership of the socket is what says the audio is actually lost with it."""
+        return socket is not None and self.current_turn_socket is socket and self.current_turn_start_time is not None
+
     def _record_turn_latency(self):
         """Append a latency record for the completed turn."""
         try:
@@ -313,6 +323,7 @@ class StreamSynthesizer(BaseSynthesizer):
                 self.ws_send_time = None
                 self.current_turn_ttfb = None
                 self.current_sequence_chars = 0
+                self.current_turn_socket = None
         except Exception:
             pass
 
