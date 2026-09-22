@@ -27,6 +27,50 @@ OPENAI_TRANSCRIBER_UTTERANCE_TIMEOUT_S = 0.5
 # ElevenLabs realtime (scribe_v2_realtime) accepts up to 50 keyterms for biasing.
 ELEVENLABS_REALTIME_MAX_KEYTERMS = 50
 
+# Past these the engine rejects the session rather than truncating.
+ASSEMBLYAI_MAX_KEYTERMS = 100
+ASSEMBLYAI_MAX_PROMPT_CHARACTERS = 1750
+SMALLEST_MAX_KEYWORDS = 100
+
+# Beyond this a phrase list costs Azure accuracy and latency rather than buying either.
+AZURE_MAX_PHRASES = 2000
+
+# Anything outside this set rejects the session.
+ASSEMBLYAI_SUPPORTED_LANGUAGES = {
+    "af",
+    "ar",
+    "ca",
+    "da",
+    "de",
+    "en",
+    "es",
+    "et",
+    "fa",
+    "fi",
+    "fr",
+    "gl",
+    "he",
+    "hi",
+    "it",
+    "ja",
+    "ko",
+    "mr",
+    "nl",
+    "nn",
+    "no",
+    "pt",
+    "ro",
+    "ru",
+    "sv",
+    "tr",
+    "ur",
+    "vi",
+    "xh",
+    "yue",
+    "zh",
+    "zu",
+}
+
 # Deepgram Flux defaults — all overridable via agent transcriber config
 DEEPGRAM_FLUX_EOT_THRESHOLD = 0.7  # confidence to declare end-of-turn
 DEEPGRAM_FLUX_EAGER_EOT_THRESHOLD = 0.5  # confidence to trigger speculative LLM early
@@ -310,7 +354,11 @@ END_CALL_TOOL_DEFINITION = {
 SARVAM_MODEL_SAMPLING_RATE_MAPPING = {
     "bulbul:v2": 22050,
     "bulbul:v3": 22050,  # NOTE: Documentation claims 24000, but WAV header shows 22050
+    "bulbul:v4-flash": 22050,
 }
+
+# These models open a stream with a bare WAV header and send raw PCM after it.
+SARVAM_STREAMING_WAV_HEADER_MODELS = {"bulbul:v3", "bulbul:v4-flash"}
 
 # bulbul TTS requires a concrete target_language_code (no "unknown"/auto).
 SARVAM_TTS_SUPPORTED_LANGUAGES = {
