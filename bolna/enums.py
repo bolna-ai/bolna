@@ -204,6 +204,7 @@ class HangupReason(str, Enum):
     LLM_PROMPTED_HANGUP = "llm_prompted_hangup"
     VOICEMAIL_DETECTED = "voicemail_detected"
     WEB_CALL_MAX_DURATION_REACHED = "web_call_max_duration_reached"
+    MAX_DURATION_REACHED = "max_duration_reached"
     INACTIVITY_TIMEOUT = "inactivity_timeout"
     TRANSCRIBER_ERROR = "transcriber_error"
     TRANSCRIBER_CONNECTION_ERROR = "transcriber_connection_error"

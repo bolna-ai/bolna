@@ -35,6 +35,7 @@ class TelephonyInputHandler(DefaultInputHandler):
         self._stream_sid = None
         self.stream_sid_ready.clear()
         self.call_sid = None
+        self._fallback_call_sid = None
         self.buffer = []
         self.message_count = 0
         # self.mark_event_meta_data = mark_event_meta_data
@@ -56,7 +57,11 @@ class TelephonyInputHandler(DefaultInputHandler):
         return self._stream_sid
 
     def get_call_sid(self):
-        return self.call_sid
+        return self.call_sid or self._fallback_call_sid
+
+    def set_fallback_call_sid(self, call_sid):
+        """Carrier sid from the call record, for a stream that reconnects with no start event."""
+        self._fallback_call_sid = call_sid
 
     async def call_start(self, packet):
         pass

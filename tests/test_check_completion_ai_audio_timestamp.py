@@ -7,14 +7,19 @@ scored a still-speaking agent as silent and cut the call.
 import time
 from types import SimpleNamespace
 
+import pytest
+
 from bolna.agent_manager.task_manager import TaskManager
 from bolna.helpers.mark_event_meta_data import MarkEventMetaData
 
 
 # Exercised on a stand-in via the unbound method, as in test_check_completion_stall_backstop.
-def _resolve(last_transmitted, audio_playing_until):
+def _resolve(last_transmitted, audio_playing_until, *, start_time=0.0, stream_sid_ts=None, welcome_delay_ms=0):
     fake = SimpleNamespace(
         last_transmitted_timestamp=last_transmitted,
+        start_time=start_time,
+        stream_sid_ts=stream_sid_ts,
+        welcome_message_delay=welcome_delay_ms,
         mark_event_meta_data=SimpleNamespace(get_audio_playing_until=lambda: audio_playing_until),
     )
     return TaskManager.compute_last_ai_audio_timestamp(fake)
@@ -51,6 +56,25 @@ def test_never_reports_older_than_final_chunk_stamp():
     now = time.time()
     for playing_until in (0.0, now - 60, now, now + 60):
         assert _resolve(now - 30, playing_until) >= now - 30
+
+
+def test_before_any_audio_silence_runs_from_the_stream_being_ready():
+    # Not from the websocket connecting: the agent cannot speak before the stream can carry it.
+    now = time.time()
+    stream_sid_ts = (now - 5) * 1000
+    assert _resolve(0, 0.0, start_time=now - 90, stream_sid_ts=stream_sid_ts) == stream_sid_ts / 1000
+
+
+def test_before_any_stream_silence_runs_from_the_call_start():
+    now = time.time()
+    assert _resolve(0, 0.0, start_time=now - 90) == now - 90
+
+
+@pytest.mark.parametrize("welcome_delay_ms,silent_for", [(3000, 87), (None, 90)])
+def test_a_configured_welcome_delay_is_not_counted_as_silence(welcome_delay_ms, silent_for):
+    # The delay is slept before the stream sid is stamped, so it falls in the start_time window.
+    now = time.time()
+    assert _resolve(0, 0.0, start_time=now - 90, welcome_delay_ms=welcome_delay_ms) == now - silent_for
 
 
 def test_queued_audio_accumulates_beyond_send_time():

@@ -24,8 +24,8 @@ from bolna.transcriber.deepgram_transcriber import DeepgramTranscriber
 MULAW_BYTES_PER_SECOND = 8000
 # sip_trunk._listen merges 4 x 20 ms ulaw frames before ingest_audio -> 80 ms per send.
 SIP_TRUNK_PACKET_BYTES = 640
-# TranscriberPool._silence_frame keepalive -> 40 ms of ulaw at 8 kHz.
-POOL_KEEPALIVE_PACKET_BYTES = 320
+# TranscriberPool._silence_frame keepalive -> 100 ms of ulaw at 8 kHz.
+POOL_KEEPALIVE_PACKET_BYTES = 800
 # freeswitch.INGEST_CHUNK_BYTES -> 200 ms of linear16 at 16 kHz.
 WEBCALL_CHUNK_BYTES = 6400
 STREAM_START_MS = 1_700_000_000_000.0
