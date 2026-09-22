@@ -55,6 +55,7 @@ from bolna.constants import (
     WEBCALL_TTS_SAMPLE_RATE,
 )
 from bolna.helpers.function_calling_helpers import (
+    redacted_url,
     trigger_api,
     computed_api_response,
     prepare_api_request,
@@ -4088,7 +4089,7 @@ class TaskManager(BaseManager):
                     logger.info(
                         "Triggering function call %s url=%s method=%s seq=%s turn=%s args=%s",
                         data.called_fun,
-                        data.url,
+                        redacted_url(data.url),
                         data.method,
                         meta_info.get("sequence_id"),
                         meta_info.get("turn_id"),

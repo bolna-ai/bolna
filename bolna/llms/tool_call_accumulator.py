@@ -1,5 +1,6 @@
 import json
 from bolna.constants import END_CALL_FUNCTION_PREFIX
+from bolna.helpers.function_calling_helpers import redacted_url
 from bolna.helpers.utils import convert_to_request_log, compute_function_pre_call_message
 from bolna.helpers.logger_config import configure_logger
 from .types import FunctionCallPayload
@@ -79,7 +80,7 @@ class ToolCallAccumulator:
             "Payload to send %s func=%s url=%s method=%s",
             arguments_received,
             first_func_name,
-            func_conf.get("url"),
+            redacted_url(func_conf.get("url")),
             func_conf.get("method"),
         )
         self._gave_pre_call_msg = False

@@ -6,7 +6,7 @@ all carry an api_token, auth headers or a BYOK api_key next to the fields worth 
 
 from pathlib import Path
 
-from bolna.helpers.function_calling_helpers import header_names, tool_names
+from bolna.helpers.function_calling_helpers import header_names, redacted_url, tool_names
 from bolna.llms.types import FunctionCallPayload
 
 TOKEN = "super-secret-tool-token"
@@ -72,3 +72,12 @@ def test_tool_names_keeps_the_names_and_drops_each_tool_config():
     }
     assert tool_names(custom_tools) == ["book_slot"]
     assert tool_names(None) == []
+
+
+def test_redacted_url_keeps_the_endpoint_and_drops_query_values():
+    # a query-param-auth tool carries its key in the configured url
+    assert redacted_url("https://tool.example/book?api_key=SECRET&version=2") == (
+        "https://tool.example/book?redacted=api_key,version"
+    )
+    assert redacted_url("https://tool.example/book") == "https://tool.example/book"
+    assert redacted_url(None) is None

@@ -17,6 +17,7 @@ from .llm import BaseLLM
 from .message_models import MessageFormatAdapter, strip_internal_keys
 from .routing_stream import read_routing_stream
 from .types import APIParams, LLMStreamChunk, LatencyData, FunctionCallPayload
+from bolna.helpers.function_calling_helpers import redacted_url
 from bolna.helpers.logger_config import configure_logger
 
 logger = configure_logger(__name__)
@@ -421,7 +422,7 @@ class OpenAICompatibleLLM(BaseLLM):
             "Payload to send %s func=%s url=%s method=%s",
             arguments_str,
             func_name,
-            func_conf.url,
+            redacted_url(func_conf.url),
             func_conf.method,
         )
 
