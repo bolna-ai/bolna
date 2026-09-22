@@ -233,6 +233,9 @@ class DefaultInputHandler:
         self.process_mark_message(packet)
 
     def __process_audio(self, audio):
+        if self.turn_based_conversation:
+            # A text chat has no transcriber consuming this queue; an audio frame here would only accumulate.
+            return
         data = base64.b64decode(audio)
         ws_data_packet = create_ws_data_packet(
             data=data, meta_info={"io": "default", "type": "audio", "sequence": self.input_types["audio"]}
@@ -268,6 +271,11 @@ class DefaultInputHandler:
             ws_data_packet = create_ws_data_packet(data=None, meta_info={"io": "default", "eos": True})
             await self.queues["transcriber"].put(ws_data_packet)
             self.running = False
+            if self.turn_based_conversation:
+                # A text chat's run loop listens on the llm queue; tell it the client is gone.
+                self.queues["llm"].put_nowait(
+                    create_ws_data_packet(data=None, meta_info={"io": "default", "eos": True})
+                )
 
         except Exception as e:
             # Send EOS message to transcriber to shut the connection
@@ -276,6 +284,10 @@ class DefaultInputHandler:
 
             traceback.print_exc()
             self.queues["transcriber"].put_nowait(ws_data_packet)
+            if self.turn_based_conversation:
+                self.queues["llm"].put_nowait(
+                    create_ws_data_packet(data=None, meta_info={"io": "default", "eos": True})
+                )
             logger.info(f"Error while handling websocket message: {e}")
             return
 
