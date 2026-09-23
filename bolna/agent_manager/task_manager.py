@@ -4111,6 +4111,11 @@ class TaskManager(BaseManager):
                             ts=llm_stream_end_ts,
                             llm_latency=llm_first_token_latency,
                         )
+                        if self.turn_based_conversation:
+                            await self._handle_llm_output(next_step, textual_response, True, meta_info)
+                            # Voice commits staged text once its audio is sent; chat has no audio, so the words
+                            # the user just read would otherwise never reach history or the transcript.
+                            self._commit_staged_assistant_history(meta_info.get("sequence_id"))
                     try:
                         await self.__execute_function_call(next_step=next_step, **data.model_dump())
                     finally:
