@@ -418,6 +418,8 @@ MODEL_REASONING_EFFORT_MAP = {
     "gpt-5.6-sol": [RE.NONE, RE.LOW, RE.MEDIUM, RE.HIGH, RE.XHIGH],
     "gpt-5.6-terra": [RE.NONE, RE.LOW, RE.MEDIUM, RE.HIGH, RE.XHIGH],
     "gpt-5.6-luna": [RE.NONE, RE.LOW, RE.MEDIUM, RE.HIGH, RE.XHIGH],
+    "gpt-6-sol": [RE.NONE, RE.LOW, RE.MEDIUM, RE.HIGH, RE.XHIGH],
+    "gpt-6-luna": [RE.NONE, RE.LOW, RE.MEDIUM, RE.HIGH, RE.XHIGH],
     "gpt-6-astra": [RE.LOW, RE.MEDIUM, RE.HIGH, RE.XHIGH, RE.MAX],
     # Realtime speech-to-speech. gpt-realtime-1.5 has no reasoning and is deliberately absent.
     "gpt-realtime-2": [RE.MINIMAL, RE.LOW, RE.MEDIUM, RE.HIGH, RE.XHIGH],
@@ -471,3 +473,10 @@ def canonical_model(name: str) -> str:
     bare = (name or "").rsplit("/", 1)[-1]
     known = [m for m in MODEL_REASONING_EFFORT_MAP if m in bare]
     return max(known, key=len) if known else bare
+
+
+# Text chat (turn-based) watchdog: how often idle / max-duration caps are checked.
+CHAT_WATCHDOG_TICK_S = 3.0
+# Text chat: this many failed turns in a row end the chat (LLM_ERROR) instead of answering every message with an
+# empty end_of_stream forever.
+CHAT_MAX_CONSECUTIVE_TURN_FAILURES = 3

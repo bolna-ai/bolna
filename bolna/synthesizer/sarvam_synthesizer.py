@@ -121,6 +121,9 @@ class SarvamSynthesizer(StreamSynthesizer):
                 try:
                     if self.ws_send_time is None:
                         self.ws_send_time = time.perf_counter()
+                    # Claim the socket before sending, not after: text lost into a socket that
+                    # dies mid-send is still this turn's audio, and still has to settle.
+                    self.current_turn_socket = self.websocket
                     await self._send_json({"type": "text", "data": {"text": text}})
                 except Exception as e:
                     logger.error(f"Error sending chunk: {e}")
@@ -142,11 +145,16 @@ class SarvamSynthesizer(StreamSynthesizer):
 
     async def receiver(self):
         not_connected_since = None
+        draining_ws = None
         while True:
             try:
                 if self.conversation_ended:
                     return
                 if not self._is_ws_connected():
+                    # A socket dying between recvs surfaces here, not below. self.websocket is
+                    # still the dead one — once monitor_connection swaps it, this branch is skipped.
+                    if self.has_unsettled_turn_on(self.websocket):
+                        yield b"\x00"
                     if self.connection_error:
                         return
                     now = time.perf_counter()
@@ -162,7 +170,13 @@ class SarvamSynthesizer(StreamSynthesizer):
                 else:
                     not_connected_since = None
 
-                response = await self.websocket.recv()
+                # A closing socket drains buffered frames first; they must not play as
+                # the next turn, which the replacement socket is already serving.
+                draining_ws = self.websocket
+                response = await draining_ws.recv()
+                if draining_ws is not self.websocket:
+                    logger.info("Dropping frame from a replaced Sarvam socket")
+                    continue
                 data = json.loads(response)
 
                 if data.get("type") == "audio":
@@ -181,7 +195,17 @@ class SarvamSynthesizer(StreamSynthesizer):
                     return
 
             except websockets.exceptions.ConnectionClosed:
-                break
+                # Keep looping, never break: SynthesizerPool iterates generate() once, so
+                # ending here leaves the call with no audio path at all.
+                logger.info("Sarvam WebSocket connection closed, waiting for reconnect")
+                if self.conversation_ended or self.connection_error:
+                    return
+                # A turn dying with the socket gets no 'final'; end it or playback stays
+                # marked in progress for the rest of the call.
+                if self.has_unsettled_turn_on(draining_ws):
+                    logger.error("Sarvam WebSocket dropped mid-turn, ending the turn")
+                    yield b"\x00"
+                await asyncio.sleep(0.05)
             except Exception as e:
                 logger.error(f"Error occurred in receiver - {e}")
 

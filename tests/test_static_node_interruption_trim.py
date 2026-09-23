@@ -145,6 +145,7 @@ async def _static_turn(is_silence_trigger=False):
     tm.run_id = "run"
     tm.language = "en"
     tm.stream = True
+    tm.turn_based_conversation = False
     tm.on_turn_usage = None
     tm.on_overflow = None
     tm.llm_config = {"model": "gpt-4.1-mini", "provider": "openai"}
