@@ -1680,6 +1680,9 @@ class TaskManager(BaseManager):
                         # Per-call Deepgram host override arrives per-label on cfg itself (the caller
                         # stamps only the legs a chosen endpoint can serve); do not inherit from the
                         # top-level config, or an unsupported leg would be forced onto that endpoint.
+                        # Data-retention opt-out is agent-wide, so legs do inherit it.
+                        if cfg.get("mip_opt_out") is None and transcriber_config.get("mip_opt_out") is not None:
+                            cfg["mip_opt_out"] = transcriber_config["mip_opt_out"]
                         if is_sip:
                             cfg["encoding"] = "mulaw"
                             cfg["sampling_rate"] = 8000
