@@ -11,6 +11,7 @@ import asyncio
 from collections import deque
 
 
+from bolna.enums import AudioPlaybackReason
 from bolna.helpers.mark_event_meta_data import MarkEventMetaData
 from bolna.input_handlers.telephony_providers.sip_trunk import (
     SipTrunkInputHandler,
@@ -55,8 +56,9 @@ class _FakeInputHandler:
     def is_audio_being_played_to_user(self):
         return self.audio_playing
 
-    def update_is_audio_being_played(self, value):
+    def update_is_audio_being_played(self, value, reason: AudioPlaybackReason):
         self.audio_playing = value
+        self.audio_playing_reason = reason
 
 
 def _make_output_handler(websocket, input_handler):

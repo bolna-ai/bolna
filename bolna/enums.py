@@ -257,6 +257,29 @@ _DISPLAY_NAMES = {
 }
 
 
+class AudioPlaybackReason(str, Enum):
+    """Why the agent's audio-playing state flipped. Grepped in the logs to attribute a stuck flag."""
+
+    # Enum.__str__ would render the member name, and these are logged with lazy %s args.
+    __str__ = str.__str__
+
+    AUDIO_SENT = "audio_sent"
+    BARGE_IN = "barge_in"
+    FINAL_CHUNK_ACK = "final_chunk_ack"
+    FREESWITCH_PLAYOUT_DONE_EVENT = "freeswitch_playout_done_event"
+    FREESWITCH_PLAYOUT_TIMER = "freeswitch_playout_timer"
+    FREESWITCH_SOCKET_CLOSED = "freeswitch_socket_closed"
+    LID_SWITCH_TRUNCATE = "lid_switch_truncate"
+    PRE_MARK_ACK = "pre_mark_ack"
+    S2S_AUDIO_SENT = "s2s_audio_sent"
+    S2S_DROP_QUEUED = "s2s_drop_queued"
+    SILENCE_HANGUP_INTERRUPT = "silence_hangup_interrupt"
+    SIP_INTERRUPTION = "sip_interruption"
+    SIP_PLAYBACK_FINISHED = "sip_playback_finished"
+    SYNTHESIZER_STREAM_END = "synthesizer_stream_end"
+    WELCOME_MESSAGE_SENT = "welcome_message_sent"
+
+
 class LogDirection(str, Enum):
     """Enum for CSV trace log direction types."""
 

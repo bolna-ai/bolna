@@ -678,14 +678,12 @@ class DeepgramTranscriber(BaseTranscriber):
                     self.connection_start_time = time.time() - self.audio_cursor_s
 
                 if msg["type"] == "SpeechStarted":
-                    logger.info("Received SpeechStarted event from deepgram")
                     if not isinstance(self.current_turn_id, int):
                         self._turn_first_speech_epoch_ms = timestamp_ms()
                         self._turn_pending = True  # counter incremented on first real interim
                     self.speech_start_time = timestamp_ms()
                     self.is_transcript_sent_for_processing = False
 
-                    logger.info(f"Starting new turn with turn_id: {self.current_turn_id}")
                     logger.info(
                         "BOLNA_TRACE_DG speech_started dg_turn=%s request_id=%s",
                         self.current_turn_id,

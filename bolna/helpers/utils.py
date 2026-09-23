@@ -370,6 +370,19 @@ async def get_raw_audio_bytes(
     return audio_data
 
 
+def scalar_fields(data, max_len=120):
+    """Field map with containers elided and long strings truncated, for logging a config by shape."""
+    summary = {}
+    for key, value in (data or {}).items():
+        if isinstance(value, (dict, list, tuple, set, bytes)):
+            summary[key] = f"<{type(value).__name__}[{len(value)}]>"
+        elif isinstance(value, str) and len(value) > max_len:
+            summary[key] = f"{value[:max_len]}...<{len(value)}>"
+        else:
+            summary[key] = value
+    return summary
+
+
 def get_md5_hash(text):
     # Non-security hash (cache keys / ids); usedforsecurity=False documents that and clears bandit B324.
     return hashlib.md5(text.encode(), usedforsecurity=False).hexdigest()
