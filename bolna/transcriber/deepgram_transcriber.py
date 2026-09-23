@@ -13,7 +13,7 @@ from websockets.exceptions import ConnectionClosedError, InvalidHandshake, Conne
 from .base_transcriber import BaseTranscriber
 from bolna.helpers.logger_config import configure_logger
 from bolna.helpers.ssl_context import get_ssl_context
-from bolna.helpers.utils import create_ws_data_packet, timestamp_ms
+from bolna.helpers.utils import create_ws_data_packet, resolve_deepgram_mip_opt_out, timestamp_ms
 from bolna.enums import TelephonyProvider
 from bolna.constants import (
     DEEPGRAM_FLUX_EOT_THRESHOLD,
@@ -72,12 +72,15 @@ class DeepgramTranscriber(BaseTranscriber):
         self.transcription_cursor = 0.0
         self.interruption_signalled = False
         self.run_id = kwargs.get("run_id")
+        self.mip_opt_out = resolve_deepgram_mip_opt_out(kwargs.get("mip_opt_out"))
         if not self.stream:
             self.api_url = f"https://{self.deepgram_host}/v1/listen?model={self.model}&language={self.language}"
             if self.is_english:
                 self.api_url += "&filler_words=true"
             if self.run_id:
                 self.api_url += f"&tag={quote(self.run_id)}&extra={quote(f'run_id:{self.run_id}')}"
+            if self.mip_opt_out:
+                self.api_url += "&mip_opt_out=true"
             self.session = aiohttp.ClientSession()
             if self.keywords is not None:
                 keyword_list = [quote(kw.strip()) for kw in self.keywords.split(",") if kw.strip()]
@@ -195,6 +198,9 @@ class DeepgramTranscriber(BaseTranscriber):
             dg_params["tag"] = self.run_id
             dg_params["extra"] = f"run_id:{self.run_id}"
 
+        if self.mip_opt_out:
+            dg_params["mip_opt_out"] = "true"
+
         websocket_api = "{}://{}/v1/listen?".format(self.deepgram_host_protocol, self.deepgram_host)
         websocket_url = websocket_api + urlencode(dg_params)
 
@@ -253,6 +259,9 @@ class DeepgramTranscriber(BaseTranscriber):
 
         if self.run_id:
             dg_params["tag"] = self.run_id
+
+        if self.mip_opt_out:
+            dg_params["mip_opt_out"] = "true"
 
         websocket_api = "{}://{}/v2/listen?".format(self.deepgram_host_protocol, self.deepgram_flux_host)
         websocket_url = websocket_api + urlencode(dg_params, doseq=True)
