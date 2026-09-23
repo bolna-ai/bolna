@@ -125,6 +125,29 @@ from .voicemail_handler import VoicemailHandler
 
 logger = configure_logger(__name__)
 
+MAX_TOOL_CALL_FIELD_BYTES = 10 * 1024
+TOOL_CALL_PREVIEW_CHARS = 2000
+
+
+def cap_tool_payload(value, field):
+    """`value` (copied), or a marker in its place once it serialises past the cap."""
+    if value is None:
+        return None
+    try:
+        encoded = value if isinstance(value, str) else json.dumps(value)
+    except (TypeError, ValueError):
+        encoded = str(value)
+    size = len(encoded.encode("utf-8"))
+    if size <= MAX_TOOL_CALL_FIELD_BYTES:
+        return copy.deepcopy(value)
+    # A marker, not a slice: truncated JSON fails the jsonb insert and loses the whole batch.
+    logger.warning(f"tool call {field} over cap: {size} bytes, truncating")
+    return {
+        "_truncated": True,
+        "_original_bytes": size,
+        "_preview": encoded[:TOOL_CALL_PREVIEW_CHARS],
+    }
+
 
 @lru_cache(maxsize=256)
 def welcome_pcm_upsampled(welcome_b64: str, target_sample_rate: int, source_sample_rate: int = 8000) -> bytes:
@@ -1132,10 +1155,12 @@ class TaskManager(BaseManager):
             "tool_call_id": runtime_args.get("tool_call_id", ""),
             "url": url,
             "method": method.upper() if isinstance(method, str) else method,
-            "request_template": copy.deepcopy(param),
-            "request_body": copy.deepcopy(request_body),
-            "request_params": copy.deepcopy(api_params if api_params is not None else runtime_args),
-            "runtime_args": copy.deepcopy(runtime_args),
+            "request_template": cap_tool_payload(param, "request_template"),
+            "request_body": cap_tool_payload(request_body, "request_body"),
+            "request_params": cap_tool_payload(
+                api_params if api_params is not None else runtime_args, "request_params"
+            ),
+            "runtime_args": cap_tool_payload(runtime_args, "runtime_args"),
             "headers": self._sanitize_api_call_headers(copy.deepcopy(headers)),
             "meta": {
                 "request_id": meta_info.get("request_id"),
@@ -1174,13 +1199,12 @@ class TaskManager(BaseManager):
             api_call_detail["status"] = "completed"
         api_call_detail["response_status_code"] = status_code
         api_call_detail["response_content_type"] = content_type
-        api_call_detail["response_body"] = copy.deepcopy(response)
+        api_call_detail["response_body"] = cap_tool_payload(response, "response_body")
         try:
-            api_call_detail["response_json"] = (
-                json.loads(response) if isinstance(response, str) else copy.deepcopy(response)
-            )
+            parsed = json.loads(response) if isinstance(response, str) else response
         except (TypeError, json.JSONDecodeError):
-            api_call_detail["response_json"] = None
+            parsed = None
+        api_call_detail["response_json"] = cap_tool_payload(parsed, "response_json")
 
     @property
     def history(self):
