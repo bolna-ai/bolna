@@ -31,7 +31,7 @@ from bolna.constants import (
     TRANSFERING_CALL_FILLER,
     END_CALL_FUNCTION_PREFIX,
 )
-from bolna.enums import LogComponent, LogDirection, UsageSource
+from bolna.enums import LogComponent, LogDirection, NodeType, UsageSource
 from bolna.prompts import DATE_PROMPT
 from pydub import AudioSegment
 import audioop
@@ -1128,6 +1128,25 @@ def select_message_by_language(message_config: Union[str, dict], detected_langua
 
         return next((v for v in message_config.values() if v and v.strip()), "")
     return ""
+
+
+def graph_opening_message(agent_config: dict, language: Optional[str] = None) -> str:
+    """The line an agent opens the call with: a graph agent whose start node is static opens with
+    that node's own message, every other agent with its configured welcome message. The runtime and
+    the call-setup pre-render both resolve it here so the audio and the transcript carry one text."""
+    welcome = agent_config.get("agent_welcome_message") or ""
+    tasks = agent_config.get("tasks") or []
+    llm_agent = (tasks[0].get("tools_config") or {}).get("llm_agent") or {} if tasks else {}
+    if llm_agent.get("agent_type") != "graph_agent":
+        return welcome
+
+    llm_config = llm_agent.get("llm_config") or {}
+    start_node_id = llm_config.get("current_node_id")
+    start_node = next((n for n in llm_config.get("nodes") or [] if n.get("id") == start_node_id), None)
+    if not start_node or start_node.get("node_type") != NodeType.STATIC:
+        return welcome
+
+    return select_message_by_language(start_node.get("static_message"), language) or welcome
 
 
 def has_non_english_variants(message_config: Union[str, dict]) -> bool:

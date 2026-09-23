@@ -56,6 +56,8 @@ def _base_config(nodes, current_node_id, **overrides):
         "max_tokens": 150,
         "current_node_id": current_node_id,
         "nodes": nodes,
+        # Every real call opens with one, which is what lets the start node route on turn 1.
+        "opening_message": "Hello, thanks for calling.",
     }
     cfg.update(overrides)
     return cfg
@@ -801,6 +803,21 @@ class TestFirstDeliveryHold:
 
         mock_llm.assert_called_once()
         assert agent.current_node_id == "C"
+
+    async def test_initial_node_holds_when_call_has_no_opening_message(self):
+        agent = _make_agent(_base_config(self._nodes(), "B", opening_message=""))
+        assert agent._active_node_first_response_delivered is False
+
+        with patch.object(
+            agent, "_decide_next_node_llm", new_callable=AsyncMock, return_value=self._PICK_C
+        ) as mock_llm:
+            out = await _collect(agent.generate([{"role": "user", "content": "answer"}]))
+
+        mock_llm.assert_not_called()
+        assert agent.current_node_id == "B"
+        routing = [o["routing_info"] for o in out if isinstance(o, dict) and "routing_info" in o]
+        assert routing[-1]["routing_type"] == "hold"
+        assert any(isinstance(o, dict) and "messages" in o for o in out)
 
     async def test_advance_resets_delivered_flag(self):
         agent = _make_agent(_base_config(self._nodes(), "B"))

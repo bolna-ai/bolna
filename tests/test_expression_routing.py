@@ -24,6 +24,7 @@ def _make_config(**overrides):
         "temperature": 0.7,
         "max_tokens": 150,
         "current_node_id": "greeting",
+        "opening_message": "Hello, thanks for calling.",
         "nodes": [
             {
                 "id": "greeting",

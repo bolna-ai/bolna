@@ -85,7 +85,9 @@ class GraphAgent(BaseAgent):
         self.current_node_entry_index = 0
         self._silence_repeats = 0
         self._event_triggered_generation = False
-        self._active_node_first_response_delivered = True
+        # The opening message speaks for the start node, so a call that has one starts with that
+        # node's turn already delivered; without one the start node has yet to speak.
+        self._active_node_first_response_delivered = bool((self.config.get("opening_message") or "").strip())
         self._hold_until_first_delivery = not self.config.get("turn_based_conversation", False)
         self._last_deterministic_eval = None
         self._frozen_time_vars: Optional[Dict[str, Any]] = None
