@@ -198,6 +198,13 @@ def write_json_file(file_path, data):
         json.dump(data, file, indent=4, ensure_ascii=False)
 
 
+def resolve_deepgram_mip_opt_out(value=None):
+    """Per-agent value wins; unset falls back to the fleet-wide DEEPGRAM_MIP_OPT_OUT env."""
+    if value is not None:
+        return bool(value)
+    return os.getenv("DEEPGRAM_MIP_OPT_OUT", "false").lower() == "true"
+
+
 def safe_log_text(text, limit=120):
     """Strip control chars from caller text and truncate — blocks forged log entries."""
     return re.sub(r"[\x00-\x1f\x7f]+", " ", str(text or ""))[:limit]
