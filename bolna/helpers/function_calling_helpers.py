@@ -307,6 +307,7 @@ async def trigger_api(
                 direction=LogDirection.WARNING,
                 is_cached=False,
                 run_id=run_id,
+                tool_name=called_fun,
             )
         if return_response_metadata:
             return {
@@ -328,6 +329,7 @@ async def trigger_api(
                 direction=LogDirection.WARNING,
                 is_cached=False,
                 run_id=run_id,
+                tool_name=called_fun,
             )
         if return_response_metadata:
             return {
@@ -349,6 +351,7 @@ async def trigger_api(
                 direction=LogDirection.WARNING,
                 is_cached=False,
                 run_id=run_id,
+                tool_name=called_fun,
             )
         if return_response_metadata:
             return {

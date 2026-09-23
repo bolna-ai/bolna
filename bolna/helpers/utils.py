@@ -1021,13 +1021,13 @@ def convert_to_request_log(
                 log["is_final"] = True
         case LogComponent.FUNCTION_CALL:
             log["latency"] = None
-            # Which tool this row belongs to. The CSV has no dedicated column for it, so it
-            # rides in Metadata (write_request_logs already reads function_call_metadata) and
-            # the dashboard lifts it out to label the Component cell.
             if tool_name:
                 log["function_call_metadata"] = {"tool_name": tool_name}
         case LogComponent.WARNING | LogComponent.ERROR:
             log["latency"] = None
+            if tool_name:
+                key = "error_metadata" if component == LogComponent.ERROR else "warning_metadata"
+                log[key] = {"tool_name": tool_name}
         case LogComponent.GRAPH_ROUTING:
             log["latency"] = None
             if direction == LogDirection.RESPONSE:
