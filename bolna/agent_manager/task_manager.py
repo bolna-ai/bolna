@@ -309,6 +309,7 @@ class TaskManager(BaseManager):
         super().__init__()
         self.kwargs = kwargs
         self.kwargs["task_manager_instance"] = self
+        self.provider_api_keys = self.kwargs.pop("provider_api_keys", None) or {}
         # Optional load-signal callback (set by the caller only for PTU-served calls).
         self.on_turn_usage = kwargs.get("on_turn_usage")
         # Fired instead of on_turn_usage when another backend served the turn.
@@ -1646,6 +1647,17 @@ class TaskManager(BaseManager):
         if self.task_config["tools_config"].get("llm_agent") is not None and llm_config is not None:
             llm_config["buffer_size"] = (self.task_config["tools_config"].get("synthesizer") or {}).get("buffer_size")
 
+    def __pool_leg_kwargs(self, base_kwargs, key_name, provider):
+        """Swap in this leg's own provider key; dropping it leaves the provider's env fallback."""
+        # Without a map the caller cannot resolve per-leg keys, so the base key stands.
+        if not provider or not self.provider_api_keys:
+            return base_kwargs
+        leg_kwargs = dict(base_kwargs)
+        leg_kwargs.pop(key_name, None)
+        if leg_key := self.provider_api_keys.get(provider):
+            leg_kwargs[key_name] = leg_key
+        return leg_kwargs
+
     def __setup_transcriber(self):
         try:
             if self.task_config["tools_config"]["transcriber"] is not None:
@@ -1696,7 +1708,8 @@ class TaskManager(BaseManager):
                             cls = SUPPORTED_TRANSCRIBER_PROVIDERS.get(cfg["provider"])
                         else:
                             cls = SUPPORTED_TRANSCRIBER_MODELS.get(cfg["model"])
-                        transcribers[label] = cls(provider, **cfg, **self.kwargs)
+                        leg_kwargs = self.__pool_leg_kwargs(self.kwargs, "transcriber_key", cfg.get("provider"))
+                        transcribers[label] = cls(provider, **cfg, **leg_kwargs)
 
                         if label == active_label:
                             self.transcriber_provider = cfg.get("provider", cfg.get("model"))
@@ -1836,7 +1849,8 @@ class TaskManager(BaseManager):
                         cfg["stream"] = True if self.enforce_streaming else False
 
                     cls = SUPPORTED_SYNTHESIZER_MODELS.get(provider_name)
-                    synthesizers[label] = cls(**cfg, **provider_config, **synthesizer_kwargs, caching=caching)
+                    leg_kwargs = self.__pool_leg_kwargs(synthesizer_kwargs, "synthesizer_key", provider_name)
+                    synthesizers[label] = cls(**cfg, **provider_config, **leg_kwargs, caching=caching)
 
                 # Use active synth's provider/voice for logging metadata, and buffer_size
                 # Note that in the current state, buffer_size of other synth configs is ignored
