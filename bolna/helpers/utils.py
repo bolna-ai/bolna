@@ -982,6 +982,7 @@ def convert_to_request_log(
     reasoning_content=None,
     ts=None,
     latency=None,
+    tool_name=None,
 ):
     log = dict()
     log["direction"] = direction.value if isinstance(direction, Enum) else direction
@@ -1038,8 +1039,15 @@ def convert_to_request_log(
             log["latency"] = meta_info.get("transcriber_latency", None) if direction == LogDirection.RESPONSE else None
             if "is_final" in meta_info and meta_info["is_final"]:
                 log["is_final"] = True
-        case LogComponent.FUNCTION_CALL | LogComponent.WARNING | LogComponent.ERROR:
+        case LogComponent.FUNCTION_CALL:
             log["latency"] = None
+            if tool_name:
+                log["function_call_metadata"] = {"tool_name": tool_name}
+        case LogComponent.WARNING | LogComponent.ERROR:
+            log["latency"] = None
+            if tool_name:
+                key = "error_metadata" if component == LogComponent.ERROR else "warning_metadata"
+                log[key] = {"tool_name": tool_name}
         case LogComponent.GRAPH_ROUTING:
             log["latency"] = None
             if direction == LogDirection.RESPONSE:
