@@ -33,6 +33,7 @@ class DefaultInputHandler:
         self.input_types = input_types
         self.websocket_listen_task = None
         self.running = True
+        self.input_stream_ended = False
         # set here because these handlers mint a stream id on demand; telephony clears it
         self.stream_sid_ready = asyncio.Event()
         self.stream_sid_ready.set()
@@ -63,6 +64,13 @@ class DefaultInputHandler:
         # agent_end_ms in user_bot_latencies.
         self.last_final_chunk_sequence_id: Optional[int] = None
         self.last_final_chunk_played_ts: Optional[float] = None
+
+    def _end_input_stream(self, io, **meta_info):
+        """Mark the caller's audio as over and tell the transcriber to close."""
+        self.input_stream_ended = True
+        self.queues["transcriber"].put_nowait(
+            create_ws_data_packet(data=None, meta_info={"io": io, "eos": True, **meta_info})
+        )
 
     def get_calculated_plivo_latency(self):
         return self.calculated_plivo_latency
@@ -274,8 +282,7 @@ class DefaultInputHandler:
                 await self.process_message(request)
 
         except WebSocketDisconnect as e:
-            ws_data_packet = create_ws_data_packet(data=None, meta_info={"io": "default", "eos": True})
-            await self.queues["transcriber"].put(ws_data_packet)
+            self._end_input_stream("default")
             self.running = False
             if self.turn_based_conversation:
                 # A text chat's run loop listens on the llm queue; tell it the client is gone.
@@ -284,12 +291,10 @@ class DefaultInputHandler:
                 )
 
         except Exception as e:
-            # Send EOS message to transcriber to shut the connection
-            ws_data_packet = create_ws_data_packet(data=None, meta_info={"io": "default", "eos": True})
             import traceback
 
             traceback.print_exc()
-            self.queues["transcriber"].put_nowait(ws_data_packet)
+            self._end_input_stream("default")
             if self.turn_based_conversation:
                 self.queues["llm"].put_nowait(
                     create_ws_data_packet(data=None, meta_info={"io": "default", "eos": True})

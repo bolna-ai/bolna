@@ -170,8 +170,7 @@ class TelephonyInputHandler(DefaultInputHandler):
 
                 elif packet["event"] == "stop":
                     logger.info("call stopping")
-                    ws_data_packet = create_ws_data_packet(data=None, meta_info={"io": "default", "eos": True})
-                    self.queues["transcriber"].put_nowait(ws_data_packet)
+                    self._end_input_stream("default")
                     break
 
             except WebSocketDisconnect as e:
@@ -187,8 +186,7 @@ class TelephonyInputHandler(DefaultInputHandler):
 
             except Exception as e:
                 traceback.print_exc()
-                ws_data_packet = create_ws_data_packet(data=None, meta_info={"io": "default", "eos": True})
-                self.queues["transcriber"].put_nowait(ws_data_packet)
+                self._end_input_stream("default")
                 logger.info(f"Exception in {self.io_provider} receiver reading events: {str(e)}")
                 break
 

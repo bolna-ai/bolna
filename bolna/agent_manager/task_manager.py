@@ -5365,17 +5365,18 @@ class TaskManager(BaseManager):
 
     async def _log_transcriber_connection_error(self, connection_error):
         provider = self.task_config["tools_config"]["transcriber"].get("provider", "unknown")
-        # Always record the drop — "error" when exception drove it, "drop" for clean closes
-        # (e.g. Sarvam normal end-of-stream, Deepgram inactivity timeout on standby).
+        # Once the caller's audio has ended the transcriber is being torn down, so however its
+        # socket closes (e.g. no close frame back from the provider) it is a drop, not a failure.
+        is_failure = bool(connection_error) and not self.tools["input"].input_stream_ended
         self.transcriber_error_events.append(
             {
-                "event": "error" if connection_error else "drop",
+                "event": "error" if is_failure else "drop",
                 "error": connection_error,
                 "provider": provider,
                 "ts_ms": round(time.time() * 1000 - self.conversation_start_init_ts, 2),
             }
         )
-        if connection_error:
+        if is_failure:
             await self._end_call_on_component_error(
                 TranscriberError(connection_error, provider=provider, model=self._component_model("transcriber")),
                 HangupReason.TRANSCRIBER_CONNECTION_ERROR,
