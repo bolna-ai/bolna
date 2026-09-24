@@ -131,6 +131,16 @@ class TestS2SUsage:
     def test_starts_at_zero(self):
         assert S2SUsage() + S2SUsage() == S2SUsage()
 
+    def test_subtraction_leaves_what_was_never_reported(self):
+        total = S2SUsage(input_tokens=30, output_audio_tokens=12)
+        reported = S2SUsage(input_tokens=20, output_audio_tokens=12)
+        assert total - reported == S2SUsage(input_tokens=10)
+
+    def test_a_zero_turn_is_still_a_usage(self):
+        # Optional checks read `usage is not None`; zero tokens must not look like no report.
+        assert not S2SUsage().has_tokens
+        assert S2SUsage(cached_tokens=1).has_tokens
+
     def test_is_immutable(self):
         with pytest.raises(Exception):
             S2SUsage().input_tokens = 5

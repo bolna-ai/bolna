@@ -57,6 +57,7 @@ def make_tm(*, io_provider="plivo", web=False, turn_based=False, in_rate=24000, 
     tm._s2s_welcome_sent = True
     tm._s2s_agent_speaking = False
     tm._s2s_turn_seq = 0
+    tm._s2s_usage_logged = s2s_events.S2SUsage()
     tm._s2s_playout_until = 0.0
     tm.interruption_manager = MagicMock()
     tm.last_transmitted_timestamp = 0
@@ -465,6 +466,38 @@ class TestUsageAttribution:
         call = await self._finish(make_tm(), s2s_events.S2SUsage(input_tokens=11, output_tokens=3))
         assert call.kwargs["input_tokens"] == 11
         assert call.kwargs["output_tokens"] == 3
+
+    async def test_usage_of_an_unfinished_response_is_billed_at_teardown(self):
+        # A caller hanging up mid-response leaves tokens the provider counted but no turn
+        # ever reported; without a teardown row they never reach the request log.
+        tm = make_tm(io_provider="default", web=True, in_rate=16000)
+        tm.conversation_config = {}
+        tm.s2s = SimpleNamespace(welcome_audio_gate_ms=0)
+        tm.kwargs["agent_welcome_message"] = ""
+        provider = tm.tools["s2s"]
+        provider.connect = AsyncMock()
+        provider.disconnect = AsyncMock()
+        provider.usage_total = s2s_events.S2SUsage(input_tokens=90, input_audio_tokens=90, output_tokens=0)
+
+        async def one_reported_turn():
+            yield s2s_events.ResponseDone(transcript="hi", usage=s2s_events.S2SUsage(input_tokens=40))
+            await asyncio.Event().wait()
+
+        provider.receive_events = one_reported_turn
+        with (
+            patch("bolna.agent_manager.task_manager.convert_to_request_log") as log,
+            patch.object(TaskManager, "_build_s2s_provider", return_value=provider),
+            patch.object(TaskManager, "_s2s_output_loop", AsyncMock()),
+            patch.object(TaskManager, "_TaskManager__check_for_completion", AsyncMock()),
+        ):
+            runner = asyncio.create_task(tm._run_s2s_conversation())
+            await asyncio.sleep(0.05)
+            await tm.audio_queue.put({"data": None, "meta_info": {"eos": True}})
+            done, _ = await asyncio.wait({runner}, timeout=5)
+            assert runner in done, "run loop did not tear down"
+
+        logged = [c.kwargs["input_tokens"] for c in log.call_args_list]
+        assert logged == [40, 50]
 
 
 class TestBackgroundTaskLifecycle:

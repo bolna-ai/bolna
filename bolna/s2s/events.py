@@ -33,6 +33,13 @@ class S2SUsage:
     def __add__(self, other: "S2SUsage") -> "S2SUsage":
         return replace(self, **{f: getattr(self, f) + getattr(other, f) for f in _USAGE_FIELDS})
 
+    def __sub__(self, other: "S2SUsage") -> "S2SUsage":
+        return replace(self, **{f: getattr(self, f) - getattr(other, f) for f in _USAGE_FIELDS})
+
+    @property
+    def has_tokens(self) -> bool:
+        return any(getattr(self, f) for f in _USAGE_FIELDS)
+
     def modality_split(self) -> dict:
         """The audio/text breakdown that has to reach billing."""
         return {
