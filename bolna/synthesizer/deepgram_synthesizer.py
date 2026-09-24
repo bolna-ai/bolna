@@ -34,6 +34,7 @@ class DeepgramSynthesizer(StreamSynthesizer):
         buffer_size=400,
         caching=True,
         model="aura-zeus-en",
+        speed=1.0,
         **kwargs,
     ):
         super().__init__(
@@ -56,6 +57,10 @@ class DeepgramSynthesizer(StreamSynthesizer):
 
         if len(self.model.split("-")) == 2:
             self.model = f"{self.model}-{self.voice_id}"
+        self.speed = float(speed)
+        self.supports_voice_controls = self.model.startswith("aura-2-")
+        if self.supports_voice_controls and not 0.7 <= self.speed <= 1.5:
+            raise ValueError("Deepgram Aura-2 speed must be between 0.7 and 1.5")
 
         self.caching = caching
         if caching:
@@ -64,6 +69,8 @@ class DeepgramSynthesizer(StreamSynthesizer):
         self.run_id = kwargs.get("run_id")
         self.mip_opt_out = resolve_deepgram_mip_opt_out(kwargs.get("mip_opt_out"))
         self.ws_url = f"{DEEPGRAM_TTS_WS_URL}?encoding={self.format}&sample_rate={self.sample_rate}&model={self.model}"
+        if self.supports_voice_controls:
+            self.ws_url += f"&speed={self.speed}"
         if self.run_id:
             self.ws_url += f"&tag={self.run_id}"
         if self.mip_opt_out:
@@ -266,13 +273,19 @@ class DeepgramSynthesizer(StreamSynthesizer):
     # HTTP mode (non-streaming)
     # ------------------------------------------------------------------
 
-    async def _generate_http(self, text):
-        headers = {"Authorization": f"Token {self.api_key}", "Content-Type": "application/json"}
+    def _http_url(self):
         url = f"{DEEPGRAM_TTS_URL}?container=none&encoding={self.format}&sample_rate={self.sample_rate}&model={self.model}"
+        if self.supports_voice_controls:
+            url += f"&speed={self.speed}"
         if self.run_id:
             url += f"&tag={self.run_id}"
         if self.mip_opt_out:
             url += "&mip_opt_out=true"
+        return url
+
+    async def _generate_http(self, text):
+        headers = {"Authorization": f"Token {self.api_key}", "Content-Type": "application/json"}
+        url = self._http_url()
         logger.info(f"Sending deepgram request {url}")
         try:
             async with aiohttp.ClientSession() as session:

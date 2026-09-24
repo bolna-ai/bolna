@@ -31,6 +31,7 @@ class RimeSynthesizer(StreamSynthesizer):
         caching=True,
         model="arcana",
         synthesizer_key=None,
+        time_scale_factor=1.0,
         **kwargs,
     ):
         super().__init__(
@@ -44,11 +45,17 @@ class RimeSynthesizer(StreamSynthesizer):
         self.voice_id = voice_id
         self.sample_rate = str(sampling_rate)
         self.model = model
+        self.time_scale_factor = float(time_scale_factor)
+        if not 0.4 <= self.time_scale_factor <= 2.5:
+            raise ValueError("Rime time_scale_factor must be between 0.4 and 2.5")
+        self.supports_time_scale = self.model.lower() in {"coda", "mistv3"}
         self.api_key = os.environ["RIME_API_KEY"] if synthesizer_key is None else synthesizer_key
         self.use_mulaw = True
         self.caching = caching
 
         self.ws_url = f"wss://users.rime.ai/ws2?speaker={self.voice_id}&modelId={self.model}&audioFormat=mulaw&samplingRate={self.sample_rate}"
+        if self.supports_time_scale:
+            self.ws_url += f"&timeScaleFactor={self.time_scale_factor}"
         self.api_url = "https://users.rime.ai/v1/rime-tts"
 
         # arcana model is HTTP-only
@@ -218,12 +225,7 @@ class RimeSynthesizer(StreamSynthesizer):
     # HTTP
     # ------------------------------------------------------------------
 
-    async def _generate_http(self, text):
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-            "Accept": f"audio/{self.format}",
-        }
+    def _http_payload(self, text):
         payload = {
             "speaker": self.voice_id,
             "text": text,
@@ -234,6 +236,17 @@ class RimeSynthesizer(StreamSynthesizer):
             "samplingRate": int(self.sample_rate),
             "max_tokens": 5000,
         }
+        if self.supports_time_scale:
+            payload["timeScaleFactor"] = self.time_scale_factor
+        return payload
+
+    async def _generate_http(self, text):
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+            "Accept": f"audio/{self.format}",
+        }
+        payload = self._http_payload(text)
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.post(self.api_url, headers=headers, json=payload) as response:

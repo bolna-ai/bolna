@@ -14,12 +14,23 @@ load_dotenv()
 
 class OPENAISynthesizer(BaseSynthesizer):
     def __init__(
-        self, voice, audio_format="mp3", model="tts-1", stream=False, sampling_rate=8000, buffer_size=400, **kwargs
+        self,
+        voice,
+        audio_format="mp3",
+        model="tts-1",
+        stream=False,
+        sampling_rate=8000,
+        buffer_size=400,
+        speed=1.0,
+        **kwargs,
     ):
         super().__init__(kwargs.get("task_manager_instance"), stream, buffer_size)
         self.voice = voice
         self.model = model
         self.sample_rate = int(sampling_rate) if isinstance(sampling_rate, str) else sampling_rate
+        self.speed = float(speed)
+        if not 0.25 <= self.speed <= 4.0:
+            raise ValueError("OpenAI speed must be between 0.25 and 4.0")
         self.stream = False
         api_key = kwargs.get("synthesizer_key", os.getenv("OPENAI_API_KEY"))
         self.async_client = AsyncOpenAI(api_key=api_key)
@@ -41,6 +52,7 @@ class OPENAISynthesizer(BaseSynthesizer):
             voice=self.voice,
             response_format="mp3",
             input=text,
+            speed=self.speed,
         )
         buffer = io.BytesIO()
         for chunk in spoken_response.iter_bytes(chunk_size=4096):

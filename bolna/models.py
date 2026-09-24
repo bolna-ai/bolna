@@ -63,6 +63,7 @@ class ElevenLabsConfig(BaseModel):
 class OpenAIConfig(BaseModel):
     voice: str
     model: str
+    speed: Optional[float] = Field(default=1.0, ge=0.25, le=4.0)
 
 
 class DeepgramConfig(BaseModel):
@@ -71,6 +72,7 @@ class DeepgramConfig(BaseModel):
     model: str
     # Opt out of Deepgram's Model Improvement Program (zero retention after processing).
     mip_opt_out: Optional[bool] = None
+    speed: Optional[float] = Field(default=1.0, ge=0.7, le=1.5)
 
 
 class StandardVoiceConfig(BaseModel):
@@ -83,19 +85,27 @@ class StandardVoiceConfig(BaseModel):
 
 
 class CartesiaConfig(StandardVoiceConfig):
-    speed: Optional[float] = 1.0
+    speed: Optional[float] = Field(default=1.0, ge=0.6, le=1.5)
+    volume: Optional[float] = Field(default=1.0, ge=0.5, le=2.0)
 
 
 class RimeConfig(StandardVoiceConfig):
-    pass
+    time_scale_factor: Optional[float] = Field(default=1.0, ge=0.4, le=2.5)
 
 
 class SmallestConfig(StandardVoiceConfig):
-    pass
+    speed: Optional[float] = Field(default=1.0, ge=0.5, le=2.0)
 
 
 class SarvamConfig(StandardVoiceConfig):
-    speed: Optional[float] = 1.0
+    speed: Optional[float] = Field(default=1.0, ge=0.3, le=3.0)
+    loudness: Optional[float] = Field(default=1.0, ge=0.1, le=3.0)
+
+    @model_validator(mode="after")
+    def validate_model_controls(self):
+        if self.model == "bulbul:v3" and self.speed is not None and not 0.5 <= self.speed <= 2.0:
+            raise ValueError("Sarvam bulbul:v3 speed must be between 0.5 and 2.0")
+        return self
 
 
 class PixaConfig(StandardVoiceConfig):
@@ -139,7 +149,7 @@ class GeminiConfig(StandardVoiceConfig):
 
 class SonioxConfig(StandardVoiceConfig):
     # `voice` carries a built-in voice name ("Adrian"); a cloned voice's id goes in voice_id.
-    speed: Optional[float] = None
+    speed: Optional[float] = Field(default=None, ge=0.7, le=1.3)
     reduce_silence: Optional[bool] = None
 
 

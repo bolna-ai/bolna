@@ -33,6 +33,7 @@ class SarvamSynthesizer(StreamSynthesizer):
         stream=False,
         buffer_size=400,
         speed=1.0,
+        loudness=1.0,
         synthesizer_key=None,
         **kwargs,
     ):
@@ -56,7 +57,9 @@ class SarvamSynthesizer(StreamSynthesizer):
         self.ws_url = f"wss://api.sarvam.ai/text-to-speech/ws?model={model}&send_completion_event=true"
 
         self.language = language
-        self.loudness = 1.0
+        self.loudness = float(loudness)
+        if not 0.1 <= self.loudness <= 3.0:
+            raise ValueError("Sarvam loudness must be between 0.1 and 3.0")
         self.pitch = 0.0
         self.pace = speed
         self.enable_preprocessing = True
@@ -214,21 +217,19 @@ class SarvamSynthesizer(StreamSynthesizer):
     # ------------------------------------------------------------------
 
     def _config_message(self):
-        return {
-            "type": "config",
-            "data": {
-                "target_language_code": self.language,
-                "speaker": self.voice_id,
-                "pitch": self.pitch,
-                "pace": self.pace,
-                "loudness": self.loudness,
-                "enable_preprocessing": self.enable_preprocessing,
-                "output_audio_codec": "wav",
-                "output_audio_bitrate": "32k",
-                "max_chunk_length": 250,
-                "min_buffer_size": self.buffer_size,
-            },
+        data = {
+            "target_language_code": self.language,
+            "speaker": self.voice_id,
+            "pace": self.pace,
+            "enable_preprocessing": self.enable_preprocessing,
+            "output_audio_codec": "wav",
+            "output_audio_bitrate": "32k",
+            "max_chunk_length": 250,
+            "min_buffer_size": self.buffer_size,
         }
+        if self.model == "bulbul:v2":
+            data.update({"pitch": self.pitch, "loudness": self.loudness})
+        return {"type": "config", "data": data}
 
     async def set_target_language(self, language):
         """Switch TTS output language on the live socket via a fresh config message (no reconnect)."""
@@ -296,7 +297,7 @@ class SarvamSynthesizer(StreamSynthesizer):
     async def synthesize(self, text):
         return await self._generate_http(text)
 
-    async def _generate_http(self, text):
+    def _http_payload(self, text):
         payload = {
             "target_language_code": self.language,
             "text": text,
@@ -310,4 +311,8 @@ class SarvamSynthesizer(StreamSynthesizer):
         if self.model == "bulbul:v3":
             payload.pop("pitch")
             payload.pop("loudness")
+        return payload
+
+    async def _generate_http(self, text):
+        payload = self._http_payload(text)
         return await self._send_payload(payload)
