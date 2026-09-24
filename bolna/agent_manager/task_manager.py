@@ -128,6 +128,29 @@ from .voicemail_handler import VoicemailHandler
 
 logger = configure_logger(__name__)
 
+MAX_TOOL_CALL_FIELD_BYTES = 10 * 1024
+TOOL_CALL_PREVIEW_CHARS = 2000
+
+
+def cap_tool_payload(value, field):
+    """`value` (copied), or a marker in its place once it serialises past the cap."""
+    if value is None:
+        return None
+    try:
+        encoded = value if isinstance(value, str) else json.dumps(value)
+    except (TypeError, ValueError):
+        encoded = str(value)
+    size = len(encoded.encode("utf-8"))
+    if size <= MAX_TOOL_CALL_FIELD_BYTES:
+        return copy.deepcopy(value)
+    # A marker, not a slice: truncated JSON fails the jsonb insert and loses the whole batch.
+    logger.warning(f"tool call {field} over cap: {size} bytes, truncating")
+    return {
+        "_truncated": True,
+        "_original_bytes": size,
+        "_preview": encoded[:TOOL_CALL_PREVIEW_CHARS],
+    }
+
 
 @lru_cache(maxsize=256)
 def welcome_pcm_upsampled(welcome_b64: str, target_sample_rate: int, source_sample_rate: int = 8000) -> bytes:
@@ -1062,8 +1085,9 @@ class TaskManager(BaseManager):
 
         # Record in function_tool_api_call_details so the pre-call webhook lands in the
         # same per-call S3 record as the other API/tool calls.
+        webhook_tool_name = f"{called_fun}:pre_call_webhook"
         api_call_detail = self._start_api_call_detail(
-            called_fun=f"{called_fun}:pre_call_webhook",
+            called_fun=webhook_tool_name,
             url=target_url,
             method="POST",
             param=None,
@@ -1087,6 +1111,7 @@ class TaskManager(BaseManager):
                     LogComponent.FUNCTION_CALL,
                     direction=LogDirection.REQUEST,
                     run_id=self.run_id,
+                    tool_name=webhook_tool_name,
                 )
                 async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
                     # allow_redirects=False: a redirect hop is not re-validated and would
@@ -1101,6 +1126,7 @@ class TaskManager(BaseManager):
                             LogComponent.FUNCTION_CALL,
                             direction=LogDirection.RESPONSE,
                             run_id=self.run_id,
+                            tool_name=webhook_tool_name,
                         )
                         self._finalize_api_call_detail(
                             api_call_detail,
@@ -1139,10 +1165,12 @@ class TaskManager(BaseManager):
             "tool_call_id": runtime_args.get("tool_call_id", ""),
             "url": url,
             "method": method.upper() if isinstance(method, str) else method,
-            "request_template": copy.deepcopy(param),
-            "request_body": copy.deepcopy(request_body),
-            "request_params": copy.deepcopy(api_params if api_params is not None else runtime_args),
-            "runtime_args": copy.deepcopy(runtime_args),
+            "request_template": cap_tool_payload(param, "request_template"),
+            "request_body": cap_tool_payload(request_body, "request_body"),
+            "request_params": cap_tool_payload(
+                api_params if api_params is not None else runtime_args, "request_params"
+            ),
+            "runtime_args": cap_tool_payload(runtime_args, "runtime_args"),
             "headers": self._sanitize_api_call_headers(copy.deepcopy(headers)),
             "meta": {
                 "request_id": meta_info.get("request_id"),
@@ -1181,13 +1209,12 @@ class TaskManager(BaseManager):
             api_call_detail["status"] = "completed"
         api_call_detail["response_status_code"] = status_code
         api_call_detail["response_content_type"] = content_type
-        api_call_detail["response_body"] = copy.deepcopy(response)
+        api_call_detail["response_body"] = cap_tool_payload(response, "response_body")
         try:
-            api_call_detail["response_json"] = (
-                json.loads(response) if isinstance(response, str) else copy.deepcopy(response)
-            )
+            parsed = json.loads(response) if isinstance(response, str) else response
         except (TypeError, json.JSONDecodeError):
-            api_call_detail["response_json"] = None
+            parsed = None
+        api_call_detail["response_json"] = cap_tool_payload(parsed, "response_json")
 
     @property
     def history(self):
@@ -3302,6 +3329,7 @@ class TaskManager(BaseManager):
                 "function_call",
                 direction="request",
                 run_id=self.run_id,
+                tool_name=called_fun,
             )
 
             textual_response = resp.get("textual_response", None)
@@ -3311,7 +3339,13 @@ class TaskManager(BaseManager):
             self.conversation_history.attach_tool_calls_to_turn(turn_id, resp["model_response"])
             self.conversation_history.append_tool_result(resp.get("tool_call_id", ""), tool_result)
             convert_to_request_log(
-                tool_result, meta_info, None, "function_call", direction="response", run_id=self.run_id
+                tool_result,
+                meta_info,
+                None,
+                "function_call",
+                direction="response",
+                run_id=self.run_id,
+                tool_name=called_fun,
             )
 
             try:
@@ -3469,7 +3503,13 @@ class TaskManager(BaseManager):
                 self.conversation_history.attach_tool_calls_to_turn(turn_id, resp["model_response"])
                 self.conversation_history.append_tool_result(resp.get("tool_call_id", ""), function_response)
                 convert_to_request_log(
-                    function_response, meta_info, None, "function_call", direction="response", run_id=self.run_id
+                    function_response,
+                    meta_info,
+                    None,
+                    "function_call",
+                    direction="response",
+                    run_id=self.run_id,
+                    tool_name=called_fun,
                 )
 
                 messages = self.conversation_history.get_copy()
@@ -3556,7 +3596,13 @@ class TaskManager(BaseManager):
             self.conversation_history.attach_tool_calls_to_turn(turn_id, resp["model_response"])
             self.conversation_history.append_tool_result(resp.get("tool_call_id", ""), function_response)
             convert_to_request_log(
-                function_response, meta_info, None, "function_call", direction="response", run_id=self.run_id
+                function_response,
+                meta_info,
+                None,
+                "function_call",
+                direction="response",
+                run_id=self.run_id,
+                tool_name=called_fun,
             )
 
             messages = self.conversation_history.get_copy()
@@ -3619,6 +3665,7 @@ class TaskManager(BaseManager):
                 meta_info=meta_info,
                 run_id=self.run_id,
                 return_response_metadata=True,
+                called_fun=called_fun,
                 **resp,
             )
         except asyncio.CancelledError:
@@ -3675,6 +3722,7 @@ class TaskManager(BaseManager):
             direction=LogDirection.RESPONSE,
             is_cached=False,
             run_id=self.run_id,
+            tool_name=called_fun,
         )
 
         messages = self.conversation_history.get_copy()
@@ -4628,6 +4676,7 @@ class TaskManager(BaseManager):
                 LogComponent.FUNCTION_CALL,
                 direction=LogDirection.REQUEST,
                 run_id=self.run_id,
+                tool_name=called_fun,
             )
             convert_to_request_log(
                 mock_response,
@@ -4636,6 +4685,7 @@ class TaskManager(BaseManager):
                 LogComponent.FUNCTION_CALL,
                 direction=LogDirection.RESPONSE,
                 run_id=self.run_id,
+                tool_name=called_fun,
             )
             self._finalize_api_call_detail(
                 function_call_log, response=mock_response, status_code=200, content_type="text/plain"
@@ -4686,6 +4736,7 @@ class TaskManager(BaseManager):
                 direction=LogDirection.REQUEST,
                 is_cached=False,
                 run_id=self.run_id,
+                tool_name=called_fun,
             )
             _transfer_end_recorded = False
             try:
@@ -4700,6 +4751,7 @@ class TaskManager(BaseManager):
                         direction=LogDirection.RESPONSE,
                         is_cached=False,
                         run_id=self.run_id,
+                        tool_name=called_fun,
                     )
                     self._finalize_api_call_detail(
                         function_call_log,
@@ -5313,17 +5365,18 @@ class TaskManager(BaseManager):
 
     async def _log_transcriber_connection_error(self, connection_error):
         provider = self.task_config["tools_config"]["transcriber"].get("provider", "unknown")
-        # Always record the drop — "error" when exception drove it, "drop" for clean closes
-        # (e.g. Sarvam normal end-of-stream, Deepgram inactivity timeout on standby).
+        # Once the caller's audio has ended the transcriber is being torn down, so however its
+        # socket closes (e.g. no close frame back from the provider) it is a drop, not a failure.
+        is_failure = bool(connection_error) and not self.tools["input"].input_stream_ended
         self.transcriber_error_events.append(
             {
-                "event": "error" if connection_error else "drop",
+                "event": "error" if is_failure else "drop",
                 "error": connection_error,
                 "provider": provider,
                 "ts_ms": round(time.time() * 1000 - self.conversation_start_init_ts, 2),
             }
         )
-        if connection_error:
+        if is_failure:
             await self._end_call_on_component_error(
                 TranscriberError(connection_error, provider=provider, model=self._component_model("transcriber")),
                 HangupReason.TRANSCRIBER_CONNECTION_ERROR,
@@ -8630,6 +8683,7 @@ class TaskManager(BaseManager):
             direction=LogDirection.REQUEST,
             is_cached=False,
             run_id=self.run_id,
+            tool_name=event.name,
         )
 
         ends_call = event.name.startswith(END_CALL_FUNCTION_PREFIX)
@@ -8672,6 +8726,7 @@ class TaskManager(BaseManager):
             direction=LogDirection.RESPONSE,
             is_cached=False,
             run_id=self.run_id,
+            tool_name=event.name,
         )
         await s2s.send_function_result(event.call_id, event.name, result)
         await s2s.commit_function_results()
@@ -8721,6 +8776,7 @@ class TaskManager(BaseManager):
                 meta_info=meta_info,
                 run_id=self.run_id,
                 return_response_metadata=True,
+                called_fun=event.name,
                 **args,
             )
         except asyncio.CancelledError:
