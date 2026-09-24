@@ -325,6 +325,7 @@ class OpenAiLLM(OpenAICompatibleLLM):
         latency_data = None
         service_tier = None
         stream_usage = None
+        finish_reason = None
 
         try:
             completion_stream = await self.async_client.chat.completions.create(**model_args)
@@ -381,6 +382,7 @@ class OpenAiLLM(OpenAICompatibleLLM):
                 self._log_llm_request_id(completion_stream, getattr(chunk, "id", None))
 
             delta = chunk.choices[0].delta
+            finish_reason = getattr(chunk.choices[0], "finish_reason", None) or finish_reason
 
             if hasattr(delta, "tool_calls") and delta.tool_calls and accumulator:
                 if buffer:
@@ -448,6 +450,8 @@ class OpenAiLLM(OpenAICompatibleLLM):
 
         if latency_data:
             latency_data.total_stream_duration_ms = now_ms() - start_time
+        if isinstance(meta_info, dict):
+            meta_info["llm_finish_reason"] = finish_reason
 
         if text_tool_buffer is not None:
             captured_tool_text = text_tool_buffer

@@ -543,6 +543,7 @@ class TaskManager(BaseManager):
         self.synthesizer_tasks = []
         self.synthesizer_task = None
         self._component_error = None
+        self.component_error_event = None
         self._error_logged = False
         self.synthesizer_monitor_task = None
         self.dtmf_task = None
@@ -3899,12 +3900,23 @@ class TaskManager(BaseManager):
         whole conversation task) so a hung LLM raises promptly without also racing the
         hangup-decision call or the hangup teardown that can follow it - those can legitimately
         take a while and must not be cut off mid-way. BOLNA-2563."""
-        await asyncio.wait_for(
-            self.__do_llm_generation_impl(
-                messages, meta_info, next_step, should_bypass_synth, should_trigger_function_call
-            ),
-            timeout=LLM_GENERATION_TIMEOUT_S,
-        )
+        # Per generation: tool follow-ups run on a copied meta_info that no caller reads back.
+        generation_errors = []
+        if isinstance(meta_info, dict):
+            meta_info["_non_fatal_errors"] = generation_errors
+            meta_info.pop("llm_finish_reason", None)
+        try:
+            await asyncio.wait_for(
+                self.__do_llm_generation_impl(
+                    messages, meta_info, next_step, should_bypass_synth, should_trigger_function_call
+                ),
+                timeout=LLM_GENERATION_TIMEOUT_S,
+            )
+        finally:
+            for error in generation_errors:
+                self.non_fatal_llm_error_events.append(
+                    {**error, "sequence_id": meta_info.get("sequence_id"), "turn_id": meta_info.get("turn_id")}
+                )
 
     async def __do_llm_generation_impl(
         self, messages, meta_info, next_step, should_bypass_synth=False, should_trigger_function_call=False
@@ -4290,12 +4302,13 @@ class TaskManager(BaseManager):
             # records both, and the later error is the one that silenced it.
             errors = meta_info.get("_non_fatal_errors", [])
             reason = next((e.get("error") for e in reversed(errors) if e.get("error")), None)
-            empty_turn_detail = f"LLM returned no output ({reason})" if reason else "LLM returned no output"
             if reason is None:
                 # Chat-completions has no incomplete event, so record the empty turn here to keep it observable.
+                reason = meta_info.get("llm_finish_reason")
                 meta_info.setdefault("_non_fatal_errors", []).append(
-                    {"error_type": "empty_response", "error": None, "model": self.llm_config.get("model")}
+                    {"error_type": "empty_response", "error": reason, "model": self.llm_config.get("model")}
                 )
+            empty_turn_detail = f"LLM returned no output ({reason})" if reason else "LLM returned no output"
 
         if self.stream and llm_response != filler_message:
             self.__store_into_history(
@@ -4377,7 +4390,6 @@ class TaskManager(BaseManager):
         should_bypass_synth = "bypass_synth" in meta_info and meta_info["bypass_synth"] is True
         next_step = self._get_next_step(sequence, "llm")
         meta_info["llm_start_time"] = time.time()
-        meta_info["_non_fatal_errors"] = []
         self._append_eager_llm_stub(meta_info)
 
         if self.turn_based_conversation:
@@ -4415,9 +4427,6 @@ class TaskManager(BaseManager):
                     latency_entry["cancelled_at_ms"] = round(time.time() * 1000 - self.conversation_start_init_ts, 2)
                     break
             raise
-
-        for _err in meta_info.get("_non_fatal_errors", []):
-            self.non_fatal_llm_error_events.append(_err)
 
         # TODO : Write a better check for completion prompt
 
@@ -5330,6 +5339,14 @@ class TaskManager(BaseManager):
                 "message": str(error),
                 "provider": getattr(error, "provider", None),
                 "model": getattr(error, "model", None),
+            }
+            # _component_error is cleared before the output is built; this copy reaches progression_data.
+            self.component_error_event = {
+                "component": getattr(error, "component", None),
+                "provider": getattr(error, "provider", None),
+                "model": getattr(error, "model", None),
+                "error": str(error),
+                "ts_ms": round(time.time() * 1000 - self.conversation_start_init_ts, 2),
             }
             await self._report_provider_health(
                 getattr(error, "component", "unknown"),
@@ -9157,6 +9174,7 @@ class TaskManager(BaseManager):
                     "voicemail_check_count": self.voicemail_handler.check_count,
                     "dtmf_events": list(self.dtmf_events),
                     "non_fatal_llm_error_events": list(self.non_fatal_llm_error_events),
+                    "component_error": self.component_error_event,
                     "language_switch_events": list(self.language_switch_events),
                     "transfer_call_events": list(self.transfer_call_events),
                     "interruptible_hangup_message": self.interruptible_hangup_message,
