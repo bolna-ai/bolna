@@ -93,6 +93,8 @@ def _cancel_target(history):
         _hangup_processing=True,
         _end_of_conversation_in_progress=True,
         hangup_detail="END_CALL_TOOL",
+        hangup_cancel_events=[],
+        conversation_start_init_ts=0.0,
     )
 
 

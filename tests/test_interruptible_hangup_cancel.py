@@ -29,6 +29,8 @@ def _target(llm_task=None, hangup_task=None):
         _hangup_processing=True,
         _end_of_conversation_in_progress=True,
         hangup_detail="END_CALL_TOOL",
+        hangup_cancel_events=[],
+        conversation_start_init_ts=0.0,
     )
 
 
@@ -168,6 +170,8 @@ def _cleanup_target():
     tm._hangup_processing = True
     tm._end_of_conversation_in_progress = True
     tm.hangup_detail = "END_CALL_TOOL"
+    tm.hangup_cancel_events = []
+    tm.conversation_start_init_ts = 0.0
 
     tm._cancel_in_flight_llm_response = MagicMock()
     tm.regen_settle_armed = MagicMock(return_value=False)
@@ -225,3 +229,17 @@ async def test_cleanup_cancels_goodbye_before_it_can_rearm_the_disconnect():
     assert tm.hangup_triggered is False
     assert tm._end_call_in_progress is False
     assert tm._hangup_interruptible_window is False
+
+
+async def test_records_each_cancel_for_observability():
+    tm = _target()
+    TaskManager._cancel_pending_hangup(tm)
+    assert len(tm.hangup_cancel_events) == 1
+    assert tm.hangup_cancel_events[0]["ts_ms"] > 0
+
+
+async def test_committed_disconnect_records_no_cancel():
+    tm = _target()
+    tm.conversation_ended = True
+    TaskManager._cancel_pending_hangup(tm)
+    assert tm.hangup_cancel_events == []
