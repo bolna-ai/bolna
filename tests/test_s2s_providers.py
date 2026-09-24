@@ -452,7 +452,7 @@ class TestGeminiModelCapabilities:
         "model,behavior",
         [
             ("gemini-3.1-flash-live-preview", None),
-            ("gemini-3.8-live", "BLOCKING"),
+            ("gemini-3.8-live", "NON_BLOCKING"),
             ("gemini-3.8-live-extended-thinking", "NON_BLOCKING"),
         ],
     )
@@ -461,8 +461,11 @@ class TestGeminiModelCapabilities:
         declaration = provider._build_setup()["tools"][0]["functionDeclarations"][0]
         assert declaration.get("behavior") == behavior
 
-    async def test_async_tool_result_interrupts_the_model(self):
-        provider = make_gemini(model="gemini-3.8-live-extended-thinking")
+    @pytest.mark.parametrize("model", ["gemini-3.8-live", "gemini-3.8-live-extended-thinking"])
+    async def test_async_tool_result_interrupts_the_model(self, model):
+        # After end_call the goodbye must be the next turn to complete; a result that waited
+        # for the model to finish its sentence would let that sentence complete first.
+        provider = make_gemini(model=model)
         provider._ws = FakeWS()
         await provider.send_function_result("c1", "book", '{"ok":true}')
         await provider.commit_function_results()
@@ -471,8 +474,8 @@ class TestGeminiModelCapabilities:
             "scheduling": "INTERRUPT",
         }
 
-    async def test_blocking_tool_result_carries_no_scheduling(self):
-        provider = make_gemini(model="gemini-3.8-live")
+    async def test_blocking_model_result_carries_no_scheduling(self):
+        provider = make_gemini()
         provider._ws = FakeWS()
         await provider.send_function_result("c1", "book", '{"ok":true}')
         await provider.commit_function_results()

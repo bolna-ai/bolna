@@ -168,8 +168,7 @@ class GeminiLiveS2S(BaseS2SProvider):
                 continue
             declaration = {"name": spec["name"], "description": spec.get("description", "")}
             if self.capabilities.tool_behavior:
-                # 3.8 defaults to async, where the model keeps speaking while the tool runs.
-                declaration["behavior"] = self.capabilities.tool_behavior
+                declaration["behavior"] = self.capabilities.tool_behavior.value
             parameters = spec.get("parameters")
             if parameters:
                 # An unsupported schema key does not just drop the tool: Gemini rejects the
@@ -348,10 +347,8 @@ class GeminiLiveS2S(BaseS2SProvider):
                 payload = {"result": payload}
         except (ValueError, TypeError):
             payload = {"result": result}
-        if self.capabilities.tool_behavior == "NON_BLOCKING":
-            # The caller is waiting on this answer, so it cuts into whatever the model is
-            # saying rather than queueing behind it.
-            payload["scheduling"] = "INTERRUPT"
+        if self.capabilities.tool_scheduling:
+            payload["scheduling"] = self.capabilities.tool_scheduling.value
         self._pending_tool_results.append({"id": call_id, "name": name, "response": payload})
 
     def _start_turn_clock(self) -> None:

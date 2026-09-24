@@ -331,6 +331,21 @@ class NodeType(str, Enum):
     ROUTER = "router"
 
 
+class GeminiToolBehavior(str, Enum):
+    """Live API function declaration behavior."""
+
+    BLOCKING = "BLOCKING"
+    NON_BLOCKING = "NON_BLOCKING"
+
+
+class GeminiToolScheduling(str, Enum):
+    """When a Live API model acts on a non-blocking function result."""
+
+    INTERRUPT = "INTERRUPT"
+    WHEN_IDLE = "WHEN_IDLE"
+    SILENT = "SILENT"
+
+
 class S2SProvider(str, Enum):
     """Enum for speech-to-speech providers."""
 

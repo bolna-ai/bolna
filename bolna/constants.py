@@ -2,7 +2,7 @@ import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional
-from bolna.enums import ReasoningEffort as RE, TelephonyProvider
+from bolna.enums import GeminiToolBehavior, GeminiToolScheduling, ReasoningEffort as RE, TelephonyProvider
 
 PREPROCESS_DIR = "agent_data"
 PCM16_SCALE = 32768.0
@@ -499,20 +499,24 @@ class GeminiLiveCapabilities:
     """What one Live API model accepts in its setup frame."""
 
     language_code: bool = True
-    thinking_levels: tuple = ()
-    # None omits the field and takes the model's own default, which is blocking before 3.8.
-    tool_behavior: Optional[str] = None
+    thinking_levels: tuple[RE, ...] = ()
+    # None omits the field: models before 3.8 support only blocking calls.
+    tool_behavior: Optional[GeminiToolBehavior] = None
+    tool_scheduling: Optional[GeminiToolScheduling] = None
 
 
-# 3.8 picks its own language and rejects a language code, only the extended-thinking variant
-# takes a thinking level, and 3.8 flipped the tool default to async, so a model that wants
-# today's blocking semantics has to ask for them.
+# 3.8 picks its own language and rejects a language code, and only the extended-thinking
+# variant takes a thinking level. Both run tools async, Google's default for 3.8. Results
+# interrupt: the caller is waiting on the answer, and after end_call the goodbye has to be
+# the next turn to complete, not the sentence the model was midway through.
+_GEMINI_3_8_TOOLS = {
+    "tool_behavior": GeminiToolBehavior.NON_BLOCKING,
+    "tool_scheduling": GeminiToolScheduling.INTERRUPT,
+}
 GEMINI_LIVE_MODEL_CAPABILITIES = {
-    "gemini-3.8-live": GeminiLiveCapabilities(language_code=False, tool_behavior="BLOCKING"),
+    "gemini-3.8-live": GeminiLiveCapabilities(language_code=False, **_GEMINI_3_8_TOOLS),
     "gemini-3.8-live-extended-thinking": GeminiLiveCapabilities(
-        language_code=False,
-        thinking_levels=(RE.LOW, RE.MEDIUM, RE.HIGH),
-        tool_behavior="NON_BLOCKING",
+        language_code=False, thinking_levels=(RE.LOW, RE.MEDIUM, RE.HIGH), **_GEMINI_3_8_TOOLS
     ),
 }
 
